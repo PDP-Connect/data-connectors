@@ -84,7 +84,7 @@
       "version": "1.0.0",
       "name": "Instagram Ads",
       "status": "beta",
-      "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+      "description": "Exports your Instagram ad interests \u2014 advertisers and ad topics.",
       "consumerMetadata": {
         "sourceId": "instagram",
         "displayName": "Instagram Ads",
@@ -336,19 +336,19 @@
       }
     },
     {
-      "id": "claude-playwright",
+      "id": "claude-export-playwright",
       "company": "Anthropic",
-      "version": "1.1.0",
-      "name": "Claude",
+      "version": "1.0.0",
+      "name": "Claude (Export)",
       "status": "experimental",
-      "description": "Exports your Claude conversations and projects from claude.ai.",
+      "description": "Exports your Claude conversations and projects via Anthropic's official data export (one complete archive, no per-conversation rate limiting).",
       "files": {
-        "script": "anthropic/claude-playwright.js",
-        "metadata": "anthropic/claude-playwright.json"
+        "script": "anthropic/claude-export-playwright.js",
+        "metadata": "anthropic/claude-export-playwright.json"
       },
       "checksums": {
-        "script": "sha256:4e070bc31afd210563db5c0ece547c9535f197b79b5b28951d87993c8538dafe",
-        "metadata": "sha256:f95d69603c9bcd0a41be780721a20a2d6587cb901a8b52d29a0a601c089e2f1e"
+        "script": "sha256:3f899a5a22c89a8e05a4710fafb95907509fbf222a7208bdf620c96f81ff7a09",
+        "metadata": "sha256:70a2b6f3d248071b5854716707b41bbcc1ab25f08cb9eff7c18c9a3f08f3bdb3"
       }
     },
     {
