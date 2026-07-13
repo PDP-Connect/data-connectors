@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { assertBundledScopeSchemasMatch } from "./connector-artifact-contract.mjs";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 const registryPath = join(repoRoot, "registry.json");
@@ -24,6 +26,8 @@ const indexPath = join(repoRoot, "connector-index.json");
 const artifactsDir = join(repoRoot, "artifacts");
 const shouldEmitSignatureMetadata =
   process.env.CONNECTOR_ENABLE_SIGSTORE_METADATA === "1";
+const shouldUseReleaseAssets =
+  process.env.CONNECTOR_USE_RELEASE_ASSETS === "1";
 
 function resolveSourceCommit() {
   const explicitCommit = process.env.CONNECTOR_SOURCE_COMMIT?.trim();
@@ -111,6 +115,33 @@ function buildSigstoreBundleMetadata(bundlePath, bundleUrl = null) {
     type: "sigstoreBundle",
     bundlePath,
     ...(bundleUrl ? { bundleUrl } : {}),
+  };
+}
+
+function refreshReleaseDistributionMetadata(entry, releaseMetadata) {
+  const artifactRelativePath = entry.artifactPath;
+  const artifactFilename = basename(artifactRelativePath);
+  const sourceCommit = entry.sourceCommit ?? entry.gitRef ?? resolveSourceCommit();
+  const signature = buildSigstoreBundleMetadata(
+    `${artifactFilename}.sigstore.json`,
+    buildArtifactUrl({
+      artifactRelativePath: `${artifactRelativePath}.sigstore.json`,
+      releaseTag: releaseMetadata.releaseTag,
+      repo: releaseMetadata.repo,
+      sourceCommit,
+    }),
+  );
+
+  return {
+    ...entry,
+    releaseId: releaseMetadata.releaseId,
+    artifactUrl: buildArtifactUrl({
+      artifactRelativePath,
+      releaseTag: releaseMetadata.releaseTag,
+      repo: releaseMetadata.repo,
+      sourceCommit,
+    }),
+    ...(signature ? { artifactSignature: signature } : {}),
   };
 }
 
@@ -436,9 +467,52 @@ async function main() {
   const expectedArtifactPaths = new Set();
 
   for (const entry of registry.connectors) {
-    const metadata = readJson(
-      join(repoRoot, "connectors", entry.files.metadata),
+    const metadataPath = join(repoRoot, "connectors", entry.files.metadata);
+    const scriptPath = join(repoRoot, "connectors", entry.files.script);
+    const metadata = readJson(metadataPath);
+    const manifestBuffer = readFileSync(metadataPath);
+    const scriptBuffer = readFileSync(scriptPath);
+    const previousVersions = existingIndex?.connectors?.[entry.id] ?? [];
+    const existingVersion = previousVersions.find(
+      (version) => version.version === entry.version,
     );
+
+    if (existingVersion) {
+      if (
+        existingVersion.manifestSha256 !== sha256Buffer(manifestBuffer) ||
+        existingVersion.scriptSha256 !== sha256Buffer(scriptBuffer)
+      ) {
+        throw new Error(
+          `${entry.id}@${entry.version} source changed without a version bump`,
+        );
+      }
+      if (!existingVersion.artifactPath) {
+        throw new Error(`${entry.id}@${entry.version} is missing artifactPath`);
+      }
+      const existingArtifactPath = join(repoRoot, existingVersion.artifactPath);
+      if (!existsSync(existingArtifactPath)) {
+        throw new Error(`Missing artifact: ${existingVersion.artifactPath}`);
+      }
+      if (
+        existingVersion.artifactSha256 !==
+        sha256Buffer(readFileSync(existingArtifactPath))
+      ) {
+        throw new Error(`${entry.id}@${entry.version} immutable artifact drifted`);
+      }
+      assertBundledScopeSchemasMatch({
+        artifactPath: existingArtifactPath,
+        manifestPath: metadataPath,
+      });
+      expectedArtifactPaths.add(existingVersion.artifactPath);
+      const preservedVersion = shouldUseReleaseAssets
+        ? refreshReleaseDistributionMetadata(existingVersion, releaseMetadata)
+        : existingVersion;
+      nextIndex.connectors[entry.id] = previousVersions.map((version) =>
+        version.version === entry.version ? preservedVersion : version,
+      );
+      continue;
+    }
+
     const bundle = createArtifactBundle(entry, metadata);
     const artifactDir = join(artifactsDir, entry.id);
     mkdirSync(artifactDir, { recursive: true });
@@ -462,8 +536,6 @@ async function main() {
       ".",
     ]);
 
-    const manifestBuffer = readFileSync(bundle.metadataSource);
-    const scriptBuffer = readFileSync(bundle.scriptSource);
     const artifactBuffer = readFileSync(tempArtifactPath);
 
     const packaged = {
@@ -532,7 +604,6 @@ async function main() {
     expectedArtifactPaths.add(packaged.artifactPath);
     rmSync(dirname(bundle.bundleDir), { recursive: true, force: true });
 
-    const previousVersions = existingIndex?.connectors?.[entry.id] ?? [];
     const retained = [];
     for (const version of previousVersions) {
       if (version.version === entry.version) {

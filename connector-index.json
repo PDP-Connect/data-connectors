@@ -1,7 +1,7 @@
 {
   "indexVersion": "2.0",
   "sourceRepo": "https://github.com/vana-com/data-connectors",
-  "generatedAt": "2026-04-13T00:00:00Z",
+  "generatedAt": "2026-07-13T00:00:00Z",
   "signature": null,
   "connectors": {
     "amazon-playwright": [
@@ -267,6 +267,43 @@
           "iconKey": "github",
           "defaultScope": "github.profile"
         }
+      },
+      {
+        "connectorId": "github-playwright",
+        "company": "github",
+        "version": "1.5.0",
+        "name": "GitHub",
+        "status": "stable",
+        "description": "Exports your GitHub profile, repositories, starred repositories, public activity events, and contribution graph.",
+        "sourceFiles": {
+          "script": "github/github-playwright.js",
+          "metadata": "github/github-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "callum/bui-705-scope-catalog",
+        "sourceCommit": "c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2",
+        "releaseId": "connectors-c690bc129e25",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:8c67662e3efa1c3a8660ead8a030ce4996d54ebd3afb194a59c04efe12340c96",
+        "scriptSha256": "sha256:61eb4be00e1d267075cd78d7e14648615c62aa7cebffeae73ab4135acfe58b2f",
+        "artifactSha256": "sha256:32fe765df96d153bb1164b78e07079db42fb7008dcd8984cf62b4409ef308d3e",
+        "artifactPath": "artifacts/github-playwright/github-playwright-1.5.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/github-playwright/github-playwright-1.5.0.tgz",
+        "scopes": [
+          "github.profile",
+          "github.repositories",
+          "github.starred",
+          "github.events",
+          "github.contributions",
+          "github.history"
+        ],
+        "consumerMetadata": {
+          "sourceId": "github",
+          "displayName": "GitHub",
+          "brandDomain": "github.com",
+          "iconKey": "github",
+          "defaultScope": "github.profile"
+        }
       }
     ],
     "heb-playwright": [
@@ -403,6 +440,38 @@
           "iconKey": "instagram",
           "defaultScope": "instagram.ads"
         }
+      },
+      {
+        "connectorId": "instagram-ads-playwright",
+        "company": "meta",
+        "version": "1.1.0",
+        "name": "Instagram Ads",
+        "status": "beta",
+        "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+        "sourceFiles": {
+          "script": "meta/instagram-ads-playwright.js",
+          "metadata": "meta/instagram-ads-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "callum/bui-705-scope-catalog",
+        "sourceCommit": "c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2",
+        "releaseId": "connectors-c690bc129e25",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:c7bc1657723ff545225cbfdea4274e48a72c5d429363e9e97662f39b4663351f",
+        "scriptSha256": "sha256:ef759279f73e52a05b063cf8e6a6bceb63409039f35f529b342bc1af004c972d",
+        "artifactSha256": "sha256:f682c0c714c4d045d00272517d24e44142cbc91ab4fcb045876ed14298c1da58",
+        "artifactPath": "artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.0.tgz",
+        "scopes": [
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram Ads",
+          "brandDomain": "instagram.com",
+          "iconKey": "instagram",
+          "defaultScope": "instagram.ads"
+        }
       }
     ],
     "instagram-playwright": [
@@ -463,6 +532,44 @@
         "artifactSha256": "sha256:f6e61df2d1cd29d8e929584133f57eaff4e54df18db53717bd32f0894092a58c",
         "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.1.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/instagram-playwright/instagram-playwright-2.1.0.tgz",
+        "scopes": [
+          "instagram.profile",
+          "instagram.posts",
+          "instagram.following",
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram",
+          "brandDomain": "instagram.com",
+          "aliases": [
+            "meta"
+          ],
+          "iconKey": "instagram",
+          "defaultScope": "instagram.posts"
+        }
+      },
+      {
+        "connectorId": "instagram-playwright",
+        "company": "meta",
+        "version": "2.2.0",
+        "name": "Instagram",
+        "status": "stable",
+        "description": "Exports your Instagram profile and posts.",
+        "sourceFiles": {
+          "script": "meta/instagram-playwright.js",
+          "metadata": "meta/instagram-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "callum/bui-705-scope-catalog",
+        "sourceCommit": "c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2",
+        "releaseId": "connectors-c690bc129e25",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:e416162473afc28b02febee130701ac86d45e12f142adfb9d61a3f59ae83e3ba",
+        "scriptSha256": "sha256:909618f8c07b38608e3de152724c81853c21540f797f0afcb84810513a342224",
+        "artifactSha256": "sha256:003cc59f50269e5a2801910636882b8bedc1803c30ddce409634f63ab084b7e6",
+        "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.2.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/instagram-playwright/instagram-playwright-2.2.0.tgz",
         "scopes": [
           "instagram.profile",
           "instagram.posts",
@@ -787,6 +894,44 @@
         "artifactSha256": "sha256:d58c92c540d2748c287bd82dac3a0caa8af66e22ab2e3e80bf7fbdf2908d6edc",
         "artifactPath": "artifacts/youtube-playwright/youtube-playwright-1.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/youtube-playwright/youtube-playwright-1.0.0.tgz",
+        "scopes": [
+          "youtube.profile",
+          "youtube.subscriptions",
+          "youtube.playlists",
+          "youtube.playlistItems",
+          "youtube.likes",
+          "youtube.watchLater",
+          "youtube.history"
+        ],
+        "consumerMetadata": {
+          "sourceId": "youtube",
+          "displayName": "YouTube",
+          "brandDomain": "youtube.com",
+          "iconKey": "youtube",
+          "defaultScope": "youtube.profile"
+        }
+      },
+      {
+        "connectorId": "youtube-playwright",
+        "company": "google",
+        "version": "1.1.0",
+        "name": "YouTube",
+        "status": "beta",
+        "description": "Exports your YouTube profile, subscriptions, playlists, playlist items, liked videos, watch later list, and top 50 recent watch history entries.",
+        "sourceFiles": {
+          "script": "google/youtube-playwright.js",
+          "metadata": "google/youtube-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "callum/bui-705-scope-catalog",
+        "sourceCommit": "c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2",
+        "releaseId": "connectors-c690bc129e25",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:79fbbca571aeb1e6cf660bfb1c7accabe036d32b246ed21b3b174b568cb75730",
+        "scriptSha256": "sha256:a0c43d4c931a5893e3b2e29f708350a2d7e4d22898ad820ac410c8ddf7558b9a",
+        "artifactSha256": "sha256:ee331236c5eaca233d61a23cb244accabd90b3f7000ecf35c8a632eed5858bf7",
+        "artifactPath": "artifacts/youtube-playwright/youtube-playwright-1.1.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/youtube-playwright/youtube-playwright-1.1.0.tgz",
         "scopes": [
           "youtube.profile",
           "youtube.subscriptions",
