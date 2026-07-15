@@ -554,28 +554,60 @@ const spClientFetch = async (path) => {
     message: 'Loading profile data...',
   });
 
-  // Use spclient for profile (always works, returns JSON directly)
-  const profileData = await spClientFetch('/user-profile-view/v3/profile/me');
-
-  // Also get profileAttributes via GraphQL for username/uri
+  // IDENTITY comes from the session-bound GraphQL `me` query, never from the
+  // profile-view path. `spClientFetch('/user-profile-view/v3/profile/me')` is
+  // NOT a self-alias: the trailing segment is a literal vanity username, and a
+  // real Spotify user grabbed the username "me" (open.spotify.com/user/me =>
+  // "Micael Widell"). So "me" resolved to that stranger's public profile for
+  // every user, stamping his name/avatar/counts onto their spotify.profile
+  // while the ids and collected data stayed their own.
   const profileAttrs = await gqlFetch('profileAttributes', {});
   const pa = profileAttrs?.data?.me?.profile;
 
-  if (!profileData && !pa) {
-    await page.setData('error', 'Could not fetch profile. Token may be invalid.');
-    return { error: 'Could not fetch profile' };
+  if (!pa?.username) {
+    await page.setData(
+      'error',
+      'Could not confirm which Spotify account is signed in. Please sign in again.'
+    );
+    return { error: 'Could not resolve the signed-in Spotify profile' };
   }
 
+  const identityUri = pa.uri || 'spotify:user:' + pa.username;
+
+  // spclient is enrichment ONLY (avatar + counts, which GraphQL does not
+  // expose). Fetch the profile-view for the RESOLVED username — never the
+  // literal "me" — and still verify it describes the same account before
+  // trusting it, in case the username itself is ever ambiguous.
+  const profileData = await spClientFetch(
+    '/user-profile-view/v3/profile/' + encodeURIComponent(pa.username)
+  );
+  const enrichment =
+    profileData && profileData.uri === identityUri ? profileData : null;
+
+  if (profileData && !enrichment) {
+    await page.setData(
+      'status',
+      'Profile details unavailable for this account; continuing with the signed-in identity.'
+    );
+  }
+
+  // Avatar: prefer the session-bound GraphQL field when Spotify exposes it,
+  // and only fall back to the (verified-same-account) spclient image.
+  const avatar = pa.imageUrl || enrichment?.image_url || null;
+
   state.profile = {
-    id: pa?.username || '',
-    display_name: profileData?.name || pa?.name || '',
-    uri: pa?.uri || profileData?.uri || '',
-    followers: profileData?.followers_count || 0,
-    following: profileData?.following_count || 0,
-    images: profileData?.image_url ? [profileData.image_url] : [],
+    id: pa.username,
+    display_name: pa.name || '',
+    uri: identityUri,
+    followers: enrichment?.followers_count || 0,
+    following: enrichment?.following_count || 0,
+    images: avatar ? [avatar] : [],
   };
 
-  await page.setData('status', 'Logged in as ' + state.profile.display_name);
+  await page.setData(
+    'status',
+    'Logged in as ' + (state.profile.display_name || state.profile.id)
+  );
 
   // Step 2: Liked Songs (paginated via GraphQL)
   await page.setProgress({

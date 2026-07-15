@@ -779,6 +779,40 @@
           "iconKey": "spotify",
           "defaultScope": "spotify.savedTracks"
         }
+      },
+      {
+        "connectorId": "spotify-playwright",
+        "company": "spotify",
+        "version": "1.1.0",
+        "name": "Spotify",
+        "status": "stable",
+        "description": "Exports your Spotify library, playlists, listening history, and preferences.",
+        "sourceFiles": {
+          "script": "spotify/spotify-playwright.js",
+          "metadata": "spotify/spotify-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "volod/spotify-profile-identity",
+        "sourceCommit": "09a6745b31b57ab4b574af11cc53f6a7fb2fc853",
+        "releaseId": "connectors-09a6745b31b5",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:e5f5df94f724a2417b66b52edd0a4f12a3278b2566c9aaf5a2a69b31f80cbb2a",
+        "scriptSha256": "sha256:0cca7383277f4b4d24747d684e67a8c76c2af77180f8bf3d51ce722521e91e84",
+        "artifactSha256": "sha256:d76579a2d38ccec46f3f78d12316e144df41ba948734e4f2f01daf3bd6bdd30b",
+        "artifactPath": "artifacts/spotify-playwright/spotify-playwright-1.1.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/09a6745b31b57ab4b574af11cc53f6a7fb2fc853/artifacts/spotify-playwright/spotify-playwright-1.1.0.tgz",
+        "scopes": [
+          "spotify.profile",
+          "spotify.savedTracks",
+          "spotify.playlists"
+        ],
+        "consumerMetadata": {
+          "sourceId": "spotify",
+          "displayName": "Spotify",
+          "brandDomain": "spotify.com",
+          "iconKey": "spotify",
+          "defaultScope": "spotify.savedTracks"
+        }
       }
     ],
     "steam-playwright": [
