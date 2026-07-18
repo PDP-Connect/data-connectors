@@ -19,7 +19,7 @@ export const DEFAULT_CONNECTOR_INDEX_URL =
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
 export const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY =
-  "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+  "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
 
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
