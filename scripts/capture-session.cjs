@@ -55,6 +55,8 @@ function resolveRunnerDir() {
   }
 
   const candidates = [
+    // Bundled runner in this repo
+    path.resolve(__dirname, '..', 'playwright-runner'),
     path.resolve(__dirname, '..', 'data-dt-app', 'playwright-runner'),
     path.join(os.homedir(), 'Documents', 'GitHub', 'data-dt-app', 'playwright-runner'),
     path.join(os.homedir(), 'Documents', 'Github', 'data-dt-app', 'playwright-runner'),
@@ -126,7 +128,7 @@ ${c.cyan}How it works:${c.reset}
   4. Session is persisted in browser profile for connector reuse
 
 ${c.cyan}Profile sharing:${c.reset}
-  The browser profile is stored at ~/.vana/desktop/browser-profiles/<platform>-playwright/
+  The browser profile is stored at ~/.pdp-connect/desktop/browser-profiles/<platform>-playwright/
   Any connector named <platform>-playwright.js will automatically reuse this session.
 `);
 }
@@ -266,7 +268,7 @@ function generateLoginConnector(platform, loginUrl, timeout, checkUrl) {
   lines.push('      sessionStorageKeys: Object.keys(sessionStorageData || {}).length');
   lines.push('    },');
   lines.push('    note: \'Full session (including HttpOnly cookies) is persisted in the browser profile. This file contains browser-accessible data only.\',');
-  lines.push('    profileDir: \'~/.vana/desktop/browser-profiles/' + platform + '-playwright/\'');
+  lines.push('    profileDir: \'~/.pdp-connect/desktop/browser-profiles/' + platform + '-playwright/\'');
   lines.push('  };');
   lines.push('');
   lines.push('  await page.setData(\'result\', result);');
@@ -318,7 +320,7 @@ async function main() {
   console.log(`  ${c.cyan}Platform:${c.reset}  ${args.platform}`);
   console.log(`  ${c.cyan}Login URL:${c.reset} ${args.loginUrl}`);
   console.log(`  ${c.cyan}Timeout:${c.reset}   ${args.timeout}s`);
-  console.log(`  ${c.cyan}Profile:${c.reset}   ~/.vana/desktop/browser-profiles/${connectorName}/`);
+  console.log(`  ${c.cyan}Profile:${c.reset}   ~/.pdp-connect/desktop/browser-profiles/${connectorName}/`);
   console.log('─'.repeat(50));
   console.log('');
   console.log(`${c.yellow}A browser window will open. Please log in manually.${c.reset}`);
@@ -411,7 +413,7 @@ async function main() {
     const sessionFile = path.join(sessionsDir, `${args.platform}.json`);
     fs.writeFileSync(sessionFile, JSON.stringify(resultRef.data, null, 2));
     print(c.green, '[saved]', `Session data: ${sessionFile}`);
-    print(c.green, '[saved]', `Browser profile: ~/.vana/desktop/browser-profiles/${connectorName}/`);
+    print(c.green, '[saved]', `Browser profile: ~/.pdp-connect/desktop/browser-profiles/${connectorName}/`);
 
     const stats = resultRef.data.stats || {};
     console.log('');
