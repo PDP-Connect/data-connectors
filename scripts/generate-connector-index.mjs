@@ -381,14 +381,36 @@ async function materializeRetainedArtifact({
     entry.sourceCommit ?? entry.gitRef ?? resolveSourceCommit();
 
   if (shouldRepackageRetainedEntry(entry)) {
-    if (checkMode && !existsSync(artifactPath)) {
+    // Prefer whatever is already on disk: the local artifacts/ tree is the
+    // source of truth for anything still checked in, and skipping the
+    // network round-trip avoids depending on history/URLs that may not
+    // survive a repo transfer (see the missing-history fallback below).
+    const hasLocalArtifact = existsSync(artifactPath);
+
+    if (checkMode && !hasLocalArtifact) {
       throw new Error(`Missing artifact: ${artifactRelativePath}`);
     }
 
-    if (!checkMode) {
-      const artifactBuffer = await fetchBuffer(
-        resolveRetainedArtifactSourceUrl(entry, releaseMetadata.repo),
+    if (!checkMode && !hasLocalArtifact) {
+      const sourceUrl = resolveRetainedArtifactSourceUrl(
+        entry,
+        releaseMetadata.repo,
       );
+      let artifactBuffer;
+      try {
+        artifactBuffer = await fetchBuffer(sourceUrl);
+      } catch (error) {
+        // A retained historical artifact that is neither committed locally
+        // nor reachable at its recorded source URL (e.g. after a repo
+        // transfer that didn't carry every historical commit) must not
+        // hard-fail the whole publish. Drop just this version and keep
+        // going; the URLs for every other, reachable version are left
+        // untouched.
+        console.warn(
+          `Dropping unreachable retained artifact for ${entry.connectorId}@${entry.version}: ${sourceUrl} (${error.message})`,
+        );
+        return null;
+      }
       mkdirSync(dirname(artifactPath), { recursive: true });
       writeFileSync(artifactPath, artifactBuffer);
     }
@@ -521,14 +543,15 @@ async function main() {
           carriedVersions.push(preservedVersion);
           continue;
         }
-        carriedVersions.push(
-          await materializeRetainedArtifact({
-            entry: version,
-            releaseMetadata,
-            expectedArtifactPaths,
-            checkMode,
-          }),
-        );
+        const materialized = await materializeRetainedArtifact({
+          entry: version,
+          releaseMetadata,
+          expectedArtifactPaths,
+          checkMode,
+        });
+        if (materialized) {
+          carriedVersions.push(materialized);
+        }
       }
       nextIndex.connectors[entry.id] = carriedVersions;
       continue;
@@ -630,14 +653,15 @@ async function main() {
       if (version.version === entry.version) {
         continue;
       }
-      retained.push(
-        await materializeRetainedArtifact({
-          entry: version,
-          releaseMetadata,
-          expectedArtifactPaths,
-          checkMode,
-        }),
-      );
+      const materialized = await materializeRetainedArtifact({
+        entry: version,
+        releaseMetadata,
+        expectedArtifactPaths,
+        checkMode,
+      });
+      if (materialized) {
+        retained.push(materialized);
+      }
     }
     nextIndex.connectors[entry.id] = [...retained, packaged];
   }
