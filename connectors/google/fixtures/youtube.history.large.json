@@ -2,6 +2,7 @@
   "timeWindow": "top 50 most recent items",
   "history": [
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0001",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0001",
@@ -11,6 +12,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0002",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0002",
@@ -20,6 +22,7 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0003",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0003",
@@ -29,6 +32,7 @@
       "description": null
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0004",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0004",
@@ -38,6 +42,7 @@
       "description": "Recorded live, lightly edited. Chapters in the description."
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0005",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0005",
@@ -47,6 +52,7 @@
       "description": null
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0006",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0006",
@@ -56,6 +62,7 @@
       "description": "Part of the ongoing explainer series."
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0007",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0007",
@@ -65,6 +72,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0008",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0008",
@@ -74,6 +82,7 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0009",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0009",
@@ -83,6 +92,7 @@
       "description": null
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0010",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0010",
@@ -92,6 +102,7 @@
       "description": "Recorded live, lightly edited. Chapters in the description."
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0011",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0011",
@@ -101,6 +112,7 @@
       "description": null
     },
     {
+      "watchedAt": "2026-07-17",
       "watchedAtText": "Yesterday",
       "videoId": "mockvid0012",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0012",
@@ -110,6 +122,7 @@
       "description": "Part of the ongoing explainer series."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 30 2026",
       "videoId": "mockvid0013",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0013",
@@ -119,6 +132,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 30 2026",
       "videoId": "mockvid0014",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0014",
@@ -128,6 +142,7 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 30 2026",
       "videoId": "mockvid0015",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0015",
@@ -137,6 +152,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 29 2026",
       "videoId": "mockvid0016",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0016",
@@ -146,6 +162,7 @@
       "description": "Recorded live, lightly edited. Chapters in the description."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 29 2026",
       "videoId": "mockvid0017",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0017",
@@ -155,6 +172,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 29 2026",
       "videoId": "mockvid0018",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0018",
@@ -164,6 +182,7 @@
       "description": "Part of the ongoing explainer series."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 27 2026",
       "videoId": "mockvid0019",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0019",
@@ -173,6 +192,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 27 2026",
       "videoId": "mockvid0020",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0020",
@@ -182,6 +202,7 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 27 2026",
       "videoId": "mockvid0021",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0021",
@@ -191,6 +212,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 24 2026",
       "videoId": "mockvid0022",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0022",
@@ -200,6 +222,7 @@
       "description": "Recorded live, lightly edited. Chapters in the description."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 24 2026",
       "videoId": "mockvid0023",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0023",
@@ -209,6 +232,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 24 2026",
       "videoId": "mockvid0024",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0024",
@@ -218,6 +242,7 @@
       "description": "Part of the ongoing explainer series."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 21 2026",
       "videoId": "mockvid0025",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0025",
@@ -227,6 +252,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 21 2026",
       "videoId": "mockvid0026",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0026",
@@ -236,6 +262,7 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 21 2026",
       "videoId": "mockvid0027",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0027",
@@ -245,6 +272,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 15 2026",
       "videoId": "mockvid0028",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0028",
@@ -254,6 +282,7 @@
       "description": "Recorded live, lightly edited. Chapters in the description."
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 15 2026",
       "videoId": "mockvid0029",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0029",
@@ -263,6 +292,7 @@
       "description": null
     },
     {
+      "watchedAt": null,
       "watchedAtText": "Jun 15 2026",
       "videoId": "mockvid0030",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0030",

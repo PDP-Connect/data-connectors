@@ -11,7 +11,8 @@
  *   - youtube.playlistItems
  *   - youtube.likes        (Liked Videos playlist: list=LL)
  *   - youtube.watchLater   (Watch Later playlist:  list=WL)
- *   - youtube.history      (top 50 most recent entries, with watchedAtText from date headers)
+ *   - youtube.history      (top 50 most recent entries; date headers resolved
+ *                           to ISO watchedAt at scrape time, raw watchedAtText kept)
  */
 
 // ─── State ────────────────────────────────────────────────────
@@ -784,6 +785,68 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
   return allItems;
 };
 
+// ─── Watch-date resolution ────────────────────────────────────
+// The history page only exposes day-granular section headers as text
+// ("Today", "Yesterday", a weekday for the current week, or an absolute
+// date). Relative labels are only meaningful at scrape time, so they are
+// resolved to an ISO date (YYYY-MM-DD) here, while the scrape's "now" and
+// the account's YouTube UI locale are still in hand. Unrecognized header
+// text yields null rather than a guessed date.
+// Extracted verbatim by scripts/youtube-watched-at.test.mjs — keep the
+// region between the WATCHED_AT_RESOLVER markers self-contained.
+/* WATCHED_AT_RESOLVER:BEGIN */
+const resolveWatchedAt = (watchedAtText, now = new Date()) => {
+  if (!watchedAtText) return null;
+  const text = String(watchedAtText).trim();
+  if (!text) return null;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const toIsoDate = (d) =>
+    new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+      .toISOString()
+      .slice(0, 10);
+  if (/^today$/i.test(text)) return toIsoDate(now);
+  if (/^yesterday$/i.test(text)) return toIsoDate(new Date(now.getTime() - DAY_MS));
+  const WEEKDAYS = [
+    'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'
+  ];
+  const weekdayIndex = WEEKDAYS.indexOf(text.toLowerCase());
+  if (weekdayIndex >= 0) {
+    // Weekday headers appear for the current week; "Monday" seen on a
+    // Monday would have been "Today", so a zero delta means a week ago.
+    let delta = (now.getDay() - weekdayIndex + 7) % 7;
+    if (delta === 0) delta = 7;
+    return toIsoDate(new Date(now.getTime() - delta * DAY_MS));
+  }
+  // Absolute headers: "Jan 23, 2026" or "Jan 23" (current year implied).
+  // Matched explicitly by month name — Date.parse is too lax and would
+  // accept arbitrary text with a trailing year.
+  const MONTHS = [
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+    'jul', 'aug', 'sep', 'oct', 'nov', 'dec'
+  ];
+  const abs = text.match(/^([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?$/);
+  if (abs) {
+    const monthIndex = MONTHS.indexOf(abs[1].slice(0, 3).toLowerCase());
+    const day = Number(abs[2]);
+    if (monthIndex >= 0 && day >= 1 && day <= 31) {
+      const hasYear = abs[3] !== undefined;
+      const d = new Date(
+        hasYear ? Number(abs[3]) : now.getFullYear(),
+        monthIndex,
+        day
+      );
+      // A month-day header without a year can land in the future ("Dec 31"
+      // scraped on Jan 2) — that means it was last year.
+      if (!hasYear && d.getTime() > now.getTime()) {
+        d.setFullYear(d.getFullYear() - 1);
+      }
+      return toIsoDate(d);
+    }
+  }
+  return null;
+};
+/* WATCHED_AT_RESOLVER:END */
+
 // ─── Watch History Scraper ────────────────────────────────────
 
 const scrapeHistory = async () => {
@@ -901,7 +964,11 @@ const scrapeHistory = async () => {
     })()
   `);
 
-  return (items || []).slice(0, MAX_HISTORY_ITEMS);
+  const scrapedAt = new Date();
+  return (items || []).slice(0, MAX_HISTORY_ITEMS).map((item) => ({
+    ...item,
+    watchedAt: resolveWatchedAt(item.watchedAtText, scrapedAt),
+  }));
 };
 
 // ─── Main Connector Flow ──────────────────────────────────────

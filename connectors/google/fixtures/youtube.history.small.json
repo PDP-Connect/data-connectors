@@ -2,6 +2,7 @@
   "timeWindow": "top 50 most recent items",
   "history": [
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0001",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0001",
@@ -11,6 +12,7 @@
       "description": "A step-by-step walkthrough with diagrams and slow-motion footage."
     },
     {
+      "watchedAt": "2026-07-18",
       "watchedAtText": "Today",
       "videoId": "mockvid0002",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0002",
@@ -20,7 +22,8 @@
       "description": "Full parts list and measurements in the pinned comment."
     },
     {
-      "watchedAtText": "Today",
+      "watchedAt": "2026-07-17",
+      "watchedAtText": "Yesterday",
       "videoId": "mockvid0003",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0003",
       "videoTitle": "One-Pan Miso Butter Pasta in 15 Minutes",
@@ -29,7 +32,8 @@
       "description": null
     },
     {
-      "watchedAtText": "Today",
+      "watchedAt": "2026-07-15",
+      "watchedAtText": "Jul 15, 2026",
       "videoId": "mockvid0004",
       "videoUrl": "https://www.youtube.com/watch?v=mockvid0004",
       "videoTitle": "The History of the Synthesizer, Explained",
