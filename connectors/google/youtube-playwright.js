@@ -724,10 +724,13 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
     const batch = await page.evaluate(`
       (() => {
         const results = [];
-        const videos = document.querySelectorAll(
+
+        // Old-generation extraction: ytd-playlist-video-renderer (grid) and
+        // ytd-playlist-panel-video-renderer (side panel).
+        const oldVideos = document.querySelectorAll(
           'ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer'
         );
-        for (const video of videos) {
+        for (const video of oldVideos) {
           const titleEl = video.querySelector(
             '#video-title, a#video-title span, span#video-title, ' +
             'a#video-title yt-formatted-string'
@@ -772,6 +775,88 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
             thumbnailUrl: thumbImg ? thumbImg.src : null
           });
         }
+
+        // New-generation extraction: playlist pages (Liked Videos, Watch
+        // Later, user playlists) now render items as yt-lockup-view-model,
+        // the same rewrite the history page uses. Same selectors as the
+        // history scraper, kept in sync.
+        const lockups = document.querySelectorAll('yt-lockup-view-model');
+        for (const lockup of lockups) {
+          const linkEl = lockup.querySelector(
+            'a.yt-lockup-view-model__content-image, ' +
+            'a.ytLockupViewModelContentImage, ' +
+            'a.yt-lockup-metadata-view-model__title, ' +
+            'a.ytLockupMetadataViewModelTitle'
+          ) || lockup.querySelector('a[href*="/watch?"], a[href*="/shorts/"]');
+          if (!linkEl) continue;
+
+          const href = linkEl.getAttribute('href') || '';
+          const url = href.startsWith('http')
+            ? href
+            : 'https://www.youtube.com' + href;
+
+          const contentIdHost =
+            (lockup.getAttribute('class') || '').includes('content-id-')
+              ? lockup
+              : lockup.querySelector('[class*="content-id-"]');
+          const contentIdClass = contentIdHost
+            ? Array.from(contentIdHost.classList)
+                .find(c => c.startsWith('content-id-'))
+            : null;
+          let videoId = contentIdClass
+            ? contentIdClass.replace('content-id-', '')
+            : null;
+          if (!videoId) {
+            const m = href.match(/[?&]v=([\\w-]{6,})/) || href.match(/\\/shorts\\/([\\w-]{6,})/);
+            videoId = m ? m[1] : null;
+          }
+
+          const titleEl = lockup.querySelector(
+            'h3.yt-lockup-metadata-view-model__heading-reset, ' +
+            'h3.ytLockupMetadataViewModelHeadingReset, ' +
+            'h3'
+          );
+          const videoTitle = titleEl
+            ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim()
+            : '';
+
+          const avatarEl = lockup.querySelector('[aria-label^="Go to channel"]');
+          const metaSpans = lockup.querySelectorAll(
+            '.yt-content-metadata-view-model__metadata-text, ' +
+            '.ytContentMetadataViewModelMetadataText'
+          );
+          const channelTitle = avatarEl
+            ? (avatarEl.getAttribute('aria-label') || '')
+                .replace(/^Go to channel\\s+/i, '').trim() || null
+            : metaSpans[0]
+              ? (metaSpans[0].textContent || '').trim() || null
+              : null;
+          const channelLink = lockup.querySelector('a[href*="/@"], a[href*="/channel/"]');
+          const channelHref = channelLink ? channelLink.getAttribute('href') || '' : '';
+          const channelUrl = channelHref
+            ? (channelHref.startsWith('http') ? channelHref : 'https://www.youtube.com' + channelHref)
+            : null;
+
+          const thumbImg = lockup.querySelector('img.yt-core-image, img');
+          const badge = lockup.querySelector(
+            '.ytBadgeShapeText, ' +
+            '.badge-shape-wiz__text, ' +
+            '.ytThumbnailBottomOverlayViewModelBadgeContainer .ytBadgeShapeText'
+          );
+
+          if (!videoTitle && !videoId) continue;
+
+          results.push({
+            videoId,
+            videoUrl: url,
+            videoTitle,
+            channelTitle,
+            channelUrl,
+            durationText: badge ? (badge.textContent || '').trim() || null : null,
+            thumbnailUrl: thumbImg ? thumbImg.src : null
+          });
+        }
+
         return results;
       })()
     `);
