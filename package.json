@@ -18,7 +18,7 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "sigstore": "^4.1.0"
+    "sigstore": "^4.1.1"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
