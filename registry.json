@@ -150,7 +150,7 @@
     {
       "id": "youtube-playwright",
       "company": "google",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "name": "YouTube",
       "status": "beta",
       "description": "Exports your YouTube profile, subscriptions, playlists, playlist items, liked videos, watch later list, and top 50 recent watch history entries.",
@@ -166,8 +166,8 @@
         "metadata": "google/youtube-playwright.json"
       },
       "checksums": {
-        "script": "sha256:a0c43d4c931a5893e3b2e29f708350a2d7e4d22898ad820ac410c8ddf7558b9a",
-        "metadata": "sha256:79fbbca571aeb1e6cf660bfb1c7accabe036d32b246ed21b3b174b568cb75730"
+        "script": "sha256:8dcb7e8a9a2a02e21e69374141ad44e6f5d778d6c6a314d216c74dc5115cc9ae",
+        "metadata": "sha256:16dc3966b5d235d5ff93ee07720c0ddf9d06479dca30387f026482fff8fbdf72"
       }
     },
     {
