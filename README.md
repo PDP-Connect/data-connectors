@@ -41,22 +41,6 @@ The catalog describes the local desktop collection path: registered Playwright c
 | `youtube` | `youtube.history`, `youtube.likes`, `youtube.playlistItems`, `youtube.playlists`, `youtube.profile`, `youtube.subscriptions`, `youtube.watchLater` | youtube-playwright (beta) |
 <!-- END GENERATED CONNECTOR OVERVIEW -->
 
-## Context Gateway
-
-Open Data Labs exposes source data through the [Context Gateway API](https://dev.opendatalabs.com/docs/data-sources). The table below lists its permissions by source.
-
-These `read:*` values are Context Gateway permissions, not canonical scope IDs. Use [`scope-catalog.json`](scope-catalog.json) to find canonical source and scope IDs, payload schemas, collection paths, limits, and maturity.
-
-| Source       | Status      | Scopes                                          |
-| ------------ | ----------- | ----------------------------------------------- |
-| GitHub       | Available   | `read:profile`, `read:repositories`, `read:starred` |
-| iCloud Notes | Available   | `read:notes`, `read:folders`                    |
-| Instagram    | Available   | `read:profile`, `read:following`, `read:ads`    |
-| Oura Ring    | Available   | `read:readiness`, `read:sleep`, `read:activity` |
-| Spotify      | Coming soon | `read:profile`, `read:savedTracks`, `read:playlists` |
-
-See the [Context Gateway docs](https://dev.opendatalabs.com/docs/data-sources) for full schemas and example responses.
-
 ## Running a connector
 
 ```bash
@@ -118,8 +102,8 @@ create-connector.sh                # Quick autonomous scaffold script
 ## Distribution contract
 
 `data-connectors` is an open collection of data connectors that any consumer
-can pin and resolve as a versioned dependency. Vana's Context Gateway and
-Unity Surfaces are two example consumers; nothing here is specific to them.
+can pin and resolve as a versioned dependency; nothing here is specific to
+any one consumer.
 
 - `connector-index.json` is the authoritative release index.
 - `scope-catalog.json` is the generated, schema-validated public contract for
@@ -531,6 +515,3 @@ This fetches matching versions from the signed `connectors-latest`
 artifact/manifest/script checksums, and writes the scripts + manifests to a
 local snapshot directory. It's analogous to `npm install`.
 
-Vana's [Context Gateway](https://github.com/vana-com/context-gateway) and
-[Unity Surfaces](https://github.com/vana-com/unity-surfaces) are two examples
-of consumers that resolve connectors this way.
