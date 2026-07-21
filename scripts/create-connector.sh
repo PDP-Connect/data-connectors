@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+
 # Autonomous Data Connector Creator
 #
 # Creates, tests, and validates a data connector — end to end.

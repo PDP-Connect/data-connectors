@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+
 // TODO: Migrate .claude/skills/ and scripts/ to use run-connector.cjs
 // (skills/pdp-connect/scripts/run-connector.cjs), then delete this file.
 

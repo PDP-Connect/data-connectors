@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 # smoke-test-canary.sh — Run connector smoke test, post to Slack on failure only.
 #
 # Required env vars (set in ~/.dataconnect/canary.env or export before running):

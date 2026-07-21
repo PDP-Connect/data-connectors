@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Validate that every scope declared in a manifest has a matching
 // connector-local schema file under that manifest's schemas/ directory.
 //
