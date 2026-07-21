@@ -204,17 +204,23 @@ const openAvatarMenu = async () => {
     })()
   `);
 
-  await waitForCondition(async () => {
-    const menuIsOpen = await page.evaluate(`
+  // Wait for the ACTIVE-ACCOUNT HEADER specifically, not just any popup. This
+  // is the element that carries the signed-in user's own handle; gating on it
+  // is what lets getChannelUrlFromMenu read the real channel instead of
+  // falling back to a page link (which would be a subscribed channel). The
+  // menu container tag has drifted over time (tp-yt-iron-dropdown now), so we
+  // key on the header renderer, which is stable.
+  return await waitForCondition(async () => {
+    return await page.evaluate(`
       (() => {
-        return !!document.querySelector(
-          'ytd-multi-page-menu-renderer, tp-yt-paper-dialog, paper-dialog'
-        );
+        const header = document.querySelector('ytd-active-account-header-renderer');
+        if (!header) return false;
+        const handle = header.querySelector('#channel-handle');
+        const link = header.querySelector('a[href*="/@"], a[href*="/channel/"]');
+        return !!(handle || link);
       })()
     `);
-
-    return menuIsOpen;
-  }, { timeout: 2500 });
+  }, { timeout: 4000 });
 };
 
 // ─── Email Extraction ────────────────────────────────────────
@@ -281,16 +287,21 @@ const extractEmail = async () => {
 // ─── Channel URL (from avatar menu) ──────────────────────────
 
 const getChannelUrlFromMenu = async () => {
-  // Open avatar menu
+  // Open avatar menu (resolves once the active-account header has rendered)
   await openAvatarMenu();
 
   const channelUrl = await page.evaluate(`
     (() => {
-      // Primary: read handle directly from the active-account header element
-      const handleEl = document.querySelector(
-        'yt-formatted-string#channel-handle, ' +
-        'ytd-active-account-header-renderer yt-formatted-string#channel-handle'
-      );
+      // Scope EVERY read to the signed-in user's own account header. Reading
+      // page-wide (the old behavior) grabbed the first "/@" link anywhere on
+      // the page — on the homepage that's the first channel in the guide
+      // sidebar, i.e. a channel the user is SUBSCRIBED to, not their own. That
+      // recorded a subscribed channel's profile as the user's (BUI-763).
+      const header = document.querySelector('ytd-active-account-header-renderer');
+      if (!header) return null;
+
+      // Primary: the handle text in the header.
+      const handleEl = header.querySelector('#channel-handle');
       if (handleEl) {
         const handle = (handleEl.textContent || '').trim();
         if (handle.startsWith('@')) {
@@ -298,8 +309,9 @@ const getChannelUrlFromMenu = async () => {
         }
       }
 
-      // Fallback: look for a channel link in the dropdown, skip utility pages
-      const links = document.querySelectorAll('a[href*="/@"], a[href*="/channel/"]');
+      // Fallback: a channel link, but ONLY within the header, and skip the
+      // account-management utility links.
+      const links = header.querySelectorAll('a[href*="/@"], a[href*="/channel/"]');
       for (const link of links) {
         const href = link.getAttribute('href') || '';
         if (
@@ -313,6 +325,9 @@ const getChannelUrlFromMenu = async () => {
             : 'https://www.youtube.com' + href;
         }
       }
+
+      // Nothing trustworthy in the header — return null and skip profile
+      // rather than guessing a wrong channel from the page.
       return null;
     })()
   `);
