@@ -886,24 +886,46 @@ const scrapeHistory = async () => {
         for (const lockup of lockups) {
           if (results.length >= ${MAX_HISTORY_ITEMS}) break;
 
-          // videoId from the content-id-* class
-          const contentIdClass = Array.from(lockup.classList)
-            .find(c => c.startsWith('content-id-'));
-          const videoId = contentIdClass
+          // Selectors cover both lockup DOM generations: the BEM classes
+          // (yt-lockup-view-model__content-image) and the camelCase rewrite
+          // YouTube is rolling out (ytLockupViewModelContentImage), where
+          // content-id-* also moved from the lockup element onto an inner div.
+
+          // videoId from the content-id-* class (lockup itself or descendant).
+          // getAttribute('class') — Polymer components may shadow .className.
+          const contentIdHost =
+            (lockup.getAttribute('class') || '').includes('content-id-')
+              ? lockup
+              : lockup.querySelector('[class*="content-id-"]');
+          const contentIdClass = contentIdHost
+            ? Array.from(contentIdHost.classList)
+                .find(c => c.startsWith('content-id-'))
+            : null;
+          let videoId = contentIdClass
             ? contentIdClass.replace('content-id-', '')
             : null;
 
-          // Video URL — thumbnail anchor or title anchor
+          // Video URL — thumbnail anchor or title anchor, either generation;
+          // last resort: any watch/shorts link.
           const linkEl = lockup.querySelector(
             'a.yt-lockup-view-model__content-image, ' +
-            'a.yt-lockup-metadata-view-model__title'
-          );
+            'a.ytLockupViewModelContentImage, ' +
+            'a.yt-lockup-metadata-view-model__title, ' +
+            'a.ytLockupMetadataViewModelTitle'
+          ) || lockup.querySelector('a[href*="/watch?"], a[href*="/shorts/"]');
           if (!linkEl) continue;
 
           const href = linkEl.getAttribute('href') || '';
           const videoUrl = href.startsWith('http')
             ? href
             : 'https://www.youtube.com' + href;
+          if (!videoId) {
+            const watchMatch = href.match(/[?&]v=([\\w-]{6,})/);
+            const shortsMatch = href.match(/\\/shorts\\/([\\w-]{6,})/);
+            videoId = watchMatch ? watchMatch[1]
+              : shortsMatch ? shortsMatch[1]
+              : null;
+          }
 
           // De-dup across scroll re-evaluations
           const key = videoId || videoUrl;
@@ -912,35 +934,38 @@ const scrapeHistory = async () => {
 
           // Title: prefer h3[title] attribute (full, untruncated)
           const titleEl = lockup.querySelector(
-            'h3.yt-lockup-metadata-view-model__heading-reset'
+            'h3.yt-lockup-metadata-view-model__heading-reset, ' +
+            'h3.ytLockupMetadataViewModelHeadingReset, ' +
+            'h3'
           );
           const videoTitle = titleEl
             ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim() || null
             : null;
 
-          // Channel name: from avatar aria-label ("Go to channel X")
+          // Channel name: from avatar aria-label ("Go to channel X"), with a
+          // first-metadata-row fallback (channel is the first metadata text).
           const avatarEl = lockup.querySelector('[aria-label^="Go to channel"]');
+          const metaSpans = lockup.querySelectorAll(
+            '.yt-content-metadata-view-model__metadata-text, ' +
+            '.ytContentMetadataViewModelMetadataText'
+          );
           const channelTitle = avatarEl
             ? (avatarEl.getAttribute('aria-label') || '')
                 .replace(/^Go to channel\\s+/i, '').trim() || null
-            : null;
+            : metaSpans[0]
+              ? (metaSpans[0].textContent || '').trim() || null
+              : null;
 
-          // Views: last .metadata-text span inside the first padded row
-          const firstRow = lockup.querySelector(
-            '.yt-content-metadata-view-model__metadata-row--metadata-row-padding'
-          );
-          let views = null;
-          if (firstRow) {
-            const metaSpans = firstRow.querySelectorAll(
-              '.yt-content-metadata-view-model__metadata-text'
-            );
-            const lastSpan = metaSpans[metaSpans.length - 1];
-            if (lastSpan) views = (lastSpan.textContent || '').trim() || null;
-          }
+          // Views: last metadata-text span (row text is "Channel • 349K views")
+          const lastSpan = metaSpans[metaSpans.length - 1];
+          const views = lastSpan && /view/i.test(lastSpan.textContent || '')
+            ? (lastSpan.textContent || '').trim() || null
+            : null;
 
           // Description: multi-line text snippet
           const descEl = lockup.querySelector(
-            '.yt-content-metadata-view-model__metadata-text-max-lines-2'
+            '.yt-content-metadata-view-model__metadata-text-max-lines-2, ' +
+            '.ytContentMetadataViewModelMetadataTextMaxLines2'
           );
           const description = descEl
             ? (descEl.textContent || '').trim() || null
