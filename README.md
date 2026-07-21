@@ -515,5 +515,3 @@ This fetches matching versions from the signed `connectors-latest`
 artifact/manifest/script checksums, and writes the scripts + manifests to a
 local snapshot directory. It's analogous to `npm install`.
 
-Downstream personal-data platforms are examples of consumers that resolve
-connectors this way.
