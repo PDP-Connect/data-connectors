@@ -11,7 +11,8 @@
  *   - youtube.playlistItems
  *   - youtube.likes        (Liked Videos playlist: list=LL)
  *   - youtube.watchLater   (Watch Later playlist:  list=WL)
- *   - youtube.history      (top 50 most recent entries, with watchedAtText from date headers)
+ *   - youtube.history      (top 50 most recent entries; date headers resolved
+ *                           to ISO watchedAt at scrape time, raw watchedAtText kept)
  */
 
 // ─── State ────────────────────────────────────────────────────
@@ -203,17 +204,23 @@ const openAvatarMenu = async () => {
     })()
   `);
 
-  await waitForCondition(async () => {
-    const menuIsOpen = await page.evaluate(`
+  // Wait for the ACTIVE-ACCOUNT HEADER specifically, not just any popup. This
+  // is the element that carries the signed-in user's own handle; gating on it
+  // is what lets getChannelUrlFromMenu read the real channel instead of
+  // falling back to a page link (which would be a subscribed channel). The
+  // menu container tag has drifted over time (tp-yt-iron-dropdown now), so we
+  // key on the header renderer, which is stable.
+  return await waitForCondition(async () => {
+    return await page.evaluate(`
       (() => {
-        return !!document.querySelector(
-          'ytd-multi-page-menu-renderer, tp-yt-paper-dialog, paper-dialog'
-        );
+        const header = document.querySelector('ytd-active-account-header-renderer');
+        if (!header) return false;
+        const handle = header.querySelector('#channel-handle');
+        const link = header.querySelector('a[href*="/@"], a[href*="/channel/"]');
+        return !!(handle || link);
       })()
     `);
-
-    return menuIsOpen;
-  }, { timeout: 2500 });
+  }, { timeout: 4000 });
 };
 
 // ─── Email Extraction ────────────────────────────────────────
@@ -280,16 +287,21 @@ const extractEmail = async () => {
 // ─── Channel URL (from avatar menu) ──────────────────────────
 
 const getChannelUrlFromMenu = async () => {
-  // Open avatar menu
+  // Open avatar menu (resolves once the active-account header has rendered)
   await openAvatarMenu();
 
   const channelUrl = await page.evaluate(`
     (() => {
-      // Primary: read handle directly from the active-account header element
-      const handleEl = document.querySelector(
-        'yt-formatted-string#channel-handle, ' +
-        'ytd-active-account-header-renderer yt-formatted-string#channel-handle'
-      );
+      // Scope EVERY read to the signed-in user's own account header. Reading
+      // page-wide (the old behavior) grabbed the first "/@" link anywhere on
+      // the page — on the homepage that's the first channel in the guide
+      // sidebar, i.e. a channel the user is SUBSCRIBED to, not their own. That
+      // recorded a subscribed channel's profile as the user's (BUI-763).
+      const header = document.querySelector('ytd-active-account-header-renderer');
+      if (!header) return null;
+
+      // Primary: the handle text in the header.
+      const handleEl = header.querySelector('#channel-handle');
       if (handleEl) {
         const handle = (handleEl.textContent || '').trim();
         if (handle.startsWith('@')) {
@@ -297,8 +309,9 @@ const getChannelUrlFromMenu = async () => {
         }
       }
 
-      // Fallback: look for a channel link in the dropdown, skip utility pages
-      const links = document.querySelectorAll('a[href*="/@"], a[href*="/channel/"]');
+      // Fallback: a channel link, but ONLY within the header, and skip the
+      // account-management utility links.
+      const links = header.querySelectorAll('a[href*="/@"], a[href*="/channel/"]');
       for (const link of links) {
         const href = link.getAttribute('href') || '';
         if (
@@ -312,6 +325,9 @@ const getChannelUrlFromMenu = async () => {
             : 'https://www.youtube.com' + href;
         }
       }
+
+      // Nothing trustworthy in the header — return null and skip profile
+      // rather than guessing a wrong channel from the page.
       return null;
     })()
   `);
@@ -708,10 +724,13 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
     const batch = await page.evaluate(`
       (() => {
         const results = [];
-        const videos = document.querySelectorAll(
+
+        // Old-generation extraction: ytd-playlist-video-renderer (grid) and
+        // ytd-playlist-panel-video-renderer (side panel).
+        const oldVideos = document.querySelectorAll(
           'ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer'
         );
-        for (const video of videos) {
+        for (const video of oldVideos) {
           const titleEl = video.querySelector(
             '#video-title, a#video-title span, span#video-title, ' +
             'a#video-title yt-formatted-string'
@@ -756,6 +775,88 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
             thumbnailUrl: thumbImg ? thumbImg.src : null
           });
         }
+
+        // New-generation extraction: playlist pages (Liked Videos, Watch
+        // Later, user playlists) now render items as yt-lockup-view-model,
+        // the same rewrite the history page uses. Same selectors as the
+        // history scraper, kept in sync.
+        const lockups = document.querySelectorAll('yt-lockup-view-model');
+        for (const lockup of lockups) {
+          const linkEl = lockup.querySelector(
+            'a.yt-lockup-view-model__content-image, ' +
+            'a.ytLockupViewModelContentImage, ' +
+            'a.yt-lockup-metadata-view-model__title, ' +
+            'a.ytLockupMetadataViewModelTitle'
+          ) || lockup.querySelector('a[href*="/watch?"], a[href*="/shorts/"]');
+          if (!linkEl) continue;
+
+          const href = linkEl.getAttribute('href') || '';
+          const url = href.startsWith('http')
+            ? href
+            : 'https://www.youtube.com' + href;
+
+          const contentIdHost =
+            (lockup.getAttribute('class') || '').includes('content-id-')
+              ? lockup
+              : lockup.querySelector('[class*="content-id-"]');
+          const contentIdClass = contentIdHost
+            ? Array.from(contentIdHost.classList)
+                .find(c => c.startsWith('content-id-'))
+            : null;
+          let videoId = contentIdClass
+            ? contentIdClass.replace('content-id-', '')
+            : null;
+          if (!videoId) {
+            const m = href.match(/[?&]v=([\\w-]{6,})/) || href.match(/\\/shorts\\/([\\w-]{6,})/);
+            videoId = m ? m[1] : null;
+          }
+
+          const titleEl = lockup.querySelector(
+            'h3.yt-lockup-metadata-view-model__heading-reset, ' +
+            'h3.ytLockupMetadataViewModelHeadingReset, ' +
+            'h3'
+          );
+          const videoTitle = titleEl
+            ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim()
+            : '';
+
+          const avatarEl = lockup.querySelector('[aria-label^="Go to channel"]');
+          const metaSpans = lockup.querySelectorAll(
+            '.yt-content-metadata-view-model__metadata-text, ' +
+            '.ytContentMetadataViewModelMetadataText'
+          );
+          const channelTitle = avatarEl
+            ? (avatarEl.getAttribute('aria-label') || '')
+                .replace(/^Go to channel\\s+/i, '').trim() || null
+            : metaSpans[0]
+              ? (metaSpans[0].textContent || '').trim() || null
+              : null;
+          const channelLink = lockup.querySelector('a[href*="/@"], a[href*="/channel/"]');
+          const channelHref = channelLink ? channelLink.getAttribute('href') || '' : '';
+          const channelUrl = channelHref
+            ? (channelHref.startsWith('http') ? channelHref : 'https://www.youtube.com' + channelHref)
+            : null;
+
+          const thumbImg = lockup.querySelector('img.yt-core-image, img');
+          const badge = lockup.querySelector(
+            '.ytBadgeShapeText, ' +
+            '.badge-shape-wiz__text, ' +
+            '.ytThumbnailBottomOverlayViewModelBadgeContainer .ytBadgeShapeText'
+          );
+
+          if (!videoTitle && !videoId) continue;
+
+          results.push({
+            videoId,
+            videoUrl: url,
+            videoTitle,
+            channelTitle,
+            channelUrl,
+            durationText: badge ? (badge.textContent || '').trim() || null : null,
+            thumbnailUrl: thumbImg ? thumbImg.src : null
+          });
+        }
+
         return results;
       })()
     `);
@@ -783,6 +884,68 @@ const scrapePlaylistPage = async (playlistUrl, maxScrolls) => {
 
   return allItems;
 };
+
+// ─── Watch-date resolution ────────────────────────────────────
+// The history page only exposes day-granular section headers as text
+// ("Today", "Yesterday", a weekday for the current week, or an absolute
+// date). Relative labels are only meaningful at scrape time, so they are
+// resolved to an ISO date (YYYY-MM-DD) here, while the scrape's "now" and
+// the account's YouTube UI locale are still in hand. Unrecognized header
+// text yields null rather than a guessed date.
+// Extracted verbatim by scripts/youtube-watched-at.test.mjs — keep the
+// region between the WATCHED_AT_RESOLVER markers self-contained.
+/* WATCHED_AT_RESOLVER:BEGIN */
+const resolveWatchedAt = (watchedAtText, now = new Date()) => {
+  if (!watchedAtText) return null;
+  const text = String(watchedAtText).trim();
+  if (!text) return null;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const toIsoDate = (d) =>
+    new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+      .toISOString()
+      .slice(0, 10);
+  if (/^today$/i.test(text)) return toIsoDate(now);
+  if (/^yesterday$/i.test(text)) return toIsoDate(new Date(now.getTime() - DAY_MS));
+  const WEEKDAYS = [
+    'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'
+  ];
+  const weekdayIndex = WEEKDAYS.indexOf(text.toLowerCase());
+  if (weekdayIndex >= 0) {
+    // Weekday headers appear for the current week; "Monday" seen on a
+    // Monday would have been "Today", so a zero delta means a week ago.
+    let delta = (now.getDay() - weekdayIndex + 7) % 7;
+    if (delta === 0) delta = 7;
+    return toIsoDate(new Date(now.getTime() - delta * DAY_MS));
+  }
+  // Absolute headers: "Jan 23, 2026" or "Jan 23" (current year implied).
+  // Matched explicitly by month name — Date.parse is too lax and would
+  // accept arbitrary text with a trailing year.
+  const MONTHS = [
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+    'jul', 'aug', 'sep', 'oct', 'nov', 'dec'
+  ];
+  const abs = text.match(/^([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?$/);
+  if (abs) {
+    const monthIndex = MONTHS.indexOf(abs[1].slice(0, 3).toLowerCase());
+    const day = Number(abs[2]);
+    if (monthIndex >= 0 && day >= 1 && day <= 31) {
+      const hasYear = abs[3] !== undefined;
+      const d = new Date(
+        hasYear ? Number(abs[3]) : now.getFullYear(),
+        monthIndex,
+        day
+      );
+      // A month-day header without a year can land in the future ("Dec 31"
+      // scraped on Jan 2) — that means it was last year.
+      if (!hasYear && d.getTime() > now.getTime()) {
+        d.setFullYear(d.getFullYear() - 1);
+      }
+      return toIsoDate(d);
+    }
+  }
+  return null;
+};
+/* WATCHED_AT_RESOLVER:END */
 
 // ─── Watch History Scraper ────────────────────────────────────
 
@@ -823,24 +986,46 @@ const scrapeHistory = async () => {
         for (const lockup of lockups) {
           if (results.length >= ${MAX_HISTORY_ITEMS}) break;
 
-          // videoId from the content-id-* class
-          const contentIdClass = Array.from(lockup.classList)
-            .find(c => c.startsWith('content-id-'));
-          const videoId = contentIdClass
+          // Selectors cover both lockup DOM generations: the BEM classes
+          // (yt-lockup-view-model__content-image) and the camelCase rewrite
+          // YouTube is rolling out (ytLockupViewModelContentImage), where
+          // content-id-* also moved from the lockup element onto an inner div.
+
+          // videoId from the content-id-* class (lockup itself or descendant).
+          // getAttribute('class') — Polymer components may shadow .className.
+          const contentIdHost =
+            (lockup.getAttribute('class') || '').includes('content-id-')
+              ? lockup
+              : lockup.querySelector('[class*="content-id-"]');
+          const contentIdClass = contentIdHost
+            ? Array.from(contentIdHost.classList)
+                .find(c => c.startsWith('content-id-'))
+            : null;
+          let videoId = contentIdClass
             ? contentIdClass.replace('content-id-', '')
             : null;
 
-          // Video URL — thumbnail anchor or title anchor
+          // Video URL — thumbnail anchor or title anchor, either generation;
+          // last resort: any watch/shorts link.
           const linkEl = lockup.querySelector(
             'a.yt-lockup-view-model__content-image, ' +
-            'a.yt-lockup-metadata-view-model__title'
-          );
+            'a.ytLockupViewModelContentImage, ' +
+            'a.yt-lockup-metadata-view-model__title, ' +
+            'a.ytLockupMetadataViewModelTitle'
+          ) || lockup.querySelector('a[href*="/watch?"], a[href*="/shorts/"]');
           if (!linkEl) continue;
 
           const href = linkEl.getAttribute('href') || '';
           const videoUrl = href.startsWith('http')
             ? href
             : 'https://www.youtube.com' + href;
+          if (!videoId) {
+            const watchMatch = href.match(/[?&]v=([\\w-]{6,})/);
+            const shortsMatch = href.match(/\\/shorts\\/([\\w-]{6,})/);
+            videoId = watchMatch ? watchMatch[1]
+              : shortsMatch ? shortsMatch[1]
+              : null;
+          }
 
           // De-dup across scroll re-evaluations
           const key = videoId || videoUrl;
@@ -849,35 +1034,38 @@ const scrapeHistory = async () => {
 
           // Title: prefer h3[title] attribute (full, untruncated)
           const titleEl = lockup.querySelector(
-            'h3.yt-lockup-metadata-view-model__heading-reset'
+            'h3.yt-lockup-metadata-view-model__heading-reset, ' +
+            'h3.ytLockupMetadataViewModelHeadingReset, ' +
+            'h3'
           );
           const videoTitle = titleEl
             ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim() || null
             : null;
 
-          // Channel name: from avatar aria-label ("Go to channel X")
+          // Channel name: from avatar aria-label ("Go to channel X"), with a
+          // first-metadata-row fallback (channel is the first metadata text).
           const avatarEl = lockup.querySelector('[aria-label^="Go to channel"]');
+          const metaSpans = lockup.querySelectorAll(
+            '.yt-content-metadata-view-model__metadata-text, ' +
+            '.ytContentMetadataViewModelMetadataText'
+          );
           const channelTitle = avatarEl
             ? (avatarEl.getAttribute('aria-label') || '')
                 .replace(/^Go to channel\\s+/i, '').trim() || null
-            : null;
+            : metaSpans[0]
+              ? (metaSpans[0].textContent || '').trim() || null
+              : null;
 
-          // Views: last .metadata-text span inside the first padded row
-          const firstRow = lockup.querySelector(
-            '.yt-content-metadata-view-model__metadata-row--metadata-row-padding'
-          );
-          let views = null;
-          if (firstRow) {
-            const metaSpans = firstRow.querySelectorAll(
-              '.yt-content-metadata-view-model__metadata-text'
-            );
-            const lastSpan = metaSpans[metaSpans.length - 1];
-            if (lastSpan) views = (lastSpan.textContent || '').trim() || null;
-          }
+          // Views: last metadata-text span (row text is "Channel • 349K views")
+          const lastSpan = metaSpans[metaSpans.length - 1];
+          const views = lastSpan && /view/i.test(lastSpan.textContent || '')
+            ? (lastSpan.textContent || '').trim() || null
+            : null;
 
           // Description: multi-line text snippet
           const descEl = lockup.querySelector(
-            '.yt-content-metadata-view-model__metadata-text-max-lines-2'
+            '.yt-content-metadata-view-model__metadata-text-max-lines-2, ' +
+            '.ytContentMetadataViewModelMetadataTextMaxLines2'
           );
           const description = descEl
             ? (descEl.textContent || '').trim() || null
@@ -901,7 +1089,11 @@ const scrapeHistory = async () => {
     })()
   `);
 
-  return (items || []).slice(0, MAX_HISTORY_ITEMS);
+  const scrapedAt = new Date();
+  return (items || []).slice(0, MAX_HISTORY_ITEMS).map((item) => ({
+    ...item,
+    watchedAt: resolveWatchedAt(item.watchedAtText, scrapedAt),
+  }));
 };
 
 // ─── Main Connector Flow ──────────────────────────────────────

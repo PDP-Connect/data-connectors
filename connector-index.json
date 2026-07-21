@@ -1094,6 +1094,44 @@
           "iconKey": "youtube",
           "defaultScope": "youtube.profile"
         }
+      },
+      {
+        "connectorId": "youtube-playwright",
+        "company": "google",
+        "version": "1.2.0",
+        "name": "YouTube",
+        "status": "beta",
+        "description": "Exports your YouTube profile, subscriptions, playlists, playlist items, liked videos, watch later list, and top 50 recent watch history entries.",
+        "sourceFiles": {
+          "script": "google/youtube-playwright.js",
+          "metadata": "google/youtube-playwright.json"
+        },
+        "publishedAt": "2026-07-13T00:00:00Z",
+        "sourceTag": "volod/bui-763-youtube-watchedat",
+        "sourceCommit": "6cfa9586e1d6dd7c18f986ff9cf5dfc2b1c30bae",
+        "releaseId": "connectors-6cfa9586e1d6",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:16dc3966b5d235d5ff93ee07720c0ddf9d06479dca30387f026482fff8fbdf72",
+        "scriptSha256": "sha256:8dcb7e8a9a2a02e21e69374141ad44e6f5d778d6c6a314d216c74dc5115cc9ae",
+        "artifactSha256": "sha256:5c3a6ea50007e8d6882e658fa8305f9769ad78dfac6cc8c9351f19e712756c1b",
+        "artifactPath": "artifacts/youtube-playwright/youtube-playwright-1.2.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/6cfa9586e1d6dd7c18f986ff9cf5dfc2b1c30bae/artifacts/youtube-playwright/youtube-playwright-1.2.0.tgz",
+        "scopes": [
+          "youtube.profile",
+          "youtube.subscriptions",
+          "youtube.playlists",
+          "youtube.playlistItems",
+          "youtube.likes",
+          "youtube.watchLater",
+          "youtube.history"
+        ],
+        "consumerMetadata": {
+          "sourceId": "youtube",
+          "displayName": "YouTube",
+          "brandDomain": "youtube.com",
+          "iconKey": "youtube",
+          "defaultScope": "youtube.profile"
+        }
       }
     ]
   }

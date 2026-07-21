@@ -105,8 +105,8 @@
       "path": "connectors/google/fixtures/youtube.history.small.json",
       "rawUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/main/connectors/google/fixtures/youtube.history.small.json",
       "schemaPath": "connectors/google/schemas/youtube.history.json",
-      "sizeBytes": 1431,
-      "sha256": "sha256:4d3fb2096b2a46741c42894095fdd12ffea69b3fbe905b1b507167236a43197f"
+      "sizeBytes": 1574,
+      "sha256": "sha256:e1622275c61bf41cd4d52747e630b952082a58218e86f6fd910adff893e537f2"
     },
     {
       "id": "youtube-playwright.youtube.history.large",
@@ -118,8 +118,8 @@
       "path": "connectors/google/fixtures/youtube.history.large.json",
       "rawUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/main/connectors/google/fixtures/youtube.history.large.json",
       "schemaPath": "connectors/google/schemas/youtube.history.json",
-      "sizeBytes": 10107,
-      "sha256": "sha256:fd202ae77b4f21f7bfe26f9b3b2f50a6f7af5cd76ab933f8ebe9ed762fc98eb6"
+      "sizeBytes": 10953,
+      "sha256": "sha256:4276adbeae8ecf205bf32bb31d022b568afaa5b05ae616a12571b43da711400f"
     },
     {
       "id": "youtube-playwright.youtube.likes.empty",
