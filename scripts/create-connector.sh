@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 # Legacy Playwright Data Connector Creator
 #
 # Creates, tests, and validates a legacy Playwright connector end to end.

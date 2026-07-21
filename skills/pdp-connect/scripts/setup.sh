@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 # setup.sh — One-shot setup for the pdp-connect skill.
 # Installs the bundled playwright-runner's dependencies and Chromium.
 #

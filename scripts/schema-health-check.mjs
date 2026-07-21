@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+
 import { readFile, readdir } from "fs/promises";
 import { dirname, join } from "path";
 import { execSync } from "child_process";

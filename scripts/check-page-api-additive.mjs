@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Detect removals and renames on the PageAPI interface in types/connector.d.ts.
 // Fails if a method was present in the base revision but is missing in HEAD,
 // unless PAGE_API_VERSION in types/page-api-version.ts has been bumped.
