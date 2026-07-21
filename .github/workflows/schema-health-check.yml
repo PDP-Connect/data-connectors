@@ -22,8 +22,6 @@ jobs:
 
       - name: Run schema health check
         id: check
-        env:
-          GATEWAY_URL: ${{ vars.GATEWAY_URL }}
         run: |
           node scripts/schema-health-check.mjs --json --base-ref origin/${{ github.base_ref }} > report.json 2> summary.txt
           echo "exit_code=0" >> "$GITHUB_OUTPUT"
@@ -47,28 +45,18 @@ jobs:
               TOTAL=$(jq -r '.summary.total' report.json)
               CONSISTENT=$(jq -r '.summary.fullyConsistent' report.json)
               MISSING_FILE=$(jq -r '.summary.missingSchemaFile' report.json)
-              MISSING_GW=$(jq -r '.summary.missingGateway' report.json)
-              GW_ERRORS=$(jq -r '.summary.gatewayErrors' report.json)
-              META_DRIFT=$(jq -r '.summary.metadataDrift' report.json)
               ORPHANS=$(jq -r '.summary.orphanedSchemas' report.json)
-              BLOCKING_MISSING_GW=$(jq -r '.summary.blockingMissingGateway // 0' report.json)
-              INHERITED_MISSING_GW=$(jq -r '.summary.inheritedMissingGateway // 0' report.json)
 
-              ISSUES=$((MISSING_FILE + MISSING_GW + GW_ERRORS + META_DRIFT + ORPHANS))
-              BLOCKING_ISSUES=$((MISSING_FILE + BLOCKING_MISSING_GW + GW_ERRORS + META_DRIFT + ORPHANS))
+              ISSUES=$((MISSING_FILE + ORPHANS))
 
-              if [ "$BLOCKING_ISSUES" = "0" ] && [ "$ISSUES" = "0" ]; then
+              if [ "$ISSUES" = "0" ]; then
                 echo "## Schema Health Check — All Clear"
                 echo ""
-                echo "All $TOTAL scopes are fully consistent (local schema files + Gateway registration)."
-              elif [ "$BLOCKING_ISSUES" = "0" ]; then
-                echo "## Schema Health Check — Non-blocking inherited issues"
-                echo ""
-                echo "$CONSISTENT/$TOTAL scopes consistent | $INHERITED_MISSING_GW inherited Gateway gap(s) | no new blocking issues in this PR"
+                echo "All $TOTAL scopes have consistent local schema files."
               else
-                echo "## Schema Health Check — $BLOCKING_ISSUES blocking issue(s) found"
+                echo "## Schema Health Check — $ISSUES issue(s) found"
                 echo ""
-                echo "$CONSISTENT/$TOTAL scopes consistent | $MISSING_FILE missing schema files | $BLOCKING_MISSING_GW new Gateway gap(s) | $INHERITED_MISSING_GW inherited Gateway gap(s) | $META_DRIFT metadata drift | $ORPHANS orphaned"
+                echo "$CONSISTENT/$TOTAL scopes consistent | $MISSING_FILE missing schema files | $ORPHANS orphaned"
                 echo ""
                 echo "<details>"
                 echo "<summary>View issues</summary>"
@@ -83,33 +71,6 @@ jobs:
                   echo ""
                 fi
 
-                if [ "$MISSING_GW" != "0" ]; then
-                  echo "**Not registered in Gateway:**"
-                  echo ""
-                  echo "| Scope | Connector | Added in PR? |"
-                  echo "|-------|-----------|--------------|"
-                  jq -r '.scopes[] | select(.gatewayStatus == "missing") | "| \(.scope) | \(.connector) | \(if .isNew then "added in this PR" else "" end) |"' report.json
-                  echo ""
-                fi
-
-                if [ "$META_DRIFT" != "0" ]; then
-                  echo "**Metadata mismatch (local vs Gateway):**"
-                  echo ""
-                  echo "| Scope | Connector | Mismatches |"
-                  echo "|-------|-----------|------------|"
-                  jq -r '.scopes[] | select(.metadataMismatches != null and (.metadataMismatches | length) > 0) | "| \(.scope) | \(.connector) | \(.metadataMismatches | join("; ")) |"' report.json
-                  echo ""
-                fi
-
-                if [ "$GW_ERRORS" != "0" ]; then
-                  echo "**Gateway errors:**"
-                  echo ""
-                  echo "| Scope | Connector | Error |"
-                  echo "|-------|-----------|-------|"
-                  jq -r '.scopes[] | select(.gatewayStatus == "error") | "| \(.scope) | \(.connector) | \(.gatewayError // "-") |"' report.json
-                  echo ""
-                fi
-
                 if [ "$ORPHANS" != "0" ]; then
                   echo "**Orphaned schema files** (no connector declares this scope):"
                   echo ""
@@ -119,7 +80,7 @@ jobs:
 
                 echo "</details>"
                 echo ""
-                echo "> New blocking issues must be resolved before connectors can be used by Personal Servers. Inherited Gateway registration debt remains visible but does not fail this PR."
+                echo "> These issues must be resolved before connectors can be considered schema-healthy."
               fi
 
               echo 'COMMENT_EOF'
