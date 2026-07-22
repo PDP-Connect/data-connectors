@@ -20,6 +20,12 @@ export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
 export const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY =
   "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+// Transitional only: remove the vana-com identity after every referenced artifact
+// has been re-published from PDP-Connect and shrink this list back to one identity.
+export const TRANSITIONAL_ARTIFACT_CERTIFICATE_IDENTITIES = [
+  DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+  "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main",
+];
 
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -182,12 +188,14 @@ function resolveBundleUrl(subjectUrl, signature) {
   return `${subjectUrl}.sigstore.json`;
 }
 
-async function verifyRemoteSignature({
+export async function verifyRemoteSignature({
   payloadBuffer,
   subjectLabel,
   subjectUrl,
   signature,
   allowUnsignedRemote = false,
+  certificateIdentities = [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY],
+  verifyBundle = verifySigstoreBundle,
 }) {
   const normalizedSignature = normalizeSignature(signature);
   if (!normalizedSignature) {
@@ -209,18 +217,24 @@ async function verifyRemoteSignature({
   const bundleBuffer = await fetchBinary(bundleUrl);
   const bundle = JSON.parse(bundleBuffer.toString("utf8"));
 
-  try {
-    await verifySigstoreBundle(bundle, payloadBuffer, {
-      certificateIssuer: DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
-      certificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-    });
-  } catch (error) {
-    throw new Error(
-      `${subjectLabel} signature verification failed: ${error instanceof Error ? error.message : String(error)}`
-    );
+  const verificationErrors = [];
+  for (const certificateIdentityURI of certificateIdentities) {
+    try {
+      await verifyBundle(bundle, payloadBuffer, {
+        certificateIssuer: DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
+        certificateIdentityURI,
+      });
+      return true;
+    } catch (error) {
+      verificationErrors.push(error instanceof Error ? error.message : String(error));
+    }
   }
 
-  return true;
+  throw new Error(
+    `${subjectLabel} signature verification failed: attempted certificate identities ${certificateIdentities.join(
+      ", "
+    )}; ${verificationErrors.join("; ")}`
+  );
 }
 
 function ensureInside(baseDir, relativePath) {
@@ -464,6 +478,7 @@ async function fetchArtifactForEntry(indexSource, entry) {
     subjectLabel: `Connector artifact ${resolvedEntry.connectorId}@${resolvedEntry.version}`,
     subjectUrl: resolvedEntry.artifactUrl,
     signature: resolvedEntry.artifactSignature,
+    certificateIdentities: TRANSITIONAL_ARTIFACT_CERTIFICATE_IDENTITIES,
   });
   return artifactBuffer;
 }
