@@ -367,6 +367,11 @@ The runner classifies each run into one of:
 
 Use this path to maintain an existing legacy browser connector. New connector work belongs in `PDP-Connect/pdpp` by default. See [Connector authoring](AUTHORING.md).
 
+Read [`CONNECTOR-GUIDELINES.md`](CONNECTOR-GUIDELINES.md) first: the rules that keep a
+connector running unchanged on both the desktop runner and the mobile WebView shim. They
+apply to legacy Playwright connectors here and to PDPP Collection Profiles alike, since
+both are written against the same `page` API.
+
 Creating a new legacy connector requires an explicit exception. The creation tools reject requests without `--legacy-exception`. See [`skills/pdp-connect/CREATE.md`](skills/pdp-connect/CREATE.md) after the exception is approved.
 
 Summary:
