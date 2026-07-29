@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { arch, platform } from "node:process";
 
-const isTruthyEnv = (value) => {
+const isTruthyEnv = (value: string | undefined): boolean => {
   if (value === undefined) {
     return false;
   }
@@ -16,9 +16,7 @@ if (
   isTruthyEnv(process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD) ||
   isTruthyEnv(process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD)
 ) {
-  console.log(
-    "Skipping Patchright browser download because a browser-download skip env variable is set."
-  );
+  console.log("Skipping Patchright browser download because a browser-download skip env variable is set.");
   process.exit(0);
 }
 
@@ -30,12 +28,15 @@ const readOsRelease = () => {
   }
 };
 
+const UBUNTU_2604_VERSION_ID_PATTERN = /(^|\n)(VERSION_ID="26\.04"|VERSION_ID=26\.04)(\n|$)/;
+const UBUNTU_ID_PATTERN = /(^|\n)ID=ubuntu(\n|$)/;
+
 const isUnsupportedPatchrightHost = () => {
   if (platform !== "linux" || arch !== "x64") {
     return false;
   }
   const osRelease = readOsRelease();
-  return /(^|\n)(VERSION_ID="26\.04"|VERSION_ID=26\.04)(\n|$)/.test(osRelease) && /(^|\n)ID=ubuntu(\n|$)/.test(osRelease);
+  return UBUNTU_2604_VERSION_ID_PATTERN.test(osRelease) && UBUNTU_ID_PATTERN.test(osRelease);
 };
 
 if (isUnsupportedPatchrightHost()) {
