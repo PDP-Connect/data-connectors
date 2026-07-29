@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "lastUpdated": "2026-07-13T00:00:00Z",
+  "lastUpdated": "2026-07-29T00:00:00Z",
   "baseUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/main/connectors",
   "connectors": [
     {
@@ -55,7 +55,7 @@
     {
       "id": "instagram-playwright",
       "company": "meta",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "name": "Instagram",
       "status": "stable",
       "description": "Exports your Instagram profile and posts.",
@@ -74,8 +74,8 @@
         "metadata": "meta/instagram-playwright.json"
       },
       "checksums": {
-        "script": "sha256:909618f8c07b38608e3de152724c81853c21540f797f0afcb84810513a342224",
-        "metadata": "sha256:e416162473afc28b02febee130701ac86d45e12f142adfb9d61a3f59ae83e3ba"
+        "script": "sha256:0f64f1149616a712c82473608a7b8a520d2582d26b58adac2fea2cc8be4be530",
+        "metadata": "sha256:ecc60960baf6acae0dddef65b8cf7861010e3b0473ca014c3a67fef8a269116d"
       }
     },
     {
@@ -127,7 +127,7 @@
     {
       "id": "spotify-playwright",
       "company": "spotify",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "name": "Spotify",
       "status": "stable",
       "description": "Exports your Spotify library, playlists, listening history, and preferences.",
@@ -143,8 +143,8 @@
         "metadata": "spotify/spotify-playwright.json"
       },
       "checksums": {
-        "script": "sha256:0cca7383277f4b4d24747d684e67a8c76c2af77180f8bf3d51ce722521e91e84",
-        "metadata": "sha256:e5f5df94f724a2417b66b52edd0a4f12a3278b2566c9aaf5a2a69b31f80cbb2a"
+        "script": "sha256:7a7424c9533b75f80444970bd4259756d2c45c253b30f4dbc96bf5b940e99b87",
+        "metadata": "sha256:731c42ca58401df05573be47e663adde25456fef611da19ac4895c26c6a207b9"
       }
     },
     {
@@ -354,7 +354,7 @@
     {
       "id": "icloud-notes-playwright",
       "company": "Apple",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "name": "iCloud Notes",
       "status": "experimental",
       "description": "Exports your Apple Notes and folders from iCloud.",
@@ -370,8 +370,8 @@
         "metadata": "apple/icloud-notes-playwright.json"
       },
       "checksums": {
-        "script": "sha256:ab465031ce09187c70890f4498fb0d650d0ea0dd7a11d558496d834a00076188",
-        "metadata": "sha256:1b43c2ab74a7dc8bb2271b5be9d6f1d1e64d3f636604332f67439663bfd62bce"
+        "script": "sha256:e58841373d8e52b9cd52d0537da3f9c209b9dc9db1c86f005f3cf526ac840a73",
+        "metadata": "sha256:20c79f11d934c4ca990c75995405fef1abd34648956a5d06e89e7f90298e7c56"
       }
     }
   ]

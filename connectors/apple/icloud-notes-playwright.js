@@ -12,6 +12,30 @@
  * can reject the connector up front until runtime convergence lands.
  */
 
+// Status-only runner hook. It deliberately returns only a boolean and never
+// starts the interactive authentication or export flow below.
+const checkLoginStatus = async () => {
+  try {
+    return await page.evaluate(`
+      (async () => {
+        try {
+          const response = await fetch('https://setup.icloud.com/setup/ws/1/validate', {
+            method: 'POST',
+            credentials: 'include'
+          });
+          if (!response.ok) return false;
+          const data = await response.json();
+          return Boolean(data?.dsInfo?.dsid && data?.webservices?.ckdatabasews?.url);
+        } catch {
+          return false;
+        }
+      })()
+    `);
+  } catch {
+    return false;
+  }
+};
+
 (async () => {
   const PLATFORM = "icloud_notes";
   const VERSION = "0.2.0";
