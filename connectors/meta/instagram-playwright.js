@@ -349,6 +349,8 @@ const fetchWebInfo = async () => {
   }
 };
 
+const checkLoginStatus = async () => Boolean((await fetchWebInfo())?.username);
+
 // Main export flow
 (async () => {
   let requestedScopes = [...CANONICAL_SCOPES];

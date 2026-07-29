@@ -250,7 +250,7 @@ const extractQueryHashes = async () => {
 // Check if user has completed login by verifying we're on open.spotify.com.
 // Spotify only redirects here after full authentication (including email confirmation codes).
 // This prevents premature detection when still on accounts.spotify.com or challenge.spotify.com.
-const checkLoginComplete = async () => {
+const checkLoginStatus = async () => {
   try {
     const result = await page.evaluate(`
       (() => window.location.hostname === 'open.spotify.com')()
@@ -469,14 +469,14 @@ const spClientFetch = async (path) => {
 
       // Wait for redirect to open.spotify.com
       for (let i = 0; i < 10; i++) {
-        const onPlayer = await checkLoginComplete();
+        const onPlayer = await checkLoginStatus();
         if (onPlayer) break;
         await page.sleep(2000);
       }
     }
 
     // Check if we made it to the player
-    const loginOk = await checkLoginComplete();
+    const loginOk = await checkLoginStatus();
 
     // Fallback to headed browser if programmatic login failed
     if (!loginOk) {
@@ -485,7 +485,7 @@ const spClientFetch = async (path) => {
         await page.setData('status', 'Please complete login in the browser...');
         await page.promptUser(
           'Complete any remaining verification, then click "Done".',
-          async () => await checkLoginComplete(),
+          async () => await checkLoginStatus(),
           3000
         );
         await page.goHeadless();
