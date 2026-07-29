@@ -1,7 +1,7 @@
 {
   "indexVersion": "2.0",
   "sourceRepo": "https://github.com/PDP-Connect/data-connectors",
-  "generatedAt": "2026-07-13T00:00:00Z",
+  "generatedAt": "2026-07-29T00:00:00Z",
   "signature": null,
   "connectors": {
     "amazon-playwright": [
@@ -454,6 +454,39 @@
           "iconKey": "icloud_notes",
           "defaultScope": "icloud_notes.notes"
         }
+      },
+      {
+        "connectorId": "icloud-notes-playwright",
+        "company": "Apple",
+        "version": "0.2.1",
+        "name": "iCloud Notes",
+        "status": "experimental",
+        "description": "Exports your Apple Notes and folders from iCloud.",
+        "sourceFiles": {
+          "script": "apple/icloud-notes-playwright.js",
+          "metadata": "apple/icloud-notes-playwright.json"
+        },
+        "publishedAt": "2026-07-29T00:00:00Z",
+        "sourceTag": "callum/fix-connector-session-status-artifacts",
+        "sourceCommit": "acfc3a6de152a6dc986b01d71a84c9174623efff",
+        "releaseId": "connectors-acfc3a6de152",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:20c79f11d934c4ca990c75995405fef1abd34648956a5d06e89e7f90298e7c56",
+        "scriptSha256": "sha256:e58841373d8e52b9cd52d0537da3f9c209b9dc9db1c86f005f3cf526ac840a73",
+        "artifactSha256": "sha256:dadd25144cc97486bcd4515a9525ef35287d1913bdd4d2dec53165b373f5ce22",
+        "artifactPath": "artifacts/icloud-notes-playwright/icloud-notes-playwright-0.2.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/acfc3a6de152a6dc986b01d71a84c9174623efff/artifacts/icloud-notes-playwright/icloud-notes-playwright-0.2.1.tgz",
+        "scopes": [
+          "icloud_notes.notes",
+          "icloud_notes.folders"
+        ],
+        "consumerMetadata": {
+          "sourceId": "icloud_notes",
+          "displayName": "iCloud Notes",
+          "brandDomain": "icloud.com",
+          "iconKey": "icloud_notes",
+          "defaultScope": "icloud_notes.notes"
+        }
       }
     ],
     "instagram-ads-playwright": [
@@ -634,6 +667,44 @@
         "artifactSha256": "sha256:003cc59f50269e5a2801910636882b8bedc1803c30ddce409634f63ab084b7e6",
         "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.2.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/instagram-playwright/instagram-playwright-2.2.0.tgz",
+        "scopes": [
+          "instagram.profile",
+          "instagram.posts",
+          "instagram.following",
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram",
+          "brandDomain": "instagram.com",
+          "aliases": [
+            "meta"
+          ],
+          "iconKey": "instagram",
+          "defaultScope": "instagram.posts"
+        }
+      },
+      {
+        "connectorId": "instagram-playwright",
+        "company": "meta",
+        "version": "2.2.1",
+        "name": "Instagram",
+        "status": "stable",
+        "description": "Exports your Instagram profile and posts.",
+        "sourceFiles": {
+          "script": "meta/instagram-playwright.js",
+          "metadata": "meta/instagram-playwright.json"
+        },
+        "publishedAt": "2026-07-29T00:00:00Z",
+        "sourceTag": "callum/fix-connector-session-status-artifacts",
+        "sourceCommit": "acfc3a6de152a6dc986b01d71a84c9174623efff",
+        "releaseId": "connectors-acfc3a6de152",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:ecc60960baf6acae0dddef65b8cf7861010e3b0473ca014c3a67fef8a269116d",
+        "scriptSha256": "sha256:0f64f1149616a712c82473608a7b8a520d2582d26b58adac2fea2cc8be4be530",
+        "artifactSha256": "sha256:2c29a59dfebaa61d163311c1582163c3456e114f598e94e3631a17c1f8035052",
+        "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.2.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/acfc3a6de152a6dc986b01d71a84c9174623efff/artifacts/instagram-playwright/instagram-playwright-2.2.1.tgz",
         "scopes": [
           "instagram.profile",
           "instagram.posts",
@@ -864,6 +935,40 @@
         "artifactSha256": "sha256:d76579a2d38ccec46f3f78d12316e144df41ba948734e4f2f01daf3bd6bdd30b",
         "artifactPath": "artifacts/spotify-playwright/spotify-playwright-1.1.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/09a6745b31b57ab4b574af11cc53f6a7fb2fc853/artifacts/spotify-playwright/spotify-playwright-1.1.0.tgz",
+        "scopes": [
+          "spotify.profile",
+          "spotify.savedTracks",
+          "spotify.playlists"
+        ],
+        "consumerMetadata": {
+          "sourceId": "spotify",
+          "displayName": "Spotify",
+          "brandDomain": "spotify.com",
+          "iconKey": "spotify",
+          "defaultScope": "spotify.savedTracks"
+        }
+      },
+      {
+        "connectorId": "spotify-playwright",
+        "company": "spotify",
+        "version": "1.1.1",
+        "name": "Spotify",
+        "status": "stable",
+        "description": "Exports your Spotify library, playlists, listening history, and preferences.",
+        "sourceFiles": {
+          "script": "spotify/spotify-playwright.js",
+          "metadata": "spotify/spotify-playwright.json"
+        },
+        "publishedAt": "2026-07-29T00:00:00Z",
+        "sourceTag": "callum/fix-connector-session-status-artifacts",
+        "sourceCommit": "acfc3a6de152a6dc986b01d71a84c9174623efff",
+        "releaseId": "connectors-acfc3a6de152",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:731c42ca58401df05573be47e663adde25456fef611da19ac4895c26c6a207b9",
+        "scriptSha256": "sha256:7a7424c9533b75f80444970bd4259756d2c45c253b30f4dbc96bf5b940e99b87",
+        "artifactSha256": "sha256:55a1399a2eba7f601b4a58b62daeceb8d465d467be47f6f7c5eea44bd7d4662e",
+        "artifactPath": "artifacts/spotify-playwright/spotify-playwright-1.1.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/acfc3a6de152a6dc986b01d71a84c9174623efff/artifacts/spotify-playwright/spotify-playwright-1.1.1.tgz",
         "scopes": [
           "spotify.profile",
           "spotify.savedTracks",
