@@ -3,6 +3,8 @@
 .DS_Store
 .fetch-cache.json
 .env
+node_modules/
+connectors/github-pdpp/dist/
 
 # Test runner output
 connector-result.json

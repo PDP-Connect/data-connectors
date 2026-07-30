@@ -132,6 +132,16 @@ any one consumer.
   release indexes.
 - `artifacts/<connector>/<connector>-<version>.tgz` is the immutable bundle
   format consumed by installers.
+- `github-pdpp` is an opt-in, unpublished PDPP Collection Profile artifact.
+  Its GitHub collector source lives normally under `connectors/github-pdpp/`;
+  generic PDPP runtime source does not. Explicit regeneration resolves that
+  runtime from the exact pinned PDPP worktree and records its full hash
+  inventory in provenance. The bundled entrypoint and provenance are
+  generated. The raw `dist/` build output is ignored, while its exact bytes
+  are committed inside the artifact tarball and recorded by the index and
+  provenance digests. Update GitHub logic deliberately in this repo (or
+  re-copy from PDPP), then rebuild and review the provenance—there is no sync
+  framework or legacy projection.
 - `artifacts/**/*.tgz.sigstore.json` is the detached Sigstore bundle for each
   immutable artifact.
 - `@opendatalabs/data-connectors-tools/installer-core` exposes the supported
@@ -514,4 +524,3 @@ This fetches matching versions from the signed `connectors-latest`
 `connector-index.json`, verifies the detached Sigstore bundles plus the
 artifact/manifest/script checksums, and writes the scripts + manifests to a
 local snapshot directory. It's analogous to `npm install`.
-

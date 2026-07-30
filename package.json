@@ -24,6 +24,8 @@
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
     "connector-index:check": "node ./scripts/generate-connector-index.mjs --check",
     "connector-index:test": "node --test ./scripts/connector-artifact-contract.test.mjs",
+    "github-pdpp:build": "node ./scripts/build-github-pdpp-artifact.mjs",
+    "github-pdpp:test": "node --test ./test/github-pdpp/github-pdpp.test.mjs",
     "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./schemas/connector-index.schema.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
@@ -34,6 +36,8 @@
     "release:sign": "node ./scripts/sign-release-assets.mjs"
   },
   "devDependencies": {
-    "ajv": "^8.17.1"
+    "ajv": "^8.17.1",
+    "esbuild": "0.28.1",
+    "zod": "4.3.6"
   }
 }
