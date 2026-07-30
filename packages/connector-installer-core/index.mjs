@@ -229,7 +229,7 @@ function validateRelativeArtifactPath(relativePath, label = "Artifact path") {
     relativePath === "" ||
     relativePath === "." ||
     relativePath.startsWith("/") ||
-    /^[A-Za-z]:\//.test(relativePath) ||
+    /^[A-Za-z]:/.test(relativePath) ||
     relativePath.includes("\\") ||
     relativePath.includes("\0") ||
     relativePath.split("/").includes("..")
@@ -244,7 +244,7 @@ function ensureInside(baseDir, relativePath) {
   return join(baseDir, normalize(validPath));
 }
 
-function walkFiles(dir, root = dir) {
+function walkArtifactFiles(dir, root = dir) {
   if (!existsSync(dir)) {
     return [];
   }
@@ -258,7 +258,7 @@ function walkFiles(dir, root = dir) {
       throw new Error(`Artifact contains unsupported link "${full.slice(root.length + 1)}"`);
     }
     if (st.isDirectory()) {
-      out.push(...walkFiles(full, root));
+      out.push(...walkArtifactFiles(full, root));
       continue;
     }
     if (!st.isFile()) {
@@ -292,8 +292,9 @@ function assertSafeArchive(tarPath) {
     .split("\n")
     .filter(Boolean);
   for (const member of verboseMembers) {
-    if (member.startsWith("l") || member.startsWith("h")) {
-      throw new Error("Artifact contains unsupported link entry");
+    const type = member[0];
+    if (type !== "-" && type !== "d") {
+      throw new Error(`Artifact contains unsupported archive entry type "${type}"`);
     }
   }
 }
@@ -351,7 +352,7 @@ function unpackArtifactBuffer(entry, buffer) {
     assertSafeArchive(tarPath);
     execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
 
-    const files = walkFiles(unpackDir);
+    const files = walkArtifactFiles(unpackDir);
     const manifestFile = files.find((file) => file.relativePath === contract.manifestPath);
     const entrypointFile = files.find((file) => file.relativePath === contract.entrypointPath);
     if (!manifestFile || !entrypointFile) {
@@ -636,6 +637,25 @@ function normalizeFetchedArtifact(entry, artifact) {
   };
 }
 
+function projectFetchedArtifact(entry, artifact) {
+  if (entry.artifactKind === "legacy") {
+    return {
+      manifest: artifact.manifest,
+      manifestBuffer: artifact.manifestBuffer,
+      scriptBuffer: artifact.entrypointBuffer,
+      schemaFiles: artifact.schemaFiles,
+      assetFiles: artifact.assetFiles,
+      readme: artifact.readme,
+      checksums: {
+        artifact: artifact.checksums.artifact,
+        manifest: artifact.checksums.manifest,
+        script: artifact.checksums.script,
+      },
+    };
+  }
+  return artifact;
+}
+
 function metadataDirFromSourceFiles(entry) {
   const sourceFiles = entry.sourceFiles;
   if (!sourceFiles?.metadata || !sourceFiles?.script) {
@@ -761,37 +781,41 @@ function removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel = 
   const expected = new Set(expectedPaths);
   const preserve = new Set(preserveTopLevel);
 
-  for (const file of walkFiles(installRoot)) {
-    if (expected.has(file.relativePath)) {
-      continue;
+  function pruneDirectory(dir, relativeDir = "") {
+    for (const entry of readdirSync(dir)) {
+      const relativePath = relativeDir ? `${relativeDir}/${entry}` : entry;
+      const topLevel = relativePath.split("/")[0];
+      if (preserve.has(topLevel)) {
+        continue;
+      }
+
+      const path = join(dir, entry);
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) {
+        pruneDirectory(path, relativePath);
+        if (readdirSync(path).length === 0) {
+          rmSync(path, { recursive: true, force: true });
+        }
+        continue;
+      }
+      if (!expected.has(relativePath)) {
+        rmSync(path, { force: true });
+      }
     }
-    const topLevel = file.relativePath.split("/")[0];
-    if (preserve.has(topLevel)) {
-      continue;
-    }
-    rmSync(file.path, { force: true });
   }
 
-  const candidateDirs = walkFiles(installRoot)
-    .map((file) => dirname(join(installRoot, file.relativePath)))
-    .sort((a, b) => b.length - a.length);
-
-  for (const dir of candidateDirs) {
-    if (dir === installRoot) continue;
-    try {
-      if (readdirSync(dir).length === 0) {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    } catch {
-      // Ignore races from nested cleanup.
-    }
+  if (existsSync(installRoot)) {
+    pruneDirectory(installRoot);
   }
 }
 
 export async function fetchResolvedArtifact(indexSource, entry) {
   const normalizedEntry = normalizeLockEntry(entry);
   const artifactBuffer = await fetchArtifactForEntry(indexSource, normalizedEntry);
-  return unpackAndVerifyArtifact(normalizedEntry, artifactBuffer);
+  return projectFetchedArtifact(
+    normalizedEntry,
+    unpackAndVerifyArtifact(normalizedEntry, artifactBuffer)
+  );
 }
 
 export async function resolveConnectorArtifacts({

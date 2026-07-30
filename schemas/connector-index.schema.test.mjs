@@ -62,22 +62,25 @@ test("index schema accepts the PDPP shape and preserves legacy requirements", ()
   delete legacyWithoutScriptDigest.scriptSha256;
   assert.equal(validate(documentWith(legacyWithoutScriptDigest)), false);
 
-  assert.equal(
-    validate(documentWith({ ...pdpp, entrypointPath: "../outside.cjs" })),
-    false,
-  );
-  assert.equal(
-    validate(documentWith({ ...pdpp, entrypointPath: "/outside.cjs" })),
-    false,
-  );
-  assert.equal(
-    validate(documentWith({ ...pdpp, entrypointPath: "C:/outside.cjs" })),
-    false,
-  );
-  assert.equal(
-    validate(documentWith({ ...pdpp, entrypointPath: "dist\\outside.cjs" })),
-    false,
-  );
+  const bundlePathCases = [
+    ["profile/collection-profile.json", true],
+    [".", false],
+    ["profile/\0collection-profile.json", false],
+    ["/outside.cjs", false],
+    ["C:relative.cjs", false],
+    ["C:/outside.cjs", false],
+    ["dist\\outside.cjs", false],
+    ["dist/../outside.cjs", false],
+  ];
+  for (const [path, accepted] of bundlePathCases) {
+    for (const field of ["manifestPath", "entrypointPath"]) {
+      assert.equal(
+        validate(documentWith({ ...pdpp, [field]: path })),
+        accepted,
+        `${field}=${JSON.stringify(path)} schema validity`,
+      );
+    }
+  }
   assert.equal(
     validate(documentWith({ ...pdpp, artifactKind: "future-kind" })),
     false,

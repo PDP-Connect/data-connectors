@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -18,6 +20,7 @@ import {
   generateLock,
   installFromLock,
   loadConnectorIndex,
+  pruneInstalled,
   resolveConnectorArtifacts,
   verifyInstalled,
 } from "./index.mjs";
@@ -58,13 +61,23 @@ function baseEntry(overrides = {}) {
 
 function pdppFixture(overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), "pdpp-artifact-test-"));
-  const manifestPath = "profile/collection-profile.json";
-  const entrypointPath = "dist/collection-profile.cjs";
+  const manifestPath = overrides.manifestPath ?? "profile/collection-profile.json";
+  const entrypointPath = overrides.entrypointPath ?? "dist/collection-profile.cjs";
   const manifestBuffer = Buffer.from('{"version":"1.0.0","profileVersion":"1"}\n');
   const entrypointBuffer = Buffer.from("export default {};\n");
+  const safeFixturePath = (path, fallback) =>
+    typeof path === "string" &&
+    path !== "." &&
+    !path.startsWith("/") &&
+    !/^[A-Za-z]:/.test(path) &&
+    !path.includes("\\") &&
+    !path.includes("\0") &&
+    !path.split("/").includes("..")
+      ? path
+      : fallback;
   const artifact = createArtifact(root, {
-    [manifestPath]: manifestBuffer,
-    [entrypointPath]: entrypointBuffer,
+    [safeFixturePath(manifestPath, "profile/collection-profile.json")]: manifestBuffer,
+    [safeFixturePath(entrypointPath, "dist/collection-profile.cjs")]: entrypointBuffer,
   });
   const entry = baseEntry({
     artifactKind: "pdpp-collection-profile",
@@ -127,22 +140,44 @@ test("accepts a PDPP Collection Profile bundle and records its discriminated loc
 });
 
 test("rejects a PDPP bundle whose declared entrypoint is missing", async () => {
-  const fixture = pdppFixture({ entrypointPath: "dist/missing.cjs" });
+  const fixture = pdppFixture();
+  fixture.entry.entrypointPath = "dist/missing.cjs";
   await assert.rejects(
     () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
     /Artifact missing dist\/missing\.cjs/,
   );
 });
 
-test("rejects absolute, backslash, and traversal PDPP entrypoint paths", async (t) => {
-  for (const path of ["/outside.cjs", "dist\\outside.cjs", "dist/../outside.cjs"]) {
-    await t.test(path, async () => {
-      const fixture = pdppFixture({ entrypointPath: path });
-      await assert.rejects(
-        () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-        /Invalid pdpp entrypoint path/i,
-      );
-    });
+test("runtime enforces the portable bundle-path contract", async (t) => {
+  const invalidPaths = [
+    [".", false],
+    ["dist/\0profile.cjs", false],
+    ["/outside.cjs", false],
+    ["C:relative.cjs", false],
+    ["C:/outside.cjs", false],
+    ["dist\\outside.cjs", false],
+    ["dist/../outside.cjs", false],
+  ];
+  const cases = [
+    ["manifestPath", "profile/collection-profile.json"],
+    ["entrypointPath", "dist/collection-profile.cjs"],
+  ];
+  for (const [field, validPath] of cases) {
+    for (const [path, accepted] of [[validPath, true], ...invalidPaths]) {
+      await t.test(`${field}=${JSON.stringify(path)}`, async () => {
+        const fixture = pdppFixture({ [field]: path });
+        const fetch = () =>
+          fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry);
+        if (accepted) {
+          await assert.doesNotReject(fetch);
+          return;
+        }
+        await assert.rejects(
+          fetch,
+          /Invalid pdpp .* path/i,
+        );
+      });
+    }
   }
 });
 
@@ -159,7 +194,25 @@ test("rejects link entries before unpacking a PDPP artifact", async () => {
   );
   await assert.rejects(
     () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-    /Artifact contains unsupported link entry/,
+    /Artifact contains unsupported archive entry type "l"/,
+  );
+  const artifactTempDirsAfter = new Set(
+    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
+  );
+  assert.deepEqual(artifactTempDirsAfter, artifactTempDirsBefore);
+});
+
+test("rejects FIFO archive entries before extraction and cleans up", async () => {
+  const fixture = pdppFixture();
+  execFileSync("mkfifo", [join(fixture.root, "bundle", "payload.fifo")]);
+  execFileSync("tar", ["-czf", join(fixture.root, "artifact.tgz"), "-C", join(fixture.root, "bundle"), "."]);
+  fixture.entry.artifactSha256 = sha256(readFileSync(join(fixture.root, "artifact.tgz")));
+  const artifactTempDirsBefore = new Set(
+    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
+  );
+  await assert.rejects(
+    () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
+    /Artifact contains unsupported archive entry type "p"/,
   );
   const artifactTempDirsAfter = new Set(
     readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
@@ -195,8 +248,27 @@ test("legacy bundle resolution and both legacy install layouts remain unchanged"
   assert.equal(lock.connectors[0].artifactKind, undefined);
   assert.equal(lock.connectors[0].scriptSha256, fixture.entry.scriptSha256);
   const fetched = await fetchResolvedArtifact(source, fixture.entry);
-  assert.deepEqual(fetched.scriptBuffer, fixture.scriptBuffer);
-  assert.equal(fetched.checksums.script, fixture.entry.scriptSha256);
+  assert.deepEqual(fetched, {
+    manifest: JSON.parse(fixture.manifestBuffer),
+    manifestBuffer: fixture.manifestBuffer,
+    scriptBuffer: fixture.scriptBuffer,
+    schemaFiles: [],
+    assetFiles: [],
+    readme: null,
+    checksums: {
+      artifact: fixture.entry.artifactSha256,
+      manifest: fixture.entry.manifestSha256,
+      script: fixture.entry.scriptSha256,
+    },
+  });
+
+  const resolution = await resolveConnectorArtifacts({ dependencies, source });
+  assert.deepEqual(resolution.resolved[0], {
+    connectorId: fixture.entry.connectorId,
+    constraint: "1.0.0",
+    entry: fixture.entry,
+    ...fetched,
+  });
 
   const snapshotRoot = join(fixture.root, "snapshot");
   await installFromLock({ lock, source, installRoot: snapshotRoot, layout: "snapshot" });
@@ -208,6 +280,29 @@ test("legacy bundle resolution and both legacy install layouts remain unchanged"
   await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
   assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.json")), fixture.manifestBuffer);
   assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.js")), fixture.scriptBuffer);
+});
+
+test("pruning preserves configured link subtrees and removes only unpreserved links", () => {
+  const installRoot = mkdtempSync(join(tmpdir(), "prune-install-test-"));
+  const externalRoot = mkdtempSync(join(tmpdir(), "prune-external-test-"));
+  const externalFile = join(externalRoot, "must-survive.txt");
+  writeFileSync(externalFile, "outside\n");
+  writeFileSync(join(installRoot, "expected.txt"), "expected\n");
+  symlinkSync(externalRoot, join(installRoot, "preserved-link"));
+  mkdirSync(join(installRoot, "preserved-subtree"), { recursive: true });
+  symlinkSync(externalRoot, join(installRoot, "preserved-subtree", "nested-link"));
+  symlinkSync(externalRoot, join(installRoot, "remove-link"));
+
+  pruneInstalled({
+    installRoot,
+    expectedPaths: ["expected.txt"],
+    preserveTopLevel: ["preserved-link", "preserved-subtree"],
+  });
+
+  assert.equal(lstatSync(join(installRoot, "preserved-link")).isSymbolicLink(), true);
+  assert.equal(lstatSync(join(installRoot, "preserved-subtree", "nested-link")).isSymbolicLink(), true);
+  assert.equal(existsSync(join(installRoot, "remove-link")), false);
+  assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
 });
 
 test("legacy install layouts explicitly reject PDPP artifacts", async () => {
