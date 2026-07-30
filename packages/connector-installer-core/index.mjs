@@ -1,11 +1,11 @@
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -223,15 +223,25 @@ async function verifyRemoteSignature({
   return true;
 }
 
+function validateRelativeArtifactPath(relativePath, label = "Artifact path") {
+  if (
+    typeof relativePath !== "string" ||
+    relativePath === "" ||
+    relativePath === "." ||
+    relativePath.startsWith("/") ||
+    /^[A-Za-z]:\//.test(relativePath) ||
+    relativePath.includes("\\") ||
+    relativePath.includes("\0") ||
+    relativePath.split("/").includes("..")
+  ) {
+    throw new Error(`Invalid ${label.toLowerCase()} "${relativePath}"`);
+  }
+  return relativePath;
+}
+
 function ensureInside(baseDir, relativePath) {
-  if (relativePath.startsWith("/") || relativePath.includes("\\")) {
-    throw new Error(`Invalid artifact path "${relativePath}"`);
-  }
-  const normalizedPath = normalize(relativePath);
-  if (normalizedPath.startsWith("..")) {
-    throw new Error(`Artifact path escapes bundle root: "${relativePath}"`);
-  }
-  return join(baseDir, normalizedPath);
+  const validPath = validateRelativeArtifactPath(relativePath);
+  return join(baseDir, normalize(validPath));
 }
 
 function walkFiles(dir, root = dir) {
@@ -243,33 +253,111 @@ function walkFiles(dir, root = dir) {
   for (const entry of readdirSync(dir)) {
     if (entry.startsWith(".")) continue;
     const full = join(dir, entry);
-    const st = statSync(full);
+    const st = lstatSync(full);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Artifact contains unsupported link "${full.slice(root.length + 1)}"`);
+    }
     if (st.isDirectory()) {
       out.push(...walkFiles(full, root));
-    } else {
-      out.push({
-        path: full,
-        relativePath: full.slice(root.length + 1),
-      });
+      continue;
     }
+    if (!st.isFile()) {
+      throw new Error(`Artifact contains unsupported entry "${full.slice(root.length + 1)}"`);
+    }
+    out.push({
+      path: full,
+      relativePath: full.slice(root.length + 1),
+    });
   }
   return out;
 }
 
-function unpackArtifactBuffer(buffer) {
+function validateArchiveMemberPath(memberPath) {
+  const trimmedPath = memberPath.replace(/^\.\//, "").replace(/\/$/, "");
+  if (trimmedPath === "") {
+    return;
+  }
+  validateRelativeArtifactPath(trimmedPath, "archive member path");
+}
+
+function assertSafeArchive(tarPath) {
+  const members = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+  for (const memberPath of members) {
+    validateArchiveMemberPath(memberPath);
+  }
+
+  const verboseMembers = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+  for (const member of verboseMembers) {
+    if (member.startsWith("l") || member.startsWith("h")) {
+      throw new Error("Artifact contains unsupported link entry");
+    }
+  }
+}
+
+function artifactContract(entry) {
+  const artifactKind = entry.artifactKind ?? "legacy";
+
+  if (artifactKind === "legacy") {
+    return {
+      manifestPath: "manifest.json",
+      entrypointPath: "script.js",
+      entrypointChecksum: entry.scriptSha256,
+      entrypointLabel: "script",
+    };
+  }
+
+  if (artifactKind === "pdpp-collection-profile") {
+    const manifestPath = validateRelativeArtifactPath(
+      entry.manifestPath,
+      "PDPP manifest path"
+    );
+    const entrypointPath = validateRelativeArtifactPath(
+      entry.entrypointPath,
+      "PDPP entrypoint path"
+    );
+    for (const [label, checksum] of Object.entries({
+      artifact: entry.artifactSha256,
+      manifest: entry.manifestSha256,
+      entrypoint: entry.entrypointSha256,
+    })) {
+      if (typeof checksum !== "string" || !/^sha256:[0-9a-f]{64}$/.test(checksum)) {
+        throw new Error(`${entry.connectorId} PDPP ${label} checksum is required`);
+      }
+    }
+    return {
+      manifestPath,
+      entrypointPath,
+      entrypointChecksum: entry.entrypointSha256,
+      entrypointLabel: "entrypoint",
+    };
+  }
+
+  throw new Error(`Unsupported artifact kind "${artifactKind}"`);
+}
+
+function unpackArtifactBuffer(entry, buffer) {
+  const contract = artifactContract(entry);
   const tempRoot = mkdtempSync(join(tmpdir(), "connector-artifact-"));
   const tarPath = join(tempRoot, "artifact.tgz");
   const unpackDir = join(tempRoot, "bundle");
-  mkdirSync(unpackDir, { recursive: true });
-  writeFileSync(tarPath, buffer);
-  execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
 
   try {
+    mkdirSync(unpackDir, { recursive: true });
+    writeFileSync(tarPath, buffer);
+    assertSafeArchive(tarPath);
+    execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
+
     const files = walkFiles(unpackDir);
-    const manifestFile = files.find((file) => file.relativePath === "manifest.json");
-    const scriptFile = files.find((file) => file.relativePath === "script.js");
-    if (!manifestFile || !scriptFile) {
-      throw new Error("Artifact missing manifest.json or script.js");
+    const manifestFile = files.find((file) => file.relativePath === contract.manifestPath);
+    const entrypointFile = files.find((file) => file.relativePath === contract.entrypointPath);
+    if (!manifestFile || !entrypointFile) {
+      throw new Error(
+        `Artifact missing ${!manifestFile ? contract.manifestPath : contract.entrypointPath}`
+      );
     }
 
     const schemaFiles = [];
@@ -277,7 +365,10 @@ function unpackArtifactBuffer(buffer) {
     let readme = null;
 
     for (const file of files) {
-      if (file.relativePath === "manifest.json" || file.relativePath === "script.js") {
+      if (
+        file.relativePath === contract.manifestPath ||
+        file.relativePath === contract.entrypointPath
+      ) {
         continue;
       }
       if (file.relativePath === "README.md") {
@@ -302,7 +393,10 @@ function unpackArtifactBuffer(buffer) {
 
     return {
       manifestBuffer: readFileSync(manifestFile.path),
-      scriptBuffer: readFileSync(scriptFile.path),
+      entrypointBuffer: readFileSync(entrypointFile.path),
+      entrypointPath: contract.entrypointPath,
+      entrypointChecksum: contract.entrypointChecksum,
+      entrypointLabel: contract.entrypointLabel,
       schemaFiles,
       assetFiles,
       readme,
@@ -395,10 +489,12 @@ function deriveSourceMeta(indexSource, connectors = []) {
       const sourceTag = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
         cwd: indexSource.rootDir,
         encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
       const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: indexSource.rootDir,
         encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
       return { sourceTag, sourceCommit };
     } catch {
@@ -418,6 +514,7 @@ function deriveSourceMeta(indexSource, connectors = []) {
 }
 
 function normalizeLockEntry(entry) {
+  const artifactKind = entry.artifactKind ?? entry.artifact_kind ?? "legacy";
   return {
     connectorId: entry.connectorId ?? entry.id,
     company: entry.company,
@@ -433,6 +530,11 @@ function normalizeLockEntry(entry) {
     manifestSha256:
       entry.manifestSha256 ?? entry.manifest_sha256 ?? entry.checksums?.metadata,
     scriptSha256: entry.scriptSha256 ?? entry.script_sha256 ?? entry.checksums?.script,
+    artifactKind,
+    manifestPath: entry.manifestPath ?? entry.manifest_path ?? null,
+    entrypointPath: entry.entrypointPath ?? entry.entrypoint_path ?? null,
+    entrypointSha256:
+      entry.entrypointSha256 ?? entry.entrypoint_sha256 ?? entry.checksums?.entrypoint,
     sourceTag: entry.sourceTag ?? entry.source_tag ?? entry.gitRef ?? entry.git_ref ?? null,
     sourceCommit:
       entry.sourceCommit ?? entry.source_commit ?? entry.gitRef ?? entry.git_ref ?? null,
@@ -476,19 +578,19 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
     );
   }
 
-  const unpacked = unpackArtifactBuffer(artifactBuffer);
+  const unpacked = unpackArtifactBuffer(entry, artifactBuffer);
   const manifest = JSON.parse(unpacked.manifestBuffer.toString("utf8"));
   const manifestChecksum = sha256Buffer(unpacked.manifestBuffer);
-  const scriptChecksum = sha256Buffer(unpacked.scriptBuffer);
+  const entrypointChecksum = sha256Buffer(unpacked.entrypointBuffer);
 
   if (entry.manifestSha256 && entry.manifestSha256 !== manifestChecksum) {
     throw new Error(
       `${entry.connectorId} manifest checksum mismatch: expected ${entry.manifestSha256}, got ${manifestChecksum}`
     );
   }
-  if (entry.scriptSha256 && entry.scriptSha256 !== scriptChecksum) {
+  if (unpacked.entrypointChecksum && unpacked.entrypointChecksum !== entrypointChecksum) {
     throw new Error(
-      `${entry.connectorId} script checksum mismatch: expected ${entry.scriptSha256}, got ${scriptChecksum}`
+      `${entry.connectorId} ${unpacked.entrypointLabel} checksum mismatch: expected ${unpacked.entrypointChecksum}, got ${entrypointChecksum}`
     );
   }
 
@@ -498,7 +600,7 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
     );
   }
 
-  if (manifest.connector_id && manifest.connector_id !== entry.connectorId) {
+  if (entry.artifactKind === "legacy" && manifest.connector_id && manifest.connector_id !== entry.connectorId) {
     throw new Error(
       `${entry.connectorId} artifact manifest declares connector_id ${manifest.connector_id}`
     );
@@ -507,14 +609,18 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
   return {
     manifest,
     manifestBuffer: unpacked.manifestBuffer,
-    scriptBuffer: unpacked.scriptBuffer,
+    entrypointBuffer: unpacked.entrypointBuffer,
+    entrypointPath: unpacked.entrypointPath,
+    artifactKind: entry.artifactKind,
+    ...(entry.artifactKind === "legacy" ? { scriptBuffer: unpacked.entrypointBuffer } : {}),
     schemaFiles: unpacked.schemaFiles,
     assetFiles: unpacked.assetFiles,
     readme: unpacked.readme,
     checksums: {
       artifact: artifactChecksum,
       manifest: manifestChecksum,
-      script: scriptChecksum,
+      entrypoint: entrypointChecksum,
+      ...(entry.artifactKind === "legacy" ? { script: entrypointChecksum } : {}),
     },
   };
 }
@@ -546,7 +652,7 @@ function buildSnapshotWrites(installRoot, resolved) {
     },
     {
       relativePath: `scripts/${resolved.connectorId}.js`,
-      buffer: resolved.scriptBuffer,
+      buffer: resolved.entrypointBuffer,
     },
   ];
 
@@ -582,7 +688,7 @@ function buildSourceWrites(installRoot, resolved) {
     },
     {
       relativePath: resolved.entry.sourceFiles.script,
-      buffer: resolved.scriptBuffer,
+      buffer: resolved.entrypointBuffer,
     },
   ];
 
@@ -616,6 +722,11 @@ function buildSourceWrites(installRoot, resolved) {
 }
 
 function buildInstallWrites(layout, installRoot, resolved) {
+  if (resolved.artifactKind === "pdpp-collection-profile") {
+    throw new Error(
+      `Install layout "${layout}" does not support pdpp-collection-profile artifacts`
+    );
+  }
   if (layout === "snapshot") {
     return buildSnapshotWrites(installRoot, resolved);
   }
@@ -761,7 +872,14 @@ export async function generateLock({
         artifactSha256: resolved.checksums.artifact,
         artifactSignature: resolved.entry.artifactSignature ?? null,
         manifestSha256: resolved.checksums.manifest,
-        scriptSha256: resolved.checksums.script,
+        ...(resolved.entry.artifactKind === "pdpp-collection-profile"
+          ? {
+              artifactKind: resolved.entry.artifactKind,
+              manifestPath: resolved.entry.manifestPath,
+              entrypointPath: resolved.entry.entrypointPath,
+              entrypointSha256: resolved.checksums.entrypoint,
+            }
+          : { scriptSha256: resolved.checksums.script }),
         sourceTag: resolved.entry.sourceTag ?? resolved.entry.gitRef ?? sourceMeta.sourceTag,
         sourceCommit:
           resolved.entry.sourceCommit ?? resolved.entry.gitRef ?? sourceMeta.sourceCommit,
