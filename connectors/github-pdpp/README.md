@@ -5,7 +5,8 @@ the mechanical import seam used by the explicit build. It was initially copied
 from PDPP commit `597cc012611df90d07edbed187ba3e3212dbf258`; later connector
 changes may be made here without a synchronization framework. Generic PDPP
 runtime source is deliberately not checked in: the build resolves that closure
-from the exact pinned `--pdpp-root` and records every runtime input hash.
+from the pinned commit object in `--pdpp-root` and records every runtime input
+hash. Dirty or untracked files in that worktree are never build inputs.
 
 `collection-profile.json` is held byte-for-byte equal to PDPP's canonical
 GitHub manifest at that commit. `dist/collection-profile.mjs` is ignored
@@ -19,9 +20,9 @@ change may use `node scripts/generate-connector-index.mjs
 --allow-unpublished-rebuild`; the default generator and every `--check` run
 still reject same-version source drift.
 The ordinary `npm run github-pdpp:test` suite is hermetic; it tests the
-checked-in source, provenance, and tarball. To additionally compare a clean
-pinned PDPP worktree and prove a byte-stable rebuild, set
-`PDPP_GITHUB_SOURCE_ROOT=/path/to/pdpp` for that test command.
+checked-in source, provenance, and tarball. To additionally compare a pinned
+PDPP repository and prove a dirty worktree cannot affect a byte-stable rebuild,
+set `PDPP_GITHUB_SOURCE_ROOT=/path/to/pdpp` for that test command.
 
 The connector declares and uses only the `network` runtime binding. The pinned
 generic runtime retains browser paths for source fidelity, but the build replaces

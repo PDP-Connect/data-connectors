@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -15,10 +15,13 @@ const secret = "github-pdpp-test-secret";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 const artifact = join(root, "artifacts", "github-pdpp", "github-pdpp-0.5.0.tgz");
+const expectedCommit = "597cc012611df90d07edbed187ba3e3212dbf258";
 const artifactEntrypoint = execFileSync("tar", ["-xOf", artifact, "./dist/collection-profile.mjs"]);
 const smokeDirectory = mkdtempSync(join(tmpdir(), "github-pdpp-smoke-"));
 const entrypoint = join(smokeDirectory, "collection-profile.mjs");
 writeFileSync(entrypoint, artifactEntrypoint);
+const pinnedFile = (repository, path) =>
+  execFileSync("git", ["show", `${expectedCommit}:${path}`], { cwd: repository });
 
 test.after(() => rmSync(smokeDirectory, { recursive: true, force: true }));
 
@@ -55,26 +58,26 @@ test("github-pdpp checked-in source matches its provenance inventory", () => {
   assert.equal(existsSync(join(connectorRoot, "src", "browser-runtime-unavailable.mjs")), false);
 });
 
-test("github-pdpp optionally verifies the pinned upstream source and byte-stable rebuild", { skip: !process.env.PDPP_GITHUB_SOURCE_ROOT }, () => {
+test("github-pdpp optionally verifies a dirty upstream worktree cannot affect the pinned rebuild", { skip: !process.env.PDPP_GITHUB_SOURCE_ROOT }, () => {
   const upstreamRoot = process.env.PDPP_GITHUB_SOURCE_ROOT;
-  const upstream = join(upstreamRoot, "packages", "polyfill-connectors");
+  const upstream = "packages/polyfill-connectors";
   assert.deepEqual(
     JSON.parse(readFileSync(join(connectorRoot, "collection-profile.json"), "utf8")),
-    JSON.parse(readFileSync(join(upstream, "manifests", "github.json"), "utf8")),
+    JSON.parse(pinnedFile(upstreamRoot, `${upstream}/manifests/github.json`).toString("utf8")),
   );
   for (const file of ["parsers.ts", "types.ts"]) {
     assert.deepEqual(
       readFileSync(join(connectorRoot, "src", "connector", file)),
-      readFileSync(join(upstream, "connectors", "github", file)),
+      pinnedFile(upstreamRoot, `${upstream}/connectors/github/${file}`),
       `${file} must remain a direct source copy`,
     );
   }
   assert.equal(
     readFileSync(join(connectorRoot, "src", "connector", "schemas.ts"), "utf8").replaceAll("../runtime/", "../../src/"),
-    readFileSync(join(upstream, "connectors", "github", "schemas.ts"), "utf8"),
+    pinnedFile(upstreamRoot, `${upstream}/connectors/github/schemas.ts`).toString("utf8"),
     "schemas.ts may differ only at the runtime import seam",
   );
-  const upstreamIndex = readFileSync(join(upstream, "connectors", "github", "index.ts"), "utf8");
+  const upstreamIndex = pinnedFile(upstreamRoot, `${upstream}/connectors/github/index.ts`).toString("utf8");
   const localIndex = readFileSync(join(connectorRoot, "src", "connector", "index.ts"), "utf8");
   assert.equal(
     localIndex.replaceAll("../runtime/", "../../src/"),
@@ -84,14 +87,53 @@ test("github-pdpp optionally verifies the pinned upstream source and byte-stable
   const provenance = JSON.parse(readFileSync(join(connectorRoot, "provenance.json"), "utf8"));
   for (const file of provenance.source_inventory.upstream_runtime) {
     assert.equal(
-      sha256(join(upstreamRoot, file.path)),
+      sha256Buffer(pinnedFile(upstreamRoot, file.path)),
       file.sha256,
       `${file.path} must match the pinned runtime inventory`,
     );
   }
   const before = sha256Buffer(artifactEntrypoint);
-  execFileSync(process.execPath, ["scripts/build-github-pdpp-artifact.mjs", "--pdpp-root", upstreamRoot], { cwd: root });
-  assert.equal(sha256(join(connectorRoot, "dist", "collection-profile.mjs")), before, "rebuild must be byte-stable");
+  const provenanceBefore = readFileSync(join(connectorRoot, "provenance.json"));
+  const tempBase = join(homedir(), ".tmp");
+  mkdirSync(tempBase, { recursive: true });
+  const dirtyWorktree = mkdtempSync(join(tempBase, "github-pdpp-dirty-worktree-"));
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", dirtyWorktree, expectedCommit], { cwd: upstreamRoot });
+    writeFileSync(
+      join(dirtyWorktree, `${upstream}/src/auth.ts`),
+      "\nthrow new Error('dirty tracked source must not be packaged');\n",
+      { flag: "a" },
+    );
+    writeFileSync(
+      join(dirtyWorktree, `${upstream}/src/untracked-build-input.ts`),
+      "throw new Error('untracked source must not be packaged');\n",
+    );
+    assert.notEqual(
+      execFileSync("git", ["status", "--porcelain"], { cwd: dirtyWorktree, encoding: "utf8" }).trim(),
+      "",
+    );
+    execFileSync(process.execPath, ["scripts/build-github-pdpp-artifact.mjs", "--pdpp-root", dirtyWorktree], { cwd: root });
+    assert.equal(sha256(join(connectorRoot, "dist", "collection-profile.mjs")), before, "rebuild must ignore dirty source and remain byte-stable");
+    assert.deepEqual(readFileSync(join(connectorRoot, "provenance.json")), provenanceBefore);
+  } finally {
+    spawnSync("git", ["worktree", "remove", "--force", dirtyWorktree], { cwd: upstreamRoot });
+    rmSync(dirtyWorktree, { recursive: true, force: true });
+  }
+});
+
+test("connector index generation prunes stale legacy and PDPP artifacts globally", () => {
+  const staleLegacy = join(root, "artifacts", "github-playwright", "stale-legacy.tgz");
+  const stalePdpp = join(root, "artifacts", "github-pdpp", "stale-pdpp.tgz");
+  try {
+    writeFileSync(staleLegacy, "stale legacy artifact");
+    writeFileSync(stalePdpp, "stale PDPP artifact");
+    execFileSync(process.execPath, ["scripts/generate-connector-index.mjs"], { cwd: root });
+    assert.equal(existsSync(staleLegacy), false);
+    assert.equal(existsSync(stalePdpp), false);
+  } finally {
+    rmSync(staleLegacy, { force: true });
+    rmSync(stalePdpp, { force: true });
+  }
 });
 
 test("github-pdpp packaging leaves every legacy artifact and index entry byte-for-byte intact", () => {

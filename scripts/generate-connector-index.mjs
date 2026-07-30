@@ -575,6 +575,9 @@ async function materializeRetainedArtifact({
     };
   }
 
+  if (existsSync(artifactPath)) {
+    expectedArtifactPaths.add(artifactRelativePath);
+  }
   return entry;
 }
 
@@ -828,10 +831,7 @@ async function main() {
 
   for (const file of walkFiles(artifactsDir)) {
     const repoRelativePath = `artifacts/${file.relativePath}`;
-    if (
-      repoRelativePath.startsWith("artifacts/github-pdpp/") &&
-      !expectedArtifactPaths.has(repoRelativePath)
-    ) {
+    if (!expectedArtifactPaths.has(repoRelativePath)) {
       unlinkSync(file.path);
     }
   }

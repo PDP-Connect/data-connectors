@@ -150,7 +150,7 @@
   },
   "outputs": {
     "profile/collection-profile.json": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
-    "dist/collection-profile.mjs": "sha256:5e51a74992e986c8f9815f529955e45e60750ed20ca4a3e9c413dc47023c940f",
+    "dist/collection-profile.mjs": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
     "unresolved_non_node_imports": []
   }
 }
