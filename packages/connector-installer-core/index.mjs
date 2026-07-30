@@ -783,6 +783,9 @@ function removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel = 
 
   function pruneDirectory(dir, relativeDir = "") {
     for (const entry of readdirSync(dir)) {
+      if (entry.startsWith(".")) {
+        continue;
+      }
       const relativePath = relativeDir ? `${relativeDir}/${entry}` : entry;
       const topLevel = relativePath.split("/")[0];
       if (preserve.has(topLevel)) {

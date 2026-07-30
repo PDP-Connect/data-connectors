@@ -288,6 +288,9 @@ test("pruning preserves configured link subtrees and removes only unpreserved li
   const externalFile = join(externalRoot, "must-survive.txt");
   writeFileSync(externalFile, "outside\n");
   writeFileSync(join(installRoot, "expected.txt"), "expected\n");
+  writeFileSync(join(installRoot, ".legacy-file"), "hidden\n");
+  mkdirSync(join(installRoot, ".legacy-directory", "nested"), { recursive: true });
+  writeFileSync(join(installRoot, ".legacy-directory", "nested", "state.txt"), "hidden\n");
   symlinkSync(externalRoot, join(installRoot, "preserved-link"));
   mkdirSync(join(installRoot, "preserved-subtree"), { recursive: true });
   symlinkSync(externalRoot, join(installRoot, "preserved-subtree", "nested-link"));
@@ -301,6 +304,11 @@ test("pruning preserves configured link subtrees and removes only unpreserved li
 
   assert.equal(lstatSync(join(installRoot, "preserved-link")).isSymbolicLink(), true);
   assert.equal(lstatSync(join(installRoot, "preserved-subtree", "nested-link")).isSymbolicLink(), true);
+  assert.equal(readFileSync(join(installRoot, ".legacy-file"), "utf8"), "hidden\n");
+  assert.equal(
+    readFileSync(join(installRoot, ".legacy-directory", "nested", "state.txt"), "utf8"),
+    "hidden\n",
+  );
   assert.equal(existsSync(join(installRoot, "remove-link")), false);
   assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
 });
