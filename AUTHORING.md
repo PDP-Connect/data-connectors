@@ -40,13 +40,13 @@ Do not hand-edit generated files. Review the recorded input and output hashes af
 
 ### GitHub
 
-GitHub requires only the `network` binding. Its index entry has `releaseId: "unpublished"`, so it is not a published release artifact.
+GitHub requires only the `network` binding. The checked-in index entry intentionally has `releaseId: "unpublished"` before CI regenerates the source-tree index. The immutable [`connectors-cc744cbf5782` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-cc744cbf5782) contains the signed GitHub artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it.
 
 GitHub predates the generic descriptor. It uses a maintainer-only builder and checked-in connector source. See [GitHub PDPP maintenance](connectors/github-pdpp/AUTHORING.md).
 
 ### ChatGPT
 
-ChatGPT uses `artifact.json` and the generic builder. Its index entry has `releaseId: "unpublished"`, so it is not a published release artifact.
+ChatGPT uses `artifact.json` and the generic builder. The checked-in index entry intentionally has `releaseId: "unpublished"` before CI regenerates the source-tree index. The immutable [`connectors-cc744cbf5782` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-cc744cbf5782) contains the signed ChatGPT artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it.
 
 The ChatGPT profile requires both `network` and `browser`. Its host must provide Node 22, `p-queue@^9.3.3`, and `patchright@^1.61.1`. DataConnect support remains pending until the browser-host PR lands. Do not describe ChatGPT PDPP collection as supported before that host work lands.
 
