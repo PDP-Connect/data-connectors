@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import test from "node:test";
 
 import {
@@ -24,6 +24,7 @@ import {
   loadConnectorIndex,
   pruneInstalled,
   resolveConnectorArtifacts,
+  toPortableArtifactPath,
   verifyInstalled,
 } from "./index.mjs";
 
@@ -124,6 +125,27 @@ function legacyFixture() {
   });
   return { root, entry, manifestBuffer, scriptBuffer };
 }
+
+test("normalizes extracted artifact paths to the portable POSIX contract", () => {
+  const windowsRelativePath = win32.relative(
+    "D:\\artifact\\bundle",
+    "D:\\artifact\\bundle\\profile\\collection-profile.json",
+  );
+  const posixRelativePath = posix.relative(
+    "/artifact/bundle",
+    "/artifact/bundle/profile/collection-profile.json",
+  );
+
+  assert.equal(windowsRelativePath, "profile\\collection-profile.json");
+  assert.equal(
+    toPortableArtifactPath(windowsRelativePath, win32.sep),
+    "profile/collection-profile.json",
+  );
+  assert.equal(
+    toPortableArtifactPath(posixRelativePath, posix.sep),
+    "profile/collection-profile.json",
+  );
+});
 
 async function withRemoteArtifactFetch(routes, callback) {
   const originalFetch = globalThis.fetch;

@@ -11,7 +11,14 @@ import {
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, resolve as resolvePath } from "node:path";
+import {
+  dirname,
+  join,
+  normalize,
+  relative,
+  resolve as resolvePath,
+  sep,
+} from "node:path";
 import { verify as verifySigstoreBundle } from "sigstore";
 
 export const DEFAULT_CONNECTOR_INDEX_URL =
@@ -267,6 +274,10 @@ function ensureInside(baseDir, relativePath) {
   return join(baseDir, normalize(validPath));
 }
 
+export function toPortableArtifactPath(relativePath, pathSeparator = sep) {
+  return relativePath.split(pathSeparator).join("/");
+}
+
 function walkArtifactFiles(dir, root = dir) {
   if (!existsSync(dir)) {
     return [];
@@ -276,20 +287,21 @@ function walkArtifactFiles(dir, root = dir) {
   for (const entry of readdirSync(dir)) {
     if (entry.startsWith(".")) continue;
     const full = join(dir, entry);
+    const relativePath = toPortableArtifactPath(relative(root, full));
     const st = lstatSync(full);
     if (st.isSymbolicLink()) {
-      throw new Error(`Artifact contains unsupported link "${full.slice(root.length + 1)}"`);
+      throw new Error(`Artifact contains unsupported link "${relativePath}"`);
     }
     if (st.isDirectory()) {
       out.push(...walkArtifactFiles(full, root));
       continue;
     }
     if (!st.isFile()) {
-      throw new Error(`Artifact contains unsupported entry "${full.slice(root.length + 1)}"`);
+      throw new Error(`Artifact contains unsupported entry "${relativePath}"`);
     }
     out.push({
       path: full,
-      relativePath: full.slice(root.length + 1),
+      relativePath,
     });
   }
   return out;
