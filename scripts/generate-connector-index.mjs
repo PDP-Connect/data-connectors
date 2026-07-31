@@ -394,8 +394,6 @@ function materializeGithubPdppArtifact({
   const entrypointPath = join(repoRoot, "connectors", entry.files.entrypoint);
   const provenancePath = join(repoRoot, "connectors", entry.files.provenance);
   const manifestBuffer = readFileSync(manifestPath);
-  const entrypointBuffer = readFileSync(entrypointPath);
-  const provenanceBuffer = readFileSync(provenancePath);
   const manifest = JSON.parse(manifestBuffer);
   if (entry.version !== manifest.version) throw new Error(`${entry.id} version must match its canonical manifest`);
   if (allowUnpublishedRebuild && entry.releaseId !== "unpublished") {
@@ -403,22 +401,23 @@ function materializeGithubPdppArtifact({
   }
   const existing = existingIndex?.connectors?.[entry.id]?.find((version) => version.version === entry.version);
   if (existing) {
-    let sourceMatches = true;
-    for (const [field, buffer] of Object.entries({ manifestSha256: manifestBuffer, entrypointSha256: entrypointBuffer, provenanceSha256: provenanceBuffer })) {
-      sourceMatches &&= existing[field] === sha256Buffer(buffer);
-    }
+    const sourceMatches = existing.manifestSha256 === sha256Buffer(manifestBuffer);
     if (sourceMatches) {
       const artifactPath = join(repoRoot, existing.artifactPath);
       if (!existsSync(artifactPath) || existing.artifactSha256 !== sha256Buffer(readFileSync(artifactPath))) {
         throw new Error(`${entry.id}@${entry.version} immutable artifact drifted`);
       }
       expectedArtifactPaths.add(existing.artifactPath);
-      return existing;
+      return shouldUseReleaseAssets
+        ? refreshReleaseDistributionMetadata(existing, releaseMetadata)
+        : existing;
     }
     if (hasCommittedGithubPdppVersion(entry) && !allowUnpublishedRebuild) {
       throw new Error(`${entry.id}@${entry.version} source changed without a version bump`);
     }
   }
+  const entrypointBuffer = readFileSync(entrypointPath);
+  const provenanceBuffer = readFileSync(provenancePath);
   const bundle = createGithubPdppArtifactBundle(entry);
   const artifactRelativePath = `artifacts/${entry.id}/${entry.id}-${entry.version}.tgz`;
   const artifactPath = join(repoRoot, artifactRelativePath);
