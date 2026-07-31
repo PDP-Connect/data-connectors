@@ -21,6 +21,7 @@ import {
   assertBundledScopeSchemasMatch,
   assertConnectorIndexSigned,
 } from "./connector-artifact-contract.mjs";
+import { assertBundledDependenciesMatch } from "./pdpp-bundled-dependencies.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
@@ -243,7 +244,7 @@ function sha256Buffer(buffer) {
   return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 }
 
-function verifyGithubPdppMaintainedSources({ entry, provenance }) {
+function verifyPdppArtifactMaintainedSources({ entry, provenance }) {
   const connectorDir = join(repoRoot, "connectors", dirname(entry.files.manifest));
   for (const source of provenance.source_inventory?.maintained_local ?? []) {
     if (!source?.path || !source?.sha256) {
@@ -264,6 +265,11 @@ function verifyGithubPdppMaintainedSources({ entry, provenance }) {
       );
     }
   }
+  assertBundledDependenciesMatch({
+    repoRoot,
+    dependencies: provenance.source_inventory?.bundled_dependencies,
+    artifactLabel: `${entry.id}@${entry.version}`,
+  });
 }
 
 function copyIntoBundle(sourcePath, targetPath) {
@@ -363,7 +369,7 @@ function createArtifactBundle(entry, metadata) {
   }
 }
 
-function createGithubPdppArtifactBundle(entry) {
+function createPdppArtifactBundle(entry) {
   const tempRoot = mkdtempSync(join(tmpdir(), "pdpp-connector-bundle-"));
   const bundleDir = join(tempRoot, "bundle");
   const connectorDir = join(repoRoot, "connectors", dirname(entry.files.manifest));
@@ -388,7 +394,7 @@ function createDeterministicTar(bundleDir, outputPath) {
   ]);
 }
 
-function hasCommittedGithubPdppVersion(entry) {
+function hasCommittedPdppArtifactVersion(entry) {
   try {
     const committedIndex = JSON.parse(execFileSync("git", ["show", "HEAD:connector-index.json"], {
       cwd: repoRoot,
@@ -402,7 +408,7 @@ function hasCommittedGithubPdppVersion(entry) {
   }
 }
 
-function materializeGithubPdppArtifact({
+function materializePdppArtifact({
   entry,
   existingIndex,
   checkMode,
@@ -410,9 +416,6 @@ function materializeGithubPdppArtifact({
   expectedArtifactPaths,
   releaseMetadata,
 }) {
-  if (entry.id !== "github-pdpp") {
-    throw new Error(`Unsupported PDPP artifact ${entry.id}; this generator has one explicit GitHub path`);
-  }
   const manifestPath = join(repoRoot, "connectors", entry.files.manifest);
   const entrypointPath = join(repoRoot, "connectors", entry.files.entrypoint);
   const provenancePath = join(repoRoot, "connectors", entry.files.provenance);
@@ -420,13 +423,13 @@ function materializeGithubPdppArtifact({
   const manifest = JSON.parse(manifestBuffer);
   if (entry.version !== manifest.version) throw new Error(`${entry.id} version must match its canonical manifest`);
   if (allowUnpublishedRebuild && entry.releaseId !== "unpublished") {
-    throw new Error("--allow-unpublished-rebuild requires an unpublished github-pdpp artifact");
+    throw new Error("--allow-unpublished-rebuild requires an unpublished PDPP artifact");
   }
   const existing = existingIndex?.connectors?.[entry.id]?.find((version) => version.version === entry.version);
   if (existing) {
     const provenanceBuffer = readFileSync(provenancePath);
     const provenance = JSON.parse(provenanceBuffer);
-    verifyGithubPdppMaintainedSources({ entry, provenance });
+    verifyPdppArtifactMaintainedSources({ entry, provenance });
     const entrypointMatches =
       !existsSync(entrypointPath) ||
       existing.entrypointSha256 === sha256Buffer(readFileSync(entrypointPath));
@@ -444,13 +447,13 @@ function materializeGithubPdppArtifact({
         ? refreshReleaseDistributionMetadata(existing, releaseMetadata)
         : existing;
     }
-    if (hasCommittedGithubPdppVersion(entry) && !allowUnpublishedRebuild) {
+    if (hasCommittedPdppArtifactVersion(entry) && !allowUnpublishedRebuild) {
       throw new Error(`${entry.id}@${entry.version} source changed without a version bump`);
     }
   }
   const entrypointBuffer = readFileSync(entrypointPath);
   const provenanceBuffer = readFileSync(provenancePath);
-  const bundle = createGithubPdppArtifactBundle(entry);
+  const bundle = createPdppArtifactBundle(entry);
   const artifactRelativePath = `artifacts/${entry.id}/${entry.id}-${entry.version}.tgz`;
   const artifactPath = join(repoRoot, artifactRelativePath);
   mkdirSync(dirname(artifactPath), { recursive: true });
@@ -467,7 +470,7 @@ function materializeGithubPdppArtifact({
     name: entry.name,
     status: entry.status,
     description: entry.description,
-    artifactKind: "pdpp-collection-profile",
+    artifactKind: entry.artifactKind,
     manifestPath: entry.manifestPath,
     entrypointPath: entry.entrypointPath,
     provenancePath: entry.provenancePath,
@@ -647,7 +650,7 @@ async function main() {
 
   for (const entry of registry.connectors) {
     if (entry.artifactKind === "pdpp-collection-profile") {
-      nextIndex.connectors[entry.id] = [materializeGithubPdppArtifact({
+      nextIndex.connectors[entry.id] = [materializePdppArtifact({
         entry,
         existingIndex,
         checkMode,

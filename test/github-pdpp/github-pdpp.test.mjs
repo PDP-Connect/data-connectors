@@ -44,6 +44,11 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
   assert.deepEqual(provenance.outputs.unresolved_non_node_imports, []);
   assert.equal(provenance.source_inventory.upstream_connector.length, 5);
   assert.ok(provenance.source_inventory.upstream_runtime.length > 0);
+  assert.deepEqual(provenance.source_inventory.bundled_dependencies.map((dependency) => ({
+    name: dependency.name,
+    version: dependency.version,
+    files: dependency.files.length,
+  })), [{ name: "zod", version: "4.3.6", files: 76 }]);
   assert.match(readFileSync(entrypoint, "utf8"), /Browser runtime is unavailable/);
   assert.doesNotMatch(execFileSync("tar", ["-xOf", artifact, "./provenance.json"], { encoding: "utf8" }), new RegExp(secret));
   assert.deepEqual(execFileSync("tar", ["-xOf", artifact, "./provenance.json"]), readFileSync(join(connectorRoot, "provenance.json")));
@@ -136,14 +141,29 @@ test("connector index generation prunes stale legacy and PDPP artifacts globally
   }
 });
 
-test("github-pdpp packaging leaves every legacy artifact and index entry byte-for-byte intact", () => {
-  const base = "origin/feat/pdpp-collection-profile-artifacts";
+test("PDPP artifact packaging leaves every legacy artifact and index entry byte-for-byte intact", () => {
+  const base = process.env.PDPP_ARTIFACT_BASE_REF ?? "origin/main";
   const beforeIndex = JSON.parse(execFileSync("git", ["show", `${base}:connector-index.json`], { cwd: root, encoding: "utf8" }));
   const currentIndex = JSON.parse(readFileSync(join(root, "connector-index.json"), "utf8"));
-  delete currentIndex.connectors["github-pdpp"];
+  for (const index of [beforeIndex, currentIndex]) {
+    for (const [connectorId, versions] of Object.entries(index.connectors)) {
+      if (versions.some((version) => version.artifactKind === "pdpp-collection-profile")) {
+        delete index.connectors[connectorId];
+      }
+    }
+  }
   assert.deepEqual(currentIndex, beforeIndex);
+  const pdppArtifactPaths = new Set(
+    Object.values(JSON.parse(readFileSync(join(root, "connector-index.json"), "utf8")).connectors)
+      .flatMap((versions) => versions)
+      .filter((entry) => entry.artifactKind === "pdpp-collection-profile")
+      .map((entry) => entry.artifactPath),
+  );
   const legacyArtifacts = execFileSync("git", ["ls-tree", "-r", "--name-only", base, "artifacts"], { cwd: root, encoding: "utf8" })
-    .split("\n").filter((path) => path.endsWith(".tgz"));
+    .split("\n")
+    .filter((path) => path.endsWith(".tgz"))
+    .filter((path) => existsSync(join(root, path)))
+    .filter((path) => !pdppArtifactPaths.has(path));
   for (const artifact of legacyArtifacts) {
     assert.deepEqual(readFileSync(join(root, artifact)), execFileSync("git", ["show", `${base}:${artifact}`], { cwd: root }));
   }

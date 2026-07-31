@@ -115,6 +115,321 @@
         "sha256": "sha256:58a0dfeaa0d07ab6748263fa4c631e47c228a9637a544749f1f9092db7b65771"
       }
     ],
+    "bundled_dependencies": [
+      {
+        "name": "zod",
+        "version": "4.3.6",
+        "package_path": "node_modules/zod",
+        "package_json_sha256": "sha256:1a316ad36e36c6c500bce6e9a6dcbec8efda1083f49a72185226b35573b543ba",
+        "files": [
+          {
+            "path": "index.cjs",
+            "sha256": "sha256:2a3455cecff4f7021c92d0a3e2e5fc170c0448dc5cc261160127e08f4888a9c2"
+          },
+          {
+            "path": "v4/classic/checks.cjs",
+            "sha256": "sha256:df8f7d3f808b226719e1a23a0303ff75c450c9037a82cc137ef6592decda3d31"
+          },
+          {
+            "path": "v4/classic/coerce.cjs",
+            "sha256": "sha256:d25b07eead67ff339c3e2a6d5b7364647e11f57fff3e82055d49575304dce057"
+          },
+          {
+            "path": "v4/classic/compat.cjs",
+            "sha256": "sha256:dcd3c3b05fbc82ed0241ec7e015071a528a1e2e8025e96259be932e7340608e7"
+          },
+          {
+            "path": "v4/classic/errors.cjs",
+            "sha256": "sha256:f704ed9292288d685a33123242399179eba77f1190299bc83042b434c1ae8cd6"
+          },
+          {
+            "path": "v4/classic/external.cjs",
+            "sha256": "sha256:88f600b7ec41204e625886c93864568e6dbda628c94db92bc928f8b2e163eec1"
+          },
+          {
+            "path": "v4/classic/from-json-schema.cjs",
+            "sha256": "sha256:9950682bd6c7bad0e8638d71ee54bed561aa81b2e8d70311d6cc8ed3968cced8"
+          },
+          {
+            "path": "v4/classic/iso.cjs",
+            "sha256": "sha256:f5d840d941b87a868da63fba9e4eb5917cadd87100af4940113f0ddd75dd9043"
+          },
+          {
+            "path": "v4/classic/parse.cjs",
+            "sha256": "sha256:0fb97825ed1c15a1f6a238df9506e23f2e720edeae4774aa46a60ce7b2a75319"
+          },
+          {
+            "path": "v4/classic/schemas.cjs",
+            "sha256": "sha256:071570f4fe89da6d545af4465ce1719914b1cccc1a6929ecbf8f5d83c10cde9a"
+          },
+          {
+            "path": "v4/core/api.cjs",
+            "sha256": "sha256:e51d74f3d81c633d0e52cc96c8b898a095c2103370979939ba6488cfbd5310f2"
+          },
+          {
+            "path": "v4/core/checks.cjs",
+            "sha256": "sha256:d9b6a4b1d366015f4f2b7ca931f1a65cf787d7892f50d693350834b9a345f2e1"
+          },
+          {
+            "path": "v4/core/core.cjs",
+            "sha256": "sha256:a1769923f84360c5e2c9cdba3404534df3a18a7ab976a9ec47551e7addb861e1"
+          },
+          {
+            "path": "v4/core/doc.cjs",
+            "sha256": "sha256:ae6c5bfe9570d30c119cd6bc9dff33f6956858b4fa6887b2b1f9680f11d1b65d"
+          },
+          {
+            "path": "v4/core/errors.cjs",
+            "sha256": "sha256:143fe7bbd15a123e7615a4fe62c6663b2e6c2e5ad16f5efa0cf7953c275b1d65"
+          },
+          {
+            "path": "v4/core/index.cjs",
+            "sha256": "sha256:cb40bcdacc990895d8ceaf0aeca2d92c73db7dc67094821560eea09186840093"
+          },
+          {
+            "path": "v4/core/json-schema-generator.cjs",
+            "sha256": "sha256:7b685f409c6ca5f76bd2184470c9fb80decfb1ce7592f3b72d4af3cfd7e52c6f"
+          },
+          {
+            "path": "v4/core/json-schema-processors.cjs",
+            "sha256": "sha256:de82b7ed029933f0b7d23cd658f0513d17c05839e5494023de100c89cd953032"
+          },
+          {
+            "path": "v4/core/json-schema.cjs",
+            "sha256": "sha256:d43aa81f5bc89faa359e0f97c814ba25155591ff078fbb9bfd40f8c7c9683230"
+          },
+          {
+            "path": "v4/core/parse.cjs",
+            "sha256": "sha256:ea957a211bf66fd211842cfd2bcf4bea43aa27c643dc44da012ca63739672ef6"
+          },
+          {
+            "path": "v4/core/regexes.cjs",
+            "sha256": "sha256:443b0c212655df655a775748c060dbfb0ca5f070884ba32cbaad0e8c3057e9e9"
+          },
+          {
+            "path": "v4/core/registries.cjs",
+            "sha256": "sha256:674a7d7f25a3db1589776b868bbb07116974198ad159ca28e66fb20616946bbd"
+          },
+          {
+            "path": "v4/core/schemas.cjs",
+            "sha256": "sha256:ee1a7cb1da1ab818424627a35ba14336334e6370633d2673d42c040caeb5fdec"
+          },
+          {
+            "path": "v4/core/to-json-schema.cjs",
+            "sha256": "sha256:36ea47f6596aa6cb5961f471b1fb39774b2a85cd0e4e4a9d6a902dfe91e987b8"
+          },
+          {
+            "path": "v4/core/util.cjs",
+            "sha256": "sha256:6f189702e9e207141f331b9ab400bb2b27a5397e914979a7d427856586bc2633"
+          },
+          {
+            "path": "v4/core/versions.cjs",
+            "sha256": "sha256:dbe213fb4e3e5a4564ff42001d227e608a1ca2329901156c823e0b57dd19f511"
+          },
+          {
+            "path": "v4/locales/ar.cjs",
+            "sha256": "sha256:9e6476e5237fdfa8ea07d30a8a725e484ebcb7fdc732eb55607815ee701f5177"
+          },
+          {
+            "path": "v4/locales/az.cjs",
+            "sha256": "sha256:be8c72acf84df55f5fd0a673f9488543d95a201fa65e828f9142e0dc0fa87a28"
+          },
+          {
+            "path": "v4/locales/be.cjs",
+            "sha256": "sha256:3071dee4104152c31a8130dd366870c32616c00f39b4bed4e565b5069d42acc9"
+          },
+          {
+            "path": "v4/locales/bg.cjs",
+            "sha256": "sha256:6c8c8cfc221283ed7ee6039e1d9ba9b09c023e25764d4a3c769bb6a7799e3f2c"
+          },
+          {
+            "path": "v4/locales/ca.cjs",
+            "sha256": "sha256:cc4f06062420bd95f9e57fa0e1a3531bad691f2259a6566402c2565e73e8017f"
+          },
+          {
+            "path": "v4/locales/cs.cjs",
+            "sha256": "sha256:a018d1328a7be5e75a50bce168593f717efbfb183bea3fc57d90ef85719aff33"
+          },
+          {
+            "path": "v4/locales/da.cjs",
+            "sha256": "sha256:aa67e238640b08a61bf4b293530577d63e5e492fd1f3e2becc3e4f58c86c1cf7"
+          },
+          {
+            "path": "v4/locales/de.cjs",
+            "sha256": "sha256:2271ecd86ac9698136b633422c1049a7510b1470121adce607da3fc74e26d673"
+          },
+          {
+            "path": "v4/locales/en.cjs",
+            "sha256": "sha256:ba4269302deae584b126d90f7219e1f2b88242d7f505fc6dcfdf444b4f131587"
+          },
+          {
+            "path": "v4/locales/eo.cjs",
+            "sha256": "sha256:8cb3c550c5947d2ce3274608e2487d3ab166ec307a5ea67ef4990b9da74d296f"
+          },
+          {
+            "path": "v4/locales/es.cjs",
+            "sha256": "sha256:d59637d0c9c319713fc21fac73ca9700154c2672da2b6c4bf23b6fd45abb0174"
+          },
+          {
+            "path": "v4/locales/fa.cjs",
+            "sha256": "sha256:96a5dc859f85b89d3c49c859c8051887efee046c2e5393b60a2294e10a18596a"
+          },
+          {
+            "path": "v4/locales/fi.cjs",
+            "sha256": "sha256:3736651f1edbf2af972e5a81ba240055414e1dc00dc79241462a7eeea7032b17"
+          },
+          {
+            "path": "v4/locales/fr-CA.cjs",
+            "sha256": "sha256:5fa4eecb16770c0a56fe176a0cfa41f8d3c3c421bc3f9c6182df3300c1fc0f12"
+          },
+          {
+            "path": "v4/locales/fr.cjs",
+            "sha256": "sha256:fbef9497be9a8035061c9d403dcf200c6d93777aa5b18e9d021c6be89b1741e3"
+          },
+          {
+            "path": "v4/locales/he.cjs",
+            "sha256": "sha256:caa87c00543b915b13bfe7f0af67cc46f833c40f525d7302c3fc628bcb243b3d"
+          },
+          {
+            "path": "v4/locales/hu.cjs",
+            "sha256": "sha256:fb3125c8c751902a2998fcfb7b2c1c3aa6722c1409cf4f997ee11db52ef5b8b0"
+          },
+          {
+            "path": "v4/locales/hy.cjs",
+            "sha256": "sha256:9a22becbfb671b7a67141c753fdc81bde74f1ba853a8634462ee523a2e4c4d2d"
+          },
+          {
+            "path": "v4/locales/id.cjs",
+            "sha256": "sha256:aa9cbd4d299b36a0a2f10b4fb612d287d63f82da5fe8b226ef642e624fbe579b"
+          },
+          {
+            "path": "v4/locales/index.cjs",
+            "sha256": "sha256:8012bfa49ee41cafc1ebfca8505e92503088d9d421bfee1e9fd601c8d8599894"
+          },
+          {
+            "path": "v4/locales/is.cjs",
+            "sha256": "sha256:62d9adfda6e5cb1d4f49af6bb9646eaa42e21fffe605786cc9cc7b7bbc9e3158"
+          },
+          {
+            "path": "v4/locales/it.cjs",
+            "sha256": "sha256:931d0e4352d43d1a94b9ec59c98751f8e0e4b69d153839423a0acb184c0cb68f"
+          },
+          {
+            "path": "v4/locales/ja.cjs",
+            "sha256": "sha256:fc485198da07908fdf412e23150d1a1e2977467aaa524cb506fe66b830bdd720"
+          },
+          {
+            "path": "v4/locales/ka.cjs",
+            "sha256": "sha256:9e4f6ede9a9b89b11a4df7d10c05a49eeece6bc0ee318832c204ee273a06f98a"
+          },
+          {
+            "path": "v4/locales/kh.cjs",
+            "sha256": "sha256:5a5f3a63e4e97a25b44692b0910f73cf15e54fc5b03c61f9d87e2a9eb6e2a098"
+          },
+          {
+            "path": "v4/locales/km.cjs",
+            "sha256": "sha256:e448be8e315d2c722875690058ac56eaa85144b085021e865f66d3a3166dec56"
+          },
+          {
+            "path": "v4/locales/ko.cjs",
+            "sha256": "sha256:db9ce154ae9778fa7785417230f4bb6aaa6ebc201eadf4bba1390e1a8cf64ae0"
+          },
+          {
+            "path": "v4/locales/lt.cjs",
+            "sha256": "sha256:1bafea36bf6890030fa71df69c2666243c13fb66399cd5c94f346a7e18d03176"
+          },
+          {
+            "path": "v4/locales/mk.cjs",
+            "sha256": "sha256:5db40799c29ac29a7c89e4b14d3b08938266b580ec1a845978f7b97861095fce"
+          },
+          {
+            "path": "v4/locales/ms.cjs",
+            "sha256": "sha256:9b21835c0e797a98b44b9d7869c899c69adf0532fa6979b300a4f0ddfac90dc1"
+          },
+          {
+            "path": "v4/locales/nl.cjs",
+            "sha256": "sha256:3018bb81ec0b95bf05ca997f68e393ebd0403b7434c1b7ec435ff7b21c64ee70"
+          },
+          {
+            "path": "v4/locales/no.cjs",
+            "sha256": "sha256:f4ffc6925e0ff009fc253e52c7bf1195b41e0141359d86822930f89ee416135e"
+          },
+          {
+            "path": "v4/locales/ota.cjs",
+            "sha256": "sha256:2cf89b0f9e8ec15010282e0cd33ab44b69f38f6e2bd7a67e4c909fd7f303f23c"
+          },
+          {
+            "path": "v4/locales/pl.cjs",
+            "sha256": "sha256:013076bb5458e33e21bb3486537fa819b4d55a960a17c125afab9878fe734969"
+          },
+          {
+            "path": "v4/locales/ps.cjs",
+            "sha256": "sha256:d2bd29c361f664127599e66cfacb2ce63005a557d58293100d408ac045f032d7"
+          },
+          {
+            "path": "v4/locales/pt.cjs",
+            "sha256": "sha256:27c2005bd63e25301f277b1a326bd64d1c4af5d7714760ac07f8460f835a11bc"
+          },
+          {
+            "path": "v4/locales/ru.cjs",
+            "sha256": "sha256:d3bb2d4f2a62569f7b48aee4c06283b55bc9cc9fa7a0fd4c3adf740d9bc149e6"
+          },
+          {
+            "path": "v4/locales/sl.cjs",
+            "sha256": "sha256:a596863bd1e2fbbf15d8a8a65d0d7491896c57c0a286ba3b3a24a8f35ad3dc57"
+          },
+          {
+            "path": "v4/locales/sv.cjs",
+            "sha256": "sha256:8d3e57e9e9c316b13685195391d32914c3bfaf33bb1279983c0ebc65ec44c6a8"
+          },
+          {
+            "path": "v4/locales/ta.cjs",
+            "sha256": "sha256:8f66c3ade923ffc374efefa326cfbc4fbb8d3ab40a811088e3382e495974322a"
+          },
+          {
+            "path": "v4/locales/th.cjs",
+            "sha256": "sha256:f142afb29f948d8ae28f0ac7ec6a14b5afe662ea6974b9eb76c4d4a61143b7ba"
+          },
+          {
+            "path": "v4/locales/tr.cjs",
+            "sha256": "sha256:a7bc91118509dbd965268972c67703fe0a0e628c768a16a8104bc118e134fda9"
+          },
+          {
+            "path": "v4/locales/ua.cjs",
+            "sha256": "sha256:0565126e33d30fd26046fd5399fe6293e8827fa846c3a7ff414e4e63acbfbf0a"
+          },
+          {
+            "path": "v4/locales/uk.cjs",
+            "sha256": "sha256:2f3b10a8255f54a28fa31c1783c86e1fc1744370c5b5cddee02ba476e0ecc406"
+          },
+          {
+            "path": "v4/locales/ur.cjs",
+            "sha256": "sha256:822f8dfde3eaa1d5962cc4b606e69bff750ffbe3bf5f4927a61d79c22ddd1644"
+          },
+          {
+            "path": "v4/locales/uz.cjs",
+            "sha256": "sha256:3d8fb6f6afa190c5da0937c77e1e1422eb8fd31a74d8ddd27a5c51ff4a8dc0bf"
+          },
+          {
+            "path": "v4/locales/vi.cjs",
+            "sha256": "sha256:f3ccad01b00f0501e6e0b332a8d9f36a49b717b7d9439fc8d1cf23188f2ed245"
+          },
+          {
+            "path": "v4/locales/yo.cjs",
+            "sha256": "sha256:f4ea0b4741b203f344fbcd3e6ef6d2960096139ad93fdb9e98d01bef6978ddb8"
+          },
+          {
+            "path": "v4/locales/zh-CN.cjs",
+            "sha256": "sha256:3a2a1f8914fec65cc60f66611758db1e0d205797a54b2ea67767808861211f2d"
+          },
+          {
+            "path": "v4/locales/zh-TW.cjs",
+            "sha256": "sha256:e534adb851ef96b0678bfa755a4d4440453245fcc8137f801500cbe05e47d491"
+          }
+        ],
+        "closure_sha256": "sha256:bc0f48d6bedb00d88db9efc78de1fcf3411944ddb7b59f58aa0c5eeafff88901"
+      }
+    ],
     "maintained_local": [
       {
         "path": "src/connector/index.ts",
