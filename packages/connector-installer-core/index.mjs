@@ -21,6 +21,10 @@ export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
 export const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY =
   "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
 
+export function defaultArtifactCertificateIdentityResolver() {
+  return DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY;
+}
+
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -188,6 +192,8 @@ async function verifyRemoteSignature({
   subjectUrl,
   signature,
   allowUnsignedRemote = false,
+  certificateIdentityURI = DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+  sigstoreVerifier = verifySigstoreBundle,
 }) {
   const normalizedSignature = normalizeSignature(signature);
   if (!normalizedSignature) {
@@ -210,9 +216,9 @@ async function verifyRemoteSignature({
   const bundle = JSON.parse(bundleBuffer.toString("utf8"));
 
   try {
-    await verifySigstoreBundle(bundle, payloadBuffer, {
+    await sigstoreVerifier(bundle, payloadBuffer, {
       certificateIssuer: DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
-      certificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+      certificateIdentityURI,
     });
   } catch (error) {
     throw new Error(
@@ -221,6 +227,23 @@ async function verifyRemoteSignature({
   }
 
   return true;
+}
+
+async function resolveArtifactCertificateIdentity({
+  artifactCertificateIdentityResolver = defaultArtifactCertificateIdentityResolver,
+  artifactUrl,
+  entry,
+}) {
+  const certificateIdentityURI = await artifactCertificateIdentityResolver({
+    artifactUrl,
+    entry,
+  });
+  if (typeof certificateIdentityURI !== "string" || certificateIdentityURI.length === 0) {
+    throw new Error(
+      `No trusted Sigstore certificate identity configured for connector artifact ${entry.connectorId}@${entry.version}`
+    );
+  }
+  return certificateIdentityURI;
 }
 
 function validateRelativeArtifactPath(relativePath, label = "Artifact path") {
@@ -565,7 +588,7 @@ function normalizeLockEntry(entry) {
   };
 }
 
-async function fetchArtifactForEntry(indexSource, entry) {
+async function fetchArtifactForEntry(indexSource, entry, options = {}) {
   const resolvedEntry = enrichRemoteEntry(indexSource, entry);
 
   if (indexSource?.mode === "local") {
@@ -581,11 +604,18 @@ async function fetchArtifactForEntry(indexSource, entry) {
     throw new Error(`Connector ${resolvedEntry.connectorId} is missing artifactUrl`);
   }
   const artifactBuffer = await fetchBinary(resolvedEntry.artifactUrl);
+  const certificateIdentityURI = await resolveArtifactCertificateIdentity({
+    artifactCertificateIdentityResolver: options.artifactCertificateIdentityResolver,
+    artifactUrl: resolvedEntry.artifactUrl,
+    entry: resolvedEntry,
+  });
   await verifyRemoteSignature({
     payloadBuffer: artifactBuffer,
     subjectLabel: `Connector artifact ${resolvedEntry.connectorId}@${resolvedEntry.version}`,
     subjectUrl: resolvedEntry.artifactUrl,
     signature: resolvedEntry.artifactSignature,
+    certificateIdentityURI,
+    sigstoreVerifier: options.sigstoreVerifier,
   });
   return artifactBuffer;
 }
@@ -810,12 +840,14 @@ function buildInstallWrites(layout, installRoot, resolved) {
   throw new Error(`Unsupported install layout "${layout}"`);
 }
 
-async function fetchLockArtifacts({ lock, source }) {
+async function fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver }) {
   const normalizedEntries = (lock.connectors ?? []).map(normalizeLockEntry);
   const resolved = [];
 
   for (const entry of normalizedEntries) {
-    const artifactBuffer = await fetchArtifactForEntry(source, entry);
+    const artifactBuffer = await fetchArtifactForEntry(source, entry, {
+      artifactCertificateIdentityResolver,
+    });
     const artifact = unpackAndVerifyArtifact(entry, artifactBuffer);
     resolved.push(normalizeFetchedArtifact(entry, artifact));
   }
@@ -866,9 +898,9 @@ function removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel = 
   }
 }
 
-export async function fetchResolvedArtifact(indexSource, entry) {
+export async function fetchResolvedArtifact(indexSource, entry, options = {}) {
   const normalizedEntry = normalizeLockEntry(entry);
-  const artifactBuffer = await fetchArtifactForEntry(indexSource, normalizedEntry);
+  const artifactBuffer = await fetchArtifactForEntry(indexSource, normalizedEntry, options);
   return projectFetchedArtifact(
     normalizedEntry,
     unpackAndVerifyArtifact(normalizedEntry, artifactBuffer)
@@ -879,6 +911,7 @@ export async function resolveConnectorArtifacts({
   dependencies,
   requestedConnectorIds,
   source,
+  artifactCertificateIdentityResolver,
 }) {
   const connectorIds = requestedConnectorIds ?? Object.keys(dependencies.connectors);
   const resolved = [];
@@ -890,7 +923,9 @@ export async function resolveConnectorArtifacts({
     }
     const availableEntries = extractAvailableVersions(source.doc, connectorId);
     const selected = selectResolvedEntry(availableEntries, constraint, connectorId);
-    const artifact = await fetchResolvedArtifact(source, selected);
+    const artifact = await fetchResolvedArtifact(source, selected, {
+      artifactCertificateIdentityResolver,
+    });
     resolved.push({
       connectorId,
       constraint,
@@ -912,11 +947,13 @@ export async function generateLock({
   lockVersion = "1.0",
   generatedAt = new Date().toISOString(),
   requestedConnectorIds,
+  artifactCertificateIdentityResolver,
 }) {
   const resolution = await resolveConnectorArtifacts({
     dependencies,
     source,
     requestedConnectorIds,
+    artifactCertificateIdentityResolver,
   });
   const sourceMeta = deriveSourceMeta(
     source,
@@ -1029,8 +1066,9 @@ export async function installFromLock({
   layout,
   prune = false,
   preserveTopLevel = [],
+  artifactCertificateIdentityResolver,
 }) {
-  const resolved = await fetchLockArtifacts({ lock, source });
+  const resolved = await fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver });
   const writes = expectedWritesForLock({ installRoot, layout, resolved });
   const expectedPaths = writes.map((write) => write.relativePath);
 
@@ -1061,8 +1099,9 @@ export async function verifyInstalled({
   source,
   installRoot,
   layout,
+  artifactCertificateIdentityResolver,
 }) {
-  const resolved = await fetchLockArtifacts({ lock, source });
+  const resolved = await fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver });
   const writes = expectedWritesForLock({ installRoot, layout, resolved });
   const missing = [];
   const mismatched = [];

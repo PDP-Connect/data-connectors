@@ -16,6 +16,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+  defaultArtifactCertificateIdentityResolver,
   fetchResolvedArtifact,
   generateLock,
   installFromLock,
@@ -24,6 +26,9 @@ import {
   resolveConnectorArtifacts,
   verifyInstalled,
 } from "./index.mjs";
+
+const VANA_LEGACY_CERTIFICATE_IDENTITY =
+  "https://github.com/vana-com/data-connectors/.github/workflows/publish-connectors.yml@refs/heads/main";
 
 function sha256(buffer) {
   return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
@@ -118,6 +123,64 @@ function legacyFixture() {
     },
   });
   return { root, entry, manifestBuffer, scriptBuffer };
+}
+
+async function withRemoteArtifactFetch(routes, callback) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const route = routes[String(url)];
+    if (!route) {
+      return new Response("not found\n", { status: 404, statusText: "Not Found" });
+    }
+    return new Response(route);
+  };
+  try {
+    return await callback();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function artifactVerifierFor(expectedCertificateIdentityURI) {
+  return async (_bundle, _payloadBuffer, options) => {
+    assert.equal(options.certificateIdentityURI, expectedCertificateIdentityURI);
+  };
+}
+
+async function fetchRemoteLegacyArtifactWithIdentity({
+  artifactUrl,
+  resolver,
+  expectedCertificateIdentityURI,
+  entryOverrides = {},
+}) {
+  const fixture = legacyFixture();
+  const bundleUrl = `${artifactUrl}.sigstore.json`;
+  const entry = {
+    ...fixture.entry,
+    artifactPath: null,
+    artifactUrl,
+    artifactSignature: {
+      type: "sigstoreBundle",
+      bundleUrl,
+    },
+    ...entryOverrides,
+  };
+
+  return withRemoteArtifactFetch(
+    {
+      [artifactUrl]: readFileSync(join(fixture.root, "artifact.tgz")),
+      [bundleUrl]: Buffer.from("{}\n"),
+    },
+    () =>
+      fetchResolvedArtifact(
+        { mode: "remote", doc: { connectors: { [entry.connectorId]: [entry] } } },
+        entry,
+        {
+          artifactCertificateIdentityResolver: resolver,
+          sigstoreVerifier: artifactVerifierFor(expectedCertificateIdentityURI),
+        },
+      ),
+  );
 }
 
 test("accepts a PDPP Collection Profile bundle and records its discriminated lock entry", async () => {
@@ -286,6 +349,80 @@ test("legacy bundle resolution and both legacy install layouts remain unchanged"
   await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
   assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.json")), fixture.manifestBuffer);
   assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.js")), fixture.scriptBuffer);
+});
+
+test("remote artifact verification defaults to the PDP workflow identity", async () => {
+  const artifact = await fetchRemoteLegacyArtifactWithIdentity({
+    artifactUrl:
+      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
+    expectedCertificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+  });
+
+  assert.equal(artifact.manifest.connector_id, "legacy-connector");
+});
+
+test("remote artifact verification accepts a caller-mapped legacy Vana signer", async () => {
+  const artifactUrl =
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz";
+  const resolverCalls = [];
+  const artifact = await fetchRemoteLegacyArtifactWithIdentity({
+    artifactUrl,
+    expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
+    resolver: ({ artifactUrl: url, entry }) => {
+      resolverCalls.push({ artifactUrl: url, connectorId: entry.connectorId });
+      if (new URL(url).hostname === "github.com" && url.includes("/vana-com/data-connectors/")) {
+        return VANA_LEGACY_CERTIFICATE_IDENTITY;
+      }
+      return null;
+    },
+  });
+
+  assert.equal(artifact.manifest.connector_id, "legacy-connector");
+  assert.deepEqual(resolverCalls, [{ artifactUrl, connectorId: "legacy-connector" }]);
+});
+
+test("remote artifact verification rejects a caller-selected wrong signer", async () => {
+  await assert.rejects(
+    () =>
+      fetchRemoteLegacyArtifactWithIdentity({
+        artifactUrl:
+          "https://github.com/vana-com/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
+        resolver: () => DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+        expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
+      }),
+    /signature verification failed: Expected values to be strictly equal/,
+  );
+});
+
+test("remote artifact verification fails closed when caller policy rejects the artifact origin", async () => {
+  await assert.rejects(
+    () =>
+      fetchRemoteLegacyArtifactWithIdentity({
+        artifactUrl:
+          "https://evil.example/connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
+        resolver: ({ artifactUrl: url }) => {
+          if (new URL(url).hostname === "github.com") {
+            return VANA_LEGACY_CERTIFICATE_IDENTITY;
+          }
+          return null;
+        },
+        expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
+      }),
+    /No trusted Sigstore certificate identity configured/,
+  );
+});
+
+test("remote artifact verification ignores identity metadata supplied by the connector index", async () => {
+  await fetchRemoteLegacyArtifactWithIdentity({
+    artifactUrl:
+      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
+    expectedCertificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+    entryOverrides: {
+      certificateIdentityURI:
+        "https://github.com/attacker/data-connectors/.github/workflows/publish.yml@refs/heads/main",
+    },
+  });
+  assert.equal(defaultArtifactCertificateIdentityResolver(), DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
 });
 
 test("pruning preserves configured link subtrees and removes only unpreserved links", () => {
