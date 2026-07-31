@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Detect breaking changes to public scope schemas between the base ref and
 // HEAD. A breaking change is: a removed property, a removed required field,
 // or a new required field.

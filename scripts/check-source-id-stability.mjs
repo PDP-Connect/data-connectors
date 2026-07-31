@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Detect source_id changes in manifests between the base ref and HEAD.
 // Fails if a connector's source_id changed without an explicit migration
 // marker.
