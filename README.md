@@ -343,6 +343,9 @@ The runner classifies each run into one of:
 
 ## Building a new connector
 
+Read [`CONNECTOR-GUIDELINES.md`](CONNECTOR-GUIDELINES.md) first — the rules that keep a
+connector running unchanged on both the desktop runner and the mobile WebView shim.
+
 See [`skills/pdp-connect/CREATE.md`](skills/pdp-connect/CREATE.md) for the full walkthrough. Summary:
 
 1. **Scaffold:** `node skills/pdp-connect/scripts/scaffold.cjs <platform> [company]` -- generates script, metadata, and connector-local stub schema
