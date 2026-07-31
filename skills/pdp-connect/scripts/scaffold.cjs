@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * scaffold.cjs — Hydrate templates to create connector boilerplate.
+ * scaffold.cjs: Hydrate templates to create legacy Playwright connector boilerplate.
  *
- * Usage: node scaffold.cjs <platform> [company] [output-dir]
+ * Usage: node scaffold.cjs --legacy-exception <platform> [company] [output-dir]
  *
  * Defaults: company = platform, output-dir = ~/.pdp-connect/desktop/connectors
  */
@@ -10,12 +10,19 @@
 const fs = require('fs');
 const path = require('path');
 
-const platform = process.argv[2];
-const company = process.argv[3] || platform;
-const outputDir = process.argv[4] || path.join(require('os').homedir(), '.pdp-connect', 'desktop', 'connectors');
+const legacyException = process.argv[2] === '--legacy-exception';
+if (!legacyException) {
+  console.error('Refusing to scaffold a new legacy Playwright connector without --legacy-exception.');
+  console.error('Start new connector work in PDP-Connect/pdpp, then package its pinned artifact here.');
+  process.exit(2);
+}
+
+const platform = process.argv[3];
+const company = process.argv[4] || platform;
+const outputDir = process.argv[5] || path.join(require('os').homedir(), '.pdp-connect', 'desktop', 'connectors');
 
 if (!platform) {
-  console.error('Usage: node scaffold.cjs <platform> [company] [output-dir]');
+  console.error('Usage: node scaffold.cjs --legacy-exception <platform> [company] [output-dir]');
   process.exit(1);
 }
 

@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import * as esbuild from "esbuild";
+import { inventoryBundledDependencies } from "./pdpp-bundled-dependencies.mjs";
 
 const EXPECTED_COMMIT = "597cc012611df90d07edbed187ba3e3212dbf258";
 const UPSTREAM_REPOSITORY = "https://github.com/PDP-Connect/pdpp";
@@ -124,6 +125,10 @@ async function main() {
     const runtimeInputs = Object.keys(result.metafile.inputs)
       .map((file) => isAbsolute(file) ? file : resolve(repoRoot, file))
       .filter((file) => file.startsWith(`${upstreamRuntimeRoot}/`));
+    const bundledDependencies = inventoryBundledDependencies({
+      repoRoot,
+      metafileInputs: Object.keys(result.metafile.inputs),
+    });
     const provenance = {
       generated_file_notice: "GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-github-pdpp-artifact.mjs.",
       artifact_id: "github-pdpp",
@@ -132,6 +137,7 @@ async function main() {
       source_inventory: {
         upstream_connector: inventory(pinnedRoot, upstreamConnectorFiles),
         upstream_runtime: inventoryAbsolute(pinnedRoot, runtimeInputs),
+        bundled_dependencies: bundledDependencies,
         maintained_local: inventory(connectorRoot, localSourceFiles),
       },
       build: { esbuild_version: esbuild.version, options: { bundle: true, format: "esm", minifyWhitespace: true, platform: "node", target: "node22" } },

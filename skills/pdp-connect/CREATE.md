@@ -1,13 +1,15 @@
-# Creating a Connector
+# Creating a legacy Playwright connector
 
-Build a data connector for a platform that isn't in the registry yet.
+Use this guide only after a maintainer approves a legacy Playwright exception.
+
+New connector work belongs in `PDP-Connect/pdpp` by default. Follow [Connector authoring](../../AUTHORING.md). This guide creates only the legacy `*-playwright.js` and `*-playwright.json` format.
 
 ## Prerequisites
 
 - `reference/PAGE-API.md` -- full `page` object API
 - `reference/PATTERNS.md` -- data extraction approaches and code examples
 
-All `node scripts/...` commands refer to `skills/pdp-connect/scripts/` in the data-connectors repo. `run-connector.cjs` is the bundled runner at the repo root (a symlink to `skills/pdp-connect/scripts/run-connector.cjs`); see `SETUP.md` for the one-time install.
+Run all commands from the data-connectors repository root. `run-connector.cjs` is a symlink to `skills/pdp-connect/scripts/run-connector.cjs`.
 
 ## Connector Format
 
@@ -16,20 +18,20 @@ Scripts are plain JavaScript (CJS), no imports, no require. The runner injects a
 ```javascript
 (async () => {
   // connector logic here
-  await page.setData('result', { 'platform.scope': data });
-})()
+  await page.setData("result", { "platform.scope": data });
+})();
 ```
 
 ## Reference Connectors
 
-| Platform   | Strategy           | Rung | Notes                                    |
-|------------|--------------------|------|------------------------------------------|
-| Reddit     | In-page fetch      | 1    | OAuth-like endpoints, JSON responses     |
-| Twitter/X  | Network capture    | 2    | GraphQL via captureNetwork               |
-| Instagram  | In-page fetch      | 1    | Cookie auth, pagination                  |
-| LinkedIn   | In-page fetch      | 1    | Voyager API, CSRF token required         |
-| GitHub     | DOM extraction     | 3    | Server-rendered, no client API           |
-| Spotify    | In-page fetch      | 1    | Well-documented public API               |
+| Platform  | Strategy        | Rung | Notes                                |
+| --------- | --------------- | ---- | ------------------------------------ |
+| Reddit    | In-page fetch   | 1    | OAuth-like endpoints, JSON responses |
+| Twitter/X | Network capture | 2    | GraphQL via captureNetwork           |
+| Instagram | In-page fetch   | 1    | Cookie auth, pagination              |
+| LinkedIn  | In-page fetch   | 1    | Voyager API, CSRF token required     |
+| GitHub    | DOM extraction  | 3    | Server-rendered, no client API       |
+| Spotify   | In-page fetch   | 1    | Well-documented public API           |
 
 Look at existing connectors in `~/.pdp-connect/desktop/connectors/` for working examples.
 
@@ -68,7 +70,7 @@ Pick the approach with the best user experience. See `reference/PATTERNS.md` for
 ## Step 2 -- Scaffold and Implement
 
 ```bash
-node scripts/scaffold.cjs connectors/<platform> [company]
+node skills/pdp-connect/scripts/scaffold.cjs --legacy-exception <platform> [company]
 ```
 
 ### Auth pattern
@@ -76,21 +78,25 @@ node scripts/scaffold.cjs connectors/<platform> [company]
 Two credential sources: `process.env` (automated runs) and `page.requestInput()` (interactive). Try env first, fall back to requestInput. If the platform has multiple login options (discovered via screenshot in Step 1), include a `method` field listing the options you observed:
 
 ```javascript
-let username = process.env.USER_LOGIN_PLATFORMNAME || '';
-let password = process.env.USER_PASSWORD_PLATFORMNAME || '';
+let username = process.env.USER_LOGIN_PLATFORMNAME || "";
+let password = process.env.USER_PASSWORD_PLATFORMNAME || "";
 
 if (!username || !password) {
   const creds = await page.requestInput({
-    message: 'Enter your Platform credentials.',
+    message: "Enter your Platform credentials.",
     schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        method: { type: 'string', title: 'Login method', description: 'List the options you found on the login page' },
-        username: { type: 'string', title: 'Email or username' },
-        password: { type: 'string', title: 'Password' }
+        method: {
+          type: "string",
+          title: "Login method",
+          description: "List the options you found on the login page",
+        },
+        username: { type: "string", title: "Email or username" },
+        password: { type: "string", title: "Password" },
       },
-      required: ['username', 'password']
-    }
+      required: ["username", "password"],
+    },
   });
   username = creds.username;
   password = creds.password;
@@ -104,7 +110,7 @@ if (!username || !password) {
 const loginStr = JSON.stringify(username);
 const passStr = JSON.stringify(password);
 
-await page.goto('https://platform.com/login');
+await page.goto("https://platform.com/login");
 await page.sleep(2000);
 
 await page.evaluate(`
@@ -166,9 +172,9 @@ Full API: `reference/PAGE-API.md`
 Run the connector and validate in one step:
 
 ```bash
-node scripts/validate.cjs connectors/<company>/<name>-playwright.js && \
+node skills/pdp-connect/scripts/validate.cjs connectors/<company>/<name>-playwright.js && \
   node run-connector.cjs connectors/<company>/<name>-playwright.js [start-url] && \
-  node scripts/validate.cjs connectors/<company>/<name>-playwright.js --check-result ~/.pdp-connect/desktop/last-result.json
+  node skills/pdp-connect/scripts/validate.cjs connectors/<company>/<name>-playwright.js --check-result ~/.pdp-connect/desktop/last-result.json
 ```
 
 The validator checks structure, output quality, debug code, data cleanliness, schema descriptions, and login method diversity. Fix all reported issues and re-run.
@@ -179,28 +185,34 @@ If an extraction approach fails after 2 attempts, move to the next rung (see `re
 
 ## Step 4 -- Enrich Schemas
 
-Schemas are an API contract — app developers build against them.
+Schemas are an API contract. App developers build against them.
 
 ### Generate the skeleton
 
 ```bash
-node scripts/generate-schemas.cjs ~/.pdp-connect/desktop/last-result.json <platform> [output-dir]
+node skills/pdp-connect/scripts/generate-schemas.cjs ~/.pdp-connect/desktop/last-result.json <platform> [output-dir]
 ```
 
 ### Enrich from what you know
 
 - Add `description` to every field and `format` hints where applicable (`date-time`, `uri`, `email`). The validator checks description coverage.
 - Mark fields `required` only if guaranteed for all users. Use `additionalProperties: true`.
-- Write a meaningful top-level `description` — not "GitHub profile data" but "GitHub user profile including bio, follower counts, and repository statistics."
+- Write a meaningful top-level `description`. Describe the real data instead of using a generic label.
 
 Before (from `generate-schemas.cjs`):
+
 ```json
 { "type": "string" }
 ```
 
 After (enriched):
+
 ```json
-{ "type": "string", "format": "date-time", "description": "When the issue was created (ISO 8601)" }
+{
+  "type": "string",
+  "format": "date-time",
+  "description": "When the issue was created (ISO 8601)"
+}
 ```
 
 ---
@@ -240,8 +252,8 @@ npm run fixture-index:check
 ## Step 6 -- Register and Contribute
 
 ```bash
-node scripts/register.cjs connectors/<company>/<name>-playwright.js
-node scripts/validate.cjs connectors/<company>/<name>-playwright.js --contribute
+node skills/pdp-connect/scripts/register.cjs connectors/<company>/<name>-playwright.js
+node skills/pdp-connect/scripts/validate.cjs connectors/<company>/<name>-playwright.js --contribute
 ```
 
-The validator runs all checks including secret scanning before creating a PR. All checks must pass — the validator is the quality gate.
+The validator runs all checks, including secret scanning, before it creates a PR. All checks must pass.

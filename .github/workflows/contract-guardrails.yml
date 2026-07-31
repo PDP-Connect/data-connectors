@@ -36,6 +36,16 @@ jobs:
       - name: Test installer artifact contracts
         run: npm run installer:test
 
+      - name: Checkout pinned PDPP source for ChatGPT artifact provenance
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp"
+          git -C "$RUNNER_TEMP/pdpp" checkout cc07e3a896c2c0df7841da4ec6b2c660ffe1e792
+
+      - name: Test ChatGPT PDPP artifact provenance
+        env:
+          PDPP_CHATGPT_SOURCE_ROOT: ${{ runner.temp }}/pdpp
+        run: npm run chatgpt-pdpp:test
+
       - name: Check source/scope catalog generated files
         run: node scripts/generate-scope-catalog.mjs --check
 

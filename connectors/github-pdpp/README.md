@@ -6,7 +6,9 @@ from PDPP commit `597cc012611df90d07edbed187ba3e3212dbf258`; later connector
 changes may be made here without a synchronization framework. Generic PDPP
 runtime source is deliberately not checked in: the build resolves that closure
 from the pinned commit object in `--pdpp-root` and records every runtime input
-hash. Dirty or untracked files in that worktree are never build inputs.
+hash plus every bundled `node_modules` input by package, version,
+package-manifest hash, per-file hashes, and closure hash. Dirty or untracked
+files in that worktree are never build inputs.
 
 `collection-profile.json` is held byte-for-byte equal to PDPP's canonical
 GitHub manifest at that commit. `dist/collection-profile.mjs` is ignored

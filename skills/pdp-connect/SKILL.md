@@ -1,16 +1,18 @@
 ---
 name: pdp-connect
 description: >
-  Connect personal data from any web platform using browser automation.
+  Connect personal data from any web platform using legacy Playwright browser automation.
   Use when: (1) user wants to connect a data source like ChatGPT, Instagram,
   Spotify, or any platform, (2) user says "connect my [platform]",
   (3) user wants to generate or update their profile from connected data.
-  Also triggers on: "create a connector for [platform]".
+  New connector requests route to PDP-Connect/pdpp instead of this legacy skill.
 ---
 
-# Connect
+# Connect with legacy Playwright
 
 Connect personal data from web platforms using the in-repo scripts under `skills/pdp-connect/scripts/` and local browser automation.
+
+This skill runs and maintains the legacy `*-playwright.js` and `*-playwright.json` format. It does not create or run PDPP Collection Profiles. For new connector work, read [Connector authoring](../../AUTHORING.md).
 
 ## Setup
 
@@ -36,7 +38,7 @@ or inspect `registry.json` / the `connectors/` directory directly for the source
 
 If the requested platform is present, use the run flow below.
 
-**If no connector exists for the platform,** tell the user you'll build one — this involves researching the platform's data APIs, writing the extraction code, and testing it. Let them know it'll take a bit and they're welcome to do something else while you work. Then read `CREATE.md` and follow it.
+**If no connector exists for the platform,** start the work in `PDP-Connect/pdpp`. Follow [Connector authoring](../../AUTHORING.md). Do not create a legacy Playwright connector unless a maintainer approves an explicit exception.
 
 If the user is building or testing an app and needs sample data, prefer the
 public fixture flow over pasting large JSON into the agent:
@@ -48,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/PDP-Connect/data-connectors/main/fi
 Find the matching `sourceId`, `scope`, and `scenario`, then download the entry's
 `rawUrl` into a local `fixtures/` directory. Fixtures are synthetic scope
 payloads that conform to the connector schema. The raw URL points at latest
-`main`; compare the downloaded file against the entry's `sha256` if exact bytes
+`main`. Compare the downloaded file against the entry's `sha256` if exact bytes
 matter.
 
 ### 2. Run the connector
@@ -67,14 +69,14 @@ This will:
 
 If the connector emits `need-input`, either supply the value up front with `--inputs '{"key":"val"}'` or rerun with `--pretty` for a human-readable interactive session so the user can respond.
 
-If the connector emits `legacy-auth`, it still depends on an older `showBrowser` / `promptUser` pattern and may need a headed/manual session path — flag this to the user rather than retrying blindly.
+If the connector emits `legacy-auth`, it still depends on an older `showBrowser` / `promptUser` pattern. It may need a headed or manual session path. Tell the user instead of retrying blindly.
 
 ### 3. Handle outcomes
 
-- `need-input` — the connector needs a live login or another manual step. Explain that you'll rerun interactively or with `--inputs`.
-- `legacy-auth` — this source still needs a headed/manual session and may not work in fully headless batch mode yet.
-- `result` — data was collected and written to the output path (default `~/.pdp-connect/desktop/last-result.json`, override with `--output`).
-- `error` — the run failed; inspect the emitted message and `~/.pdp-connect/desktop/logs/` if present.
+- `need-input`: The connector needs a live login or another manual step. Explain that you will rerun interactively or with `--inputs`.
+- `legacy-auth`: This source still needs a headed or manual session. It might not work in fully headless batch mode.
+- `result`: The connector wrote data to the output path. The default path is `~/.pdp-connect/desktop/last-result.json`.
+- `error`: The run failed. Inspect the emitted message and `~/.pdp-connect/desktop/logs/` if present.
 
 If output is truncated or unclear, check `~/.pdp-connect/desktop/logs/` directly rather than rerunning blindly.
 
@@ -82,21 +84,21 @@ After a successful run, read the result file at the output path to inspect the c
 
 ### 4. Validate, present results, and offer to contribute
 
-If you built or modified a connector, immediately run validation — before presenting results to the user:
+If you modified a connector, run validation before you present results to the user:
 
 ```bash
-node scripts/validate.cjs connectors/<company>/<name>-playwright.js --check-result ~/.pdp-connect/desktop/last-result.json
+node skills/pdp-connect/scripts/validate.cjs connectors/<company>/<name>-playwright.js --check-result ~/.pdp-connect/desktop/last-result.json
 ```
 
-Fix any issues the validator reports. The validator checks debug code, login method diversity, schema descriptions, data cleanliness, and more — it is the quality gate. Iterate until validation passes.
+Fix all reported issues. The validator checks debug code, login methods, schema descriptions, and data cleanliness. Iterate until validation passes.
 
 Then read the result file and summarize for the user in human terms (see "Communicating with the user" below).
 
-If you built a new connector (not one from the registry), ask the user:
+If you built a new legacy connector under an approved exception, ask the user:
 
 > "Want to share this connector so others can connect their [Platform] data too? Contributing means the community helps maintain it when [Platform] changes their site."
 
-If yes, run `node scripts/validate.cjs connectors/<company>/<name>-playwright.js --contribute`. If no, move on.
+If yes, run `node skills/pdp-connect/scripts/validate.cjs connectors/<company>/<name>-playwright.js --contribute`. If no, move on.
 
 ### 5. Suggest what to do with the data
 
@@ -107,12 +109,12 @@ After the contribution question is resolved (or if using an existing connector),
 The user can't see what you're doing behind the scenes. Keep them informed at key moments:
 
 1. **Before asking for credentials**, explain the approach and reassure on privacy:
-   - "I'll connect to [Platform] using a local browser on your machine. Your credentials stay local — nothing is sent to any server except [Platform] itself."
+   - "I will connect to [Platform] using a local browser. Your credentials stay local. Only [Platform] receives them."
    - If using an API key: "This uses [Platform]'s API key. You can find it at [location]. The key stays on your machine."
 
 2. **During long operations** (building a connector, collecting paginated data), give brief progress updates. Don't go silent for more than ~30 seconds.
 
-3. **After collection**, summarize results in human terms — not file paths:
+3. **After collection**, summarize results in human terms, not file paths:
    - Good: "Connected! I collected 249 issues, 63 projects, 9 teams, and your profile from Linear."
    - Bad: "Data saved to ~/.pdp-connect/desktop/last-result.json"
    - Build the summary from the result's `exportSummary` and the scoped keys.

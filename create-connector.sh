@@ -1,18 +1,17 @@
 #!/bin/bash
 
-# Autonomous Data Connector Creator
+# Legacy Playwright Data Connector Creator
 #
-# Creates, tests, and validates a data connector for any web platform.
+# Creates, tests, and validates a legacy Playwright connector for a web platform.
 # Uses Claude Code as the AI backbone to drive the full workflow.
-# Login is fully automated via credentials in .env — no human interaction needed.
+# Login is fully automated through credentials in .env. No human interaction is needed.
 #
 # Usage:
-#   ./create-connector.sh <platform> [description]
+#   ./create-connector.sh --legacy-exception <platform> [description]
 #
 # Examples:
-#   ./create-connector.sh twitter
-#   ./create-connector.sh reddit "Extract saved posts, comments, and karma history"
-#   ./create-connector.sh notion "Export all pages and databases"
+#   ./create-connector.sh --legacy-exception twitter
+#   ./create-connector.sh --legacy-exception reddit "Extract saved posts, comments, and karma history"
 #
 # Prerequisites:
 #   - Claude Code CLI: npm install -g @anthropic-ai/claude-code
@@ -21,14 +20,27 @@
 
 set -e
 
-PLATFORM="${1:?Usage: ./create-connector.sh <platform> [description]}"
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  echo "Usage: ./create-connector.sh --legacy-exception <platform> [description]"
+  echo "New connector work starts in PDP-Connect/pdpp."
+  exit 0
+fi
+
+if [ "${1:-}" != "--legacy-exception" ]; then
+  echo "Refusing to create a new legacy Playwright connector without --legacy-exception."
+  echo "Start new connector work in PDP-Connect/pdpp, then package its pinned artifact here."
+  exit 2
+fi
+shift
+
+PLATFORM="${1:?Usage: ./create-connector.sh --legacy-exception <platform> [description]}"
 DESCRIPTION="${2:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLATFORM_UPPER=$(echo "$PLATFORM" | tr '[:lower:]' '[:upper:]')
 
 echo "╔══════════════════════════════════════════════╗"
-echo "║   Autonomous Data Connector Creator          ║"
+echo "║   Legacy Playwright Connector Creator        ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Platform:    ${PLATFORM}"
 echo "║  Description: ${DESCRIPTION:-<auto-detect>}"
@@ -86,7 +98,7 @@ if [ "$RUNNER_FOUND" = false ]; then
 fi
 
 # Build the prompt
-PROMPT="Create a data connector for ${PLATFORM}."
+PROMPT="Create a legacy Playwright data connector for ${PLATFORM}."
 
 if [ -n "$DESCRIPTION" ]; then
   PROMPT="${PROMPT} Data to extract: ${DESCRIPTION}."

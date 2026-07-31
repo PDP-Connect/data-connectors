@@ -30,6 +30,32 @@
       }
     },
     {
+      "id": "chatgpt-pdpp",
+      "company": "openai",
+      "version": "0.1.0",
+      "name": "ChatGPT (PDPP Collection Profile)",
+      "status": "experimental",
+      "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
+      "artifactKind": "pdpp-collection-profile",
+      "manifestPath": "profile/collection-profile.json",
+      "entrypointPath": "dist/collection-profile.mjs",
+      "provenancePath": "provenance.json",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.0.tgz",
+      "releaseId": "unpublished",
+      "sourceTag": "pdpp-cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
+      "sourceCommit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
+      "publishedAt": "2026-07-31T00:00:00Z",
+      "upstream": {
+        "repository": "https://github.com/PDP-Connect/pdpp",
+        "commit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792"
+      },
+      "files": {
+        "manifest": "chatgpt-pdpp/collection-profile.json",
+        "entrypoint": "chatgpt-pdpp/dist/collection-profile.mjs",
+        "provenance": "chatgpt-pdpp/provenance.json"
+      }
+    },
+    {
       "id": "github-pdpp",
       "company": "github",
       "version": "0.5.0",

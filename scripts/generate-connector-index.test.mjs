@@ -26,6 +26,7 @@ function makeRepoCopy() {
       return ![".git", "node_modules", "reports"].includes(name);
     },
   });
+  execFileSync("npm", ["ci", "--ignore-scripts"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "tests@example.com"], {
     cwd: root,
@@ -72,6 +73,24 @@ test("same-version GitHub PDPP maintained source drift fails check mode", () => 
   }
 });
 
+test("same-version ChatGPT PDPP artifact configuration drift fails check mode", () => {
+  const root = makeRepoCopy();
+  try {
+    const sourcePath = join(root, "connectors", "chatgpt-pdpp", "artifact.json");
+    writeFileSync(sourcePath, `${readFileSync(sourcePath, "utf8")}\n`);
+
+    const result = runGenerator(root, ["--check"]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /chatgpt-pdpp@0\.1\.0 maintained source changed without a version bump: artifact\.json/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("same-version GitHub PDPP provenance drift fails check mode", () => {
   const root = makeRepoCopy();
   try {
@@ -95,11 +114,16 @@ test("same-version GitHub PDPP provenance drift fails check mode", () => {
   }
 });
 
-test("release-assets refresh preserves GitHub PDPP artifact when generated dist is absent", () => {
+test("release-assets refresh preserves every PDPP artifact when generated dist is absent", () => {
   const root = makeRepoCopy();
   try {
+    const originalIndex = JSON.parse(readFileSync(join(root, "connector-index.json"), "utf8"));
     rmSync(
       join(root, "connectors", "github-pdpp", "dist", "collection-profile.mjs"),
+      { force: true },
+    );
+    rmSync(
+      join(root, "connectors", "chatgpt-pdpp", "dist", "collection-profile.mjs"),
       { force: true },
     );
 
@@ -120,10 +144,16 @@ test("release-assets refresh preserves GitHub PDPP artifact when generated dist 
     );
     assert.equal(
       pdpp.artifactSha256,
-      "sha256:9c57424f0b361003e31f4b2af1667dcfef617505ce29d0c0a02f837f75880e57",
+      originalIndex.connectors["github-pdpp"][0].artifactSha256,
     );
     assert.equal(pdpp.releaseId, "connectors-release-test");
     assert.equal(pdpp.artifactSignature?.type, "sigstoreBundle");
+    const chatgpt = index.connectors["chatgpt-pdpp"][0];
+    assert.equal(
+      chatgpt.artifactUrl,
+      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-release-test/chatgpt-pdpp-0.1.0.tgz",
+    );
+    assert.equal(chatgpt.artifactSignature?.type, "sigstoreBundle");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

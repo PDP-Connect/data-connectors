@@ -1,24 +1,23 @@
 #!/bin/bash
 
-# Autonomous Data Connector Creator
+# Legacy Playwright Data Connector Creator
 #
-# Creates, tests, and validates a data connector — end to end.
+# Creates, tests, and validates a legacy Playwright connector end to end.
 # Handles session capture (manual login) when needed, then uses Claude Code
 # to autonomously build the connector.
 #
 # Usage:
-#   ./create-connector.sh <platform> [options] [description]
+#   ./create-connector.sh --legacy-exception <platform> [options] [description]
 #
 # Options:
+#   --legacy-exception  Confirm an approved legacy format exception
 #   --login-url URL   Login URL for session capture (skips prompt)
 #   --skip-session    Skip session capture even if no credentials
 #   --session-only    Only capture session, don't build connector
 #
 # Examples:
-#   ./create-connector.sh instagram
-#   ./create-connector.sh uber --login-url https://auth.uber.com
-#   ./create-connector.sh google --login-url https://accounts.google.com "Export contacts and calendar"
-#   ./create-connector.sh reddit "Extract saved posts and comment history"
+#   ./create-connector.sh --legacy-exception instagram
+#   ./create-connector.sh --legacy-exception uber --login-url https://auth.uber.com
 
 set -e
 
@@ -30,9 +29,14 @@ DESCRIPTION=""
 SKIP_SESSION=false
 SESSION_ONLY=false
 FORCE_SESSION=false
+LEGACY_EXCEPTION=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --legacy-exception)
+      LEGACY_EXCEPTION=true
+      shift
+      ;;
     --login-url)
       LOGIN_URL="$2"
       shift 2
@@ -50,17 +54,19 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: ./create-connector.sh <platform> [options] [description]"
+      echo "Usage: ./create-connector.sh --legacy-exception <platform> [options] [description]"
       echo ""
       echo "Options:"
+      echo "  --legacy-exception  Confirm an approved legacy format exception"
       echo "  --login-url URL   Login URL for session capture"
       echo "  --skip-session    Skip session capture"
       echo "  --session-only    Only capture session, don't build connector"
       echo ""
       echo "Examples:"
-      echo "  ./create-connector.sh instagram"
-      echo "  ./create-connector.sh uber --login-url https://auth.uber.com"
-      echo "  ./create-connector.sh google --login-url https://accounts.google.com \"Export contacts\""
+      echo "  ./create-connector.sh --legacy-exception instagram"
+      echo "  ./create-connector.sh --legacy-exception uber --login-url https://auth.uber.com"
+      echo ""
+      echo "New connector work starts in PDP-Connect/pdpp."
       exit 0
       ;;
     -*)
@@ -78,18 +84,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ! $LEGACY_EXCEPTION; then
+  echo "Refusing to create a new legacy Playwright connector without --legacy-exception."
+  echo "Start new connector work in PDP-Connect/pdpp, then package its pinned artifact here."
+  exit 2
+fi
+
 if [ -z "$PLATFORM" ]; then
   echo "Error: Platform name required."
-  echo "Usage: ./create-connector.sh <platform> [options] [description]"
+  echo "Usage: ./create-connector.sh --legacy-exception <platform> [options] [description]"
   exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLATFORM_UPPER=$(echo "$PLATFORM" | tr '[:lower:]' '[:upper:]')
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║   Data Connector Creator                     ║"
+echo "║   Legacy Playwright Connector Creator        ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Platform:    ${PLATFORM}"
 echo "║  Description: ${DESCRIPTION:-<auto-detect>}"
@@ -141,10 +154,10 @@ if ! $SKIP_SESSION; then
     # Explicit force re-capture
     NEEDS_SESSION=true
   elif ! $HAS_SESSION && ! $HAS_CREDENTIALS; then
-    # No auth at all — need session capture
+    # No auth is available, so capture a session.
     NEEDS_SESSION=true
   elif ! $HAS_SESSION && [ -n "$LOGIN_URL" ]; then
-    # No session but login URL provided — capture it
+    # A login URL is available, so capture a session.
     NEEDS_SESSION=true
   fi
 fi
@@ -174,8 +187,7 @@ if $NEEDS_SESSION; then
   echo "───────────────────────────────────────────────"
   echo ""
 
-  cd "$SCRIPT_DIR"
-  node capture-session.cjs "$PLATFORM" "$LOGIN_URL" --timeout 300
+  node "$SCRIPT_DIR/capture-session.cjs" "$PLATFORM" "$LOGIN_URL" --timeout 300
 
   CAPTURE_EXIT=$?
   if [ $CAPTURE_EXIT -ne 0 ]; then
@@ -223,7 +235,7 @@ fi
 
 # ─── Build Prompt ────────────────────────────────────────────
 
-PROMPT="Create a data connector for ${PLATFORM}."
+PROMPT="Create a legacy Playwright data connector for ${PLATFORM}."
 
 if [ -n "$DESCRIPTION" ]; then
   PROMPT="${PROMPT} Data to extract: ${DESCRIPTION}."
@@ -242,15 +254,15 @@ PROMPT="${PROMPT}
 
 ${AUTH_INFO}
 
-IMPORTANT: You are running from the scripts/ directory. Connector files go in the connectors/ directory at repo root:
-- Connector: ../connectors/${PLATFORM}/${PLATFORM}-playwright.js and ../connectors/${PLATFORM}/${PLATFORM}-playwright.json
-- Schemas: ../connectors/${PLATFORM}/schemas/${PLATFORM}.<scope>.json
-- Registry: ../registry.json
-Do NOT create files inside scripts/. Use ../connectors/ paths for all connector output.
+IMPORTANT: Your working directory is ${REPO_ROOT}
+- Connector: ${REPO_ROOT}/connectors/${PLATFORM}/${PLATFORM}-playwright.js and ${REPO_ROOT}/connectors/${PLATFORM}/${PLATFORM}-playwright.json
+- Schemas: ${REPO_ROOT}/connectors/${PLATFORM}/schemas/${PLATFORM}.<scope>.json
+- Registry: ${REPO_ROOT}/registry.json
+Do NOT create connector files inside ${SCRIPT_DIR}.
 
-Read and follow the autonomous workflow in .claude/skills/auto-create-connector/SKILL.md
+Read and follow the autonomous workflow in ${REPO_ROOT}/.claude/skills/auto-create-connector/SKILL.md
 Execute ALL steps: research, create, validate structure, test (headless), validate output, iterate if needed, finalize (including registry update).
-Skip Step 1.5 (session capture) — session is already handled.
+Skip Step 1.5 (session capture). The session is already handled.
 Do not stop until the connector passes all validation checks or you've exhausted 3 iteration attempts."
 
 # ─── Run Claude Agent ───────────────────────────────────────
@@ -260,10 +272,10 @@ echo "  Launching Claude agent..."
 echo "───────────────────────────────────────────────"
 echo ""
 
-cd "$SCRIPT_DIR"
+cd "$REPO_ROOT"
 
 "$CLAUDE_BIN" -p "$PROMPT" \
   --allowedTools "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch,Agent" \
   --output-format stream-json \
   --verbose \
-  | node scripts/format-stream.cjs
+  | node "$SCRIPT_DIR/format-stream.cjs"

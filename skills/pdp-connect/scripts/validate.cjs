@@ -7,8 +7,8 @@
  * Returns machine-readable JSON for use by automated agents in the create-test-validate loop.
  *
  * Usage:
- *   node scripts/validate.cjs <connector.js>
- *   node scripts/validate.cjs <connector.js> --check-result ./connector-result.json
+ *   node skills/pdp-connect/scripts/validate.cjs <connector.js>
+ *   node skills/pdp-connect/scripts/validate.cjs <connector.js> --check-result ./connector-result.json
  *
  * Exit codes:
  *   0 = all checks passed
@@ -750,9 +750,9 @@ function main() {
 Connector Validator — validates structure and output of data connectors.
 
 Usage:
-  node scripts/validate.cjs <connector.js>
-  node scripts/validate.cjs <connector.js> --check-result <result.json>
-  node scripts/validate.cjs <connector.js> --contribute
+  node skills/pdp-connect/scripts/validate.cjs <connector.js>
+  node skills/pdp-connect/scripts/validate.cjs <connector.js> --check-result <result.json>
+  node skills/pdp-connect/scripts/validate.cjs <connector.js> --contribute
 
 Flags:
   --check-result <file>  Also validate connector output data
