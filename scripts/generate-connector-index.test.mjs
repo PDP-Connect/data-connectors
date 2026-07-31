@@ -6,7 +6,6 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -99,8 +98,9 @@ test("same-version GitHub PDPP provenance drift fails check mode", () => {
 test("release-assets refresh preserves GitHub PDPP artifact when generated dist is absent", () => {
   const root = makeRepoCopy();
   try {
-    unlinkSync(
+    rmSync(
       join(root, "connectors", "github-pdpp", "dist", "collection-profile.mjs"),
+      { force: true },
     );
 
     const result = runGenerator(root, [], {
