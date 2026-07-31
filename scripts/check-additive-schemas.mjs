@@ -22,6 +22,37 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
+function schemaDocsFromPdppManifest(connector, manifestPath, manifest) {
+  const relManifestPath = manifestPath.replace(repoRoot + "/", "");
+  return (manifest.streams ?? [])
+    .filter((stream) => stream?.name && stream?.schema)
+    .map((stream) => ({
+      path: manifestPath,
+      rel: `${relManifestPath}#streams.${stream.name}`,
+      version: manifest.version,
+      schema: stream.schema,
+      baseSchemaAtRef(ref) {
+        const baseManifest = getJsonAtRef(ref, relManifestPath);
+        const baseStream = baseManifest?.streams?.find((entry) => entry?.name === stream.name);
+        if (!baseStream?.schema) return null;
+        return {
+          version: baseManifest.version,
+          schema: baseStream.schema,
+        };
+      },
+    }));
+}
+
+function getJsonAtRef(ref, relPath) {
+  const content = getFileAtRef(ref, relPath);
+  if (!content) return null;
+  try {
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
 function listSchemas() {
   const registryPath = join(repoRoot, "registry.json");
   if (!existsSync(registryPath)) {
@@ -29,10 +60,20 @@ function listSchemas() {
   }
 
   const registry = JSON.parse(readFileSync(registryPath, "utf8"));
-  const schemaFiles = [];
+  const schemaDocs = [];
 
   for (const connector of registry.connectors ?? []) {
-    const metadataPath = join(repoRoot, "connectors", connector.files.metadata);
+    if (connector.artifactKind === "pdpp-collection-profile") {
+      const manifestPath = join(repoRoot, "connectors", connector.files?.manifest ?? "");
+      if (!existsSync(manifestPath)) {
+        continue;
+      }
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      schemaDocs.push(...schemaDocsFromPdppManifest(connector, manifestPath, manifest));
+      continue;
+    }
+
+    const metadataPath = join(repoRoot, "connectors", connector.files?.metadata ?? "");
     if (!existsSync(metadataPath)) {
       continue;
     }
@@ -46,12 +87,19 @@ function listSchemas() {
       }
       const schemaPath = join(manifestDir, "schemas", `${scope}.json`);
       if (existsSync(schemaPath)) {
-        schemaFiles.push(schemaPath);
+        schemaDocs.push({
+          path: schemaPath,
+          rel: schemaPath.replace(repoRoot + "/", ""),
+          ...JSON.parse(readFileSync(schemaPath, "utf8")),
+          baseSchemaAtRef(ref) {
+            return getJsonAtRef(ref, this.rel);
+          },
+        });
       }
     }
   }
 
-  return schemaFiles;
+  return schemaDocs;
 }
 
 function getFileAtRef(ref, relPath) {
@@ -114,27 +162,13 @@ function diffSchemas(baseSchema, headSchema) {
 
 function main() {
   const baseRef = process.env.BASE_REF || "origin/main";
-  const schemaFiles = listSchemas();
+  const schemaDocs = listSchemas();
   const errors = [];
   let checked = 0;
 
-  for (const path of schemaFiles) {
-    const rel = path.replace(repoRoot + "/", "");
-    const headContent = readFileSync(path, "utf8");
-    let head;
-    try {
-      head = JSON.parse(headContent);
-    } catch {
-      continue;
-    }
-    const baseContent = getFileAtRef(baseRef, rel);
-    if (!baseContent) continue;
-    let base;
-    try {
-      base = JSON.parse(baseContent);
-    } catch {
-      continue;
-    }
+  for (const head of schemaDocs) {
+    const base = head.baseSchemaAtRef(baseRef);
+    if (!base) continue;
 
     checked++;
     const { removed, newlyRequired } = diffSchemas(base.schema, head.schema);
@@ -144,7 +178,7 @@ function main() {
     const breaking = removed.length > 0 || newlyRequired.length > 0;
     if (breaking && headMajor <= baseMajor) {
       errors.push(
-        `${rel}: breaking schema change without major version bump (base v${base.version}, head v${head.version}). removed=${JSON.stringify(removed)} newly_required=${JSON.stringify(newlyRequired)}`,
+        `${head.rel}: breaking schema change without major version bump (base v${base.version}, head v${head.version}). removed=${JSON.stringify(removed)} newly_required=${JSON.stringify(newlyRequired)}`,
       );
     }
   }

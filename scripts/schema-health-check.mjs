@@ -59,6 +59,47 @@ async function listConnectorLocalSchemas(manifestPath, metadata) {
   return results;
 }
 
+function isPdppCollectionProfile(connector) {
+  return connector.artifactKind === "pdpp-collection-profile";
+}
+
+function pdppStreamScopeId(connector, stream) {
+  return `${connector.id}:${stream.name}`;
+}
+
+async function readRegistryManifest(connector) {
+  if (isPdppCollectionProfile(connector)) {
+    const manifestPath = join(REPO_ROOT, "connectors", connector.files?.manifest ?? "");
+    return { metadataPath: manifestPath, metadata: await readJson(manifestPath) };
+  }
+
+  const metadataPath = join(REPO_ROOT, "connectors", connector.files?.metadata ?? "");
+  return { metadataPath, metadata: await readJson(metadataPath) };
+}
+
+function extractDeclaredSchemas(connector, metadataPath, metadata) {
+  if (isPdppCollectionProfile(connector)) {
+    return (metadata.streams ?? [])
+      .filter((stream) => stream?.name)
+      .map((stream) => ({
+        scope: pdppStreamScopeId(connector, stream),
+        hasSchema: Boolean(stream.schema),
+        schema: stream.schema ?? null,
+        path: `${metadataPath}#streams.${stream.name}.schema`,
+      }));
+  }
+
+  return (metadata.scopes ?? [])
+    .map((entry) => extractScopeId(entry))
+    .filter(Boolean)
+    .map((scope) => ({
+      scope,
+      hasSchema: null,
+      schema: null,
+      path: null,
+    }));
+}
+
 async function walkJsonFiles(dir, out = []) {
   let entries;
   try {
@@ -121,12 +162,18 @@ const baseScopeSet = new Set();
 const baseRegistry = readGitJson(baseRef, "registry.json");
 if (baseRegistry?.connectors) {
   for (const connector of baseRegistry.connectors) {
-    const metadata = readGitJson(baseRef, `connectors/${connector.files.metadata}`);
-    if (metadata?.scopes) {
-      for (const entry of metadata.scopes) {
-        const scope = extractScopeId(entry);
-        if (scope) baseScopeSet.add(scope);
+    if (isPdppCollectionProfile(connector)) {
+      const metadata = readGitJson(baseRef, `connectors/${connector.files?.manifest ?? ""}`);
+      for (const stream of metadata?.streams ?? []) {
+        if (stream?.name) baseScopeSet.add(pdppStreamScopeId(connector, stream));
       }
+      continue;
+    }
+
+    const metadata = readGitJson(baseRef, `connectors/${connector.files?.metadata ?? ""}`);
+    for (const entry of metadata?.scopes ?? []) {
+      const scope = extractScopeId(entry);
+      if (scope) baseScopeSet.add(scope);
     }
   }
 }
@@ -144,21 +191,19 @@ const connectors = registry.connectors;
 const scopeToConnector = new Map();
 
 for (const connector of connectors) {
-  const metadataPath = join(REPO_ROOT, "connectors", connector.files.metadata);
   let metadata;
+  let metadataPath;
   try {
-    metadata = await readJson(metadataPath);
+    ({ metadataPath, metadata } = await readRegistryManifest(connector));
   } catch (err) {
     process.stderr.write(
-      `Warning: could not read metadata for ${connector.id}: ${err.message}\n`
+      `Warning: could not read manifest for ${connector.id}: ${err.message}\n`
     );
     continue;
   }
 
-  if (!Array.isArray(metadata.scopes)) continue;
-
-  for (const entry of metadata.scopes) {
-    const scope = extractScopeId(entry);
+  for (const entry of extractDeclaredSchemas(connector, metadataPath, metadata)) {
+    const { scope } = entry;
     if (scope && !scopeToConnector.has(scope)) {
       scopeToConnector.set(scope, connector.id);
     }
@@ -194,9 +239,20 @@ try {
 // 5. Collect connector-local schema files from registered connectors only.
 const localSchemasByScope = new Map();
 for (const connector of connectors) {
-  const metadataPath = join(REPO_ROOT, "connectors", connector.files.metadata);
   try {
-    const metadata = await readJson(metadataPath);
+    const { metadataPath, metadata } = await readRegistryManifest(connector);
+    if (isPdppCollectionProfile(connector)) {
+      for (const entry of extractDeclaredSchemas(connector, metadataPath, metadata)) {
+        localSchemasByScope.set(entry.scope, {
+          schema: entry.schema,
+          path: entry.path,
+          inline: true,
+          hasSchema: entry.hasSchema,
+        });
+      }
+      continue;
+    }
+
     const schemaEntries = await listConnectorLocalSchemas(metadataPath, metadata);
     for (const [scope, value] of schemaEntries) {
       localSchemasByScope.set(scope, value);
