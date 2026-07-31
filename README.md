@@ -25,6 +25,7 @@ The catalog describes the local desktop collection path: registered Playwright c
 |---|---|---|
 | `amazon` | `amazon.orders`, `amazon.profile` | amazon-playwright (beta) |
 | `chatgpt` | `chatgpt.conversations`, `chatgpt.memories` | chatgpt-playwright (stable) |
+| `claude_code` | `claude_code.prompts`, `claude_code.sessions`, `claude_code.trajectories`, `claude_code.usage` | claude-code-local (experimental) |
 | `claude` | `claude.conversations`, `claude.projects` | claude-export-playwright (experimental) |
 | `doordash` | `doordash.orders` | doordash-playwright (beta) |
 | `github` | `github.contributions`, `github.events`, `github.history`, `github.profile`, `github.repositories`, `github.starred` | github-playwright (stable) |
