@@ -86,17 +86,64 @@
         "version",
         "name",
         "description",
-        "sourceFiles",
         "publishedAt",
-        "sourceTag",
-        "sourceCommit",
         "releaseId",
         "manifestSha256",
-        "scriptSha256",
         "artifactSha256",
         "artifactUrl"
       ],
       "additionalProperties": true,
+      "oneOf": [
+        {
+          "description": "Legacy connector artifacts omit artifactKind and retain the manifest.json plus script.js contract.",
+          "allOf": [
+            {
+              "not": {
+                "required": ["artifactKind"]
+              }
+            },
+            {
+              "required": ["sourceFiles", "scriptSha256"]
+            },
+            {
+              "oneOf": [
+                {
+                  "required": ["sourceTag", "sourceCommit"]
+                },
+                {
+                  "required": ["gitRef"]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "description": "PDPP Collection Profile artifacts declare their canonical manifest and packaged executable entrypoint.",
+          "required": [
+            "artifactKind",
+            "manifestPath",
+            "entrypointPath",
+            "entrypointSha256",
+            "sourceTag",
+            "sourceCommit"
+          ],
+          "properties": {
+            "artifactKind": {
+              "const": "pdpp-collection-profile"
+            },
+            "manifestPath": {
+              "$ref": "#/$defs/bundlePath"
+            },
+            "entrypointPath": {
+              "$ref": "#/$defs/bundlePath"
+            },
+            "entrypointSha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ],
       "properties": {
         "connectorId": {
           "type": "string"
@@ -130,6 +177,10 @@
           "type": "string",
           "pattern": "^[0-9a-f]{40}$"
         },
+        "gitRef": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
         "releaseId": {
           "type": "string"
         },
@@ -138,6 +189,19 @@
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
         "scriptSha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "artifactKind": {
+          "type": "string"
+        },
+        "manifestPath": {
+          "$ref": "#/$defs/bundlePath"
+        },
+        "entrypointPath": {
+          "$ref": "#/$defs/bundlePath"
+        },
+        "entrypointSha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
@@ -175,6 +239,11 @@
           ]
         }
       }
+    },
+    "bundlePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\.$)(?!.*\\u0000)(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
     }
   }
 }
