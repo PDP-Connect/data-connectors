@@ -243,6 +243,29 @@ function sha256Buffer(buffer) {
   return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 }
 
+function verifyGithubPdppMaintainedSources({ entry, provenance }) {
+  const connectorDir = join(repoRoot, "connectors", dirname(entry.files.manifest));
+  for (const source of provenance.source_inventory?.maintained_local ?? []) {
+    if (!source?.path || !source?.sha256) {
+      throw new Error(
+        `${entry.id}@${entry.version} provenance has an invalid maintained source entry`,
+      );
+    }
+    const sourcePath = join(connectorDir, source.path);
+    if (!existsSync(sourcePath)) {
+      throw new Error(
+        `${entry.id}@${entry.version} maintained source missing: ${source.path}`,
+      );
+    }
+    const actual = sha256Buffer(readFileSync(sourcePath));
+    if (actual !== source.sha256) {
+      throw new Error(
+        `${entry.id}@${entry.version} maintained source changed without a version bump: ${source.path}`,
+      );
+    }
+  }
+}
+
 function copyIntoBundle(sourcePath, targetPath) {
   mkdirSync(dirname(targetPath), { recursive: true });
   writeFileSync(targetPath, readFileSync(sourcePath));
@@ -401,7 +424,16 @@ function materializeGithubPdppArtifact({
   }
   const existing = existingIndex?.connectors?.[entry.id]?.find((version) => version.version === entry.version);
   if (existing) {
-    const sourceMatches = existing.manifestSha256 === sha256Buffer(manifestBuffer);
+    const provenanceBuffer = readFileSync(provenancePath);
+    const provenance = JSON.parse(provenanceBuffer);
+    verifyGithubPdppMaintainedSources({ entry, provenance });
+    const entrypointMatches =
+      !existsSync(entrypointPath) ||
+      existing.entrypointSha256 === sha256Buffer(readFileSync(entrypointPath));
+    const sourceMatches =
+      existing.manifestSha256 === sha256Buffer(manifestBuffer) &&
+      existing.provenanceSha256 === sha256Buffer(provenanceBuffer) &&
+      entrypointMatches;
     if (sourceMatches) {
       const artifactPath = join(repoRoot, existing.artifactPath);
       if (!existsSync(artifactPath) || existing.artifactSha256 !== sha256Buffer(readFileSync(artifactPath))) {
