@@ -269,6 +269,7 @@ test("the checked-in catalog contains every published scope exactly once", () =>
   const registry = JSON.parse(readFileSync(join(repoRoot, "registry.json")));
   const expected = new Set();
   for (const connector of registry.connectors) {
+    if (connector.artifactKind === "pdpp-collection-profile") continue;
     const manifest = JSON.parse(
       readFileSync(join(repoRoot, "connectors", connector.files.metadata)),
     );

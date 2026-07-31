@@ -308,6 +308,8 @@ function artifactContract(entry) {
       entrypointPath: "script.js",
       entrypointChecksum: entry.scriptSha256,
       entrypointLabel: "script",
+      provenancePath: null,
+      provenanceChecksum: null,
     };
   }
 
@@ -320,10 +322,15 @@ function artifactContract(entry) {
       entry.entrypointPath,
       "PDPP entrypoint path"
     );
+    const provenancePath = validateRelativeArtifactPath(
+      entry.provenancePath,
+      "PDPP provenance path"
+    );
     for (const [label, checksum] of Object.entries({
       artifact: entry.artifactSha256,
       manifest: entry.manifestSha256,
       entrypoint: entry.entrypointSha256,
+      provenance: entry.provenanceSha256,
     })) {
       if (typeof checksum !== "string" || !/^sha256:[0-9a-f]{64}$/.test(checksum)) {
         throw new Error(`${entry.connectorId} PDPP ${label} checksum is required`);
@@ -334,6 +341,8 @@ function artifactContract(entry) {
       entrypointPath,
       entrypointChecksum: entry.entrypointSha256,
       entrypointLabel: "entrypoint",
+      provenancePath,
+      provenanceChecksum: entry.provenanceSha256,
     };
   }
 
@@ -355,9 +364,12 @@ function unpackArtifactBuffer(entry, buffer) {
     const files = walkArtifactFiles(unpackDir);
     const manifestFile = files.find((file) => file.relativePath === contract.manifestPath);
     const entrypointFile = files.find((file) => file.relativePath === contract.entrypointPath);
-    if (!manifestFile || !entrypointFile) {
+    const provenanceFile = contract.provenancePath
+      ? files.find((file) => file.relativePath === contract.provenancePath)
+      : null;
+    if (!manifestFile || !entrypointFile || (contract.provenancePath && !provenanceFile)) {
       throw new Error(
-        `Artifact missing ${!manifestFile ? contract.manifestPath : contract.entrypointPath}`
+        `Artifact missing ${!manifestFile ? contract.manifestPath : !entrypointFile ? contract.entrypointPath : contract.provenancePath}`
       );
     }
 
@@ -368,7 +380,8 @@ function unpackArtifactBuffer(entry, buffer) {
     for (const file of files) {
       if (
         file.relativePath === contract.manifestPath ||
-        file.relativePath === contract.entrypointPath
+        file.relativePath === contract.entrypointPath ||
+        file.relativePath === contract.provenancePath
       ) {
         continue;
       }
@@ -398,6 +411,9 @@ function unpackArtifactBuffer(entry, buffer) {
       entrypointPath: contract.entrypointPath,
       entrypointChecksum: contract.entrypointChecksum,
       entrypointLabel: contract.entrypointLabel,
+      provenanceBuffer: provenanceFile ? readFileSync(provenanceFile.path) : null,
+      provenancePath: contract.provenancePath,
+      provenanceChecksum: contract.provenanceChecksum,
       schemaFiles,
       assetFiles,
       readme,
@@ -536,6 +552,9 @@ function normalizeLockEntry(entry) {
     entrypointPath: entry.entrypointPath ?? entry.entrypoint_path ?? null,
     entrypointSha256:
       entry.entrypointSha256 ?? entry.entrypoint_sha256 ?? entry.checksums?.entrypoint,
+    provenancePath: entry.provenancePath ?? entry.provenance_path ?? null,
+    provenanceSha256:
+      entry.provenanceSha256 ?? entry.provenance_sha256 ?? entry.checksums?.provenance,
     sourceTag: entry.sourceTag ?? entry.source_tag ?? entry.gitRef ?? entry.git_ref ?? null,
     sourceCommit:
       entry.sourceCommit ?? entry.source_commit ?? entry.gitRef ?? entry.git_ref ?? null,
@@ -583,6 +602,9 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
   const manifest = JSON.parse(unpacked.manifestBuffer.toString("utf8"));
   const manifestChecksum = sha256Buffer(unpacked.manifestBuffer);
   const entrypointChecksum = sha256Buffer(unpacked.entrypointBuffer);
+  const provenanceChecksum = unpacked.provenanceBuffer
+    ? sha256Buffer(unpacked.provenanceBuffer)
+    : null;
 
   if (entry.manifestSha256 && entry.manifestSha256 !== manifestChecksum) {
     throw new Error(
@@ -592,6 +614,11 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
   if (unpacked.entrypointChecksum && unpacked.entrypointChecksum !== entrypointChecksum) {
     throw new Error(
       `${entry.connectorId} ${unpacked.entrypointLabel} checksum mismatch: expected ${unpacked.entrypointChecksum}, got ${entrypointChecksum}`
+    );
+  }
+  if (unpacked.provenanceChecksum && unpacked.provenanceChecksum !== provenanceChecksum) {
+    throw new Error(
+      `${entry.connectorId} provenance checksum mismatch: expected ${unpacked.provenanceChecksum}, got ${provenanceChecksum}`
     );
   }
 
@@ -612,6 +639,8 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
     manifestBuffer: unpacked.manifestBuffer,
     entrypointBuffer: unpacked.entrypointBuffer,
     entrypointPath: unpacked.entrypointPath,
+    provenanceBuffer: unpacked.provenanceBuffer,
+    provenancePath: unpacked.provenancePath,
     artifactKind: entry.artifactKind,
     ...(entry.artifactKind === "legacy" ? { scriptBuffer: unpacked.entrypointBuffer } : {}),
     schemaFiles: unpacked.schemaFiles,
@@ -621,6 +650,7 @@ function unpackAndVerifyArtifact(entry, artifactBuffer) {
       artifact: artifactChecksum,
       manifest: manifestChecksum,
       entrypoint: entrypointChecksum,
+      ...(provenanceChecksum ? { provenance: provenanceChecksum } : {}),
       ...(entry.artifactKind === "legacy" ? { script: entrypointChecksum } : {}),
     },
   };
@@ -741,11 +771,35 @@ function buildSourceWrites(installRoot, resolved) {
   }));
 }
 
+function buildPdppCollectionProfileWrites(installRoot, resolved) {
+  const artifactRoot = `collection-profiles/${resolved.connectorId}`;
+  const writes = [
+    {
+      relativePath: `${artifactRoot}/${resolved.entry.manifestPath}`,
+      buffer: resolved.manifestBuffer,
+    },
+    {
+      relativePath: `${artifactRoot}/${resolved.entry.entrypointPath}`,
+      buffer: resolved.entrypointBuffer,
+    },
+    {
+      relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
+      buffer: resolved.provenanceBuffer,
+    },
+  ];
+
+  return writes.map((write) => ({
+    ...write,
+    absolutePath: join(installRoot, write.relativePath),
+  }));
+}
+
 function buildInstallWrites(layout, installRoot, resolved) {
   if (resolved.artifactKind === "pdpp-collection-profile") {
-    throw new Error(
-      `Install layout "${layout}" does not support pdpp-collection-profile artifacts`
-    );
+    if (layout === "snapshot" || layout === "source") {
+      return buildPdppCollectionProfileWrites(installRoot, resolved);
+    }
+    throw new Error(`Unsupported install layout "${layout}"`);
   }
   if (layout === "snapshot") {
     return buildSnapshotWrites(installRoot, resolved);
@@ -905,6 +959,8 @@ export async function generateLock({
               manifestPath: resolved.entry.manifestPath,
               entrypointPath: resolved.entry.entrypointPath,
               entrypointSha256: resolved.checksums.entrypoint,
+              provenancePath: resolved.entry.provenancePath,
+              provenanceSha256: resolved.checksums.provenance,
             }
           : { scriptSha256: resolved.checksums.script }),
         sourceTag: resolved.entry.sourceTag ?? resolved.entry.gitRef ?? sourceMeta.sourceTag,

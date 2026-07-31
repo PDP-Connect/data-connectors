@@ -67,6 +67,12 @@ function loadPublishedScopes(repoRoot) {
     }
     seenConnectorIds.add(registryEntry.id);
 
+    // Collection Profile artifacts are resolved by installer-core, not the
+    // desktop Playwright catalog. Do not synthesize a legacy projection.
+    if (registryEntry.artifactKind === "pdpp-collection-profile") {
+      continue;
+    }
+
     if (!maturityRank.has(registryEntry.status)) {
       throw new Error(
         `Registry connector ${registryEntry.id} has invalid status ${registryEntry.status}`,

@@ -124,6 +124,8 @@
             "manifestPath",
             "entrypointPath",
             "entrypointSha256",
+            "provenancePath",
+            "provenanceSha256",
             "sourceTag",
             "sourceCommit"
           ],
@@ -138,6 +140,13 @@
               "$ref": "#/$defs/bundlePath"
             },
             "entrypointSha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "provenancePath": {
+              "$ref": "#/$defs/bundlePath"
+            },
+            "provenanceSha256": {
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
             }
@@ -202,6 +211,13 @@
           "$ref": "#/$defs/bundlePath"
         },
         "entrypointSha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "provenancePath": {
+          "$ref": "#/$defs/bundlePath"
+        },
+        "provenanceSha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },

@@ -63,8 +63,10 @@ function pdppFixture(overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), "pdpp-artifact-test-"));
   const manifestPath = overrides.manifestPath ?? "profile/collection-profile.json";
   const entrypointPath = overrides.entrypointPath ?? "dist/collection-profile.cjs";
+  const provenancePath = overrides.provenancePath ?? "provenance.json";
   const manifestBuffer = Buffer.from('{"version":"1.0.0","profileVersion":"1"}\n');
   const entrypointBuffer = Buffer.from("export default {};\n");
+  const provenanceBuffer = Buffer.from('{"upstream":{"commit":"test"}}\n');
   const safeFixturePath = (path, fallback) =>
     typeof path === "string" &&
     path !== "." &&
@@ -78,6 +80,7 @@ function pdppFixture(overrides = {}) {
   const artifact = createArtifact(root, {
     [safeFixturePath(manifestPath, "profile/collection-profile.json")]: manifestBuffer,
     [safeFixturePath(entrypointPath, "dist/collection-profile.cjs")]: entrypointBuffer,
+    [safeFixturePath(provenancePath, "provenance.json")]: provenanceBuffer,
   });
   const entry = baseEntry({
     artifactKind: "pdpp-collection-profile",
@@ -86,9 +89,11 @@ function pdppFixture(overrides = {}) {
     artifactSha256: sha256(artifact.artifactBuffer),
     manifestSha256: sha256(manifestBuffer),
     entrypointSha256: sha256(entrypointBuffer),
+    provenancePath,
+    provenanceSha256: sha256(provenanceBuffer),
     ...overrides,
   });
-  return { root, entry, manifestBuffer, entrypointBuffer };
+  return { root, entry, manifestBuffer, entrypointBuffer, provenanceBuffer };
 }
 
 function legacyFixture() {
@@ -161,6 +166,7 @@ test("runtime enforces the portable bundle-path contract", async (t) => {
   const cases = [
     ["manifestPath", "profile/collection-profile.json"],
     ["entrypointPath", "dist/collection-profile.cjs"],
+    ["provenancePath", "provenance.json"],
   ];
   for (const [field, validPath] of cases) {
     for (const [path, accepted] of [[validPath, true], ...invalidPaths]) {
@@ -220,8 +226,8 @@ test("rejects FIFO archive entries before extraction and cleans up", async () =>
   assert.deepEqual(artifactTempDirsAfter, artifactTempDirsBefore);
 });
 
-test("rejects artifact, manifest, and entrypoint digest mismatches", async (t) => {
-  for (const field of ["artifactSha256", "manifestSha256", "entrypointSha256"]) {
+test("rejects artifact, manifest, entrypoint, and provenance digest mismatches", async (t) => {
+  for (const field of ["artifactSha256", "manifestSha256", "entrypointSha256", "provenanceSha256"]) {
     await t.test(field, async () => {
       const fixture = pdppFixture({ [field]: `sha256:${"0".repeat(64)}` });
       await assert.rejects(
@@ -313,15 +319,40 @@ test("pruning preserves configured link subtrees and removes only unpreserved li
   assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
 });
 
-test("legacy install layouts explicitly reject PDPP artifacts", async () => {
+test("PDPP collection profiles install, verify, and report tampering without a legacy projection", async () => {
   const fixture = pdppFixture();
   const source = { mode: "local", rootDir: fixture.root, doc: { connectors: { [fixture.entry.connectorId]: [fixture.entry] } } };
   const lock = await generateLock({
     dependencies: { connectors: { [fixture.entry.connectorId]: "1.0.0" } },
     source,
   });
-  await assert.rejects(
-    () => installFromLock({ lock, source, installRoot: join(fixture.root, "install"), layout: "snapshot" }),
-    /does not support pdpp-collection-profile artifacts/,
-  );
+  const installRoot = join(fixture.root, "install");
+  const expectedRoot = join(installRoot, "collection-profiles", fixture.entry.connectorId);
+  const result = await installFromLock({ lock, source, installRoot, layout: "snapshot" });
+  assert.deepEqual(result.expectedPaths, [
+    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.manifestPath}`,
+    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.entrypointPath}`,
+    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.provenancePath}`,
+  ]);
+  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.manifestPath)), fixture.manifestBuffer);
+  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.entrypointPath)), fixture.entrypointBuffer);
+  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.provenancePath)), fixture.provenanceBuffer);
+  assert.equal(existsSync(join(installRoot, "scripts", `${fixture.entry.connectorId}.js`)), false);
+  assert.equal((await verifyInstalled({ lock, source, installRoot, layout: "snapshot" })).ok, true);
+
+  for (const relativePath of [fixture.entry.manifestPath, fixture.entry.entrypointPath, fixture.entry.provenancePath]) {
+    const installed = join(expectedRoot, relativePath);
+    writeFileSync(installed, "tampered\n");
+    const verification = await verifyInstalled({ lock, source, installRoot, layout: "snapshot" });
+    assert.equal(verification.ok, false);
+    assert.deepEqual(verification.mismatched, [
+      `collection-profiles/${fixture.entry.connectorId}/${relativePath}`,
+    ]);
+    await installFromLock({ lock, source, installRoot, layout: "snapshot" });
+  }
+  assert.equal((await verifyInstalled({ lock, source, installRoot, layout: "snapshot" })).ok, true);
+
+  const sourceRoot = join(fixture.root, "source-install");
+  await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
+  assert.equal((await verifyInstalled({ lock, source, installRoot: sourceRoot, layout: "source" })).ok, true);
 });

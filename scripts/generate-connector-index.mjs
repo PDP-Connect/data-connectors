@@ -243,6 +243,29 @@ function sha256Buffer(buffer) {
   return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 }
 
+function verifyGithubPdppMaintainedSources({ entry, provenance }) {
+  const connectorDir = join(repoRoot, "connectors", dirname(entry.files.manifest));
+  for (const source of provenance.source_inventory?.maintained_local ?? []) {
+    if (!source?.path || !source?.sha256) {
+      throw new Error(
+        `${entry.id}@${entry.version} provenance has an invalid maintained source entry`,
+      );
+    }
+    const sourcePath = join(connectorDir, source.path);
+    if (!existsSync(sourcePath)) {
+      throw new Error(
+        `${entry.id}@${entry.version} maintained source missing: ${source.path}`,
+      );
+    }
+    const actual = sha256Buffer(readFileSync(sourcePath));
+    if (actual !== source.sha256) {
+      throw new Error(
+        `${entry.id}@${entry.version} maintained source changed without a version bump: ${source.path}`,
+      );
+    }
+  }
+}
+
 function copyIntoBundle(sourcePath, targetPath) {
   mkdirSync(dirname(targetPath), { recursive: true });
   writeFileSync(targetPath, readFileSync(sourcePath));
@@ -338,6 +361,130 @@ function createArtifactBundle(entry, metadata) {
   } finally {
     // Caller is responsible for cleanup because bundleDir is needed for tar creation.
   }
+}
+
+function createGithubPdppArtifactBundle(entry) {
+  const tempRoot = mkdtempSync(join(tmpdir(), "pdpp-connector-bundle-"));
+  const bundleDir = join(tempRoot, "bundle");
+  const connectorDir = join(repoRoot, "connectors", dirname(entry.files.manifest));
+  mkdirSync(bundleDir, { recursive: true });
+  try {
+    copyIntoBundle(join(repoRoot, "connectors", entry.files.manifest), join(bundleDir, entry.manifestPath));
+    copyIntoBundle(join(repoRoot, "connectors", entry.files.entrypoint), join(bundleDir, entry.entrypointPath));
+    copyIntoBundle(join(repoRoot, "connectors", entry.files.provenance), join(bundleDir, entry.provenancePath));
+    const readmeSource = join(connectorDir, "README.md");
+    if (existsSync(readmeSource)) copyIntoBundle(readmeSource, join(bundleDir, "README.md"));
+    return { bundleDir };
+  } catch (error) {
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function createDeterministicTar(bundleDir, outputPath) {
+  execFileSync("tar", [
+    "--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner",
+    "--pax-option=delete=atime,delete=ctime", "-I", "gzip -n", "-cf", outputPath, "-C", bundleDir, ".",
+  ]);
+}
+
+function hasCommittedGithubPdppVersion(entry) {
+  try {
+    const committedIndex = JSON.parse(execFileSync("git", ["show", "HEAD:connector-index.json"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }));
+    return Boolean(
+      committedIndex.connectors?.[entry.id]?.some((version) => version.version === entry.version),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function materializeGithubPdppArtifact({
+  entry,
+  existingIndex,
+  checkMode,
+  allowUnpublishedRebuild,
+  expectedArtifactPaths,
+  releaseMetadata,
+}) {
+  if (entry.id !== "github-pdpp") {
+    throw new Error(`Unsupported PDPP artifact ${entry.id}; this generator has one explicit GitHub path`);
+  }
+  const manifestPath = join(repoRoot, "connectors", entry.files.manifest);
+  const entrypointPath = join(repoRoot, "connectors", entry.files.entrypoint);
+  const provenancePath = join(repoRoot, "connectors", entry.files.provenance);
+  const manifestBuffer = readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestBuffer);
+  if (entry.version !== manifest.version) throw new Error(`${entry.id} version must match its canonical manifest`);
+  if (allowUnpublishedRebuild && entry.releaseId !== "unpublished") {
+    throw new Error("--allow-unpublished-rebuild requires an unpublished github-pdpp artifact");
+  }
+  const existing = existingIndex?.connectors?.[entry.id]?.find((version) => version.version === entry.version);
+  if (existing) {
+    const provenanceBuffer = readFileSync(provenancePath);
+    const provenance = JSON.parse(provenanceBuffer);
+    verifyGithubPdppMaintainedSources({ entry, provenance });
+    const entrypointMatches =
+      !existsSync(entrypointPath) ||
+      existing.entrypointSha256 === sha256Buffer(readFileSync(entrypointPath));
+    const sourceMatches =
+      existing.manifestSha256 === sha256Buffer(manifestBuffer) &&
+      existing.provenanceSha256 === sha256Buffer(provenanceBuffer) &&
+      entrypointMatches;
+    if (sourceMatches) {
+      const artifactPath = join(repoRoot, existing.artifactPath);
+      if (!existsSync(artifactPath) || existing.artifactSha256 !== sha256Buffer(readFileSync(artifactPath))) {
+        throw new Error(`${entry.id}@${entry.version} immutable artifact drifted`);
+      }
+      expectedArtifactPaths.add(existing.artifactPath);
+      return shouldUseReleaseAssets
+        ? refreshReleaseDistributionMetadata(existing, releaseMetadata)
+        : existing;
+    }
+    if (hasCommittedGithubPdppVersion(entry) && !allowUnpublishedRebuild) {
+      throw new Error(`${entry.id}@${entry.version} source changed without a version bump`);
+    }
+  }
+  const entrypointBuffer = readFileSync(entrypointPath);
+  const provenanceBuffer = readFileSync(provenancePath);
+  const bundle = createGithubPdppArtifactBundle(entry);
+  const artifactRelativePath = `artifacts/${entry.id}/${entry.id}-${entry.version}.tgz`;
+  const artifactPath = join(repoRoot, artifactRelativePath);
+  mkdirSync(dirname(artifactPath), { recursive: true });
+  const tempArtifactPath = join(dirname(bundle.bundleDir), basename(artifactPath));
+  createDeterministicTar(bundle.bundleDir, tempArtifactPath);
+  const artifactBuffer = readFileSync(tempArtifactPath);
+  if (!checkMode) writeFileSync(artifactPath, artifactBuffer);
+  rmSync(dirname(bundle.bundleDir), { recursive: true, force: true });
+  expectedArtifactPaths.add(artifactRelativePath);
+  return {
+    connectorId: entry.id,
+    company: entry.company,
+    version: entry.version,
+    name: entry.name,
+    status: entry.status,
+    description: entry.description,
+    artifactKind: "pdpp-collection-profile",
+    manifestPath: entry.manifestPath,
+    entrypointPath: entry.entrypointPath,
+    provenancePath: entry.provenancePath,
+    manifestSha256: sha256Buffer(manifestBuffer),
+    entrypointSha256: sha256Buffer(entrypointBuffer),
+    provenanceSha256: sha256Buffer(provenanceBuffer),
+    artifactSha256: sha256Buffer(artifactBuffer),
+    artifactPath: artifactRelativePath,
+    artifactUrl: entry.artifactUrl,
+    publishedAt: entry.publishedAt ?? entry.lastUpdated,
+    sourceTag: entry.sourceTag ?? releaseMetadata.releaseTag,
+    sourceCommit: entry.sourceCommit,
+    releaseId: entry.releaseId ?? "unpublished",
+    upstream: entry.upstream,
+    scopes: manifest.streams.map((stream) => stream.name),
+    consumerMetadata: entry.consumerMetadata ?? null,
+  };
 }
 
 function sortIndex(indexDoc) {
@@ -459,11 +606,18 @@ async function materializeRetainedArtifact({
     };
   }
 
+  if (existsSync(artifactPath)) {
+    expectedArtifactPaths.add(artifactRelativePath);
+  }
   return entry;
 }
 
 async function main() {
   const checkMode = process.argv.includes("--check");
+  const allowUnpublishedRebuild = process.argv.includes("--allow-unpublished-rebuild");
+  if (checkMode && allowUnpublishedRebuild) {
+    throw new Error("--allow-unpublished-rebuild cannot be used with --check");
+  }
   const registry = readJson(registryPath);
   const existingIndex = existsSync(indexPath) ? readJson(indexPath) : null;
   const sourceCommit =
@@ -492,6 +646,17 @@ async function main() {
   const expectedArtifactPaths = new Set();
 
   for (const entry of registry.connectors) {
+    if (entry.artifactKind === "pdpp-collection-profile") {
+      nextIndex.connectors[entry.id] = [materializeGithubPdppArtifact({
+        entry,
+        existingIndex,
+        checkMode,
+        allowUnpublishedRebuild,
+        expectedArtifactPaths,
+        releaseMetadata,
+      })];
+      continue;
+    }
     const metadataPath = join(repoRoot, "connectors", entry.files.metadata);
     const scriptPath = join(repoRoot, "connectors", entry.files.script);
     const metadata = readJson(metadataPath);

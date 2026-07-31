@@ -55,6 +55,8 @@ test("index schema accepts the PDPP shape and preserves legacy requirements", ()
     manifestPath: "profile/collection-profile.json",
     entrypointPath: "dist/profile.cjs",
     entrypointSha256: digest,
+    provenancePath: "provenance.json",
+    provenanceSha256: digest,
   });
   assert.equal(validate(documentWith(pdpp)), true, JSON.stringify(validate.errors));
 
@@ -73,7 +75,7 @@ test("index schema accepts the PDPP shape and preserves legacy requirements", ()
     ["dist/../outside.cjs", false],
   ];
   for (const [path, accepted] of bundlePathCases) {
-    for (const field of ["manifestPath", "entrypointPath"]) {
+    for (const field of ["manifestPath", "entrypointPath", "provenancePath"]) {
       assert.equal(
         validate(documentWith({ ...pdpp, [field]: path })),
         accepted,

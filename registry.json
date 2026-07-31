@@ -30,6 +30,32 @@
       }
     },
     {
+      "id": "github-pdpp",
+      "company": "github",
+      "version": "0.5.0",
+      "name": "GitHub (PDPP Collection Profile)",
+      "status": "experimental",
+      "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
+      "artifactKind": "pdpp-collection-profile",
+      "manifestPath": "profile/collection-profile.json",
+      "entrypointPath": "dist/collection-profile.mjs",
+      "provenancePath": "provenance.json",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.0.tgz",
+      "releaseId": "unpublished",
+      "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
+      "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
+      "publishedAt": "2026-07-30T00:00:00Z",
+      "upstream": {
+        "repository": "https://github.com/PDP-Connect/pdpp",
+        "commit": "597cc012611df90d07edbed187ba3e3212dbf258"
+      },
+      "files": {
+        "manifest": "github-pdpp/collection-profile.json",
+        "entrypoint": "github-pdpp/dist/collection-profile.mjs",
+        "provenance": "github-pdpp/provenance.json"
+      }
+    },
+    {
       "id": "github-playwright",
       "company": "github",
       "version": "1.5.0",

@@ -1,0 +1,156 @@
+{
+  "generated_file_notice": "GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-github-pdpp-artifact.mjs.",
+  "artifact_id": "github-pdpp",
+  "artifact_kind": "pdpp-collection-profile",
+  "upstream": {
+    "repository": "https://github.com/PDP-Connect/pdpp",
+    "commit": "597cc012611df90d07edbed187ba3e3212dbf258"
+  },
+  "source_inventory": {
+    "upstream_connector": [
+      {
+        "path": "packages/polyfill-connectors/manifests/github.json",
+        "sha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4"
+      },
+      {
+        "path": "packages/polyfill-connectors/connectors/github/index.ts",
+        "sha256": "sha256:ce9284907e37c1a68c0887c57fe52fe3951e95cdf06575df0dfed69a442f8c8b"
+      },
+      {
+        "path": "packages/polyfill-connectors/connectors/github/parsers.ts",
+        "sha256": "sha256:1e993ead925cc4fcaf0511b9475bc13ac2365ee6756c3657daea3fb226d4d032"
+      },
+      {
+        "path": "packages/polyfill-connectors/connectors/github/schemas.ts",
+        "sha256": "sha256:705ebaacc53db1c82981fdd272fb1f05ecedc852deda05d5cfefdccc1bddb626"
+      },
+      {
+        "path": "packages/polyfill-connectors/connectors/github/types.ts",
+        "sha256": "sha256:dbc8468e7dfb9ba4e668fc018c22e9c94a1549580afcc7ea90d6e2159cf3db18"
+      }
+    ],
+    "upstream_runtime": [
+      {
+        "path": "packages/polyfill-connectors/src/auth.ts",
+        "sha256": "sha256:28cb3fdfe7fafe7ea33eec3702a62e88180d0fb3e85348f9bd67eac098a7f12d"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/browser-handoff.ts",
+        "sha256": "sha256:1add4671b571a3fea166b9041811115316478c2f973c8efba881961265d9cea3"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/browser-launch.ts",
+        "sha256": "sha256:93294813c638dd597dcc3308dd68116c2267330eef5e260d231b15b79e3c79ab"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/connector-exit.ts",
+        "sha256": "sha256:98e431c33108ffb4079c07c9d06c349ef82c0855cdc6aaef1fd203fa419b47f3"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/connector-http-governor.ts",
+        "sha256": "sha256:24e77958c8909635bb942cfde49aeca900f3ef8a02af6e2470184b1316af5f6f"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/connector-runtime.ts",
+        "sha256": "sha256:165fc785f5e7507d6d6a0943f812bd6e99728e737f53c04fafcf717352bb9a61"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/fingerprint-cursor.ts",
+        "sha256": "sha256:4f885eafb5b58161b09b6c2315aad329a6fee3c14103f11c4a9500aa23e5f589"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/fixture-capture.ts",
+        "sha256": "sha256:69e980626eb665afff87b7d0e18fd4568224dc6d681b31cfb9644a44cc7d7b72"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/http-retry.ts",
+        "sha256": "sha256:87e9710f635959a23ee58f319a65097af947b3f8c42267295cbf6066063f601b"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/is-main-module.ts",
+        "sha256": "sha256:bb1d842f522d7875883a3513ef3386bd6d78ebb47c738b293769c018fd646817"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/pdpp-safe-text.ts",
+        "sha256": "sha256:50820e10e1681b648cc797f185636acf3a3a653cc466c50fe1277df3eecf92ed"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/profile-lock.ts",
+        "sha256": "sha256:b6c07ad8643923685ac4adb7d9d9aed4d09c3c27b81bcdc014b638008bbf4fdf"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/provider-pacing.ts",
+        "sha256": "sha256:4848ab7b1d3b42fd68e90c21c45b8ac0bb41de0baafe193b1b31ea04a1c29c51"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/provider-profile.ts",
+        "sha256": "sha256:001809b0880a5d50c3213a5ef759a5fb712d8da619dcfba970702e79dc05fc0e"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/runtime-environment.ts",
+        "sha256": "sha256:4eb18821c02b24856b06ce4900def54414757bbb7b5c11c1544e9645960fb982"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/safe-emit.ts",
+        "sha256": "sha256:35db2388ad07d8fdee4d678ba13cb7dccf94b5f84270912ce9bc146cd154225b"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/safe-text-preview.ts",
+        "sha256": "sha256:a2091a6fea53e7935fbacb17d43c4db09a24a36ff62397519b35394bdd3be877"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/schema-registry.ts",
+        "sha256": "sha256:e8b6a482c6d2aee9115c27e53472e08d001976f3d51404f4f4f3abd6052651be"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/scope-filters.ts",
+        "sha256": "sha256:ac175899e381cb6ed0a42a5b50047df8137d6449219243cd91e1cbde30762ec1"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/shutdown-hook.ts",
+        "sha256": "sha256:b36487aee4a47558680cda5ba3ad0d057d71aae147e8fe22ebb17c5fa16e9e7c"
+      },
+      {
+        "path": "packages/polyfill-connectors/src/streaming-target-registration.ts",
+        "sha256": "sha256:58a0dfeaa0d07ab6748263fa4c631e47c228a9637a544749f1f9092db7b65771"
+      }
+    ],
+    "maintained_local": [
+      {
+        "path": "src/connector/index.ts",
+        "sha256": "sha256:617e54d5b0141007ca7a5540b574bb759de086f9f4412e32fe7e2ad63c5b59f3"
+      },
+      {
+        "path": "src/connector/parsers.ts",
+        "sha256": "sha256:1e993ead925cc4fcaf0511b9475bc13ac2365ee6756c3657daea3fb226d4d032"
+      },
+      {
+        "path": "src/connector/schemas.ts",
+        "sha256": "sha256:6c31b5a289647f1fc9c5b03c2e8dd8624f8bd32a85736c3c20feb30b7fc12f65"
+      },
+      {
+        "path": "src/connector/types.ts",
+        "sha256": "sha256:dbc8468e7dfb9ba4e668fc018c22e9c94a1549580afcc7ea90d6e2159cf3db18"
+      },
+      {
+        "path": "collection-profile.json",
+        "sha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4"
+      }
+    ]
+  },
+  "build": {
+    "esbuild_version": "0.28.1",
+    "options": {
+      "bundle": true,
+      "format": "esm",
+      "minifyWhitespace": true,
+      "platform": "node",
+      "target": "node22"
+    }
+  },
+  "outputs": {
+    "profile/collection-profile.json": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
+    "dist/collection-profile.mjs": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
+    "unresolved_non_node_imports": []
+  }
+}

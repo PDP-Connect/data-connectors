@@ -232,6 +232,44 @@
         "consumerMetadata": null
       }
     ],
+    "github-pdpp": [
+      {
+        "connectorId": "github-pdpp",
+        "company": "github",
+        "version": "0.5.0",
+        "name": "GitHub (PDPP Collection Profile)",
+        "status": "experimental",
+        "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
+        "artifactKind": "pdpp-collection-profile",
+        "manifestPath": "profile/collection-profile.json",
+        "entrypointPath": "dist/collection-profile.mjs",
+        "provenancePath": "provenance.json",
+        "manifestSha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
+        "entrypointSha256": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
+        "provenanceSha256": "sha256:ac2ba7e10ea364ea897881bd63b9b18116ee238289269badfe6a17bc16beaf9f",
+        "artifactSha256": "sha256:9c57424f0b361003e31f4b2af1667dcfef617505ce29d0c0a02f837f75880e57",
+        "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.0.tgz",
+        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.0.tgz",
+        "publishedAt": "2026-07-30T00:00:00Z",
+        "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
+        "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
+        "releaseId": "unpublished",
+        "upstream": {
+          "repository": "https://github.com/PDP-Connect/pdpp",
+          "commit": "597cc012611df90d07edbed187ba3e3212dbf258"
+        },
+        "scopes": [
+          "user",
+          "user_stats",
+          "repositories",
+          "starred",
+          "issues",
+          "pull_requests",
+          "gists"
+        ],
+        "consumerMetadata": null
+      }
+    ],
     "github-playwright": [
       {
         "connectorId": "github-playwright",
