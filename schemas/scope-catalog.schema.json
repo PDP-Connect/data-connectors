@@ -45,7 +45,8 @@
         },
         "manifests": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^connectors/.+-playwright\\.json$" },
+          "description": "Manifests the catalog was generated from, as listed by registry.json. Any connector manifest under connectors/ qualifies; the filename does not encode the runtime (a manifest may declare playwright, vanilla, or network-capture).",
+          "items": { "type": "string", "pattern": "^connectors/.+\\.json$" },
           "uniqueItems": true
         }
       },

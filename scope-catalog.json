@@ -15,6 +15,7 @@
     },
     "manifests": [
       "connectors/amazon/amazon-playwright.json",
+      "connectors/anthropic/claude-code-local.json",
       "connectors/anthropic/claude-export-playwright.json",
       "connectors/apple/icloud-notes-playwright.json",
       "connectors/doordash/doordash-playwright.json",
@@ -109,6 +110,86 @@
             {
               "id": "chatgpt-playwright",
               "status": "stable"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "sourceId": "claude_code",
+      "scopeId": "claude_code.prompts",
+      "description": "The prompts you typed into Claude Code, with timestamp and project, derived from your local command history. Pasted attachment bodies are excluded.",
+      "schema": {
+        "path": "connectors/anthropic/schemas/claude_code.prompts.json"
+      },
+      "maturity": "experimental",
+      "fulfillment": {
+        "desktop": {
+          "status": "supported",
+          "connectors": [
+            {
+              "id": "claude-code-local",
+              "status": "experimental"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "sourceId": "claude_code",
+      "scopeId": "claude_code.sessions",
+      "description": "Per-session metadata across all of your Claude Code projects: project path, git branch, CLI version, start/end time, message counts, models used, and the session title. Message bodies are not exported.",
+      "schema": {
+        "path": "connectors/anthropic/schemas/claude_code.sessions.json"
+      },
+      "maturity": "experimental",
+      "fulfillment": {
+        "desktop": {
+          "status": "supported",
+          "connectors": [
+            {
+              "id": "claude-code-local",
+              "status": "experimental"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "sourceId": "claude_code",
+      "scopeId": "claude_code.trajectories",
+      "description": "The full step-by-step trace of each Claude Code session: your prompts, the assistant's reasoning and replies, every tool call with its input, and every tool result with its output, in order. This includes source code, file paths, and command output from your machine. Credential-shaped strings are redacted and long step bodies are truncated.",
+      "schema": {
+        "path": "connectors/anthropic/schemas/claude_code.trajectories.json"
+      },
+      "maturity": "experimental",
+      "fulfillment": {
+        "desktop": {
+          "status": "supported",
+          "connectors": [
+            {
+              "id": "claude-code-local",
+              "status": "experimental"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "sourceId": "claude_code",
+      "scopeId": "claude_code.usage",
+      "description": "Aggregate Claude Code usage: total sessions and messages, per-model token consumption and cost, day-by-day activity, hour-of-day distribution, and your longest session.",
+      "schema": {
+        "path": "connectors/anthropic/schemas/claude_code.usage.json"
+      },
+      "maturity": "experimental",
+      "fulfillment": {
+        "desktop": {
+          "status": "supported",
+          "connectors": [
+            {
+              "id": "claude-code-local",
+              "status": "experimental"
             }
           ]
         }

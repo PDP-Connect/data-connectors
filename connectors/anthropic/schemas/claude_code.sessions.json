@@ -1,0 +1,179 @@
+{
+  "name": "Claude Code Sessions",
+  "version": "1.0.0",
+  "scope": "claude_code.sessions",
+  "dialect": "json",
+  "description": "Metadata for every Claude Code session across all local projects: which project and git branch it ran in, the CLI version, start and end times, message counts, models used, and the session title. Subagent runs appear as their own rows, linked to their parent session. Message bodies are intentionally excluded.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "profile": {
+        "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).",
+        "$ref": "#/$defs/profile"
+      },
+      "sessions": {
+        "type": "array",
+        "description": "One entry per recorded Claude Code session, newest last-activity first.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Unique session identifier (the transcript filename)."
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Whether this row is a main session thread ('session') or one subagent run ('subagent')."
+            },
+            "parentSessionId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a subagent row, the session that dispatched it; null for a main thread."
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Absolute path of the working directory the session ran in."
+            },
+            "gitBranch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Git branch checked out during the session, if any."
+            },
+            "cliVersion": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Claude Code CLI version that produced the session."
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "AI-generated session title or summary, if one was recorded."
+            },
+            "firstTimestamp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time",
+              "description": "Timestamp of the first message in the session (ISO 8601)."
+            },
+            "lastTimestamp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time",
+              "description": "Timestamp of the last message in the session (ISO 8601)."
+            },
+            "userMessageCount": {
+              "type": "number",
+              "description": "Number of user messages in the session."
+            },
+            "assistantMessageCount": {
+              "type": "number",
+              "description": "Number of assistant messages in the session."
+            },
+            "messageCount": {
+              "type": "number",
+              "description": "Total user + assistant messages in the session."
+            },
+            "models": {
+              "type": "array",
+              "description": "Distinct model identifiers used in the session.",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "sessionId",
+            "messageCount"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "total": {
+        "type": "number",
+        "description": "Number of sessions exported."
+      },
+      "source": {
+        "type": "string",
+        "description": "How this data was collected (e.g. 'projects-transcripts')."
+      }
+    },
+    "required": [
+      "profile",
+      "sessions",
+      "total",
+      "source"
+    ],
+    "additionalProperties": true
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Account display name."
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email",
+          "description": "Account email address."
+        },
+        "organizationName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Organization the account belongs to."
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Subscription tier / plan label."
+        },
+        "numStartups": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Number of times Claude Code has been launched on this machine."
+        },
+        "firstStartTime": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "First launch timestamp on this machine (ISO 8601)."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
