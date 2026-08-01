@@ -24,7 +24,7 @@ The GitHub collector uses a personal access token through the network binding. T
 
 The artifact kind is `pdpp-collection-profile`. Installer-core installs it under `collection-profiles/github-pdpp`. It does not create a legacy Playwright projection.
 
-The checked-in index entry uses `releaseId: "unpublished"` as source-tree placeholder metadata before CI regenerates the index. The immutable [`connectors-cc744cbf5782` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-cc744cbf5782) contains the signed artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it. Use those release assets for published artifact references.
+The checked-in index entry uses `releaseId: "unpublished"` as source-tree placeholder metadata before CI regenerates the index. The immutable [`connectors-48440fead534` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-48440fead534) contains the signed artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it. Use those release assets for published artifact references.
 
 ## Maintained source
 

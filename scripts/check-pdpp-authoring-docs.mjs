@@ -80,11 +80,11 @@ assert.match(
   README,
   /checked-in `connector-index\.json` intentionally marks both artifacts with `releaseId: "unpublished"` until CI regenerates the source-tree index/,
 );
-assert.match(README, /connectors-cc744cbf5782/);
+assert.match(README, /connectors-48440fead534/);
 assert.match(README, /connectors-latest/);
 assert.match(
   README,
-  /DataConnect support for ChatGPT remains pending until its browser-host PR lands/,
+  /DataConnect v0\.7\.54.*includes both PDPP profiles/,
 );
 assert.match(rootAuthoring, /Use PDPP for new connector work by default/);
 assert.match(rootAuthoring, /Add an `artifact\.json` descriptor/);
@@ -92,15 +92,15 @@ assert.match(rootAuthoring, /scripts\/build-pdpp-artifact\.mjs/);
 assert.match(rootAuthoring, /requires both `network` and `browser`/);
 assert.match(
   rootAuthoring,
-  /DataConnect support remains pending until the browser-host PR lands/,
+  /DataConnect v0\.7\.54.*provide this browser host/,
 );
 assert.match(rootAuthoring, /checked-in index entry intentionally has `releaseId: "unpublished"`/);
-assert.match(rootAuthoring, /connectors-cc744cbf5782/);
+assert.match(rootAuthoring, /connectors-48440fead534/);
 assert.match(rootAuthoring, /connectors-latest/);
 assert.match(githubAuthoring, /requires only the `network` binding/);
 assert.match(githubAuthoring, /releaseId: "unpublished"/);
 assert.match(githubAuthoring, /source-tree placeholder metadata/);
-assert.match(githubAuthoring, /connectors-cc744cbf5782/);
+assert.match(githubAuthoring, /connectors-48440fead534/);
 assert.match(githubAuthoring, /connectors-latest/);
 assert.match(legacySkill, /New connector requests route to PDP-Connect\/pdpp/);
 assert.match(
