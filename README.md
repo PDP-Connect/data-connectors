@@ -9,7 +9,7 @@ The existing Playwright connectors use browser automation for local desktop coll
 
 PDPP Collection Profiles are packaged and installed as a different artifact kind. They support only the bindings declared in their own manifest. Do not use the Playwright scaffold or create scripts to start a PDPP profile.
 
-GitHub and ChatGPT are the current PDPP artifact examples. The checked-in `connector-index.json` intentionally marks both artifacts with `releaseId: "unpublished"` until CI regenerates the source-tree index. The immutable [`connectors-cc744cbf5782` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-cc744cbf5782) contains the signed artifacts. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides them. DataConnect support for ChatGPT remains pending until its browser-host PR lands.
+GitHub and ChatGPT are the current PDPP artifact examples. The checked-in `connector-index.json` intentionally marks both artifacts with `releaseId: "unpublished"` until CI regenerates the source-tree index. The immutable [`connectors-48440fead534` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-48440fead534) contains the signed artifacts. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides them. [DataConnect v0.7.54](https://github.com/PDP-Connect/data-connect/releases/tag/v0.7.54) includes both PDPP profiles.
 
 ## Legacy Playwright connector status
 
