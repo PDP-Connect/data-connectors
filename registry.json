@@ -404,6 +404,22 @@
       }
     },
     {
+      "id": "claude-code-local",
+      "company": "Anthropic",
+      "version": "1.1.0",
+      "name": "Claude Code",
+      "status": "experimental",
+      "description": "Exports your local Claude Code (CLI) data: usage, session metadata, prompt history, and full agent traces. Reads ~/.claude directly, no login or browser.",
+      "files": {
+        "script": "anthropic/claude-code-local.js",
+        "metadata": "anthropic/claude-code-local.json"
+      },
+      "checksums": {
+        "script": "sha256:577002d34e3655afff031761049e46c3fe0f9580f6a03e422c69b473cca1f25b",
+        "metadata": "sha256:6cbc62ab72d2ee245f4fc74b3afaedc88c5ffbd576c429098f67a546550a986b"
+      }
+    },
+    {
       "id": "icloud-notes-playwright",
       "company": "Apple",
       "version": "0.2.1",
