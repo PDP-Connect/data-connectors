@@ -3,7 +3,7 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "ef2eb4137d51135dd063edc5cf7771be61c32c13",
+    "commit": "7495e7da80ee5216566667164f6aa253b92a32f1",
     "manifest": "packages/polyfill-connectors/manifests/whoop.json",
     "entrypoint": "packages/polyfill-connectors/connectors/whoop/index.ts",
     "connector_files": [

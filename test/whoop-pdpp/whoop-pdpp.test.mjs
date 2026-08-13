@@ -18,7 +18,7 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "whoop-pdpp");
 const artifact = join(root, "artifacts", "whoop-pdpp", "whoop-pdpp-0.1.0.tgz");
-const expectedCommit = "ef2eb4137d51135dd063edc5cf7771be61c32c13";
+const expectedCommit = "7495e7da80ee5216566667164f6aa253b92a32f1";
 const pdppSourceRoot = process.env.PDPP_WHOOP_SOURCE_ROOT;
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;

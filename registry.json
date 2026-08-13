@@ -94,12 +94,12 @@
       "provenancePath": "provenance.json",
       "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
       "releaseId": "unpublished",
-      "sourceTag": "pdpp-ef2eb4137d51135dd063edc5cf7771be61c32c13",
-      "sourceCommit": "ef2eb4137d51135dd063edc5cf7771be61c32c13",
+      "sourceTag": "pdpp-7495e7da80ee5216566667164f6aa253b92a32f1",
+      "sourceCommit": "7495e7da80ee5216566667164f6aa253b92a32f1",
       "publishedAt": "2026-08-13T00:00:00Z",
       "upstream": {
         "repository": "https://github.com/PDP-Connect/pdpp",
-        "commit": "ef2eb4137d51135dd063edc5cf7771be61c32c13"
+        "commit": "7495e7da80ee5216566667164f6aa253b92a32f1"
       },
       "files": {
         "manifest": "whoop-pdpp/collection-profile.json",
