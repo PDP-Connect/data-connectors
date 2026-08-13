@@ -4,13 +4,13 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "1fb930fe2471c7d58276a7246d80c5d41231821e"
+    "commit": "ef2eb4137d51135dd063edc5cf7771be61c32c13"
   },
   "source_inventory": {
     "upstream_connector": [
       {
         "path": "packages/polyfill-connectors/manifests/whoop.json",
-        "sha256": "sha256:8fe6509688c541f0320d846296bc58f1abe5c30605cd8eb6765bc00fb24d749b"
+        "sha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e"
       },
       {
         "path": "packages/polyfill-connectors/connectors/whoop/index.ts",
@@ -409,7 +409,7 @@
     "maintained_local": [
       {
         "path": "artifact.json",
-        "sha256": "sha256:80efc0b40f6384094a3e550398f2f89959b008e0970dbad33d6bd6cba7f3d19b"
+        "sha256": "sha256:9f0984c58c729508246a6a51a2a60d40aea36bf60cf0edd5bbee47a866477908"
       }
     ]
   },
@@ -440,7 +440,7 @@
     }
   ],
   "outputs": {
-    "profile/collection-profile.json": "sha256:8fe6509688c541f0320d846296bc58f1abe5c30605cd8eb6765bc00fb24d749b",
+    "profile/collection-profile.json": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
     "dist/collection-profile.mjs": "sha256:8dac8ccb0e7a5f0e71d5891d0d50f6b48485fcbfe834d7afb32b5485b30bf23b",
     "undeclared_external_imports": []
   }

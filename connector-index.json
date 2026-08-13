@@ -1241,19 +1241,19 @@
         "manifestPath": "profile/collection-profile.json",
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:8fe6509688c541f0320d846296bc58f1abe5c30605cd8eb6765bc00fb24d749b",
+        "manifestSha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
         "entrypointSha256": "sha256:8dac8ccb0e7a5f0e71d5891d0d50f6b48485fcbfe834d7afb32b5485b30bf23b",
-        "provenanceSha256": "sha256:e642627a92f0714c9f3d2c608aa05956d499b723ca623db2dab1d47669693b8b",
-        "artifactSha256": "sha256:e06074e6d1ae43c99a2a37fc05fbbba883dcc620ecf683e73a626cb08db895c0",
+        "provenanceSha256": "sha256:bd2bfe5caf2888260bde8e9402abaf2333f9008c6463506f8e31f6ff8045173e",
+        "artifactSha256": "sha256:d28b36ad8e3bf1c38c68b21a5b01ea78500e22d87a24b0884b2eb36ef1c8a06f",
         "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.0.tgz",
         "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
         "publishedAt": "2026-08-13T00:00:00Z",
-        "sourceTag": "pdpp-1fb930fe2471c7d58276a7246d80c5d41231821e",
-        "sourceCommit": "1fb930fe2471c7d58276a7246d80c5d41231821e",
+        "sourceTag": "pdpp-ef2eb4137d51135dd063edc5cf7771be61c32c13",
+        "sourceCommit": "ef2eb4137d51135dd063edc5cf7771be61c32c13",
         "releaseId": "unpublished",
         "upstream": {
           "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "1fb930fe2471c7d58276a7246d80c5d41231821e"
+          "commit": "ef2eb4137d51135dd063edc5cf7771be61c32c13"
         },
         "scopes": [
           "profile",
