@@ -4,7 +4,7 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "7495e7da80ee5216566667164f6aa253b92a32f1"
+    "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
   },
   "source_inventory": {
     "upstream_connector": [
@@ -409,7 +409,7 @@
     "maintained_local": [
       {
         "path": "artifact.json",
-        "sha256": "sha256:d8139b6eb8fdd763c71b955589469f215ac8f87570c1e05cc4970d79605b5189"
+        "sha256": "sha256:5544d853a62ea63727b162a58be66c850ee3f056ade0db788431a53b0c9eb1a1"
       }
     ]
   },
