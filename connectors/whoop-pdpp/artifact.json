@@ -1,0 +1,27 @@
+{
+  "artifact_id": "whoop-pdpp",
+  "artifact_kind": "pdpp-collection-profile",
+  "upstream": {
+    "repository": "https://github.com/PDP-Connect/pdpp",
+    "commit": "1fb930fe2471c7d58276a7246d80c5d41231821e",
+    "manifest": "packages/polyfill-connectors/manifests/whoop.json",
+    "entrypoint": "packages/polyfill-connectors/connectors/whoop/index.ts",
+    "connector_files": [
+      "packages/polyfill-connectors/manifests/whoop.json",
+      "packages/polyfill-connectors/connectors/whoop/index.ts",
+      "packages/polyfill-connectors/connectors/whoop/parsers.ts",
+      "packages/polyfill-connectors/connectors/whoop/schemas.ts",
+      "packages/polyfill-connectors/connectors/whoop/types.ts",
+      "packages/polyfill-connectors/package.json"
+    ],
+    "runtime_root": "packages/polyfill-connectors/src"
+  },
+  "build": {
+    "format": "esm",
+    "platform": "node",
+    "target": "node22",
+    "external_packages": [
+      { "name": "patchright", "version": "^1.61.1" }
+    ]
+  }
+}
