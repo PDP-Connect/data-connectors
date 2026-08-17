@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`7b46f9a0ee28fafb421018ff283a329e4623e44a`. This package needs them at build/test time, but they
+`48c8364c4627ee8d923f90c98de050eeaff236b3`. This package needs them at build/test time, but they
 are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,7 +22,7 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@7b46f9a0ee28fafb421018ff283a329e4623e44a`, workspace packages
+  `PDP-Connect/data-connect@48c8364c4627ee8d923f90c98de050eeaff236b3`, workspace packages
   `packages/collector-runtime` and `packages/connector-protocol`.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
