@@ -1,6 +1,15 @@
 /**
  * ChatGPT Connector (Playwright) — Resumable, rate-limit-aware
  *
+ * v4.0.0 hot-path changes (see the three inline WHY comments):
+ *   - Discovery: cursor-paginated /conversations/search (empty query), fetched in
+ *     parallel by computed cursor — replaces O(n^2) offset pagination. Incremental
+ *     watermark stops enumeration at the last full-sync time on repeat runs.
+ *   - Content: K real parallel /conversations/batch POSTs with AIMD on K (no fixed
+ *     700ms floor) — replaces one-POST-at-a-time behind a hard delay.
+ *   - Flush: checkpoint-only. The old per-25-conv page.setData('result', <whole
+ *     accumulator>) re-serialized the entire result to a listener-less event; gone.
+ *
  * Phase 1 (Browser, visible if login needed):
  *   - Detects login via persistent browser session (headless)
  *   - If not logged in, shows browser for user to log in
@@ -16,13 +25,14 @@
  *     the chatgpt.com origin. The runner's persistent browser profile keeps that
  *     store across runs, so a crash/stop/rate-limit mid-run loses nothing: the
  *     next run reloads the checkpoint and only fetches what's missing or changed.
- *   - The accumulated result is flushed to the host incrementally
- *     (page.setData('result', ...)) so partial data is persisted/delivered as it
- *     arrives, not only at the very end.
+ *   - v4: durability is the checkpoint ALONE. The result is delivered to the host
+ *     exactly once, at the end (page.setData('result', result)) — no per-flush
+ *     re-serialization of the whole accumulator.
  *
  * Rate-limit politeness (NEW):
- *   - Adaptive concurrency (AIMD): starts low, eases up on clean batches, halves
- *     on any HTTP 429.
+ *   - Adaptive parallelism (AIMD): starts low, adds a parallel request after a
+ *     couple of clean waves, resets to one-in-flight on ANY throttle signal
+ *     (429 / retry-after / short batch / non-200 / challenge).
  *   - Honors the Retry-After header; exponential backoff with jitter.
  *   - Circuit breaker: after several consecutive fully-rate-limited batches it
  *     stops, checkpoints, and returns a `partial` result instead of hammering the
@@ -41,20 +51,28 @@
 const CKPT_DB = 'pdpconnect_chatgpt_ckpt';
 const CKPT_FORMAT = 1;
 
-// "Concurrency" now sizes the /conversations/batch request (ids per POST). The
-// server caps conversation_ids at 10, so 10 is the healthy ceiling = one batch
-// call per loop. MIN drops us to 1-per-call only if the batch endpoint ever 429s.
-const START_CONCURRENCY = 10;      // a full batch from the start — batch endpoint isn't throttled
-const MAX_CONCURRENCY = 10;        // server hard cap on conversation_ids per request
-const MIN_CONCURRENCY = 1;
-const BASE_BATCH_DELAY_MS = 700;   // polite pacing between healthy batches
-const MAX_BATCH_DELAY_MS = 8000;
+// v4: "concurrency" is now the number of /conversations/batch POSTs IN FLIGHT at
+// once (real request parallelism), NOT ids-per-POST. Each POST still carries up to
+// BATCH_MAX ids (server hard cap; 422 above). Shipped 3.x ran exactly ONE POST at a
+// time behind a fixed 700ms floor — that single-in-flight + floor was the ~30-min
+// wall. v4 runs K POSTs concurrently with AIMD on K (see the download loop).
+const BATCH_MAX = 10;              // server hard cap on conversation_ids per POST
+const START_PARALLELISM = 2;       // conservative default (the official web client reads at K=1)
+const MAX_PARALLELISM = 4;         // measured: no throttle up to K=3 in a short burst
+const MIN_PARALLELISM = 1;
+const HEALTHY_WAVES_TO_RAMP = 2;   // consecutive fully-clean waves before K += 1
+const BASE_PACE_MS = 200;          // light inter-wave pacing; AIMD halves it toward 0 on healthy waves
+const MAX_PACE_MS = 8000;
 const MAX_ATTEMPTS = 8;            // per-conversation retry budget for non-throttle errors (5xx/network)
 const SERVER_ERROR_MAX_ATTEMPTS = 3; // after this many 5xx on one conversation, skip it (server-side broken)
 const CONV_FETCH_TIMEOUT_MS = 30000;
-const FLUSH_EVERY_CONVS = 25;      // incremental host flush cadence (by new convs)
+const FLUSH_EVERY_CONVS = 25;      // checkpoint flush cadence (by new convs)
 const FLUSH_INTERVAL_MS = 15000;   // …or by time
-const LIST_PAGE_DELAY_MS = 400;
+// v4 discovery: the cursor-paginated search endpoint. Page size is fixed at 30 by
+// the server (a `limit` param is ignored) and the cursor is a plain integer that
+// advances by exactly one page — so pages are computable and fetched in parallel.
+const DISCOVERY_PARALLELISM = 6;   // parallel search pages (measured: 3598 convs in ~23s, no throttle)
+const DISCOVERY_PAGE_SIZE = 30;    // server-fixed page size for /conversations/search
 
 // Patient backoff. ChatGPT returns 429 with NO Retry-After / rate-limit headers,
 // so we self-pace: once the initial burst is throttled, drop to one request at a
@@ -337,53 +355,115 @@ const fetchMemories = async (accessToken, deviceId) => {
   }
 };
 
-// Fetch one page of the conversation list. Returns { ok, status, items, total }.
-const fetchConversationsPage = async (accessToken, deviceId, offset, limit) => {
+// Discover ALL conversation ids via the cursor-paginated search endpoint.
+//
+// WHY (v4): the old offset endpoint (/conversations?offset=N) is O(n^2) — server
+// latency grows with offset depth (measured 365ms@0 → 6830ms@3000), so a large
+// account spends minutes just enumerating. The search endpoint with an EMPTY query
+// enumerates every conversation at FLAT latency (~700–1400ms) regardless of depth,
+// and its cursor is a plain integer that advances by exactly PAGE (30) per page —
+// so the cursor is computable and pages can be fetched IN PARALLEL. We fire K pages
+// at once (cursor 0,30,60,…), dedupe ids into a Set (search order can shift between
+// pages), and stop at the tail (a page with < PAGE items) or an empty page.
+//
+// ARCHIVED CONVERSATIONS ARE OUT OF SCOPE for v4 discovery: empty-query search
+// returned 3598 where offset probing suggested ~4019, i.e. search appears to EXCLUDE
+// archived conversations (the item's `is_archived` is effectively always false on
+// this path). We deliberately do NOT add a second archived-enumeration pass here —
+// that endpoint/flag behavior is unverified and the parent validated only this empty-
+// query path live. Any archived item that DOES surface is still captured (we keep the
+// is_archived field flowing through); we simply don't hunt for them. Revisit if
+// archived capture becomes a requirement.
+//
+// Hard-stops on 429 / non-200 / non-JSON, surfacing the trip like other errors.
+// Returns { ok, items:[{id,title,update_time,is_archived}], pages, trip, tripStatus }.
+const discoverConversations = async (accessToken, deviceId, watermark, K, pageSize) => {
   const result = await page.evaluate(`
     (async () => {
       const token = ${JSON.stringify(accessToken)};
       const device = ${JSON.stringify(deviceId)};
-      const offset = ${offset};
-      const limit = ${limit};
-      try {
+      const K = ${K};
+      const PAGE = ${pageSize};
+      const watermark = ${JSON.stringify(watermark || null)};
+      const H = { accept: "*/*", authorization: "Bearer " + token, "oai-device-id": device, "oai-language": "en-US" };
+
+      const fetchPage = async (cursor) => {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
-        const response = await fetch(
-          "https://chatgpt.com/backend-api/conversations?offset=" + offset + "&limit=" + limit + "&order=updated",
-          { headers: { accept: "*/*", authorization: "Bearer " + token, "oai-device-id": device, "oai-language": "en-US" },
-            method: "GET", credentials: "include", signal: controller.signal }
-        );
-        clearTimeout(timeout);
-        if (!response.ok) return { ok: false, status: response.status };
-        const data = await response.json();
-        return {
-          ok: true, status: 200,
-          items: (data.items || []).map(item => ({ id: item.id, title: item.title, create_time: item.create_time, update_time: item.update_time })),
-          total: data.total,
-        };
-      } catch (err) {
-        return { ok: false, status: 0, error: err.message };
+        const timeout = setTimeout(() => controller.abort(), ${CONV_FETCH_TIMEOUT_MS});
+        try {
+          const response = await fetch(
+            "https://chatgpt.com/backend-api/conversations/search?query=&cursor=" + cursor,
+            { headers: H, method: "GET", credentials: "include", signal: controller.signal }
+          );
+          clearTimeout(timeout);
+          if (response.status === 429) return { trip: 'rate_limited', status: 429, cursor };
+          if (response.status !== 200) {
+            const t = (await response.text()).slice(0, 80);
+            return { trip: 'http_' + response.status, status: response.status, cursor, note: t };
+          }
+          const ctype = response.headers.get('content-type') || '';
+          if (!ctype.includes('application/json')) {
+            const t = (await response.text()).slice(0, 80);
+            return { trip: 'non_json', status: response.status, cursor, note: t };
+          }
+          const data = await response.json();
+          return { items: data.items || [], cursor };
+        } catch (err) {
+          clearTimeout(timeout);
+          return { trip: 'network', status: 0, cursor, note: err.message };
+        }
+      };
+
+      const seen = new Set();
+      const items = [];
+      let cursor = 0, done = false, pages = 0, trip = null, tripStatus = null;
+      while (!done && !trip) {
+        const wave = [];
+        for (let k = 0; k < K; k++) wave.push(fetchPage(cursor + k * PAGE));
+        const results = await Promise.all(wave);
+        cursor += K * PAGE;
+        for (const res of results) {
+          if (res.trip) { trip = res.trip + (res.note ? (':' + res.note) : ''); tripStatus = res.status; break; }
+          pages++;
+          if (res.items.length < PAGE) done = true;            // reached the tail
+          for (const it of res.items) {
+            const cid = it.conversation_id || it.id;
+            if (!cid || seen.has(cid)) continue;                // dedupe: page order can shift
+            // Incremental watermark: search is newest-first, so once we cross an item
+            // at/older than the last full sync, everything remaining is already saved.
+            if (watermark && it.update_time && it.update_time <= watermark) { done = true; continue; }
+            seen.add(cid);
+            items.push({ id: cid, title: it.title, update_time: it.update_time, is_archived: it.is_archived });
+          }
+        }
       }
+      return { ok: !trip, items, pages, trip, tripStatus };
     })()
   `);
-  return result || { ok: false, status: 0 };
+  return result || { ok: false, items: [], pages: 0, trip: 'evaluate_failed', tripStatus: 0 };
 };
 
-// Fetch conversation details in bulk via the /conversations/batch endpoint
-// (POST, up to 10 ids per request). Unlike the per-conversation GET
-// (backend-api/conversation/{id}), this endpoint returns full conversation
-// content WITHOUT the brutal per-conversation rate limit — it's the path the
-// iOS/macOS ChatGPT apps use, which is why they never hit the 429 wall the web
-// client does. We chunk the caller's ids into groups of 10 and apply the same
-// message-tree walk to each returned conversation. Same return contract as before:
-// each entry { id, ok, status, retryAfter?, rl?, title?, create_time?, update_time?, messages? }.
+// Fetch ONE batch (≤ BATCH_MAX ids) via the /conversations/batch endpoint (POST).
+// Unlike the per-conversation GET (backend-api/conversation/{id}), this endpoint
+// returns full conversation content WITHOUT the brutal per-conversation rate limit —
+// it's the path the iOS/macOS ChatGPT apps use, which is why they never hit the 429
+// wall the web client does.
+//
+// v4: this is now a SINGLE POST (the caller fires K of these IN PARALLEL — see the
+// download loop's AIMD). Message extraction from each conversation's mapping tree is
+// UNCHANGED (walkMessages below, verbatim). We additionally report `meta.batchReturned`
+// (raw conversations the server put in the array, BEFORE any single-id fallback) so
+// the caller can detect a SHORT batch — fewer returned than requested — which, now
+// that a healthy batch is exactly requested/requested, is a reliable throttle signal.
+//
+// Returns { items: [ per-id { id, ok, status, retryAfter?, rl?, title?, create_time?, update_time?, messages? } ],
+//           meta: { requested, batchReturned, status, retryAfter } }.
 const fetchConversationBatch = async (accessToken, deviceId, convIds) => {
   const result = await page.evaluate(`
     (async () => {
       const token = ${JSON.stringify(accessToken)};
       const device = ${JSON.stringify(deviceId)};
-      const ids = ${JSON.stringify(convIds)};
-      const BATCH_MAX = 10;  // server caps conversation_ids at 10 (422 above that)
+      const chunk = ${JSON.stringify(convIds)};
 
       const parseRetryAfter = (resp) => {
         const h = resp.headers && resp.headers.get ? resp.headers.get('retry-after') : null;
@@ -472,42 +552,48 @@ const fetchConversationBatch = async (accessToken, deviceId, convIds) => {
       };
 
       const out = [];
-      for (let i = 0; i < ids.length; i += BATCH_MAX) {
-        const chunk = ids.slice(i, i + BATCH_MAX);
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), ${CONV_FETCH_TIMEOUT_MS});
-          const response = await fetch(
-            "https://chatgpt.com/backend-api/conversations/batch",
-            { headers: { accept: "*/*", authorization: "Bearer " + token, "oai-device-id": device, "oai-language": "en-US", "content-type": "application/json" },
-              method: "POST", credentials: "include", body: JSON.stringify({ conversation_ids: chunk }), signal: controller.signal }
-          );
-          clearTimeout(timeout);
-          if (!response.ok) {
-            const rl = {};
-            for (const [k, v] of response.headers.entries()) {
-              if (/retry-after|rate.?limit|reset|remaining/i.test(k)) rl[k] = v;
-            }
-            const retryAfter = parseRetryAfter(response);
-            for (const id of chunk) out.push({ id, ok: false, status: response.status, retryAfter, rl });
-            continue;
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), ${CONV_FETCH_TIMEOUT_MS});
+        const response = await fetch(
+          "https://chatgpt.com/backend-api/conversations/batch",
+          { headers: { accept: "*/*", authorization: "Bearer " + token, "oai-device-id": device, "oai-language": "en-US", "content-type": "application/json" },
+            method: "POST", credentials: "include", body: JSON.stringify({ conversation_ids: chunk }), signal: controller.signal }
+        );
+        clearTimeout(timeout);
+        const ctype = response.headers.get('content-type') || '';
+        // Non-200 OR an HTML challenge served with 200 both count as failure; the
+        // caller reads status + batchReturned=0 (short) as a throttle/challenge signal.
+        if (!response.ok || !ctype.includes('application/json')) {
+          const rl = {};
+          for (const [k, v] of response.headers.entries()) {
+            if (/retry-after|rate.?limit|reset|remaining/i.test(k)) rl[k] = v;
           }
-          const arr = await response.json();
-          const byId = new Map((Array.isArray(arr) ? arr : []).map(c => [c.id, c]));
-          for (const id of chunk) {
-            const data = byId.get(id);
-            if (!data) { out.push(await fetchOneFallback(id)); continue; }
-            out.push({ id, ok: true, status: 200, title: data.title, create_time: data.create_time, update_time: data.update_time, messages: walkMessages(data) });
-          }
-        } catch (err) {
-          for (const id of chunk) out.push({ id, ok: false, status: 0, error: err.message });
+          const retryAfter = parseRetryAfter(response);
+          for (const id of chunk) out.push({ id, ok: false, status: response.status, retryAfter, rl });
+          return { items: out, meta: { requested: chunk.length, batchReturned: 0, status: response.status, retryAfter } };
         }
+        const arr = await response.json();
+        const list = Array.isArray(arr) ? arr : [];
+        const byId = new Map(list.map(c => [c.id, c]));
+        for (const id of chunk) {
+          const data = byId.get(id);
+          // batch occasionally omits a conversation (e.g. oversized) → fetch it
+          // individually via the fallback below (per-id, and 429-requeued by the caller).
+          if (!data) { out.push(await fetchOneFallback(id)); continue; }
+          out.push({ id, ok: true, status: 200, title: data.title, create_time: data.create_time, update_time: data.update_time, messages: walkMessages(data) });
+        }
+        // batchReturned = raw convs the server returned in the array (before fallback):
+        // < requested means a short batch, which the caller treats as a throttle signal.
+        return { items: out, meta: { requested: chunk.length, batchReturned: list.length, status: 200, retryAfter: null } };
+      } catch (err) {
+        for (const id of chunk) out.push({ id, ok: false, status: 0, error: err.message });
+        return { items: out, meta: { requested: chunk.length, batchReturned: 0, status: 0, retryAfter: null } };
       }
-      return out;
     })()
   `);
 
-  return result || [];
+  return result || { items: [], meta: { requested: convIds.length, batchReturned: 0, status: 0, retryAfter: null } };
 };
 
 // ─── Pure helpers (Node side) ────────────────────────────────────────
@@ -586,7 +672,7 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
   const result = {
     requestedScopes,
     timestamp: new Date().toISOString(),
-    version: '3.0.0-playwright',
+    version: '4.0.0-playwright',
     platform: 'chatgpt',
     exportSummary: {
       count: conversations.length,
@@ -893,19 +979,27 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
     count: memories.length,
   });
 
-  // Step 2: Conversation list (paginated). The list endpoint is rarely rate
+  // Step 2: Conversation discovery via the cursor search endpoint. Rarely rate
   // limited; if it fails entirely we fall back to the checkpointed ids.
-  await page.setProgress({ phase: { step: 2, total: 3, label: 'Fetching conversation list' }, message: 'Loading conversations list...', count: 0 });
+  await page.setProgress({ phase: { step: 2, total: 3, label: 'Fetching conversation list' }, message: 'Discovering conversations...', count: 0 });
 
-  const listMap = new Map();    // id -> { id, title, create_time, update_time }
-  const limit = 100;
-  let offset = 0;
+  const listMap = new Map();    // id -> { id, title, create_time, update_time, is_archived }
   let listOk = true;
   const fullSyncDone = !!(checkpoint.meta && checkpoint.meta.fullSyncDone);
 
-  // Resume fast-path: reuse a recently-cached list instead of re-walking every
-  // page (which wastes minutes and can throttle the list itself). Only when we
-  // already have a partial checkpoint to extend.
+  // v4 incremental watermark: on a prior COMPLETED full sync, resume discovery only
+  // back to the last full-sync time. Search returns newest-first, so once we cross a
+  // conversation whose update_time is <= this marker, everything older is already
+  // checkpointed and we stop enumerating — turning repeat syncs from minutes into
+  // seconds. NOTE: assumes update_time is an ISO-8601 string (lexically comparable to
+  // lastFullSyncAt); if OpenAI ever returns epoch numbers the compare simply never
+  // trips and we fall back to a full enumeration (still correct, just slower).
+  const watermark = (fullSyncDone && checkpoint.meta && checkpoint.meta.lastFullSyncAt)
+    ? checkpoint.meta.lastFullSyncAt : null;
+
+  // Resume fast-path: reuse a recently-cached list instead of re-discovering every
+  // page. Only when we already have a partial checkpoint to extend (a mid-download
+  // resume — distinct from the cross-full-sync watermark above).
   const cachedList = checkpoint.meta && Array.isArray(checkpoint.meta.listSnapshot) ? checkpoint.meta.listSnapshot : null;
   const cachedFresh = cachedList && checkpoint.meta.listCachedAt &&
     (Date.now() - Date.parse(checkpoint.meta.listCachedAt) < LIST_CACHE_MS);
@@ -920,33 +1014,27 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
     });
   }
 
-  while (!usedCachedList) {
-    const pageRes = await fetchConversationsPage(userToken, deviceId, offset, limit);
-    if (!pageRes.ok) {
-      // Couldn't page the list. If we have checkpointed convs, proceed with those.
-      if (offset === 0 && convMap.size === 0) {
-        listOk = false;
-      }
-      break;
-    }
-    let allKnownUnchanged = pageRes.items.length > 0;
-    for (const item of pageRes.items) {
-      listMap.set(item.id, item);
-      const have = convMap.get(item.id);
-      if (!have || have.update_time !== item.update_time) allKnownUnchanged = false;
+  // v4 discovery: enumerate conversation ids via the parallel cursor search
+  // (replaces the O(n^2) offset pagination — see discoverConversations).
+  if (!usedCachedList) {
+    const disc = await discoverConversations(userToken, deviceId, watermark, DISCOVERY_PARALLELISM, DISCOVERY_PAGE_SIZE);
+    for (const item of disc.items) {
+      // search omits create_time; toConversationRecord falls back to the value from
+      // the fetched conversation, so a null here is fine.
+      listMap.set(item.id, { id: item.id, title: item.title, create_time: null, update_time: item.update_time, is_archived: item.is_archived });
     }
     await page.setProgress({
       phase: { step: 2, total: 3, label: 'Fetching conversation list' },
-      message: `Loaded ${listMap.size.toLocaleString()} of ${typeof pageRes.total === 'number' ? pageRes.total.toLocaleString() : '?'} conversations...`,
+      message: `Discovered ${listMap.size.toLocaleString()} conversations` +
+        (watermark ? ' (incremental)' : '') + (disc.trip ? ` — stopped: ${disc.trip}` : ''),
       count: listMap.size,
     });
-    // Incremental fast-path: on a completed prior sync, the list is updated-desc,
-    // so once we hit a full page we already have unchanged, older pages are too.
-    if (fullSyncDone && allKnownUnchanged) break;
-    if (typeof pageRes.total === 'number' && listMap.size >= pageRes.total) break;
-    if (pageRes.items.length < limit) break;
-    offset += limit;
-    await sleep(LIST_PAGE_DELAY_MS + jitter(200));
+    if (!disc.ok) {
+      // Hard-stop discovery (429 / non-200 / non-JSON). If we got nothing and have no
+      // checkpoint to fall back on, treat the list as unavailable (same as before).
+      if (listMap.size === 0 && convMap.size === 0) listOk = false;
+      if (disc.tripStatus === 429) telemetry.stoppedReason = 'discovery_rate_limited';
+    }
   }
 
   if (!listOk) {
@@ -967,7 +1055,9 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
       work.push({ id, attempts: 0, listed });
     }
   }
-  telemetry.totalConversations = listMap.size > 0 ? listMap.size : convMap.size;
+  // v4: on an incremental (watermark) run, listMap holds only new/changed convs, so
+  // the account total is at least what we already have checkpointed.
+  telemetry.totalConversations = Math.max(listMap.size, convMap.size);
 
   await page.setProgress({
     phase: { step: 3, total: 3, label: 'Downloading conversations' },
@@ -986,19 +1076,26 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
   }
   await ckptPutBatch([], memories, listMetaPatch).catch(() => {});
 
-  // Step 3: Adaptive, resumable conversation download.
+  // Step 3: Parallel, AIMD-throttled, resumable conversation download.
   const runStart = Date.now();
   const queue = work.slice();
   const skipped = new Set();        // conv ids dropped after a persistent 5xx (server-side broken)
-  let concurrency = START_CONCURRENCY;
-  let batchDelay = BASE_BATCH_DELAY_MS;
+  let parallelism = START_PARALLELISM;   // K = /conversations/batch POSTs in flight at once
+  let paceMs = BASE_PACE_MS;             // light inter-wave pacing; AIMD shrinks toward 0
   let patientWaitMs = PATIENT_BACKOFF_START_MS;  // grows while throttled, resets on recovery
-  let consecutiveRL = 0;           // throttled batches since the last success
+  let consecutiveRL = 0;           // throttled waves with ZERO success since the last progress
+  let consecutiveHealthy = 0;      // fully-clean waves since the last K ramp
   let pendingBuffer = [];          // records to flush to the checkpoint
   let convsSinceFlush = 0;
   let lastFlush = Date.now();
   let rlDiagLogged = false;        // diagnostic: log the first 429's rate headers once
 
+  // v4: checkpoint-only flush. Durability is the IndexedDB checkpoint (ckptPutBatch).
+  // Shipped 3.x ALSO called page.setData('result', <the ENTIRE accumulator>) here
+  // every 25 convs — re-serializing the whole growing result each time (~9.2GB of
+  // JSON.stringify over a run for a 117MB export) and shipping it to a `connector-data`
+  // event that has NO listener. We drop that flush-to-nowhere; the result is delivered
+  // exactly once, at the end (the terminal page.setData('result', result)).
   const flush = async (force) => {
     if (pendingBuffer.length > 0) {
       const toWrite = pendingBuffer;
@@ -1006,26 +1103,48 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
       await ckptPutBatch(toWrite, memories, null).catch(() => {});
     }
     if (force || convsSinceFlush >= FLUSH_EVERY_CONVS || Date.now() - lastFlush >= FLUSH_INTERVAL_MS) {
+      // Refresh telemetry counters for progress/diagnostics only — do NOT re-serialize
+      // and ship the whole result here (that happens once at the end).
       telemetry.skipped = skipped.size;
       telemetry.pending = queue.length + work.filter(w => w.attempts >= MAX_ATTEMPTS && !convMap.has(w.id) && !skipped.has(w.id)).length;
-      const partial = buildResult(requestedScopes, convMap, memories, telemetry);
-      await page.setData('result', partial);   // host persists + delivers progressively
       convsSinceFlush = 0;
       lastFlush = Date.now();
     }
   };
 
   while (queue.length > 0) {
-    const slice = queue.splice(0, concurrency);
-    const results = await fetchConversationBatch(userToken, deviceId, slice.map(s => s.id));
-    const byId = new Map(results.map(r => [r.id, r]));
+    // One wave = up to K chunks of ≤ BATCH_MAX ids, fired as K PARALLEL POSTs. K
+    // (parallelism) is the NEW concurrency dimension — real requests in flight, NOT
+    // ids-per-POST — which is what breaks the shipped single-in-flight wall.
+    const waveItems = queue.splice(0, parallelism * BATCH_MAX);
+    const chunks = [];
+    for (let i = 0; i < waveItems.length; i += BATCH_MAX) chunks.push(waveItems.slice(i, i + BATCH_MAX));
+    const chunkResults = await Promise.all(
+      chunks.map((chunk) => fetchConversationBatch(userToken, deviceId, chunk.map(s => s.id)))
+    );
+
+    // Merge per-id results; read wave-level throttle signals from each POST's meta.
+    const byId = new Map();
+    let shortBatch = false, sawRateLimit = false, sawOtherHttp = false, sawRetryAfter = false;
+    let maxRetryAfter = 0;
+    for (const cr of chunkResults) {
+      for (const r of cr.items) byId.set(r.id, r);
+      const m = cr.meta || {};
+      if (m.status === 429) sawRateLimit = true;
+      if (m.status && m.status !== 200 && m.status !== 429) sawOtherHttp = true;
+      if (typeof m.retryAfter === 'number' && m.retryAfter > 0) { sawRetryAfter = true; maxRetryAfter = Math.max(maxRetryAfter, m.retryAfter); }
+      // Short batch: server returned fewer conversations than requested on a 200.
+      // Now that a healthy batch is exactly requested/requested, this is a reliable
+      // throttle/challenge signal (an HTML challenge also lands here as 0/N).
+      if (m.status === 200 && typeof m.batchReturned === 'number' && m.batchReturned < m.requested) shortBatch = true;
+    }
+    const throttled = sawRateLimit || sawOtherHttp || sawRetryAfter || shortBatch;
 
     let okInBatch = 0;
     let rlInBatch = 0;
-    let maxRetryAfter = 0;
     let rlDiagHeaders = null;
 
-    for (const item of slice) {
+    for (const item of waveItems) {
       const r = byId.get(item.id) || { ok: false, status: 0 };
       bumpStatus(r.ok ? 200 : (r.status || 'no_status'));
 
@@ -1065,7 +1184,7 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
     await page.setProgress({
       phase: { step: 3, total: 3, label: 'Downloading conversations' },
       message: `Saved ${convMap.size}/${telemetry.totalConversations} conversations` +
-        (rlInBatch > 0 ? ` (easing off — rate limited)` : ''),
+        (throttled ? ` (easing off — throttled, K→1)` : ` (K=${parallelism})`),
       count: convMap.size,
     });
 
@@ -1082,21 +1201,29 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
       break;
     }
 
-    if (okInBatch > 0) {
-      // Healthy: ease concurrency up, relax pacing, reset the patient backoff.
+    if (okInBatch > 0 && !throttled) {
+      // Fully-healthy wave. AIMD additive increase: after a couple of clean waves add
+      // one parallel request; shrink the light inter-wave pace toward zero. NO fixed
+      // floor (the old unconditional 700ms floor was half the ~30-min wall).
       consecutiveRL = 0;
       patientWaitMs = PATIENT_BACKOFF_START_MS;
-      concurrency = clamp(concurrency + 1, MIN_CONCURRENCY, MAX_CONCURRENCY);
-      batchDelay = clamp(Math.floor(batchDelay * 0.8), BASE_BATCH_DELAY_MS, MAX_BATCH_DELAY_MS);
+      consecutiveHealthy++;
+      if (consecutiveHealthy >= HEALTHY_WAVES_TO_RAMP && parallelism < MAX_PARALLELISM) {
+        parallelism++;
+        consecutiveHealthy = 0;
+      }
+      paceMs = clamp(Math.floor(paceMs / 2), 0, MAX_PACE_MS);
       await flush(false);
-      await sleep(batchDelay + jitter(250));
-    } else if (rlInBatch > 0) {
-      // Throttled. Drop to one-at-a-time and wait progressively longer to let the
-      // limit clear (OpenAI gives no Retry-After). Keep going — don't bail — until
-      // the limit recovers or we hit a budget. A long wait that then succeeds
-      // resets us back to burst mode.
-      consecutiveRL++;
-      concurrency = MIN_CONCURRENCY;
+      if (paceMs > 0) await sleep(paceMs + jitter(100));
+    } else if (throttled) {
+      // Any throttle signal (429 / retry-after / short batch / non-200 / challenge).
+      // AIMD multiplicative decrease: reset K=1 and back off, honoring retry-after.
+      // A wave that still made progress resets the stall counter (we're moving).
+      consecutiveHealthy = 0;
+      parallelism = MIN_PARALLELISM;
+      paceMs = BASE_PACE_MS;
+      if (okInBatch > 0) { consecutiveRL = 0; patientWaitMs = PATIENT_BACKOFF_START_MS; }
+      else consecutiveRL++;
       const waitMs = Math.max(maxRetryAfter * 1000, patientWaitMs);
       patientWaitMs = Math.min(Math.floor(patientWaitMs * 1.5), PATIENT_BACKOFF_MAX_MS);
       await flush(false);
@@ -1112,13 +1239,13 @@ const buildResult = (requestedScopes, convMap, memories, telemetry) => {
         break;
       }
       await page.setData('status',
-        `Rate limited — waiting ${Math.round(waitMs / 1000)}s for the limit to clear ` +
+        `Rate limited — easing off (K=1), waiting ${Math.round(waitMs / 1000)}s for the limit to clear ` +
         `(${convMap.size} saved, attempt ${consecutiveRL}/${MAX_STALLED_BATCHES})...`);
       await sleep(waitMs + jitter(1000));
     } else {
-      // Transient errors only — modest pause.
+      // Transient errors only, no successes and no throttle — modest pause.
       await flush(false);
-      await sleep(batchDelay + jitter(250));
+      await sleep(BASE_PACE_MS + jitter(250));
     }
   }
 
