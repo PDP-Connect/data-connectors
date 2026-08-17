@@ -55,5 +55,25 @@
   // aren't TypeScript. fixtures/ holds gitignored live captures. Tests
   // (*.test.ts) ARE included so typecheck covers them — earlier they were
   // excluded, which let test-side type errors slip through.
-  "exclude": ["node_modules", "fixtures", "**/__fixtures__"]
+  //
+  // The 6 files below import @pdpp/reference-contract, which is out of
+  // scope for this move (Move A pins only @pdpp/collector-runtime and
+  // @pdpp/connector-protocol) and stays a monorepo-only package until its
+  // own repository move lands. Excluded here, not stubbed, to avoid
+  // vendoring a large contract package for two functions; reinstate by
+  // deleting these exclude entries once @pdpp/reference-contract is
+  // available to this repo (git-dependency pin or publish, whichever the
+  // reference-contract move settles on).
+  "exclude": [
+    "node_modules",
+    "fixtures",
+    "**/__fixtures__",
+    "connectors/_conformance/coverage-conformance.test.ts",
+    "connectors/github/index.test.ts",
+    "connectors/groupme/attachment-detail-coverage.test.ts",
+    "connectors/ynab/collect-terminal-coverage.test.ts",
+    "connectors/amazon/proof-ingest-records.test.ts",
+    "src/collector-bounded-horizon.test.ts",
+    "src/collector-scope-contract.test.ts"
+  ]
 }

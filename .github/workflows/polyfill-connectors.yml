@@ -1,0 +1,57 @@
+name: Polyfill Connectors
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/polyfill-connectors/**"
+      - ".github/workflows/polyfill-connectors.yml"
+  pull_request:
+    paths:
+      - "packages/polyfill-connectors/**"
+      - ".github/workflows/polyfill-connectors.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: polyfill-connectors-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Node 24: this package's node:test usage (--test-concurrency,
+          # --test-timeout) and node:fs/promises glob() need it; the rest of
+          # this repo's workflows run Node 20 for unrelated npm-only scripts.
+          node-version: "24"
+
+      - name: Install polyfill-connectors dependencies
+        # Scoped to the package, not the repo root: this repo has no npm
+        # workspaces wiring for packages/polyfill-connectors (see
+        # packages/polyfill-connectors/vendor/README.md for why its two
+        # @pdpp/* dependencies install from a checked-in tarball instead of a
+        # workspace/registry entry). --ignore-scripts skips patchright's
+        # postinstall browser download; verify + test don't launch a browser.
+        working-directory: packages/polyfill-connectors
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm install --ignore-scripts
+
+      - name: Verify (typecheck + biome check)
+        working-directory: packages/polyfill-connectors
+        run: npm run verify
+
+      - name: Test
+        working-directory: packages/polyfill-connectors
+        # Excludes the @pdpp/reference-contract-dependent suites; see
+        # scripts/run-tests.mjs and tsconfig.json for the file list and the
+        # reinstatement note (that package isn't part of Move A's scope).
+        run: npm run test
