@@ -1,0 +1,56 @@
+{
+  "name": "@pdpp/polyfill-connectors",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Polyfill connectors for non-PDPP platforms (YNAB, Gmail, Amazon, ChatGPT, USAA).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./collectors": "./src/collector-registry.ts",
+    "./manifests": "./src/manifest-registry.ts",
+    "./reason-display-messages": "./src/reason-display-messages.ts",
+    "./connectors/claude_code": "./connectors/claude_code/index.ts",
+    "./connectors/codex": "./connectors/codex/index.ts",
+    "./connectors/imessage": "./connectors/imessage/index.ts"
+  },
+  "bin": {
+    "pdpp-local-device-exporter": "./bin/local-device-exporter.ts"
+  },
+  "scripts": {
+    "check": "ultracite check",
+    "check:noAwaitInLoops-conformance": "node --import tsx ./scripts/check-no-await-in-loops-conformance.ts",
+    "check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
+    "conformance": "tsx scripts/conformance.ts",
+    "fix": "ultracite fix",
+    "postinstall": "node ./scripts/install-patchright-browser.ts",
+    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- bash -c 'node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"bin/**/*.test.ts\" \"connectors/**/*.test.ts\" \"src/**/*.test.ts\"'",
+    "typecheck": "tsc --noEmit",
+    "verify": "pnpm typecheck && pnpm check && pnpm check:noAwaitInLoops-conformance && pnpm check:noUnnecessaryConditions-expiry"
+  },
+  "dependencies": {
+    "@pdpp/collector-runtime": "workspace:*",
+    "@pdpp/connector-protocol": "workspace:*",
+    "@pdpp/reference-contract": "workspace:*",
+    "@streamparser/json": "^0.0.23",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^17.4.2",
+    "imapflow": "^1.6.6",
+    "linkedom": "^0.18.13",
+    "ofx-js": "^1.1.1",
+    "p-queue": "^9.3.3",
+    "p-retry": "^8.0.0",
+    "patchright": "1.61.1",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.62.1",
+    "saxes": "^6.0.0",
+    "ws": "^8.21.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@babel/parser": "7.29.2",
+    "@biomejs/biome": "2.5.7",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.18.1",
+    "ultracite": "7.10.2"
+  }
+}
