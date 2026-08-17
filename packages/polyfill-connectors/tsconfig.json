@@ -74,6 +74,15 @@
     "connectors/ynab/collect-terminal-coverage.test.ts",
     "connectors/amazon/proof-ingest-records.test.ts",
     "src/collector-bounded-horizon.test.ts",
-    "src/collector-scope-contract.test.ts"
+    "src/collector-scope-contract.test.ts",
+    // bin/orchestrate.ts imports ../../../reference-implementation/server/*
+    // (a manual dev-loop tool that spins up the monorepo's own reference
+    // server) and src/reason-display-messages.test.ts imports
+    // ../../../reference-implementation/runtime/recovery-reason-codes.ts.
+    // Neither is wired into this package's own scripts/bin entries; both
+    // are monorepo-only until reference-implementation has its own move.
+    // Reinstate once that path exists in this repo.
+    "bin/orchestrate.ts",
+    "src/reason-display-messages.test.ts"
   ]
 }

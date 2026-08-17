@@ -24,16 +24,36 @@ rejected outright rather than treated as a partial win.
   `npm run build` then packed with `npm pack` from a clean checkout of
   `PDP-Connect/data-connect@7b46f9a0ee28fafb421018ff283a329e4623e44a`, workspace packages
   `packages/collector-runtime` and `packages/connector-protocol`.
+- `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
+  `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
+  `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
+  resolves against the public registry and 404s (neither is published). `@pdpp/connector-protocol`
+  is handled by pinning it too (see `overrides` below). `@pdpp/reference-contract` is a large
+  contract package (route manifests, OpenAPI generation, validators) — out of scope for this
+  move — but `collector-runtime`'s non-test code (`src/local-device-client.ts`) genuinely imports
+  one function from it, `canonicalTerminalRunCommitEnvelope` (`@pdpp/reference-contract/common`).
+  This tarball is a minimal private stand-in carrying only that function and its sibling
+  `canonicalTerminalRunCommitJson`, copied byte-for-byte from the real package's
+  `src/common/terminal-run-commit.ts` at the same pinned commit. Delete it once the real
+  `@pdpp/reference-contract` is available to this repo.
+- Because `@pdpp/collector-runtime`'s dependency declarations point at the public registry
+  (`"*"`), not at these vendor files, `package.json`'s `overrides` field is what actually forces
+  npm to substitute the local tarballs for `@pdpp/connector-protocol` and `@pdpp/reference-contract`
+  wherever `@pdpp/collector-runtime` depends on them — a plain nested `file:` dependency in
+  `collector-runtime`'s own `package.json` isn't an option since that file lives inside the
+  already-packed tarball we don't control.
 - sha256 (informational, alongside npm's own tarball integrity hash recorded in
   `package-lock.json` once installed):
 
   ```
   34f55c3402e013774a18b688ffcabc559ffdc02d238b19257612c1dc4b813d06  pdpp-collector-runtime-0.0.1.tgz
   931660f8560a7c52cd89fb01a648268b0fb2985f53ba2d4fe99ddcc97690bd1c  pdpp-connector-protocol-0.0.1.tgz
+  5c9168ad2a872163b14e98da9cb29b685f474886d661bc2f3e564a8399770aa5  pdpp-reference-contract-0.0.1.tgz
   ```
 
-`package.json` references them via `file:./vendor/<name>.tgz`, npm's supported local-tarball
-dependency form.
+`package.json` references the two Move A packages directly via `file:./vendor/<name>.tgz`
+dependencies, npm's supported local-tarball dependency form, and the transitive
+`@pdpp/connector-protocol` / `@pdpp/reference-contract` pins via `overrides`.
 
 ## Removal trigger
 

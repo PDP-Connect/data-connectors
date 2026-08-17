@@ -18,7 +18,11 @@ import {
 import { validateRecord } from "./schemas.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "..", "..", "..");
+// Every sibling connector test computes this as two levels up
+// (connectors/<name>/ -> packages/polyfill-connectors/); this one used three,
+// which happened to still resolve tsx only because pnpm hoists devDependencies
+// above packages/ in the source monorepo. Fixed to match convention.
+const PACKAGE_ROOT = resolve(__dirname, "..", "..");
 const ENTRYPOINT = join(__dirname, "index.ts");
 
 // ─── Schema validation tests ───────────────────────────────────────────────

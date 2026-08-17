@@ -16,6 +16,9 @@ const EXCLUDED = new Set([
   "connectors/amazon/proof-ingest-records.test.ts",
   "src/collector-bounded-horizon.test.ts",
   "src/collector-scope-contract.test.ts",
+  // imports ../../../reference-implementation/runtime/recovery-reason-codes.ts
+  // (monorepo-only; see tsconfig.json's exclude comment)
+  "src/reason-display-messages.test.ts",
 ]);
 
 const patterns = ["bin/**/*.test.ts", "connectors/**/*.test.ts", "src/**/*.test.ts"];

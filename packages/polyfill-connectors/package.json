@@ -52,5 +52,11 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.11",
     "ultracite": "7.10.2"
+  },
+  "overrides": {
+    "@pdpp/collector-runtime": {
+      "@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
+      "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz"
+    }
   }
 }
