@@ -5,15 +5,16 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "177adedcf169a03c3bd75c315304238aa1ccc181",
-      "note": "Move R head after syncing all 6 vendored bundled-connector sources (apple_photos, google_messages, claude_code, codex, google_takeout, imessage) to data-connectors' canonical copies (formatting + dead biome-ignore cleanups + one executionRoot call-site fix that had drifted). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests. Re-pinned 2026-08-18 after the DCO signoff rebase (tree byte-identical; SHAs rewritten)."
+      "sha": "9a2ae2df330d4059927f168db88d656e732d2526",
+      "branch": "move-r-collector-runtime",
+      "note": "Live head of PDP-Connect/data-connect PR #26 (move-r-collector-runtime) as of 2026-08-18, verified via `gh pr view 26 --repo PDP-Connect/data-connect --json headRefOid` at pin time. Supersedes the prior 177adedc pin: a test defect found by the evidence lane was fixed on PR #26 after that pin was taken. Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
     },
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "5f988cf9898d73ec8fde4dc6adf64219ac3ae80f",
+      "sha": "01792f1b9676c3bde52abb57d1bd2c3129d45f27",
       "branch": "move-r-pdpp-removal",
-      "note": "Head of move-r-pdpp-removal as of 2026-08-18, after that branch resynced its own vendored tarballs (same stale-prepare-script drift class check-tarball-digest-drift.sh's new content-manifest comparison caught on this repo's side) and ported the executionRoot wiring to this repo's connector copy. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Re-pinned 2026-08-18, superseding the prior d255f8b9 pin, as this branch's final head for this task."
+      "note": "Live head of PDP-Connect/pdpp PR #155 (move-r-pdpp-removal) as of 2026-08-18, verified via `gh pr view 155 --repo PDP-Connect/pdpp --json headRefOid` at pin time. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Re-pinned 2026-08-18, superseding the prior 5f988cf9 pin."
     }
   }
 }
