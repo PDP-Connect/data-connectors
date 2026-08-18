@@ -72,6 +72,7 @@ import {
   enrollCollector,
   runCollectorConnector,
 } from "@pdpp/collector-runtime";
+import { resolveExecutionRoot } from "../src/execution-root.ts";
 
 const DEFAULT_QUEUE_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -195,6 +196,7 @@ async function main(): Promise<void> {
     connector: spec,
     deviceId: options.deviceId,
     deviceToken: options.deviceToken,
+    executionRoot: resolveExecutionRoot(spec),
     queuePath: scopedDefaultQueuePath(options.queuePath, DEFAULT_QUEUE_PATH, options.sourceInstanceId),
     ...(options.runId ? { runId: options.runId } : {}),
     sourceInstanceId: options.sourceInstanceId,

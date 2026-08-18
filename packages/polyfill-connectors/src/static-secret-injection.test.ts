@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCollectorConnector } from "@pdpp/collector-runtime";
+import { resolveExecutionRoot } from "./execution-root.ts";
 import {
   buildConnectionScopedSecretEnv,
   isStaticSecretCaptureOptional,
@@ -650,6 +651,7 @@ test("two gmail connections run with distinct injected secrets, scoped per run, 
         },
         deviceId: "device-1",
         deviceToken: "device-token",
+        executionRoot: resolveExecutionRoot({ args: [echo] }),
         queuePath: await tempQueuePath(),
         sourceInstanceId,
       });

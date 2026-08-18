@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
+import { resolveExecutionRoot } from "../../src/execution-root.ts";
 import { scanLocalJsonl } from "../../src/local-jsonl-cursor.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
@@ -794,6 +795,7 @@ test("M24: Claude mtime touch queues no transcript records while advancing its d
     },
     deviceId: "device-test",
     deviceToken: "test-token",
+    executionRoot: resolveExecutionRoot({ args: ["connectors/claude_code/index.ts"] }),
     queuePath,
     sourceInstanceId: "claude-mtime-touch",
   } as const;

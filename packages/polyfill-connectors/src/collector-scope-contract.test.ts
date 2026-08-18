@@ -35,6 +35,7 @@ import {
 import { buildTerminalCollectionFacts } from "@pdpp/collector-runtime/collector-runner";
 import type { TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/reference-contract/common";
+import { resolveExecutionRoot } from "./execution-root.ts";
 
 const SINCE = "2026-06-01T00:00:00.000Z";
 /** Mirrors the claude_code/codex manifest split: 3 timed streams, the rest not. */
@@ -201,6 +202,7 @@ async function runScoped(input: {
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: resolveExecutionRoot({ args: [fixture] }),
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-1",
     });

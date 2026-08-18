@@ -28,6 +28,7 @@ import { test } from "node:test";
 import { COLLECTION_SCOPE_STATE_KEY, hashCanonicalJson, runCollectorConnector } from "@pdpp/collector-runtime";
 import type { TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/reference-contract/common";
+import { resolveExecutionRoot } from "./execution-root.ts";
 
 const CONNECTORS_DIR = join(import.meta.dirname, "..", "connectors");
 const SINCE = "2026-06-01T00:00:00.000Z";
@@ -188,11 +189,12 @@ async function runFixture(
   harness: RunHarness,
   overrides: { abortSignal?: AbortSignal; queuePath?: string } = {}
 ): Promise<Awaited<ReturnType<typeof runCollectorConnector>>> {
+  const args = ["--import", "tsx", join(CONNECTORS_DIR, fixture.connector, "index.ts")];
   return runCollectorConnector({
     ...(overrides.abortSignal ? { abortSignal: overrides.abortSignal } : {}),
     baseUrl: harness.url,
     connector: {
-      args: ["--import", "tsx", join(CONNECTORS_DIR, fixture.connector, "index.ts")],
+      args,
       command: process.execPath,
       connector_id: fixture.connector,
       enforcesSourceRoots: true,
@@ -203,6 +205,7 @@ async function runFixture(
     },
     deviceId: "device-1",
     deviceToken: "device-token",
+    executionRoot: resolveExecutionRoot({ args }),
     queuePath: overrides.queuePath ?? (await tempQueuePath()),
     sourceInstanceId: "src-1",
   });
