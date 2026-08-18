@@ -22,7 +22,7 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@48c8364c4627ee8d923f90c98de050eeaff236b3`, workspace packages
+  `PDP-Connect/data-connect@525fffa6f7756b785700219afcaaacc4492a0819`, workspace packages
   `packages/collector-runtime` and `packages/connector-protocol`.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
