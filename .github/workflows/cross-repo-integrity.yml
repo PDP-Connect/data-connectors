@@ -129,6 +129,8 @@ jobs:
     outputs:
       data-connect-sha: ${{ steps.pins.outputs.data-connect-sha }}
       pdpp-sha: ${{ steps.pins.outputs.pdpp-sha }}
+      data-connect-track-ref: ${{ steps.pins.outputs.data-connect-track-ref }}
+      pdpp-track-ref: ${{ steps.pins.outputs.pdpp-track-ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -141,6 +143,14 @@ jobs:
         run: |
           DATA_CONNECT_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].sha')"
           PDPP_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].sha')"
+          # During a coordinated cutover, a pin can deliberately track an unmerged PR-head
+          # branch rather than the producer's main (see cross-repo-pins.json's own "branch"
+          # field, and MERGE-RUNBOOK-v2.md Step 7's note on removing it once main is
+          # canonical again). pin-freshness must compare against THIS ref, not unconditionally
+          # against main — main and the tracked PR branch are expected to disagree during that
+          # window, and that disagreement is not staleness.
+          DATA_CONNECT_TRACK_REF="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].branch ?? "main"')"
+          PDPP_TRACK_REF="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].branch ?? "main"')"
 
           # Pin values are shell-interpolated into `git checkout` and cloned-repo commands by
           # downstream jobs. Reject anything that isn't exactly 40 lowercase hex characters
@@ -155,7 +165,21 @@ jobs:
             fi
           done
 
+          # Track-ref values are also shell-interpolated (into `git rev-parse origin/<ref>` in
+          # pin-freshness). Reject anything that isn't a plausible branch-name token — no
+          # option-like strings, no whitespace, no shell metacharacters.
+          for name_ref in "data-connect:$DATA_CONNECT_TRACK_REF" "pdpp:$PDPP_TRACK_REF"; do
+            name="${name_ref%%:*}"
+            ref="${name_ref#*:}"
+            if ! [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$ref" == -* ]]; then
+              echo "::error::cross-repo-pins.json repos.$name.branch is not a plausible branch name: '$ref'" >&2
+              exit 1
+            fi
+          done
+
           echo "data-connect-sha=$DATA_CONNECT_SHA" >> "$GITHUB_OUTPUT"
+          echo "data-connect-track-ref=$DATA_CONNECT_TRACK_REF" >> "$GITHUB_OUTPUT"
+          echo "pdpp-track-ref=$PDPP_TRACK_REF" >> "$GITHUB_OUTPUT"
           echo "pdpp-sha=$PDPP_SHA" >> "$GITHUB_OUTPUT"
 
   drift-checks:
@@ -340,15 +364,18 @@ jobs:
     name: Pin freshness — ${{ matrix.repo.label }}
     # Producer-source freshness detection (Gate B finding B2): the drift-checks/integration
     # jobs above compare the consumer tree against the PINNED commit, which proves internal
-    # consistency but, by construction, cannot detect that the producer's OWN default branch
+    # consistency but, by construction, cannot detect that the producer's OWN tracked branch
     # has since moved past that pin. This job deliberately does the opposite: it reads each
-    # producer's CURRENT main head and diffs it against the pinned commit, restricted to the
-    # exact canonical paths that pin actually backs, so it fails precisely when — and only
-    # when — a change relevant to this repo's drift jobs has landed upstream without a
-    # matching repin. Runs regardless of THIS PR's own relevance (`changes.outputs.relevant`
-    # gates the drift-checks/integration jobs, not this one): a stale pin is a fact about the
-    # producer repos, independent of what this PR touches. It only skips if `changes` itself
-    # failed to run (`needs.changes.result == 'success'`), same as every other downstream job.
+    # producer's CURRENT tracked-ref head (main normally, or the exact PR-head branch named
+    # in cross-repo-pins.json's "branch" field during a coordinated cutover — see read-pins'
+    # comment on why that distinction matters) and diffs it against the pinned commit,
+    # restricted to the exact canonical paths that pin actually backs, so it fails precisely
+    # when — and only when — a change relevant to this repo's drift jobs has landed on the
+    # TRACKED ref without a matching repin. Runs regardless of THIS PR's own relevance
+    # (`changes.outputs.relevant` gates the drift-checks/integration jobs, not this one): a
+    # stale pin is a fact about the producer repos, independent of what this PR touches. It
+    # only skips if `changes` itself failed to run (`needs.changes.result == 'success'`),
+    # same as every other downstream job.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -379,33 +406,44 @@ jobs:
       - name: Clone ${{ matrix.repo.id }} (full history, no checkout)
         run: git clone --filter=blob:none --no-checkout "${{ matrix.repo.url }}" "${{ matrix.repo.id }}"
 
-      - name: Compare pinned commit against current main for relevant paths
+      - name: Compare pinned commit against its tracked ref for relevant paths
         working-directory: ${{ matrix.repo.id }}
         env:
           PINNED_SHA: ${{ matrix.repo.id == 'data-connect' && needs.read-pins.outputs.data-connect-sha || needs.read-pins.outputs.pdpp-sha }}
+          # The ref this pin is meant to track right now: main once the pin is on the
+          # producer's canonical trunk, or the exact PR-head branch named in
+          # cross-repo-pins.json's "branch" field during a coordinated cutover, when main and
+          # that branch are EXPECTED to disagree (see read-pins' own comment on why comparing
+          # unconditionally against main here would be a false positive, not real staleness).
+          TRACK_REF: ${{ matrix.repo.id == 'data-connect' && needs.read-pins.outputs.data-connect-track-ref || needs.read-pins.outputs.pdpp-track-ref }}
           RELEVANT_PATHS: ${{ matrix.repo.paths }}
         run: |
           if ! [[ "$PINNED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::pinned SHA for ${{ matrix.repo.id }} is not 40 lowercase hex characters: '$PINNED_SHA'" >&2
             exit 1
           fi
+          if ! [[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$TRACK_REF" == -* ]]; then
+            echo "::error::tracked ref for ${{ matrix.repo.id }} is not a plausible branch name: '$TRACK_REF'" >&2
+            exit 1
+          fi
 
-          CURRENT_MAIN="$(git rev-parse origin/main)"
+          git fetch --filter=blob:none origin "$TRACK_REF"
+          CURRENT_HEAD="$(git rev-parse FETCH_HEAD)"
 
-          if [ "$CURRENT_MAIN" = "$PINNED_SHA" ]; then
-            echo "Pin is exactly at ${{ matrix.repo.id }}'s current main ($CURRENT_MAIN) — trivially fresh."
+          if [ "$CURRENT_HEAD" = "$PINNED_SHA" ]; then
+            echo "Pin is exactly at ${{ matrix.repo.id }}'s current $TRACK_REF ($CURRENT_HEAD) — trivially fresh."
             exit 0
           fi
 
-          DIFF="$(git diff --name-only "$PINNED_SHA" "$CURRENT_MAIN" -- $RELEVANT_PATHS)"
+          DIFF="$(git diff --name-only "$PINNED_SHA" "$CURRENT_HEAD" -- $RELEVANT_PATHS)"
 
           if [ -n "$DIFF" ]; then
-            echo "::error::pin stale for relevant source paths — ${{ matrix.repo.id }}'s main ($CURRENT_MAIN) has changed these paths since the pinned commit ($PINNED_SHA):"
+            echo "::error::pin stale for relevant source paths — ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) has changed these paths since the pinned commit ($PINNED_SHA):"
             echo "$DIFF"
             exit 1
           fi
 
-          echo "Pin ($PINNED_SHA) unchanged relative to ${{ matrix.repo.id }}'s current main ($CURRENT_MAIN) across: $RELEVANT_PATHS"
+          echo "Pin ($PINNED_SHA) unchanged relative to ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) across: $RELEVANT_PATHS"
 
   gate:
     name: Cross-Repo Integrity Gate
