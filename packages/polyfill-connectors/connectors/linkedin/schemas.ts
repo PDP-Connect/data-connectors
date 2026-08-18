@@ -34,7 +34,10 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 // Opaque bounded id — LinkedIn entity ids are URNs or numeric; tighten when the
 // real payload is observed.
 const idSchema = z.string().min(1).max(200);
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 
 /**
  * profile stream (manifest required: id). One record: the owner's profile.
@@ -42,50 +45,50 @@ const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 dat
  * URL.
  */
 export const profileSchema = z.object({
-  id: idSchema,
-  full_name: pdppSafeText.max(300).nullable(),
-  headline: pdppSafeText.max(1000).nullable(),
-  summary: pdppSafeText.max(65_000).nullable(),
-  location: pdppSafeText.max(300).nullable(),
-  industry: pdppSafeText.max(300).nullable(),
-  public_url: z.url().max(4096).nullable(),
-  current_position_title: pdppSafeText.max(500).nullable(),
-  current_company: pdppSafeText.max(500).nullable(),
+	id: idSchema,
+	full_name: pdppSafeText.max(300).nullable(),
+	headline: pdppSafeText.max(1000).nullable(),
+	summary: pdppSafeText.max(65_000).nullable(),
+	location: pdppSafeText.max(300).nullable(),
+	industry: pdppSafeText.max(300).nullable(),
+	public_url: z.url().max(4096).nullable(),
+	current_position_title: pdppSafeText.max(500).nullable(),
+	current_company: pdppSafeText.max(500).nullable(),
 });
 
 /**
  * experience stream (manifest required: id). One record per role.
  */
 export const experienceSchema = z.object({
-  id: idSchema,
-  title: pdppSafeText.max(500).nullable(),
-  company: pdppSafeText.max(500).nullable(),
-  employment_type: pdppSafeText.max(200).nullable(),
-  start_date: isoDateTimeNullable,
-  end_date: isoDateTimeNullable,
-  location: pdppSafeText.max(300).nullable(),
-  description: pdppSafeText.max(65_000).nullable(),
+	id: idSchema,
+	title: pdppSafeText.max(500).nullable(),
+	company: pdppSafeText.max(500).nullable(),
+	employment_type: pdppSafeText.max(200).nullable(),
+	start_date: isoDateTimeNullable,
+	end_date: isoDateTimeNullable,
+	location: pdppSafeText.max(300).nullable(),
+	description: pdppSafeText.max(65_000).nullable(),
 });
 
 /**
  * education stream (manifest required: id). One record per school.
  */
 export const educationSchema = z.object({
-  id: idSchema,
-  school: pdppSafeText.max(500).nullable(),
-  degree: pdppSafeText.max(500).nullable(),
-  field_of_study: pdppSafeText.max(500).nullable(),
-  start_date: isoDateTimeNullable,
-  end_date: isoDateTimeNullable,
+	id: idSchema,
+	school: pdppSafeText.max(500).nullable(),
+	degree: pdppSafeText.max(500).nullable(),
+	field_of_study: pdppSafeText.max(500).nullable(),
+	start_date: isoDateTimeNullable,
+	end_date: isoDateTimeNullable,
 });
 
 /**
  * skills stream (manifest required: id, name). One record per skill.
  */
 export const skillsSchema = z.object({
-  id: idSchema,
-  name: pdppSafeText.max(300),
-  endorsement_count: z.number().int().min(0).nullable(),
+	id: idSchema,
+	name: pdppSafeText.max(300),
+	endorsement_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -93,10 +96,10 @@ export const skillsSchema = z.object({
  * connector declares (and will emit once Voyager extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  profile: profileSchema,
-  experience: experienceSchema,
-  education: educationSchema,
-  skills: skillsSchema,
+	profile: profileSchema,
+	experience: experienceSchema,
+	education: educationSchema,
+	skills: skillsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

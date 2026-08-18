@@ -21,39 +21,39 @@
  */
 
 import {
-  type BrowserCollectContext,
-  type ProbeSessionArgs,
-  politeDelay,
-  runConnector,
+	type BrowserCollectContext,
+	type ProbeSessionArgs,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 runConnector({
-  name: "uber",
-  browser: {},
-  validateRecord,
+	name: "uber",
+	browser: {},
+	validateRecord,
 
-  async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-    const cookies = await context.cookies("https://riders.uber.com/");
-    // sid is set for authenticated sessions.
-    return cookies.some((c) => c.name === "sid" && Boolean(c.value));
-  },
+	async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
+		const cookies = await context.cookies("https://riders.uber.com/");
+		// sid is set for authenticated sessions.
+		return cookies.some((c) => c.name === "sid" && Boolean(c.value));
+	},
 
-  async collect({ page, emit }: BrowserCollectContext): Promise<void> {
-    // Navigate to trips page as a no-op to verify session end-to-end.
-    await page
-      .goto("https://riders.uber.com/trips", {
-        waitUntil: "domcontentloaded",
-        timeout: 30_000,
-      })
-      .catch((): undefined => undefined);
-    await politeDelay(3000);
-    const title = await page.title().catch((): string => "");
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "trips",
-      reason: "uber_graphql_wiring_pending",
-      message: `Uber session verified (page title: "${title}"). GraphQL operation-name + persistedQueryHash wiring deferred to next session so we can capture real request signatures.`,
-    });
-  },
+	async collect({ page, emit }: BrowserCollectContext): Promise<void> {
+		// Navigate to trips page as a no-op to verify session end-to-end.
+		await page
+			.goto("https://riders.uber.com/trips", {
+				waitUntil: "domcontentloaded",
+				timeout: 30_000,
+			})
+			.catch((): undefined => undefined);
+		await politeDelay(3000);
+		const title = await page.title().catch((): string => "");
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "trips",
+			reason: "uber_graphql_wiring_pending",
+			message: `Uber session verified (page title: "${title}"). GraphQL operation-name + persistedQueryHash wiring deferred to next session so we can capture real request signatures.`,
+		});
+	},
 });

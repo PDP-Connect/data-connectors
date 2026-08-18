@@ -5,14 +5,27 @@
 // they can be unit-tested in isolation (see parsers.test.ts). The IMAP
 // client, its side effects, and clock-dependent helpers live in index.ts.
 
-import { safeTextPreview, stripForbiddenControlChars } from "@pdpp/connector-protocol/safe-text-preview";
-import type { MessageAddressObject, MessageEnvelopeObject, MessageStructureObject } from "imapflow";
+import {
+	safeTextPreview,
+	stripForbiddenControlChars,
+} from "@pdpp/connector-protocol/safe-text-preview";
+import type {
+	MessageAddressObject,
+	MessageEnvelopeObject,
+	MessageStructureObject,
+} from "imapflow";
 import { recordFingerprint } from "../../src/fingerprint-cursor.ts";
-import type { AttachmentRecord, BodySource, ClassifiedBody, ThreadAggregate } from "./types.ts";
+import type {
+	AttachmentRecord,
+	BodySource,
+	ClassifiedBody,
+	ThreadAggregate,
+} from "./types.ts";
 
 // ─── Module-scoped regexes (Biome useTopLevelRegex) ─────────────────────
 
-const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const LONE_SURROGATE_RE =
+	/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping these control chars is the point (JSONL safety)
 const CONTROL_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const GMAIL_PREFIX_RE = /^\[Gmail\]\/(.+)$/;
@@ -24,7 +37,8 @@ const SCRIPT_BLOCK_RE = /<script\b[^>]*>[\s\S]*?<\/script>/gi;
 const STYLE_BLOCK_RE = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 const BR_TAG_RE = /<\s*br\s*\/?\s*>/gi;
-const BLOCK_CLOSE_TAG_RE = /<\s*\/\s*(p|div|li|tr|h[1-6]|section|article|header|footer|blockquote|pre)\s*>/gi;
+const BLOCK_CLOSE_TAG_RE =
+	/<\s*\/\s*(p|div|li|tr|h[1-6]|section|article|header|footer|blockquote|pre)\s*>/gi;
 const HTML_TAG_RE = /<[^>]+>/g;
 const ENTITY_NBSP_RE = /&nbsp;/g;
 const ENTITY_AMP_RE = /&amp;/g;
@@ -58,13 +72,13 @@ export const MAX_BODY_FIELD_CHARS = 32 * KB;
  * runtime — casting `as bigint` would hide a future shape change.
  */
 export function bigintToNumber(value: unknown): number | null {
-  if (typeof value === "bigint") {
-    return Number(value);
-  }
-  if (typeof value === "number") {
-    return value;
-  }
-  return null;
+	if (typeof value === "bigint") {
+		return Number(value);
+	}
+	if (typeof value === "number") {
+		return value;
+	}
+	return null;
 }
 
 /**
@@ -72,72 +86,74 @@ export function bigintToNumber(value: unknown): number | null {
  * returning a string when outside it, a number otherwise.
  */
 export function bigintToCursor(value: unknown): number | string | null {
-  if (typeof value === "bigint") {
-    const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
-    const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
-    if (value <= MAX_SAFE && value >= MIN_SAFE) {
-      return Number(value);
-    }
-    return value.toString();
-  }
-  if (typeof value === "number") {
-    return value;
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  return null;
+	if (typeof value === "bigint") {
+		const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+		const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
+		if (value <= MAX_SAFE && value >= MIN_SAFE) {
+			return Number(value);
+		}
+		return value.toString();
+	}
+	if (typeof value === "number") {
+		return value;
+	}
+	if (typeof value === "string") {
+		return value;
+	}
+	return null;
 }
 
 // ─── Label + address helpers ────────────────────────────────────────────
 
 export function canonicalLabelName(raw: string): string {
-  if (raw === "INBOX") {
-    return "inbox";
-  }
-  const m = GMAIL_PREFIX_RE.exec(raw);
-  if (m?.[1]) {
-    return m[1].toLowerCase().replace(WHITESPACE_RUN_RE, "_");
-  }
-  return raw.toLowerCase().replace(WHITESPACE_RUN_RE, "_");
+	if (raw === "INBOX") {
+		return "inbox";
+	}
+	const m = GMAIL_PREFIX_RE.exec(raw);
+	if (m?.[1]) {
+		return m[1].toLowerCase().replace(WHITESPACE_RUN_RE, "_");
+	}
+	return raw.toLowerCase().replace(WHITESPACE_RUN_RE, "_");
 }
 
 export function isGmailSystemLabel(name: string): boolean {
-  return name === "INBOX" || GMAIL_PREFIX_TEST_RE.test(name);
+	return name === "INBOX" || GMAIL_PREFIX_TEST_RE.test(name);
 }
 
 export function labelParentName(name: string): string | null {
-  const parts = name.split("/");
-  return parts.length > 1 ? parts.slice(0, -1).join("/") : null;
+	const parts = name.split("/");
+	return parts.length > 1 ? parts.slice(0, -1).join("/") : null;
 }
 
 export function addressListToArray(
-  list: readonly MessageAddressObject[] | undefined
+	list: readonly MessageAddressObject[] | undefined,
 ): Array<{ name: string | null; email: string | null }> {
-  if (!list) {
-    return [];
-  }
-  return list.map((a) => ({
-    name: a.name || null,
-    email: a.address || null,
-  }));
+	if (!list) {
+		return [];
+	}
+	return list.map((a) => ({
+		name: a.name || null,
+		email: a.address || null,
+	}));
 }
 
 export function toFlagsArray(flags: Set<string> | undefined): string[] {
-  if (!flags) {
-    return [];
-  }
-  return flags instanceof Set ? [...flags] : Array.from(flags);
+	if (!flags) {
+		return [];
+	}
+	return flags instanceof Set ? [...flags] : Array.from(flags);
 }
 
-export function toLabelsArray(labels: Set<string> | string[] | undefined): string[] {
-  if (!labels) {
-    return [];
-  }
-  if (Array.isArray(labels)) {
-    return labels;
-  }
-  return [...labels];
+export function toLabelsArray(
+	labels: Set<string> | string[] | undefined,
+): string[] {
+	if (!labels) {
+		return [];
+	}
+	if (Array.isArray(labels)) {
+		return labels;
+	}
+	return [...labels];
 }
 
 // ─── JSONL sanitizer ────────────────────────────────────────────────────
@@ -154,46 +170,50 @@ export function toLabelsArray(labels: Set<string> | string[] | undefined): strin
  *   clean JSONL line.
  */
 export function sanitizeForJsonl(v: unknown): unknown {
-  if (v === null || v === undefined) {
-    return v;
-  }
-  if (typeof v === "string") {
-    return v.replace(LONE_SURROGATE_RE, "\uFFFD").replace(CONTROL_CHAR_RE, " ");
-  }
-  if (Array.isArray(v)) {
-    return v.map(sanitizeForJsonl);
-  }
-  if (typeof v === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      out[k] = sanitizeForJsonl(val);
-    }
-    return out;
-  }
-  return v;
+	if (v === null || v === undefined) {
+		return v;
+	}
+	if (typeof v === "string") {
+		return v.replace(LONE_SURROGATE_RE, "\uFFFD").replace(CONTROL_CHAR_RE, " ");
+	}
+	if (Array.isArray(v)) {
+		return v.map(sanitizeForJsonl);
+	}
+	if (typeof v === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+			out[k] = sanitizeForJsonl(val);
+		}
+		return out;
+	}
+	return v;
 }
 
 // ─── BODYSTRUCTURE walking ──────────────────────────────────────────────
 
-function isAttachmentLikeBodystructureLeaf(node: MessageStructureObject): boolean {
-  const { disposition } = node;
-  const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
-  const contentId = node.id || null;
-  const isTextLeaf = typeof node.type === "string" && node.type.startsWith("text/");
+function isAttachmentLikeBodystructureLeaf(
+	node: MessageStructureObject,
+): boolean {
+	const { disposition } = node;
+	const filename =
+		node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
+	const contentId = node.id || null;
+	const isTextLeaf =
+		typeof node.type === "string" && node.type.startsWith("text/");
 
-  if (disposition === "attachment") {
-    return true;
-  }
-  if (filename) {
-    return true;
-  }
-  if (disposition !== "inline") {
-    return false;
-  }
+	if (disposition === "attachment") {
+		return true;
+	}
+	if (filename) {
+		return true;
+	}
+	if (disposition !== "inline") {
+		return false;
+	}
 
-  // Inline body alternatives are not attachments; cid-referenced non-text
-  // leaves are real files even when presented inline.
-  return !isTextLeaf && Boolean(contentId);
+	// Inline body alternatives are not attachments; cid-referenced non-text
+	// leaves are real files even when presented inline.
+	return !isTextLeaf && Boolean(contentId);
 }
 
 /**
@@ -203,74 +223,75 @@ function isAttachmentLikeBodystructureLeaf(node: MessageStructureObject): boolea
  * 2.1.1...) so callers can fetch the part later by its exact path.
  */
 export function decodeBodystructureForAttachments(
-  structure: MessageStructureObject | undefined,
-  msgId: string,
-  receivedAt: string,
-  path = ""
+	structure: MessageStructureObject | undefined,
+	msgId: string,
+	receivedAt: string,
+	path = "",
 ): AttachmentRecord[] {
-  const items: AttachmentRecord[] = [];
-  if (!structure) {
-    return items;
-  }
-  // imapflow BODYSTRUCTURE nodes expose `type` as a combined MIME string
-  // (e.g. "image/png" or "multipart/mixed"). Multiparts have `childNodes`;
-  // leaves have `parameters`, `id`, `description`, `encoding`, `size`,
-  // `disposition`, and `dispositionParameters`.
-  const walk = (node: MessageStructureObject | undefined, p: string): void => {
-    if (!node) {
-      return;
-    }
-    if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
-      node.childNodes.forEach((child, i) => {
-        walk(child, p ? `${p}.${i + 1}` : String(i + 1));
-      });
-      return;
-    }
-    const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
+	const items: AttachmentRecord[] = [];
+	if (!structure) {
+		return items;
+	}
+	// imapflow BODYSTRUCTURE nodes expose `type` as a combined MIME string
+	// (e.g. "image/png" or "multipart/mixed"). Multiparts have `childNodes`;
+	// leaves have `parameters`, `id`, `description`, `encoding`, `size`,
+	// `disposition`, and `dispositionParameters`.
+	const walk = (node: MessageStructureObject | undefined, p: string): void => {
+		if (!node) {
+			return;
+		}
+		if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
+			node.childNodes.forEach((child, i) => {
+				walk(child, p ? `${p}.${i + 1}` : String(i + 1));
+			});
+			return;
+		}
+		const filename =
+			node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
 
-    // Classifier (RFC 2045 / RFC 2183 grounded):
-    //   - disposition=attachment    → always a real attachment.
-    //   - filename present          → always a real attachment.
-    //   - disposition=inline:
-    //       - filename present      → covered by the previous clause.
-    //       - text/* leaf           → message body alternative, NOT an
-    //                                 attachment (these are HTML/plain
-    //                                 alternatives inside
-    //                                 multipart/alternative).
-    //       - non-text/* leaf with Content-ID → inline image/file referenced
-    //                                 via cid: in HTML; real attachment
-    //                                 even though presented inline.
-    //       - otherwise              → drop (no filename, no cid, not a real
-    //                                 file enclosure).
-    //
-    // The earlier rule treated every `inline` disposition as an attachment
-    // and over-recorded ~1,000 phantom rows (text body alternatives) per
-    // real mailbox. Verified against IMAP truth on a sample of 480
-    // messages across 2020/2022/2024/2026: this classifier emits exactly
-    // the truth set (zero false-positives, zero missed real attachments).
-    if (!isAttachmentLikeBodystructureLeaf(node)) {
-      return;
-    }
-    const partIndex = p || "1";
-    items.push({
-      id: `${msgId}:${partIndex}`,
-      message_id: msgId,
-      filename,
-      content_type: node.type || null,
-      size_bytes: typeof node.size === "number" ? node.size : null,
-      content_id: node.id || null,
-      is_inline: node.disposition === "inline",
-      encoding: node.encoding || null,
-      part_index: partIndex,
-      message_received_at: receivedAt,
-      blob_ref: null,
-      content_sha256: null,
-      hydration_status: "deferred",
-      hydration_error: null,
-    });
-  };
-  walk(structure, path);
-  return items;
+		// Classifier (RFC 2045 / RFC 2183 grounded):
+		//   - disposition=attachment    → always a real attachment.
+		//   - filename present          → always a real attachment.
+		//   - disposition=inline:
+		//       - filename present      → covered by the previous clause.
+		//       - text/* leaf           → message body alternative, NOT an
+		//                                 attachment (these are HTML/plain
+		//                                 alternatives inside
+		//                                 multipart/alternative).
+		//       - non-text/* leaf with Content-ID → inline image/file referenced
+		//                                 via cid: in HTML; real attachment
+		//                                 even though presented inline.
+		//       - otherwise              → drop (no filename, no cid, not a real
+		//                                 file enclosure).
+		//
+		// The earlier rule treated every `inline` disposition as an attachment
+		// and over-recorded ~1,000 phantom rows (text body alternatives) per
+		// real mailbox. Verified against IMAP truth on a sample of 480
+		// messages across 2020/2022/2024/2026: this classifier emits exactly
+		// the truth set (zero false-positives, zero missed real attachments).
+		if (!isAttachmentLikeBodystructureLeaf(node)) {
+			return;
+		}
+		const partIndex = p || "1";
+		items.push({
+			id: `${msgId}:${partIndex}`,
+			message_id: msgId,
+			filename,
+			content_type: node.type || null,
+			size_bytes: typeof node.size === "number" ? node.size : null,
+			content_id: node.id || null,
+			is_inline: node.disposition === "inline",
+			encoding: node.encoding || null,
+			part_index: partIndex,
+			message_received_at: receivedAt,
+			blob_ref: null,
+			content_sha256: null,
+			hydration_status: "deferred",
+			hydration_error: null,
+		});
+	};
+	walk(structure, path);
+	return items;
 }
 
 /**
@@ -278,63 +299,81 @@ export function decodeBodystructureForAttachments(
  * return its IMAP part number (e.g. "1" or "1.2"), or null if none.
  */
 export function findFirstPartByType(
-  structure: MessageStructureObject | undefined,
-  mimeType: string,
-  path = ""
+	structure: MessageStructureObject | undefined,
+	mimeType: string,
+	path = "",
 ): string | null {
-  if (!structure) {
-    return null;
-  }
-  const walk = (node: MessageStructureObject | undefined, p: string): string | null => {
-    if (!node) {
-      return null;
-    }
-    if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
-      for (let i = 0; i < node.childNodes.length; i += 1) {
-        const found = walk(node.childNodes[i], p ? `${p}.${i + 1}` : String(i + 1));
-        if (found) {
-          return found;
-        }
-      }
-      return null;
-    }
-    if (node.type === mimeType) {
-      return p || "1";
-    }
-    return null;
-  };
-  return walk(structure, path);
+	if (!structure) {
+		return null;
+	}
+	const walk = (
+		node: MessageStructureObject | undefined,
+		p: string,
+	): string | null => {
+		if (!node) {
+			return null;
+		}
+		if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
+			for (let i = 0; i < node.childNodes.length; i += 1) {
+				const found = walk(
+					node.childNodes[i],
+					p ? `${p}.${i + 1}` : String(i + 1),
+				);
+				if (found) {
+					return found;
+				}
+			}
+			return null;
+		}
+		if (node.type === mimeType) {
+			return p || "1";
+		}
+		return null;
+	};
+	return walk(structure, path);
 }
 
-export function findTextPlainPart(structure: MessageStructureObject | undefined, path = ""): string | null {
-  return findFirstPartByType(structure, "text/plain", path);
+export function findTextPlainPart(
+	structure: MessageStructureObject | undefined,
+	path = "",
+): string | null {
+	return findFirstPartByType(structure, "text/plain", path);
 }
 
-export function findTextHtmlPart(structure: MessageStructureObject | undefined, path = ""): string | null {
-  return findFirstPartByType(structure, "text/html", path);
+export function findTextHtmlPart(
+	structure: MessageStructureObject | undefined,
+	path = "",
+): string | null {
+	return findFirstPartByType(structure, "text/html", path);
 }
 
 /** Locate a leaf in a BODYSTRUCTURE tree by its IMAP part number. */
 export function findLeafByPath(
-  structure: MessageStructureObject | undefined,
-  targetPath: string
+	structure: MessageStructureObject | undefined,
+	targetPath: string,
 ): MessageStructureObject | null {
-  const walk = (node: MessageStructureObject | undefined, p: string): MessageStructureObject | null => {
-    if (!node) {
-      return null;
-    }
-    if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
-      for (let i = 0; i < node.childNodes.length; i += 1) {
-        const found = walk(node.childNodes[i], p ? `${p}.${i + 1}` : String(i + 1));
-        if (found) {
-          return found;
-        }
-      }
-      return null;
-    }
-    return (p || "1") === targetPath ? node : null;
-  };
-  return walk(structure, "");
+	const walk = (
+		node: MessageStructureObject | undefined,
+		p: string,
+	): MessageStructureObject | null => {
+		if (!node) {
+			return null;
+		}
+		if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
+			for (let i = 0; i < node.childNodes.length; i += 1) {
+				const found = walk(
+					node.childNodes[i],
+					p ? `${p}.${i + 1}` : String(i + 1),
+				);
+				if (found) {
+					return found;
+				}
+			}
+			return null;
+		}
+		return (p || "1") === targetPath ? node : null;
+	};
+	return walk(structure, "");
 }
 
 // ─── Body decoding helpers ──────────────────────────────────────────────
@@ -344,40 +383,44 @@ export function findLeafByPath(
  * charset into a JavaScript string. Best-effort; never throws.
  */
 export function decodeBodyPart(
-  buffer: Buffer | null | undefined,
-  encoding: string | null,
-  charset: string | null
+	buffer: Buffer | null | undefined,
+	encoding: string | null,
+	charset: string | null,
 ): string {
-  if (!buffer?.length) {
-    return "";
-  }
-  const cs = (charset || "utf8") as BufferEncoding;
-  try {
-    const enc = (encoding || "").toLowerCase();
-    if (enc === "base64") {
-      return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-    }
-    if (enc === "quoted-printable") {
-      const raw = buffer.toString("ascii");
-      const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-      // Decode the =HH sequences as raw bytes, then interpret in charset.
-      const bytes: number[] = [];
-      let i = 0;
-      while (i < unfolded.length) {
-        if (unfolded[i] === "=" && i + 2 < unfolded.length && HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))) {
-          bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
-          i += 3;
-        } else {
-          bytes.push(unfolded.charCodeAt(i));
-          i += 1;
-        }
-      }
-      return Buffer.from(bytes).toString(cs);
-    }
-    return buffer.toString(cs);
-  } catch {
-    return buffer.toString("utf8");
-  }
+	if (!buffer?.length) {
+		return "";
+	}
+	const cs = (charset || "utf8") as BufferEncoding;
+	try {
+		const enc = (encoding || "").toLowerCase();
+		if (enc === "base64") {
+			return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
+		}
+		if (enc === "quoted-printable") {
+			const raw = buffer.toString("ascii");
+			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
+			// Decode the =HH sequences as raw bytes, then interpret in charset.
+			const bytes: number[] = [];
+			let i = 0;
+			while (i < unfolded.length) {
+				if (
+					unfolded[i] === "=" &&
+					i + 2 < unfolded.length &&
+					HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
+				) {
+					bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
+					i += 3;
+				} else {
+					bytes.push(unfolded.charCodeAt(i));
+					i += 1;
+				}
+			}
+			return Buffer.from(bytes).toString(cs);
+		}
+		return buffer.toString(cs);
+	} catch {
+		return buffer.toString("utf8");
+	}
 }
 
 /**
@@ -388,50 +431,50 @@ export function decodeBodyPart(
  * readable text fallback.
  */
 export function stripHtmlToText(html: string | null | undefined): string {
-  if (!html) {
-    return "";
-  }
-  let s = String(html);
-  // Drop script/style contents entirely
-  s = s.replace(SCRIPT_BLOCK_RE, " ");
-  s = s.replace(STYLE_BLOCK_RE, " ");
-  // HTML comments
-  s = s.replace(HTML_COMMENT_RE, " ");
-  // Line-break tags
-  s = s.replace(BR_TAG_RE, "\n");
-  // Block-level close tags — insert newline before stripping
-  s = s.replace(BLOCK_CLOSE_TAG_RE, "\n");
-  // Strip remaining tags
-  s = s.replace(HTML_TAG_RE, "");
-  // Decode common entities
-  s = s
-    .replace(ENTITY_NBSP_RE, " ")
-    .replace(ENTITY_AMP_RE, "&")
-    .replace(ENTITY_LT_RE, "<")
-    .replace(ENTITY_GT_RE, ">")
-    .replace(ENTITY_QUOT_RE, '"')
-    .replace(ENTITY_APOS_RE, "'")
-    .replace(ENTITY_DEC_RE, (_, n: string) => {
-      try {
-        return String.fromCodePoint(Number.parseInt(n, 10));
-      } catch {
-        return "";
-      }
-    })
-    .replace(ENTITY_HEX_RE, (_, h: string) => {
-      try {
-        return String.fromCodePoint(Number.parseInt(h, 16));
-      } catch {
-        return "";
-      }
-    });
-  // Collapse runs of blank lines and trim each line
-  s = s
-    .split(NEWLINE_SPLIT_RE)
-    .map((ln) => ln.replace(SPACE_TAB_RUN_RE, " ").trim())
-    .filter(Boolean)
-    .join("\n");
-  return s;
+	if (!html) {
+		return "";
+	}
+	let s = String(html);
+	// Drop script/style contents entirely
+	s = s.replace(SCRIPT_BLOCK_RE, " ");
+	s = s.replace(STYLE_BLOCK_RE, " ");
+	// HTML comments
+	s = s.replace(HTML_COMMENT_RE, " ");
+	// Line-break tags
+	s = s.replace(BR_TAG_RE, "\n");
+	// Block-level close tags — insert newline before stripping
+	s = s.replace(BLOCK_CLOSE_TAG_RE, "\n");
+	// Strip remaining tags
+	s = s.replace(HTML_TAG_RE, "");
+	// Decode common entities
+	s = s
+		.replace(ENTITY_NBSP_RE, " ")
+		.replace(ENTITY_AMP_RE, "&")
+		.replace(ENTITY_LT_RE, "<")
+		.replace(ENTITY_GT_RE, ">")
+		.replace(ENTITY_QUOT_RE, '"')
+		.replace(ENTITY_APOS_RE, "'")
+		.replace(ENTITY_DEC_RE, (_, n: string) => {
+			try {
+				return String.fromCodePoint(Number.parseInt(n, 10));
+			} catch {
+				return "";
+			}
+		})
+		.replace(ENTITY_HEX_RE, (_, h: string) => {
+			try {
+				return String.fromCodePoint(Number.parseInt(h, 16));
+			} catch {
+				return "";
+			}
+		});
+	// Collapse runs of blank lines and trim each line
+	s = s
+		.split(NEWLINE_SPLIT_RE)
+		.map((ln) => ln.replace(SPACE_TAB_RUN_RE, " ").trim())
+		.filter(Boolean)
+		.join("\n");
+	return s;
 }
 
 /**
@@ -439,26 +482,30 @@ export function stripHtmlToText(html: string | null | undefined): string {
  * IMAP may return headers as a Buffer; References is a whitespace-separated
  * list of <id@host> tokens, possibly wrapped across lines.
  */
-export function parseReferencesHeader(rawHeaders: Buffer | string | null | undefined): string[] {
-  if (!rawHeaders) {
-    return [];
-  }
-  const text = Buffer.isBuffer(rawHeaders) ? rawHeaders.toString("utf8") : String(rawHeaders);
-  // Unfold: collapse CRLF+WSP into a single space
-  const unfolded = text.replace(HEADER_FOLD_RE, " ");
-  // Find the References header value (case-insensitive)
-  const match = REFERENCES_HEADER_RE.exec(unfolded);
-  if (!match?.[1]) {
-    return [];
-  }
-  const [, value] = match;
-  const ids: string[] = [];
-  let m: RegExpExecArray | null = ANGLE_ID_RE.exec(value);
-  while (m !== null) {
-    ids.push(`<${m[1]}>`);
-    m = ANGLE_ID_RE.exec(value);
-  }
-  return ids;
+export function parseReferencesHeader(
+	rawHeaders: Buffer | string | null | undefined,
+): string[] {
+	if (!rawHeaders) {
+		return [];
+	}
+	const text = Buffer.isBuffer(rawHeaders)
+		? rawHeaders.toString("utf8")
+		: String(rawHeaders);
+	// Unfold: collapse CRLF+WSP into a single space
+	const unfolded = text.replace(HEADER_FOLD_RE, " ");
+	// Find the References header value (case-insensitive)
+	const match = REFERENCES_HEADER_RE.exec(unfolded);
+	if (!match?.[1]) {
+		return [];
+	}
+	const [, value] = match;
+	const ids: string[] = [];
+	let m: RegExpExecArray | null = ANGLE_ID_RE.exec(value);
+	while (m !== null) {
+		ids.push(`<${m[1]}>`);
+		m = ANGLE_ID_RE.exec(value);
+	}
+	return ids;
 }
 
 /**
@@ -467,50 +514,54 @@ export function parseReferencesHeader(rawHeaders: Buffer | string | null | undef
  * whitespace. Returns a trimmed string up to `maxChars`.
  */
 export function makeSnippet(
-  buffer: Buffer | null | undefined,
-  encoding: string | null,
-  charset: string | null,
-  maxChars: number = SNIPPET_MAX_CHARS
+	buffer: Buffer | null | undefined,
+	encoding: string | null,
+	charset: string | null,
+	maxChars: number = SNIPPET_MAX_CHARS,
 ): string | null {
-  if (!buffer?.length) {
-    return null;
-  }
-  let decoded: string;
-  try {
-    const enc = (encoding || "").toLowerCase();
-    const cs = (charset || "utf8") as BufferEncoding;
-    if (enc === "base64") {
-      decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-    } else if (enc === "quoted-printable") {
-      // Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
-      const raw = buffer.toString("ascii");
-      const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-      decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
-    } else {
-      decoded = buffer.toString(cs);
-    }
-  } catch {
-    decoded = buffer.toString("utf8");
-  }
-  // Drop lines that are obviously quoted replies ("> ...") and signature separators
-  const collapsed = decoded
-    .split(NEWLINE_SPLIT_RE)
-    .filter((ln) => !QUOTED_REPLY_RE.test(ln))
-    .join(" ")
-    .replace(WHITESPACE_RUN_RE, " ")
-    .trim();
-  // A snippet is a lossy, derived preview — not the canonical body (that lives
-  // in message_bodies, blob-routed when control-rich). Strip the forbidden
-  // control characters that JS `\s` whitespace-collapse misses (BEL, ESC, DEL,
-  // and the C1 range), so the messages.snippet field always satisfies the
-  // pdppSafeText brand instead of failing schema validation and dropping the
-  // whole message record as a terminal source gap. Uses the same predicate the
-  // brand enforces, so the result is provably safe.
-  const cleaned = stripForbiddenControlChars(collapsed).trim();
-  if (!cleaned) {
-    return null;
-  }
-  return cleaned.length > maxChars ? cleaned.slice(0, maxChars).trim() : cleaned;
+	if (!buffer?.length) {
+		return null;
+	}
+	let decoded: string;
+	try {
+		const enc = (encoding || "").toLowerCase();
+		const cs = (charset || "utf8") as BufferEncoding;
+		if (enc === "base64") {
+			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
+		} else if (enc === "quoted-printable") {
+			// Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
+			const raw = buffer.toString("ascii");
+			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
+			decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) =>
+				String.fromCharCode(Number.parseInt(h, 16)),
+			);
+		} else {
+			decoded = buffer.toString(cs);
+		}
+	} catch {
+		decoded = buffer.toString("utf8");
+	}
+	// Drop lines that are obviously quoted replies ("> ...") and signature separators
+	const collapsed = decoded
+		.split(NEWLINE_SPLIT_RE)
+		.filter((ln) => !QUOTED_REPLY_RE.test(ln))
+		.join(" ")
+		.replace(WHITESPACE_RUN_RE, " ")
+		.trim();
+	// A snippet is a lossy, derived preview — not the canonical body (that lives
+	// in message_bodies, blob-routed when control-rich). Strip the forbidden
+	// control characters that JS `\s` whitespace-collapse misses (BEL, ESC, DEL,
+	// and the C1 range), so the messages.snippet field always satisfies the
+	// pdppSafeText brand instead of failing schema validation and dropping the
+	// whole message record as a terminal source gap. Uses the same predicate the
+	// brand enforces, so the result is provably safe.
+	const cleaned = stripForbiddenControlChars(collapsed).trim();
+	if (!cleaned) {
+		return null;
+	}
+	return cleaned.length > maxChars
+		? cleaned.slice(0, maxChars).trim()
+		: cleaned;
 }
 
 // ─── Thread aggregation ────────────────────────────────────────────────
@@ -522,71 +573,79 @@ export function makeSnippet(
  * reference. Callers drive the Map keyed by threadId.
  */
 export function updateThreadAggregate(
-  existing: ThreadAggregate | undefined,
-  params: {
-    flagsArr: readonly string[];
-    hasAttachments: boolean;
-    labels: readonly string[];
-    participants: readonly string[];
-    receivedAt: string;
-    subject: string | null;
-    threadId: string;
-  }
+	existing: ThreadAggregate | undefined,
+	params: {
+		flagsArr: readonly string[];
+		hasAttachments: boolean;
+		labels: readonly string[];
+		participants: readonly string[];
+		receivedAt: string;
+		subject: string | null;
+		threadId: string;
+	},
 ): ThreadAggregate {
-  const agg: ThreadAggregate = existing ?? {
-    id: params.threadId,
-    subject: params.subject,
-    participant_set: new Set<string>(),
-    message_count: 0,
-    first_message_date: params.receivedAt,
-    last_message_date: params.receivedAt,
-    labels_set: new Set<string>(),
-    unread_count: 0,
-    flagged_count: 0,
-    has_attachments: false,
-  };
-  agg.message_count += 1;
-  agg.first_message_date = params.receivedAt < agg.first_message_date ? params.receivedAt : agg.first_message_date;
-  agg.last_message_date = params.receivedAt > agg.last_message_date ? params.receivedAt : agg.last_message_date;
-  for (const p of params.participants) {
-    agg.participant_set.add(p);
-  }
-  for (const l of params.labels) {
-    agg.labels_set.add(l);
-  }
-  if (params.hasAttachments) {
-    agg.has_attachments = true;
-  }
-  if (!params.flagsArr.includes("\\Seen")) {
-    agg.unread_count += 1;
-  }
-  if (params.flagsArr.includes("\\Flagged")) {
-    agg.flagged_count += 1;
-  }
-  if (!agg.subject && params.subject) {
-    agg.subject = params.subject;
-  }
-  return agg;
+	const agg: ThreadAggregate = existing ?? {
+		id: params.threadId,
+		subject: params.subject,
+		participant_set: new Set<string>(),
+		message_count: 0,
+		first_message_date: params.receivedAt,
+		last_message_date: params.receivedAt,
+		labels_set: new Set<string>(),
+		unread_count: 0,
+		flagged_count: 0,
+		has_attachments: false,
+	};
+	agg.message_count += 1;
+	agg.first_message_date =
+		params.receivedAt < agg.first_message_date
+			? params.receivedAt
+			: agg.first_message_date;
+	agg.last_message_date =
+		params.receivedAt > agg.last_message_date
+			? params.receivedAt
+			: agg.last_message_date;
+	for (const p of params.participants) {
+		agg.participant_set.add(p);
+	}
+	for (const l of params.labels) {
+		agg.labels_set.add(l);
+	}
+	if (params.hasAttachments) {
+		agg.has_attachments = true;
+	}
+	if (!params.flagsArr.includes("\\Seen")) {
+		agg.unread_count += 1;
+	}
+	if (params.flagsArr.includes("\\Flagged")) {
+		agg.flagged_count += 1;
+	}
+	if (!agg.subject && params.subject) {
+		agg.subject = params.subject;
+	}
+	return agg;
 }
 
-export function buildThreadRecord(agg: ThreadAggregate): Record<string, unknown> {
-  // Sort the participant + label arrays so the emitted record's shape is
-  // deterministic across runs. IMAP doesn't guarantee identical message
-  // iteration order across `1:*` fetches; without sorting, Set insertion
-  // order would oscillate and the per-thread fingerprint would mark
-  // every thread as changed on every run.
-  return {
-    id: agg.id,
-    subject: agg.subject,
-    participant_emails: [...agg.participant_set].sort(),
-    message_count: agg.message_count,
-    first_message_date: agg.first_message_date,
-    last_message_date: agg.last_message_date,
-    labels: [...agg.labels_set].sort(),
-    unread_count: agg.unread_count,
-    flagged_count: agg.flagged_count,
-    has_attachments: agg.has_attachments,
-  };
+export function buildThreadRecord(
+	agg: ThreadAggregate,
+): Record<string, unknown> {
+	// Sort the participant + label arrays so the emitted record's shape is
+	// deterministic across runs. IMAP doesn't guarantee identical message
+	// iteration order across `1:*` fetches; without sorting, Set insertion
+	// order would oscillate and the per-thread fingerprint would mark
+	// every thread as changed on every run.
+	return {
+		id: agg.id,
+		subject: agg.subject,
+		participant_emails: [...agg.participant_set].sort(),
+		message_count: agg.message_count,
+		first_message_date: agg.first_message_date,
+		last_message_date: agg.last_message_date,
+		labels: [...agg.labels_set].sort(),
+		unread_count: agg.unread_count,
+		flagged_count: agg.flagged_count,
+		has_attachments: agg.has_attachments,
+	};
 }
 
 /**
@@ -606,7 +665,7 @@ export function buildThreadRecord(agg: ThreadAggregate): Record<string, unknown>
  * force a one-time re-emit of every thread.
  */
 export function buildThreadFingerprint(agg: ThreadAggregate): string {
-  return recordFingerprint(buildThreadRecord(agg));
+	return recordFingerprint(buildThreadRecord(agg));
 }
 
 // ─── Body selection + record builders ───────────────────────────────────
@@ -617,14 +676,14 @@ export function buildThreadFingerprint(agg: ThreadAggregate): string {
  * how to decode the returned buffers. Pure: no IMAP IO.
  */
 export interface BodyPartSelection {
-  htmlCharset: string | null;
-  htmlEncoding: string | null;
-  htmlLeaf: MessageStructureObject | null;
-  htmlPart: string | null;
-  plainCharset: string | null;
-  plainEncoding: string | null;
-  plainLeaf: MessageStructureObject | null;
-  plainPart: string | null;
+	htmlCharset: string | null;
+	htmlEncoding: string | null;
+	htmlLeaf: MessageStructureObject | null;
+	htmlPart: string | null;
+	plainCharset: string | null;
+	plainEncoding: string | null;
+	plainLeaf: MessageStructureObject | null;
+	plainPart: string | null;
 }
 
 /**
@@ -633,21 +692,24 @@ export interface BodyPartSelection {
  * charsets. htmlPart is only resolved when wantBodies is true because we
  * otherwise skip the HTML fetch entirely (the snippet comes from text/plain).
  */
-export function selectBodyParts(structure: MessageStructureObject | undefined, wantBodies: boolean): BodyPartSelection {
-  const plainPart = findTextPlainPart(structure);
-  const htmlPart = wantBodies ? findTextHtmlPart(structure) : null;
-  const plainLeaf = plainPart ? findLeafByPath(structure, plainPart) : null;
-  const htmlLeaf = htmlPart ? findLeafByPath(structure, htmlPart) : null;
-  return {
-    plainPart,
-    htmlPart,
-    plainLeaf,
-    htmlLeaf,
-    plainEncoding: plainLeaf?.encoding ?? null,
-    htmlEncoding: htmlLeaf?.encoding ?? null,
-    plainCharset: plainLeaf?.parameters?.charset ?? null,
-    htmlCharset: htmlLeaf?.parameters?.charset ?? null,
-  };
+export function selectBodyParts(
+	structure: MessageStructureObject | undefined,
+	wantBodies: boolean,
+): BodyPartSelection {
+	const plainPart = findTextPlainPart(structure);
+	const htmlPart = wantBodies ? findTextHtmlPart(structure) : null;
+	const plainLeaf = plainPart ? findLeafByPath(structure, plainPart) : null;
+	const htmlLeaf = htmlPart ? findLeafByPath(structure, htmlPart) : null;
+	return {
+		plainPart,
+		htmlPart,
+		plainLeaf,
+		htmlLeaf,
+		plainEncoding: plainLeaf?.encoding ?? null,
+		htmlEncoding: htmlLeaf?.encoding ?? null,
+		plainCharset: plainLeaf?.parameters?.charset ?? null,
+		htmlCharset: htmlLeaf?.parameters?.charset ?? null,
+	};
 }
 
 /**
@@ -655,60 +717,67 @@ export function selectBodyParts(structure: MessageStructureObject | undefined, w
  * falling back to html_stripped when text/plain is absent. Mirrors the
  * original in-loop branching exactly so the record shape is unchanged.
  */
-export function classifyBodySource(bodyTextFull: string | null, bodyHtmlFull: string | null): ClassifiedBody {
-  if (bodyTextFull?.length) {
-    return { bodyText: bodyTextFull, bodySource: "text_plain" };
-  }
-  if (bodyHtmlFull?.length) {
-    const stripped = stripHtmlToText(bodyHtmlFull);
-    if (stripped) {
-      return { bodyText: stripped, bodySource: "html_stripped" };
-    }
-    return { bodyText: null, bodySource: "text_html" };
-  }
-  return { bodyText: null, bodySource: "empty" };
+export function classifyBodySource(
+	bodyTextFull: string | null,
+	bodyHtmlFull: string | null,
+): ClassifiedBody {
+	if (bodyTextFull?.length) {
+		return { bodyText: bodyTextFull, bodySource: "text_plain" };
+	}
+	if (bodyHtmlFull?.length) {
+		const stripped = stripHtmlToText(bodyHtmlFull);
+		if (stripped) {
+			return { bodyText: stripped, bodySource: "html_stripped" };
+		}
+		return { bodyText: null, bodySource: "text_html" };
+	}
+	return { bodyText: null, bodySource: "empty" };
 }
 
 function toCleanString(v: unknown): string | null {
-  if (v === null || v === undefined) {
-    return null;
-  }
-  const s = typeof v === "string" ? v : String(v);
-  const safe = safeTextPreview(s);
-  return safe.kind === "text" ? s : null;
+	if (v === null || v === undefined) {
+		return null;
+	}
+	const s = typeof v === "string" ? v : String(v);
+	const safe = safeTextPreview(s);
+	return safe.kind === "text" ? s : null;
 }
 
 export interface CanonicalBodyBlobCandidate {
-  content: Buffer;
-  jsonPath: "/body_html" | "/body_text";
-  mimeType: "text/html" | "text/plain";
+	content: Buffer;
+	jsonPath: "/body_html" | "/body_text";
+	mimeType: "text/html" | "text/plain";
 }
 
 /** Return exact UTF-8 bytes for body fields that cannot remain in record_json. */
 export function canonicalBodyBlobCandidates(params: {
-  bodyHtmlFull: string | null;
-  bodyTextFull: string | null;
+	bodyHtmlFull: string | null;
+	bodyTextFull: string | null;
 }): CanonicalBodyBlobCandidate[] {
-  const candidates: CanonicalBodyBlobCandidate[] = [];
-  for (const [value, jsonPath, mimeType] of [
-    [params.bodyTextFull, "/body_text", "text/plain"],
-    [params.bodyHtmlFull, "/body_html", "text/html"],
-  ] as const) {
-    if (typeof value === "string" && safeTextPreview(value).kind === "binary") {
-      candidates.push({ content: Buffer.from(value, "utf8"), jsonPath, mimeType });
-    }
-  }
-  return candidates;
+	const candidates: CanonicalBodyBlobCandidate[] = [];
+	for (const [value, jsonPath, mimeType] of [
+		[params.bodyTextFull, "/body_text", "text/plain"],
+		[params.bodyHtmlFull, "/body_html", "text/html"],
+	] as const) {
+		if (typeof value === "string" && safeTextPreview(value).kind === "binary") {
+			candidates.push({
+				content: Buffer.from(value, "utf8"),
+				jsonPath,
+				mimeType,
+			});
+		}
+	}
+	return candidates;
 }
 
 function truncateField(value: string | null, max: number): string | null {
-  if (value === null) {
-    return toCleanString(value);
-  }
-  if (value.length > max) {
-    return toCleanString(`${value.slice(0, max)}…[truncated]`);
-  }
-  return toCleanString(value);
+	if (value === null) {
+		return toCleanString(value);
+	}
+	if (value.length > max) {
+		return toCleanString(`${value.slice(0, max)}…[truncated]`);
+	}
+	return toCleanString(value);
 }
 
 /**
@@ -726,28 +795,33 @@ function truncateField(value: string | null, max: number): string | null {
  * to ingest time. Mirrors the same denormalization on `attachments`.
  */
 export function buildMessageBodyRecord(params: {
-  bodyHtmlFull: string | null;
-  bodyTextFull: string | null;
-  gmMsgid: string;
-  htmlCharset: string | null;
-  receivedAt: string;
-  textCharset: string | null;
+	bodyHtmlFull: string | null;
+	bodyTextFull: string | null;
+	gmMsgid: string;
+	htmlCharset: string | null;
+	receivedAt: string;
+	textCharset: string | null;
 }): Record<string, unknown> {
-  const { bodyText, bodySource } = classifyBodySource(params.bodyTextFull, params.bodyHtmlFull);
-  return {
-    id: params.gmMsgid,
-    message_id: params.gmMsgid,
-    message_received_at: params.receivedAt,
-    body_text: truncateField(bodyText, MAX_BODY_FIELD_CHARS),
-    body_html: truncateField(params.bodyHtmlFull, MAX_BODY_FIELD_CHARS),
-    body_text_bytes: bodyText ? Buffer.byteLength(bodyText, "utf8") : null,
-    body_html_bytes: params.bodyHtmlFull ? Buffer.byteLength(params.bodyHtmlFull, "utf8") : null,
-    body_source: bodySource satisfies BodySource,
-    // Language detection is out of scope for v1; emit null so consumers
-    // know the field exists but wasn't computed.
-    content_languages: null,
-    charset: params.textCharset || params.htmlCharset || null,
-  };
+	const { bodyText, bodySource } = classifyBodySource(
+		params.bodyTextFull,
+		params.bodyHtmlFull,
+	);
+	return {
+		id: params.gmMsgid,
+		message_id: params.gmMsgid,
+		message_received_at: params.receivedAt,
+		body_text: truncateField(bodyText, MAX_BODY_FIELD_CHARS),
+		body_html: truncateField(params.bodyHtmlFull, MAX_BODY_FIELD_CHARS),
+		body_text_bytes: bodyText ? Buffer.byteLength(bodyText, "utf8") : null,
+		body_html_bytes: params.bodyHtmlFull
+			? Buffer.byteLength(params.bodyHtmlFull, "utf8")
+			: null,
+		body_source: bodySource satisfies BodySource,
+		// Language detection is out of scope for v1; emit null so consumers
+		// know the field exists but wasn't computed.
+		content_languages: null,
+		charset: params.textCharset || params.htmlCharset || null,
+	};
 }
 
 /**
@@ -755,45 +829,45 @@ export function buildMessageBodyRecord(params: {
  * an envelope + already-parsed flags/labels/attachments — no IMAP IO.
  */
 export function buildMessageRecord(params: {
-  attachmentsCount: number;
-  dateHeader: string | null;
-  envelope: MessageEnvelopeObject;
-  flagsArr: readonly string[];
-  gmMsgid: string;
-  gmThrid: string;
-  labels: readonly string[];
-  rawHeaders: Buffer | string | null | undefined;
-  receivedAt: string;
-  sizeBytes: number | null;
-  snippet: string | null;
+	attachmentsCount: number;
+	dateHeader: string | null;
+	envelope: MessageEnvelopeObject;
+	flagsArr: readonly string[];
+	gmMsgid: string;
+	gmThrid: string;
+	labels: readonly string[];
+	rawHeaders: Buffer | string | null | undefined;
+	receivedAt: string;
+	sizeBytes: number | null;
+	snippet: string | null;
 }): Record<string, unknown> {
-  const env = params.envelope;
-  const fromAddr = env.from?.[0];
-  const references = parseReferencesHeader(params.rawHeaders);
-  return {
-    id: params.gmMsgid,
-    thread_id: params.gmThrid,
-    subject: env.subject || null,
-    from_name: fromAddr?.name || null,
-    from_email: fromAddr?.address || null,
-    to: addressListToArray(env.to),
-    cc: addressListToArray(env.cc),
-    bcc: addressListToArray(env.bcc),
-    reply_to: addressListToArray(env.replyTo),
-    date: params.dateHeader,
-    received_at: params.receivedAt,
-    message_id: env.messageId || null,
-    in_reply_to: env.inReplyTo || null,
-    references,
-    size_bytes: params.sizeBytes,
-    labels: [...params.labels],
-    is_draft: params.flagsArr.includes("\\Draft"),
-    is_flagged: params.flagsArr.includes("\\Flagged"),
-    is_seen: params.flagsArr.includes("\\Seen"),
-    is_answered: params.flagsArr.includes("\\Answered"),
-    has_attachments: params.attachmentsCount > 0,
-    snippet: params.snippet,
-  };
+	const env = params.envelope;
+	const fromAddr = env.from?.[0];
+	const references = parseReferencesHeader(params.rawHeaders);
+	return {
+		id: params.gmMsgid,
+		thread_id: params.gmThrid,
+		subject: env.subject || null,
+		from_name: fromAddr?.name || null,
+		from_email: fromAddr?.address || null,
+		to: addressListToArray(env.to),
+		cc: addressListToArray(env.cc),
+		bcc: addressListToArray(env.bcc),
+		reply_to: addressListToArray(env.replyTo),
+		date: params.dateHeader,
+		received_at: params.receivedAt,
+		message_id: env.messageId || null,
+		in_reply_to: env.inReplyTo || null,
+		references,
+		size_bytes: params.sizeBytes,
+		labels: [...params.labels],
+		is_draft: params.flagsArr.includes("\\Draft"),
+		is_flagged: params.flagsArr.includes("\\Flagged"),
+		is_seen: params.flagsArr.includes("\\Seen"),
+		is_answered: params.flagsArr.includes("\\Answered"),
+		has_attachments: params.attachmentsCount > 0,
+		snippet: params.snippet,
+	};
 }
 
 /**
@@ -802,64 +876,66 @@ export function buildMessageRecord(params: {
  * satisfy the schema-required field.
  */
 export function buildDeltaMessageRecord(params: {
-  flagsArr: readonly string[];
-  gmMsgid: string;
-  gmThrid: string;
-  labels: readonly string[];
-  receivedAtFallback: string;
+	flagsArr: readonly string[];
+	gmMsgid: string;
+	gmThrid: string;
+	labels: readonly string[];
+	receivedAtFallback: string;
 }): Record<string, unknown> {
-  return {
-    id: params.gmMsgid,
-    thread_id: params.gmThrid,
-    subject: null,
-    from_name: null,
-    from_email: null,
-    to: [],
-    cc: [],
-    bcc: [],
-    reply_to: [],
-    date: null,
-    received_at: params.receivedAtFallback,
-    message_id: null,
-    in_reply_to: null,
-    references: [],
-    size_bytes: null,
-    labels: [...params.labels],
-    is_draft: params.flagsArr.includes("\\Draft"),
-    is_flagged: params.flagsArr.includes("\\Flagged"),
-    is_seen: params.flagsArr.includes("\\Seen"),
-    is_answered: params.flagsArr.includes("\\Answered"),
-    has_attachments: false,
-    snippet: null,
-  };
+	return {
+		id: params.gmMsgid,
+		thread_id: params.gmThrid,
+		subject: null,
+		from_name: null,
+		from_email: null,
+		to: [],
+		cc: [],
+		bcc: [],
+		reply_to: [],
+		date: null,
+		received_at: params.receivedAtFallback,
+		message_id: null,
+		in_reply_to: null,
+		references: [],
+		size_bytes: null,
+		labels: [...params.labels],
+		is_draft: params.flagsArr.includes("\\Draft"),
+		is_flagged: params.flagsArr.includes("\\Flagged"),
+		is_seen: params.flagsArr.includes("\\Seen"),
+		is_answered: params.flagsArr.includes("\\Answered"),
+		has_attachments: false,
+		snippet: null,
+	};
 }
 
 /** Determine whether a received_at timestamp falls inside a since/until window. */
 export function isInTimeRange(
-  receivedAt: string,
-  range: { since?: string; until?: string } | null | undefined
+	receivedAt: string,
+	range: { since?: string; until?: string } | null | undefined,
 ): boolean {
-  if (!range) {
-    return true;
-  }
-  if (range.since && receivedAt < range.since) {
-    return false;
-  }
-  if (range.until && receivedAt >= range.until) {
-    return false;
-  }
-  return true;
+	if (!range) {
+		return true;
+	}
+	if (range.since && receivedAt < range.since) {
+		return false;
+	}
+	if (range.until && receivedAt >= range.until) {
+		return false;
+	}
+	return true;
 }
 
 /** Extract the envelope participants (from/to/cc) as a de-duped email list. */
-export function envelopeParticipants(env: MessageEnvelopeObject | undefined): string[] {
-  if (!env) {
-    return [];
-  }
-  const raw: Array<string | undefined> = [
-    env.from?.[0]?.address,
-    ...(env.to || []).map((a) => a.address),
-    ...(env.cc || []).map((a) => a.address),
-  ];
-  return raw.filter((a): a is string => typeof a === "string" && a.length > 0);
+export function envelopeParticipants(
+	env: MessageEnvelopeObject | undefined,
+): string[] {
+	if (!env) {
+		return [];
+	}
+	const raw: Array<string | undefined> = [
+		env.from?.[0]?.address,
+		...(env.to || []).map((a) => a.address),
+		...(env.cc || []).map((a) => a.address),
+	];
+	return raw.filter((a): a is string => typeof a === "string" && a.length > 0);
 }

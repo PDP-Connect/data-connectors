@@ -25,53 +25,61 @@ import pRetry, { AbortError } from "p-retry";
 import type { BrowserContext, Page } from "playwright";
 import { ensureAmazonSession } from "../../src/auto-login/amazon.ts";
 import {
-  type BrowserCollectContext,
-  type DetailGapMessage,
-  emitDetailCoverage,
-  nowIso,
-  politeDelay,
-  runConnector,
+	type BrowserCollectContext,
+	type DetailGapMessage,
+	emitDetailCoverage,
+	nowIso,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
-import { type FingerprintCursor, openFingerprintCursor, recordFingerprint } from "../../src/fingerprint-cursor.ts";
 import {
-  buildOrderItemRecord,
-  buildOrderRecord,
-  mergeOrderItems,
-  parseOrderDate,
-  parseOrderDetailDom,
-  parseOrdersListDom,
+	type FingerprintCursor,
+	openFingerprintCursor,
+	recordFingerprint,
+} from "../../src/fingerprint-cursor.ts";
+import {
+	buildOrderItemRecord,
+	buildOrderRecord,
+	mergeOrderItems,
+	parseOrderDate,
+	parseOrderDetailDom,
+	parseOrdersListDom,
 } from "./parsers.ts";
 import { listPageOrderShape, validateRecord } from "./schemas.ts";
-import type { ListPageDiagnostics, ListPageOrder, OrderDetail } from "./types.ts";
+import type {
+	ListPageDiagnostics,
+	ListPageOrder,
+	OrderDetail,
+} from "./types.ts";
 
 interface YearState {
-  frozen: boolean;
-  last_scraped: string;
-  order_count: number;
+	frozen: boolean;
+	last_scraped: string;
+	order_count: number;
 }
 
 interface YearsCursor {
-  [year: string]: YearState | undefined;
+	[year: string]: YearState | undefined;
 }
 
 interface OrdersStateShape {
-  /** Per-order fingerprint map (keyed by order id), excluding the
-   *  run-clock `fetched_at`. Sibling to `years` in the orders STATE
-   *  cursor. */
-  fingerprints?: Record<string, string>;
-  /** Order ids whose `order_items` detail has been durably hydrated by a
-   *  prior run, each mapped to the LIST-SURFACE fingerprint (see
-   *  `listSurfaceFingerprint`) observed at hydration time. Sibling to
-   *  `years`/`fingerprints` in the orders STATE cursor (order_items has no
-   *  STATE stream of its own — orders is the parent `state_stream`). Proof
-   *  is "detail durably emitted AND the list surface has not moved since" —
-   *  not permanent: an order whose list row changes (delivery status,
-   *  return/refund becoming visible) invalidates its entry and is
-   *  re-hydrated. NOT pruned, for the same partial-scan reason
-   *  `fingerprints` is not pruned: a frozen year's entries must stay valid
-   *  even though that year is no longer (re)visited. */
-  hydratedOrders?: Record<string, string>;
-  years?: YearsCursor;
+	/** Per-order fingerprint map (keyed by order id), excluding the
+	 *  run-clock `fetched_at`. Sibling to `years` in the orders STATE
+	 *  cursor. */
+	fingerprints?: Record<string, string>;
+	/** Order ids whose `order_items` detail has been durably hydrated by a
+	 *  prior run, each mapped to the LIST-SURFACE fingerprint (see
+	 *  `listSurfaceFingerprint`) observed at hydration time. Sibling to
+	 *  `years`/`fingerprints` in the orders STATE cursor (order_items has no
+	 *  STATE stream of its own — orders is the parent `state_stream`). Proof
+	 *  is "detail durably emitted AND the list surface has not moved since" —
+	 *  not permanent: an order whose list row changes (delivery status,
+	 *  return/refund becoming visible) invalidates its entry and is
+	 *  re-hydrated. NOT pruned, for the same partial-scan reason
+	 *  `fingerprints` is not pruned: a frozen year's entries must stay valid
+	 *  even though that year is no longer (re)visited. */
+	hydratedOrders?: Record<string, string>;
+	years?: YearsCursor;
 }
 
 /**
@@ -82,19 +90,21 @@ interface OrdersStateShape {
  * post-deploy run rebuilds the map and re-emits every re-scraped order
  * exactly once.
  */
-function readPriorOrderFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.orders ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+function readPriorOrderFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.orders ?? {}) as Record<string, unknown>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 /**
@@ -112,26 +122,28 @@ function readPriorOrderFingerprints(state: Record<string, unknown>): Map<string,
  * re-fetch, self-healing from that run onward. This mirrors the same
  * legacy-cursor tolerance `readPriorOrderFingerprints` already applies.
  */
-function readPriorHydratedOrders(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.orders ?? {}) as Record<string, unknown>;
-  const raw = streamState.hydratedOrders;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+function readPriorHydratedOrders(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.orders ?? {}) as Record<string, unknown>;
+	const raw = streamState.hydratedOrders;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 type EmptyListPageAction = "abort" | "terminal";
 
 interface EmptyListPageClassification {
-  action: EmptyListPageAction;
-  reason: string;
+	action: EmptyListPageAction;
+	reason: string;
 }
 
 // Navigation timeouts + pacing knobs
@@ -155,22 +167,34 @@ const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
 const SIGNIN_URL_RE = /\/ap\/(signin|challenge|mfa)/;
 const ORDERS_URL_RE = /\/your-orders|\/order-history/;
 const YEAR_VALUE_RE = /year-(\d{4})/;
-const DETAIL_URL_RE = /\/(?:gp\/your-account|fopo|uff\/your-account)\/order-details/;
+const DETAIL_URL_RE =
+	/\/(?:gp\/your-account|fopo|uff\/your-account)\/order-details/;
 export const AMAZON_NO_ORDERS_TEXT_PATTERN = String.raw`you have not placed any orders|no orders found|0\s+orders\s+placed\s+in|looks like you didn['’]t place an order in`;
 
-export type AmazonDetailGapReason = "retry_exhausted" | "temporary_unavailable" | "upstream_pressure";
+export type AmazonDetailGapReason =
+	| "retry_exhausted"
+	| "temporary_unavailable"
+	| "upstream_pressure";
 
 type DetailFailureKind =
-  | "deferred_budget"
-  | "navigation_retry_exhausted"
-  | "parse_missing"
-  | "redirected_non_detail"
-  | "session_repair_required";
+	| "deferred_budget"
+	| "navigation_retry_exhausted"
+	| "parse_missing"
+	| "redirected_non_detail"
+	| "session_repair_required";
 
 export type DetailFetchResult =
-  | { detail: OrderDetail; status: "hydrated" }
-  | { failureKind: DetailFailureKind; reason: AmazonDetailGapReason; status: "deferred" }
-  | { failureKind: DetailFailureKind; reason: AmazonDetailGapReason; status: "failed" };
+	| { detail: OrderDetail; status: "hydrated" }
+	| {
+			failureKind: DetailFailureKind;
+			reason: AmazonDetailGapReason;
+			status: "deferred";
+	  }
+	| {
+			failureKind: DetailFailureKind;
+			reason: AmazonDetailGapReason;
+			status: "failed";
+	  };
 
 /**
  * Connector-neutral recovery class for one Amazon detail-attempt outcome.
@@ -200,25 +224,27 @@ export type DetailFetchResult =
  *                                 connector itself must be fixed for.
  */
 export type AmazonRecoveryClass =
-  | "run_cap_deferred"
-  | "transient_no_progress"
-  | "provider_pressure"
-  | "owner_repair_required"
-  | "connector_defect";
+	| "run_cap_deferred"
+	| "transient_no_progress"
+	| "provider_pressure"
+	| "owner_repair_required"
+	| "connector_defect";
 
-export function reasonForDetailFailure(kind: DetailFailureKind): AmazonDetailGapReason {
-  switch (kind) {
-    case "navigation_retry_exhausted":
-      return "retry_exhausted";
-    case "deferred_budget":
-      return "retry_exhausted";
-    case "parse_missing":
-    case "redirected_non_detail":
-    case "session_repair_required":
-      return "temporary_unavailable";
-    default:
-      return "temporary_unavailable";
-  }
+export function reasonForDetailFailure(
+	kind: DetailFailureKind,
+): AmazonDetailGapReason {
+	switch (kind) {
+		case "navigation_retry_exhausted":
+			return "retry_exhausted";
+		case "deferred_budget":
+			return "retry_exhausted";
+		case "parse_missing":
+		case "redirected_non_detail":
+		case "session_repair_required":
+			return "temporary_unavailable";
+		default:
+			return "temporary_unavailable";
+	}
 }
 
 /**
@@ -233,108 +259,116 @@ export function reasonForDetailFailure(kind: DetailFailureKind): AmazonDetailGap
  * terminal-gap classifier), not a per-attempt connector call. See the recovery
  * governor design D4/D10 and the runtime dependency noted in the change report.
  */
-export function classifyAmazonDetailFailure(kind: DetailFailureKind): AmazonRecoveryClass {
-  switch (kind) {
-    case "deferred_budget":
-      return "run_cap_deferred";
-    case "session_repair_required":
-      return "owner_repair_required";
-    case "navigation_retry_exhausted":
-    case "parse_missing":
-    case "redirected_non_detail":
-      return "transient_no_progress";
-    default:
-      return "transient_no_progress";
-  }
+export function classifyAmazonDetailFailure(
+	kind: DetailFailureKind,
+): AmazonRecoveryClass {
+	switch (kind) {
+		case "deferred_budget":
+			return "run_cap_deferred";
+		case "session_repair_required":
+			return "owner_repair_required";
+		case "navigation_retry_exhausted":
+		case "parse_missing":
+		case "redirected_non_detail":
+			return "transient_no_progress";
+		default:
+			return "transient_no_progress";
+	}
 }
 
 function classForDetailFailure(kind: DetailFailureKind): string {
-  return classifyAmazonDetailFailure(kind);
+	return classifyAmazonDetailFailure(kind);
 }
 
 export async function readPageContentWithin(
-  page: Pick<Page, "content">,
-  timeoutMs = PAGE_CONTENT_TIMEOUT_MS
+	page: Pick<Page, "content">,
+	timeoutMs = PAGE_CONTENT_TIMEOUT_MS,
 ): Promise<string> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      page.content(),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`page_content_timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	try {
+		return await Promise.race([
+			page.content(),
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error(`page_content_timeout after ${timeoutMs}ms`));
+				}, timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) {
+			clearTimeout(timer);
+		}
+	}
 }
 
 // ─── Session probes ──────────────────────────────────────────────────────
 
 async function deepSessionCheck(page: Page): Promise<boolean> {
-  await page.goto("https://www.amazon.com/your-orders/orders", {
-    waitUntil: "domcontentloaded",
-    timeout: NAV_TIMEOUT_MS,
-  });
-  // Wait for either the orders page to render or a sign-in form (both are
-  // valid post-nav states; we branch on them).
-  await page
-    .locator('form[name="signIn"], #orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"]')
-    .first()
-    .waitFor({ state: "attached", timeout: DEEP_PROBE_WAIT_MS })
-    .catch((): undefined => undefined);
-  const url = page.url();
-  if (SIGNIN_URL_RE.test(url)) {
-    return false;
-  }
-  const loginForm = await page
-    .locator('form[name="signIn"]')
-    .first()
-    .isVisible()
-    .catch((): boolean => false);
-  if (loginForm) {
-    return false;
-  }
-  return ORDERS_URL_RE.test(url);
+	await page.goto("https://www.amazon.com/your-orders/orders", {
+		waitUntil: "domcontentloaded",
+		timeout: NAV_TIMEOUT_MS,
+	});
+	// Wait for either the orders page to render or a sign-in form (both are
+	// valid post-nav states; we branch on them).
+	await page
+		.locator(
+			'form[name="signIn"], #orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"]',
+		)
+		.first()
+		.waitFor({ state: "attached", timeout: DEEP_PROBE_WAIT_MS })
+		.catch((): undefined => undefined);
+	const url = page.url();
+	if (SIGNIN_URL_RE.test(url)) {
+		return false;
+	}
+	const loginForm = await page
+		.locator('form[name="signIn"]')
+		.first()
+		.isVisible()
+		.catch((): boolean => false);
+	if (loginForm) {
+		return false;
+	}
+	return ORDERS_URL_RE.test(url);
 }
 
 // ─── Year discovery & pagination ─────────────────────────────────────────
 
 async function discoverYears(page: Page): Promise<number[]> {
-  // Try select#time-filter first, then link patterns.
-  const fromSelect = await page
-    .evaluate((): string[] => {
-      const sel =
-        document.querySelector<HTMLSelectElement>("select#time-filter") ||
-        document.querySelector<HTMLSelectElement>('select[name="timeFilter"]');
-      if (!sel) {
-        return [];
-      }
-      return [...sel.options].map((o) => o.value).filter(Boolean);
-    })
-    .catch((): string[] => []);
-  const fromLinks = await page
-    .evaluate((): string[] => {
-      const links = [...document.querySelectorAll('a[href*="timeFilter=year-"]')];
-      return links.map((a) => a.getAttribute("href")).filter((v): v is string => Boolean(v));
-    })
-    .catch((): string[] => []);
-  const years = new Set<number>();
-  for (const v of [...fromSelect, ...fromLinks]) {
-    const m = YEAR_VALUE_RE.exec(v);
-    if (m?.[1]) {
-      years.add(Number(m[1]));
-    }
-  }
-  const current = new Date().getFullYear();
-  if (years.size === 0) {
-    years.add(current);
-  }
-  return [...years].sort((a, b) => b - a); // newest first
+	// Try select#time-filter first, then link patterns.
+	const fromSelect = await page
+		.evaluate((): string[] => {
+			const sel =
+				document.querySelector<HTMLSelectElement>("select#time-filter") ||
+				document.querySelector<HTMLSelectElement>('select[name="timeFilter"]');
+			if (!sel) {
+				return [];
+			}
+			return [...sel.options].map((o) => o.value).filter(Boolean);
+		})
+		.catch((): string[] => []);
+	const fromLinks = await page
+		.evaluate((): string[] => {
+			const links = [
+				...document.querySelectorAll('a[href*="timeFilter=year-"]'),
+			];
+			return links
+				.map((a) => a.getAttribute("href"))
+				.filter((v): v is string => Boolean(v));
+		})
+		.catch((): string[] => []);
+	const years = new Set<number>();
+	for (const v of [...fromSelect, ...fromLinks]) {
+		const m = YEAR_VALUE_RE.exec(v);
+		if (m?.[1]) {
+			years.add(Number(m[1]));
+		}
+	}
+	const current = new Date().getFullYear();
+	if (years.size === 0) {
+		years.add(current);
+	}
+	return [...years].sort((a, b) => b - a); // newest first
 }
 
 // ─── Per-order detail fetch ──────────────────────────────────────────────
@@ -362,97 +396,102 @@ async function discoverYears(page: Page): Promise<number[]> {
 // Cancelled orders have [data-component="cancelled"] with "This order has
 // been cancelled" text and NO other structural fields. We detect and
 // emit status_detail only.
-async function fetchOrderDetail(page: Page, orderId: string): Promise<DetailFetchResult> {
-  const url = `https://www.amazon.com/gp/your-account/order-details?orderID=${orderId}`;
+async function fetchOrderDetail(
+	page: Page,
+	orderId: string,
+): Promise<DetailFetchResult> {
+	const url = `https://www.amazon.com/gp/your-account/order-details?orderID=${orderId}`;
 
-  // Retry transient navigation failures (network, timeout, 5xx) with
-  // exponential backoff. AbortError bypasses retries — we use it for the
-  // "Amazon redirected us to a non-detail URL" signal. Valid alternate
-  // detail surfaces (for example /uff/... order cards) are handled below.
-  try {
-    await pRetry(
-      async (): Promise<void> => {
-        await page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: NAV_TIMEOUT_MS,
-        });
-        // Wait for the known detail page signatures. waitForSelector replaces
-        // `await sleep(800)` — real sync primitive instead of a pacing guess.
-        await page.waitForSelector(
-          [
-            "#orderDetails",
-            '[data-component="cancelled"]',
-            "#f3_food_ItemList",
-            "#f3_food_WfmInStoreOrderSummary",
-            ".ufpo-item-list-table",
-            "#ufpo-order-status-container",
-            ".js-order-card",
-          ].join(", "),
-          {
-            timeout: DETAIL_WAIT_MS,
-            state: "attached",
-          }
-        );
-      },
-      {
-        retries: RETRY_COUNT,
-        minTimeout: RETRY_MIN_TIMEOUT_MS,
-        factor: RETRY_FACTOR,
-        shouldRetry: ({ error }): boolean => !(error instanceof AbortError) && RETRYABLE_ERROR_RE.test(error.message),
-      }
-    );
-  } catch {
-    return {
-      failureKind: "navigation_retry_exhausted",
-      reason: reasonForDetailFailure("navigation_retry_exhausted"),
-      status: "failed",
-    };
-  }
+	// Retry transient navigation failures (network, timeout, 5xx) with
+	// exponential backoff. AbortError bypasses retries — we use it for the
+	// "Amazon redirected us to a non-detail URL" signal. Valid alternate
+	// detail surfaces (for example /uff/... order cards) are handled below.
+	try {
+		await pRetry(
+			async (): Promise<void> => {
+				await page.goto(url, {
+					waitUntil: "domcontentloaded",
+					timeout: NAV_TIMEOUT_MS,
+				});
+				// Wait for the known detail page signatures. waitForSelector replaces
+				// `await sleep(800)` — real sync primitive instead of a pacing guess.
+				await page.waitForSelector(
+					[
+						"#orderDetails",
+						'[data-component="cancelled"]',
+						"#f3_food_ItemList",
+						"#f3_food_WfmInStoreOrderSummary",
+						".ufpo-item-list-table",
+						"#ufpo-order-status-container",
+						".js-order-card",
+					].join(", "),
+					{
+						timeout: DETAIL_WAIT_MS,
+						state: "attached",
+					},
+				);
+			},
+			{
+				retries: RETRY_COUNT,
+				minTimeout: RETRY_MIN_TIMEOUT_MS,
+				factor: RETRY_FACTOR,
+				shouldRetry: ({ error }): boolean =>
+					!(error instanceof AbortError) &&
+					RETRYABLE_ERROR_RE.test(error.message),
+			},
+		);
+	} catch {
+		return {
+			failureKind: "navigation_retry_exhausted",
+			reason: reasonForDetailFailure("navigation_retry_exhausted"),
+			status: "failed",
+		};
+	}
 
-  try {
-    const landedUrl = page.url();
-    if (!DETAIL_URL_RE.test(landedUrl)) {
-      // A detail request that lands on Amazon's sign-in/challenge/MFA flow is a
-      // dead authenticated session, not a transient page miss: retrying it every
-      // run is owner busywork. Route it to owner-repair so the run stops churning
-      // retryable gaps and the owner is asked to reconnect. A redirect to any
-      // OTHER non-detail URL stays a transient no-progress gap.
-      const failureKind: DetailFailureKind = SIGNIN_URL_RE.test(landedUrl)
-        ? "session_repair_required"
-        : "redirected_non_detail";
-      return {
-        failureKind,
-        reason: reasonForDetailFailure(failureKind),
-        status: "failed",
-      };
-    }
-    const html = await readPageContentWithin(page);
-    const detail = parseOrderDetailDom(html);
-    if (detail) {
-      return { detail, status: "hydrated" };
-    }
-    return {
-      failureKind: "parse_missing",
-      reason: reasonForDetailFailure("parse_missing"),
-      status: "failed",
-    };
-  } catch {
-    return {
-      failureKind: "parse_missing",
-      reason: reasonForDetailFailure("parse_missing"),
-      status: "failed",
-    };
-  }
+	try {
+		const landedUrl = page.url();
+		if (!DETAIL_URL_RE.test(landedUrl)) {
+			// A detail request that lands on Amazon's sign-in/challenge/MFA flow is a
+			// dead authenticated session, not a transient page miss: retrying it every
+			// run is owner busywork. Route it to owner-repair so the run stops churning
+			// retryable gaps and the owner is asked to reconnect. A redirect to any
+			// OTHER non-detail URL stays a transient no-progress gap.
+			const failureKind: DetailFailureKind = SIGNIN_URL_RE.test(landedUrl)
+				? "session_repair_required"
+				: "redirected_non_detail";
+			return {
+				failureKind,
+				reason: reasonForDetailFailure(failureKind),
+				status: "failed",
+			};
+		}
+		const html = await readPageContentWithin(page);
+		const detail = parseOrderDetailDom(html);
+		if (detail) {
+			return { detail, status: "hydrated" };
+		}
+		return {
+			failureKind: "parse_missing",
+			reason: reasonForDetailFailure("parse_missing"),
+			status: "failed",
+		};
+	} catch {
+		return {
+			failureKind: "parse_missing",
+			reason: reasonForDetailFailure("parse_missing"),
+			status: "failed",
+		};
+	}
 }
 
 // ─── Per-page order extraction ────────────────────────────────────────────
 async function extractOrdersOnPage(page: Page): Promise<ListPageOrder[]> {
-  try {
-    const html = await readPageContentWithin(page);
-    return parseOrdersListDom(html);
-  } catch {
-    return [];
-  }
+	try {
+		const html = await readPageContentWithin(page);
+		return parseOrdersListDom(html);
+	} catch {
+		return [];
+	}
 }
 
 // ─── collect() helpers ───────────────────────────────────────────────────
@@ -463,31 +502,31 @@ export type CaptureDep = BrowserCollectContext["capture"];
 
 /** Ephemeral per-run flags that cross year boundaries. */
 export interface RunFlags {
-  detailAttempts: number;
-  detailCaptured: boolean;
-  failedDetailCaptured: boolean;
-  /** One-shot budget: at most one mid-run automated session-repair attempt
-   *  per run (see `attemptAutomatedSessionRepair`), regardless of how many
-   *  detail fetches subsequently land on sign-in. Distinct from
-   *  `sessionRepairRequired` — that flag starts `false` and is set `true`
-   *  exactly once, by whichever sign-in bounce reaches it first (there is no
-   *  code path that clears it back to `false` once set); this one is the
-   *  same shape (starts `false`, set `true` at most once) but guards a
-   *  different decision (spend vs. don't-spend the repair attempt, not
-   *  latch vs. don't-latch the terminal state). */
-  repairAttempted: boolean;
-  /** Set once a detail attempt lands on Amazon's sign-in/challenge flow AND
-   *  either the one-shot repair attempt was ineligible/failed, or the budget
-   *  was already spent by an earlier bounce this run — there is no code path
-   *  that clears this back to `false`, so once set it stays set for the rest
-   *  of the run (a write-once latch, not a flag a successful repair resets).
-   *  The authenticated session is dead for the rest of this run, so
-   *  remaining detail attempts are deferred (a connector-local blast-radius
-   *  stop) rather than hammering sign-in once per order. This is NOT
-   *  cross-run scheduling — the runtime owns whether/when the next run
-   *  retries. */
-  sessionRepairRequired: boolean;
-  temporaryDetailFailures: number;
+	detailAttempts: number;
+	detailCaptured: boolean;
+	failedDetailCaptured: boolean;
+	/** One-shot budget: at most one mid-run automated session-repair attempt
+	 *  per run (see `attemptAutomatedSessionRepair`), regardless of how many
+	 *  detail fetches subsequently land on sign-in. Distinct from
+	 *  `sessionRepairRequired` — that flag starts `false` and is set `true`
+	 *  exactly once, by whichever sign-in bounce reaches it first (there is no
+	 *  code path that clears it back to `false` once set); this one is the
+	 *  same shape (starts `false`, set `true` at most once) but guards a
+	 *  different decision (spend vs. don't-spend the repair attempt, not
+	 *  latch vs. don't-latch the terminal state). */
+	repairAttempted: boolean;
+	/** Set once a detail attempt lands on Amazon's sign-in/challenge flow AND
+	 *  either the one-shot repair attempt was ineligible/failed, or the budget
+	 *  was already spent by an earlier bounce this run — there is no code path
+	 *  that clears this back to `false`, so once set it stays set for the rest
+	 *  of the run (a write-once latch, not a flag a successful repair resets).
+	 *  The authenticated session is dead for the rest of this run, so
+	 *  remaining detail attempts are deferred (a connector-local blast-radius
+	 *  stop) rather than hammering sign-in once per order. This is NOT
+	 *  cross-run scheduling — the runtime owns whether/when the next run
+	 *  retries. */
+	sessionRepairRequired: boolean;
+	temporaryDetailFailures: number;
 }
 
 /**
@@ -508,13 +547,13 @@ export interface RunFlags {
  *   - `gap`       — orders whose detail fetch was attempted but degraded (null, or deferred by policy).
  */
 export interface OrderItemsCoverage {
-  gap: string[];
-  hydrated: string[];
-  required: string[];
+	gap: string[];
+	hydrated: string[];
+	required: string[];
 }
 
 export function newOrderItemsCoverage(): OrderItemsCoverage {
-  return { gap: [], hydrated: [], required: [] };
+	return { gap: [], hydrated: [], required: [] };
 }
 
 /**
@@ -535,13 +574,13 @@ export function newOrderItemsCoverage(): OrderItemsCoverage {
  * was made for it.
  */
 export interface OrdersCoverage {
-  considered: string[];
-  covered: string[];
-  dateDropped: string[];
+	considered: string[];
+	covered: string[];
+	dateDropped: string[];
 }
 
 export function newOrdersCoverage(): OrdersCoverage {
-  return { considered: [], covered: [], dateDropped: [] };
+	return { considered: [], covered: [], dateDropped: [] };
 }
 
 /** The detail-hydration outcome for one considered order. */
@@ -553,11 +592,14 @@ export type DetailOutcome = "hydrated" | "gap" | "unaccounted";
  * outcome set. Per spec, required_keys absent from outcomes defer the
  * checkpoint. Attempted-but-failed is gap (backed by DETAIL_GAP).
  */
-export function classifyDetailOutcome(skipDetail: boolean, detail: OrderDetail | null): DetailOutcome {
-  if (skipDetail) {
-    return "unaccounted";
-  }
-  return detail ? "hydrated" : "gap";
+export function classifyDetailOutcome(
+	skipDetail: boolean,
+	detail: OrderDetail | null,
+): DetailOutcome {
+	if (skipDetail) {
+		return "unaccounted";
+	}
+	return detail ? "hydrated" : "gap";
 }
 
 /**
@@ -568,14 +610,18 @@ export function classifyDetailOutcome(skipDetail: boolean, detail: OrderDetail |
  * `required` (the denominator); the outcome decides which numerator/skip set it
  * also joins.
  */
-export function recordDetailOutcome(coverage: OrderItemsCoverage, orderId: string, outcome: DetailOutcome): void {
-  coverage.required.push(orderId);
-  if (outcome === "hydrated") {
-    coverage.hydrated.push(orderId);
-  } else if (outcome === "gap") {
-    coverage.gap.push(orderId);
-  }
-  // "unaccounted" orders: required but not in hydrated or gap, per spec
+export function recordDetailOutcome(
+	coverage: OrderItemsCoverage,
+	orderId: string,
+	outcome: DetailOutcome,
+): void {
+	coverage.required.push(orderId);
+	if (outcome === "hydrated") {
+		coverage.hydrated.push(orderId);
+	} else if (outcome === "gap") {
+		coverage.gap.push(orderId);
+	}
+	// "unaccounted" orders: required but not in hydrated or gap, per spec
 }
 
 /**
@@ -597,50 +643,65 @@ export function recordDetailOutcome(coverage: OrderItemsCoverage, orderId: strin
  * from parse-missing detail pages and connector-budget deferrals.
  */
 export function buildOrderDetailGap(
-  orderId: string,
-  reason: AmazonDetailGapReason = "temporary_unavailable",
-  failureKind?: DetailFailureKind | undefined,
-  orderDate?: string | undefined
+	orderId: string,
+	reason: AmazonDetailGapReason = "temporary_unavailable",
+	failureKind?: DetailFailureKind | undefined,
+	orderDate?: string | undefined,
 ): DetailGapMessage {
-  return {
-    type: "DETAIL_GAP",
-    stream: "order_items",
-    parent_stream: "orders",
-    record_key: orderId,
-    status: "pending",
-    reason,
-    retryable: true,
-    reference_only: true,
-    detail_locator: {
-      kind: "amazon.order_detail",
-      order_id: orderId,
-      ...(orderDate ? { order_date: orderDate } : {}),
-    },
-    ...(failureKind
-      ? {
-          detail: { class: classForDetailFailure(failureKind) },
-          last_error: { class: classForDetailFailure(failureKind) },
-        }
-      : {}),
-  };
+	return {
+		type: "DETAIL_GAP",
+		stream: "order_items",
+		parent_stream: "orders",
+		record_key: orderId,
+		status: "pending",
+		reason,
+		retryable: true,
+		reference_only: true,
+		detail_locator: {
+			kind: "amazon.order_detail",
+			order_id: orderId,
+			...(orderDate ? { order_date: orderDate } : {}),
+		},
+		...(failureKind
+			? {
+					detail: { class: classForDetailFailure(failureKind) },
+					last_error: { class: classForDetailFailure(failureKind) },
+				}
+			: {}),
+	};
 }
 
 function readRecoverableAmazonOrderDetailGap(
-  gap: BrowserCollectContext["detailGaps"][number]
-): { gapId: string; orderDate: string; orderId: string; recordKey: string | number } | null {
-  if (gap.stream !== "order_items" || gap.status !== "pending") {
-    return null;
-  }
-  const locator = gap.detail_locator;
-  if (locator?.kind !== "amazon.order_detail") {
-    return null;
-  }
-  const orderId = locator.order_id;
-  const orderDate = locator.order_date;
-  if (typeof orderId !== "string" || typeof orderDate !== "string" || orderId.length === 0 || orderDate.length === 0) {
-    return null;
-  }
-  return { gapId: gap.gap_id, orderDate, orderId, recordKey: gap.record_key ?? orderId };
+	gap: BrowserCollectContext["detailGaps"][number],
+): {
+	gapId: string;
+	orderDate: string;
+	orderId: string;
+	recordKey: string | number;
+} | null {
+	if (gap.stream !== "order_items" || gap.status !== "pending") {
+		return null;
+	}
+	const locator = gap.detail_locator;
+	if (locator?.kind !== "amazon.order_detail") {
+		return null;
+	}
+	const orderId = locator.order_id;
+	const orderDate = locator.order_date;
+	if (
+		typeof orderId !== "string" ||
+		typeof orderDate !== "string" ||
+		orderId.length === 0 ||
+		orderDate.length === 0
+	) {
+		return null;
+	}
+	return {
+		gapId: gap.gap_id,
+		orderDate,
+		orderId,
+		recordKey: gap.record_key ?? orderId,
+	};
 }
 
 /** Injectable override for `attemptAutomatedSessionRepair`'s call to the
@@ -648,9 +709,9 @@ function readRecoverableAmazonOrderDetailGap(
  *  driving the full interactive login flow against a stub Page. Mirrors
  *  the USAA connector's `EmitDeps.reauthenticate` seam. */
 export type AmazonReauthFn = (input: {
-  context: BrowserContext;
-  page: Page;
-  sendInteraction: BrowserCollectContext["sendInteraction"];
+	context: BrowserContext;
+	page: Page;
+	sendInteraction: BrowserCollectContext["sendInteraction"];
 }) => Promise<boolean>;
 
 /**
@@ -667,77 +728,88 @@ export type AmazonReauthFn = (input: {
  * `session_repair_required` behavior unchanged.
  */
 async function attemptAutomatedSessionRepair(
-  page: Page,
-  context: BrowserContext,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  flags: RunFlags,
-  orderId: string,
-  reauthenticate: AmazonReauthFn = ensureAmazonSession
+	page: Page,
+	context: BrowserContext,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	flags: RunFlags,
+	orderId: string,
+	reauthenticate: AmazonReauthFn = ensureAmazonSession,
 ): Promise<DetailFetchResult | null> {
-  if (flags.repairAttempted) {
-    return null;
-  }
-  flags.repairAttempted = true;
-  const email = process.env.AMAZON_USERNAME;
-  const password = process.env.AMAZON_PASSWORD;
-  if (!(email && password)) {
-    return null;
-  }
-  const recovered = await reauthenticate({ context, page, sendInteraction }).catch((): boolean => false);
-  if (!recovered) {
-    return null;
-  }
-  return fetchOrderDetail(page, orderId);
+	if (flags.repairAttempted) {
+		return null;
+	}
+	flags.repairAttempted = true;
+	const email = process.env.AMAZON_USERNAME;
+	const password = process.env.AMAZON_PASSWORD;
+	if (!(email && password)) {
+		return null;
+	}
+	const recovered = await reauthenticate({
+		context,
+		page,
+		sendInteraction,
+	}).catch((): boolean => false);
+	if (!recovered) {
+		return null;
+	}
+	return fetchOrderDetail(page, orderId);
 }
 
 async function resolveOrderDetail(
-  page: Page,
-  context: BrowserContext | undefined,
-  sendInteraction: BrowserCollectContext["sendInteraction"] | undefined,
-  flags: RunFlags,
-  orderId: string,
-  reauthenticate?: AmazonReauthFn
+	page: Page,
+	context: BrowserContext | undefined,
+	sendInteraction: BrowserCollectContext["sendInteraction"] | undefined,
+	flags: RunFlags,
+	orderId: string,
+	reauthenticate?: AmazonReauthFn,
 ): Promise<DetailFetchResult> {
-  if (flags.sessionRepairRequired) {
-    // The session died earlier this run and the one-shot automated repair
-    // (if eligible) already failed or was never eligible. Do not touch the
-    // browser again — the gap re-defers as owner-repair so the owner is
-    // asked to reconnect instead of the run hammering sign-in once per
-    // remaining order.
-    return Promise.resolve({
-      failureKind: "session_repair_required",
-      reason: reasonForDetailFailure("session_repair_required"),
-      status: "deferred",
-    });
-  }
-  if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
-    return Promise.resolve({
-      failureKind: "deferred_budget",
-      reason: reasonForDetailFailure("deferred_budget"),
-      status: "deferred",
-    });
-  }
-  if (flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN) {
-    return Promise.resolve({
-      failureKind: "deferred_budget",
-      reason: reasonForDetailFailure("deferred_budget"),
-      status: "deferred",
-    });
-  }
-  flags.detailAttempts += 1;
-  const result = await fetchOrderDetail(page, orderId);
-  if (!(result.status === "failed" && result.failureKind === "session_repair_required" && context && sendInteraction)) {
-    return result;
-  }
-  const repaired = await attemptAutomatedSessionRepair(
-    page,
-    context,
-    sendInteraction,
-    flags,
-    orderId,
-    reauthenticate ?? ensureAmazonSession
-  );
-  return repaired ?? result;
+	if (flags.sessionRepairRequired) {
+		// The session died earlier this run and the one-shot automated repair
+		// (if eligible) already failed or was never eligible. Do not touch the
+		// browser again — the gap re-defers as owner-repair so the owner is
+		// asked to reconnect instead of the run hammering sign-in once per
+		// remaining order.
+		return Promise.resolve({
+			failureKind: "session_repair_required",
+			reason: reasonForDetailFailure("session_repair_required"),
+			status: "deferred",
+		});
+	}
+	if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+		return Promise.resolve({
+			failureKind: "deferred_budget",
+			reason: reasonForDetailFailure("deferred_budget"),
+			status: "deferred",
+		});
+	}
+	if (flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN) {
+		return Promise.resolve({
+			failureKind: "deferred_budget",
+			reason: reasonForDetailFailure("deferred_budget"),
+			status: "deferred",
+		});
+	}
+	flags.detailAttempts += 1;
+	const result = await fetchOrderDetail(page, orderId);
+	if (
+		!(
+			result.status === "failed" &&
+			result.failureKind === "session_repair_required" &&
+			context &&
+			sendInteraction
+		)
+	) {
+		return result;
+	}
+	const repaired = await attemptAutomatedSessionRepair(
+		page,
+		context,
+		sendInteraction,
+		flags,
+		orderId,
+		reauthenticate ?? ensureAmazonSession,
+	);
+	return repaired ?? result;
 }
 
 /**
@@ -750,139 +822,176 @@ async function resolveOrderDetail(
  *     still owns the cross-run retry decision).
  * `deferred` outcomes (already gated by flags) never re-ratchet.
  */
-function recordDetailFailureFlags(flags: RunFlags, result: DetailFetchResult): void {
-  if (result.status === "deferred") {
-    return;
-  }
-  if (result.status === "failed" && result.failureKind === "navigation_retry_exhausted") {
-    flags.temporaryDetailFailures += 1;
-  }
-  if (result.status === "failed" && result.failureKind === "session_repair_required") {
-    flags.sessionRepairRequired = true;
-  }
+function recordDetailFailureFlags(
+	flags: RunFlags,
+	result: DetailFetchResult,
+): void {
+	if (result.status === "deferred") {
+		return;
+	}
+	if (
+		result.status === "failed" &&
+		result.failureKind === "navigation_retry_exhausted"
+	) {
+		flags.temporaryDetailFailures += 1;
+	}
+	if (
+		result.status === "failed" &&
+		result.failureKind === "session_repair_required"
+	) {
+		flags.sessionRepairRequired = true;
+	}
 }
 
 async function captureFailedDetailOnce(
-  capture: CaptureDep,
-  page: Page,
-  flags: RunFlags,
-  result: Extract<DetailFetchResult, { status: "failed" }>
+	capture: CaptureDep,
+	page: Page,
+	flags: RunFlags,
+	result: Extract<DetailFetchResult, { status: "failed" }>,
 ): Promise<void> {
-  if (!capture || flags.failedDetailCaptured) {
-    return;
-  }
-  await capture.captureDom(page, `order-detail-failed-${result.failureKind}`);
-  flags.failedDetailCaptured = true;
+	if (!capture || flags.failedDetailCaptured) {
+		return;
+	}
+	await capture.captureDom(page, `order-detail-failed-${result.failureKind}`);
+	flags.failedDetailCaptured = true;
 }
 
 export interface AmazonDetailRecoveryDeps {
-  capture: CaptureDep;
-  /** Threaded through to `resolveOrderDetail`'s mid-run session-repair
-   *  attempt. Optional so legacy callers/tests that don't exercise the
-   *  repair path can omit it — see `EmitDeps.context`. */
-  context?: BrowserContext | undefined;
-  detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
-  emit: EmitFn;
-  emitRecord: EmitRecordFn;
-  /** Test-only override for `attemptAutomatedSessionRepair`'s reauth call.
-   *  Production callers omit it (falls back to the real `ensureAmazonSession`). */
-  reauthenticate?: AmazonReauthFn | undefined;
-  requestDetailGapPage?: BrowserCollectContext["requestDetailGapPage"] | undefined;
-  sendInteraction?: BrowserCollectContext["sendInteraction"] | undefined;
+	capture: CaptureDep;
+	/** Threaded through to `resolveOrderDetail`'s mid-run session-repair
+	 *  attempt. Optional so legacy callers/tests that don't exercise the
+	 *  repair path can omit it — see `EmitDeps.context`. */
+	context?: BrowserContext | undefined;
+	detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
+	emit: EmitFn;
+	emitRecord: EmitRecordFn;
+	/** Test-only override for `attemptAutomatedSessionRepair`'s reauth call.
+	 *  Production callers omit it (falls back to the real `ensureAmazonSession`). */
+	reauthenticate?: AmazonReauthFn | undefined;
+	requestDetailGapPage?:
+		| BrowserCollectContext["requestDetailGapPage"]
+		| undefined;
+	sendInteraction?: BrowserCollectContext["sendInteraction"] | undefined;
 }
 
 async function recoverPendingOrderItemDetailGapPage(
-  page: Page,
-  deps: AmazonDetailRecoveryDeps,
-  flags: RunFlags,
-  gaps: readonly BrowserCollectContext["detailGaps"][number][]
+	page: Page,
+	deps: AmazonDetailRecoveryDeps,
+	flags: RunFlags,
+	gaps: readonly BrowserCollectContext["detailGaps"][number][],
 ): Promise<{ recovered: number; reDeferred: number; skipped: number }> {
-  let recovered = 0;
-  let reDeferred = 0;
-  let skipped = 0;
-  for (const gap of gaps) {
-    const locator = readRecoverableAmazonOrderDetailGap(gap);
-    if (!locator) {
-      if (gap.stream === "order_items" && gap.status === "pending") {
-        skipped += 1;
-      }
-      continue;
-    }
-    const result = await resolveOrderDetail(
-      page,
-      deps.context,
-      deps.sendInteraction,
-      flags,
-      locator.orderId,
-      deps.reauthenticate
-    );
-    if (result.status === "hydrated") {
-      for (const item of result.detail.items) {
-        await deps.emitRecord("order_items", buildOrderItemRecord(locator.orderId, locator.orderDate, item));
-      }
-      await deps.emit({
-        type: "DETAIL_GAP_RECOVERED",
-        reference_only: true,
-        gap_id: locator.gapId,
-        stream: "order_items",
-        record_key: locator.recordKey,
-      });
-      // The recovery path has no list-page row for this order (only the
-      // gap locator's id/date), so it cannot compute a real list-surface
-      // fingerprint (see `listSurfaceFingerprint`) and does not mark the
-      // order known-hydrated here. The next forward walk that lists this
-      // order establishes the proof normally, with a real fingerprint.
-      recovered += 1;
-      continue;
-    }
-    recordDetailFailureFlags(flags, result);
-    if (result.status === "failed") {
-      await captureFailedDetailOnce(deps.capture, page, flags, result);
-    }
-    await deps.emit(buildOrderDetailGap(locator.orderId, result.reason, result.failureKind, locator.orderDate));
-    reDeferred += 1;
-  }
-  return { recovered, reDeferred, skipped };
+	let recovered = 0;
+	let reDeferred = 0;
+	let skipped = 0;
+	for (const gap of gaps) {
+		const locator = readRecoverableAmazonOrderDetailGap(gap);
+		if (!locator) {
+			if (gap.stream === "order_items" && gap.status === "pending") {
+				skipped += 1;
+			}
+			continue;
+		}
+		const result = await resolveOrderDetail(
+			page,
+			deps.context,
+			deps.sendInteraction,
+			flags,
+			locator.orderId,
+			deps.reauthenticate,
+		);
+		if (result.status === "hydrated") {
+			for (const item of result.detail.items) {
+				await deps.emitRecord(
+					"order_items",
+					buildOrderItemRecord(locator.orderId, locator.orderDate, item),
+				);
+			}
+			await deps.emit({
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: locator.gapId,
+				stream: "order_items",
+				record_key: locator.recordKey,
+			});
+			// The recovery path has no list-page row for this order (only the
+			// gap locator's id/date), so it cannot compute a real list-surface
+			// fingerprint (see `listSurfaceFingerprint`) and does not mark the
+			// order known-hydrated here. The next forward walk that lists this
+			// order establishes the proof normally, with a real fingerprint.
+			recovered += 1;
+			continue;
+		}
+		recordDetailFailureFlags(flags, result);
+		if (result.status === "failed") {
+			await captureFailedDetailOnce(deps.capture, page, flags, result);
+		}
+		await deps.emit(
+			buildOrderDetailGap(
+				locator.orderId,
+				result.reason,
+				result.failureKind,
+				locator.orderDate,
+			),
+		);
+		reDeferred += 1;
+	}
+	return { recovered, reDeferred, skipped };
 }
 
 export async function recoverPendingOrderItemDetailGaps(
-  page: Page,
-  deps: AmazonDetailRecoveryDeps,
-  flags: RunFlags
+	page: Page,
+	deps: AmazonDetailRecoveryDeps,
+	flags: RunFlags,
 ): Promise<{ recovered: number; stoppedWithPending: boolean }> {
-  let recovered = 0;
-  let gaps = deps.detailGaps;
-  while (gaps.length > 0) {
-    const result = await recoverPendingOrderItemDetailGapPage(page, deps, flags, gaps);
-    recovered += result.recovered;
-    if (!deps.requestDetailGapPage) {
-      return { recovered, stoppedWithPending: result.reDeferred + result.skipped > 0 };
-    }
-    if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
-      return { recovered, stoppedWithPending: true };
-    }
-    gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
-  }
-  return { recovered, stoppedWithPending: false };
+	let recovered = 0;
+	let gaps = deps.detailGaps;
+	while (gaps.length > 0) {
+		const result = await recoverPendingOrderItemDetailGapPage(
+			page,
+			deps,
+			flags,
+			gaps,
+		);
+		recovered += result.recovered;
+		if (!deps.requestDetailGapPage) {
+			return {
+				recovered,
+				stoppedWithPending: result.reDeferred + result.skipped > 0,
+			};
+		}
+		if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
+			return { recovered, stoppedWithPending: true };
+		}
+		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
+	}
+	return { recovered, stoppedWithPending: false };
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
-  page: Page,
-  deps: AmazonDetailRecoveryDeps,
-  flags: RunFlags,
-  options: { recoveryOnly?: boolean; wantsItems: boolean }
-): Promise<{ recovered: number; stoppedWithPending: boolean; suppressForward: boolean }> {
-  if (!options.wantsItems) {
-    return { recovered: 0, stoppedWithPending: false, suppressForward: options.recoveryOnly === true };
-  }
-  const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
-  const detailBudgetExhausted =
-    flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
-    flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN;
-  return {
-    ...recovery,
-    suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
-  };
+	page: Page,
+	deps: AmazonDetailRecoveryDeps,
+	flags: RunFlags,
+	options: { recoveryOnly?: boolean; wantsItems: boolean },
+): Promise<{
+	recovered: number;
+	stoppedWithPending: boolean;
+	suppressForward: boolean;
+}> {
+	if (!options.wantsItems) {
+		return {
+			recovered: 0,
+			stoppedWithPending: false,
+			suppressForward: options.recoveryOnly === true,
+		};
+	}
+	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
+	const detailBudgetExhausted =
+		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
+		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN;
+	return {
+		...recovery,
+		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+	};
 }
 
 /**
@@ -901,16 +1010,19 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
  * unreported. Reuses DETAIL_COVERAGE as a reference-only projection; it is
  * not promoted to portable protocol.
  */
-export async function emitOrderItemsCoverage(deps: EmitDeps, coverage: OrderItemsCoverage): Promise<void> {
-  await emitDetailCoverage(deps, {
-    stream: "order_items",
-    stateStream: "orders",
-    requiredKeys: coverage.required,
-    hydratedKeys: coverage.hydrated,
-    gapKeys: coverage.gap,
-    considered: coverage.required.length,
-    covered: coverage.hydrated.length,
-  });
+export async function emitOrderItemsCoverage(
+	deps: EmitDeps,
+	coverage: OrderItemsCoverage,
+): Promise<void> {
+	await emitDetailCoverage(deps, {
+		stream: "order_items",
+		stateStream: "orders",
+		requiredKeys: coverage.required,
+		hydratedKeys: coverage.hydrated,
+		gapKeys: coverage.gap,
+		considered: coverage.required.length,
+		covered: coverage.hydrated.length,
+	});
 }
 
 /**
@@ -925,70 +1037,73 @@ export async function emitOrderItemsCoverage(deps: EmitDeps, coverage: OrderItem
  * `emitOrderItemsCoverage` always emits: a completed sweep that considered
  * zero orders is a real measured zero, not silence.
  */
-export async function emitOrdersCoverage(deps: EmitDeps, coverage: OrdersCoverage): Promise<void> {
-  await emitDetailCoverage(deps, {
-    stream: "orders",
-    stateStream: "orders",
-    requiredKeys: [],
-    hydratedKeys: [],
-    considered: coverage.considered.length,
-    covered: coverage.covered.length,
-  });
+export async function emitOrdersCoverage(
+	deps: EmitDeps,
+	coverage: OrdersCoverage,
+): Promise<void> {
+	await emitDetailCoverage(deps, {
+		stream: "orders",
+		stateStream: "orders",
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered: coverage.considered.length,
+		covered: coverage.covered.length,
+	});
 }
 
 /** Per-run dependencies threaded through processListOrder → emitOrderAndItems. */
 export interface EmitDeps {
-  capture: CaptureDep;
-  /** Threaded through to `resolveOrderDetail`'s mid-run session-repair
-   *  attempt (see `attemptAutomatedSessionRepair`). Optional so legacy
-   *  callers/tests that don't exercise the repair path can omit it — when
-   *  absent, a sign-in bounce falls straight through to the existing
-   *  terminal `session_repair_required` behavior, unchanged from before
-   *  this fix. */
-  context?: BrowserContext | undefined;
-  emit: EmitFn;
-  emitRecord: EmitRecordFn;
-  emittedAt: string;
-  /** Order ids known to have a durably-hydrated `order_items` detail, mapped
-   *  to the list-surface fingerprint (see `listSurfaceFingerprint`) observed
-   *  at hydration time. Seeded from the PRIOR run's STATE cursor and mutated
-   *  in place as THIS run hydrates more orders (see
-   *  `readPriorHydratedOrders`). Proof is "hydrated AND the list surface has
-   *  not moved since" — an order whose list row changes is treated as
-   *  not-yet-hydrated and re-fetched. The current year is never frozen
-   *  (orders are ongoing), so every unfrozen year is re-listed on every run;
-   *  without this map `processListOrder` would re-attempt detail hydration
-   *  for every already-covered, unchanged order every run, burning the
-   *  per-run detail-attempt budget on repeat work instead of reaching
-   *  genuinely new orders. Optional so legacy callers/tests that don't
-   *  exercise the skip path can omit it. */
-  hydratedOrders?: Map<string, string> | undefined;
-  /** Run-level `order_items` detail coverage accumulator. Optional so legacy
-   *  callers/tests that only exercise emit ordering can omit it; when present,
-   *  processListOrder records each considered order's detail outcome here and
-   *  collect() emits one DETAIL_COVERAGE after the year loop. */
-  orderItemsCoverage?: OrderItemsCoverage | undefined;
-  /** Run-level `orders` list-stream coverage accumulator. Optional so legacy
-   *  callers/tests that only exercise emit ordering can omit it; when present,
-   *  processListOrder records each considered order's list-accounting outcome
-   *  here and collect() emits one self-referential DETAIL_COVERAGE after the
-   *  year loop. */
-  ordersCoverage?: OrdersCoverage | undefined;
-  /** Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
-   *  Shared across all years for the whole orders stream because order ids
-   *  are globally unique. Optional so legacy callers/tests emit
-   *  unconditionally. */
-  ordersFingerprintCursor?: FingerprintCursor | undefined;
-  progress: BrowserCollectContext["progress"];
-  /** Test-only override for `attemptAutomatedSessionRepair`'s reauth call.
-   *  Production callers omit it (falls back to the real `ensureAmazonSession`). */
-  reauthenticate?: AmazonReauthFn | undefined;
-  /** Threaded through to `resolveOrderDetail`'s mid-run session-repair
-   *  attempt alongside `context`. Optional for the same reason. */
-  sendInteraction?: BrowserCollectContext["sendInteraction"] | undefined;
-  skipDetail: boolean;
-  wantsItems: boolean;
-  wantsOrders: boolean;
+	capture: CaptureDep;
+	/** Threaded through to `resolveOrderDetail`'s mid-run session-repair
+	 *  attempt (see `attemptAutomatedSessionRepair`). Optional so legacy
+	 *  callers/tests that don't exercise the repair path can omit it — when
+	 *  absent, a sign-in bounce falls straight through to the existing
+	 *  terminal `session_repair_required` behavior, unchanged from before
+	 *  this fix. */
+	context?: BrowserContext | undefined;
+	emit: EmitFn;
+	emitRecord: EmitRecordFn;
+	emittedAt: string;
+	/** Order ids known to have a durably-hydrated `order_items` detail, mapped
+	 *  to the list-surface fingerprint (see `listSurfaceFingerprint`) observed
+	 *  at hydration time. Seeded from the PRIOR run's STATE cursor and mutated
+	 *  in place as THIS run hydrates more orders (see
+	 *  `readPriorHydratedOrders`). Proof is "hydrated AND the list surface has
+	 *  not moved since" — an order whose list row changes is treated as
+	 *  not-yet-hydrated and re-fetched. The current year is never frozen
+	 *  (orders are ongoing), so every unfrozen year is re-listed on every run;
+	 *  without this map `processListOrder` would re-attempt detail hydration
+	 *  for every already-covered, unchanged order every run, burning the
+	 *  per-run detail-attempt budget on repeat work instead of reaching
+	 *  genuinely new orders. Optional so legacy callers/tests that don't
+	 *  exercise the skip path can omit it. */
+	hydratedOrders?: Map<string, string> | undefined;
+	/** Run-level `order_items` detail coverage accumulator. Optional so legacy
+	 *  callers/tests that only exercise emit ordering can omit it; when present,
+	 *  processListOrder records each considered order's detail outcome here and
+	 *  collect() emits one DETAIL_COVERAGE after the year loop. */
+	orderItemsCoverage?: OrderItemsCoverage | undefined;
+	/** Run-level `orders` list-stream coverage accumulator. Optional so legacy
+	 *  callers/tests that only exercise emit ordering can omit it; when present,
+	 *  processListOrder records each considered order's list-accounting outcome
+	 *  here and collect() emits one self-referential DETAIL_COVERAGE after the
+	 *  year loop. */
+	ordersCoverage?: OrdersCoverage | undefined;
+	/** Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
+	 *  Shared across all years for the whole orders stream because order ids
+	 *  are globally unique. Optional so legacy callers/tests emit
+	 *  unconditionally. */
+	ordersFingerprintCursor?: FingerprintCursor | undefined;
+	progress: BrowserCollectContext["progress"];
+	/** Test-only override for `attemptAutomatedSessionRepair`'s reauth call.
+	 *  Production callers omit it (falls back to the real `ensureAmazonSession`). */
+	reauthenticate?: AmazonReauthFn | undefined;
+	/** Threaded through to `resolveOrderDetail`'s mid-run session-repair
+	 *  attempt alongside `context`. Optional for the same reason. */
+	sendInteraction?: BrowserCollectContext["sendInteraction"] | undefined;
+	skipDetail: boolean;
+	wantsItems: boolean;
+	wantsOrders: boolean;
 }
 
 /** Emit the order record + per-item records for a single list-page order.
@@ -1004,44 +1119,55 @@ export interface EmitDeps {
  * Regressing any of these is a real bug; integration.test.ts covers them.
  */
 export async function emitOrderAndItems(
-  deps: EmitDeps,
-  listOrder: ListPageOrder,
-  detail: OrderDetail | null,
-  orderDate: string
+	deps: EmitDeps,
+	listOrder: ListPageOrder,
+	detail: OrderDetail | null,
+	orderDate: string,
 ): Promise<void> {
-  if (deps.wantsOrders) {
-    // Gate on a per-order fingerprint that excludes the run-clock
-    // `fetched_at`. An order's identity (id = order id) is immutable and its
-    // total is fixed once placed, but the current (unfrozen) year is
-    // re-scraped every run and re-emitted with a fresh `fetched_at`. With
-    // this gate an already-seen order whose body is byte-identical modulo
-    // `fetched_at` is suppressed; a real field move (delivery_status /
-    // status_detail transitioning while the order ships) is a fingerprint
-    // boundary and still emits. `order_items` carries no `fetched_at`, so it
-    // does not churn on a no-op re-scrape and is left ungated.
-    //
-    // NOTE: orders is a PARTIAL scan (year-freezing skips historical years),
-    // so this cursor is never `pruneStale()`d — pruning ids in years the run
-    // did not scrape would drop their fingerprints and re-churn them when the
-    // year is next (re)visited.
-    const orderRecord = buildOrderRecord(listOrder, detail, orderDate, deps.emittedAt);
-    if (!deps.ordersFingerprintCursor || deps.ordersFingerprintCursor.shouldEmit(orderRecord)) {
-      await deps.emitRecord("orders", orderRecord);
-    }
-    // A fingerprint-suppressed re-scrape and a fresh emit are both a real
-    // accounting decision for this order's `orders` record, so both count as
-    // covered — only a date that never parses (handled below, before this
-    // function is reached) is considered-but-not-covered.
-    if (deps.ordersCoverage) {
-      deps.ordersCoverage.considered.push(listOrder.orderId);
-      deps.ordersCoverage.covered.push(listOrder.orderId);
-    }
-  }
-  if (deps.wantsItems) {
-    for (const merged of mergeOrderItems(listOrder, detail)) {
-      await deps.emitRecord("order_items", buildOrderItemRecord(listOrder.orderId, orderDate, merged));
-    }
-  }
+	if (deps.wantsOrders) {
+		// Gate on a per-order fingerprint that excludes the run-clock
+		// `fetched_at`. An order's identity (id = order id) is immutable and its
+		// total is fixed once placed, but the current (unfrozen) year is
+		// re-scraped every run and re-emitted with a fresh `fetched_at`. With
+		// this gate an already-seen order whose body is byte-identical modulo
+		// `fetched_at` is suppressed; a real field move (delivery_status /
+		// status_detail transitioning while the order ships) is a fingerprint
+		// boundary and still emits. `order_items` carries no `fetched_at`, so it
+		// does not churn on a no-op re-scrape and is left ungated.
+		//
+		// NOTE: orders is a PARTIAL scan (year-freezing skips historical years),
+		// so this cursor is never `pruneStale()`d — pruning ids in years the run
+		// did not scrape would drop their fingerprints and re-churn them when the
+		// year is next (re)visited.
+		const orderRecord = buildOrderRecord(
+			listOrder,
+			detail,
+			orderDate,
+			deps.emittedAt,
+		);
+		if (
+			!deps.ordersFingerprintCursor ||
+			deps.ordersFingerprintCursor.shouldEmit(orderRecord)
+		) {
+			await deps.emitRecord("orders", orderRecord);
+		}
+		// A fingerprint-suppressed re-scrape and a fresh emit are both a real
+		// accounting decision for this order's `orders` record, so both count as
+		// covered — only a date that never parses (handled below, before this
+		// function is reached) is considered-but-not-covered.
+		if (deps.ordersCoverage) {
+			deps.ordersCoverage.considered.push(listOrder.orderId);
+			deps.ordersCoverage.covered.push(listOrder.orderId);
+		}
+	}
+	if (deps.wantsItems) {
+		for (const merged of mergeOrderItems(listOrder, detail)) {
+			await deps.emitRecord(
+				"order_items",
+				buildOrderItemRecord(listOrder.orderId, orderDate, merged),
+			);
+		}
+	}
 }
 
 /**
@@ -1049,26 +1175,29 @@ export async function emitOrderAndItems(
  * the shape-check become SKIP_RESULT events; the successful subset is
  * returned in source order.
  */
-async function extractAndShapeCheckOrders(page: Page, emit: EmitFn): Promise<ListPageOrder[]> {
-  const rawOrders = await extractOrdersOnPage(page);
-  const orders: ListPageOrder[] = [];
-  for (const r of rawOrders) {
-    const parsed = listPageOrderShape.safeParse(r);
-    if (parsed.success) {
-      orders.push(parsed.data as ListPageOrder);
-    } else {
-      await emit({
-        type: "SKIP_RESULT",
-        stream: "orders",
-        reason: "list_page_shape_check_failed",
-        message: `list card ${r.orderId}: ${parsed.error.issues
-          .map((i) => `${i.path.join(".")}: ${i.message}`)
-          .join("; ")}`,
-        diagnostics: { card: r, issues: parsed.error.issues },
-      });
-    }
-  }
-  return orders;
+async function extractAndShapeCheckOrders(
+	page: Page,
+	emit: EmitFn,
+): Promise<ListPageOrder[]> {
+	const rawOrders = await extractOrdersOnPage(page);
+	const orders: ListPageOrder[] = [];
+	for (const r of rawOrders) {
+		const parsed = listPageOrderShape.safeParse(r);
+		if (parsed.success) {
+			orders.push(parsed.data as ListPageOrder);
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "orders",
+				reason: "list_page_shape_check_failed",
+				message: `list card ${r.orderId}: ${parsed.error.issues
+					.map((i) => `${i.path.join(".")}: ${i.message}`)
+					.join("; ")}`,
+				diagnostics: { card: r, issues: parsed.error.issues },
+			});
+		}
+	}
+	return orders;
 }
 
 /**
@@ -1077,97 +1206,128 @@ async function extractAndShapeCheckOrders(page: Page, emit: EmitFn): Promise<Lis
  * + screenshot when the page clearly has order-like elements but our
  * selectors matched nothing.
  */
-async function reportEmptyPageDiagnostics(page: Page, year: number, startIndex: number, emit: EmitFn): Promise<void> {
-  let diag: ListPageDiagnostics;
-  try {
-    diag = await page.evaluate((noOrdersTextPattern): ListPageDiagnostics => {
-      // biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-      const CAPTCHA_RE = /captcha|robot|unusual traffic/i;
-      const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
-      const WS = /\s+/g;
-      // biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-      return {
-        url: location.href,
-        title: document.title,
-        order_cards: document.querySelectorAll("div.order-card, div.js-order-card").length,
-        any_card: document.querySelectorAll('[class*="order" i][class*="card" i]').length,
-        any_order_header: document.querySelectorAll('[class*="order" i][class*="header" i]').length,
-        sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
-        captcha: CAPTCHA_RE.test(document.body?.innerText || "").toString(),
-        no_orders_text: NO_ORDERS_RE.test(document.body?.innerText || "").toString(),
-        body_preview: (document.body?.innerText || "").replace(WS, " ").slice(0, 240),
-      };
-    }, AMAZON_NO_ORDERS_TEXT_PATTERN);
-  } catch (error) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "renderer_diagnostics_failed",
-      message: `Amazon year ${year} startIndex=${startIndex}: renderer diagnostics failed; refusing to advance the cursor.`,
-      diagnostics: { error_class: error instanceof Error ? "Error" : "unknown" },
-    });
-    throw new Error("amazon_empty_list_page_renderer_diagnostics_failed", { cause: error });
-  }
-  const classification = classifyEmptyListPageDiagnostics(diag, startIndex);
-  if (classification.action === "terminal") {
-    return;
-  }
-  if (classification.reason === "source_auth_or_challenge") {
-    await emit({
-      type: "PROGRESS",
-      stream: "orders",
-      message: `Amazon year ${year}: sign-in or CAPTCHA challenge detected; manual action required to continue`,
-    });
-  }
-  if (diag && classification.reason === "selector_drift") {
-    const shotPath = `/tmp/amazon-drift-${year}-${startIndex}.png`;
-    await page.screenshot({ path: shotPath, fullPage: true }).catch((): undefined => undefined);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "selector_drift",
-      message: `Year ${year} startIndex=${startIndex}: order containers visible on page but .order-card/.js-order-card selector matched 0. Screenshot=${shotPath}`,
-      diagnostics: redactAmazonListPageDiagnostics(diag),
-    });
-  } else {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: classification.reason,
-      message: `Year ${year} startIndex=${startIndex}: empty Amazon list page is not a proven terminal page; refusing to advance the cursor.`,
-      diagnostics: diag ? redactAmazonListPageDiagnostics(diag) : { missing_diagnostics: true },
-    });
-  }
-  throw new Error(`amazon_empty_list_page_${classification.reason}`);
+async function reportEmptyPageDiagnostics(
+	page: Page,
+	year: number,
+	startIndex: number,
+	emit: EmitFn,
+): Promise<void> {
+	let diag: ListPageDiagnostics;
+	try {
+		diag = await page.evaluate((noOrdersTextPattern): ListPageDiagnostics => {
+			// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+			const CAPTCHA_RE = /captcha|robot|unusual traffic/i;
+			const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
+			const WS = /\s+/g;
+			// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+			return {
+				url: location.href,
+				title: document.title,
+				order_cards: document.querySelectorAll(
+					"div.order-card, div.js-order-card",
+				).length,
+				any_card: document.querySelectorAll(
+					'[class*="order" i][class*="card" i]',
+				).length,
+				any_order_header: document.querySelectorAll(
+					'[class*="order" i][class*="header" i]',
+				).length,
+				sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
+				captcha: CAPTCHA_RE.test(document.body?.innerText || "").toString(),
+				no_orders_text: NO_ORDERS_RE.test(
+					document.body?.innerText || "",
+				).toString(),
+				body_preview: (document.body?.innerText || "")
+					.replace(WS, " ")
+					.slice(0, 240),
+			};
+		}, AMAZON_NO_ORDERS_TEXT_PATTERN);
+	} catch (error) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "renderer_diagnostics_failed",
+			message: `Amazon year ${year} startIndex=${startIndex}: renderer diagnostics failed; refusing to advance the cursor.`,
+			diagnostics: {
+				error_class: error instanceof Error ? "Error" : "unknown",
+			},
+		});
+		throw new Error("amazon_empty_list_page_renderer_diagnostics_failed", {
+			cause: error,
+		});
+	}
+	const classification = classifyEmptyListPageDiagnostics(diag, startIndex);
+	if (classification.action === "terminal") {
+		return;
+	}
+	if (classification.reason === "source_auth_or_challenge") {
+		await emit({
+			type: "PROGRESS",
+			stream: "orders",
+			message: `Amazon year ${year}: sign-in or CAPTCHA challenge detected; manual action required to continue`,
+		});
+	}
+	if (diag && classification.reason === "selector_drift") {
+		const shotPath = `/tmp/amazon-drift-${year}-${startIndex}.png`;
+		await page
+			.screenshot({ path: shotPath, fullPage: true })
+			.catch((): undefined => undefined);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "selector_drift",
+			message: `Year ${year} startIndex=${startIndex}: order containers visible on page but .order-card/.js-order-card selector matched 0. Screenshot=${shotPath}`,
+			diagnostics: redactAmazonListPageDiagnostics(diag),
+		});
+	} else {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: classification.reason,
+			message: `Year ${year} startIndex=${startIndex}: empty Amazon list page is not a proven terminal page; refusing to advance the cursor.`,
+			diagnostics: diag
+				? redactAmazonListPageDiagnostics(diag)
+				: { missing_diagnostics: true },
+		});
+	}
+	throw new Error(`amazon_empty_list_page_${classification.reason}`);
 }
 
 /** Browser text, titles, and URLs are useful for local classification but are
  * not durable connector evidence. Keep only structural facts in SKIP_RESULT. */
-export function redactAmazonListPageDiagnostics(diag: ListPageDiagnostics): ListPageDiagnostics {
-  return { ...diag, body_preview: "", title: "", url: "" };
+export function redactAmazonListPageDiagnostics(
+	diag: ListPageDiagnostics,
+): ListPageDiagnostics {
+	return { ...diag, body_preview: "", title: "", url: "" };
 }
 
 export function classifyEmptyListPageDiagnostics(
-  diag: ListPageDiagnostics | null,
-  startIndex: number
+	diag: ListPageDiagnostics | null,
+	startIndex: number,
 ): EmptyListPageClassification {
-  if (!diag) {
-    return { action: "abort", reason: "renderer_diagnostics_failed" };
-  }
-  const captcha = diag.captcha === "true";
-  if (diag.sign_in_form || captcha || SIGNIN_URL_RE.test(diag.url)) {
-    return { action: "abort", reason: "source_auth_or_challenge" };
-  }
-  if ((diag.any_card > 0 || diag.any_order_header > 0) && diag.order_cards === 0) {
-    return { action: "abort", reason: "selector_drift" };
-  }
-  if (diag.no_orders_text === "true") {
-    return { action: "terminal", reason: "no_orders_text" };
-  }
-  if (startIndex > 0) {
-    return { action: "terminal", reason: "pagination_exhausted" };
-  }
-  return { action: "abort", reason: "empty_first_page_without_terminal_signal" };
+	if (!diag) {
+		return { action: "abort", reason: "renderer_diagnostics_failed" };
+	}
+	const captcha = diag.captcha === "true";
+	if (diag.sign_in_form || captcha || SIGNIN_URL_RE.test(diag.url)) {
+		return { action: "abort", reason: "source_auth_or_challenge" };
+	}
+	if (
+		(diag.any_card > 0 || diag.any_order_header > 0) &&
+		diag.order_cards === 0
+	) {
+		return { action: "abort", reason: "selector_drift" };
+	}
+	if (diag.no_orders_text === "true") {
+		return { action: "terminal", reason: "no_orders_text" };
+	}
+	if (startIndex > 0) {
+		return { action: "terminal", reason: "pagination_exhausted" };
+	}
+	return {
+		action: "abort",
+		reason: "empty_first_page_without_terminal_signal",
+	};
 }
 
 /**
@@ -1176,45 +1336,49 @@ export function classifyEmptyListPageDiagnostics(
  * orders. On zero orders, emits drift diagnostics before returning [].
  */
 export async function scrapeListPage(
-  page: Page,
-  capture: CaptureDep,
-  year: number,
-  startIndex: number,
-  emit: EmitFn
+	page: Page,
+	capture: CaptureDep,
+	year: number,
+	startIndex: number,
+	emit: EmitFn,
 ): Promise<ListPageOrder[]> {
-  const url = `https://www.amazon.com/your-orders/orders?timeFilter=year-${year}&startIndex=${startIndex}`;
-  try {
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: NAV_TIMEOUT_MS,
-    });
-  } catch (error) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "list_page_navigation_failed",
-      message: "Amazon list-page navigation failed; refusing to reuse the previous page as current data.",
-      diagnostics: { error_class: error instanceof Error ? error.constructor.name : "unknown" },
-    });
-    throw new Error("amazon_list_page_navigation_failed", { cause: error });
-  }
-  // Wait for list-page signal. `.order-card` is the standard container
-  // in modern layouts; `#ordersContainer` catches legacy. Either appears
-  // when the orders list has rendered.
-  await page
-    .locator(".order-card, .js-order-card, #ordersContainer, #no-orders")
-    .first()
-    .waitFor({ state: "attached", timeout: LIST_PAGE_WAIT_MS })
-    .catch((): undefined => undefined);
-  // Fixture capture: one list-page snapshot per year (page 1 only).
-  if (capture && startIndex === 0) {
-    await capture.captureDom(page, `orders-list-${year}`);
-  }
-  const orders = await extractAndShapeCheckOrders(page, emit);
-  if (orders.length === 0) {
-    await reportEmptyPageDiagnostics(page, year, startIndex, emit);
-  }
-  return orders;
+	const url = `https://www.amazon.com/your-orders/orders?timeFilter=year-${year}&startIndex=${startIndex}`;
+	try {
+		await page.goto(url, {
+			waitUntil: "domcontentloaded",
+			timeout: NAV_TIMEOUT_MS,
+		});
+	} catch (error) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "list_page_navigation_failed",
+			message:
+				"Amazon list-page navigation failed; refusing to reuse the previous page as current data.",
+			diagnostics: {
+				error_class:
+					error instanceof Error ? error.constructor.name : "unknown",
+			},
+		});
+		throw new Error("amazon_list_page_navigation_failed", { cause: error });
+	}
+	// Wait for list-page signal. `.order-card` is the standard container
+	// in modern layouts; `#ordersContainer` catches legacy. Either appears
+	// when the orders list has rendered.
+	await page
+		.locator(".order-card, .js-order-card, #ordersContainer, #no-orders")
+		.first()
+		.waitFor({ state: "attached", timeout: LIST_PAGE_WAIT_MS })
+		.catch((): undefined => undefined);
+	// Fixture capture: one list-page snapshot per year (page 1 only).
+	if (capture && startIndex === 0) {
+		await capture.captureDom(page, `orders-list-${year}`);
+	}
+	const orders = await extractAndShapeCheckOrders(page, emit);
+	if (orders.length === 0) {
+		await reportEmptyPageDiagnostics(page, year, startIndex, emit);
+	}
+	return orders;
 }
 
 /**
@@ -1228,9 +1392,9 @@ export async function scrapeListPage(
  * count crosses into operator-visible evidence.
  */
 interface ListOrderDetailResolution {
-  detail: OrderDetail | null;
-  detailFailureKind: DetailFailureKind | null;
-  detailGapReason: AmazonDetailGapReason;
+	detail: OrderDetail | null;
+	detailFailureKind: DetailFailureKind | null;
+	detailGapReason: AmazonDetailGapReason;
 }
 
 /**
@@ -1244,8 +1408,15 @@ interface ListOrderDetailResolution {
  * still valid; if it has (delivery progressed, a return appeared), the
  * order must be re-hydrated.
  */
-export function listSurfaceFingerprint(listOrder: ListPageOrder, orderDate: string, emittedAt: string): string {
-  return recordFingerprint(buildOrderRecord(listOrder, null, orderDate, emittedAt), ["fetched_at"]);
+export function listSurfaceFingerprint(
+	listOrder: ListPageOrder,
+	orderDate: string,
+	emittedAt: string,
+): string {
+	return recordFingerprint(
+		buildOrderRecord(listOrder, null, orderDate, emittedAt),
+		["fetched_at"],
+	);
 }
 
 /**
@@ -1256,163 +1427,182 @@ export function listSurfaceFingerprint(listOrder: ListPageOrder, orderDate: stri
  * return early before reaching this function (see `processListOrder`).
  */
 async function resolveDetailForListOrder(
-  page: Page,
-  deps: EmitDeps,
-  flags: RunFlags,
-  listOrder: ListPageOrder
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	listOrder: ListPageOrder,
 ): Promise<ListOrderDetailResolution> {
-  const resolution: ListOrderDetailResolution = {
-    detail: null,
-    detailFailureKind: null,
-    detailGapReason: "temporary_unavailable",
-  };
-  if (deps.skipDetail) {
-    return resolution;
-  }
-  const result = await resolveOrderDetail(
-    page,
-    deps.context,
-    deps.sendInteraction,
-    flags,
-    listOrder.orderId,
-    deps.reauthenticate
-  );
-  if (result.status === "hydrated") {
-    resolution.detail = result.detail;
-    return resolution;
-  }
-  resolution.detailGapReason = result.reason;
-  resolution.detailFailureKind = result.failureKind;
-  recordDetailFailureFlags(flags, result);
-  if (result.status === "failed") {
-    await captureFailedDetailOnce(deps.capture, page, flags, result);
-  }
-  return resolution;
+	const resolution: ListOrderDetailResolution = {
+		detail: null,
+		detailFailureKind: null,
+		detailGapReason: "temporary_unavailable",
+	};
+	if (deps.skipDetail) {
+		return resolution;
+	}
+	const result = await resolveOrderDetail(
+		page,
+		deps.context,
+		deps.sendInteraction,
+		flags,
+		listOrder.orderId,
+		deps.reauthenticate,
+	);
+	if (result.status === "hydrated") {
+		resolution.detail = result.detail;
+		return resolution;
+	}
+	resolution.detailGapReason = result.reason;
+	resolution.detailFailureKind = result.failureKind;
+	recordDetailFailureFlags(flags, result);
+	if (result.status === "failed") {
+		await captureFailedDetailOnce(deps.capture, page, flags, result);
+	}
+	return resolution;
 }
 
 export async function processListOrder(
-  page: Page,
-  deps: EmitDeps,
-  flags: RunFlags,
-  listOrder: ListPageOrder
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	listOrder: ListPageOrder,
 ): Promise<boolean> {
-  const orderDate = parseOrderDate(listOrder.orderDateRaw);
-  if (!orderDate) {
-    // A list row whose date does not parse never reaches the detail lane, so it
-    // is not counted toward order-item coverage; runYear already accounts for
-    // it via the bounded per-year drop SKIP_RESULT. It was still enumerated by
-    // the list scan, so the `orders` coverage denominator must not silently
-    // drop it: considered, but not covered (no accounting decision was made
-    // for its `orders` record).
-    if (deps.ordersCoverage) {
-      deps.ordersCoverage.considered.push(listOrder.orderId);
-      deps.ordersCoverage.dateDropped.push(listOrder.orderId);
-    }
-    return false;
-  }
-  // The current (and previous) year is re-listed on every run — orders are
-  // ongoing, so year-freezing never applies to it (see planIncrementalYears).
-  // An order already known-hydrated AND whose list surface has not moved
-  // since needs no repeat detail fetch or re-emit: its enriched records are
-  // already durable and unchanged. A list-surface change (delivery status
-  // moved, a return/refund became visible) invalidates the entry below and
-  // forces a full re-hydration, so detail-driven fields never go stale.
-  const currentListFingerprint = listSurfaceFingerprint(listOrder, orderDate, deps.emittedAt);
-  const priorFingerprint = deps.hydratedOrders?.get(listOrder.orderId);
-  const alreadyHydrated = !deps.skipDetail && priorFingerprint === currentListFingerprint;
-  if (priorFingerprint !== undefined && priorFingerprint !== currentListFingerprint) {
-    // Stale proof: the list surface moved since hydration. Drop the entry
-    // so this run's real hydration (below) re-establishes it fresh.
-    deps.hydratedOrders?.delete(listOrder.orderId);
-  }
-  if (alreadyHydrated) {
-    // Already-hydrated AND unchanged: nothing new to prove or emit on
-    // either stream. Emitting a list-page-only `orders` record here would
-    // silently downgrade the durable enriched record (recipient, payment,
-    // status_detail nulled) even though nothing actually changed.
-    if (deps.orderItemsCoverage) {
-      recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "hydrated");
-    }
-    // The list scan still enumerated this order and the fingerprint match is
-    // itself a real accounting decision (list surface unchanged since a prior
-    // durable emit) — considered and covered, even though nothing re-emits.
-    if (deps.ordersCoverage) {
-      deps.ordersCoverage.considered.push(listOrder.orderId);
-      deps.ordersCoverage.covered.push(listOrder.orderId);
-    }
-    return true;
-  }
-  const { detail, detailGapReason, detailFailureKind } = await resolveDetailForListOrder(page, deps, flags, listOrder);
-  if (deps.capture && !(flags.detailCaptured || deps.skipDetail) && detail) {
-    await deps.capture.captureDom(page, `order-detail-${listOrder.orderId}`);
-    flags.detailCaptured = true;
-  }
-  // A real hydration this run joins the durable known-hydrated map, keyed to
-  // the list surface observed THIS run, so a later run only skips re-fetch
-  // while that surface stays unchanged. Gated on `wantsItems`: the map's
-  // honest meaning is "order_items durably emitted", so a run scoped to
-  // `orders` only (which may still fetch detail for order enrichment) must
-  // not mark an order hydrated when no order_items record was emitted for
-  // it — a later item-scoped run needs its own real attempt.
-  if (detail && deps.wantsItems) {
-    deps.hydratedOrders?.set(listOrder.orderId, currentListFingerprint);
-  }
-  if (deps.orderItemsCoverage) {
-    const outcome = classifyDetailOutcome(deps.skipDetail, detail);
-    recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
-    // Attempted-but-failed detail emits a durable DETAIL_GAP so the gap_key is
-    // backed and the checkpoint is satisfiable on recovery.
-    if (outcome === "gap") {
-      await deps.emit(
-        buildOrderDetailGap(listOrder.orderId, detailGapReason, detailFailureKind ?? undefined, orderDate)
-      );
-    }
-  }
-  await emitOrderAndItems(deps, listOrder, detail, orderDate);
-  return true;
+	const orderDate = parseOrderDate(listOrder.orderDateRaw);
+	if (!orderDate) {
+		// A list row whose date does not parse never reaches the detail lane, so it
+		// is not counted toward order-item coverage; runYear already accounts for
+		// it via the bounded per-year drop SKIP_RESULT. It was still enumerated by
+		// the list scan, so the `orders` coverage denominator must not silently
+		// drop it: considered, but not covered (no accounting decision was made
+		// for its `orders` record).
+		if (deps.ordersCoverage) {
+			deps.ordersCoverage.considered.push(listOrder.orderId);
+			deps.ordersCoverage.dateDropped.push(listOrder.orderId);
+		}
+		return false;
+	}
+	// The current (and previous) year is re-listed on every run — orders are
+	// ongoing, so year-freezing never applies to it (see planIncrementalYears).
+	// An order already known-hydrated AND whose list surface has not moved
+	// since needs no repeat detail fetch or re-emit: its enriched records are
+	// already durable and unchanged. A list-surface change (delivery status
+	// moved, a return/refund became visible) invalidates the entry below and
+	// forces a full re-hydration, so detail-driven fields never go stale.
+	const currentListFingerprint = listSurfaceFingerprint(
+		listOrder,
+		orderDate,
+		deps.emittedAt,
+	);
+	const priorFingerprint = deps.hydratedOrders?.get(listOrder.orderId);
+	const alreadyHydrated =
+		!deps.skipDetail && priorFingerprint === currentListFingerprint;
+	if (
+		priorFingerprint !== undefined &&
+		priorFingerprint !== currentListFingerprint
+	) {
+		// Stale proof: the list surface moved since hydration. Drop the entry
+		// so this run's real hydration (below) re-establishes it fresh.
+		deps.hydratedOrders?.delete(listOrder.orderId);
+	}
+	if (alreadyHydrated) {
+		// Already-hydrated AND unchanged: nothing new to prove or emit on
+		// either stream. Emitting a list-page-only `orders` record here would
+		// silently downgrade the durable enriched record (recipient, payment,
+		// status_detail nulled) even though nothing actually changed.
+		if (deps.orderItemsCoverage) {
+			recordDetailOutcome(
+				deps.orderItemsCoverage,
+				listOrder.orderId,
+				"hydrated",
+			);
+		}
+		// The list scan still enumerated this order and the fingerprint match is
+		// itself a real accounting decision (list surface unchanged since a prior
+		// durable emit) — considered and covered, even though nothing re-emits.
+		if (deps.ordersCoverage) {
+			deps.ordersCoverage.considered.push(listOrder.orderId);
+			deps.ordersCoverage.covered.push(listOrder.orderId);
+		}
+		return true;
+	}
+	const { detail, detailGapReason, detailFailureKind } =
+		await resolveDetailForListOrder(page, deps, flags, listOrder);
+	if (deps.capture && !(flags.detailCaptured || deps.skipDetail) && detail) {
+		await deps.capture.captureDom(page, `order-detail-${listOrder.orderId}`);
+		flags.detailCaptured = true;
+	}
+	// A real hydration this run joins the durable known-hydrated map, keyed to
+	// the list surface observed THIS run, so a later run only skips re-fetch
+	// while that surface stays unchanged. Gated on `wantsItems`: the map's
+	// honest meaning is "order_items durably emitted", so a run scoped to
+	// `orders` only (which may still fetch detail for order enrichment) must
+	// not mark an order hydrated when no order_items record was emitted for
+	// it — a later item-scoped run needs its own real attempt.
+	if (detail && deps.wantsItems) {
+		deps.hydratedOrders?.set(listOrder.orderId, currentListFingerprint);
+	}
+	if (deps.orderItemsCoverage) {
+		const outcome = classifyDetailOutcome(deps.skipDetail, detail);
+		recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
+		// Attempted-but-failed detail emits a durable DETAIL_GAP so the gap_key is
+		// backed and the checkpoint is satisfiable on recovery.
+		if (outcome === "gap") {
+			await deps.emit(
+				buildOrderDetailGap(
+					listOrder.orderId,
+					detailGapReason,
+					detailFailureKind ?? undefined,
+					orderDate,
+				),
+			);
+		}
+	}
+	await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	return true;
 }
 
 interface YearRunResult {
-  orderCount: number;
-  unparseableDateCount: number;
+	orderCount: number;
+	unparseableDateCount: number;
 }
 
 interface YearCompletionArgs {
-  newYearsState: YearsCursor;
-  prior: YearState | undefined;
-  progress: BrowserCollectContext["progress"];
-  unparseableDateCount: number;
-  year: number;
-  yearOrderCount: number;
+	newYearsState: YearsCursor;
+	prior: YearState | undefined;
+	progress: BrowserCollectContext["progress"];
+	unparseableDateCount: number;
+	year: number;
+	yearOrderCount: number;
 }
 
 async function applyYearCompletionState({
-  newYearsState,
-  prior,
-  progress,
-  unparseableDateCount,
-  year,
-  yearOrderCount,
+	newYearsState,
+	prior,
+	progress,
+	unparseableDateCount,
+	year,
+	yearOrderCount,
 }: YearCompletionArgs): Promise<void> {
-  // Year completion state with freeze-once-stable policy. If required
-  // list rows were dropped, do not advance `last_scraped`: the next run
-  // must be allowed to retry the year after a parser fix instead of
-  // treating the year as complete forever.
-  if (unparseableDateCount === 0) {
-    const stableCount = prior !== undefined && prior.order_count === yearOrderCount;
-    newYearsState[String(year)] = {
-      order_count: yearOrderCount,
-      frozen: year < new Date().getFullYear() && stableCount,
-      last_scraped: nowIso(),
-    };
-  } else {
-    await progress(
-      `Not advancing Amazon year ${year} cursor because ${unparseableDateCount} order row${
-        unparseableDateCount === 1 ? "" : "s"
-      } could not be emitted`,
-      { stream: "orders" }
-    );
-  }
+	// Year completion state with freeze-once-stable policy. If required
+	// list rows were dropped, do not advance `last_scraped`: the next run
+	// must be allowed to retry the year after a parser fix instead of
+	// treating the year as complete forever.
+	if (unparseableDateCount === 0) {
+		const stableCount =
+			prior !== undefined && prior.order_count === yearOrderCount;
+		newYearsState[String(year)] = {
+			order_count: yearOrderCount,
+			frozen: year < new Date().getFullYear() && stableCount,
+			last_scraped: nowIso(),
+		};
+	} else {
+		await progress(
+			`Not advancing Amazon year ${year} cursor because ${unparseableDateCount} order row${
+				unparseableDateCount === 1 ? "" : "s"
+			} could not be emitted`,
+			{ stream: "orders" },
+		);
+	}
 }
 
 /**
@@ -1422,18 +1612,18 @@ async function applyYearCompletionState({
  * regardless of which site triggers the emit.
  */
 function buildAmazonOrdersStateCursor(
-  yearsState: YearsCursor,
-  ordersFingerprintCursor: FingerprintCursor | undefined,
-  hydratedOrders: ReadonlyMap<string, string>
+	yearsState: YearsCursor,
+	ordersFingerprintCursor: FingerprintCursor | undefined,
+	hydratedOrders: ReadonlyMap<string, string>,
 ): OrdersStateShape {
-  const cursor: OrdersStateShape = { years: yearsState };
-  if (ordersFingerprintCursor && ordersFingerprintCursor.size() > 0) {
-    cursor.fingerprints = ordersFingerprintCursor.toState();
-  }
-  if (hydratedOrders.size > 0) {
-    cursor.hydratedOrders = Object.fromEntries(hydratedOrders);
-  }
-  return cursor;
+	const cursor: OrdersStateShape = { years: yearsState };
+	if (ordersFingerprintCursor && ordersFingerprintCursor.size() > 0) {
+		cursor.fingerprints = ordersFingerprintCursor.toState();
+	}
+	if (hydratedOrders.size > 0) {
+		cursor.hydratedOrders = Object.fromEntries(hydratedOrders);
+	}
+	return cursor;
 }
 
 /**
@@ -1448,10 +1638,10 @@ function buildAmazonOrdersStateCursor(
  * connector test suites also don't build).
  */
 export function shouldEmitTrailingOrdersState(
-  ordersStateEmitted: boolean,
-  hydratedOrders: ReadonlyMap<string, string>
+	ordersStateEmitted: boolean,
+	hydratedOrders: ReadonlyMap<string, string>,
 ): boolean {
-  return !ordersStateEmitted && hydratedOrders.size > 0;
+	return !ordersStateEmitted && hydratedOrders.size > 0;
 }
 
 /**
@@ -1459,52 +1649,74 @@ export function shouldEmitTrailingOrdersState(
  * order count seen for the year (used for freeze-once-stable policy) and the
  * count of rows we could not emit because their order date was unparseable.
  */
-async function runYear(page: Page, deps: EmitDeps, flags: RunFlags, year: number): Promise<YearRunResult> {
-  let startIndex = 0;
-  let pageCount = 0;
-  let yearOrderCount = 0;
-  let unparseableDateCount = 0;
-  while (pageCount < PAGE_LIMIT) {
-    await deps.progress(`Amazon year ${year}: scanning page ${pageCount + 1}`, { stream: "orders" });
-    const orders = await scrapeListPage(page, deps.capture, year, startIndex, deps.emit);
-    if (orders.length === 0) {
-      await deps.progress(`Amazon year ${year}: no more orders after ${yearOrderCount} seen`, { stream: "orders" });
-      break;
-    }
-    yearOrderCount += orders.length;
-    await deps.progress(`Amazon year ${year}: page ${pageCount + 1} found ${orders.length} orders`, {
-      stream: "orders",
-    });
-    for (const [index, o] of orders.entries()) {
-      await deps.progress(
-        `Amazon year ${year}: processing order ${index + 1}/${orders.length} on page ${pageCount + 1}`,
-        { stream: "orders" }
-      );
-      const processed = await processListOrder(page, deps, flags, o);
-      if (!processed) {
-        // biome-ignore lint/style/noIncrementDecrement: integration.test.ts asserts this literal `unparseableDateCount++` source text (source-regex oracle); switching to += would fail that pre-existing test for a purely cosmetic change.
-        unparseableDateCount++;
-      }
-    }
-    pageCount += 1;
-    startIndex += START_INDEX_STEP;
-    await politeDelay(POLITE_DELAY_MS);
-  }
-  // Bounded per-year coverage evidence: a year that silently drops order rows
-  // with an unparseable order date must not look complete. One count-only
-  // SKIP_RESULT per year (no raw order ids) instead of a per-item flood.
-  if (unparseableDateCount > 0) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "unparseable_order_date",
-      message: `Amazon year ${year}: dropped ${unparseableDateCount} order row${
-        unparseableDateCount === 1 ? "" : "s"
-      } with unparseable dates (of ${yearOrderCount} seen)`,
-      diagnostics: { dropped: unparseableDateCount, total_seen: yearOrderCount, year },
-    });
-  }
-  return { orderCount: yearOrderCount, unparseableDateCount };
+async function runYear(
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	year: number,
+): Promise<YearRunResult> {
+	let startIndex = 0;
+	let pageCount = 0;
+	let yearOrderCount = 0;
+	let unparseableDateCount = 0;
+	while (pageCount < PAGE_LIMIT) {
+		await deps.progress(`Amazon year ${year}: scanning page ${pageCount + 1}`, {
+			stream: "orders",
+		});
+		const orders = await scrapeListPage(
+			page,
+			deps.capture,
+			year,
+			startIndex,
+			deps.emit,
+		);
+		if (orders.length === 0) {
+			await deps.progress(
+				`Amazon year ${year}: no more orders after ${yearOrderCount} seen`,
+				{ stream: "orders" },
+			);
+			break;
+		}
+		yearOrderCount += orders.length;
+		await deps.progress(
+			`Amazon year ${year}: page ${pageCount + 1} found ${orders.length} orders`,
+			{
+				stream: "orders",
+			},
+		);
+		for (const [index, o] of orders.entries()) {
+			await deps.progress(
+				`Amazon year ${year}: processing order ${index + 1}/${orders.length} on page ${pageCount + 1}`,
+				{ stream: "orders" },
+			);
+			const processed = await processListOrder(page, deps, flags, o);
+			if (!processed) {
+				unparseableDateCount++;
+			}
+		}
+		pageCount += 1;
+		startIndex += START_INDEX_STEP;
+		await politeDelay(POLITE_DELAY_MS);
+	}
+	// Bounded per-year coverage evidence: a year that silently drops order rows
+	// with an unparseable order date must not look complete. One count-only
+	// SKIP_RESULT per year (no raw order ids) instead of a per-item flood.
+	if (unparseableDateCount > 0) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "unparseable_order_date",
+			message: `Amazon year ${year}: dropped ${unparseableDateCount} order row${
+				unparseableDateCount === 1 ? "" : "s"
+			} with unparseable dates (of ${yearOrderCount} seen)`,
+			diagnostics: {
+				dropped: unparseableDateCount,
+				total_seen: yearOrderCount,
+				year,
+			},
+		});
+	}
+	return { orderCount: yearOrderCount, unparseableDateCount };
 }
 
 // ─── Incremental year planning ───────────────────────────────────────────
@@ -1529,38 +1741,43 @@ async function runYear(page: Page, deps: EmitDeps, flags: RunFlags, year: number
  * is injected to keep the function pure (no `new Date()` at call time).
  */
 export function planIncrementalYears(
-  years: number[],
-  yearsState: YearsCursor,
-  currentYear: number
+	years: number[],
+	yearsState: YearsCursor,
+	currentYear: number,
 ): { planned: number[]; skipped: Array<{ year: number; reason: string }> } {
-  // If there is no prior scraped state at all, treat this as a first run —
-  // return all discovered years so the initial backfill completes normally.
-  const hasAnyScrapeHistory = Object.values(yearsState).some((s) => s?.last_scraped);
-  if (!hasAnyScrapeHistory) {
-    return { planned: [...years], skipped: [] };
-  }
+	// If there is no prior scraped state at all, treat this as a first run —
+	// return all discovered years so the initial backfill completes normally.
+	const hasAnyScrapeHistory = Object.values(yearsState).some(
+		(s) => s?.last_scraped,
+	);
+	if (!hasAnyScrapeHistory) {
+		return { planned: [...years], skipped: [] };
+	}
 
-  const planned: number[] = [];
-  const skipped: Array<{ year: number; reason: string }> = [];
-  const prevYear = currentYear - 1;
+	const planned: number[] = [];
+	const skipped: Array<{ year: number; reason: string }> = [];
+	const prevYear = currentYear - 1;
 
-  for (const year of years) {
-    if (year >= prevYear) {
-      // Current and previous year are always eligible.
-      planned.push(year);
-      continue;
-    }
-    const prior = yearsState[String(year)];
-    if (prior?.last_scraped) {
-      // Historical year with prior state: skip to prevent unbounded re-scrape.
-      skipped.push({ year, reason: `prior state last_scraped=${prior.last_scraped}` });
-    } else {
-      // Newly discovered historical year (no prior state): include once.
-      planned.push(year);
-    }
-  }
+	for (const year of years) {
+		if (year >= prevYear) {
+			// Current and previous year are always eligible.
+			planned.push(year);
+			continue;
+		}
+		const prior = yearsState[String(year)];
+		if (prior?.last_scraped) {
+			// Historical year with prior state: skip to prevent unbounded re-scrape.
+			skipped.push({
+				year,
+				reason: `prior state last_scraped=${prior.last_scraped}`,
+			});
+		} else {
+			// Newly discovered historical year (no prior state): include once.
+			planned.push(year);
+		}
+	}
 
-  return { planned, skipped };
+	return { planned, skipped };
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────
@@ -1569,197 +1786,237 @@ export function planIncrementalYears(
 // and block the Node event loop on stdin. Only fires when this module
 // IS the process entry point (i.e. `tsx connectors/amazon/index.ts`).
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "amazon",
-    validateRecord,
-    // Persistent profile keeps cookies and session state across runs; browser
-    // mode is selected by the deployment, not by this connector.
-    browser: { profileName: "amazon" },
-    async ensureSession({ capture, checkpoint, context, onCredentialSubmit, page, sendInteraction }): Promise<void> {
-      await ensureAmazonSession({
-        ...(capture ? { capture } : {}),
-        checkpoint,
-        context,
-        onCredentialSubmit,
-        page,
-        sendInteraction,
-      });
-      await checkpoint("amazon-deep-session-check");
-      const deepOk = await deepSessionCheck(page);
-      if (!deepOk) {
-        throw new Error("amazon_session_required");
-      }
-    },
-    async collect(ctx: BrowserCollectContext): Promise<void> {
-      const { scope, state, emitRecord, emit, progress, capture, emittedAt, page, context, sendInteraction } = ctx;
-      const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
-      const wantsItems = requested.has("order_items");
-      const wantsOrders = requested.has("orders");
-      const flags: RunFlags = {
-        detailAttempts: 0,
-        detailCaptured: false,
-        failedDetailCaptured: false,
-        repairAttempted: false,
-        sessionRepairRequired: false,
-        temporaryDetailFailures: 0,
-      };
+	runConnector({
+		name: "amazon",
+		validateRecord,
+		// Persistent profile keeps cookies and session state across runs; browser
+		// mode is selected by the deployment, not by this connector.
+		browser: { profileName: "amazon" },
+		async ensureSession({
+			capture,
+			checkpoint,
+			context,
+			onCredentialSubmit,
+			page,
+			sendInteraction,
+		}): Promise<void> {
+			await ensureAmazonSession({
+				...(capture ? { capture } : {}),
+				checkpoint,
+				context,
+				onCredentialSubmit,
+				page,
+				sendInteraction,
+			});
+			await checkpoint("amazon-deep-session-check");
+			const deepOk = await deepSessionCheck(page);
+			if (!deepOk) {
+				throw new Error("amazon_session_required");
+			}
+		},
+		async collect(ctx: BrowserCollectContext): Promise<void> {
+			const {
+				scope,
+				state,
+				emitRecord,
+				emit,
+				progress,
+				capture,
+				emittedAt,
+				page,
+				context,
+				sendInteraction,
+			} = ctx;
+			const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
+			const wantsItems = requested.has("order_items");
+			const wantsOrders = requested.has("orders");
+			const flags: RunFlags = {
+				detailAttempts: 0,
+				detailCaptured: false,
+				failedDetailCaptured: false,
+				repairAttempted: false,
+				sessionRepairRequired: false,
+				temporaryDetailFailures: 0,
+			};
 
-      // Seeded once for the whole run; mutated in place by the forward walk
-      // only (the recovery pass has no list-page row to fingerprint against
-      // — see AmazonDetailRecoveryDeps).
-      const hydratedOrders = readPriorHydratedOrders(state);
+			// Seeded once for the whole run; mutated in place by the forward walk
+			// only (the recovery pass has no list-page row to fingerprint against
+			// — see AmazonDetailRecoveryDeps).
+			const hydratedOrders = readPriorHydratedOrders(state);
 
-      const gapRecovery = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
-        page,
-        {
-          capture,
-          context,
-          detailGaps: ctx.detailGaps,
-          emit,
-          emitRecord,
-          requestDetailGapPage: ctx.requestDetailGapPage,
-          sendInteraction,
-        },
-        flags,
-        { recoveryOnly: ctx.recoveryOnly === true, wantsItems }
-      );
-      if (gapRecovery.stoppedWithPending) {
-        await progress(
-          "Amazon order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery"
-        );
-      }
-      if (gapRecovery.suppressForward) {
-        return;
-      }
+			const gapRecovery =
+				await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+					page,
+					{
+						capture,
+						context,
+						detailGaps: ctx.detailGaps,
+						emit,
+						emitRecord,
+						requestDetailGapPage: ctx.requestDetailGapPage,
+						sendInteraction,
+					},
+					flags,
+					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
+				);
+			if (gapRecovery.stoppedWithPending) {
+				await progress(
+					"Amazon order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery",
+				);
+			}
+			if (gapRecovery.suppressForward) {
+				return;
+			}
 
-      // STATE is stream-keyed per Collection Profile: `state` is
-      // { <stream>: <cursor>, ... }. We write STATE stream='orders'
-      // cursor={years:{...}}, so reads must go through state.orders.
-      const ordersState = (state.orders ?? {}) as OrdersStateShape;
-      const legacyYears = (state as { years?: YearsCursor }).years;
-      const yearsState: YearsCursor = ordersState.years ?? legacyYears ?? {};
+			// STATE is stream-keyed per Collection Profile: `state` is
+			// { <stream>: <cursor>, ... }. We write STATE stream='orders'
+			// cursor={years:{...}}, so reads must go through state.orders.
+			const ordersState = (state.orders ?? {}) as OrdersStateShape;
+			const legacyYears = (state as { years?: YearsCursor }).years;
+			const yearsState: YearsCursor = ordersState.years ?? legacyYears ?? {};
 
-      // Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
-      // One cursor for the whole orders stream — order ids are globally
-      // unique across years. Only opened when orders are requested. NOT
-      // pruned: orders is a partial scan (year-freezing skips historical
-      // years — see emitOrderAndItems).
-      const ordersFingerprintCursor = requested.has("orders")
-        ? openFingerprintCursor(state.orders, {
-            excludeFromFingerprint: ["fetched_at"],
-            priorFingerprints: readPriorOrderFingerprints(state),
-          })
-        : undefined;
+			// Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
+			// One cursor for the whole orders stream — order ids are globally
+			// unique across years. Only opened when orders are requested. NOT
+			// pruned: orders is a partial scan (year-freezing skips historical
+			// years — see emitOrderAndItems).
+			const ordersFingerprintCursor = requested.has("orders")
+				? openFingerprintCursor(state.orders, {
+						excludeFromFingerprint: ["fetched_at"],
+						priorFingerprints: readPriorOrderFingerprints(state),
+					})
+				: undefined;
 
-      await progress("Amazon session verified; discovering years");
-      const discoveredYears = await discoverYears(page);
-      let years: number[];
-      // Targeted-year override for spot checks and explicit backfills.
-      // Bypasses incremental planning entirely.
-      if (process.env.PDPP_AMAZON_YEARS) {
-        const filter = new Set(process.env.PDPP_AMAZON_YEARS.split(",").map((y) => Number(y.trim())));
-        years = discoveredYears.filter((y) => filter.has(y));
-      } else {
-        // Incremental planning: bound the year set so historical years with
-        // prior scraped state are not re-scraped on every run.
-        const currentYear = new Date().getFullYear();
-        const { planned, skipped } = planIncrementalYears(discoveredYears, yearsState, currentYear);
-        for (const { year, reason } of skipped) {
-          await progress(`Skipping year ${year} (incremental: ${reason})`);
-        }
-        years = planned;
-      }
-      await progress(`Years to scrape: ${years.join(", ")}`);
+			await progress("Amazon session verified; discovering years");
+			const discoveredYears = await discoverYears(page);
+			let years: number[];
+			// Targeted-year override for spot checks and explicit backfills.
+			// Bypasses incremental planning entirely.
+			if (process.env.PDPP_AMAZON_YEARS) {
+				const filter = new Set(
+					process.env.PDPP_AMAZON_YEARS.split(",").map((y) => Number(y.trim())),
+				);
+				years = discoveredYears.filter((y) => filter.has(y));
+			} else {
+				// Incremental planning: bound the year set so historical years with
+				// prior scraped state are not re-scraped on every run.
+				const currentYear = new Date().getFullYear();
+				const { planned, skipped } = planIncrementalYears(
+					discoveredYears,
+					yearsState,
+					currentYear,
+				);
+				for (const { year, reason } of skipped) {
+					await progress(`Skipping year ${year} (incremental: ${reason})`);
+				}
+				years = planned;
+			}
+			await progress(`Years to scrape: ${years.join(", ")}`);
 
-      // Capture fixtures (gated on PDPP_CAPTURE_FIXTURES=1). One orders-list
-      // page per year and one order-detail page overall is enough to drive
-      // offline parser tests — more just bloats the fixture tree.
-      // Order-item detail coverage is only meaningful when the detail-enriched
-      // `order_items` stream is in scope. When it is not requested, the
-      // accumulator stays undefined and processListOrder records nothing.
-      const orderItemsCoverage = wantsItems ? newOrderItemsCoverage() : undefined;
-      // `orders` list-stream coverage is only meaningful when `orders` itself
-      // is in scope — mirrors the `wantsItems`-gated accumulator above.
-      const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
-      const deps: EmitDeps = {
-        capture,
-        context,
-        emit,
-        emitRecord,
-        emittedAt,
-        hydratedOrders,
-        orderItemsCoverage,
-        ordersCoverage,
-        ordersFingerprintCursor,
-        progress,
-        sendInteraction,
-        skipDetail: process.env.PDPP_AMAZON_SKIP_DETAIL === "1",
-        wantsItems,
-        wantsOrders,
-      };
+			// Capture fixtures (gated on PDPP_CAPTURE_FIXTURES=1). One orders-list
+			// page per year and one order-detail page overall is enough to drive
+			// offline parser tests — more just bloats the fixture tree.
+			// Order-item detail coverage is only meaningful when the detail-enriched
+			// `order_items` stream is in scope. When it is not requested, the
+			// accumulator stays undefined and processListOrder records nothing.
+			const orderItemsCoverage = wantsItems
+				? newOrderItemsCoverage()
+				: undefined;
+			// `orders` list-stream coverage is only meaningful when `orders` itself
+			// is in scope — mirrors the `wantsItems`-gated accumulator above.
+			const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
+			const deps: EmitDeps = {
+				capture,
+				context,
+				emit,
+				emitRecord,
+				emittedAt,
+				hydratedOrders,
+				orderItemsCoverage,
+				ordersCoverage,
+				ordersFingerprintCursor,
+				progress,
+				sendInteraction,
+				skipDetail: process.env.PDPP_AMAZON_SKIP_DETAIL === "1",
+				wantsItems,
+				wantsOrders,
+			};
 
-      const newYearsState: YearsCursor = { ...yearsState };
-      const buildOrdersStateCursor = (): OrdersStateShape =>
-        buildAmazonOrdersStateCursor(newYearsState, ordersFingerprintCursor, hydratedOrders);
+			const newYearsState: YearsCursor = { ...yearsState };
+			const buildOrdersStateCursor = (): OrdersStateShape =>
+				buildAmazonOrdersStateCursor(
+					newYearsState,
+					ordersFingerprintCursor,
+					hydratedOrders,
+				);
 
-      // Tracks whether the loop below has emitted STATE at least once, so
-      // the trailing fallback emit (below the loop) fires exactly when the
-      // loop emitted nothing — including "every planned year is frozen",
-      // which `years.length === 0` does not cover: `planIncrementalYears`
-      // always plans the current and previous year, and the previous year
-      // CAN be frozen, so `years.length > 0` while every iteration
-      // `continue`s before reaching the STATE emit.
-      let ordersStateEmitted = false;
+			// Tracks whether the loop below has emitted STATE at least once, so
+			// the trailing fallback emit (below the loop) fires exactly when the
+			// loop emitted nothing — including "every planned year is frozen",
+			// which `years.length === 0` does not cover: `planIncrementalYears`
+			// always plans the current and previous year, and the previous year
+			// CAN be frozen, so `years.length > 0` while every iteration
+			// `continue`s before reaching the STATE emit.
+			let ordersStateEmitted = false;
 
-      for (const year of years) {
-        const prior = yearsState[String(year)];
-        // Year-freezing: skip if already frozen
-        if (prior?.frozen) {
-          await progress(`Skipping year ${year} (frozen)`);
-          continue;
-        }
+			for (const year of years) {
+				const prior = yearsState[String(year)];
+				// Year-freezing: skip if already frozen
+				if (prior?.frozen) {
+					await progress(`Skipping year ${year} (frozen)`);
+					continue;
+				}
 
-        const { orderCount: yearOrderCount, unparseableDateCount } = await runYear(page, deps, flags, year);
+				const { orderCount: yearOrderCount, unparseableDateCount } =
+					await runYear(page, deps, flags, year);
 
-        await applyYearCompletionState({
-          newYearsState,
-          prior,
-          progress,
-          unparseableDateCount,
-          year,
-          yearOrderCount,
-        });
-        // Carry the per-order fingerprint map and known-hydrated order map
-        // forward alongside the year cursors so the next run can suppress
-        // re-scraped orders whose body is unchanged modulo the run clock, and
-        // skip re-fetching detail for orders whose list surface has not
-        // moved. NOT pruned: orders is a partial scan (frozen years are
-        // skipped, so their ids are never re-seen).
-        await emit({ type: "STATE", stream: "orders", cursor: buildOrdersStateCursor() });
-        ordersStateEmitted = true;
-      }
-      // The loop may emit no STATE at all — every planned year frozen, or no
-      // years discovered — even though the recovery pass above hydrated
-      // gaps or a prior run's `hydratedOrders` map is non-empty. Without
-      // this, that durable progress would never reach a STATE emit this run.
-      if (shouldEmitTrailingOrdersState(ordersStateEmitted, hydratedOrders)) {
-        await emit({ type: "STATE", stream: "orders", cursor: buildOrdersStateCursor() });
-      }
+				await applyYearCompletionState({
+					newYearsState,
+					prior,
+					progress,
+					unparseableDateCount,
+					year,
+					yearOrderCount,
+				});
+				// Carry the per-order fingerprint map and known-hydrated order map
+				// forward alongside the year cursors so the next run can suppress
+				// re-scraped orders whose body is unchanged modulo the run clock, and
+				// skip re-fetching detail for orders whose list surface has not
+				// moved. NOT pruned: orders is a partial scan (frozen years are
+				// skipped, so their ids are never re-seen).
+				await emit({
+					type: "STATE",
+					stream: "orders",
+					cursor: buildOrdersStateCursor(),
+				});
+				ordersStateEmitted = true;
+			}
+			// The loop may emit no STATE at all — every planned year frozen, or no
+			// years discovered — even though the recovery pass above hydrated
+			// gaps or a prior run's `hydratedOrders` map is non-empty. Without
+			// this, that durable progress would never reach a STATE emit this run.
+			if (shouldEmitTrailingOrdersState(ordersStateEmitted, hydratedOrders)) {
+				await emit({
+					type: "STATE",
+					stream: "orders",
+					cursor: buildOrdersStateCursor(),
+				});
+			}
 
-      // After every scraped year settles, emit one run-level `order_items`
-      // DETAIL_COVERAGE: the order list is a real "considered" denominator, so
-      // the console can tell a fully-hydrated run from one that degraded some
-      // order-detail fetches without inferring it from gaps alone. No-ops when
-      // order_items is out of scope or no order was considered.
-      if (orderItemsCoverage) {
-        await emitOrderItemsCoverage(deps, orderItemsCoverage);
-      }
-      // Same honesty posture as order_items: emit once the year sweep
-      // completes, including the zero-considered steady-state case, so the
-      // `orders` list stream is never left permanently unmeasured.
-      if (ordersCoverage) {
-        await emitOrdersCoverage(deps, ordersCoverage);
-      }
-    },
-  });
+			// After every scraped year settles, emit one run-level `order_items`
+			// DETAIL_COVERAGE: the order list is a real "considered" denominator, so
+			// the console can tell a fully-hydrated run from one that degraded some
+			// order-detail fetches without inferring it from gaps alone. No-ops when
+			// order_items is out of scope or no order was considered.
+			if (orderItemsCoverage) {
+				await emitOrderItemsCoverage(deps, orderItemsCoverage);
+			}
+			// Same honesty posture as order_items: emit once the year sweep
+			// completes, including the zero-considered steady-state case, so the
+			// `orders` list stream is never left permanently unmeasured.
+			if (ordersCoverage) {
+				await emitOrdersCoverage(deps, ordersCoverage);
+			}
+		},
+	});
 }

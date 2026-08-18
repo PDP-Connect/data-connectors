@@ -7,136 +7,151 @@
 
 import type { StatementContentFingerprint } from "../../src/statement-content-fingerprint.ts";
 
-export type ChaseAccountType = "credit_card" | "checking" | "savings" | "unknown";
+export type ChaseAccountType =
+	| "credit_card"
+	| "checking"
+	| "savings"
+	| "unknown";
 
 export interface ChaseAccount {
-  internal_id: string;
-  last_four: string | null;
-  name: string;
-  type: ChaseAccountType;
+	internal_id: string;
+	last_four: string | null;
+	name: string;
+	type: ChaseAccountType;
 }
 
-export type ActivityKind = "all" | "since_last_statement" | "year_to_date" | "last_year" | "current" | "date_range";
+export type ActivityKind =
+	| "all"
+	| "since_last_statement"
+	| "year_to_date"
+	| "last_year"
+	| "current"
+	| "date_range";
 
 export interface DateRange {
-  from?: string | undefined;
-  to?: string | undefined;
+	from?: string | undefined;
+	to?: string | undefined;
 }
 
 export interface DownloadOptions {
-  activity?: ActivityKind;
-  dateRange?: DateRange;
+	activity?: ActivityKind;
+	dateRange?: DateRange;
 }
 
 export interface DownloadSuccess {
-  activity: ActivityKind;
-  downloaded: true;
-  qfxPath: string;
+	activity: ActivityKind;
+	downloaded: true;
+	qfxPath: string;
 }
 
 export interface DownloadFailure {
-  downloaded: false;
-  error: string;
+	downloaded: false;
+	error: string;
 }
 
 export interface DownloadNoActivity {
-  activity: ActivityKind;
-  noActivity: true;
+	activity: ActivityKind;
+	noActivity: true;
 }
 
-export type DownloadResult = DownloadSuccess | DownloadFailure | DownloadNoActivity;
+export type DownloadResult =
+	| DownloadSuccess
+	| DownloadFailure
+	| DownloadNoActivity;
 
 export interface DateFillOk {
-  ok: true;
+	ok: true;
 }
 
 export interface DateFillErr {
-  error: string;
-  ok: false;
+	error: string;
+	ok: false;
 }
 
 export type DateFillResult = DateFillOk | DateFillErr;
 
 export interface StatementRow {
-  account_reference: string | null;
-  date_delivered_raw: string;
-  doc_kind: string;
-  rowAnchorId: string;
-  rowIdx: string | undefined;
-  tableIdx: string | undefined;
-  title: string;
+	account_reference: string | null;
+	date_delivered_raw: string;
+	doc_kind: string;
+	rowAnchorId: string;
+	rowIdx: string | undefined;
+	tableIdx: string | undefined;
+	title: string;
 }
 
 export interface StatementDownloadOk {
-  content: StatementContentFingerprint;
-  ok: true;
-  pdfPath: string;
-  pdfSha256: string;
+	content: StatementContentFingerprint;
+	ok: true;
+	pdfPath: string;
+	pdfSha256: string;
 }
 
 export interface StatementDownloadErr {
-  error: string;
-  ok: false;
+	error: string;
+	ok: false;
 }
 
-export type StatementDownloadResult = StatementDownloadOk | StatementDownloadErr;
+export type StatementDownloadResult =
+	| StatementDownloadOk
+	| StatementDownloadErr;
 
 export interface QfxTransaction {
-  amount_cents: number;
-  check_number: string | null;
-  currency: string;
-  date: string | null;
-  fitid: string;
-  memo: string | null;
-  name: string | null;
-  reference_number: string | null;
-  type: string | null;
+	amount_cents: number;
+	check_number: string | null;
+	currency: string;
+	date: string | null;
+	fitid: string;
+	memo: string | null;
+	name: string | null;
+	reference_number: string | null;
+	type: string | null;
 }
 
 export interface QfxBalance {
-  as_of: string;
-  available_cents: number | null;
-  ledger_cents: number | null;
+	as_of: string;
+	available_cents: number | null;
+	ledger_cents: number | null;
 }
 
 export interface QfxExtracted {
-  balance: QfxBalance | null;
-  transactions: QfxTransaction[];
+	balance: QfxBalance | null;
+	transactions: QfxTransaction[];
 }
 
 export type CurrentActivityStatus = "pending" | "posted" | "unknown";
 
 export interface CurrentActivityRow {
-  activity_date: string;
-  amount_cents: number;
-  description: string;
-  memo: string | null;
-  posted_date: string | null;
-  status: CurrentActivityStatus;
-  ui_transaction_id: string | null;
+	activity_date: string;
+	amount_cents: number;
+	description: string;
+	memo: string | null;
+	posted_date: string | null;
+	status: CurrentActivityStatus;
+	ui_transaction_id: string | null;
 }
 
 export interface DashboardDiagnostics {
-  body_preview: string;
-  income_capture_description_count: number;
-  income_capture_heading_count: number;
-  title: string;
-  url: string;
+	body_preview: string;
+	income_capture_description_count: number;
+	income_capture_heading_count: number;
+	title: string;
+	url: string;
 }
 
 export interface TransactionCursor {
-  last_activity?: string;
-  last_fetched_at?: string;
-  max_seen_date?: string | null;
+	last_activity?: string;
+	last_fetched_at?: string;
+	max_seen_date?: string | null;
 }
 
 export interface TransactionsStateShape {
-  per_account?: Record<string, TransactionCursor | undefined>;
+	per_account?: Record<string, TransactionCursor | undefined>;
 }
 
 export interface ActivityChoice {
-  activity: ActivityKind;
-  dateRange?: DateRange;
+	activity: ActivityKind;
+	dateRange?: DateRange;
 }
 
 // OFX parser output is deeply nested, loosely typed, and varies by ofx-js

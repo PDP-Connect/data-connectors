@@ -14,37 +14,37 @@
  */
 
 import {
-  type BrowserCollectContext,
-  type ProbeSessionArgs,
-  politeDelay,
-  runConnector,
+	type BrowserCollectContext,
+	type ProbeSessionArgs,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 
 runConnector({
-  name: "anthropic",
-  browser: {},
-  validateRecord,
-  async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-    const cookies = await context.cookies("https://claude.ai/");
-    return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
-  },
-  async collect({ page, emit }: BrowserCollectContext): Promise<void> {
-    await page
-      .goto("https://claude.ai/", {
-        waitUntil: "domcontentloaded",
-        timeout: 30_000,
-      })
-      .catch((): undefined => undefined);
-    await politeDelay(3000);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "conversations",
-      reason: "claude_api_wiring_pending",
-      message:
-        "Claude session reachable. Org UUID discovery + conversation/message endpoint wiring deferred to live session.",
-    });
-  },
+	name: "anthropic",
+	browser: {},
+	validateRecord,
+	async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
+		const cookies = await context.cookies("https://claude.ai/");
+		return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
+	},
+	async collect({ page, emit }: BrowserCollectContext): Promise<void> {
+		await page
+			.goto("https://claude.ai/", {
+				waitUntil: "domcontentloaded",
+				timeout: 30_000,
+			})
+			.catch((): undefined => undefined);
+		await politeDelay(3000);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "conversations",
+			reason: "claude_api_wiring_pending",
+			message:
+				"Claude session reachable. Org UUID discovery + conversation/message endpoint wiring deferred to live session.",
+		});
+	},
 });

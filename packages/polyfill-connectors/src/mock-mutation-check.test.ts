@@ -28,68 +28,85 @@ import { test } from "node:test";
 import { findPathLiteralSites } from "../scripts/mock-mutation-check.ts";
 
 test("findPathLiteralSites: detects === string-equality path matchers", () => {
-  const source = ['if (path === "/System/Info") {', "  respond();", "}"].join("\n");
-  const sites = findPathLiteralSites("fake.test.ts", source);
-  assert.deepEqual(
-    sites.map((s) => s.literal),
-    ["/System/Info"]
-  );
-  assert.equal(sites[0]?.line, 1);
+	const source = ['if (path === "/System/Info") {', "  respond();", "}"].join(
+		"\n",
+	);
+	const sites = findPathLiteralSites("fake.test.ts", source);
+	assert.deepEqual(
+		sites.map((s) => s.literal),
+		["/System/Info"],
+	);
+	assert.equal(sites[0]?.line, 1);
 });
 
 test("findPathLiteralSites: detects .startsWith and .includes path matchers", () => {
-  const source = [
-    'if (path.startsWith("/api/")) {',
-    "  return notFound();",
-    "}",
-    'if (path.includes("/Users/test-user-123/Items")) {',
-    "  return items();",
-    "}",
-  ].join("\n");
-  const sites = findPathLiteralSites("fake.test.ts", source);
-  assert.deepEqual(
-    sites.map((s) => s.literal),
-    ["/api/", "/Users/test-user-123/Items"]
-  );
+	const source = [
+		'if (path.startsWith("/api/")) {',
+		"  return notFound();",
+		"}",
+		'if (path.includes("/Users/test-user-123/Items")) {',
+		"  return items();",
+		"}",
+	].join("\n");
+	const sites = findPathLiteralSites("fake.test.ts", source);
+	assert.deepEqual(
+		sites.map((s) => s.literal),
+		["/api/", "/Users/test-user-123/Items"],
+	);
 });
 
 test("findPathLiteralSites: ignores comment lines quoting a path", () => {
-  const source = [
-    "// Jellyfin serves its REST API at the root, NOT under /api/ — a request",
-    "// path with that prefix indicates a regression to a URL shape that 404s.",
-    " * See /api/ for background.",
-    'if (path === "/System/Info") {',
-    "  respond();",
-    "}",
-  ].join("\n");
-  const sites = findPathLiteralSites("fake.test.ts", source);
-  assert.deepEqual(
-    sites.map((s) => s.literal),
-    ["/System/Info"],
-    "commented-out path mentions must not be treated as executable matchers"
-  );
+	const source = [
+		"// Jellyfin serves its REST API at the root, NOT under /api/ — a request",
+		"// path with that prefix indicates a regression to a URL shape that 404s.",
+		" * See /api/ for background.",
+		'if (path === "/System/Info") {',
+		"  respond();",
+		"}",
+	].join("\n");
+	const sites = findPathLiteralSites("fake.test.ts", source);
+	assert.deepEqual(
+		sites.map((s) => s.literal),
+		["/System/Info"],
+		"commented-out path mentions must not be treated as executable matchers",
+	);
 });
 
 test("findPathLiteralSites: ignores non-path string literals and non-matcher comparisons", () => {
-  const source = [
-    'const label = "not a path";',
-    'assert.equal(status, "ok");',
-    'const greeting = "/not/really/checked" + suffix;', // string concat — not a matcher shape
-  ].join("\n");
-  const sites = findPathLiteralSites("fake.test.ts", source);
-  assert.deepEqual(sites, [], "no `===`, `.startsWith(...)`, or `.includes(...)` path-matcher shape is present");
+	const source = [
+		'const label = "not a path";',
+		'assert.equal(status, "ok");',
+		'const greeting = "/not/really/checked" + suffix;', // string concat — not a matcher shape
+	].join("\n");
+	const sites = findPathLiteralSites("fake.test.ts", source);
+	assert.deepEqual(
+		sites,
+		[],
+		"no `===`, `.startsWith(...)`, or `.includes(...)` path-matcher shape is present",
+	);
 });
 
 test("findPathLiteralSites: returns empty for a file with zero path literals (the UNKNOWN case)", () => {
-  const source = [
-    "const fetchStub = () => Promise.resolve({ ok: true });",
-    "test('does nothing HTTP-shaped', () => {});",
-  ].join("\n");
-  assert.deepEqual(findPathLiteralSites("fake.test.ts", source), []);
+	const source = [
+		"const fetchStub = () => Promise.resolve({ ok: true });",
+		"test('does nothing HTTP-shaped', () => {});",
+	].join("\n");
+	assert.deepEqual(findPathLiteralSites("fake.test.ts", source), []);
 });
 
 test("findPathLiteralSites: records the correct file and 1-indexed line for a multi-line file", () => {
-  const source = ["", "", 'if (url === "/Users/Me") {', "  ok();", "}"].join("\n");
-  const sites = findPathLiteralSites("connectors/jellyfin/integration.test.ts", source);
-  assert.deepEqual(sites, [{ file: "connectors/jellyfin/integration.test.ts", line: 3, literal: "/Users/Me" }]);
+	const source = ["", "", 'if (url === "/Users/Me") {', "  ok();", "}"].join(
+		"\n",
+	);
+	const sites = findPathLiteralSites(
+		"connectors/jellyfin/integration.test.ts",
+		source,
+	);
+	assert.deepEqual(sites, [
+		{
+			file: "connectors/jellyfin/integration.test.ts",
+			line: 3,
+			literal: "/Users/Me",
+		},
+	]);
 });

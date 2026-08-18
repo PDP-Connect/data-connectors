@@ -66,22 +66,30 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import { redactTransportDetail } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
-import { ensureVenmoOrigin, ensureVenmoSession } from "../../src/auto-login/venmo.ts";
 import {
-  type BrowserCollectContext,
-  buildDetailCoverageMessage,
-  politeDelay,
-  runConnector,
+	ensureVenmoOrigin,
+	ensureVenmoSession,
+} from "../../src/auto-login/venmo.ts";
+import {
+	type BrowserCollectContext,
+	buildDetailCoverageMessage,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
-import { API_BASE, profileRecord, transactionRecord, userRecord } from "./parsers.ts";
+import {
+	API_BASE,
+	profileRecord,
+	transactionRecord,
+	userRecord,
+} from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
-  VenmoAccountResponse,
-  VenmoFriendsResponse,
-  VenmoStoriesResponse,
-  VenmoStory,
-  VenmoUser,
+	VenmoAccountResponse,
+	VenmoFriendsResponse,
+	VenmoStoriesResponse,
+	VenmoStory,
+	VenmoUser,
 } from "./types.ts";
 
 const FRIENDS_PAGE_SIZE = 200;
@@ -120,7 +128,8 @@ const MAX_TRANSACTION_PAGES = 400;
  * `src/auto-login/venmo.test.ts` assert against the REAL pattern, not a
  * hand-copied stand-in that could silently drift from it.
  */
-export const VENMO_RETRYABLE_PATTERN = /venmo_rate_limited|venmo_transport_error|venmo_probe_transport_error/i;
+export const VENMO_RETRYABLE_PATTERN =
+	/venmo_rate_limited|venmo_transport_error|venmo_probe_transport_error/i;
 // The redesign dropped `venmoPacingProfile`/the HTTP governor (page-context
 // fetch has no direct outbound Node HTTP to pace — F10 in
 // /tmp/review-venmo-browser-redesign-0810.md), but the page loops below
@@ -130,18 +139,21 @@ export const VENMO_RETRYABLE_PATTERN = /venmo_rate_limited|venmo_transport_error
 const PAGE_DELAY_MS = 500;
 
 interface VenmoProgressExtra {
-  cursor_present?: boolean;
-  item_count?: number;
-  offset_ordinal?: number;
-  phase?: string;
-  stream?: string;
-  total_seen?: number;
+	cursor_present?: boolean;
+	item_count?: number;
+	offset_ordinal?: number;
+	phase?: string;
+	stream?: string;
+	total_seen?: number;
 }
-type VenmoProgress = (message: string, extra?: VenmoProgressExtra) => Promise<void>;
+type VenmoProgress = (
+	message: string,
+	extra?: VenmoProgressExtra,
+) => Promise<void>;
 
 interface VenmoPageFetchResult {
-  body: string;
-  status: number;
+	body: string;
+	status: number;
 }
 
 /**
@@ -150,7 +162,10 @@ interface VenmoPageFetchResult {
  * custom User-Agent. This is the entire auth surface: the browser IS the
  * credential.
  */
-export type VenmoPageFetch = (path: string, query?: Record<string, string>) => Promise<VenmoPageFetchResult>;
+export type VenmoPageFetch = (
+	path: string,
+	query?: Record<string, string>,
+) => Promise<VenmoPageFetchResult>;
 
 /**
  * Distinguishes "the fetch could not run at all" (opaque origin, DNS, TLS,
@@ -163,338 +178,393 @@ export type VenmoPageFetch = (path: string, query?: Record<string, string>) => P
  * established the `venmo.com` origin (F1/F3).
  */
 type VenmoFetchOutcome =
-  | { kind: "response"; body: string; status: number }
-  | { kind: "transport_error"; message: string };
+	| { kind: "response"; body: string; status: number }
+	| { kind: "transport_error"; message: string };
 
 function makePageFetch(page: Page): VenmoPageFetch {
-  return async (path, query) => {
-    const url = new URL(API_BASE + path);
-    for (const [key, value] of Object.entries(query ?? {})) {
-      url.searchParams.set(key, value);
-    }
-    let outcome: VenmoFetchOutcome;
-    try {
-      outcome = (await page.evaluate(async (fetchUrl) => {
-        try {
-          const res = await fetch(fetchUrl, {
-            credentials: "include",
-            headers: { accept: "application/json" },
-          });
-          return { kind: "response" as const, status: res.status, body: await res.text().catch(() => "") };
-        } catch (err) {
-          return { kind: "transport_error" as const, message: err instanceof Error ? err.message : String(err) };
-        }
-      }, url.toString())) as VenmoFetchOutcome;
-    } catch (err) {
-      // `page.evaluate` itself rejected (execution context destroyed by a
-      // navigation, or the page/browser crashed) — same "could not run at
-      // all" classification as a fetch throwing inside the callback.
-      outcome = { kind: "transport_error", message: err instanceof Error ? err.message : String(err) };
-    }
-    if (outcome.kind === "transport_error") {
-      throw new Error(`venmo_transport_error [endpoint ${path}]: ${redactTransportDetail(outcome.message)}`);
-    }
-    return { status: outcome.status, body: outcome.body };
-  };
+	return async (path, query) => {
+		const url = new URL(API_BASE + path);
+		for (const [key, value] of Object.entries(query ?? {})) {
+			url.searchParams.set(key, value);
+		}
+		let outcome: VenmoFetchOutcome;
+		try {
+			outcome = (await page.evaluate(async (fetchUrl) => {
+				try {
+					const res = await fetch(fetchUrl, {
+						credentials: "include",
+						headers: { accept: "application/json" },
+					});
+					return {
+						kind: "response" as const,
+						status: res.status,
+						body: await res.text().catch(() => ""),
+					};
+				} catch (err) {
+					return {
+						kind: "transport_error" as const,
+						message: err instanceof Error ? err.message : String(err),
+					};
+				}
+			}, url.toString())) as VenmoFetchOutcome;
+		} catch (err) {
+			// `page.evaluate` itself rejected (execution context destroyed by a
+			// navigation, or the page/browser crashed) — same "could not run at
+			// all" classification as a fetch throwing inside the callback.
+			outcome = {
+				kind: "transport_error",
+				message: err instanceof Error ? err.message : String(err),
+			};
+		}
+		if (outcome.kind === "transport_error") {
+			throw new Error(
+				`venmo_transport_error [endpoint ${path}]: ${redactTransportDetail(outcome.message)}`,
+			);
+		}
+		return { status: outcome.status, body: outcome.body };
+	};
 }
 
 export function errorDetail(body: string): string {
-  try {
-    const parsed = JSON.parse(body) as { error?: { message?: string } };
-    if (parsed.error?.message) {
-      return redactTransportDetail(parsed.error.message).slice(0, 200);
-    }
-  } catch {
-    // fall through to raw redaction below
-  }
-  return redactTransportDetail(body).slice(0, 200);
+	try {
+		const parsed = JSON.parse(body) as { error?: { message?: string } };
+		if (parsed.error?.message) {
+			return redactTransportDetail(parsed.error.message).slice(0, 200);
+		}
+	} catch {
+		// fall through to raw redaction below
+	}
+	return redactTransportDetail(body).slice(0, 200);
 }
 
 function assertVenmoOk(status: number, body: string, path: string): void {
-  if (status === 401 || status === 403) {
-    throw new Error(`venmo_session_expired [endpoint ${path}]: ${errorDetail(body)}`);
-  }
-  if (status === 429) {
-    throw new Error(`venmo_rate_limited [endpoint ${path}]`);
-  }
-  if (status < 200 || status >= 300) {
-    throw new Error(`venmo_http_${String(status)} [endpoint ${path}]: ${errorDetail(body)}`);
-  }
+	if (status === 401 || status === 403) {
+		throw new Error(
+			`venmo_session_expired [endpoint ${path}]: ${errorDetail(body)}`,
+		);
+	}
+	if (status === 429) {
+		throw new Error(`venmo_rate_limited [endpoint ${path}]`);
+	}
+	if (status < 200 || status >= 300) {
+		throw new Error(
+			`venmo_http_${String(status)} [endpoint ${path}]: ${errorDetail(body)}`,
+		);
+	}
 }
 
-export async function fetchProfile(fetchPath: VenmoPageFetch): Promise<VenmoUser | null> {
-  const { status, body } = await fetchPath("/account");
-  assertVenmoOk(status, body, "/account");
-  return (JSON.parse(body) as VenmoAccountResponse).data?.user ?? null;
+export async function fetchProfile(
+	fetchPath: VenmoPageFetch,
+): Promise<VenmoUser | null> {
+	const { status, body } = await fetchPath("/account");
+	assertVenmoOk(status, body, "/account");
+	return (JSON.parse(body) as VenmoAccountResponse).data?.user ?? null;
 }
 
 export async function fetchAllFriends(
-  fetchPath: VenmoPageFetch,
-  ownerId: string,
-  progress: VenmoProgress,
-  delay: (ms: number) => Promise<void> = politeDelay
+	fetchPath: VenmoPageFetch,
+	ownerId: string,
+	progress: VenmoProgress,
+	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<VenmoUser[]> {
-  const all: VenmoUser[] = [];
-  let offset = 0;
-  for (let page = 0; page < MAX_FRIENDS_PAGES; page += 1) {
-    await progress("Fetching Venmo friends page", { stream: "friends", phase: "fetch", offset_ordinal: page });
-    const { status, body } = await fetchPath(`/users/${ownerId}/friends`, {
-      limit: String(FRIENDS_PAGE_SIZE),
-      offset: String(offset),
-    });
-    assertVenmoOk(status, body, "/users/{id}/friends");
-    const parsed = JSON.parse(body) as VenmoFriendsResponse;
-    const batch = parsed.data ?? [];
-    all.push(...batch);
-    await progress("Fetched Venmo friends page", {
-      stream: "friends",
-      phase: "page",
-      item_count: batch.length,
-      total_seen: all.length,
-    });
-    if (batch.length < FRIENDS_PAGE_SIZE) {
-      break;
-    }
-    offset += batch.length;
-    await delay(PAGE_DELAY_MS);
-  }
-  return all;
+	const all: VenmoUser[] = [];
+	let offset = 0;
+	for (let page = 0; page < MAX_FRIENDS_PAGES; page += 1) {
+		await progress("Fetching Venmo friends page", {
+			stream: "friends",
+			phase: "fetch",
+			offset_ordinal: page,
+		});
+		const { status, body } = await fetchPath(`/users/${ownerId}/friends`, {
+			limit: String(FRIENDS_PAGE_SIZE),
+			offset: String(offset),
+		});
+		assertVenmoOk(status, body, "/users/{id}/friends");
+		const parsed = JSON.parse(body) as VenmoFriendsResponse;
+		const batch = parsed.data ?? [];
+		all.push(...batch);
+		await progress("Fetched Venmo friends page", {
+			stream: "friends",
+			phase: "page",
+			item_count: batch.length,
+			total_seen: all.length,
+		});
+		if (batch.length < FRIENDS_PAGE_SIZE) {
+			break;
+		}
+		offset += batch.length;
+		await delay(PAGE_DELAY_MS);
+	}
+	return all;
 }
 
 export async function fetchTransactionsPage(
-  fetchPath: VenmoPageFetch,
-  ownerId: string,
-  beforeId: string | undefined
+	fetchPath: VenmoPageFetch,
+	ownerId: string,
+	beforeId: string | undefined,
 ): Promise<VenmoStory[]> {
-  const { status, body } = await fetchPath(`/stories/target-or-actor/${ownerId}`, {
-    limit: String(TRANSACTIONS_PAGE_SIZE),
-    ...(beforeId ? { before_id: beforeId } : {}),
-  });
-  assertVenmoOk(status, body, "/stories/target-or-actor/{id}");
-  return (JSON.parse(body) as VenmoStoriesResponse).data ?? [];
+	const { status, body } = await fetchPath(
+		`/stories/target-or-actor/${ownerId}`,
+		{
+			limit: String(TRANSACTIONS_PAGE_SIZE),
+			...(beforeId ? { before_id: beforeId } : {}),
+		},
+	);
+	assertVenmoOk(status, body, "/stories/target-or-actor/{id}");
+	return (JSON.parse(body) as VenmoStoriesResponse).data ?? [];
 }
 
 async function emitTransactionsPage(
-  emitRecord: BrowserCollectContext["emitRecord"],
-  stories: VenmoStory[],
-  ownerId: string
+	emitRecord: BrowserCollectContext["emitRecord"],
+	stories: VenmoStory[],
+	ownerId: string,
 ): Promise<{ latestSeenAt: string | null; modeled: number }> {
-  let modeled = 0;
-  let latestSeenAt: string | null = null;
-  for (const story of stories) {
-    const record = transactionRecord(story, ownerId);
-    if (!record) {
-      continue;
-    }
-    await emitRecord("transactions", record);
-    modeled += 1;
-    const createdAt = typeof record.date_created === "string" ? record.date_created : null;
-    if (createdAt && (!latestSeenAt || createdAt > latestSeenAt)) {
-      latestSeenAt = createdAt;
-    }
-  }
-  return { latestSeenAt, modeled };
+	let modeled = 0;
+	let latestSeenAt: string | null = null;
+	for (const story of stories) {
+		const record = transactionRecord(story, ownerId);
+		if (!record) {
+			continue;
+		}
+		await emitRecord("transactions", record);
+		modeled += 1;
+		const createdAt =
+			typeof record.date_created === "string" ? record.date_created : null;
+		if (createdAt && (!latestSeenAt || createdAt > latestSeenAt)) {
+			latestSeenAt = createdAt;
+		}
+	}
+	return { latestSeenAt, modeled };
 }
 
 export async function collectTransactions(
-  ctx: BrowserCollectContext,
-  fetchPath: VenmoPageFetch,
-  ownerId: string,
-  delay: (ms: number) => Promise<void> = politeDelay
-): Promise<{ considered: number; covered: number; latestSeenAt: string | null }> {
-  const { emitRecord } = ctx;
-  const progress = ctx.progress as VenmoProgress;
-  // `before_id` pages backward (toward older history) with no documented
-  // forward/`after_id` counterpart. A cursor persisted across runs would
-  // resume deeper into old history and permanently skip new transactions
-  // added at the head since the last run. So every run re-walks from the
-  // head — this variable is a same-run pagination cursor only, never read
-  // from or written to STATE.
-  let beforeId: string | undefined;
-  let totalSeen = 0;
-  let totalModeled = 0;
-  let latestSeenAt: string | null = null;
+	ctx: BrowserCollectContext,
+	fetchPath: VenmoPageFetch,
+	ownerId: string,
+	delay: (ms: number) => Promise<void> = politeDelay,
+): Promise<{
+	considered: number;
+	covered: number;
+	latestSeenAt: string | null;
+}> {
+	const { emitRecord } = ctx;
+	const progress = ctx.progress as VenmoProgress;
+	// `before_id` pages backward (toward older history) with no documented
+	// forward/`after_id` counterpart. A cursor persisted across runs would
+	// resume deeper into old history and permanently skip new transactions
+	// added at the head since the last run. So every run re-walks from the
+	// head — this variable is a same-run pagination cursor only, never read
+	// from or written to STATE.
+	let beforeId: string | undefined;
+	let totalSeen = 0;
+	let totalModeled = 0;
+	let latestSeenAt: string | null = null;
 
-  for (let page = 0; page < MAX_TRANSACTION_PAGES; page += 1) {
-    await progress("Fetching Venmo transactions page", {
-      stream: "transactions",
-      phase: "fetch",
-      offset_ordinal: page,
-      cursor_present: Boolean(beforeId),
-      total_seen: totalSeen,
-    });
-    const stories = await fetchTransactionsPage(fetchPath, ownerId, beforeId);
-    if (stories.length === 0) {
-      break;
-    }
+	for (let page = 0; page < MAX_TRANSACTION_PAGES; page += 1) {
+		await progress("Fetching Venmo transactions page", {
+			stream: "transactions",
+			phase: "fetch",
+			offset_ordinal: page,
+			cursor_present: Boolean(beforeId),
+			total_seen: totalSeen,
+		});
+		const stories = await fetchTransactionsPage(fetchPath, ownerId, beforeId);
+		if (stories.length === 0) {
+			break;
+		}
 
-    const { latestSeenAt: pageLatest, modeled } = await emitTransactionsPage(emitRecord, stories, ownerId);
-    if (pageLatest && (!latestSeenAt || pageLatest > latestSeenAt)) {
-      latestSeenAt = pageLatest;
-    }
-    totalSeen += stories.length;
-    totalModeled += modeled;
-    await progress("Fetched Venmo transactions page", {
-      stream: "transactions",
-      phase: "page",
-      item_count: modeled,
-      total_seen: totalSeen,
-      cursor_present: stories.length === TRANSACTIONS_PAGE_SIZE,
-    });
+		const { latestSeenAt: pageLatest, modeled } = await emitTransactionsPage(
+			emitRecord,
+			stories,
+			ownerId,
+		);
+		if (pageLatest && (!latestSeenAt || pageLatest > latestSeenAt)) {
+			latestSeenAt = pageLatest;
+		}
+		totalSeen += stories.length;
+		totalModeled += modeled;
+		await progress("Fetched Venmo transactions page", {
+			stream: "transactions",
+			phase: "page",
+			item_count: modeled,
+			total_seen: totalSeen,
+			cursor_present: stories.length === TRANSACTIONS_PAGE_SIZE,
+		});
 
-    const lastStory = stories.at(-1);
-    if (!lastStory?.id || stories.length < TRANSACTIONS_PAGE_SIZE) {
-      break;
-    }
-    beforeId = lastStory.id;
-    await delay(PAGE_DELAY_MS);
-  }
+		const lastStory = stories.at(-1);
+		if (!lastStory?.id || stories.length < TRANSACTIONS_PAGE_SIZE) {
+			break;
+		}
+		beforeId = lastStory.id;
+		await delay(PAGE_DELAY_MS);
+	}
 
-  return { considered: totalSeen, covered: totalModeled, latestSeenAt };
+	return { considered: totalSeen, covered: totalModeled, latestSeenAt };
 }
 
 async function collectProfile(
-  ctx: BrowserCollectContext,
-  fetchPath: VenmoPageFetch,
-  account: VenmoUser | null
+	ctx: BrowserCollectContext,
+	fetchPath: VenmoPageFetch,
+	account: VenmoUser | null,
 ): Promise<void> {
-  const { emit, emitRecord } = ctx;
-  const progress = ctx.progress as VenmoProgress;
-  await progress("Fetching Venmo profile", { stream: "profile", phase: "fetch" });
-  const profileUser = account ?? (await fetchProfile(fetchPath));
-  const cursor = openFingerprintCursor(ctx.state.profile, { excludeFromFingerprint: [] });
-  let covered = 0;
-  if (profileUser) {
-    const record = profileRecord(profileUser);
-    if (cursor.shouldEmit(record)) {
-      await emitRecord("profile", record);
-    }
-    covered = 1;
-    cursor.pruneStale();
-    await emit({ type: "STATE", stream: "profile", cursor: { fingerprints: cursor.toState() } });
-  }
-  await emit(
-    buildDetailCoverageMessage({
-      stream: "profile",
-      stateStream: "profile",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: profileUser ? 1 : 0,
-      covered,
-    })
-  );
+	const { emit, emitRecord } = ctx;
+	const progress = ctx.progress as VenmoProgress;
+	await progress("Fetching Venmo profile", {
+		stream: "profile",
+		phase: "fetch",
+	});
+	const profileUser = account ?? (await fetchProfile(fetchPath));
+	const cursor = openFingerprintCursor(ctx.state.profile, {
+		excludeFromFingerprint: [],
+	});
+	let covered = 0;
+	if (profileUser) {
+		const record = profileRecord(profileUser);
+		if (cursor.shouldEmit(record)) {
+			await emitRecord("profile", record);
+		}
+		covered = 1;
+		cursor.pruneStale();
+		await emit({
+			type: "STATE",
+			stream: "profile",
+			cursor: { fingerprints: cursor.toState() },
+		});
+	}
+	await emit(
+		buildDetailCoverageMessage({
+			stream: "profile",
+			stateStream: "profile",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: profileUser ? 1 : 0,
+			covered,
+		}),
+	);
 }
 
 async function collectFriends(
-  ctx: BrowserCollectContext,
-  fetchPath: VenmoPageFetch,
-  ownerId: string,
-  progress: VenmoProgress
+	ctx: BrowserCollectContext,
+	fetchPath: VenmoPageFetch,
+	ownerId: string,
+	progress: VenmoProgress,
 ): Promise<void> {
-  const { emit, emitRecord } = ctx;
-  const friends = await fetchAllFriends(fetchPath, ownerId, progress);
-  const cursor = openFingerprintCursor(ctx.state.friends, { excludeFromFingerprint: [] });
-  let covered = 0;
-  for (const friend of friends) {
-    const record = userRecord(friend);
-    if (cursor.shouldEmit(record)) {
-      await emitRecord("friends", record);
-    }
-    covered += 1;
-  }
-  cursor.pruneStale();
-  await emit({ type: "STATE", stream: "friends", cursor: { fingerprints: cursor.toState() } });
-  await emit(
-    buildDetailCoverageMessage({
-      stream: "friends",
-      stateStream: "friends",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: friends.length,
-      covered,
-    })
-  );
+	const { emit, emitRecord } = ctx;
+	const friends = await fetchAllFriends(fetchPath, ownerId, progress);
+	const cursor = openFingerprintCursor(ctx.state.friends, {
+		excludeFromFingerprint: [],
+	});
+	let covered = 0;
+	for (const friend of friends) {
+		const record = userRecord(friend);
+		if (cursor.shouldEmit(record)) {
+			await emitRecord("friends", record);
+		}
+		covered += 1;
+	}
+	cursor.pruneStale();
+	await emit({
+		type: "STATE",
+		stream: "friends",
+		cursor: { fingerprints: cursor.toState() },
+	});
+	await emit(
+		buildDetailCoverageMessage({
+			stream: "friends",
+			stateStream: "friends",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: friends.length,
+			covered,
+		}),
+	);
 }
 
 /** Exported for integration tests — the full collect() body against an injected page fetch. */
 export async function collectAllStreams(
-  ctx: BrowserCollectContext,
-  fetchPath: VenmoPageFetch,
-  ownerId: string,
-  account: VenmoUser | null
+	ctx: BrowserCollectContext,
+	fetchPath: VenmoPageFetch,
+	ownerId: string,
+	account: VenmoUser | null,
 ): Promise<void> {
-  const { emit, requested } = ctx;
-  const progress = ctx.progress as VenmoProgress;
+	const { emit, requested } = ctx;
+	const progress = ctx.progress as VenmoProgress;
 
-  if (requested.has("profile")) {
-    await collectProfile(ctx, fetchPath, account);
-  }
+	if (requested.has("profile")) {
+		await collectProfile(ctx, fetchPath, account);
+	}
 
-  if (requested.has("friends")) {
-    await collectFriends(ctx, fetchPath, ownerId, progress);
-  }
+	if (requested.has("friends")) {
+		await collectFriends(ctx, fetchPath, ownerId, progress);
+	}
 
-  if (requested.has("transactions")) {
-    const { considered, covered, latestSeenAt } = await collectTransactions(ctx, fetchPath, ownerId);
-    await emit({
-      type: "STATE",
-      stream: "transactions",
-      cursor: { last_seen_date_created: latestSeenAt },
-    });
-    await emit(
-      buildDetailCoverageMessage({
-        stream: "transactions",
-        stateStream: "transactions",
-        requiredKeys: [],
-        hydratedKeys: [],
-        considered,
-        covered,
-      })
-    );
-  }
+	if (requested.has("transactions")) {
+		const { considered, covered, latestSeenAt } = await collectTransactions(
+			ctx,
+			fetchPath,
+			ownerId,
+		);
+		await emit({
+			type: "STATE",
+			stream: "transactions",
+			cursor: { last_seen_date_created: latestSeenAt },
+		});
+		await emit(
+			buildDetailCoverageMessage({
+				stream: "transactions",
+				stateStream: "transactions",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered,
+				covered,
+			}),
+		);
+	}
 }
 
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "venmo",
-    validateRecord,
-    // See VENMO_RETRYABLE_PATTERN's doc above for why this is an exact-name
-    // pattern rather than the wildcard/bare-vocabulary form it replaced (B4).
-    retryablePattern: VENMO_RETRYABLE_PATTERN,
-    auth: { kind: "env", required: ["VENMO_USERNAME", "VENMO_PASSWORD"] },
-    browser: { profileName: "venmo" },
-    async ensureSession({
-      capture,
-      checkpoint,
-      credentials,
-      onCredentialSubmit,
-      page,
-      sendInteraction,
-    }): Promise<void> {
-      await ensureVenmoSession({
-        ...(capture ? { capture } : {}),
-        checkpoint,
-        credentials,
-        onCredentialSubmit,
-        page,
-        sendInteraction,
-      });
-    },
-    async collect(ctx: BrowserCollectContext): Promise<void> {
-      const { page } = ctx;
-      // `ensureSession` may leave the page wherever sign-in redirected it
-      // (e.g. `id.venmo.com`); `api.venmo.com`'s CORS allowlist only grants
-      // a credentialed fetch from `https://venmo.com`, so collect must
-      // establish that origin itself rather than assume ensureSession left
-      // it there (F3 in /tmp/review-venmo-browser-redesign-0810.md).
-      await ensureVenmoOrigin(page);
-      const fetchPath = makePageFetch(page);
-      const account = await fetchProfile(fetchPath);
-      const ownerId = account?.id;
-      if (!ownerId) {
-        throw new Error("venmo_session_expired: /account returned no user id after ensureSession succeeded");
-      }
-      await collectAllStreams(ctx, fetchPath, ownerId, account);
-    },
-  });
+	runConnector({
+		name: "venmo",
+		validateRecord,
+		// See VENMO_RETRYABLE_PATTERN's doc above for why this is an exact-name
+		// pattern rather than the wildcard/bare-vocabulary form it replaced (B4).
+		retryablePattern: VENMO_RETRYABLE_PATTERN,
+		auth: { kind: "env", required: ["VENMO_USERNAME", "VENMO_PASSWORD"] },
+		browser: { profileName: "venmo" },
+		async ensureSession({
+			capture,
+			checkpoint,
+			credentials,
+			onCredentialSubmit,
+			page,
+			sendInteraction,
+		}): Promise<void> {
+			await ensureVenmoSession({
+				...(capture ? { capture } : {}),
+				checkpoint,
+				credentials,
+				onCredentialSubmit,
+				page,
+				sendInteraction,
+			});
+		},
+		async collect(ctx: BrowserCollectContext): Promise<void> {
+			const { page } = ctx;
+			// `ensureSession` may leave the page wherever sign-in redirected it
+			// (e.g. `id.venmo.com`); `api.venmo.com`'s CORS allowlist only grants
+			// a credentialed fetch from `https://venmo.com`, so collect must
+			// establish that origin itself rather than assume ensureSession left
+			// it there (F3 in /tmp/review-venmo-browser-redesign-0810.md).
+			await ensureVenmoOrigin(page);
+			const fetchPath = makePageFetch(page);
+			const account = await fetchProfile(fetchPath);
+			const ownerId = account?.id;
+			if (!ownerId) {
+				throw new Error(
+					"venmo_session_expired: /account returned no user id after ensureSession succeeded",
+				);
+			}
+			await collectAllStreams(ctx, fetchPath, ownerId, account);
+		},
+	});
 }

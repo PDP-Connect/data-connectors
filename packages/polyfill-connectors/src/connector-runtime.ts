@@ -50,40 +50,47 @@ import { emitToStdout, resourceSet } from "@pdpp/connector-protocol";
 
 import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
-  AssistanceCompletionStatus,
-  AssistanceRequest,
-  DetailCoverageMessage,
-  DetailGapMessage,
-  DetailGapNetworkPressure,
-  DetailGapStartEntry,
-  DetailGapsPageResponse,
-  EmittedMessage,
-  InteractionRequest,
-  InteractionResponse,
-  ProgressExtra,
-  RecordData,
-  ShapeAnomaly,
-  StartMessage,
-  StreamScope,
-  ValidateRecord,
+	AssistanceCompletionStatus,
+	AssistanceRequest,
+	DetailCoverageMessage,
+	DetailGapMessage,
+	DetailGapNetworkPressure,
+	DetailGapStartEntry,
+	DetailGapsPageResponse,
+	EmittedMessage,
+	InteractionRequest,
+	InteractionResponse,
+	ProgressExtra,
+	RecordData,
+	ShapeAnomaly,
+	StartMessage,
+	StreamScope,
+	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { Browser, BrowserContext, CDPSession, Page } from "playwright";
 import {
-  DEADLINE_TIMEOUT,
-  prepareBrowserInteractionTarget,
-  unregisterBrowserInteractionTarget,
-  withDeadline,
+	DEADLINE_TIMEOUT,
+	prepareBrowserInteractionTarget,
+	unregisterBrowserInteractionTarget,
+	withDeadline,
 } from "./browser-handoff.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
-import { type CaptureSession, createCaptureSession } from "./fixture-capture.ts";
 import {
-  DEFAULT_RETRYABLE_PATTERN,
-  type EnsureSessionArgs,
-  establishSession,
-  type ProbeSessionArgs,
-  type SessionCheckpointFn,
+	type CaptureSession,
+	createCaptureSession,
+} from "./fixture-capture.ts";
+import {
+	DEFAULT_RETRYABLE_PATTERN,
+	type EnsureSessionArgs,
+	establishSession,
+	type ProbeSessionArgs,
+	type SessionCheckpointFn,
 } from "./session-establish.ts";
-import { assertValidConnectorErrorCode, TerminalError, type TerminalErrorDetails } from "./terminal-error.ts";
+import {
+	assertValidConnectorErrorCode,
+	TerminalError,
+	type TerminalErrorDetails,
+} from "./terminal-error.ts";
 
 // ─── Protocol message shapes (re-exported from connector-runtime-protocol.ts) ──
 //
@@ -93,35 +100,35 @@ import { assertValidConnectorErrorCode, TerminalError, type TerminalErrorDetails
 // surface. This file re-exports them for backward compatibility with the
 // many import sites that still target `connector-runtime.ts` directly.
 export type {
-  AssistanceAttachment,
-  AssistanceAttachmentKind,
-  AssistanceCompletion,
-  AssistanceCompletionStatus,
-  AssistanceOwnerAction,
-  AssistanceProgressPosture,
-  AssistanceRequest,
-  AssistanceResponseContract,
-  AssistanceSensitivity,
-  AttachmentHydrationFailureOutcomeProgress,
-  AttachmentRecoveryOutcomeProgress,
-  CollectionRateProgress,
-  DetailCoverageMessage,
-  DetailGapAttemptedMessage,
-  DetailGapMessage,
-  DetailGapNetworkPressure,
-  DetailGapRecoveredMessage,
-  DetailGapStartEntry,
-  EmittedMessage,
-  InteractionKind,
-  InteractionRequest,
-  InteractionResponse,
-  ProgressExtra,
-  ProviderBudgetProgress,
-  RecordData,
-  ShapeAnomaly,
-  StartMessage,
-  StreamScope,
-  ValidateRecord,
+	AssistanceAttachment,
+	AssistanceAttachmentKind,
+	AssistanceCompletion,
+	AssistanceCompletionStatus,
+	AssistanceOwnerAction,
+	AssistanceProgressPosture,
+	AssistanceRequest,
+	AssistanceResponseContract,
+	AssistanceSensitivity,
+	AttachmentHydrationFailureOutcomeProgress,
+	AttachmentRecoveryOutcomeProgress,
+	CollectionRateProgress,
+	DetailCoverageMessage,
+	DetailGapAttemptedMessage,
+	DetailGapMessage,
+	DetailGapNetworkPressure,
+	DetailGapRecoveredMessage,
+	DetailGapStartEntry,
+	EmittedMessage,
+	InteractionKind,
+	InteractionRequest,
+	InteractionResponse,
+	ProgressExtra,
+	ProviderBudgetProgress,
+	RecordData,
+	ShapeAnomaly,
+	StartMessage,
+	StreamScope,
+	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 
 // The session-establishment flow and the typed terminal-error primitive live
@@ -130,7 +137,11 @@ export type {
 // are re-exported here so connector and auto-login code keeps a single
 // runtime import surface; `createConnectorFailure` below is that surface's
 // value-level counterpart.
-export type { EnsureSessionArgs, ProbeSessionArgs, SessionCheckpointFn } from "./session-establish.ts";
+export type {
+	EnsureSessionArgs,
+	ProbeSessionArgs,
+	SessionCheckpointFn,
+} from "./session-establish.ts";
 export type { TerminalErrorDetails } from "./terminal-error.ts";
 
 /**
@@ -148,12 +159,12 @@ export type { TerminalErrorDetails } from "./terminal-error.ts";
  * safe — write it as you would write any other diagnostic string.
  */
 export function createConnectorFailure(
-  code: string,
-  message: string,
-  options: { cause?: unknown; retryable?: boolean } = {}
+	code: string,
+	message: string,
+	options: { cause?: unknown; retryable?: boolean } = {},
 ): Error {
-  assertValidConnectorErrorCode(code);
-  return new TerminalError(message, { ...options, code });
+	assertValidConnectorErrorCode(code);
+	return new TerminalError(message, { ...options, code });
 }
 
 // ─── Collect context ────────────────────────────────────────────────────
@@ -161,114 +172,122 @@ export function createConnectorFailure(
 type Credentials = Record<string, string>;
 
 interface EmitRecordOptions {
-  skipResourceFilter?: boolean;
+	skipResourceFilter?: boolean;
 }
 
 interface BaseCollectContext {
-  assist: (req: AssistanceRequest) => Promise<string>;
-  capture: CaptureSession | null;
-  /**
-   * Threaded from the START message's `collection_mode` field (already sent
-   * on the wire by RI; this is the connector-runtime-side surfacing of it).
-   * `"full_refresh"` is an explicit owner/operator bypass: a connector with
-   * its own incremental bookkeeping (checkpoints, anchors, frontiers) MUST
-   * ignore that bookkeeping for this run and walk each stream to its natural
-   * end, providing a repair path for state a narrower incremental walk would
-   * never revisit (e.g. a mutable field that changed further back than any
-   * per-record change-detection window). Optional, matching `recoveryOnly`'s
-   * precedent, so hand-built `CollectContext` literals elsewhere in the
-   * codebase (tests, other connectors) that predate this field keep
-   * compiling unchanged. A connector reading this MUST treat `undefined` the
-   * same as `"incremental"` — the runtime's real construction site always
-   * sets it explicitly (see `run()` below), so `undefined` only ever reaches
-   * a connector via a test harness that hasn't been updated yet.
-   */
-  collectionMode?: "full_refresh" | "incremental";
-  completeAssistance: (
-    assistanceRequestId: string,
-    status: AssistanceCompletionStatus,
-    extra?: { message?: string }
-  ) => Promise<void>;
-  credentials: Credentials;
-  detailGaps: readonly DetailGapStartEntry[];
-  emit: (msg: EmittedMessage) => Promise<void>;
-  emitRecord: (stream: string, data: RecordData, options?: EmitRecordOptions) => Promise<void>;
-  emittedAt: string;
-  progress: (message: string, extra?: ProgressExtra) => Promise<void>;
-  /**
-   * SLVP-ideal §4.3: when true, the connector MUST run its gap-recovery pass
-   * then return before any forward walk / list-phase fetch. Threaded from the
-   * START message's `recovery_only` field. Absent/false = ordinary full run —
-   * optional so connectors that do not implement recovery-only ignore it.
-   */
-  recoveryOnly?: boolean;
-  /**
-   * Report a stream-level collection failure while allowing independent
-   * streams to finish. The runtime emits bounded failure evidence immediately
-   * and converts the eventual terminal DONE to `failed`; a connector must not
-   * turn a failed stream into a successful run merely by returning from
-   * `collect()`.
-   *
-   * Optional for compatibility with hand-built test contexts. The real runtime
-   * always supplies it.
-   */
-  reportStreamFailure?: (stream: string, message: string, options?: { retryable?: boolean }) => Promise<void>;
-  requestDetailGapPage: (req?: {
-    maxBytes?: number;
-    streams?: readonly string[];
-  }) => Promise<readonly DetailGapStartEntry[]>;
-  requested: Map<string, StreamScope>;
-  scope: StartMessage["scope"];
-  sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
-  state: Record<string, unknown>;
+	assist: (req: AssistanceRequest) => Promise<string>;
+	capture: CaptureSession | null;
+	/**
+	 * Threaded from the START message's `collection_mode` field (already sent
+	 * on the wire by RI; this is the connector-runtime-side surfacing of it).
+	 * `"full_refresh"` is an explicit owner/operator bypass: a connector with
+	 * its own incremental bookkeeping (checkpoints, anchors, frontiers) MUST
+	 * ignore that bookkeeping for this run and walk each stream to its natural
+	 * end, providing a repair path for state a narrower incremental walk would
+	 * never revisit (e.g. a mutable field that changed further back than any
+	 * per-record change-detection window). Optional, matching `recoveryOnly`'s
+	 * precedent, so hand-built `CollectContext` literals elsewhere in the
+	 * codebase (tests, other connectors) that predate this field keep
+	 * compiling unchanged. A connector reading this MUST treat `undefined` the
+	 * same as `"incremental"` — the runtime's real construction site always
+	 * sets it explicitly (see `run()` below), so `undefined` only ever reaches
+	 * a connector via a test harness that hasn't been updated yet.
+	 */
+	collectionMode?: "full_refresh" | "incremental";
+	completeAssistance: (
+		assistanceRequestId: string,
+		status: AssistanceCompletionStatus,
+		extra?: { message?: string },
+	) => Promise<void>;
+	credentials: Credentials;
+	detailGaps: readonly DetailGapStartEntry[];
+	emit: (msg: EmittedMessage) => Promise<void>;
+	emitRecord: (
+		stream: string,
+		data: RecordData,
+		options?: EmitRecordOptions,
+	) => Promise<void>;
+	emittedAt: string;
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	/**
+	 * SLVP-ideal §4.3: when true, the connector MUST run its gap-recovery pass
+	 * then return before any forward walk / list-phase fetch. Threaded from the
+	 * START message's `recovery_only` field. Absent/false = ordinary full run —
+	 * optional so connectors that do not implement recovery-only ignore it.
+	 */
+	recoveryOnly?: boolean;
+	/**
+	 * Report a stream-level collection failure while allowing independent
+	 * streams to finish. The runtime emits bounded failure evidence immediately
+	 * and converts the eventual terminal DONE to `failed`; a connector must not
+	 * turn a failed stream into a successful run merely by returning from
+	 * `collect()`.
+	 *
+	 * Optional for compatibility with hand-built test contexts. The real runtime
+	 * always supplies it.
+	 */
+	reportStreamFailure?: (
+		stream: string,
+		message: string,
+		options?: { retryable?: boolean },
+	) => Promise<void>;
+	requestDetailGapPage: (req?: {
+		maxBytes?: number;
+		streams?: readonly string[];
+	}) => Promise<readonly DetailGapStartEntry[]>;
+	requested: Map<string, StreamScope>;
+	scope: StartMessage["scope"];
+	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
+	state: Record<string, unknown>;
 }
 
 export interface CollectContext extends BaseCollectContext {}
 
 export interface BrowserCollectContext extends BaseCollectContext {
-  browserSurface?: BrowserSurfaceRuntimeKind;
-  context: BrowserContext;
-  page: Page;
+	browserSurface?: BrowserSurfaceRuntimeKind;
+	context: BrowserContext;
+	page: Page;
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
 export interface BrowserConfig {
-  /**
-   * Preserve the run page after failed runs. Use only for sources where closing
-   * a failed-but-authenticated page would destroy the best repair surface.
-   */
-  preservePageOnFailure?: boolean;
-  /**
-   * Reuse and preserve the run page after successful runs. Use only for
-   * sources whose auth state is held in the live page instead of durable
-   * browser storage.
-   */
-  preservePageOnSuccess?: boolean;
-  profileName?: string;
+	/**
+	 * Preserve the run page after failed runs. Use only for sources where closing
+	 * a failed-but-authenticated page would destroy the best repair surface.
+	 */
+	preservePageOnFailure?: boolean;
+	/**
+	 * Reuse and preserve the run page after successful runs. Use only for
+	 * sources whose auth state is held in the live page instead of durable
+	 * browser storage.
+	 */
+	preservePageOnSuccess?: boolean;
+	profileName?: string;
 }
 
 export interface BrowserRuntimeVisibility {
-  readonly envKey: string;
-  readonly headless: boolean;
-  readonly profileName: string;
+	readonly envKey: string;
+	readonly headless: boolean;
+	readonly profileName: string;
 }
 
 export const BROWSER_HEADLESS_ENV = "PDPP_BROWSER_HEADLESS";
 
 export type BrowserLaunchSource =
-  | {
-      readonly kind: "managed_neko";
-      readonly leaseId?: string;
-      readonly profileKey?: string;
-      readonly remoteCdpUrl: string;
-    }
-  | {
-      readonly envKey: string;
-      readonly kind: "legacy_remote_cdp";
-      readonly remoteCdpUrl: string;
-    }
-  | { readonly kind: "isolated_local" };
+	| {
+			readonly kind: "managed_neko";
+			readonly leaseId?: string;
+			readonly profileKey?: string;
+			readonly remoteCdpUrl: string;
+	  }
+	| {
+			readonly envKey: string;
+			readonly kind: "legacy_remote_cdp";
+			readonly remoteCdpUrl: string;
+	  }
+	| { readonly kind: "isolated_local" };
 
 /**
  * Reference-runtime-only launch posture exposed to browser connectors for
@@ -277,51 +296,53 @@ export type BrowserLaunchSource =
  */
 export type BrowserSurfaceRuntimeKind = BrowserLaunchSource["kind"];
 
-export type NormalizeTerminalError = (error: TerminalErrorDetails) => TerminalErrorDetails;
+export type NormalizeTerminalError = (
+	error: TerminalErrorDetails,
+) => TerminalErrorDetails;
 
 /** Fields shared by browser and non-browser configs. */
 interface BaseRunConnectorConfig {
-  auth?: AuthConfig;
-  /** Marks a record as a tombstone; runtime strips to { id } + op:'delete'. */
-  isTombstone?: (stream: string, data: RecordData) => boolean;
-  name: string;
-  normalizeTerminalError?: NormalizeTerminalError;
-  /**
-   * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
-   * runtime has acknowledged durable ingest (stdin EOF) and immediately
-   * BEFORE process exit. Use it for local side effects that must not precede
-   * a durable commit — e.g. reclaiming on-disk residue the connector does not
-   * ingest. Never runs on a failed/interrupted run, so no cleanup can outrun
-   * the commit receipt. Errors are swallowed (best-effort): a failed cleanup
-   * must not turn a durably-committed run into a failure.
-   *
-   * MUST NOT call `emit`/`progress`/any stdout-JSONL write. By the time this
-   * hook runs, the runtime has already consumed this run's DONE message and
-   * torn down its message loop for this connector instance; any further
-   * stdout JSONL (including PROGRESS) is parsed as "message after DONE" and
-   * fails the ALREADY-SUCCEEDED run as `connector_protocol_violation` on the
-   * next run's read of this one's exit, not a no-op. Use `logDurableCommit`
-   * (stderr, outside the protocol channel) to report hook activity instead.
-   */
-  onDurableCommit?: (log: (message: string) => void) => void | Promise<void>;
-  retryablePattern?: RegExp;
-  /** Record field that scope.time_range filters on. Default 'date'. */
-  timeRangeField?: string | ((stream: string) => string);
-  validateRecord?: ValidateRecord;
+	auth?: AuthConfig;
+	/** Marks a record as a tombstone; runtime strips to { id } + op:'delete'. */
+	isTombstone?: (stream: string, data: RecordData) => boolean;
+	name: string;
+	normalizeTerminalError?: NormalizeTerminalError;
+	/**
+	 * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
+	 * runtime has acknowledged durable ingest (stdin EOF) and immediately
+	 * BEFORE process exit. Use it for local side effects that must not precede
+	 * a durable commit — e.g. reclaiming on-disk residue the connector does not
+	 * ingest. Never runs on a failed/interrupted run, so no cleanup can outrun
+	 * the commit receipt. Errors are swallowed (best-effort): a failed cleanup
+	 * must not turn a durably-committed run into a failure.
+	 *
+	 * MUST NOT call `emit`/`progress`/any stdout-JSONL write. By the time this
+	 * hook runs, the runtime has already consumed this run's DONE message and
+	 * torn down its message loop for this connector instance; any further
+	 * stdout JSONL (including PROGRESS) is parsed as "message after DONE" and
+	 * fails the ALREADY-SUCCEEDED run as `connector_protocol_violation` on the
+	 * next run's read of this one's exit, not a no-op. Use `logDurableCommit`
+	 * (stderr, outside the protocol channel) to report hook activity instead.
+	 */
+	onDurableCommit?: (log: (message: string) => void) => void | Promise<void>;
+	retryablePattern?: RegExp;
+	/** Record field that scope.time_range filters on. Default 'date'. */
+	timeRangeField?: string | ((stream: string) => string);
+	validateRecord?: ValidateRecord;
 }
 
 /** Config for a non-browser connector (API, file-based). */
 export interface NonBrowserConnectorConfig extends BaseRunConnectorConfig {
-  browser?: undefined;
-  collect: (ctx: CollectContext) => Promise<void>;
+	browser?: undefined;
+	collect: (ctx: CollectContext) => Promise<void>;
 }
 
 /** Config for a browser-driven connector. */
 export interface BrowserConnectorConfig extends BaseRunConnectorConfig {
-  browser: BrowserConfig;
-  collect: (ctx: BrowserCollectContext) => Promise<void>;
-  ensureSession?: (args: EnsureSessionArgs) => Promise<void>;
-  probeSession?: (args: ProbeSessionArgs) => Promise<boolean>;
+	browser: BrowserConfig;
+	collect: (ctx: BrowserCollectContext) => Promise<void>;
+	ensureSession?: (args: EnsureSessionArgs) => Promise<void>;
+	probeSession?: (args: ProbeSessionArgs) => Promise<boolean>;
 }
 
 /**
@@ -329,7 +350,9 @@ export interface BrowserConnectorConfig extends BaseRunConnectorConfig {
  * otherwise it doesn't. TS narrows the right way at each call site so
  * destructuring `{ page }` in a browser connector's collect() is type-safe.
  */
-export type RunConnectorConfig = NonBrowserConnectorConfig | BrowserConnectorConfig;
+export type RunConnectorConfig =
+	| NonBrowserConnectorConfig
+	| BrowserConnectorConfig;
 
 // ─── Primitive helpers (exported for connector convenience) ─────────────
 
@@ -360,18 +383,22 @@ const TRACE_TIMESTAMP_UNSAFE = /[:.]/g;
  * driving the full `runConnector` process/stdio wiring.
  */
 export function composeNormalizedTerminalError({
-  message,
-  retryable,
-  code,
-  normalizeTerminalError,
+	message,
+	retryable,
+	code,
+	normalizeTerminalError,
 }: {
-  message: string;
-  retryable: boolean;
-  code?: string | undefined;
-  normalizeTerminalError: NormalizeTerminalError;
+	message: string;
+	retryable: boolean;
+	code?: string | undefined;
+	normalizeTerminalError: NormalizeTerminalError;
 }): TerminalErrorDetails {
-  const normalized = normalizeTerminalError({ message, retryable, ...(code ? { code } : {}) });
-  return code && !normalized.code ? { ...normalized, code } : normalized;
+	const normalized = normalizeTerminalError({
+		message,
+		retryable,
+		...(code ? { code } : {}),
+	});
+	return code && !normalized.code ? { ...normalized, code } : normalized;
 }
 
 const UNEXPECTED_FAILURE_DETAIL_MAX = 300;
@@ -392,18 +419,24 @@ const UNEXPECTED_FAILURE_DETAIL_MAX = 300;
  * object -- see imap-flow.js's settleRequest and commands/login.js.
  */
 function extractKnownErrorDetail(err: Error): string | null {
-  const withDetail = err as Error & {
-    executedCommand?: unknown;
-    responseText?: unknown;
-  };
-  const parts: string[] = [];
-  if (typeof withDetail.responseText === "string" && withDetail.responseText.length > 0) {
-    parts.push(`server: ${withDetail.responseText}`);
-  }
-  if (typeof withDetail.executedCommand === "string" && withDetail.executedCommand.length > 0) {
-    parts.push(`command: ${withDetail.executedCommand}`);
-  }
-  return parts.length > 0 ? parts.join("; ") : null;
+	const withDetail = err as Error & {
+		executedCommand?: unknown;
+		responseText?: unknown;
+	};
+	const parts: string[] = [];
+	if (
+		typeof withDetail.responseText === "string" &&
+		withDetail.responseText.length > 0
+	) {
+		parts.push(`server: ${withDetail.responseText}`);
+	}
+	if (
+		typeof withDetail.executedCommand === "string" &&
+		withDetail.executedCommand.length > 0
+	) {
+		parts.push(`command: ${withDetail.executedCommand}`);
+	}
+	return parts.length > 0 ? parts.join("; ") : null;
 }
 
 /**
@@ -417,44 +450,47 @@ function extractKnownErrorDetail(err: Error): string | null {
  * on why `executedCommand` is already redacted at the source).
  */
 export function describeUnexpectedFailure(err: unknown): string {
-  if (!(err instanceof Error)) {
-    return String(err);
-  }
-  const detail = extractKnownErrorDetail(err);
-  const combined = detail ? `${err.message} (${detail})` : err.message;
-  return combined.length > UNEXPECTED_FAILURE_DETAIL_MAX
-    ? `${combined.slice(0, UNEXPECTED_FAILURE_DETAIL_MAX)}…`
-    : combined;
+	if (!(err instanceof Error)) {
+		return String(err);
+	}
+	const detail = extractKnownErrorDetail(err);
+	const combined = detail ? `${err.message} (${detail})` : err.message;
+	return combined.length > UNEXPECTED_FAILURE_DETAIL_MAX
+		? `${combined.slice(0, UNEXPECTED_FAILURE_DETAIL_MAX)}…`
+		: combined;
 }
 
 /** Returns true if the scope's time_range excludes this record's date value. */
-function isOutsideTimeRange(timeRange: { since?: string; until?: string }, dateValue: unknown): boolean {
-  if (typeof dateValue !== "string" || !dateValue) {
-    return false;
-  }
-  if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
-    return true;
-  }
-  if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
-    return true;
-  }
-  return false;
+function isOutsideTimeRange(
+	timeRange: { since?: string; until?: string },
+	dateValue: unknown,
+): boolean {
+	if (typeof dateValue !== "string" || !dateValue) {
+		return false;
+	}
+	if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
+		return true;
+	}
+	if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
+		return true;
+	}
+	return false;
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
 function makeShapeCheckSkip(
-  stream: string,
-  data: RecordData,
-  issues: ReadonlyArray<{ path: string; message: string }>
+	stream: string,
+	data: RecordData,
+	issues: ReadonlyArray<{ path: string; message: string }>,
 ): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
-  const message = `${String(data.id)}: ${issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`;
-  return {
-    type: "SKIP_RESULT",
-    stream,
-    reason: "shape_check_failed",
-    message,
-    diagnostics: { id: data.id, issues, record: data },
-  };
+	const message = `${String(data.id)}: ${issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`;
+	return {
+		type: "SKIP_RESULT",
+		stream,
+		reason: "shape_check_failed",
+		message,
+		diagnostics: { id: data.id, issues, record: data },
+	};
 }
 
 /**
@@ -469,18 +505,20 @@ function makeShapeCheckSkip(
  * what the vendor actually sent and widen the schema against real data.
  */
 function makeShapeAnomalyReport(
-  stream: string,
-  data: RecordData,
-  anomalies: readonly ShapeAnomaly[]
+	stream: string,
+	data: RecordData,
+	anomalies: readonly ShapeAnomaly[],
 ): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
-  const detail = anomalies.map((a) => `${a.path}: unmodeled value ${JSON.stringify(a.value)}`).join("; ");
-  return {
-    type: "SKIP_RESULT",
-    stream,
-    reason: "shape_check_unmodeled_value",
-    message: `${String(data.id)}: retained with ${detail}`,
-    diagnostics: { id: data.id, anomalies, retained: true },
-  };
+	const detail = anomalies
+		.map((a) => `${a.path}: unmodeled value ${JSON.stringify(a.value)}`)
+		.join("; ");
+	return {
+		type: "SKIP_RESULT",
+		stream,
+		reason: "shape_check_unmodeled_value",
+		message: `${String(data.id)}: retained with ${detail}`,
+		diagnostics: { id: data.id, anomalies, retained: true },
+	};
 }
 
 /**
@@ -490,41 +528,41 @@ function makeShapeAnomalyReport(
  * partial run from a complete one without inferring it from gaps.
  */
 export interface DetailCoverageParams {
-  /**
-   * Optional explicit `considered` denominator: how many items the run weighed
-   * for this stream (the source inventory or boundary it enumerated). When
-   * present it is preferred over `requiredKeys.length` so a list stream that has
-   * no detail-hydration phase can still declare partial-vs-complete by passing
-   * empty `requiredKeys`/`hydratedKeys` and a measured `considered` count. It
-   * MUST be measured independently at the enumeration site, never aliased to the
-   * collected/emitted count — the runtime never infers it from collected.
-   */
-  considered?: number;
-  /**
-   * Optional explicit `covered` count: how many of the `considered` in-boundary
-   * items the run accounted for — the items it emitted plus the items it
-   * deliberately suppressed as unchanged (a full-sync stream gated by a per-record
-   * fingerprint). When present, the projection compares `considered` against
-   * `covered` instead of the collected count, so a steady-state run that suppressed
-   * every unchanged record reads `complete` rather than a false `partial`. It MUST
-   * be measured at the enumeration site from objective per-record outcomes
-   * (emitted, or suppressed-because-unchanged) and MUST NOT count a weighed-but-
-   * dropped item — a dropped item is in neither the collected nor the covered
-   * count, so it still reads `partial`. Never aliased to the collected count.
-   */
-  covered?: number;
-  /** Keys for which a DETAIL_GAP was emitted and should be retried next run. */
-  gapKeys?: ReadonlyArray<string | number>;
-  /** Subset of requiredKeys whose detail was fetched and emitted. */
-  hydratedKeys: ReadonlyArray<string | number>;
-  /** Keys skipped by explicit policy, such as selection scope. */
-  optionalSkipKeys?: ReadonlyArray<string | number>;
-  /** Full set of keys considered for detail fetch this run. */
-  requiredKeys: ReadonlyArray<string | number>;
-  /** The list/parent stream whose cursor anchors the detail pass. */
-  stateStream: string;
-  /** The detail stream the coverage report describes. */
-  stream: string;
+	/**
+	 * Optional explicit `considered` denominator: how many items the run weighed
+	 * for this stream (the source inventory or boundary it enumerated). When
+	 * present it is preferred over `requiredKeys.length` so a list stream that has
+	 * no detail-hydration phase can still declare partial-vs-complete by passing
+	 * empty `requiredKeys`/`hydratedKeys` and a measured `considered` count. It
+	 * MUST be measured independently at the enumeration site, never aliased to the
+	 * collected/emitted count — the runtime never infers it from collected.
+	 */
+	considered?: number;
+	/**
+	 * Optional explicit `covered` count: how many of the `considered` in-boundary
+	 * items the run accounted for — the items it emitted plus the items it
+	 * deliberately suppressed as unchanged (a full-sync stream gated by a per-record
+	 * fingerprint). When present, the projection compares `considered` against
+	 * `covered` instead of the collected count, so a steady-state run that suppressed
+	 * every unchanged record reads `complete` rather than a false `partial`. It MUST
+	 * be measured at the enumeration site from objective per-record outcomes
+	 * (emitted, or suppressed-because-unchanged) and MUST NOT count a weighed-but-
+	 * dropped item — a dropped item is in neither the collected nor the covered
+	 * count, so it still reads `partial`. Never aliased to the collected count.
+	 */
+	covered?: number;
+	/** Keys for which a DETAIL_GAP was emitted and should be retried next run. */
+	gapKeys?: ReadonlyArray<string | number>;
+	/** Subset of requiredKeys whose detail was fetched and emitted. */
+	hydratedKeys: ReadonlyArray<string | number>;
+	/** Keys skipped by explicit policy, such as selection scope. */
+	optionalSkipKeys?: ReadonlyArray<string | number>;
+	/** Full set of keys considered for detail fetch this run. */
+	requiredKeys: ReadonlyArray<string | number>;
+	/** The list/parent stream whose cursor anchors the detail pass. */
+	stateStream: string;
+	/** The detail stream the coverage report describes. */
+	stream: string;
 }
 
 /**
@@ -534,26 +572,45 @@ export interface DetailCoverageParams {
  * optional key sets are omitted so a fully hydrated boundary carries no gap
  * fields.
  */
-export function buildDetailCoverageMessage(params: DetailCoverageParams): DetailCoverageMessage {
-  const { stream, stateStream, requiredKeys, hydratedKeys, gapKeys, optionalSkipKeys, considered, covered } = params;
-  return {
-    type: "DETAIL_COVERAGE",
-    reference_only: true,
-    stream,
-    state_stream: stateStream,
-    required_keys: [...requiredKeys],
-    hydrated_keys: [...hydratedKeys],
-    // Only emit `considered` when the connector supplied a non-negative integer.
-    // The runtime re-validates and drops anything unsafe to `unknown`; omitting
-    // it here keeps a no-considered run byte-identical to the prior shape.
-    ...(typeof considered === "number" && Number.isInteger(considered) && considered >= 0 ? { considered } : {}),
-    // Same drop-don't-fabricate posture for the optional `covered` count: omitting
-    // it when absent or unsafe keeps a no-covered run byte-identical to the prior
-    // shape, so every existing declarer is unaffected.
-    ...(typeof covered === "number" && Number.isInteger(covered) && covered >= 0 ? { covered } : {}),
-    ...(gapKeys?.length ? { gap_keys: [...gapKeys] } : {}),
-    ...(optionalSkipKeys?.length ? { optional_skip_keys: [...optionalSkipKeys] } : {}),
-  };
+export function buildDetailCoverageMessage(
+	params: DetailCoverageParams,
+): DetailCoverageMessage {
+	const {
+		stream,
+		stateStream,
+		requiredKeys,
+		hydratedKeys,
+		gapKeys,
+		optionalSkipKeys,
+		considered,
+		covered,
+	} = params;
+	return {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream,
+		state_stream: stateStream,
+		required_keys: [...requiredKeys],
+		hydrated_keys: [...hydratedKeys],
+		// Only emit `considered` when the connector supplied a non-negative integer.
+		// The runtime re-validates and drops anything unsafe to `unknown`; omitting
+		// it here keeps a no-considered run byte-identical to the prior shape.
+		...(typeof considered === "number" &&
+		Number.isInteger(considered) &&
+		considered >= 0
+			? { considered }
+			: {}),
+		// Same drop-don't-fabricate posture for the optional `covered` count: omitting
+		// it when absent or unsafe keeps a no-covered run byte-identical to the prior
+		// shape, so every existing declarer is unaffected.
+		...(typeof covered === "number" && Number.isInteger(covered) && covered >= 0
+			? { covered }
+			: {}),
+		...(gapKeys?.length ? { gap_keys: [...gapKeys] } : {}),
+		...(optionalSkipKeys?.length
+			? { optional_skip_keys: [...optionalSkipKeys] }
+			: {}),
+	};
 }
 
 /**
@@ -572,15 +629,18 @@ export function buildDetailCoverageMessage(params: DetailCoverageParams): Detail
  * The caller owns when to emit, and MUST emit only on a successful
  * enumeration — a fetch or parse failure never proves an empty boundary.
  */
-export function buildFullScanCoverageMessage(stream: string, considered: number): DetailCoverageMessage {
-  return buildDetailCoverageMessage({
-    stream,
-    stateStream: stream,
-    requiredKeys: [],
-    hydratedKeys: [],
-    considered,
-    covered: considered,
-  });
+export function buildFullScanCoverageMessage(
+	stream: string,
+	considered: number,
+): DetailCoverageMessage {
+	return buildDetailCoverageMessage({
+		stream,
+		stateStream: stream,
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered,
+		covered: considered,
+	});
 }
 
 /**
@@ -589,10 +649,10 @@ export function buildFullScanCoverageMessage(stream: string, considered: number)
  * can use it without importing a heavier runtime type.
  */
 export function emitDetailCoverage(
-  ctx: { emit: (msg: EmittedMessage) => Promise<void> },
-  params: DetailCoverageParams
+	ctx: { emit: (msg: EmittedMessage) => Promise<void> },
+	params: DetailCoverageParams,
 ): Promise<void> {
-  return ctx.emit(buildDetailCoverageMessage(params));
+	return ctx.emit(buildDetailCoverageMessage(params));
 }
 
 /**
@@ -612,14 +672,14 @@ export function emitDetailCoverage(
  * connector is the only line of redaction inside this helper.
  */
 export interface DetailGapErrorContext {
-  /** Connector-chosen error class (e.g. `upstream_pressure`, the deferred class). */
-  class: string;
-  /** Optional upstream HTTP status that triggered the gap. */
-  httpStatus?: number;
-  /** Optional human-readable message. Carried on `last_error` only — the protocol's `detail` block has no `message` field. */
-  message?: string;
-  /** Pre-redacted network-pressure diagnostic (endpoint route, method, error class). Copied verbatim — redact at the source. */
-  networkPressure?: DetailGapNetworkPressure;
+	/** Connector-chosen error class (e.g. `upstream_pressure`, the deferred class). */
+	class: string;
+	/** Optional upstream HTTP status that triggered the gap. */
+	httpStatus?: number;
+	/** Optional human-readable message. Carried on `last_error` only — the protocol's `detail` block has no `message` field. */
+	message?: string;
+	/** Pre-redacted network-pressure diagnostic (endpoint route, method, error class). Copied verbatim — redact at the source. */
+	networkPressure?: DetailGapNetworkPressure;
 }
 
 /**
@@ -640,20 +700,20 @@ export interface DetailGapErrorContext {
  * `temporary_unavailable` record a resumable gap without arming a cooldown.
  */
 export interface DetailGapParams {
-  /** Optional bounded error context fanned into `detail` and `last_error`. Omit both blocks when absent. */
-  error?: DetailGapErrorContext;
-  /** Optional opaque cursor the next run uses to resume the parent list at this gap. */
-  listCursor?: DetailGapMessage["list_cursor"];
-  /** Locator the next run uses to re-hydrate this record's detail. */
-  locator: DetailGapMessage["detail_locator"];
-  /** Optional list/parent stream this detail stream hangs off (e.g. `accounts` for `transactions`). */
-  parentStream?: string;
-  /** Why detail could not be hydrated; drives retryability and any cooldown. */
-  reason: DetailGapMessage["reason"];
-  /** Key of the record whose detail is gapped. */
-  recordKey: string | number;
-  /** The detail stream the gap belongs to. */
-  stream: string;
+	/** Optional bounded error context fanned into `detail` and `last_error`. Omit both blocks when absent. */
+	error?: DetailGapErrorContext;
+	/** Optional opaque cursor the next run uses to resume the parent list at this gap. */
+	listCursor?: DetailGapMessage["list_cursor"];
+	/** Locator the next run uses to re-hydrate this record's detail. */
+	locator: DetailGapMessage["detail_locator"];
+	/** Optional list/parent stream this detail stream hangs off (e.g. `accounts` for `transactions`). */
+	parentStream?: string;
+	/** Why detail could not be hydrated; drives retryability and any cooldown. */
+	reason: DetailGapMessage["reason"];
+	/** Key of the record whose detail is gapped. */
+	recordKey: string | number;
+	/** The detail stream the gap belongs to. */
+	stream: string;
 }
 
 /**
@@ -668,36 +728,45 @@ export interface DetailGapParams {
  * `detail` block has no `message` field.
  */
 export function buildDetailGap(params: DetailGapParams): DetailGapMessage {
-  const { stream, recordKey, reason, locator, parentStream, listCursor, error } = params;
-  let errorBlocks: Pick<DetailGapMessage, "detail" | "last_error"> = {};
-  if (error) {
-    const sharedBlock = {
-      class: error.class,
-      // biome-ignore lint/suspicious/noEqualsToNull: httpStatus is optional (may be undefined, not just null); === null would wrongly include an undefined http_status field
-      ...(error.httpStatus == null ? {} : { http_status: error.httpStatus }),
-      // biome-ignore lint/suspicious/noEqualsToNull: networkPressure is optional (may be undefined, not just null); === null would wrongly include an undefined network_pressure field
-      ...(error.networkPressure == null ? {} : { network_pressure: error.networkPressure }),
-    };
-    errorBlocks = {
-      detail: sharedBlock,
-      // biome-ignore lint/suspicious/noEqualsToNull: error.message is optional (may be undefined, not just null); === null would miss the undefined case
-      last_error: error.message == null ? sharedBlock : { ...sharedBlock, message: error.message },
-    };
-  }
-  return {
-    type: "DETAIL_GAP",
-    stream,
-    // biome-ignore lint/suspicious/noEqualsToNull: parentStream is optional (may be undefined, not just null); === null would wrongly include an undefined parent_stream field
-    ...(parentStream == null ? {} : { parent_stream: parentStream }),
-    record_key: recordKey,
-    status: "pending",
-    reason,
-    detail_locator: locator,
-    ...(listCursor === undefined ? {} : { list_cursor: listCursor }),
-    retryable: true,
-    reference_only: true,
-    ...errorBlocks,
-  };
+	const {
+		stream,
+		recordKey,
+		reason,
+		locator,
+		parentStream,
+		listCursor,
+		error,
+	} = params;
+	let errorBlocks: Pick<DetailGapMessage, "detail" | "last_error"> = {};
+	if (error) {
+		const sharedBlock = {
+			class: error.class,
+			...(error.httpStatus == null ? {} : { http_status: error.httpStatus }),
+			...(error.networkPressure == null
+				? {}
+				: { network_pressure: error.networkPressure }),
+		};
+		errorBlocks = {
+			detail: sharedBlock,
+			last_error:
+				error.message == null
+					? sharedBlock
+					: { ...sharedBlock, message: error.message },
+		};
+	}
+	return {
+		type: "DETAIL_GAP",
+		stream,
+		...(parentStream == null ? {} : { parent_stream: parentStream }),
+		record_key: recordKey,
+		status: "pending",
+		reason,
+		detail_locator: locator,
+		...(listCursor === undefined ? {} : { list_cursor: listCursor }),
+		retryable: true,
+		reference_only: true,
+		...errorBlocks,
+	};
 }
 
 /**
@@ -706,10 +775,10 @@ export function buildDetailGap(params: DetailGapParams): DetailGapMessage {
  * use it without importing a heavier runtime type. Mirrors `emitDetailCoverage`.
  */
 export function emitDetailGap(
-  ctx: { emit: (msg: EmittedMessage) => Promise<void> },
-  params: DetailGapParams
+	ctx: { emit: (msg: EmittedMessage) => Promise<void> },
+	params: DetailGapParams,
 ): Promise<void> {
-  return ctx.emit(buildDetailGap(params));
+	return ctx.emit(buildDetailGap(params));
 }
 
 export const nowIso = (): string => new Date().toISOString();
@@ -720,7 +789,8 @@ export const nowIso = (): string => new Date().toISOString();
  * which wait for a page condition. This one is "slow us down so we look
  * human", not "wait until X is ready". See authoring guide §7.
  */
-export const politeDelay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+export const politeDelay = (ms: number): Promise<void> =>
+	new Promise((r) => setTimeout(r, ms));
 
 // ─── Runtime entry point ────────────────────────────────────────────────
 
@@ -728,368 +798,438 @@ export const politeDelay = (ms: number): Promise<void> => new Promise((r) => set
  * Run a connector end-to-end. The only entry point connectors should use.
  */
 export function runConnector(config: RunConnectorConfig): void {
-  if (!config.name) {
-    throw new Error("runConnector: config.name required");
-  }
-  if (typeof config.collect !== "function") {
-    throw new Error("runConnector: config.collect required");
-  }
+	if (!config.name) {
+		throw new Error("runConnector: config.name required");
+	}
+	if (typeof config.collect !== "function") {
+		throw new Error("runConnector: config.collect required");
+	}
 
-  const {
-    name,
-    validateRecord,
-    collect,
-    browser,
-    normalizeTerminalError = (error: TerminalErrorDetails): TerminalErrorDetails => error,
-    onDurableCommit,
-    retryablePattern = DEFAULT_RETRYABLE_PATTERN,
-    timeRangeField = "date",
-    isTombstone,
-    auth,
-  } = config;
-  // ensureSession/probeSession are only on BrowserConnectorConfig; extract
-  // after the browser-narrowing check.
-  const ensureSession = browser ? config.ensureSession : undefined;
-  const probeSession = browser ? config.probeSession : undefined;
+	const {
+		name,
+		validateRecord,
+		collect,
+		browser,
+		normalizeTerminalError = (
+			error: TerminalErrorDetails,
+		): TerminalErrorDetails => error,
+		onDurableCommit,
+		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
+		timeRangeField = "date",
+		isTombstone,
+		auth,
+	} = config;
+	// ensureSession/probeSession are only on BrowserConnectorConfig; extract
+	// after the browser-narrowing check.
+	const ensureSession = browser ? config.ensureSession : undefined;
+	const probeSession = browser ? config.probeSession : undefined;
 
-  const timeRangeFieldFor: (stream: string) => string =
-    typeof timeRangeField === "function" ? timeRangeField : (): string => timeRangeField;
+	const timeRangeFieldFor: (stream: string) => string =
+		typeof timeRangeField === "function"
+			? timeRangeField
+			: (): string => timeRangeField;
 
-  // Capture session: null unless PDPP_CAPTURE_FIXTURES=1.
-  const capture = createCaptureSession(name);
+	// Capture session: null unless PDPP_CAPTURE_FIXTURES=1.
+	const capture = createCaptureSession(name);
 
-  // stdin reader for START + INTERACTION_RESPONSE.
-  const rl = createInterface({ input: process.stdin, terminal: false });
+	// stdin reader for START + INTERACTION_RESPONSE.
+	const rl = createInterface({ input: process.stdin, terminal: false });
 
-  // Wraps stdout write with backpressure. RECORD messages auto-captured.
-  const emit = (msg: EmittedMessage): Promise<void> => {
-    if (capture && msg.type === "RECORD") {
-      capture.recordRecord(msg);
-    }
-    return emitToStdout(msg);
-  };
+	// Wraps stdout write with backpressure. RECORD messages auto-captured.
+	const emit = (msg: EmittedMessage): Promise<void> => {
+		if (capture && msg.type === "RECORD") {
+			capture.recordRecord(msg);
+		}
+		return emitToStdout(msg);
+	};
 
-  if (capture) {
-    const modeLabel = capture.keepOnSuccess
-      ? "PDPP_CAPTURE_FIXTURES=1 (always retain)"
-      : "PDPP_CAPTURE_ON_FAILURE=1 (retain on failure only)";
-    process.stderr.write(`[capture] ${modeLabel}; writing to ${capture.baseDir}\n`);
-  }
+	if (capture) {
+		const modeLabel = capture.keepOnSuccess
+			? "PDPP_CAPTURE_FIXTURES=1 (always retain)"
+			: "PDPP_CAPTURE_ON_FAILURE=1 (retain on failure only)";
+		process.stderr.write(
+			`[capture] ${modeLabel}; writing to ${capture.baseDir}\n`,
+		);
+	}
 
-  const flushAndExit = (code: number): void => {
-    // On a successful run, run the optional durable-commit hook after the
-    // runtime acknowledges ingest (the `exit` callback fires post-ack) and
-    // before the real process exit. Best-effort: a hook failure never changes
-    // the already-committed run's outcome.
-    if (code === 0 && onDurableCommit) {
-      const logDurableCommit = (message: string): void => {
-        process.stderr.write(`[onDurableCommit] ${message}\n`);
-      };
-      flushAndExitAfterRuntimeAck(code, {
-        exit: (finalCode: number): void => {
-          Promise.resolve()
-            .then(() => onDurableCommit(logDurableCommit))
-            .catch((): undefined => undefined)
-            .finally((): void => {
-              process.exit(finalCode);
-            });
-        },
-      });
-      return;
-    }
-    flushAndExitAfterRuntimeAck(code);
-  };
+	const flushAndExit = (code: number): void => {
+		// On a successful run, run the optional durable-commit hook after the
+		// runtime acknowledges ingest (the `exit` callback fires post-ack) and
+		// before the real process exit. Best-effort: a hook failure never changes
+		// the already-committed run's outcome.
+		if (code === 0 && onDurableCommit) {
+			const logDurableCommit = (message: string): void => {
+				process.stderr.write(`[onDurableCommit] ${message}\n`);
+			};
+			flushAndExitAfterRuntimeAck(code, {
+				exit: (finalCode: number): void => {
+					Promise.resolve()
+						.then(() => onDurableCommit(logDurableCommit))
+						.catch((): undefined => undefined)
+						.finally((): void => {
+							process.exit(finalCode);
+						});
+				},
+			});
+			return;
+		}
+		flushAndExitAfterRuntimeAck(code);
+	};
 
-  let observedCounters: { totalEmitted: number; totalSkipped: number } | null = null;
-  let reportedStreamFailure: { message: string; retryable: boolean; stream: string } | null = null;
+	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
+		null;
+	let reportedStreamFailure: {
+		message: string;
+		retryable: boolean;
+		stream: string;
+	} | null = null;
 
-  const emitFailed = (
-    message: string,
-    retryable = false,
-    records_emitted = observedCounters?.totalEmitted ?? 0,
-    code?: string
-  ): void => {
-    // The runtime ACK handshake may outlive every ref'd process handle. Mark
-    // the natural exit path before emitting DONE so it cannot contradict the
-    // failed terminal status if Node exits before the explicit callback.
-    process.exitCode = 1;
-    const terminalError = composeNormalizedTerminalError({ message, retryable, code, normalizeTerminalError });
-    // Fire-and-forget. emit() resolves after stdout drains; we're about to
-    // exit(1) anyway, so we don't need to block. If it rejects (the write
-    // fails), the process is dying either way.
-    emit({
-      type: "DONE",
-      status: "failed",
-      records_emitted,
-      error: terminalError,
-    }).catch((): undefined => undefined);
-    flushAndExit(1);
-  };
+	const emitFailed = (
+		message: string,
+		retryable = false,
+		records_emitted = observedCounters?.totalEmitted ?? 0,
+		code?: string,
+	): void => {
+		// The runtime ACK handshake may outlive every ref'd process handle. Mark
+		// the natural exit path before emitting DONE so it cannot contradict the
+		// failed terminal status if Node exits before the explicit callback.
+		process.exitCode = 1;
+		const terminalError = composeNormalizedTerminalError({
+			message,
+			retryable,
+			code,
+			normalizeTerminalError,
+		});
+		// Fire-and-forget. emit() resolves after stdout drains; we're about to
+		// exit(1) anyway, so we don't need to block. If it rejects (the write
+		// fails), the process is dying either way.
+		emit({
+			type: "DONE",
+			status: "failed",
+			records_emitted,
+			error: terminalError,
+		}).catch((): undefined => undefined);
+		flushAndExit(1);
+	};
 
-  let interactionCounter = 0;
-  const nextInteractionId = (): string => {
-    interactionCounter += 1;
-    return `int_${Date.now()}_${interactionCounter}`;
-  };
-  let detailGapPageCounter = 0;
-  const nextDetailGapPageRequestId = (): string => {
-    detailGapPageCounter += 1;
-    return `dgp_${Date.now()}_${detailGapPageCounter}`;
-  };
-  let assistanceCounter = 0;
-  const nextAssistanceId = (): string => {
-    assistanceCounter += 1;
-    return `asst_${Date.now()}_${assistanceCounter}`;
-  };
+	let interactionCounter = 0;
+	const nextInteractionId = (): string => {
+		interactionCounter += 1;
+		return `int_${Date.now()}_${interactionCounter}`;
+	};
+	let detailGapPageCounter = 0;
+	const nextDetailGapPageRequestId = (): string => {
+		detailGapPageCounter += 1;
+		return `dgp_${Date.now()}_${detailGapPageCounter}`;
+	};
+	let assistanceCounter = 0;
+	const nextAssistanceId = (): string => {
+		assistanceCounter += 1;
+		return `asst_${Date.now()}_${assistanceCounter}`;
+	};
 
-  const sendInteraction = (req: InteractionRequest): Promise<InteractionResponse> => {
-    const request_id = req.request_id ?? nextInteractionId();
-    const wrapped: EmittedMessage = {
-      type: "INTERACTION",
-      request_id,
-      kind: req.kind,
-      message: req.message,
-      ...(req.schema === undefined ? {} : { schema: req.schema }),
-      ...(req.timeout_seconds === undefined ? {} : { timeout_seconds: req.timeout_seconds }),
-    };
-    // Fire the INTERACTION; response arrives separately on stdin.
-    emit(wrapped).catch((): undefined => undefined);
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanup = (): void => {
-        rl.off("line", onLine);
-        rl.off("close", onClose);
-        process.stdin.off("end", onClose);
-        process.stdin.off("error", onError);
-      };
-      const settle = (fn: () => void): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        fn();
-      };
-      const onLine = (line: string): void => {
-        try {
-          const parsed = JSON.parse(line) as InteractionResponse;
-          if (parsed.type === "INTERACTION_RESPONSE" && parsed.request_id === request_id) {
-            settle(() => resolve(parsed));
-          }
-        } catch (err) {
-          settle(() => reject(err instanceof Error ? err : new Error(String(err))));
-        }
-      };
-      const onClose = (): void => {
-        settle(() => reject(new Error(`Interaction ${request_id} ended before a response`)));
-      };
-      const onError = (err: Error): void => {
-        settle(() => reject(new Error(`Interaction ${request_id} stdin error: ${err.message}`)));
-      };
-      rl.on("line", onLine);
-      rl.once("close", onClose);
-      process.stdin.once("end", onClose);
-      process.stdin.once("error", onError);
-    });
-  };
+	const sendInteraction = (
+		req: InteractionRequest,
+	): Promise<InteractionResponse> => {
+		const request_id = req.request_id ?? nextInteractionId();
+		const wrapped: EmittedMessage = {
+			type: "INTERACTION",
+			request_id,
+			kind: req.kind,
+			message: req.message,
+			...(req.schema === undefined ? {} : { schema: req.schema }),
+			...(req.timeout_seconds === undefined
+				? {}
+				: { timeout_seconds: req.timeout_seconds }),
+		};
+		// Fire the INTERACTION; response arrives separately on stdin.
+		emit(wrapped).catch((): undefined => undefined);
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const cleanup = (): void => {
+				rl.off("line", onLine);
+				rl.off("close", onClose);
+				process.stdin.off("end", onClose);
+				process.stdin.off("error", onError);
+			};
+			const settle = (fn: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				cleanup();
+				fn();
+			};
+			const onLine = (line: string): void => {
+				try {
+					const parsed = JSON.parse(line) as InteractionResponse;
+					if (
+						parsed.type === "INTERACTION_RESPONSE" &&
+						parsed.request_id === request_id
+					) {
+						settle(() => resolve(parsed));
+					}
+				} catch (err) {
+					settle(() =>
+						reject(err instanceof Error ? err : new Error(String(err))),
+					);
+				}
+			};
+			const onClose = (): void => {
+				settle(() =>
+					reject(
+						new Error(`Interaction ${request_id} ended before a response`),
+					),
+				);
+			};
+			const onError = (err: Error): void => {
+				settle(() =>
+					reject(
+						new Error(`Interaction ${request_id} stdin error: ${err.message}`),
+					),
+				);
+			};
+			rl.on("line", onLine);
+			rl.once("close", onClose);
+			process.stdin.once("end", onClose);
+			process.stdin.once("error", onError);
+		});
+	};
 
-  const readStart = (): Promise<StartMessage> =>
-    new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanup = (): void => {
-        rl.off("line", onLine);
-        rl.off("close", onClose);
-        process.stdin.off("end", onClose);
-        process.stdin.off("error", onError);
-      };
-      const settle = (fn: () => void): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        fn();
-      };
-      const onLine = (line: string): void => {
-        settle(() => {
-          try {
-            resolve(JSON.parse(line) as StartMessage);
-          } catch (err) {
-            reject(err instanceof Error ? err : new Error(String(err)));
-          }
-        });
-      };
-      const onClose = (): void => {
-        settle(() => reject(new Error("Missing START message before stdin closed")));
-      };
-      const onError = (err: Error): void => {
-        settle(() => reject(new Error(`Missing START message before stdin error: ${err.message}`)));
-      };
+	const readStart = (): Promise<StartMessage> =>
+		new Promise((resolve, reject) => {
+			let settled = false;
+			const cleanup = (): void => {
+				rl.off("line", onLine);
+				rl.off("close", onClose);
+				process.stdin.off("end", onClose);
+				process.stdin.off("error", onError);
+			};
+			const settle = (fn: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				cleanup();
+				fn();
+			};
+			const onLine = (line: string): void => {
+				settle(() => {
+					try {
+						resolve(JSON.parse(line) as StartMessage);
+					} catch (err) {
+						reject(err instanceof Error ? err : new Error(String(err)));
+					}
+				});
+			};
+			const onClose = (): void => {
+				settle(() =>
+					reject(new Error("Missing START message before stdin closed")),
+				);
+			};
+			const onError = (err: Error): void => {
+				settle(() =>
+					reject(
+						new Error(
+							`Missing START message before stdin error: ${err.message}`,
+						),
+					),
+				);
+			};
 
-      rl.once("line", onLine);
-      rl.once("close", onClose);
-      process.stdin.once("end", onClose);
-      process.stdin.once("error", onError);
-    });
+			rl.once("line", onLine);
+			rl.once("close", onClose);
+			process.stdin.once("end", onClose);
+			process.stdin.once("error", onError);
+		});
 
-  const requestDetailGapPage: BaseCollectContext["requestDetailGapPage"] = (req = {}) => {
-    const request_id = nextDetailGapPageRequestId();
-    const streams = Array.isArray(req.streams)
-      ? req.streams.filter((stream) => typeof stream === "string" && stream.length > 0)
-      : undefined;
-    const maxBytes =
-      typeof req.maxBytes === "number" && Number.isFinite(req.maxBytes) && req.maxBytes > 0
-        ? Math.floor(req.maxBytes)
-        : undefined;
-    emit({
-      type: "DETAIL_GAPS_PAGE_REQUEST",
-      reference_only: true,
-      request_id,
-      ...(streams && streams.length > 0 ? { streams } : {}),
-      ...(maxBytes ? { max_bytes: maxBytes } : {}),
-    }).catch((): undefined => undefined);
-    return new Promise((resolve, reject) => {
-      const onLine = (line: string): void => {
-        try {
-          const parsed = JSON.parse(line) as DetailGapsPageResponse;
-          if (parsed.type !== "DETAIL_GAPS_PAGE_RESPONSE" || parsed.request_id !== request_id) {
-            return;
-          }
-          rl.off("line", onLine);
-          if (parsed.reference_only !== true || !Array.isArray(parsed.detail_gaps)) {
-            reject(new Error("Invalid DETAIL_GAPS_PAGE_RESPONSE envelope"));
-            return;
-          }
-          resolve(parsed.detail_gaps);
-        } catch (err) {
-          rl.off("line", onLine);
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
-      };
-      rl.on("line", onLine);
-    });
-  };
+	const requestDetailGapPage: BaseCollectContext["requestDetailGapPage"] = (
+		req = {},
+	) => {
+		const request_id = nextDetailGapPageRequestId();
+		const streams = Array.isArray(req.streams)
+			? req.streams.filter(
+					(stream) => typeof stream === "string" && stream.length > 0,
+				)
+			: undefined;
+		const maxBytes =
+			typeof req.maxBytes === "number" &&
+			Number.isFinite(req.maxBytes) &&
+			req.maxBytes > 0
+				? Math.floor(req.maxBytes)
+				: undefined;
+		emit({
+			type: "DETAIL_GAPS_PAGE_REQUEST",
+			reference_only: true,
+			request_id,
+			...(streams && streams.length > 0 ? { streams } : {}),
+			...(maxBytes ? { max_bytes: maxBytes } : {}),
+		}).catch((): undefined => undefined);
+		return new Promise((resolve, reject) => {
+			const onLine = (line: string): void => {
+				try {
+					const parsed = JSON.parse(line) as DetailGapsPageResponse;
+					if (
+						parsed.type !== "DETAIL_GAPS_PAGE_RESPONSE" ||
+						parsed.request_id !== request_id
+					) {
+						return;
+					}
+					rl.off("line", onLine);
+					if (
+						parsed.reference_only !== true ||
+						!Array.isArray(parsed.detail_gaps)
+					) {
+						reject(new Error("Invalid DETAIL_GAPS_PAGE_RESPONSE envelope"));
+						return;
+					}
+					resolve(parsed.detail_gaps);
+				} catch (err) {
+					rl.off("line", onLine);
+					reject(err instanceof Error ? err : new Error(String(err)));
+				}
+			};
+			rl.on("line", onLine);
+		});
+	};
 
-  const progress = (message: string, extra: ProgressExtra = {}): Promise<void> =>
-    emit({ type: "PROGRESS", message, ...extra });
-  const assist = async (req: AssistanceRequest): Promise<string> => {
-    const assistance_request_id = req.assistance_request_id ?? nextAssistanceId();
-    await emit({ type: "ASSISTANCE", ...req, assistance_request_id });
-    return assistance_request_id;
-  };
-  const completeAssistance: BaseCollectContext["completeAssistance"] = (assistanceRequestId, status, extra = {}) =>
-    emit({ type: "ASSISTANCE_STATUS", assistance_request_id: assistanceRequestId, status, ...extra });
+	const progress = (
+		message: string,
+		extra: ProgressExtra = {},
+	): Promise<void> => emit({ type: "PROGRESS", message, ...extra });
+	const assist = async (req: AssistanceRequest): Promise<string> => {
+		const assistance_request_id =
+			req.assistance_request_id ?? nextAssistanceId();
+		await emit({ type: "ASSISTANCE", ...req, assistance_request_id });
+		return assistance_request_id;
+	};
+	const completeAssistance: BaseCollectContext["completeAssistance"] = (
+		assistanceRequestId,
+		status,
+		extra = {},
+	) =>
+		emit({
+			type: "ASSISTANCE_STATUS",
+			assistance_request_id: assistanceRequestId,
+			status,
+			...extra,
+		});
 
-  const reportStreamFailure: NonNullable<BaseCollectContext["reportStreamFailure"]> = async (
-    stream,
-    message,
-    options = {}
-  ): Promise<void> => {
-    if (!stream.trim()) {
-      throw new TerminalError("Stream failure report is missing a stream", { code: "stream_failure_invalid" });
-    }
-    const normalizedMessage = message.trim();
-    if (!normalizedMessage) {
-      throw new TerminalError("Stream failure report is missing a message", { code: "stream_failure_invalid" });
-    }
-    const retryable = options.retryable === true;
-    reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
-    await emit({
-      type: "SKIP_RESULT",
-      stream,
-      reason: "stream_collection_failed",
-      message: normalizedMessage,
-      recovery_hint: { action: "retry_by_runtime", retryable },
-    });
-  };
+	const reportStreamFailure: NonNullable<
+		BaseCollectContext["reportStreamFailure"]
+	> = async (stream, message, options = {}): Promise<void> => {
+		if (!stream.trim()) {
+			throw new TerminalError("Stream failure report is missing a stream", {
+				code: "stream_failure_invalid",
+			});
+		}
+		const normalizedMessage = message.trim();
+		if (!normalizedMessage) {
+			throw new TerminalError("Stream failure report is missing a message", {
+				code: "stream_failure_invalid",
+			});
+		}
+		const retryable = options.retryable === true;
+		reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "stream_collection_failed",
+			message: normalizedMessage,
+			recovery_hint: { action: "retry_by_runtime", retryable },
+		});
+	};
 
-  // Kick off the run. The outer catch distinguishes TerminalError (which
-  // the runtime threw deliberately with an explicit retryable bit) from
-  // unexpected throws (where we pattern-match the message).
-  run().catch((err: unknown) => {
-    if (err instanceof TerminalError) {
-      emitFailed(err.message, err.retryable, undefined, err.code);
-      return;
-    }
-    const message = describeUnexpectedFailure(err);
-    emitFailed(message, retryablePattern.test(message));
-  });
+	// Kick off the run. The outer catch distinguishes TerminalError (which
+	// the runtime threw deliberately with an explicit retryable bit) from
+	// unexpected throws (where we pattern-match the message).
+	run().catch((err: unknown) => {
+		if (err instanceof TerminalError) {
+			emitFailed(err.message, err.retryable, undefined, err.code);
+			return;
+		}
+		const message = describeUnexpectedFailure(err);
+		emitFailed(message, retryablePattern.test(message));
+	});
 
-  async function run(): Promise<void> {
-    const startMsg = await parseStart(readStart);
-    const requested = buildRequested(startMsg);
-    const credentials = await resolveCredentials(auth, {
-      sendInteraction,
-      connectorName: name,
-    });
+	async function run(): Promise<void> {
+		const startMsg = await parseStart(readStart);
+		const requested = buildRequested(startMsg);
+		const credentials = await resolveCredentials(auth, {
+			sendInteraction,
+			connectorName: name,
+		});
 
-    const emitRecord = makeEmitRecord({
-      requested,
-      emit,
-      emittedAt: nowIso(),
-      validateRecord,
-      isTombstone,
-      timeRangeFieldFor,
-    });
-    observedCounters = emitRecord.counters;
-    const emittedAt = nowIso();
+		const emitRecord = makeEmitRecord({
+			requested,
+			emit,
+			emittedAt: nowIso(),
+			validateRecord,
+			isTombstone,
+			timeRangeFieldFor,
+		});
+		observedCounters = emitRecord.counters;
+		const emittedAt = nowIso();
 
-    const baseCtx: BaseCollectContext = {
-      scope: startMsg.scope,
-      state: startMsg.state ?? {},
-      requested,
-      credentials,
-      emit,
-      emitRecord: emitRecord.emit,
-      assist,
-      completeAssistance,
-      progress,
-      reportStreamFailure,
-      capture,
-      sendInteraction,
-      emittedAt,
-      detailGaps: startMsg.detail_gaps ?? [],
-      requestDetailGapPage,
-      // §4.3: forward recovery_only from the START message so connectors can
-      // suppress the forward walk while draining non-pressure detail gaps.
-      recoveryOnly: startMsg.recovery_only === true,
-      // Defaults to "incremental" when absent — see BaseCollectContext's doc
-      // comment: an ordinary run (no collection_mode on the wire) must behave
-      // exactly as before this field existed.
-      collectionMode: startMsg.collection_mode === "full_refresh" ? "full_refresh" : "incremental",
-    };
+		const baseCtx: BaseCollectContext = {
+			scope: startMsg.scope,
+			state: startMsg.state ?? {},
+			requested,
+			credentials,
+			emit,
+			emitRecord: emitRecord.emit,
+			assist,
+			completeAssistance,
+			progress,
+			reportStreamFailure,
+			capture,
+			sendInteraction,
+			emittedAt,
+			detailGaps: startMsg.detail_gaps ?? [],
+			requestDetailGapPage,
+			// §4.3: forward recovery_only from the START message so connectors can
+			// suppress the forward walk while draining non-pressure detail gaps.
+			recoveryOnly: startMsg.recovery_only === true,
+			// Defaults to "incremental" when absent — see BaseCollectContext's doc
+			// comment: an ordinary run (no collection_mode on the wire) must behave
+			// exactly as before this field existed.
+			collectionMode:
+				startMsg.collection_mode === "full_refresh"
+					? "full_refresh"
+					: "incremental",
+		};
 
-    if (browser) {
-      await runInBrowser({
-        browser,
-        name,
-        sendInteraction,
-        assist,
-        completeAssistance,
-        nextAssistanceRequestId: nextAssistanceId,
-        progress,
-        ensureSession,
-        probeSession,
-        collect,
-        baseCtx,
-        retryablePattern,
-      });
-    } else {
-      await collect(baseCtx);
-    }
+		if (browser) {
+			await runInBrowser({
+				browser,
+				name,
+				sendInteraction,
+				assist,
+				completeAssistance,
+				nextAssistanceRequestId: nextAssistanceId,
+				progress,
+				ensureSession,
+				probeSession,
+				collect,
+				baseCtx,
+				retryablePattern,
+			});
+		} else {
+			await collect(baseCtx);
+		}
 
-    if (reportedStreamFailure) {
-      emitFailed(
-        `stream collection failed: ${reportedStreamFailure.stream}: ${reportedStreamFailure.message}`,
-        reportedStreamFailure.retryable,
-        emitRecord.counters.totalEmitted,
-        "stream_collection_failed"
-      );
-      return;
-    }
-    await finalizeRun(emitRecord.counters, progress, emit);
-    flushAndExit(0);
-  }
+		if (reportedStreamFailure) {
+			emitFailed(
+				`stream collection failed: ${reportedStreamFailure.stream}: ${reportedStreamFailure.message}`,
+				reportedStreamFailure.retryable,
+				emitRecord.counters.totalEmitted,
+				"stream_collection_failed",
+			);
+			return;
+		}
+		await finalizeRun(emitRecord.counters, progress, emit);
+		flushAndExit(0);
+	}
 }
 
 // ─── run() helpers (top-level so each is independently readable) ───────
@@ -1099,290 +1239,337 @@ export function runConnector(config: RunConnectorConfig): void {
  * TerminalError on malformed input or wrong type — the runtime can't
  * proceed without a valid START.
  */
-async function parseStart(readStart: () => Promise<StartMessage>): Promise<StartMessage> {
-  const startMsg = await readStart();
-  if (startMsg.type !== "START") {
-    throw new TerminalError("Expected START message");
-  }
-  return startMsg;
+async function parseStart(
+	readStart: () => Promise<StartMessage>,
+): Promise<StartMessage> {
+	const startMsg = await readStart();
+	if (startMsg.type !== "START") {
+		throw new TerminalError("Expected START message");
+	}
+	return startMsg;
 }
 
 /** Build the requested-streams map; the runtime requires at least one stream. */
 function buildRequested(startMsg: StartMessage): Map<string, StreamScope> {
-  const requested = new Map<string, StreamScope>((startMsg.scope.streams ?? []).map((s) => [s.name, s]));
-  if (requested.size === 0) {
-    throw new TerminalError("START.scope.streams is required");
-  }
-  return requested;
+	const requested = new Map<string, StreamScope>(
+		(startMsg.scope.streams ?? []).map((s) => [s.name, s]),
+	);
+	if (requested.size === 0) {
+		throw new TerminalError("START.scope.streams is required");
+	}
+	return requested;
 }
 
 /** Resolve credentials via the configured auth strategy. */
 async function resolveCredentials(
-  auth: AuthConfig | undefined,
-  ctx: {
-    sendInteraction: BaseCollectContext["sendInteraction"];
-    connectorName: string;
-  }
+	auth: AuthConfig | undefined,
+	ctx: {
+		sendInteraction: BaseCollectContext["sendInteraction"];
+		connectorName: string;
+	},
 ): Promise<Credentials> {
-  if (!auth) {
-    return {};
-  }
-  try {
-    return await resolveAuth(auth, ctx);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new TerminalError(message, { cause: err });
-  }
+	if (!auth) {
+		return {};
+	}
+	try {
+		return await resolveAuth(auth, ctx);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		throw new TerminalError(message, { cause: err });
+	}
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
 function makeEmitRecord(deps: {
-  requested: Map<string, StreamScope>;
-  emit: (msg: EmittedMessage) => Promise<void>;
-  emittedAt: string;
-  validateRecord: ValidateRecord | undefined;
-  isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
-  timeRangeFieldFor: (stream: string) => string;
+	requested: Map<string, StreamScope>;
+	emit: (msg: EmittedMessage) => Promise<void>;
+	emittedAt: string;
+	validateRecord: ValidateRecord | undefined;
+	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
+	timeRangeFieldFor: (stream: string) => string;
 }): {
-  emit: (stream: string, data: RecordData) => Promise<void>;
-  counters: { totalEmitted: number; totalSkipped: number; totalAnomalous: number };
+	emit: (stream: string, data: RecordData) => Promise<void>;
+	counters: {
+		totalEmitted: number;
+		totalSkipped: number;
+		totalAnomalous: number;
+	};
 } {
-  const { requested, emit, emittedAt, validateRecord, isTombstone, timeRangeFieldFor } = deps;
-  // `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
-  // subset of totalEmitted, not a sibling of totalSkipped.
-  const counters = { totalEmitted: 0, totalSkipped: 0, totalAnomalous: 0 };
-  const resFilters = new Map<string, ReadonlySet<string> | null>();
-  for (const [streamName, scope] of requested) {
-    resFilters.set(streamName, resourceSet(scope));
-  }
+	const {
+		requested,
+		emit,
+		emittedAt,
+		validateRecord,
+		isTombstone,
+		timeRangeFieldFor,
+	} = deps;
+	// `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
+	// subset of totalEmitted, not a sibling of totalSkipped.
+	const counters = { totalEmitted: 0, totalSkipped: 0, totalAnomalous: 0 };
+	const resFilters = new Map<string, ReadonlySet<string> | null>();
+	for (const [streamName, scope] of requested) {
+		resFilters.set(streamName, resourceSet(scope));
+	}
 
-  const emitRecord = (stream: string, data: RecordData, options: EmitRecordOptions = {}): Promise<void> => {
-    // biome-ignore lint/suspicious/noEqualsToNull: data.id is optional (may be undefined, not just null); === null would let undefined ids through
-    if (data.id == null) {
-      return Promise.resolve();
-    }
-    const rs = resFilters.get(stream);
-    if (!options.skipResourceFilter && rs && !rs.has(String(data.id))) {
-      return Promise.resolve();
-    }
+	const emitRecord = (
+		stream: string,
+		data: RecordData,
+		options: EmitRecordOptions = {},
+	): Promise<void> => {
+		if (data.id == null) {
+			return Promise.resolve();
+		}
+		const rs = resFilters.get(stream);
+		if (!options.skipResourceFilter && rs && !rs.has(String(data.id))) {
+			return Promise.resolve();
+		}
 
-    if (isTombstone?.(stream, data)) {
-      counters.totalEmitted += 1;
-      return emit({
-        type: "RECORD",
-        stream,
-        key: String(data.id),
-        data: { id: data.id },
-        emitted_at: emittedAt,
-        op: "delete",
-      });
-    }
+		if (isTombstone?.(stream, data)) {
+			counters.totalEmitted += 1;
+			return emit({
+				type: "RECORD",
+				stream,
+				key: String(data.id),
+				data: { id: data.id },
+				emitted_at: emittedAt,
+				op: "delete",
+			});
+		}
 
-    const streamScope = requested.get(stream);
-    const field = timeRangeFieldFor(stream);
-    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
-      return Promise.resolve();
-    }
+		const streamScope = requested.get(stream);
+		const field = timeRangeFieldFor(stream);
+		if (
+			streamScope?.time_range &&
+			isOutsideTimeRange(streamScope.time_range, data[field])
+		) {
+			return Promise.resolve();
+		}
 
-    const validation = validateRecord?.(stream, data);
-    if (validation && !validation.ok) {
-      counters.totalSkipped += 1;
-      return emit(makeShapeCheckSkip(stream, data, validation.issues));
-    }
-    // Present only when the record was RETAINED despite carrying a value the
-    // schema does not model (see makeValidateRecord in schema-registry.ts).
-    const anomalies = validation?.anomalies;
-    counters.totalEmitted += 1;
-    const record: EmittedMessage = {
-      type: "RECORD",
-      stream,
-      key: String(data.id),
-      data,
-      emitted_at: emittedAt,
-    };
-    // A retained-with-drift record still emits; its diagnostic rides alongside
-    // so the unmodeled value is visible rather than silently tolerated. Reported
-    // BEFORE the RECORD so a truncated stream never shows the record without the
-    // caveat attached to it.
-    if (anomalies?.length) {
-      counters.totalAnomalous += 1;
-      return emit(makeShapeAnomalyReport(stream, data, anomalies)).then(() => emit(record));
-    }
-    return emit(record);
-  };
+		const validation = validateRecord?.(stream, data);
+		if (validation && !validation.ok) {
+			counters.totalSkipped += 1;
+			return emit(makeShapeCheckSkip(stream, data, validation.issues));
+		}
+		// Present only when the record was RETAINED despite carrying a value the
+		// schema does not model (see makeValidateRecord in schema-registry.ts).
+		const anomalies = validation?.anomalies;
+		counters.totalEmitted += 1;
+		const record: EmittedMessage = {
+			type: "RECORD",
+			stream,
+			key: String(data.id),
+			data,
+			emitted_at: emittedAt,
+		};
+		// A retained-with-drift record still emits; its diagnostic rides alongside
+		// so the unmodeled value is visible rather than silently tolerated. Reported
+		// BEFORE the RECORD so a truncated stream never shows the record without the
+		// caveat attached to it.
+		if (anomalies?.length) {
+			counters.totalAnomalous += 1;
+			return emit(makeShapeAnomalyReport(stream, data, anomalies)).then(() =>
+				emit(record),
+			);
+		}
+		return emit(record);
+	};
 
-  return { emit: emitRecord, counters };
+	return { emit: emitRecord, counters };
 }
 
 /** Run collect() inside an acquired browser context, with session + tracing. */
 async function runInBrowser(args: {
-  browser: BrowserConfig;
-  name: string;
-  sendInteraction: BaseCollectContext["sendInteraction"];
-  assist: BaseCollectContext["assist"];
-  completeAssistance: BaseCollectContext["completeAssistance"];
-  nextAssistanceRequestId: () => string;
-  progress: BaseCollectContext["progress"];
-  ensureSession: BrowserConnectorConfig["ensureSession"];
-  probeSession: BrowserConnectorConfig["probeSession"];
-  collect: BrowserConnectorConfig["collect"];
-  baseCtx: BaseCollectContext;
-  retryablePattern: RegExp;
+	browser: BrowserConfig;
+	name: string;
+	sendInteraction: BaseCollectContext["sendInteraction"];
+	assist: BaseCollectContext["assist"];
+	completeAssistance: BaseCollectContext["completeAssistance"];
+	nextAssistanceRequestId: () => string;
+	progress: BaseCollectContext["progress"];
+	ensureSession: BrowserConnectorConfig["ensureSession"];
+	probeSession: BrowserConnectorConfig["probeSession"];
+	collect: BrowserConnectorConfig["collect"];
+	baseCtx: BaseCollectContext;
+	retryablePattern: RegExp;
 }): Promise<void> {
-  const {
-    browser,
-    name,
-    sendInteraction,
-    assist,
-    completeAssistance,
-    nextAssistanceRequestId,
-    progress,
-    ensureSession,
-    probeSession,
-    collect,
-    baseCtx,
-    retryablePattern,
-  } = args;
-  const { context: ctx, release } = await acquireBrowser(browser, name);
-  const visibility = resolveBrowserRuntimeVisibility(browser, name);
-  const browserSurface = resolveBrowserLaunchSource(visibility).kind;
-  // Prevention layer (Layer A): register a SIGTERM/SIGINT handler that
-  // awaits release() before exit. Without this, Docker stop / controller
-  // restart kills this child process before the `finally` block below
-  // runs, Chromium dies with its profile-lock symlink still pointing at
-  // this PID, and the next launch fails the hostname check. See
-  // `shutdown-hook.ts` for the design and `profile-lock.ts` for the
-  // correction-layer counterpart.
-  const { withShutdownRelease } = await import("./shutdown-hook.ts");
-  const tracer = makeTracer(ctx, name, baseCtx.capture);
-  // Finalization runs before release(). On SIGTERM/SIGINT this is what
-  // gives the operator a usable trace/capture artifact for the in-flight
-  // run; without it, Docker stop / scheduler restart drops the trace.
-  let traceFinalized = false;
-  const finalizeDiagnostics = async (): Promise<void> => {
-    if (traceFinalized) {
-      return;
-    }
-    traceFinalized = true;
-    baseCtx.capture?.setTraceCheckpointHook?.(null);
-    await tracer.stop();
-  };
-  const disposeShutdownHook = withShutdownRelease(release, { finalize: finalizeDiagnostics });
-  await tracer.start();
-  baseCtx.capture?.setTraceCheckpointHook?.((label) => tracer.checkpoint(label));
-  let page: Page | null = null;
-  let runSucceeded = false;
-  const openBrowserSurfaceAssistanceIds = new Set<string>();
-  try {
-    page = await selectBrowserPageForRun(ctx, browser);
-    const browserAssist: BaseCollectContext["assist"] = async (req) => {
-      const assistanceRequestId = req.assistance_request_id ?? nextAssistanceRequestId();
-      if (req.attachments?.some((attachment) => attachment.kind === "browser_surface")) {
-        openBrowserSurfaceAssistanceIds.add(assistanceRequestId);
-        // Registration must happen before ASSISTANCE reaches the reference
-        // server. The server's owner-authenticated mint route can then fail
-        // closed unless this exact (run, assistance) target is ready.
-        await prepareBrowserInteractionTarget({
-          interactionId: assistanceRequestId,
-          page: page as Page,
-          reason: "manual_action",
-        });
-      }
-      return assist({ ...req, assistance_request_id: assistanceRequestId });
-    };
-    const browserCompleteAssistance: BaseCollectContext["completeAssistance"] = async (
-      assistanceRequestId,
-      status,
-      extra = {}
-    ) => {
-      try {
-        await completeAssistance(assistanceRequestId, status, extra);
-      } finally {
-        if (openBrowserSurfaceAssistanceIds.delete(assistanceRequestId)) {
-          await unregisterBrowserInteractionTarget({ interactionId: assistanceRequestId });
-        }
-      }
-    };
-    const browserSendInteraction = makeBrowserInteractionKeepalive({
-      context: ctx,
-      diagnostics: process.env.PDPP_BROWSER_SURFACE_DIAGNOSTICS === "1",
-      progress,
-      sendInteraction: async (req) => {
-        const decorated = decorateBrowserManualAction(req, visibility);
-        if (decorated.kind !== "otp") {
-          return sendInteraction(decorated);
-        }
-        const { interactionId } = await prepareBrowserInteractionTarget({
-          page: page as Page,
-          reason: "2fa",
-          ...(decorated.request_id ? { interactionId: decorated.request_id } : {}),
-        });
-        return sendInteraction({ ...decorated, request_id: interactionId });
-      },
-    });
-    await captureBrowserPage(baseCtx.capture, page, "runtime-run-page");
-    await closeBrowserContextPagesExcept(ctx, page);
-    // Session establishment is the window the watchdog guards. A wedged
-    // renderer can hang a connector's ensureSession indefinitely with no
-    // INTERACTION ever emitted, so the controller's mid-wait detector cannot
-    // help. The watchdog keys on checkpoint progress (paused while an
-    // interaction is open) and fails closed if establishment stalls.
-    const watchdog = makeSessionEstablishWatchdog({
-      capture: baseCtx.capture,
-      name,
-      page,
-    });
-    await watchdog.run(() =>
-      establishSession(
-        { ensureSession, probeSession },
-        {
-          assist: watchdog.wrapAssist(browserAssist),
-          capture: baseCtx.capture,
-          checkpoint: watchdog.checkpoint,
-          completeAssistance: watchdog.wrapCompleteAssistance(browserCompleteAssistance),
-          context: ctx,
-          credentials: baseCtx.credentials,
-          page: page as Page,
-          name,
-          progress,
-          retryablePattern,
-          sendInteraction: watchdog.wrapSendInteraction(browserSendInteraction),
-        }
-      )
-    );
-    await captureBrowserPage(baseCtx.capture, page, "runtime-session-established");
-    await captureBrowserPage(baseCtx.capture, page, "runtime-collect-start");
-    await collect({ ...baseCtx, browserSurface, context: ctx, page, sendInteraction: browserSendInteraction });
-    await captureBrowserPage(baseCtx.capture, page, "runtime-collect-complete");
-    // Mark success before the finally so tracer.stop() deletes chunks on a
-    // clean run, and capture.finalize() can scrub the raw dir in
-    // PDPP_CAPTURE_ON_FAILURE mode. Anything thrown after this point (only
-    // release/page-close) is treated as benign teardown.
-    tracer.markSucceeded();
-    baseCtx.capture?.markSucceeded?.();
-    runSucceeded = true;
-  } catch (err) {
-    if (page) {
-      await captureBrowserPage(baseCtx.capture, page, "runtime-error");
-    }
-    throw err;
-  } finally {
-    await finalizeDiagnostics();
-    if (page) {
-      await Promise.all(
-        [...openBrowserSurfaceAssistanceIds].map((assistanceRequestId) =>
-          unregisterBrowserInteractionTarget({ interactionId: assistanceRequestId })
-        )
-      );
-      openBrowserSurfaceAssistanceIds.clear();
-    }
-    if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
-      await closeBrowserPage(page);
-    }
-    await release().catch((): undefined => undefined);
-    disposeShutdownHook();
-    baseCtx.capture?.finalize?.();
-  }
+	const {
+		browser,
+		name,
+		sendInteraction,
+		assist,
+		completeAssistance,
+		nextAssistanceRequestId,
+		progress,
+		ensureSession,
+		probeSession,
+		collect,
+		baseCtx,
+		retryablePattern,
+	} = args;
+	const { context: ctx, release } = await acquireBrowser(browser, name);
+	const visibility = resolveBrowserRuntimeVisibility(browser, name);
+	const browserSurface = resolveBrowserLaunchSource(visibility).kind;
+	// Prevention layer (Layer A): register a SIGTERM/SIGINT handler that
+	// awaits release() before exit. Without this, Docker stop / controller
+	// restart kills this child process before the `finally` block below
+	// runs, Chromium dies with its profile-lock symlink still pointing at
+	// this PID, and the next launch fails the hostname check. See
+	// `shutdown-hook.ts` for the design and `profile-lock.ts` for the
+	// correction-layer counterpart.
+	const { withShutdownRelease } = await import("./shutdown-hook.ts");
+	const tracer = makeTracer(ctx, name, baseCtx.capture);
+	// Finalization runs before release(). On SIGTERM/SIGINT this is what
+	// gives the operator a usable trace/capture artifact for the in-flight
+	// run; without it, Docker stop / scheduler restart drops the trace.
+	let traceFinalized = false;
+	const finalizeDiagnostics = async (): Promise<void> => {
+		if (traceFinalized) {
+			return;
+		}
+		traceFinalized = true;
+		baseCtx.capture?.setTraceCheckpointHook?.(null);
+		await tracer.stop();
+	};
+	const disposeShutdownHook = withShutdownRelease(release, {
+		finalize: finalizeDiagnostics,
+	});
+	await tracer.start();
+	baseCtx.capture?.setTraceCheckpointHook?.((label) =>
+		tracer.checkpoint(label),
+	);
+	let page: Page | null = null;
+	let runSucceeded = false;
+	const openBrowserSurfaceAssistanceIds = new Set<string>();
+	try {
+		page = await selectBrowserPageForRun(ctx, browser);
+		const browserAssist: BaseCollectContext["assist"] = async (req) => {
+			const assistanceRequestId =
+				req.assistance_request_id ?? nextAssistanceRequestId();
+			if (
+				req.attachments?.some(
+					(attachment) => attachment.kind === "browser_surface",
+				)
+			) {
+				openBrowserSurfaceAssistanceIds.add(assistanceRequestId);
+				// Registration must happen before ASSISTANCE reaches the reference
+				// server. The server's owner-authenticated mint route can then fail
+				// closed unless this exact (run, assistance) target is ready.
+				await prepareBrowserInteractionTarget({
+					interactionId: assistanceRequestId,
+					page: page as Page,
+					reason: "manual_action",
+				});
+			}
+			return assist({ ...req, assistance_request_id: assistanceRequestId });
+		};
+		const browserCompleteAssistance: BaseCollectContext["completeAssistance"] =
+			async (assistanceRequestId, status, extra = {}) => {
+				try {
+					await completeAssistance(assistanceRequestId, status, extra);
+				} finally {
+					if (openBrowserSurfaceAssistanceIds.delete(assistanceRequestId)) {
+						await unregisterBrowserInteractionTarget({
+							interactionId: assistanceRequestId,
+						});
+					}
+				}
+			};
+		const browserSendInteraction = makeBrowserInteractionKeepalive({
+			context: ctx,
+			diagnostics: process.env.PDPP_BROWSER_SURFACE_DIAGNOSTICS === "1",
+			progress,
+			sendInteraction: async (req) => {
+				const decorated = decorateBrowserManualAction(req, visibility);
+				if (decorated.kind !== "otp") {
+					return sendInteraction(decorated);
+				}
+				const { interactionId } = await prepareBrowserInteractionTarget({
+					page: page as Page,
+					reason: "2fa",
+					...(decorated.request_id
+						? { interactionId: decorated.request_id }
+						: {}),
+				});
+				return sendInteraction({ ...decorated, request_id: interactionId });
+			},
+		});
+		await captureBrowserPage(baseCtx.capture, page, "runtime-run-page");
+		await closeBrowserContextPagesExcept(ctx, page);
+		// Session establishment is the window the watchdog guards. A wedged
+		// renderer can hang a connector's ensureSession indefinitely with no
+		// INTERACTION ever emitted, so the controller's mid-wait detector cannot
+		// help. The watchdog keys on checkpoint progress (paused while an
+		// interaction is open) and fails closed if establishment stalls.
+		const watchdog = makeSessionEstablishWatchdog({
+			capture: baseCtx.capture,
+			name,
+			page,
+		});
+		await watchdog.run(() =>
+			establishSession(
+				{ ensureSession, probeSession },
+				{
+					assist: watchdog.wrapAssist(browserAssist),
+					capture: baseCtx.capture,
+					checkpoint: watchdog.checkpoint,
+					completeAssistance: watchdog.wrapCompleteAssistance(
+						browserCompleteAssistance,
+					),
+					context: ctx,
+					credentials: baseCtx.credentials,
+					page: page as Page,
+					name,
+					progress,
+					retryablePattern,
+					sendInteraction: watchdog.wrapSendInteraction(browserSendInteraction),
+				},
+			),
+		);
+		await captureBrowserPage(
+			baseCtx.capture,
+			page,
+			"runtime-session-established",
+		);
+		await captureBrowserPage(baseCtx.capture, page, "runtime-collect-start");
+		await collect({
+			...baseCtx,
+			browserSurface,
+			context: ctx,
+			page,
+			sendInteraction: browserSendInteraction,
+		});
+		await captureBrowserPage(baseCtx.capture, page, "runtime-collect-complete");
+		// Mark success before the finally so tracer.stop() deletes chunks on a
+		// clean run, and capture.finalize() can scrub the raw dir in
+		// PDPP_CAPTURE_ON_FAILURE mode. Anything thrown after this point (only
+		// release/page-close) is treated as benign teardown.
+		tracer.markSucceeded();
+		baseCtx.capture?.markSucceeded?.();
+		runSucceeded = true;
+	} catch (err) {
+		if (page) {
+			await captureBrowserPage(baseCtx.capture, page, "runtime-error");
+		}
+		throw err;
+	} finally {
+		await finalizeDiagnostics();
+		if (page) {
+			await Promise.all(
+				[...openBrowserSurfaceAssistanceIds].map((assistanceRequestId) =>
+					unregisterBrowserInteractionTarget({
+						interactionId: assistanceRequestId,
+					}),
+				),
+			);
+			openBrowserSurfaceAssistanceIds.clear();
+		}
+		if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
+			await closeBrowserPage(page);
+		}
+		await release().catch((): undefined => undefined);
+		disposeShutdownHook();
+		baseCtx.capture?.finalize?.();
+	}
 }
 
 // A wedged renderer can hang the CDP-backed reads inside captureDom
@@ -1393,491 +1580,548 @@ const CAPTURE_DOM_DEADLINE_MS = 10_000;
 const PAGE_CLOSE_DEADLINE_MS = 10_000;
 
 export function isReusableBrowserRunPage(page: ReusableBrowserPage): boolean {
-  if (page.isClosed()) {
-    return false;
-  }
-  const url = page.url();
-  return Boolean(url) && url !== "about:blank" && !url.startsWith("data:");
+	if (page.isClosed()) {
+		return false;
+	}
+	const url = page.url();
+	return Boolean(url) && url !== "about:blank" && !url.startsWith("data:");
 }
 
 export async function selectBrowserPageForRun(
-  context: Pick<BrowserContext, "newPage" | "pages">,
-  browser: Pick<BrowserConfig, "preservePageOnFailure" | "preservePageOnSuccess">
+	context: Pick<BrowserContext, "newPage" | "pages">,
+	browser: Pick<
+		BrowserConfig,
+		"preservePageOnFailure" | "preservePageOnSuccess"
+	>,
 ): Promise<Page> {
-  if (browser.preservePageOnSuccess || browser.preservePageOnFailure) {
-    for (const page of context.pages()) {
-      if (isReusableBrowserRunPage(page)) {
-        return page;
-      }
-    }
-  }
-  return await context.newPage();
+	if (browser.preservePageOnSuccess || browser.preservePageOnFailure) {
+		for (const page of context.pages()) {
+			if (isReusableBrowserRunPage(page)) {
+				return page;
+			}
+		}
+	}
+	return await context.newPage();
 }
 
 export function shouldCloseBrowserPageAfterRun(
-  browser: Pick<BrowserConfig, "preservePageOnFailure" | "preservePageOnSuccess">,
-  runSucceeded: boolean
+	browser: Pick<
+		BrowserConfig,
+		"preservePageOnFailure" | "preservePageOnSuccess"
+	>,
+	runSucceeded: boolean,
 ): boolean {
-  if (runSucceeded && browser.preservePageOnSuccess) {
-    return false;
-  }
-  if (!runSucceeded && browser.preservePageOnFailure) {
-    return false;
-  }
-  return true;
+	if (runSucceeded && browser.preservePageOnSuccess) {
+		return false;
+	}
+	if (!runSucceeded && browser.preservePageOnFailure) {
+		return false;
+	}
+	return true;
 }
 
 export async function captureBrowserPage(
-  capture: CaptureSession | null,
-  page: Page,
-  label: string,
-  deadlineMs = CAPTURE_DOM_DEADLINE_MS
+	capture: CaptureSession | null,
+	page: Page,
+	label: string,
+	deadlineMs = CAPTURE_DOM_DEADLINE_MS,
 ): Promise<void> {
-  if (!capture) {
-    return;
-  }
-  // After a CDP transport drop / remote target loss the page may already
-  // be closed by the time we try to capture (`runtime-error` is the
-  // common case). Skipping cleanly here keeps a bounded diagnostic line
-  // out of Playwright's noisy "Target page, context or browser has been
-  // closed" exception path.
-  if (page.isClosed()) {
-    process.stderr.write(`[capture] page already closed at ${label}; skipping dom snapshot\n`);
-    return;
-  }
-  // captureDom is best-effort by construction (each internal step swallows its
-  // own errors to stderr), so it never rejects; on timeout the detached promise
-  // simply keeps running harmlessly while teardown proceeds.
-  const captureWork = capture.captureDom(page, label);
-  captureWork.catch((): undefined => undefined);
-  await withDeadline(captureWork, deadlineMs, () => {
-    process.stderr.write(
-      `[capture] dom snapshot for ${label} exceeded ${String(deadlineMs)}ms (wedged renderer?); abandoning this capture.\n`
-    );
-  });
+	if (!capture) {
+		return;
+	}
+	// After a CDP transport drop / remote target loss the page may already
+	// be closed by the time we try to capture (`runtime-error` is the
+	// common case). Skipping cleanly here keeps a bounded diagnostic line
+	// out of Playwright's noisy "Target page, context or browser has been
+	// closed" exception path.
+	if (page.isClosed()) {
+		process.stderr.write(
+			`[capture] page already closed at ${label}; skipping dom snapshot\n`,
+		);
+		return;
+	}
+	// captureDom is best-effort by construction (each internal step swallows its
+	// own errors to stderr), so it never rejects; on timeout the detached promise
+	// simply keeps running harmlessly while teardown proceeds.
+	const captureWork = capture.captureDom(page, label);
+	captureWork.catch((): undefined => undefined);
+	await withDeadline(captureWork, deadlineMs, () => {
+		process.stderr.write(
+			`[capture] dom snapshot for ${label} exceeded ${String(deadlineMs)}ms (wedged renderer?); abandoning this capture.\n`,
+		);
+	});
 }
 
 export async function closeBrowserContextPagesExcept(
-  context: { pages: () => ClosableBrowserPage[] },
-  keepPage: ClosableBrowserPage,
-  deadlineMs = PAGE_CLOSE_DEADLINE_MS
+	context: { pages: () => ClosableBrowserPage[] },
+	keepPage: ClosableBrowserPage,
+	deadlineMs = PAGE_CLOSE_DEADLINE_MS,
 ): Promise<number> {
-  let pages: ClosableBrowserPage[];
-  try {
-    pages = context.pages();
-  } catch {
-    return 0;
-  }
+	let pages: ClosableBrowserPage[];
+	try {
+		pages = context.pages();
+	} catch {
+		return 0;
+	}
 
-  let closed = 0;
-  for (const page of pages) {
-    if (page === keepPage || page.isClosed()) {
-      continue;
-    }
-    if (await closeBrowserPage(page, deadlineMs)) {
-      closed += 1;
-    }
-  }
-  return closed;
+	let closed = 0;
+	for (const page of pages) {
+		if (page === keepPage || page.isClosed()) {
+			continue;
+		}
+		if (await closeBrowserPage(page, deadlineMs)) {
+			closed += 1;
+		}
+	}
+	return closed;
 }
 
 export async function closeBrowserPage(
-  page: ClosableBrowserPage | null,
-  deadlineMs = PAGE_CLOSE_DEADLINE_MS
+	page: ClosableBrowserPage | null,
+	deadlineMs = PAGE_CLOSE_DEADLINE_MS,
 ): Promise<boolean> {
-  if (!page || page.isClosed()) {
-    return false;
-  }
-  try {
-    const closeWork = page.close();
-    closeWork.catch((): undefined => undefined);
-    const result = await withDeadline(closeWork, deadlineMs, () => {
-      process.stderr.write(
-        `[browser-runtime] page.close() exceeded ${String(deadlineMs)}ms (wedged renderer?); abandoning close.\n`
-      );
-    });
-    return result !== DEADLINE_TIMEOUT;
-  } catch {
-    // Remote-CDP targets can disappear underneath us during banking OTP/manual
-    // waits. Cleanup must never mask the connector's real terminal reason.
-    return false;
-  }
+	if (!page || page.isClosed()) {
+		return false;
+	}
+	try {
+		const closeWork = page.close();
+		closeWork.catch((): undefined => undefined);
+		const result = await withDeadline(closeWork, deadlineMs, () => {
+			process.stderr.write(
+				`[browser-runtime] page.close() exceeded ${String(deadlineMs)}ms (wedged renderer?); abandoning close.\n`,
+			);
+		});
+		return result !== DEADLINE_TIMEOUT;
+	} catch {
+		// Remote-CDP targets can disappear underneath us during banking OTP/manual
+		// waits. Cleanup must never mask the connector's real terminal reason.
+		return false;
+	}
 }
 
 const BROWSER_INTERACTION_KEEPALIVE_INTERVAL_MS = 15_000;
 
 interface BrowserSurfaceDiagnosticContext {
-  browser: BrowserContext["browser"];
-  pages?: BrowserContext["pages"];
+	browser: BrowserContext["browser"];
+	pages?: BrowserContext["pages"];
 }
 
 interface BrowserConnectionKeepaliveSummary {
-  browserConnectedAtStart: boolean;
-  browserConnectedAtStop: boolean;
-  disconnectEventCount: number;
-  disconnectEventElapsedMs?: number;
-  elapsedMs: number;
-  firstObservedDisconnectedElapsedMs?: number;
-  lastError?: string;
-  lastSuccessfulPingElapsedMs?: number;
-  pingAttempts: number;
-  pingFailures: number;
-  pingInFlight: boolean;
-  pingSuccesses: number;
-  skippedDisconnected: number;
+	browserConnectedAtStart: boolean;
+	browserConnectedAtStop: boolean;
+	disconnectEventCount: number;
+	disconnectEventElapsedMs?: number;
+	elapsedMs: number;
+	firstObservedDisconnectedElapsedMs?: number;
+	lastError?: string;
+	lastSuccessfulPingElapsedMs?: number;
+	pingAttempts: number;
+	pingFailures: number;
+	pingInFlight: boolean;
+	pingSuccesses: number;
+	skippedDisconnected: number;
 }
 
 interface BrowserConnectionKeepaliveHandle {
-  stop: () => BrowserConnectionKeepaliveSummary;
+	stop: () => BrowserConnectionKeepaliveSummary;
 }
 
 export function makeBrowserInteractionKeepalive(args: {
-  context: BrowserSurfaceDiagnosticContext;
-  diagnostics?: boolean;
-  intervalMs?: number;
-  progress?: BaseCollectContext["progress"];
-  sendInteraction: BaseCollectContext["sendInteraction"];
+	context: BrowserSurfaceDiagnosticContext;
+	diagnostics?: boolean;
+	intervalMs?: number;
+	progress?: BaseCollectContext["progress"];
+	sendInteraction: BaseCollectContext["sendInteraction"];
 }): BaseCollectContext["sendInteraction"] {
-  const {
-    context,
-    diagnostics = false,
-    intervalMs = BROWSER_INTERACTION_KEEPALIVE_INTERVAL_MS,
-    progress,
-    sendInteraction,
-  } = args;
-  return async (req) => {
-    await emitBrowserSurfaceDiagnostic({ context, diagnostics, phase: "interaction_start", progress, req });
-    const keepalive = startBrowserConnectionKeepalive(context, intervalMs);
-    try {
-      const response = await sendInteraction(req);
-      await emitBrowserSurfaceDiagnostic({
-        context,
-        diagnostics,
-        keepalive: keepalive.stop(),
-        phase: "interaction_response",
-        progress,
-        req,
-        responseStatus: response.status,
-      });
-      return response;
-    } catch (err) {
-      await emitBrowserSurfaceDiagnostic({
-        context,
-        diagnostics,
-        error: err,
-        keepalive: keepalive.stop(),
-        phase: "interaction_error",
-        progress,
-        req,
-      });
-      throw err;
-    }
-  };
+	const {
+		context,
+		diagnostics = false,
+		intervalMs = BROWSER_INTERACTION_KEEPALIVE_INTERVAL_MS,
+		progress,
+		sendInteraction,
+	} = args;
+	return async (req) => {
+		await emitBrowserSurfaceDiagnostic({
+			context,
+			diagnostics,
+			phase: "interaction_start",
+			progress,
+			req,
+		});
+		const keepalive = startBrowserConnectionKeepalive(context, intervalMs);
+		try {
+			const response = await sendInteraction(req);
+			await emitBrowserSurfaceDiagnostic({
+				context,
+				diagnostics,
+				keepalive: keepalive.stop(),
+				phase: "interaction_response",
+				progress,
+				req,
+				responseStatus: response.status,
+			});
+			return response;
+		} catch (err) {
+			await emitBrowserSurfaceDiagnostic({
+				context,
+				diagnostics,
+				error: err,
+				keepalive: keepalive.stop(),
+				phase: "interaction_error",
+				progress,
+				req,
+			});
+			throw err;
+		}
+	};
 }
 
 async function emitBrowserSurfaceDiagnostic(args: {
-  context: BrowserSurfaceDiagnosticContext;
-  diagnostics: boolean;
-  error?: unknown;
-  keepalive?: BrowserConnectionKeepaliveSummary;
-  phase: "interaction_error" | "interaction_response" | "interaction_start";
-  progress: BaseCollectContext["progress"] | undefined;
-  req: InteractionRequest;
-  responseStatus?: InteractionResponse["status"];
+	context: BrowserSurfaceDiagnosticContext;
+	diagnostics: boolean;
+	error?: unknown;
+	keepalive?: BrowserConnectionKeepaliveSummary;
+	phase: "interaction_error" | "interaction_response" | "interaction_start";
+	progress: BaseCollectContext["progress"] | undefined;
+	req: InteractionRequest;
+	responseStatus?: InteractionResponse["status"];
 }): Promise<void> {
-  const { context, diagnostics, error, keepalive, phase, progress, req, responseStatus } = args;
-  if (!(diagnostics && progress)) {
-    return;
-  }
-  let errorMessage: string | null = null;
-  if (error instanceof Error) {
-    errorMessage = error.message;
-    // biome-ignore lint/suspicious/noEqualsToNull: error is optional (may be undefined, not just null); === null would wrongly stringify an absent error as "undefined"
-  } else if (error != null) {
-    errorMessage = String(error);
-  }
-  const payload = {
-    phase,
-    interaction_kind: req.kind,
-    request_id: req.request_id ?? null,
-    response_status: responseStatus ?? null,
-    surface: describeBrowserSurface(context),
-    keepalive: keepalive ?? null,
-    error: errorMessage,
-  };
-  try {
-    await progress(`browser_surface.diagnostic ${JSON.stringify(payload)}`);
-  } catch (progressError) {
-    const message = progressError instanceof Error ? progressError.message : String(progressError);
-    process.stderr.write(`[browser-surface-diagnostics] progress emit failed: ${message}\n`);
-  }
+	const {
+		context,
+		diagnostics,
+		error,
+		keepalive,
+		phase,
+		progress,
+		req,
+		responseStatus,
+	} = args;
+	if (!(diagnostics && progress)) {
+		return;
+	}
+	let errorMessage: string | null = null;
+	if (error instanceof Error) {
+		errorMessage = error.message;
+	} else if (error != null) {
+		errorMessage = String(error);
+	}
+	const payload = {
+		phase,
+		interaction_kind: req.kind,
+		request_id: req.request_id ?? null,
+		response_status: responseStatus ?? null,
+		surface: describeBrowserSurface(context),
+		keepalive: keepalive ?? null,
+		error: errorMessage,
+	};
+	try {
+		await progress(`browser_surface.diagnostic ${JSON.stringify(payload)}`);
+	} catch (progressError) {
+		const message =
+			progressError instanceof Error
+				? progressError.message
+				: String(progressError);
+		process.stderr.write(
+			`[browser-surface-diagnostics] progress emit failed: ${message}\n`,
+		);
+	}
 }
 
 function describeBrowserSurface(context: BrowserSurfaceDiagnosticContext): {
-  browser_connected: boolean;
-  page_count: number | null;
-  pages: Array<{ closed: boolean; url: string | null }>;
+	browser_connected: boolean;
+	page_count: number | null;
+	pages: Array<{ closed: boolean; url: string | null }>;
 } {
-  const browser = context.browser();
-  let pages: Page[] = [];
-  try {
-    pages = typeof context.pages === "function" ? context.pages() : [];
-  } catch {
-    pages = [];
-  }
-  return {
-    browser_connected: Boolean(browser?.isConnected()),
-    page_count: typeof context.pages === "function" ? pages.length : null,
-    pages: pages.slice(0, 5).map((page) => ({
-      closed: page.isClosed(),
-      url: sanitizeDiagnosticUrl(page),
-    })),
-  };
+	const browser = context.browser();
+	let pages: Page[] = [];
+	try {
+		pages = typeof context.pages === "function" ? context.pages() : [];
+	} catch {
+		pages = [];
+	}
+	return {
+		browser_connected: Boolean(browser?.isConnected()),
+		page_count: typeof context.pages === "function" ? pages.length : null,
+		pages: pages.slice(0, 5).map((page) => ({
+			closed: page.isClosed(),
+			url: sanitizeDiagnosticUrl(page),
+		})),
+	};
 }
 
 function sanitizeDiagnosticUrl(page: Page): string | null {
-  if (page.isClosed()) {
-    return null;
-  }
-  try {
-    const rawUrl = page.url();
-    if (!rawUrl || rawUrl === "about:blank") {
-      return rawUrl || null;
-    }
-    const url = new URL(rawUrl);
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return "unparseable";
-  }
+	if (page.isClosed()) {
+		return null;
+	}
+	try {
+		const rawUrl = page.url();
+		if (!rawUrl || rawUrl === "about:blank") {
+			return rawUrl || null;
+		}
+		const url = new URL(rawUrl);
+		return `${url.origin}${url.pathname}`;
+	} catch {
+		return "unparseable";
+	}
 }
 
 function normalizeDiagnosticError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw.slice(0, 300);
+	const raw = error instanceof Error ? error.message : String(error);
+	return raw.slice(0, 300);
 }
 
 function summarizeInactiveKeepalive(
-  browser: ReturnType<BrowserContext["browser"]> | null | undefined,
-  startedAt: number
+	browser: ReturnType<BrowserContext["browser"]> | null | undefined,
+	startedAt: number,
 ): BrowserConnectionKeepaliveSummary {
-  return {
-    browserConnectedAtStart: Boolean(browser?.isConnected()),
-    browserConnectedAtStop: Boolean(browser?.isConnected()),
-    elapsedMs: Date.now() - startedAt,
-    disconnectEventCount: 0,
-    pingAttempts: 0,
-    pingFailures: 0,
-    pingInFlight: false,
-    pingSuccesses: 0,
-    skippedDisconnected: 0,
-  };
+	return {
+		browserConnectedAtStart: Boolean(browser?.isConnected()),
+		browserConnectedAtStop: Boolean(browser?.isConnected()),
+		elapsedMs: Date.now() - startedAt,
+		disconnectEventCount: 0,
+		pingAttempts: 0,
+		pingFailures: 0,
+		pingInFlight: false,
+		pingSuccesses: 0,
+		skippedDisconnected: 0,
+	};
 }
 
 function startBrowserConnectionKeepalive(
-  context: BrowserSurfaceDiagnosticContext,
-  intervalMs: number
+	context: BrowserSurfaceDiagnosticContext,
+	intervalMs: number,
 ): BrowserConnectionKeepaliveHandle {
-  const startedAt = Date.now();
-  const browser = context.browser();
-  if (intervalMs <= 0 || !browser?.isConnected()) {
-    return { stop: () => summarizeInactiveKeepalive(browser, startedAt) };
-  }
-  let sessionPromise: Promise<CDPSession> | null = null;
-  let pingInFlight = false;
-  let pingAttempts = 0;
-  let pingFailures = 0;
-  let pingSuccesses = 0;
-  let skippedDisconnected = 0;
-  let stopped = false;
-  let lastError: string | undefined;
-  let lastSuccessfulPingElapsedMs: number | undefined;
-  let firstObservedDisconnectedElapsedMs: number | undefined;
-  let disconnectEventElapsedMs: number | undefined;
-  let disconnectEventCount = 0;
-  const browserConnectedAtStart = browser.isConnected();
-  const removeDisconnectedListener = attachBrowserDisconnectedDiagnostic(browser, () => {
-    disconnectEventCount += 1;
-    const elapsedMs = Date.now() - startedAt;
-    disconnectEventElapsedMs ??= elapsedMs;
-    firstObservedDisconnectedElapsedMs ??= elapsedMs;
-    process.stderr.write(`[browser-keepalive] browser disconnected during interaction after ${elapsedMs}ms\n`);
-  });
-  const sessionFor = (connectedBrowser: Browser): Promise<CDPSession> => {
-    sessionPromise ??= connectedBrowser.newBrowserCDPSession();
-    return sessionPromise;
-  };
-  const ping = async (): Promise<void> => {
-    if (stopped || pingInFlight) {
-      return;
-    }
-    if (!browser.isConnected()) {
-      firstObservedDisconnectedElapsedMs ??= Date.now() - startedAt;
-      skippedDisconnected += 1;
-      return;
-    }
-    pingInFlight = true;
-    pingAttempts += 1;
-    try {
-      const session = await sessionFor(browser);
-      await session.send("Browser.getVersion");
-      pingSuccesses += 1;
-      lastSuccessfulPingElapsedMs = Date.now() - startedAt;
-    } catch (err) {
-      sessionPromise = null;
-      pingFailures += 1;
-      lastError = normalizeDiagnosticError(err);
-      process.stderr.write(`[browser-keepalive] Browser.getVersion failed: ${lastError}\n`);
-    } finally {
-      pingInFlight = false;
-    }
-  };
-  const timer = setInterval(ping, intervalMs);
-  timer.unref?.();
-  ping().catch((): undefined => undefined);
-  return {
-    stop: () => {
-      stopped = true;
-      clearInterval(timer);
-      removeDisconnectedListener();
-      sessionPromise?.then((session) => session.detach()).catch((): undefined => undefined);
-      return {
-        browserConnectedAtStart,
-        browserConnectedAtStop: browser.isConnected(),
-        disconnectEventCount,
-        ...(disconnectEventElapsedMs === undefined ? {} : { disconnectEventElapsedMs }),
-        elapsedMs: Date.now() - startedAt,
-        ...(firstObservedDisconnectedElapsedMs === undefined ? {} : { firstObservedDisconnectedElapsedMs }),
-        ...(lastSuccessfulPingElapsedMs === undefined ? {} : { lastSuccessfulPingElapsedMs }),
-        pingAttempts,
-        pingFailures,
-        pingInFlight,
-        pingSuccesses,
-        skippedDisconnected,
-        ...(lastError ? { lastError } : {}),
-      };
-    },
-  };
+	const startedAt = Date.now();
+	const browser = context.browser();
+	if (intervalMs <= 0 || !browser?.isConnected()) {
+		return { stop: () => summarizeInactiveKeepalive(browser, startedAt) };
+	}
+	let sessionPromise: Promise<CDPSession> | null = null;
+	let pingInFlight = false;
+	let pingAttempts = 0;
+	let pingFailures = 0;
+	let pingSuccesses = 0;
+	let skippedDisconnected = 0;
+	let stopped = false;
+	let lastError: string | undefined;
+	let lastSuccessfulPingElapsedMs: number | undefined;
+	let firstObservedDisconnectedElapsedMs: number | undefined;
+	let disconnectEventElapsedMs: number | undefined;
+	let disconnectEventCount = 0;
+	const browserConnectedAtStart = browser.isConnected();
+	const removeDisconnectedListener = attachBrowserDisconnectedDiagnostic(
+		browser,
+		() => {
+			disconnectEventCount += 1;
+			const elapsedMs = Date.now() - startedAt;
+			disconnectEventElapsedMs ??= elapsedMs;
+			firstObservedDisconnectedElapsedMs ??= elapsedMs;
+			process.stderr.write(
+				`[browser-keepalive] browser disconnected during interaction after ${elapsedMs}ms\n`,
+			);
+		},
+	);
+	const sessionFor = (connectedBrowser: Browser): Promise<CDPSession> => {
+		sessionPromise ??= connectedBrowser.newBrowserCDPSession();
+		return sessionPromise;
+	};
+	const ping = async (): Promise<void> => {
+		if (stopped || pingInFlight) {
+			return;
+		}
+		if (!browser.isConnected()) {
+			firstObservedDisconnectedElapsedMs ??= Date.now() - startedAt;
+			skippedDisconnected += 1;
+			return;
+		}
+		pingInFlight = true;
+		pingAttempts += 1;
+		try {
+			const session = await sessionFor(browser);
+			await session.send("Browser.getVersion");
+			pingSuccesses += 1;
+			lastSuccessfulPingElapsedMs = Date.now() - startedAt;
+		} catch (err) {
+			sessionPromise = null;
+			pingFailures += 1;
+			lastError = normalizeDiagnosticError(err);
+			process.stderr.write(
+				`[browser-keepalive] Browser.getVersion failed: ${lastError}\n`,
+			);
+		} finally {
+			pingInFlight = false;
+		}
+	};
+	const timer = setInterval(ping, intervalMs);
+	timer.unref?.();
+	ping().catch((): undefined => undefined);
+	return {
+		stop: () => {
+			stopped = true;
+			clearInterval(timer);
+			removeDisconnectedListener();
+			sessionPromise
+				?.then((session) => session.detach())
+				.catch((): undefined => undefined);
+			return {
+				browserConnectedAtStart,
+				browserConnectedAtStop: browser.isConnected(),
+				disconnectEventCount,
+				...(disconnectEventElapsedMs === undefined
+					? {}
+					: { disconnectEventElapsedMs }),
+				elapsedMs: Date.now() - startedAt,
+				...(firstObservedDisconnectedElapsedMs === undefined
+					? {}
+					: { firstObservedDisconnectedElapsedMs }),
+				...(lastSuccessfulPingElapsedMs === undefined
+					? {}
+					: { lastSuccessfulPingElapsedMs }),
+				pingAttempts,
+				pingFailures,
+				pingInFlight,
+				pingSuccesses,
+				skippedDisconnected,
+				...(lastError ? { lastError } : {}),
+			};
+		},
+	};
 }
 
-function attachBrowserDisconnectedDiagnostic(browser: Browser, onDisconnected: () => void): () => void {
-  const eventTarget = browser as Browser & {
-    off?: (event: "disconnected", listener: () => void) => Browser;
-    on?: (event: "disconnected", listener: () => void) => Browser;
-  };
-  if (typeof eventTarget.on !== "function") {
-    return () => undefined;
-  }
-  eventTarget.on("disconnected", onDisconnected);
-  return () => {
-    if (typeof eventTarget.off === "function") {
-      eventTarget.off("disconnected", onDisconnected);
-    }
-  };
+function attachBrowserDisconnectedDiagnostic(
+	browser: Browser,
+	onDisconnected: () => void,
+): () => void {
+	const eventTarget = browser as Browser & {
+		off?: (event: "disconnected", listener: () => void) => Browser;
+		on?: (event: "disconnected", listener: () => void) => Browser;
+	};
+	if (typeof eventTarget.on !== "function") {
+		return () => undefined;
+	}
+	eventTarget.on("disconnected", onDisconnected);
+	return () => {
+		if (typeof eventTarget.off === "function") {
+			eventTarget.off("disconnected", onDisconnected);
+		}
+	};
 }
 
 /** Emit the final PROGRESS summary (if any skips) and the succeeded DONE. */
 async function finalizeRun(
-  counters: { totalEmitted: number; totalSkipped: number; totalAnomalous?: number },
-  progress: BaseCollectContext["progress"],
-  emit: (msg: EmittedMessage) => Promise<void>
+	counters: {
+		totalEmitted: number;
+		totalSkipped: number;
+		totalAnomalous?: number;
+	},
+	progress: BaseCollectContext["progress"],
+	emit: (msg: EmittedMessage) => Promise<void>,
 ): Promise<void> {
-  if (counters.totalSkipped > 0) {
-    await progress(`shape-check skipped ${String(counters.totalSkipped)} record(s); see SKIP_RESULT events above`);
-  }
-  // Retained-with-drift records are emitted, so they are absent from the skip
-  // line above; surfacing the count keeps schema drift from going unnoticed
-  // simply because nothing was lost to it.
-  if (counters.totalAnomalous) {
-    await progress(
-      `shape-check retained ${String(counters.totalAnomalous)} record(s) carrying unmodeled values; see SKIP_RESULT events above`
-    );
-  }
-  await emit({
-    type: "DONE",
-    status: "succeeded",
-    records_emitted: counters.totalEmitted,
-  });
+	if (counters.totalSkipped > 0) {
+		await progress(
+			`shape-check skipped ${String(counters.totalSkipped)} record(s); see SKIP_RESULT events above`,
+		);
+	}
+	// Retained-with-drift records are emitted, so they are absent from the skip
+	// line above; surfacing the count keeps schema drift from going unnoticed
+	// simply because nothing was lost to it.
+	if (counters.totalAnomalous) {
+		await progress(
+			`shape-check retained ${String(counters.totalAnomalous)} record(s) carrying unmodeled values; see SKIP_RESULT events above`,
+		);
+	}
+	await emit({
+		type: "DONE",
+		status: "succeeded",
+		records_emitted: counters.totalEmitted,
+	});
 }
 
 // ─── Browser-mode helpers ──────────────────────────────────────────────
 
 interface AcquiredBrowser {
-  context: BrowserContext;
-  release: () => Promise<void>;
+	context: BrowserContext;
+	release: () => Promise<void>;
 }
 
-const MANUAL_ACTION_RECOVERY_RE = /\bheadless\b|local collector|rerun .*headed|PDPP_BROWSER_HEADLESS/iu;
+const MANUAL_ACTION_RECOVERY_RE =
+	/\bheadless\b|local collector|rerun .*headed|PDPP_BROWSER_HEADLESS/iu;
 
 export function resolveBrowserRuntimeVisibility(
-  browser: BrowserConfig,
-  name: string,
-  env: NodeJS.ProcessEnv = process.env
+	browser: BrowserConfig,
+	name: string,
+	env: NodeJS.ProcessEnv = process.env,
 ): BrowserRuntimeVisibility {
-  const baseProfileName = browser.profileName ?? name;
-  const connectorInstanceId = env.PDPP_CONNECTOR_INSTANCE_ID?.trim();
-  const profileName = connectorInstanceId ? `${baseProfileName}__${connectorInstanceId}` : baseProfileName;
-  return {
-    envKey: BROWSER_HEADLESS_ENV,
-    headless: env[BROWSER_HEADLESS_ENV]?.trim() === "1",
-    profileName,
-  };
+	const baseProfileName = browser.profileName ?? name;
+	const connectorInstanceId = env.PDPP_CONNECTOR_INSTANCE_ID?.trim();
+	const profileName = connectorInstanceId
+		? `${baseProfileName}__${connectorInstanceId}`
+		: baseProfileName;
+	return {
+		envKey: BROWSER_HEADLESS_ENV,
+		headless: env[BROWSER_HEADLESS_ENV]?.trim() === "1",
+		profileName,
+	};
 }
 
 export function resolveBrowserLaunchSource(
-  visibility: Pick<BrowserRuntimeVisibility, "profileName">,
-  env: NodeJS.ProcessEnv = process.env
+	visibility: Pick<BrowserRuntimeVisibility, "profileName">,
+	env: NodeJS.ProcessEnv = process.env,
 ): BrowserLaunchSource {
-  const managedRequired = env.PDPP_BROWSER_SURFACE_REQUIRED?.trim().toLowerCase() === "neko";
-  const managedRemoteCdpUrl = env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim();
-  if (managedRequired) {
-    if (!managedRemoteCdpUrl) {
-      throw new TerminalError(
-        "browser surface required: PDPP_BROWSER_SURFACE_REQUIRED=neko but PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is missing"
-      );
-    }
-    return {
-      kind: "managed_neko",
-      remoteCdpUrl: managedRemoteCdpUrl,
-      ...(env.PDPP_BROWSER_SURFACE_LEASE_ID?.trim() ? { leaseId: env.PDPP_BROWSER_SURFACE_LEASE_ID.trim() } : {}),
-      ...(env.PDPP_BROWSER_SURFACE_PROFILE_KEY?.trim()
-        ? { profileKey: env.PDPP_BROWSER_SURFACE_PROFILE_KEY.trim() }
-        : {}),
-    };
-  }
+	const managedRequired =
+		env.PDPP_BROWSER_SURFACE_REQUIRED?.trim().toLowerCase() === "neko";
+	const managedRemoteCdpUrl = env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim();
+	if (managedRequired) {
+		if (!managedRemoteCdpUrl) {
+			throw new TerminalError(
+				"browser surface required: PDPP_BROWSER_SURFACE_REQUIRED=neko but PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is missing",
+			);
+		}
+		return {
+			kind: "managed_neko",
+			remoteCdpUrl: managedRemoteCdpUrl,
+			...(env.PDPP_BROWSER_SURFACE_LEASE_ID?.trim()
+				? { leaseId: env.PDPP_BROWSER_SURFACE_LEASE_ID.trim() }
+				: {}),
+			...(env.PDPP_BROWSER_SURFACE_PROFILE_KEY?.trim()
+				? { profileKey: env.PDPP_BROWSER_SURFACE_PROFILE_KEY.trim() }
+				: {}),
+		};
+	}
 
-  const legacyRemoteCdpEnvKey = `PDPP_${visibility.profileName.toUpperCase()}_REMOTE_CDP_URL`;
-  const legacyRemoteCdpUrl = env[legacyRemoteCdpEnvKey]?.trim();
-  if (legacyRemoteCdpUrl) {
-    return {
-      envKey: legacyRemoteCdpEnvKey,
-      kind: "legacy_remote_cdp",
-      remoteCdpUrl: legacyRemoteCdpUrl,
-    };
-  }
+	const legacyRemoteCdpEnvKey = `PDPP_${visibility.profileName.toUpperCase()}_REMOTE_CDP_URL`;
+	const legacyRemoteCdpUrl = env[legacyRemoteCdpEnvKey]?.trim();
+	if (legacyRemoteCdpUrl) {
+		return {
+			envKey: legacyRemoteCdpEnvKey,
+			kind: "legacy_remote_cdp",
+			remoteCdpUrl: legacyRemoteCdpUrl,
+		};
+	}
 
-  return { kind: "isolated_local" };
+	return { kind: "isolated_local" };
 }
 
 export function decorateBrowserManualAction(
-  req: InteractionRequest,
-  visibility: BrowserRuntimeVisibility
+	req: InteractionRequest,
+	visibility: BrowserRuntimeVisibility,
 ): InteractionRequest {
-  if (req.kind !== "manual_action") {
-    return req;
-  }
-  if (!visibility.headless) {
-    return req;
-  }
-  if (MANUAL_ACTION_RECOVERY_RE.test(req.message)) {
-    return req;
-  }
-  return {
-    ...req,
-    message:
-      `${req.message}\n\n` +
-      "Open the streaming companion to drive the connector's browser from your phone or laptop. " +
-      `Or rerun with ${visibility.envKey}=0 (or unset it) on a browser-capable deployment to use headed Chromium instead.`,
-  };
+	if (req.kind !== "manual_action") {
+		return req;
+	}
+	if (!visibility.headless) {
+		return req;
+	}
+	if (MANUAL_ACTION_RECOVERY_RE.test(req.message)) {
+		return req;
+	}
+	return {
+		...req,
+		message:
+			`${req.message}\n\n` +
+			"Open the streaming companion to drive the connector's browser from your phone or laptop. " +
+			`Or rerun with ${visibility.envKey}=0 (or unset it) on a browser-capable deployment to use headed Chromium instead.`,
+	};
 }
 
 /**
@@ -1894,55 +2138,75 @@ export function decorateBrowserManualAction(
  * registers the exact page target when a browser interaction is emitted;
  * launch alone never creates a run-wide or placeholder target.
  */
-async function acquireBrowser(browser: BrowserConfig, name: string): Promise<AcquiredBrowser> {
-  const { acquireBrowserForConnector, CdpAttachSessionRaceExhaustedError, HeadedBrowserUnavailableError } =
-    await import("./browser-launch.ts");
-  const visibility = resolveBrowserRuntimeVisibility(browser, name);
-  const { headless, profileName } = visibility;
-  // Streaming env vars are present iff the controller wired up Mode-A
-  // streaming for this run. Their presence is the signal to launch
-  // Chromium in CDP-port mode (so the handoff helper can compose
-  // wsUrls). Actual per-interaction registration happens in the binding
-  // path via `manualAction(...)`, not at launch — so we don't need the
-  // full registration client here, just the env presence check.
-  const streamingEnabled =
-    Boolean(process.env.PDPP_RUN_ID?.trim()) &&
-    Boolean(process.env.PDPP_REFERENCE_BASE_URL?.trim()) &&
-    Boolean(process.env.PDPP_STREAMING_REGISTRATION_TOKEN?.trim() || process.env.PDPP_LOCAL_DEVICE_TOKEN?.trim());
-  const launchSource = resolveBrowserLaunchSource(visibility);
-  const remoteCdpUrl =
-    launchSource.kind === "managed_neko" || launchSource.kind === "legacy_remote_cdp"
-      ? launchSource.remoteCdpUrl
-      : undefined;
-  try {
-    return await acquireBrowserForConnector({
-      profileName,
-      headless,
-      ...(browser.preservePageOnSuccess || browser.preservePageOnFailure ? { preserveRemotePagesOnAcquire: true } : {}),
-      ...(streamingEnabled ? { streamingEnabled: true } : {}),
-      ...(remoteCdpUrl ? { remoteCdpUrl } : {}),
-    });
-  } catch (err) {
-    if (err instanceof HeadedBrowserUnavailableError) {
-      // Surface the stable code in the terminal-error message so the
-      // controller's run-failed copy can render the deployment-config
-      // error state rather than a generic browser failure.
-      throw new TerminalError(`[${err.code}] ${err.message}`, { code: err.code, cause: err });
-    }
-    if (err instanceof CdpAttachSessionRaceExhaustedError) {
-      // The narrow attach-session race (see browser-launch.ts) exhausted its
-      // bounded retry budget. Carry the stable code so the reference
-      // runtime's managed-surface lifecycle can decide the leased dynamic
-      // surface itself needs recycling, without re-parsing this message.
-      throw new TerminalError(`could not open browser profile: ${err.message}`, {
-        retryable: true,
-        code: err.code,
-        cause: err,
-      });
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    throw new TerminalError(`could not open browser profile: ${message}`, { cause: err });
-  }
+async function acquireBrowser(
+	browser: BrowserConfig,
+	name: string,
+): Promise<AcquiredBrowser> {
+	const {
+		acquireBrowserForConnector,
+		CdpAttachSessionRaceExhaustedError,
+		HeadedBrowserUnavailableError,
+	} = await import("./browser-launch.ts");
+	const visibility = resolveBrowserRuntimeVisibility(browser, name);
+	const { headless, profileName } = visibility;
+	// Streaming env vars are present iff the controller wired up Mode-A
+	// streaming for this run. Their presence is the signal to launch
+	// Chromium in CDP-port mode (so the handoff helper can compose
+	// wsUrls). Actual per-interaction registration happens in the binding
+	// path via `manualAction(...)`, not at launch — so we don't need the
+	// full registration client here, just the env presence check.
+	const streamingEnabled =
+		Boolean(process.env.PDPP_RUN_ID?.trim()) &&
+		Boolean(process.env.PDPP_REFERENCE_BASE_URL?.trim()) &&
+		Boolean(
+			process.env.PDPP_STREAMING_REGISTRATION_TOKEN?.trim() ||
+				process.env.PDPP_LOCAL_DEVICE_TOKEN?.trim(),
+		);
+	const launchSource = resolveBrowserLaunchSource(visibility);
+	const remoteCdpUrl =
+		launchSource.kind === "managed_neko" ||
+		launchSource.kind === "legacy_remote_cdp"
+			? launchSource.remoteCdpUrl
+			: undefined;
+	try {
+		return await acquireBrowserForConnector({
+			profileName,
+			headless,
+			...(browser.preservePageOnSuccess || browser.preservePageOnFailure
+				? { preserveRemotePagesOnAcquire: true }
+				: {}),
+			...(streamingEnabled ? { streamingEnabled: true } : {}),
+			...(remoteCdpUrl ? { remoteCdpUrl } : {}),
+		});
+	} catch (err) {
+		if (err instanceof HeadedBrowserUnavailableError) {
+			// Surface the stable code in the terminal-error message so the
+			// controller's run-failed copy can render the deployment-config
+			// error state rather than a generic browser failure.
+			throw new TerminalError(`[${err.code}] ${err.message}`, {
+				code: err.code,
+				cause: err,
+			});
+		}
+		if (err instanceof CdpAttachSessionRaceExhaustedError) {
+			// The narrow attach-session race (see browser-launch.ts) exhausted its
+			// bounded retry budget. Carry the stable code so the reference
+			// runtime's managed-surface lifecycle can decide the leased dynamic
+			// surface itself needs recycling, without re-parsing this message.
+			throw new TerminalError(
+				`could not open browser profile: ${err.message}`,
+				{
+					retryable: true,
+					code: err.code,
+					cause: err,
+				},
+			);
+		}
+		const message = err instanceof Error ? err.message : String(err);
+		throw new TerminalError(`could not open browser profile: ${message}`, {
+			cause: err,
+		});
+	}
 }
 
 // ─── Session-establishment watchdog ─────────────────────────────────────
@@ -1960,29 +2224,35 @@ const DEFAULT_SESSION_ESTABLISH_WATCHDOG_MS = 120_000;
 const SESSION_ESTABLISH_WATCHDOG_ENV = "PDPP_SESSION_ESTABLISH_WATCHDOG_MS";
 
 export interface SessionEstablishWatchdog {
-  checkpoint: SessionCheckpointFn;
-  /** Run the establishment work under the watchdog; rejects with TerminalError on trip. */
-  run: (work: () => Promise<void>) => Promise<void>;
-  /** Wrap nonblocking assistance so external owner waits pause the watchdog. */
-  wrapAssist: (assist: BaseCollectContext["assist"]) => BaseCollectContext["assist"];
-  /** Re-arm the watchdog when a nonblocking assistance wait is resolved/escalated. */
-  wrapCompleteAssistance: (
-    completeAssistance: BaseCollectContext["completeAssistance"]
-  ) => BaseCollectContext["completeAssistance"];
-  /** Wrap a sendInteraction so the watchdog is paused while an interaction is open. */
-  wrapSendInteraction: (send: BaseCollectContext["sendInteraction"]) => BaseCollectContext["sendInteraction"];
+	checkpoint: SessionCheckpointFn;
+	/** Run the establishment work under the watchdog; rejects with TerminalError on trip. */
+	run: (work: () => Promise<void>) => Promise<void>;
+	/** Wrap nonblocking assistance so external owner waits pause the watchdog. */
+	wrapAssist: (
+		assist: BaseCollectContext["assist"],
+	) => BaseCollectContext["assist"];
+	/** Re-arm the watchdog when a nonblocking assistance wait is resolved/escalated. */
+	wrapCompleteAssistance: (
+		completeAssistance: BaseCollectContext["completeAssistance"],
+	) => BaseCollectContext["completeAssistance"];
+	/** Wrap a sendInteraction so the watchdog is paused while an interaction is open. */
+	wrapSendInteraction: (
+		send: BaseCollectContext["sendInteraction"],
+	) => BaseCollectContext["sendInteraction"];
 }
 
-export function resolveSessionEstablishWatchdogMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env[SESSION_ESTABLISH_WATCHDOG_ENV]?.trim();
-  if (!raw) {
-    return DEFAULT_SESSION_ESTABLISH_WATCHDOG_MS;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!(Number.isFinite(parsed) && parsed > 0)) {
-    return DEFAULT_SESSION_ESTABLISH_WATCHDOG_MS;
-  }
-  return parsed;
+export function resolveSessionEstablishWatchdogMs(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	const raw = env[SESSION_ESTABLISH_WATCHDOG_ENV]?.trim();
+	if (!raw) {
+		return DEFAULT_SESSION_ESTABLISH_WATCHDOG_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!(Number.isFinite(parsed) && parsed > 0)) {
+		return DEFAULT_SESSION_ESTABLISH_WATCHDOG_MS;
+	}
+	return parsed;
 }
 
 /**
@@ -1991,173 +2261,194 @@ export function resolveSessionEstablishWatchdogMs(env: NodeJS.ProcessEnv = proce
  * without real-time sleeps.
  */
 export function makeSessionEstablishWatchdog(args: {
-  capture: CaptureSession | null;
-  deadlineMs?: number;
-  name: string;
-  now?: () => number;
-  page: Page;
-  pollIntervalMs?: number;
-  /** Hook fired exactly once when the watchdog trips, before the run rejects. */
-  onTrip?: (info: { lastLabel: string | null; sinceMs: number }) => void;
+	capture: CaptureSession | null;
+	deadlineMs?: number;
+	name: string;
+	now?: () => number;
+	page: Page;
+	pollIntervalMs?: number;
+	/** Hook fired exactly once when the watchdog trips, before the run rejects. */
+	onTrip?: (info: { lastLabel: string | null; sinceMs: number }) => void;
 }): SessionEstablishWatchdog {
-  const now = args.now ?? Date.now;
-  const deadlineMs = args.deadlineMs ?? resolveSessionEstablishWatchdogMs();
-  // Poll often enough to trip near the deadline without busy-waiting; never
-  // longer than the deadline itself so a small test deadline still trips.
-  const pollIntervalMs = args.pollIntervalMs ?? Math.max(1, Math.min(1000, Math.floor(deadlineMs / 4)));
+	const now = args.now ?? Date.now;
+	const deadlineMs = args.deadlineMs ?? resolveSessionEstablishWatchdogMs();
+	// Poll often enough to trip near the deadline without busy-waiting; never
+	// longer than the deadline itself so a small test deadline still trips.
+	const pollIntervalMs =
+		args.pollIntervalMs ??
+		Math.max(1, Math.min(1000, Math.floor(deadlineMs / 4)));
 
-  let lastProgressAt = now();
-  let lastLabel: string | null = null;
-  const openAssistance = new Map<string, number>();
-  let openInteractions = 0;
-  let tripped = false;
+	let lastProgressAt = now();
+	let lastLabel: string | null = null;
+	const openAssistance = new Map<string, number>();
+	let openInteractions = 0;
+	let tripped = false;
 
-  const markProgress = (label: string | null): void => {
-    lastProgressAt = now();
-    if (label !== null) {
-      lastLabel = label;
-    }
-  };
+	const markProgress = (label: string | null): void => {
+		lastProgressAt = now();
+		if (label !== null) {
+			lastLabel = label;
+		}
+	};
 
-  const checkpoint: SessionCheckpointFn = async (label) => {
-    markProgress(label);
-    // Best-effort durable diagnostic so a hang no longer leaves only the
-    // initial blank-page artifact. captureBrowserPage already guards a closed
-    // page; the bounded-title fix keeps the underlying metadata read from
-    // hanging. A failed capture never fails the run.
-    try {
-      await captureBrowserPage(args.capture, args.page, `session-establish-${label}`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[session-watchdog] checkpoint capture failed for ${label}: ${message}\n`);
-    }
-  };
+	const checkpoint: SessionCheckpointFn = async (label) => {
+		markProgress(label);
+		// Best-effort durable diagnostic so a hang no longer leaves only the
+		// initial blank-page artifact. captureBrowserPage already guards a closed
+		// page; the bounded-title fix keeps the underlying metadata read from
+		// hanging. A failed capture never fails the run.
+		try {
+			await captureBrowserPage(
+				args.capture,
+				args.page,
+				`session-establish-${label}`,
+			);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			process.stderr.write(
+				`[session-watchdog] checkpoint capture failed for ${label}: ${message}\n`,
+			);
+		}
+	};
 
-  const assistancePausesWatchdog = (req: AssistanceRequest): boolean =>
-    req.progress_posture === "running" && req.response_contract === "none";
+	const assistancePausesWatchdog = (req: AssistanceRequest): boolean =>
+		req.progress_posture === "running" && req.response_contract === "none";
 
-  const pruneExpiredAssistance = (): void => {
-    const current = now();
-    let pruned = false;
-    for (const [id, expiresAt] of openAssistance) {
-      if (expiresAt > current) {
-        continue;
-      }
-      openAssistance.delete(id);
-      pruned = true;
-    }
-    if (pruned) {
-      // Give post-timeout fallback logic a fresh watchdog window.
-      markProgress(null);
-    }
-  };
+	const pruneExpiredAssistance = (): void => {
+		const current = now();
+		let pruned = false;
+		for (const [id, expiresAt] of openAssistance) {
+			if (expiresAt > current) {
+				continue;
+			}
+			openAssistance.delete(id);
+			pruned = true;
+		}
+		if (pruned) {
+			// Give post-timeout fallback logic a fresh watchdog window.
+			markProgress(null);
+		}
+	};
 
-  const wrapAssist: SessionEstablishWatchdog["wrapAssist"] = (assist) => async (req) => {
-    markProgress(null);
-    const assistanceRequestId = await assist(req);
-    if (assistancePausesWatchdog(req)) {
-      const timeoutMs =
-        typeof req.timeout_seconds === "number" && Number.isFinite(req.timeout_seconds) && req.timeout_seconds > 0
-          ? req.timeout_seconds * 1000
-          : deadlineMs;
-      openAssistance.set(assistanceRequestId, now() + timeoutMs + deadlineMs);
-      markProgress(null);
-    }
-    return assistanceRequestId;
-  };
+	const wrapAssist: SessionEstablishWatchdog["wrapAssist"] =
+		(assist) => async (req) => {
+			markProgress(null);
+			const assistanceRequestId = await assist(req);
+			if (assistancePausesWatchdog(req)) {
+				const timeoutMs =
+					typeof req.timeout_seconds === "number" &&
+					Number.isFinite(req.timeout_seconds) &&
+					req.timeout_seconds > 0
+						? req.timeout_seconds * 1000
+						: deadlineMs;
+				openAssistance.set(assistanceRequestId, now() + timeoutMs + deadlineMs);
+				markProgress(null);
+			}
+			return assistanceRequestId;
+		};
 
-  const wrapCompleteAssistance: SessionEstablishWatchdog["wrapCompleteAssistance"] =
-    (completeAssistance) =>
-    async (assistanceRequestId, status, extra = {}) => {
-      try {
-        await completeAssistance(assistanceRequestId, status, extra);
-      } finally {
-        if (openAssistance.delete(assistanceRequestId)) {
-          markProgress(null);
-        }
-      }
-    };
+	const wrapCompleteAssistance: SessionEstablishWatchdog["wrapCompleteAssistance"] =
+		(completeAssistance) =>
+		async (assistanceRequestId, status, extra = {}) => {
+			try {
+				await completeAssistance(assistanceRequestId, status, extra);
+			} finally {
+				if (openAssistance.delete(assistanceRequestId)) {
+					markProgress(null);
+				}
+			}
+		};
 
-  const wrapSendInteraction: SessionEstablishWatchdog["wrapSendInteraction"] = (send) => async (req) => {
-    // An open interaction means the run is legitimately waiting on the owner;
-    // pause the watchdog so a long CAPTCHA/OTP wait is not killed. Reset the
-    // deadline on resolve so post-interaction work gets a fresh window.
-    openInteractions += 1;
-    markProgress(null);
-    try {
-      return await send(req);
-    } finally {
-      openInteractions -= 1;
-      markProgress(null);
-    }
-  };
+	const wrapSendInteraction: SessionEstablishWatchdog["wrapSendInteraction"] =
+		(send) => async (req) => {
+			// An open interaction means the run is legitimately waiting on the owner;
+			// pause the watchdog so a long CAPTCHA/OTP wait is not killed. Reset the
+			// deadline on resolve so post-interaction work gets a fresh window.
+			openInteractions += 1;
+			markProgress(null);
+			try {
+				return await send(req);
+			} finally {
+				openInteractions -= 1;
+				markProgress(null);
+			}
+		};
 
-  const run: SessionEstablishWatchdog["run"] = async (work) => {
-    let timer: ReturnType<typeof setInterval> | undefined;
-    let tripInfo: { lastLabel: string | null; sinceMs: number } | null = null;
-    // The trip path *resolves* (rather than rejects) a sentinel and the caller
-    // throws afterward. Rejecting from inside the interval callback opens a
-    // one-microtask window where the rejection has no attached handler yet,
-    // which Node surfaces as PromiseRejectionHandledWarning / an unhandled
-    // rejection. Resolving avoids that window entirely; the TerminalError is
-    // constructed and thrown synchronously in `run` once the race settles.
-    const TRIP = Symbol("session-establish-trip");
-    const tripPromise = new Promise<typeof TRIP>((resolve) => {
-      const onTick = (): void => {
-        pruneExpiredAssistance();
-        if (tripped || openInteractions > 0 || openAssistance.size > 0) {
-          return;
-        }
-        const sinceMs = now() - lastProgressAt;
-        if (sinceMs <= deadlineMs) {
-          return;
-        }
-        tripped = true;
-        if (timer) {
-          clearInterval(timer);
-        }
-        tripInfo = { lastLabel, sinceMs };
-        args.onTrip?.(tripInfo);
-        resolve(TRIP);
-      };
-      timer = setInterval(onTick, pollIntervalMs);
-    });
+	const run: SessionEstablishWatchdog["run"] = async (work) => {
+		let timer: ReturnType<typeof setInterval> | undefined;
+		let tripInfo: { lastLabel: string | null; sinceMs: number } | null = null;
+		// The trip path *resolves* (rather than rejects) a sentinel and the caller
+		// throws afterward. Rejecting from inside the interval callback opens a
+		// one-microtask window where the rejection has no attached handler yet,
+		// which Node surfaces as PromiseRejectionHandledWarning / an unhandled
+		// rejection. Resolving avoids that window entirely; the TerminalError is
+		// constructed and thrown synchronously in `run` once the race settles.
+		const TRIP = Symbol("session-establish-trip");
+		const tripPromise = new Promise<typeof TRIP>((resolve) => {
+			const onTick = (): void => {
+				pruneExpiredAssistance();
+				if (tripped || openInteractions > 0 || openAssistance.size > 0) {
+					return;
+				}
+				const sinceMs = now() - lastProgressAt;
+				if (sinceMs <= deadlineMs) {
+					return;
+				}
+				tripped = true;
+				if (timer) {
+					clearInterval(timer);
+				}
+				tripInfo = { lastLabel, sinceMs };
+				args.onTrip?.(tripInfo);
+				resolve(TRIP);
+			};
+			timer = setInterval(onTick, pollIntervalMs);
+		});
 
-    const workPromise = work();
-    // If the watchdog wins the race, `workPromise` may still settle later
-    // (e.g. the wedged call finally rejects). Attach a no-op catch so that
-    // late rejection cannot surface as an unhandled rejection after we have
-    // already failed the run closed.
-    workPromise.catch((): undefined => undefined);
-    try {
-      const outcome = await Promise.race([workPromise, tripPromise]);
-      if (outcome === TRIP) {
-        const info = tripInfo as { lastLabel: string | null; sinceMs: number } | null;
-        const sinceMs = info?.sinceMs ?? deadlineMs;
-        const lastCheckpoint = info?.lastLabel ?? "<none>";
-        throw new TerminalError(
-          `${args.name}_session_establish_timeout: no session-establishment progress for ${String(sinceMs)}ms ` +
-            `(last checkpoint: ${lastCheckpoint}); failing run closed`,
-          { retryable: true }
-        );
-      }
-    } finally {
-      if (timer) {
-        clearInterval(timer);
-      }
-    }
-  };
+		const workPromise = work();
+		// If the watchdog wins the race, `workPromise` may still settle later
+		// (e.g. the wedged call finally rejects). Attach a no-op catch so that
+		// late rejection cannot surface as an unhandled rejection after we have
+		// already failed the run closed.
+		workPromise.catch((): undefined => undefined);
+		try {
+			const outcome = await Promise.race([workPromise, tripPromise]);
+			if (outcome === TRIP) {
+				const info = tripInfo as {
+					lastLabel: string | null;
+					sinceMs: number;
+				} | null;
+				const sinceMs = info?.sinceMs ?? deadlineMs;
+				const lastCheckpoint = info?.lastLabel ?? "<none>";
+				throw new TerminalError(
+					`${args.name}_session_establish_timeout: no session-establishment progress for ${String(sinceMs)}ms ` +
+						`(last checkpoint: ${lastCheckpoint}); failing run closed`,
+					{ retryable: true },
+				);
+			}
+		} finally {
+			if (timer) {
+				clearInterval(timer);
+			}
+		}
+	};
 
-  return { checkpoint, wrapAssist, wrapCompleteAssistance, wrapSendInteraction, run };
+	return {
+		checkpoint,
+		wrapAssist,
+		wrapCompleteAssistance,
+		wrapSendInteraction,
+		run,
+	};
 }
 
 // ─── Playwright tracing helper ──────────────────────────────────────────
 
 interface Tracer {
-  checkpoint: (label: string) => Promise<void>;
-  markSucceeded: () => void;
-  start: () => Promise<void>;
-  stop: () => Promise<void>;
+	checkpoint: (label: string) => Promise<void>;
+	markSucceeded: () => void;
+	start: () => Promise<void>;
+	stop: () => Promise<void>;
 }
 
 /**
@@ -2166,20 +2457,22 @@ interface Tracer {
  * shape by treating an unknown answer as "connected" so this guard never
  * silently disables a working trace stop.
  */
-export function isContextDisconnected(context: Pick<BrowserContext, "browser">): boolean {
-  try {
-    const browser = context.browser?.();
-    if (!browser) {
-      return false;
-    }
-    if (typeof browser.isConnected === "function") {
-      return browser.isConnected() === false;
-    }
-  } catch {
-    // If the bridge itself throws, treat that as a disconnect signal.
-    return true;
-  }
-  return false;
+export function isContextDisconnected(
+	context: Pick<BrowserContext, "browser">,
+): boolean {
+	try {
+		const browser = context.browser?.();
+		if (!browser) {
+			return false;
+		}
+		if (typeof browser.isConnected === "function") {
+			return browser.isConnected() === false;
+		}
+	} catch {
+		// If the bridge itself throws, treat that as a disconnect signal.
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -2192,186 +2485,217 @@ export function isContextDisconnected(context: Pick<BrowserContext, "browser">):
  * after a clean run (markSucceeded() called before stop()) and retained on
  * failure for post-mortem debugging.
  */
-export function makeTracer(context: BrowserContext, name: string, capture: CaptureSession | null): Tracer {
-  const enabled = process.env.PDPP_TRACE === "1" || capture !== null;
-  const traceName = `${name}-${new Date().toISOString().replace(TRACE_TIMESTAMP_UNSAFE, "-")}`;
-  const tracePath = capture ? join(capture.baseDir, "traces", `${traceName}.zip`) : `/tmp/${traceName}.zip`;
-  const traceBaseDir = capture ? join(capture.baseDir, "traces") : null;
-  const tracing = context.tracing as BrowserContext["tracing"] & {
-    startChunk?: (options?: { title?: string }) => Promise<void>;
-    stopChunk?: (options?: { path?: string }) => Promise<void>;
-  };
-  let started = false;
-  let chunkStarted = false;
-  let chunkSeq = 0;
-  let succeeded = false;
-  const writtenTraceFiles: string[] = [];
+export function makeTracer(
+	context: BrowserContext,
+	name: string,
+	capture: CaptureSession | null,
+): Tracer {
+	const enabled = process.env.PDPP_TRACE === "1" || capture !== null;
+	const traceName = `${name}-${new Date().toISOString().replace(TRACE_TIMESTAMP_UNSAFE, "-")}`;
+	const tracePath = capture
+		? join(capture.baseDir, "traces", `${traceName}.zip`)
+		: `/tmp/${traceName}.zip`;
+	const traceBaseDir = capture ? join(capture.baseDir, "traces") : null;
+	const tracing = context.tracing as BrowserContext["tracing"] & {
+		startChunk?: (options?: { title?: string }) => Promise<void>;
+		stopChunk?: (options?: { path?: string }) => Promise<void>;
+	};
+	let started = false;
+	let chunkStarted = false;
+	let chunkSeq = 0;
+	let succeeded = false;
+	const writtenTraceFiles: string[] = [];
 
-  const safeChunkLabel = (label: string): string =>
-    String(label)
-      .replace(/[^A-Za-z0-9_.-]/g, "_")
-      .slice(0, 80);
+	const safeChunkLabel = (label: string): string =>
+		String(label)
+			.replace(/[^A-Za-z0-9_.-]/g, "_")
+			.slice(0, 80);
 
-  const writeTraceDiagnostic = (phase: string, err: unknown): void => {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[trace] ${phase} failed: ${message}\n`);
-    if (!traceBaseDir) {
-      return;
-    }
-    try {
-      writeFileSync(
-        join(traceBaseDir, `${traceName}-${String(chunkSeq).padStart(3, "0")}-${safeChunkLabel(phase)}.error.json`),
-        JSON.stringify(
-          {
-            captured_at: new Date().toISOString(),
-            error: message,
-            phase,
-          },
-          null,
-          2
-        )
-      );
-    } catch {
-      // Diagnostics must never affect the connector outcome.
-    }
-  };
+	const writeTraceDiagnostic = (phase: string, err: unknown): void => {
+		const message = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[trace] ${phase} failed: ${message}\n`);
+		if (!traceBaseDir) {
+			return;
+		}
+		try {
+			writeFileSync(
+				join(
+					traceBaseDir,
+					`${traceName}-${String(chunkSeq).padStart(3, "0")}-${safeChunkLabel(phase)}.error.json`,
+				),
+				JSON.stringify(
+					{
+						captured_at: new Date().toISOString(),
+						error: message,
+						phase,
+					},
+					null,
+					2,
+				),
+			);
+		} catch {
+			// Diagnostics must never affect the connector outcome.
+		}
+	};
 
-  const startChunk = async (label: string): Promise<void> => {
-    if (!traceBaseDir || typeof tracing.startChunk !== "function") {
-      return;
-    }
-    try {
-      await tracing.startChunk({ title: `${traceName}:${label}` });
-      chunkStarted = true;
-    } catch (err) {
-      chunkStarted = false;
-      writeTraceDiagnostic("start-chunk", err);
-    }
-  };
+	const startChunk = async (label: string): Promise<void> => {
+		if (!traceBaseDir || typeof tracing.startChunk !== "function") {
+			return;
+		}
+		try {
+			await tracing.startChunk({ title: `${traceName}:${label}` });
+			chunkStarted = true;
+		} catch (err) {
+			chunkStarted = false;
+			writeTraceDiagnostic("start-chunk", err);
+		}
+	};
 
-  const stopChunk = async (label: string): Promise<void> => {
-    if (!(traceBaseDir && chunkStarted) || typeof tracing.stopChunk !== "function") {
-      return;
-    }
-    chunkSeq += 1;
-    const path = join(traceBaseDir, `${traceName}-${String(chunkSeq).padStart(3, "0")}-${safeChunkLabel(label)}.zip`);
-    try {
-      await tracing.stopChunk({ path });
-      writtenTraceFiles.push(path);
-    } catch (err) {
-      writeTraceDiagnostic(`stop-chunk-${safeChunkLabel(label)}`, err);
-    } finally {
-      chunkStarted = false;
-    }
-  };
+	const stopChunk = async (label: string): Promise<void> => {
+		if (
+			!(traceBaseDir && chunkStarted) ||
+			typeof tracing.stopChunk !== "function"
+		) {
+			return;
+		}
+		chunkSeq += 1;
+		const path = join(
+			traceBaseDir,
+			`${traceName}-${String(chunkSeq).padStart(3, "0")}-${safeChunkLabel(label)}.zip`,
+		);
+		try {
+			await tracing.stopChunk({ path });
+			writtenTraceFiles.push(path);
+		} catch (err) {
+			writeTraceDiagnostic(`stop-chunk-${safeChunkLabel(label)}`, err);
+		} finally {
+			chunkStarted = false;
+		}
+	};
 
-  const deleteWrittenTraces = (): void => {
-    for (const path of writtenTraceFiles) {
-      try {
-        rmSync(path, { force: true });
-      } catch (err) {
-        writeTraceDiagnostic("delete-on-success", err);
-      }
-    }
-    writtenTraceFiles.length = 0;
-  };
+	const deleteWrittenTraces = (): void => {
+		for (const path of writtenTraceFiles) {
+			try {
+				rmSync(path, { force: true });
+			} catch (err) {
+				writeTraceDiagnostic("delete-on-success", err);
+			}
+		}
+		writtenTraceFiles.length = 0;
+	};
 
-  return {
-    async start(): Promise<void> {
-      if (!enabled) {
-        return;
-      }
-      try {
-        // Max-fidelity flags: screenshots+snapshots+sources. Expect ~20–100 MB
-        // per run; retain-on-failure (see stop()) keeps the disk cost bounded.
-        await context.tracing.start({
-          name: traceName,
-          screenshots: true,
-          snapshots: true,
-          sources: true,
-        });
-        started = true;
-      } catch (err) {
-        writeTraceDiagnostic("start", err);
-        return;
-      }
-      await startChunk("start");
-      process.stderr.write(
-        `[trace] tracing enabled; ${traceBaseDir ? `writing chunks under ${traceBaseDir}` : `will write ${tracePath} on exit`}\n`
-      );
-    },
-    async checkpoint(label: string): Promise<void> {
-      if (!(enabled && started && traceBaseDir) || typeof tracing.startChunk !== "function") {
-        return;
-      }
-      await stopChunk(label);
-      await startChunk(label);
-    },
-    markSucceeded(): void {
-      succeeded = true;
-    },
-    async stop(): Promise<void> {
-      if (!(enabled && started)) {
-        return;
-      }
-      started = false; // idempotent: SIGTERM finalize + finally block both call stop().
-      // If the browser is already disconnected (CDP transport drop), the
-      // server has buffered events we can't retrieve. Skip the stop call
-      // and keep the chunks we've already written rather than throwing a
-      // noisy "Target page, context or browser has been closed".
-      if (isContextDisconnected(context)) {
-        finalizeDisconnected();
-        return;
-      }
-      try {
-        if (traceBaseDir && typeof tracing.stopChunk === "function") {
-          await stopChunkedTrace();
-          return;
-        }
-        await stopSingleTrace();
-      } catch (err) {
-        writeTraceDiagnostic("stop", err);
-      }
-    },
-  };
+	return {
+		async start(): Promise<void> {
+			if (!enabled) {
+				return;
+			}
+			try {
+				// Max-fidelity flags: screenshots+snapshots+sources. Expect ~20–100 MB
+				// per run; retain-on-failure (see stop()) keeps the disk cost bounded.
+				await context.tracing.start({
+					name: traceName,
+					screenshots: true,
+					snapshots: true,
+					sources: true,
+				});
+				started = true;
+			} catch (err) {
+				writeTraceDiagnostic("start", err);
+				return;
+			}
+			await startChunk("start");
+			process.stderr.write(
+				`[trace] tracing enabled; ${traceBaseDir ? `writing chunks under ${traceBaseDir}` : `will write ${tracePath} on exit`}\n`,
+			);
+		},
+		async checkpoint(label: string): Promise<void> {
+			if (
+				!(enabled && started && traceBaseDir) ||
+				typeof tracing.startChunk !== "function"
+			) {
+				return;
+			}
+			await stopChunk(label);
+			await startChunk(label);
+		},
+		markSucceeded(): void {
+			succeeded = true;
+		},
+		async stop(): Promise<void> {
+			if (!(enabled && started)) {
+				return;
+			}
+			started = false; // idempotent: SIGTERM finalize + finally block both call stop().
+			// If the browser is already disconnected (CDP transport drop), the
+			// server has buffered events we can't retrieve. Skip the stop call
+			// and keep the chunks we've already written rather than throwing a
+			// noisy "Target page, context or browser has been closed".
+			if (isContextDisconnected(context)) {
+				finalizeDisconnected();
+				return;
+			}
+			try {
+				if (traceBaseDir && typeof tracing.stopChunk === "function") {
+					await stopChunkedTrace();
+					return;
+				}
+				await stopSingleTrace();
+			} catch (err) {
+				writeTraceDiagnostic("stop", err);
+			}
+		},
+	};
 
-  function finalizeDisconnected(): void {
-    writeTraceDiagnostic("stop-disconnected", new Error("browser disconnected before trace stop"));
-    if (!traceBaseDir) {
-      return;
-    }
-    if (succeeded) {
-      deleteWrittenTraces();
-      process.stderr.write(
-        `[trace] run succeeded but browser disconnected; trace chunks deleted from ${traceBaseDir}\n`
-      );
-    } else {
-      process.stderr.write(`[trace] browser disconnected before stop; chunks retained under ${traceBaseDir}\n`);
-    }
-  }
+	function finalizeDisconnected(): void {
+		writeTraceDiagnostic(
+			"stop-disconnected",
+			new Error("browser disconnected before trace stop"),
+		);
+		if (!traceBaseDir) {
+			return;
+		}
+		if (succeeded) {
+			deleteWrittenTraces();
+			process.stderr.write(
+				`[trace] run succeeded but browser disconnected; trace chunks deleted from ${traceBaseDir}\n`,
+			);
+		} else {
+			process.stderr.write(
+				`[trace] browser disconnected before stop; chunks retained under ${traceBaseDir}\n`,
+			);
+		}
+	}
 
-  async function stopChunkedTrace(): Promise<void> {
-    await stopChunk("final");
-    await context.tracing.stop();
-    if (succeeded) {
-      deleteWrittenTraces();
-      process.stderr.write(`[trace] run succeeded; trace chunks deleted from ${traceBaseDir}\n`);
-    } else {
-      process.stderr.write(`[trace] run failed; trace chunks retained under ${traceBaseDir}\n`);
-    }
-  }
+	async function stopChunkedTrace(): Promise<void> {
+		await stopChunk("final");
+		await context.tracing.stop();
+		if (succeeded) {
+			deleteWrittenTraces();
+			process.stderr.write(
+				`[trace] run succeeded; trace chunks deleted from ${traceBaseDir}\n`,
+			);
+		} else {
+			process.stderr.write(
+				`[trace] run failed; trace chunks retained under ${traceBaseDir}\n`,
+			);
+		}
+	}
 
-  async function stopSingleTrace(): Promise<void> {
-    await context.tracing.stop({ path: tracePath });
-    if (!succeeded) {
-      process.stderr.write(`[trace] run failed; trace retained at ${tracePath}\n`);
-      return;
-    }
-    try {
-      rmSync(tracePath, { force: true });
-      process.stderr.write(`[trace] run succeeded; trace deleted (${tracePath})\n`);
-    } catch (err) {
-      writeTraceDiagnostic("delete-on-success", err);
-    }
-  }
+	async function stopSingleTrace(): Promise<void> {
+		await context.tracing.stop({ path: tracePath });
+		if (!succeeded) {
+			process.stderr.write(
+				`[trace] run failed; trace retained at ${tracePath}\n`,
+			);
+			return;
+		}
+		try {
+			rmSync(tracePath, { force: true });
+			process.stderr.write(
+				`[trace] run succeeded; trace deleted (${tracePath})\n`,
+			);
+		} catch (err) {
+			writeTraceDiagnostic("delete-on-success", err);
+		}
+	}
 }

@@ -26,12 +26,19 @@
 import { createHash } from "node:crypto";
 
 /** The two positive content-fingerprint fields a statement record carries. */
-export const STATEMENT_CONTENT_FIELDS = ["pdf_text_sha256", "pdf_page_count"] as const;
+export const STATEMENT_CONTENT_FIELDS = [
+	"pdf_text_sha256",
+	"pdf_page_count",
+] as const;
 
 /** The blob/acquisition-identity fields that move on every re-download with no
  *  owner-visible content change. `pdf_path` and `document_url` embed the
  *  `pdf_sha256`, so all three move together; `fetched_at` is the run clock. */
-export const STATEMENT_BLOB_IDENTITY_KEYS = ["pdf_sha256", "pdf_path", "document_url"] as const;
+export const STATEMENT_BLOB_IDENTITY_KEYS = [
+	"pdf_sha256",
+	"pdf_path",
+	"document_url",
+] as const;
 
 /** The run-clock-only exclusion used when the positive content fields are
  *  absent — identical to the conservative pre-content behavior. */
@@ -40,22 +47,22 @@ export const STATEMENT_RUN_CLOCK_EXCLUDE_KEYS = ["fetched_at"] as const;
 /** The full content-gated exclusion used when both content fields are present:
  *  the blob/acquisition-identity fields PLUS the run clock. */
 export const STATEMENT_CONTENT_GATED_EXCLUDE_KEYS = [
-  ...STATEMENT_BLOB_IDENTITY_KEYS,
-  ...STATEMENT_RUN_CLOCK_EXCLUDE_KEYS,
+	...STATEMENT_BLOB_IDENTITY_KEYS,
+	...STATEMENT_RUN_CLOCK_EXCLUDE_KEYS,
 ] as const;
 
 /** The positive content fingerprint a connector emits per statement. Both
  *  fields are `null` when text extraction failed or returned empty text
  *  (fail-closed). */
 export interface StatementContentFingerprint {
-  pdf_page_count: number | null;
-  pdf_text_sha256: string | null;
+	pdf_page_count: number | null;
+	pdf_text_sha256: string | null;
 }
 
 /** The all-null fingerprint emitted on extraction failure / empty text. */
 export const NO_STATEMENT_CONTENT_FINGERPRINT: StatementContentFingerprint = {
-  pdf_text_sha256: null,
-  pdf_page_count: null,
+	pdf_text_sha256: null,
+	pdf_page_count: null,
 };
 
 const WHITESPACE_RUN_RE = /\s+/g;
@@ -72,7 +79,7 @@ const WHITESPACE_RUN_RE = /\s+/g;
  * a future extractor version that re-wraps lines.
  */
 export function normalizeStatementText(text: string): string {
-  return text.normalize("NFC").replace(WHITESPACE_RUN_RE, " ").trim();
+	return text.normalize("NFC").replace(WHITESPACE_RUN_RE, " ").trim();
 }
 
 /**
@@ -87,18 +94,21 @@ export function normalizeStatementText(text: string): string {
  * content match for a non-empty one.
  */
 export function statementContentFingerprintFromText(
-  text: string | null | undefined,
-  pageCount: number | null | undefined
+	text: string | null | undefined,
+	pageCount: number | null | undefined,
 ): StatementContentFingerprint {
-  const normalized = normalizeStatementText(text ?? "");
-  if (normalized.length === 0) {
-    return { ...NO_STATEMENT_CONTENT_FINGERPRINT };
-  }
-  const pages = typeof pageCount === "number" && Number.isFinite(pageCount) && pageCount > 0 ? pageCount : null;
-  return {
-    pdf_text_sha256: createHash("sha256").update(normalized).digest("hex"),
-    pdf_page_count: pages,
-  };
+	const normalized = normalizeStatementText(text ?? "");
+	if (normalized.length === 0) {
+		return { ...NO_STATEMENT_CONTENT_FINGERPRINT };
+	}
+	const pages =
+		typeof pageCount === "number" && Number.isFinite(pageCount) && pageCount > 0
+			? pageCount
+			: null;
+	return {
+		pdf_text_sha256: createHash("sha256").update(normalized).digest("hex"),
+		pdf_page_count: pages,
+	};
 }
 
 /**
@@ -113,20 +123,23 @@ export function statementContentFingerprintFromText(
  * no startup cost.
  */
 export async function extractStatementPdfTextAndPages(
-  buffer: Buffer
+	buffer: Buffer,
 ): Promise<{ text: string; pageCount: number | null }> {
-  const { PDFParse } = await import("pdf-parse");
-  const parser = new PDFParse({ data: buffer });
-  let textResult: { text?: string; total?: number };
-  try {
-    textResult = await parser.getText();
-  } finally {
-    await parser.destroy().catch(() => {
-      /* ignore */
-    });
-  }
-  const pageCount = typeof textResult.total === "number" && textResult.total > 0 ? textResult.total : null;
-  return { text: textResult.text || "", pageCount };
+	const { PDFParse } = await import("pdf-parse");
+	const parser = new PDFParse({ data: buffer });
+	let textResult: { text?: string; total?: number };
+	try {
+		textResult = await parser.getText();
+	} finally {
+		await parser.destroy().catch(() => {
+			/* ignore */
+		});
+	}
+	const pageCount =
+		typeof textResult.total === "number" && textResult.total > 0
+			? textResult.total
+			: null;
+	return { text: textResult.text || "", pageCount };
 }
 
 /**
@@ -135,22 +148,31 @@ export async function extractStatementPdfTextAndPages(
  * all-null fingerprint so the canonical exclusion stays conservative and the
  * statement record is still emitted.
  */
-export async function extractStatementContentFingerprint(buffer: Buffer): Promise<StatementContentFingerprint> {
-  try {
-    const { text, pageCount } = await extractStatementPdfTextAndPages(buffer);
-    return statementContentFingerprintFromText(text, pageCount);
-  } catch {
-    return { ...NO_STATEMENT_CONTENT_FINGERPRINT };
-  }
+export async function extractStatementContentFingerprint(
+	buffer: Buffer,
+): Promise<StatementContentFingerprint> {
+	try {
+		const { text, pageCount } = await extractStatementPdfTextAndPages(buffer);
+		return statementContentFingerprintFromText(text, pageCount);
+	} catch {
+		return { ...NO_STATEMENT_CONTENT_FINGERPRINT };
+	}
 }
 
 /** True iff a record carries BOTH positive content fields, present and
  *  non-null. Requiring both fails closed against a partial extraction (text
  *  but no page count, or vice versa). */
-export function hasStatementContentFingerprint(record: Record<string, unknown>): boolean {
-  const textSha = record.pdf_text_sha256;
-  const pageCount = record.pdf_page_count;
-  return typeof textSha === "string" && textSha.length > 0 && typeof pageCount === "number" && pageCount > 0;
+export function hasStatementContentFingerprint(
+	record: Record<string, unknown>,
+): boolean {
+	const textSha = record.pdf_text_sha256;
+	const pageCount = record.pdf_page_count;
+	return (
+		typeof textSha === "string" &&
+		textSha.length > 0 &&
+		typeof pageCount === "number" &&
+		pageCount > 0
+	);
 }
 
 /**
@@ -166,8 +188,10 @@ export function hasStatementContentFingerprint(record: Record<string, unknown>):
  *     conservative pre-content behavior, so a content-less version is never
  *     collapsed against a content-bearing version).
  */
-export function statementFingerprintExcludeKeys(record: Record<string, unknown>): readonly string[] {
-  return hasStatementContentFingerprint(record)
-    ? STATEMENT_CONTENT_GATED_EXCLUDE_KEYS
-    : STATEMENT_RUN_CLOCK_EXCLUDE_KEYS;
+export function statementFingerprintExcludeKeys(
+	record: Record<string, unknown>,
+): readonly string[] {
+	return hasStatementContentFingerprint(record)
+		? STATEMENT_CONTENT_GATED_EXCLUDE_KEYS
+		: STATEMENT_RUN_CLOCK_EXCLUDE_KEYS;
 }

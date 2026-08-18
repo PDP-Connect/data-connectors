@@ -11,11 +11,11 @@
  */
 
 export interface TerminalErrorDetails {
-  code?: string;
-  message: string;
-  /** Provider-neutral action for the runtime to preserve on DONE.error. */
-  recovery_hint?: string | { action: string; retryable?: boolean };
-  retryable: boolean;
+	code?: string;
+	message: string;
+	/** Provider-neutral action for the runtime to preserve on DONE.error. */
+	recovery_hint?: string | { action: string; retryable?: boolean };
+	retryable: boolean;
 }
 
 /**
@@ -28,16 +28,22 @@ export interface TerminalErrorDetails {
  * `normalizeTerminalError` for how this survives connector overrides.
  */
 export class TerminalError extends Error {
-  readonly code?: string;
-  readonly retryable: boolean;
-  constructor(message: string, options: { cause?: unknown; code?: string; retryable?: boolean } = {}) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
-    this.name = "TerminalError";
-    this.retryable = options.retryable ?? false;
-    if (options.code !== undefined) {
-      this.code = options.code;
-    }
-  }
+	readonly code?: string;
+	readonly retryable: boolean;
+	constructor(
+		message: string,
+		options: { cause?: unknown; code?: string; retryable?: boolean } = {},
+	) {
+		super(
+			message,
+			options.cause === undefined ? undefined : { cause: options.cause },
+		);
+		this.name = "TerminalError";
+		this.retryable = options.retryable ?? false;
+		if (options.code !== undefined) {
+			this.code = options.code;
+		}
+	}
 }
 
 /**
@@ -67,10 +73,10 @@ const CONNECTOR_ERROR_CODE_RE = /^[a-z][a-z0-9_]{1,63}$/;
  * `connector_error_json` with no further redaction.
  */
 export function assertValidConnectorErrorCode(code: string): void {
-  if (!CONNECTOR_ERROR_CODE_RE.test(code)) {
-    throw new Error(
-      `connector_failure_invalid_code: "${code}" must match ${CONNECTOR_ERROR_CODE_RE.source} ` +
-        "(short, lowercase, snake_case — this channel is never redacted, so it cannot carry arbitrary text)"
-    );
-  }
+	if (!CONNECTOR_ERROR_CODE_RE.test(code)) {
+		throw new Error(
+			`connector_failure_invalid_code: "${code}" must match ${CONNECTOR_ERROR_CODE_RE.source} ` +
+				"(short, lowercase, snake_case — this channel is never redacted, so it cannot carry arbitrary text)",
+		);
+	}
 }

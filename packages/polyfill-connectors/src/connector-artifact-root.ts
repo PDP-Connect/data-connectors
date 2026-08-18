@@ -69,8 +69,8 @@ const ARTIFACT_DIR_NAME = "connector-artifacts";
 const IN_MEMORY_DB_PATH = ":memory:";
 
 export interface ConnectorArtifactRootEnv {
-  PDPP_CONNECTOR_ARTIFACT_ROOT?: string;
-  PDPP_DB_PATH?: string;
+	PDPP_CONNECTOR_ARTIFACT_ROOT?: string;
+	PDPP_DB_PATH?: string;
 }
 
 /**
@@ -79,19 +79,22 @@ export interface ConnectorArtifactRootEnv {
  * `local-development-fallback` is the only one that is NOT deployment-owned;
  * callers disclose it rather than let it pass unnoticed.
  */
-export type ConnectorArtifactRootSource = "explicit-override" | "database-directory" | "local-development-fallback";
+export type ConnectorArtifactRootSource =
+	| "explicit-override"
+	| "database-directory"
+	| "local-development-fallback";
 
 export interface ConnectorArtifactRoot {
-  /** True when the root is deployment-owned (rules 1 and 2). */
-  deploymentOwned: boolean;
-  /** Absolute path to the durable root. */
-  root: string;
-  source: ConnectorArtifactRootSource;
+	/** True when the root is deployment-owned (rules 1 and 2). */
+	deploymentOwned: boolean;
+	/** Absolute path to the durable root. */
+	root: string;
+	source: ConnectorArtifactRootSource;
 }
 
 function trimmed(value: string | undefined): string | undefined {
-  const cleaned = value?.trim();
-  return cleaned && cleaned.length > 0 ? cleaned : undefined;
+	const cleaned = value?.trim();
+	return cleaned && cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**
@@ -101,27 +104,31 @@ function trimmed(value: string | undefined): string | undefined {
  * "where would this go?" without provisioning it.
  */
 export function resolveConnectorArtifactRoot(
-  env: NodeJS.ProcessEnv | ConnectorArtifactRootEnv = process.env
+	env: NodeJS.ProcessEnv | ConnectorArtifactRootEnv = process.env,
 ): ConnectorArtifactRoot {
-  const override = trimmed(env.PDPP_CONNECTOR_ARTIFACT_ROOT);
-  if (override) {
-    return { root: override, source: "explicit-override", deploymentOwned: true };
-  }
+	const override = trimmed(env.PDPP_CONNECTOR_ARTIFACT_ROOT);
+	if (override) {
+		return {
+			root: override,
+			source: "explicit-override",
+			deploymentOwned: true,
+		};
+	}
 
-  const dbPath = trimmed(env.PDPP_DB_PATH);
-  if (dbPath && dbPath !== IN_MEMORY_DB_PATH) {
-    return {
-      root: join(dirname(dbPath), ARTIFACT_DIR_NAME),
-      source: "database-directory",
-      deploymentOwned: true,
-    };
-  }
+	const dbPath = trimmed(env.PDPP_DB_PATH);
+	if (dbPath && dbPath !== IN_MEMORY_DB_PATH) {
+		return {
+			root: join(dirname(dbPath), ARTIFACT_DIR_NAME),
+			source: "database-directory",
+			deploymentOwned: true,
+		};
+	}
 
-  return {
-    root: join(homedir(), ".pdpp", ARTIFACT_DIR_NAME),
-    source: "local-development-fallback",
-    deploymentOwned: false,
-  };
+	return {
+		root: join(homedir(), ".pdpp", ARTIFACT_DIR_NAME),
+		source: "local-development-fallback",
+		deploymentOwned: false,
+	};
 }
 
 /**
@@ -133,12 +140,12 @@ export function resolveConnectorArtifactRoot(
  * pass anything user-supplied sanitize it first.
  */
 export function resolveConnectorArtifactDir(
-  connectorName: string,
-  segments: readonly string[] = [],
-  env: NodeJS.ProcessEnv | ConnectorArtifactRootEnv = process.env
+	connectorName: string,
+	segments: readonly string[] = [],
+	env: NodeJS.ProcessEnv | ConnectorArtifactRootEnv = process.env,
 ): ConnectorArtifactRoot {
-  const resolved = resolveConnectorArtifactRoot(env);
-  return { ...resolved, root: join(resolved.root, connectorName, ...segments) };
+	const resolved = resolveConnectorArtifactRoot(env);
+	return { ...resolved, root: join(resolved.root, connectorName, ...segments) };
 }
 
 /**
@@ -147,17 +154,19 @@ export function resolveConnectorArtifactDir(
  * is stated in the run log instead of being inferred from a missing archive
  * three container replacements later.
  */
-export function describeConnectorArtifactRoot(resolved: ConnectorArtifactRoot): string {
-  switch (resolved.source) {
-    case "explicit-override":
-      return `Durable artifact root ${resolved.root} (PDPP_CONNECTOR_ARTIFACT_ROOT).`;
-    case "database-directory":
-      return `Durable artifact root ${resolved.root} (alongside PDPP_DB_PATH, on the deployment's persistent volume).`;
-    default:
-      return (
-        `Durable artifact root ${resolved.root} (LOCAL-DEVELOPMENT FALLBACK — no ` +
-        "PDPP_CONNECTOR_ARTIFACT_ROOT and no PDPP_DB_PATH). This path is NOT on a " +
-        "deployment-managed volume; artifacts here are lost when the container is replaced."
-      );
-  }
+export function describeConnectorArtifactRoot(
+	resolved: ConnectorArtifactRoot,
+): string {
+	switch (resolved.source) {
+		case "explicit-override":
+			return `Durable artifact root ${resolved.root} (PDPP_CONNECTOR_ARTIFACT_ROOT).`;
+		case "database-directory":
+			return `Durable artifact root ${resolved.root} (alongside PDPP_DB_PATH, on the deployment's persistent volume).`;
+		default:
+			return (
+				`Durable artifact root ${resolved.root} (LOCAL-DEVELOPMENT FALLBACK — no ` +
+				"PDPP_CONNECTOR_ARTIFACT_ROOT and no PDPP_DB_PATH). This path is NOT on a " +
+				"deployment-managed volume; artifacts here are lost when the container is replaced."
+			);
+	}
 }

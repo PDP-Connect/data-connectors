@@ -7,8 +7,8 @@ import type { Locator } from "playwright";
 
 /** `true` iff the first match becomes visible within 1s; never throws. */
 export async function locatorIsVisible(locator: Locator): Promise<boolean> {
-  return await locator
-    .first()
-    .isVisible({ timeout: 1000 })
-    .catch((): boolean => false);
+	return await locator
+		.first()
+		.isVisible({ timeout: 1000 })
+		.catch((): boolean => false);
 }

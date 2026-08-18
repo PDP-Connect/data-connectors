@@ -10,26 +10,26 @@ import { buildFullScanCoverageMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 test("Notion full-scan coverage records the enumerated boundary, including empty", () => {
-  assert.deepEqual(buildFullScanCoverageMessage("pages", 0), {
-    type: "DETAIL_COVERAGE",
-    reference_only: true,
-    stream: "pages",
-    state_stream: "pages",
-    required_keys: [],
-    hydrated_keys: [],
-    considered: 0,
-    covered: 0,
-  });
-  assert.deepEqual(buildFullScanCoverageMessage("databases", 162), {
-    type: "DETAIL_COVERAGE",
-    reference_only: true,
-    stream: "databases",
-    state_stream: "databases",
-    required_keys: [],
-    hydrated_keys: [],
-    considered: 162,
-    covered: 162,
-  });
+	assert.deepEqual(buildFullScanCoverageMessage("pages", 0), {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "pages",
+		state_stream: "pages",
+		required_keys: [],
+		hydrated_keys: [],
+		considered: 0,
+		covered: 0,
+	});
+	assert.deepEqual(buildFullScanCoverageMessage("databases", 162), {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "databases",
+		state_stream: "databases",
+		required_keys: [],
+		hydrated_keys: [],
+		considered: 162,
+		covered: 162,
+	});
 });
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -38,25 +38,31 @@ const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const DATABASE_ID = "22222222-2222-4222-8222-222222222222";
 const ACTOR_ID = "33333333-3333-4333-8333-333333333333";
 
-function protocolMessagesFor(messages: readonly EmittedMessage[], type: EmittedMessage["type"]): EmittedMessage[] {
-  return messages.filter((message) => message.type === type);
+function protocolMessagesFor(
+	messages: readonly EmittedMessage[],
+	type: EmittedMessage["type"],
+): EmittedMessage[] {
+	return messages.filter((message) => message.type === type);
 }
 
-function lastDone(messages: readonly EmittedMessage[]): Extract<EmittedMessage, { type: "DONE" }> {
-  const done = messages.findLast(
-    (message): message is Extract<EmittedMessage, { type: "DONE" }> => message.type === "DONE"
-  );
-  assert.ok(done, "connector emits DONE");
-  return done;
+function lastDone(
+	messages: readonly EmittedMessage[],
+): Extract<EmittedMessage, { type: "DONE" }> {
+	const done = messages.findLast(
+		(message): message is Extract<EmittedMessage, { type: "DONE" }> =>
+			message.type === "DONE",
+	);
+	assert.ok(done, "connector emits DONE");
+	return done;
 }
 
 async function runRealNotionConnector(mode: "complete" | "provider_failure") {
-  const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
-  const wrapperPath = join(harnessDir, "notion-wrapper.mjs");
-  const entrypointUrl = pathToFileURL(ENTRYPOINT).href;
-  await writeFile(
-    wrapperPath,
-    `
+	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
+	const wrapperPath = join(harnessDir, "notion-wrapper.mjs");
+	const entrypointUrl = pathToFileURL(ENTRYPOINT).href;
+	await writeFile(
+		wrapperPath,
+		`
 const mode = ${JSON.stringify(mode)};
 globalThis.fetch = async (_input, init) => {
   if (mode === "provider_failure") {
@@ -112,55 +118,77 @@ globalThis.fetch = async (_input, init) => {
 };
 await import(${JSON.stringify(entrypointUrl)});
 `,
-    "utf8"
-  );
+		"utf8",
+	);
 
-  try {
-    return await runConnectorProtocolSubprocess({
-      allowFailedDone: mode === "provider_failure",
-      cwd: PACKAGE_ROOT,
-      entrypoint: wrapperPath,
-      env: { NOTION_API_TOKEN: "bounded-test-token" },
-      start: {
-        scope: { streams: [{ name: "pages" }, { name: "databases" }] },
-        state: {},
-        type: "START",
-      },
-    });
-  } finally {
-    await rm(harnessDir, { force: true, recursive: true });
-  }
+	try {
+		return await runConnectorProtocolSubprocess({
+			allowFailedDone: mode === "provider_failure",
+			cwd: PACKAGE_ROOT,
+			entrypoint: wrapperPath,
+			env: { NOTION_API_TOKEN: "bounded-test-token" },
+			start: {
+				scope: { streams: [{ name: "pages" }, { name: "databases" }] },
+				state: {},
+				type: "START",
+			},
+		});
+	} finally {
+		await rm(harnessDir, { force: true, recursive: true });
+	}
 }
 
 test("real Notion connector protocol emits coverage and STATE after complete pages/databases enumeration", async () => {
-  const result = await runRealNotionConnector("complete");
-  assert.equal(result.code, 0);
+	const result = await runRealNotionConnector("complete");
+	assert.equal(result.code, 0);
 
-  const coverages = protocolMessagesFor(result.messages, "DETAIL_COVERAGE");
-  const states = protocolMessagesFor(result.messages, "STATE");
-  for (const [stream, considered] of [
-    ["pages", 2],
-    ["databases", 1],
-  ] as const) {
-    const coverage = coverages.find((message) => message.type === "DETAIL_COVERAGE" && message.stream === stream);
-    assert.ok(coverage && coverage.type === "DETAIL_COVERAGE", `${stream} DETAIL_COVERAGE is on the wire`);
-    assert.equal(coverage.state_stream, stream);
-    assert.equal(coverage.considered, considered);
-    assert.equal(coverage.covered, considered);
-    assert.deepEqual(coverage.required_keys, []);
-    assert.deepEqual(coverage.hydrated_keys, []);
+	const coverages = protocolMessagesFor(result.messages, "DETAIL_COVERAGE");
+	const states = protocolMessagesFor(result.messages, "STATE");
+	for (const [stream, considered] of [
+		["pages", 2],
+		["databases", 1],
+	] as const) {
+		const coverage = coverages.find(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === stream,
+		);
+		assert.ok(
+			coverage && coverage.type === "DETAIL_COVERAGE",
+			`${stream} DETAIL_COVERAGE is on the wire`,
+		);
+		assert.equal(coverage.state_stream, stream);
+		assert.equal(coverage.considered, considered);
+		assert.equal(coverage.covered, considered);
+		assert.deepEqual(coverage.required_keys, []);
+		assert.deepEqual(coverage.hydrated_keys, []);
 
-    const state = states.find((message) => message.type === "STATE" && message.stream === stream);
-    assert.ok(state && state.type === "STATE", `${stream} STATE is on the wire`);
-    assert.ok(state.cursor && typeof state.cursor === "object");
-  }
-  assert.equal(lastDone(result.messages).status, "succeeded", "complete enumeration succeeds");
+		const state = states.find(
+			(message) => message.type === "STATE" && message.stream === stream,
+		);
+		assert.ok(
+			state && state.type === "STATE",
+			`${stream} STATE is on the wire`,
+		);
+		assert.ok(state.cursor && typeof state.cursor === "object");
+	}
+	assert.equal(
+		lastDone(result.messages).status,
+		"succeeded",
+		"complete enumeration succeeds",
+	);
 });
 
 test("real Notion connector protocol emits no coverage proof or STATE when provider enumeration fails", async () => {
-  const result = await runRealNotionConnector("provider_failure");
-  assert.equal(result.code, 1, "failed connector exits with its normal failed-run status");
-  assert.equal(protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length, 0);
-  assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
-  assert.equal(lastDone(result.messages).status, "failed");
+	const result = await runRealNotionConnector("provider_failure");
+	assert.equal(
+		result.code,
+		1,
+		"failed connector exits with its normal failed-run status",
+	);
+	assert.equal(
+		protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
+	assert.equal(lastDone(result.messages).status, "failed");
 });

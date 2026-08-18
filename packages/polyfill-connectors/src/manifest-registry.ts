@@ -27,41 +27,46 @@ const packageDir = dirname(fileURLToPath(import.meta.url));
 const realManifestsDir = join(packageDir, "..", "manifests");
 
 export interface PolyfillManifestEntry {
-  file: string;
-  manifest: unknown;
+	file: string;
+	manifest: unknown;
 }
 
 function readManifestFile(manifestPath: string): unknown {
-  return JSON.parse(readFileSync(manifestPath, "utf8"));
+	return JSON.parse(readFileSync(manifestPath, "utf8"));
 }
 
 /** Every `*.json` file directly under this package's real, shipped `manifests/` directory, parsed. */
 function readRealPolyfillManifests(): PolyfillManifestEntry[] {
-  const out: PolyfillManifestEntry[] = [];
-  for (const file of readdirSync(realManifestsDir)) {
-    if (!file.endsWith(".json")) {
-      continue;
-    }
-    out.push({ file, manifest: readManifestFile(join(realManifestsDir, file)) });
-  }
-  return out;
+	const out: PolyfillManifestEntry[] = [];
+	for (const file of readdirSync(realManifestsDir)) {
+		if (!file.endsWith(".json")) {
+			continue;
+		}
+		out.push({
+			file,
+			manifest: readManifestFile(join(realManifestsDir, file)),
+		});
+	}
+	return out;
 }
 
 /** Every `*.json` file directly under an env-var-selected override directory (tests only), parsed. */
-function readOverridePolyfillManifests(overrideDir: string): PolyfillManifestEntry[] {
-  const out: PolyfillManifestEntry[] = [];
-  for (const file of readdirSync(overrideDir)) {
-    if (!file.endsWith(".json")) {
-      continue;
-    }
-    out.push({ file, manifest: readManifestFile(join(overrideDir, file)) });
-  }
-  return out;
+function readOverridePolyfillManifests(
+	overrideDir: string,
+): PolyfillManifestEntry[] {
+	const out: PolyfillManifestEntry[] = [];
+	for (const file of readdirSync(overrideDir)) {
+		if (!file.endsWith(".json")) {
+			continue;
+		}
+		out.push({ file, manifest: readManifestFile(join(overrideDir, file)) });
+	}
+	return out;
 }
 
 /** Every `*.json` file directly under this package's `manifests/` directory (or the test override), parsed. */
 export function readPolyfillManifests(): PolyfillManifestEntry[] {
-  return process.env.PDPP_POLYFILL_MANIFESTS_DIR
-    ? readOverridePolyfillManifests(process.env.PDPP_POLYFILL_MANIFESTS_DIR)
-    : readRealPolyfillManifests();
+	return process.env.PDPP_POLYFILL_MANIFESTS_DIR
+		? readOverridePolyfillManifests(process.env.PDPP_POLYFILL_MANIFESTS_DIR)
+		: readRealPolyfillManifests();
 }

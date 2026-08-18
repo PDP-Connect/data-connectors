@@ -24,7 +24,10 @@ import { googleMessagesCollectorDefinition } from "../connectors/google_messages
 import { googleTakeoutCollectorDefinition } from "../connectors/google_takeout/collector-definition.ts";
 import { imessageCollectorDefinition } from "../connectors/imessage/collector-definition.ts";
 
-export type { LocalCollectorBinding, LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
+export type {
+	LocalCollectorBinding,
+	LocalCollectorDefinition,
+} from "@pdpp/connector-protocol/collector-definition";
 
 /**
  * Every connector definition the published local collector bundles, in the
@@ -43,11 +46,12 @@ export type { LocalCollectorBinding, LocalCollectorDefinition } from "@pdpp/conn
  * arms-length-subprocess shape this repo's Slack connector already uses
  * for slackdump.
  */
-export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = Object.freeze([
-  claudeCodeCollectorDefinition,
-  codexCollectorDefinition,
-  googleTakeoutCollectorDefinition,
-  imessageCollectorDefinition,
-  applePhotosCollectorDefinition,
-  googleMessagesCollectorDefinition,
-]);
+export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
+	Object.freeze([
+		claudeCodeCollectorDefinition,
+		codexCollectorDefinition,
+		googleTakeoutCollectorDefinition,
+		imessageCollectorDefinition,
+		applePhotosCollectorDefinition,
+		googleMessagesCollectorDefinition,
+	]);

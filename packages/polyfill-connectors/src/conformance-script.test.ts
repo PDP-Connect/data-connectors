@@ -6,7 +6,7 @@ import test from "node:test";
 import { checkManifest } from "../scripts/conformance.ts";
 
 test("conformance reports the manifest's lifecycle tier", () => {
-  const step = checkManifest("google_maps");
-  assert.equal(step.verdict, "PASS");
-  assert.match(step.detail, /lifecycle tier "supported"/);
+	const step = checkManifest("google_maps");
+	assert.equal(step.verdict, "PASS");
+	assert.match(step.detail, /lifecycle tier "supported"/);
 });

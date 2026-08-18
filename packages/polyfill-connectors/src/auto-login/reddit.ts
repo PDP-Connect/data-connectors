@@ -22,7 +22,10 @@
 
 import type { BrowserContext, Page } from "playwright";
 import { manualBrowserLogin } from "../browser-handoff.ts";
-import type { InteractionRequest, InteractionResponse } from "../connector-runtime.ts";
+import type {
+	InteractionRequest,
+	InteractionResponse,
+} from "../connector-runtime.ts";
 import type { CaptureSession, LocatorProbe } from "../fixture-capture.ts";
 import { detectCloudflareChallenge } from "../platform-probes.ts";
 import { locatorIsVisible } from "./locator-helpers.ts";
@@ -32,71 +35,78 @@ const HOME_URL = "https://www.reddit.com/";
 const SESSION_COOKIE_NAME = "reddit_session";
 const USERNAME_SELECTOR = 'input[name="username"], input#loginUsername';
 const PASSWORD_SELECTOR = 'input[name="password"], input#loginPassword';
-const SUBMIT_SELECTOR = 'button[type="submit"]:has-text("Log In"), button[type="submit"]:has-text("Continue")';
-const OTP_SELECTOR = 'input[name="otp"], input[name="verification_code"], input[autocomplete="one-time-code"]';
+const SUBMIT_SELECTOR =
+	'button[type="submit"]:has-text("Log In"), button[type="submit"]:has-text("Continue")';
+const OTP_SELECTOR =
+	'input[name="otp"], input[name="verification_code"], input[autocomplete="one-time-code"]';
 const SUBMIT_BUTTON_NAME_RE = /^(log in|continue)$/i;
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-  "No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser, then respond success.";
+	"No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser, then respond success.";
 
 const LOGIN_LOCATOR_PROBES: LocatorProbe[] = [
-  {
-    id: "username",
-    kind: "css",
-    selector: USERNAME_SELECTOR,
-    description: "Reddit username field candidates used by the connector.",
-  },
-  {
-    id: "password",
-    kind: "css",
-    selector: PASSWORD_SELECTOR,
-    description: "Reddit password field candidates used by the connector.",
-  },
-  {
-    id: "submit-role",
-    kind: "role",
-    role: "button",
-    namePattern: "^(log in|continue)$",
-    nameFlags: "i",
-    description: "Semantic login/continue button candidate.",
-  },
-  {
-    id: "submit-css",
-    kind: "css",
-    selector: SUBMIT_SELECTOR,
-    description: "Fallback CSS submit candidate.",
-  },
-  {
-    id: "otp",
-    kind: "css",
-    selector: OTP_SELECTOR,
-    description: "OTP candidates; hidden fields must not trigger an OTP interaction.",
-  },
+	{
+		id: "username",
+		kind: "css",
+		selector: USERNAME_SELECTOR,
+		description: "Reddit username field candidates used by the connector.",
+	},
+	{
+		id: "password",
+		kind: "css",
+		selector: PASSWORD_SELECTOR,
+		description: "Reddit password field candidates used by the connector.",
+	},
+	{
+		id: "submit-role",
+		kind: "role",
+		role: "button",
+		namePattern: "^(log in|continue)$",
+		nameFlags: "i",
+		description: "Semantic login/continue button candidate.",
+	},
+	{
+		id: "submit-css",
+		kind: "css",
+		selector: SUBMIT_SELECTOR,
+		description: "Fallback CSS submit candidate.",
+	},
+	{
+		id: "otp",
+		kind: "css",
+		selector: OTP_SELECTOR,
+		description:
+			"OTP candidates; hidden fields must not trigger an OTP interaction.",
+	},
 ];
 
-type SendInteraction = (req: InteractionRequest) => Promise<InteractionResponse>;
+type SendInteraction = (
+	req: InteractionRequest,
+) => Promise<InteractionResponse>;
 
 interface EnsureRedditSessionArgs {
-  capture?: CaptureSession | null;
-  context: BrowserContext;
-  /**
-   * Runtime marker for the post-submit credential-safety invariant: fired at
-   * the exact click that sends the saved password to Reddit's real sign-in
-   * form (see `EnsureSessionArgs.onCredentialSubmit`). Never fired on the
-   * session-reuse early return, the manual hand-off paths, or the OTP
-   * resubmit — those never send the saved password.
-   */
-  onCredentialSubmit?: () => void;
-  page: Page;
-  sendInteraction: SendInteraction;
+	capture?: CaptureSession | null;
+	context: BrowserContext;
+	/**
+	 * Runtime marker for the post-submit credential-safety invariant: fired at
+	 * the exact click that sends the saved password to Reddit's real sign-in
+	 * form (see `EnsureSessionArgs.onCredentialSubmit`). Never fired on the
+	 * session-reuse early return, the manual hand-off paths, or the OTP
+	 * resubmit — those never send the saved password.
+	 */
+	onCredentialSubmit?: () => void;
+	page: Page;
+	sendInteraction: SendInteraction;
 }
 
 function otpCode(resp: InteractionResponse): string | null {
-  return resp.data?.code ?? resp.value ?? null;
+	return resp.data?.code ?? resp.value ?? null;
 }
 
 async function hasSessionCookie(context: BrowserContext): Promise<boolean> {
-  const cookies = await context.cookies(HOME_URL);
-  return cookies.some((c) => c.name === SESSION_COOKIE_NAME && Boolean(c.value));
+	const cookies = await context.cookies(HOME_URL);
+	return cookies.some(
+		(c) => c.name === SESSION_COOKIE_NAME && Boolean(c.value),
+	);
 }
 
 /**
@@ -105,184 +115,220 @@ async function hasSessionCookie(context: BrowserContext): Promise<boolean> {
  * the logout link, which is only rendered when authenticated.
  */
 export async function isSessionLive(page: Page): Promise<boolean> {
-  try {
-    await page.goto("https://old.reddit.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    const logout = await page.locator('a[href*="/logout"], form[action*="logout"]').count();
-    return logout > 0;
-  } catch {
-    return false;
-  }
+	try {
+		await page.goto("https://old.reddit.com/", {
+			waitUntil: "domcontentloaded",
+			timeout: 30_000,
+		});
+		const logout = await page
+			.locator('a[href*="/logout"], form[action*="logout"]')
+			.count();
+		return logout > 0;
+	} catch {
+		return false;
+	}
 }
 
-async function captureLoginState(capture: CaptureSession | null | undefined, page: Page, label: string): Promise<void> {
-  if (!capture) {
-    return;
-  }
-  await capture.captureDom(page, label).catch((): undefined => undefined);
-  await capture.captureLocatorProbe?.(page, label, LOGIN_LOCATOR_PROBES).catch((): undefined => undefined);
+async function captureLoginState(
+	capture: CaptureSession | null | undefined,
+	page: Page,
+	label: string,
+): Promise<void> {
+	if (!capture) {
+		return;
+	}
+	await capture.captureDom(page, label).catch((): undefined => undefined);
+	await capture
+		.captureLocatorProbe?.(page, label, LOGIN_LOCATOR_PROBES)
+		.catch((): undefined => undefined);
 }
 
-async function clickRedditLoginSubmit(page: Page, onCredentialSubmit?: () => void): Promise<boolean> {
-  const { getByRole } = page as Pick<Page, "getByRole">;
-  if (typeof getByRole === "function") {
-    const semantic = getByRole.call(page, "button", { name: SUBMIT_BUTTON_NAME_RE }).first();
-    if (await locatorIsVisible(semantic)) {
-      await semantic.click();
-      onCredentialSubmit?.();
-      return true;
-    }
-  }
+async function clickRedditLoginSubmit(
+	page: Page,
+	onCredentialSubmit?: () => void,
+): Promise<boolean> {
+	const { getByRole } = page as Pick<Page, "getByRole">;
+	if (typeof getByRole === "function") {
+		const semantic = getByRole
+			.call(page, "button", { name: SUBMIT_BUTTON_NAME_RE })
+			.first();
+		if (await locatorIsVisible(semantic)) {
+			await semantic.click();
+			onCredentialSubmit?.();
+			return true;
+		}
+	}
 
-  const fallback = page.locator(SUBMIT_SELECTOR).first();
-  if (await locatorIsVisible(fallback)) {
-    await fallback.click();
-    onCredentialSubmit?.();
-    return true;
-  }
-  return false;
+	const fallback = page.locator(SUBMIT_SELECTOR).first();
+	if (await locatorIsVisible(fallback)) {
+		await fallback.click();
+		onCredentialSubmit?.();
+		return true;
+	}
+	return false;
 }
 
 function loginBlockedMessage(cfSignals: string[]): string {
-  if (cfSignals.length > 0) {
-    return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the browser window and re-run.`;
-  }
-  return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the browser window and re-run.";
+	if (cfSignals.length > 0) {
+		return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the browser window and re-run.`;
+	}
+	return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the browser window and re-run.";
 }
 
 async function ensureRedditManualSession({
-  capture,
-  page,
-  sendInteraction,
-}: Pick<EnsureRedditSessionArgs, "capture" | "page" | "sendInteraction">): Promise<void> {
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
-  if (
-    await manualBrowserLogin({
-      ...(capture ? { capture } : {}),
-      message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
-      page,
-      probe: () => isSessionLive(page),
-      sendInteraction,
-      timeoutSeconds: 1800,
-    })
-  ) {
-    return;
-  }
-  throw new Error("reddit_login_manual_incomplete");
+	capture,
+	page,
+	sendInteraction,
+}: Pick<
+	EnsureRedditSessionArgs,
+	"capture" | "page" | "sendInteraction"
+>): Promise<void> {
+	await page
+		.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+		.catch((): undefined => undefined);
+	if (
+		await manualBrowserLogin({
+			...(capture ? { capture } : {}),
+			message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
+			page,
+			probe: () => isSessionLive(page),
+			sendInteraction,
+			timeoutSeconds: 1800,
+		})
+	) {
+		return;
+	}
+	throw new Error("reddit_login_manual_incomplete");
 }
 
 async function recoverRedditBlockedLogin({
-  capture,
-  page,
-  sendInteraction,
-}: Pick<EnsureRedditSessionArgs, "capture" | "page" | "sendInteraction">): Promise<void> {
-  const cf = await detectCloudflareChallenge(page);
-  const message = loginBlockedMessage(cf.signals);
-  if (
-    await manualBrowserLogin({
-      ...(capture ? { capture } : {}),
-      message,
-      page,
-      probe: () => isSessionLive(page),
-      reason: "captcha",
-      sendInteraction,
-      timeoutSeconds: 1800,
-    })
-  ) {
-    return;
-  }
-  throw new Error("reddit_login_unexpected_ui");
+	capture,
+	page,
+	sendInteraction,
+}: Pick<
+	EnsureRedditSessionArgs,
+	"capture" | "page" | "sendInteraction"
+>): Promise<void> {
+	const cf = await detectCloudflareChallenge(page);
+	const message = loginBlockedMessage(cf.signals);
+	if (
+		await manualBrowserLogin({
+			...(capture ? { capture } : {}),
+			message,
+			page,
+			probe: () => isSessionLive(page),
+			reason: "captcha",
+			sendInteraction,
+			timeoutSeconds: 1800,
+		})
+	) {
+		return;
+	}
+	throw new Error("reddit_login_unexpected_ui");
 }
 
 export async function ensureRedditSession({
-  capture,
-  context,
-  onCredentialSubmit,
-  page,
-  sendInteraction,
+	capture,
+	context,
+	onCredentialSubmit,
+	page,
+	sendInteraction,
 }: EnsureRedditSessionArgs): Promise<void> {
-  if ((await hasSessionCookie(context)) && (await isSessionLive(page))) {
-    return;
-  }
+	if ((await hasSessionCookie(context)) && (await isSessionLive(page))) {
+		return;
+	}
 
-  const username = process.env.REDDIT_USERNAME;
-  const password = process.env.REDDIT_PASSWORD;
-  if (!(username && password)) {
-    await ensureRedditManualSession({ ...(capture === undefined ? {} : { capture }), page, sendInteraction });
-    return;
-  }
+	const username = process.env.REDDIT_USERNAME;
+	const password = process.env.REDDIT_PASSWORD;
+	if (!(username && password)) {
+		await ensureRedditManualSession({
+			...(capture === undefined ? {} : { capture }),
+			page,
+			sendInteraction,
+		});
+		return;
+	}
 
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
-  await captureLoginState(capture, page, "reddit-login-page");
+	await page
+		.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+		.catch((): undefined => undefined);
+	await captureLoginState(capture, page, "reddit-login-page");
 
-  const userIn = page.locator(USERNAME_SELECTOR).first();
-  // `count()` is a one-shot DOM snapshot with no wait; on Reddit's
-  // client-rendered login page it can read 0 before the field has painted.
-  // `waitFor` gives the render a real, bounded chance instead.
-  const usernameAppeared = await userIn
-    .waitFor({ state: "attached", timeout: 10_000 })
-    .then((): true => true)
-    .catch((): false => false);
-  if (!usernameAppeared) {
-    // Cloudflare challenge, shadow DOM change, or redirect loop — hand off.
-    // Earn the diagnosis via the shared detector instead of guessing "possible
-    // Cloudflare challenge" from absence of inputs alone.
-    await recoverRedditBlockedLogin({ ...(capture === undefined ? {} : { capture }), page, sendInteraction });
-    return;
-  }
+	const userIn = page.locator(USERNAME_SELECTOR).first();
+	// `count()` is a one-shot DOM snapshot with no wait; on Reddit's
+	// client-rendered login page it can read 0 before the field has painted.
+	// `waitFor` gives the render a real, bounded chance instead.
+	const usernameAppeared = await userIn
+		.waitFor({ state: "attached", timeout: 10_000 })
+		.then((): true => true)
+		.catch((): false => false);
+	if (!usernameAppeared) {
+		// Cloudflare challenge, shadow DOM change, or redirect loop — hand off.
+		// Earn the diagnosis via the shared detector instead of guessing "possible
+		// Cloudflare challenge" from absence of inputs alone.
+		await recoverRedditBlockedLogin({
+			...(capture === undefined ? {} : { capture }),
+			page,
+			sendInteraction,
+		});
+		return;
+	}
 
-  await userIn.fill(username);
-  await page.locator(PASSWORD_SELECTOR).first().fill(password);
-  await captureLoginState(capture, page, "reddit-login-before-submit");
-  if (!(await clickRedditLoginSubmit(page, onCredentialSubmit))) {
-    await captureLoginState(capture, page, "reddit-login-submit-missing");
-    throw new Error("reddit_login_submit_missing");
-  }
-  await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch((): null => null);
-  await captureLoginState(capture, page, "reddit-login-after-submit");
+	await userIn.fill(username);
+	await page.locator(PASSWORD_SELECTOR).first().fill(password);
+	await captureLoginState(capture, page, "reddit-login-before-submit");
+	if (!(await clickRedditLoginSubmit(page, onCredentialSubmit))) {
+		await captureLoginState(capture, page, "reddit-login-submit-missing");
+		throw new Error("reddit_login_submit_missing");
+	}
+	await page
+		.waitForLoadState("domcontentloaded", { timeout: 30_000 })
+		.catch((): null => null);
+	await captureLoginState(capture, page, "reddit-login-after-submit");
 
-  // 2FA: Reddit shows a separate OTP step when 2FA is enabled on the account.
-  const otpIn = page.locator(OTP_SELECTOR).first();
-  if (await locatorIsVisible(otpIn)) {
-    await captureLoginState(capture, page, "reddit-otp-detected");
-    const resp = await sendInteraction({
-      kind: "otp",
-      message: "Reddit requires a 2FA verification code. Enter the 6-digit code from your authenticator app or SMS:",
-      schema: {
-        type: "object",
-        properties: { code: { type: "string", pattern: "^\\d{6}$" } },
-        required: ["code"],
-      },
-      timeout_seconds: 300,
-    });
-    const code = otpCode(resp);
-    if (!code) {
-      if (await isSessionLive(page)) {
-        return;
-      }
-      throw new Error("reddit_2fa_cancelled");
-    }
-    await otpIn.fill(code);
-    await page
-      .locator('button[type="submit"]')
-      .first()
-      .click()
-      .catch((): undefined => undefined);
-    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch((): null => null);
-    await captureLoginState(capture, page, "reddit-otp-after-submit");
-  }
+	// 2FA: Reddit shows a separate OTP step when 2FA is enabled on the account.
+	const otpIn = page.locator(OTP_SELECTOR).first();
+	if (await locatorIsVisible(otpIn)) {
+		await captureLoginState(capture, page, "reddit-otp-detected");
+		const resp = await sendInteraction({
+			kind: "otp",
+			message:
+				"Reddit requires a 2FA verification code. Enter the 6-digit code from your authenticator app or SMS:",
+			schema: {
+				type: "object",
+				properties: { code: { type: "string", pattern: "^\\d{6}$" } },
+				required: ["code"],
+			},
+			timeout_seconds: 300,
+		});
+		const code = otpCode(resp);
+		if (!code) {
+			if (await isSessionLive(page)) {
+				return;
+			}
+			throw new Error("reddit_2fa_cancelled");
+		}
+		await otpIn.fill(code);
+		await page
+			.locator('button[type="submit"]')
+			.first()
+			.click()
+			.catch((): undefined => undefined);
+		await page
+			.waitForLoadState("domcontentloaded", { timeout: 30_000 })
+			.catch((): null => null);
+		await captureLoginState(capture, page, "reddit-otp-after-submit");
+	}
 
-  // Poll up to 90s — Reddit may redirect through interstitials before the
-  // session cookie is written.
-  for (let attempt = 0; attempt < 18; attempt += 1) {
-    if ((await hasSessionCookie(context)) && (await isSessionLive(page))) {
-      return;
-    }
-    await page.waitForTimeout(5000);
-  }
+	// Poll up to 90s — Reddit may redirect through interstitials before the
+	// session cookie is written.
+	for (let attempt = 0; attempt < 18; attempt += 1) {
+		if ((await hasSessionCookie(context)) && (await isSessionLive(page))) {
+			return;
+		}
+		await page.waitForTimeout(5000);
+	}
 
-  await captureLoginState(capture, page, "reddit-login-post-submit-failed");
-  throw new Error("reddit_login_post_submit_failed");
+	await captureLoginState(capture, page, "reddit-login-post-submit-failed");
+	throw new Error("reddit_login_post_submit_failed");
 }

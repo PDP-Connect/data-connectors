@@ -38,27 +38,34 @@ import { fileURLToPath } from "node:url";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 function largeFixtureBaseDir(): string {
-  return process.env.PDPP_TEST_LARGE_FIXTURE_DIR || tmpdir();
+	return process.env.PDPP_TEST_LARGE_FIXTURE_DIR || tmpdir();
 }
 
 async function waitForBarrier(path: string, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    try {
-      await access(path);
-      return;
-    } catch (error) {
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out waiting for test barrier: ${path}`, { cause: error });
-      }
-      await new Promise((done) => setTimeout(done, 10));
-    }
-  }
+	const deadline = Date.now() + timeoutMs;
+	while (true) {
+		try {
+			await access(path);
+			return;
+		} catch (error) {
+			if (Date.now() >= deadline) {
+				throw new Error(`timed out waiting for test barrier: ${path}`, {
+					cause: error,
+				});
+			}
+			await new Promise((done) => setTimeout(done, 10));
+		}
+	}
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(__dirname, "../..");
-const WHATSAPP_ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "whatsapp", "index.ts");
+const WHATSAPP_ENTRYPOINT = join(
+	PACKAGE_ROOT,
+	"connectors",
+	"whatsapp",
+	"index.ts",
+);
 
 const ORIGINAL_EXPORT = `[6/5/24, 9:15:22 AM] Alice: Hello
 [6/5/24, 9:16:00 AM] Bob: Hi there`;
@@ -70,95 +77,113 @@ const REWRITTEN_SAME_SIZE_EXPORT = `[6/5/24, 9:15:22 AM] Alice: Zzzzz
 [6/5/24, 9:16:00 AM] Bob: Hi there`;
 
 test("a .txt export rewritten (same size, new mtime) between pass 1 and pass 2 fails the run rather than emitting mismatched content", async () => {
-  assert.equal(
-    Buffer.byteLength(ORIGINAL_EXPORT, "utf8"),
-    Buffer.byteLength(REWRITTEN_SAME_SIZE_EXPORT, "utf8"),
-    "fixture sanity: the rewrite must be same-size to prove mtime, not just size, is checked"
-  );
-  const importRoot = await mkdtemp(join(largeFixtureBaseDir(), "pdpp-whatsapp-toctou-"));
-  const filePath = join(importRoot, "WhatsApp Chat - Alice.txt");
-  try {
-    await writeFile(filePath, ORIGINAL_EXPORT);
+	assert.equal(
+		Buffer.byteLength(ORIGINAL_EXPORT, "utf8"),
+		Buffer.byteLength(REWRITTEN_SAME_SIZE_EXPORT, "utf8"),
+		"fixture sanity: the rewrite must be same-size to prove mtime, not just size, is checked",
+	);
+	const importRoot = await mkdtemp(
+		join(largeFixtureBaseDir(), "pdpp-whatsapp-toctou-"),
+	);
+	const filePath = join(importRoot, "WhatsApp Chat - Alice.txt");
+	try {
+		await writeFile(filePath, ORIGINAL_EXPORT);
 
-    const runPromise = runConnectorProtocolSubprocess({
-      allowFailedDone: true,
-      cwd: PACKAGE_ROOT,
-      entrypoint: WHATSAPP_ENTRYPOINT,
-      env: {
-        PDPP_OWNER_TOKEN: "",
-        PDPP_RS_URL: "",
-        PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
-        RS_URL: "",
-        TZ: "America/Chicago",
-        WHATSAPP_EXPORT_DIR: importRoot,
-      },
-      start: {
-        scope: { streams: [{ name: "chats" }, { name: "messages" }] },
-        type: "START",
-      },
-      timeoutMs: 15_000,
-    });
+		const runPromise = runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_OWNER_TOKEN: "",
+				PDPP_RS_URL: "",
+				PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			start: {
+				scope: { streams: [{ name: "chats" }, { name: "messages" }] },
+				type: "START",
+			},
+			timeoutMs: 15_000,
+		});
 
-    await waitForBarrier(join(importRoot, "pass-1-complete"));
-    await writeFile(filePath, REWRITTEN_SAME_SIZE_EXPORT);
-    await writeFile(join(importRoot, "release-pass-2"), "release\n");
+		await waitForBarrier(join(importRoot, "pass-1-complete"));
+		await writeFile(filePath, REWRITTEN_SAME_SIZE_EXPORT);
+		await writeFile(join(importRoot, "release-pass-2"), "release\n");
 
-    const result = await runPromise;
-    const done = result.messages.at(-1);
-    assert.equal(done?.type, "DONE");
-    if (done?.type === "DONE") {
-      assert.equal(done.status, "failed", "the run must fail closed, not silently emit mismatched content");
-      assert.match(done.error?.message ?? "", /changed on disk/);
-    }
-    const messageRecords = result.messages.filter(
-      (m): m is Extract<typeof m, { type: "RECORD" }> => m.type === "RECORD" && m.stream === "messages"
-    );
-    assert.equal(messageRecords.length, 0, "no message records were emitted from the mismatched second pass");
-  } finally {
-    await rm(importRoot, { force: true, recursive: true });
-  }
+		const result = await runPromise;
+		const done = result.messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(
+				done.status,
+				"failed",
+				"the run must fail closed, not silently emit mismatched content",
+			);
+			assert.match(done.error?.message ?? "", /changed on disk/);
+		}
+		const messageRecords = result.messages.filter(
+			(m): m is Extract<typeof m, { type: "RECORD" }> =>
+				m.type === "RECORD" && m.stream === "messages",
+		);
+		assert.equal(
+			messageRecords.length,
+			0,
+			"no message records were emitted from the mismatched second pass",
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
 });
 
 test("a .txt export left UNCHANGED between pass 1 and pass 2 (barrier active, no mutation) still succeeds", async () => {
-  // Proves the barrier + identity re-check do not themselves introduce a
-  // false positive: releasing the exact boundary without touching the file
-  // must still succeed.
-  const importRoot = await mkdtemp(join(largeFixtureBaseDir(), "pdpp-whatsapp-toctou-stable-"));
-  const filePath = join(importRoot, "WhatsApp Chat - Alice.txt");
-  try {
-    await writeFile(filePath, ORIGINAL_EXPORT);
+	// Proves the barrier + identity re-check do not themselves introduce a
+	// false positive: releasing the exact boundary without touching the file
+	// must still succeed.
+	const importRoot = await mkdtemp(
+		join(largeFixtureBaseDir(), "pdpp-whatsapp-toctou-stable-"),
+	);
+	const filePath = join(importRoot, "WhatsApp Chat - Alice.txt");
+	try {
+		await writeFile(filePath, ORIGINAL_EXPORT);
 
-    const runPromise = runConnectorProtocolSubprocess({
-      cwd: PACKAGE_ROOT,
-      entrypoint: WHATSAPP_ENTRYPOINT,
-      env: {
-        PDPP_OWNER_TOKEN: "",
-        PDPP_RS_URL: "",
-        PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
-        RS_URL: "",
-        TZ: "America/Chicago",
-        WHATSAPP_EXPORT_DIR: importRoot,
-      },
-      start: {
-        scope: { streams: [{ name: "chats" }, { name: "messages" }] },
-        type: "START",
-      },
-      timeoutMs: 15_000,
-    });
-    await waitForBarrier(join(importRoot, "pass-1-complete"));
-    await writeFile(join(importRoot, "release-pass-2"), "release\n");
-    const result = await runPromise;
+		const runPromise = runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_OWNER_TOKEN: "",
+				PDPP_RS_URL: "",
+				PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			start: {
+				scope: { streams: [{ name: "chats" }, { name: "messages" }] },
+				type: "START",
+			},
+			timeoutMs: 15_000,
+		});
+		await waitForBarrier(join(importRoot, "pass-1-complete"));
+		await writeFile(join(importRoot, "release-pass-2"), "release\n");
+		const result = await runPromise;
 
-    const done = result.messages.at(-1);
-    assert.equal(done?.type, "DONE");
-    if (done?.type === "DONE") {
-      assert.equal(done.status, "succeeded");
-    }
-    const messageRecords = result.messages.filter(
-      (m): m is Extract<typeof m, { type: "RECORD" }> => m.type === "RECORD" && m.stream === "messages"
-    );
-    assert.equal(messageRecords.length, 2, "both messages are emitted when the file is genuinely unchanged");
-  } finally {
-    await rm(importRoot, { force: true, recursive: true });
-  }
+		const done = result.messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+		}
+		const messageRecords = result.messages.filter(
+			(m): m is Extract<typeof m, { type: "RECORD" }> =>
+				m.type === "RECORD" && m.stream === "messages",
+		);
+		assert.equal(
+			messageRecords.length,
+			2,
+			"both messages are emitted when the file is genuinely unchanged",
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
 });

@@ -15,30 +15,35 @@
  */
 
 /** Codes indicating source pressure rather than a connector defect. */
-export const PROVIDER_PRESSURE_REASONS: ReadonlySet<string> = new Set(["rate_limited", "upstream_pressure"]);
+export const PROVIDER_PRESSURE_REASONS: ReadonlySet<string> = new Set([
+	"rate_limited",
+	"upstream_pressure",
+]);
 
 /**
  * Codes requiring owner re-authentication (auth failure, credential expiry).
  */
-export const OWNER_REQUIRED_REASONS: ReadonlySet<string> = new Set(["auth_failure"]);
+export const OWNER_REQUIRED_REASONS: ReadonlySet<string> = new Set([
+	"auth_failure",
+]);
 
 /**
  * Codes indicating connector/system defects or permanent unavailability.
  */
 export const CONNECTOR_DEFECT_REASONS: ReadonlySet<string> = new Set([
-  "gone",
-  "not_found",
-  "permanent_forbidden",
-  "quarantined",
+	"gone",
+	"not_found",
+	"permanent_forbidden",
+	"quarantined",
 ]);
 
 /**
  * Informational, non-recoverable reason codes (user disabled, out of scope).
  */
 export const INFORMATIONAL_RECOVERY_REASONS: ReadonlySet<string> = new Set([
-  "not_available_in_mode",
-  "out_of_scope",
-  "user_disabled",
+	"not_available_in_mode",
+	"out_of_scope",
+	"user_disabled",
 ]);
 
 /**
@@ -48,11 +53,11 @@ export const INFORMATIONAL_RECOVERY_REASONS: ReadonlySet<string> = new Set([
  * to verify all codes have corresponding vetted copy.
  */
 export const RUNTIME_GENERIC_REASON_CODES: ReadonlySet<string> = new Set([
-  ...PROVIDER_PRESSURE_REASONS,
-  ...OWNER_REQUIRED_REASONS,
-  ...CONNECTOR_DEFECT_REASONS,
-  ...INFORMATIONAL_RECOVERY_REASONS,
-  "retry_exhausted",
-  "run_cap_deferred",
-  "temporary_unavailable",
+	...PROVIDER_PRESSURE_REASONS,
+	...OWNER_REQUIRED_REASONS,
+	...CONNECTOR_DEFECT_REASONS,
+	...INFORMATIONAL_RECOVERY_REASONS,
+	"retry_exhausted",
+	"run_cap_deferred",
+	"temporary_unavailable",
 ]);

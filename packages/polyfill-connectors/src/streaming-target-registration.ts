@@ -38,7 +38,7 @@
  */
 
 const REGISTRATION_PATH = (runId: string, interactionId: string): string =>
-  `/admin/runs/${encodeURIComponent(runId)}/interactions/${encodeURIComponent(interactionId)}/streaming-target`;
+	`/admin/runs/${encodeURIComponent(runId)}/interactions/${encodeURIComponent(interactionId)}/streaming-target`;
 
 // The connector process runs inside the Docker network for managed n.eko
 // surfaces, so its CDP endpoint is addressed by the internal service name.
@@ -46,88 +46,88 @@ const REGISTRATION_PATH = (runId: string, interactionId: string): string =>
 const ALLOWED_CDP_TARGET_HOSTS = new Set(["127.0.0.1", "localhost", "neko"]);
 
 export interface RegistrationLogger {
-  /**
-   * Best-effort warn channel; we keep the surface intentionally tiny so
-   * `console` and pino-style loggers both satisfy the type.
-   */
-  warn: (message: string, data?: Record<string, unknown>) => void;
+	/**
+	 * Best-effort warn channel; we keep the surface intentionally tiny so
+	 * `console` and pino-style loggers both satisfy the type.
+	 */
+	warn: (message: string, data?: Record<string, unknown>) => void;
 }
 
 export interface CreateRegistrationClientOptions {
-  /**
-   * Reference server base URL — the same value the surrounding collector
-   * runner uses when calling `LocalDeviceClient`.
-   */
-  readonly baseUrl: string;
-  /**
-   * Device-exporter bearer token, sourced from collector-runner enrollment.
-   * Without this, the reference server's `requireDeviceExporterCredential`
-   * middleware rejects with 401, so the client should not be constructed
-   * at all when the token is absent — let the call site decide.
-   */
-  readonly deviceToken: string;
-  /**
-   * Injectable for tests. Defaults to `globalThis.fetch`. Honours the
-   * standard `fetch` typing.
-   */
-  readonly fetch?: typeof fetch;
-  /**
-   * Optional structured logger. Defaults to a logger that writes to
-   * `process.stderr`, since this code runs inside the connector runtime
-   * which uses stdio for protocol traffic.
-   */
-  readonly logger?: RegistrationLogger;
+	/**
+	 * Reference server base URL — the same value the surrounding collector
+	 * runner uses when calling `LocalDeviceClient`.
+	 */
+	readonly baseUrl: string;
+	/**
+	 * Device-exporter bearer token, sourced from collector-runner enrollment.
+	 * Without this, the reference server's `requireDeviceExporterCredential`
+	 * middleware rejects with 401, so the client should not be constructed
+	 * at all when the token is absent — let the call site decide.
+	 */
+	readonly deviceToken: string;
+	/**
+	 * Injectable for tests. Defaults to `globalThis.fetch`. Honours the
+	 * standard `fetch` typing.
+	 */
+	readonly fetch?: typeof fetch;
+	/**
+	 * Optional structured logger. Defaults to a logger that writes to
+	 * `process.stderr`, since this code runs inside the connector runtime
+	 * which uses stdio for protocol traffic.
+	 */
+	readonly logger?: RegistrationLogger;
 }
 
 interface RegisterMetadataArgs {
-  readonly pageTitle?: string;
-  /**
-   * Optional diagnostic metadata. Forward-compatible: the server accepts,
-   * stores, and surfaces these on debug paths but does not consult them
-   * for resolution. Useful for "why did the operator see THIS page?"
-   * postmortems.
-   */
-  readonly pageUrl?: string;
-  readonly reason?: string;
+	readonly pageTitle?: string;
+	/**
+	 * Optional diagnostic metadata. Forward-compatible: the server accepts,
+	 * stores, and surfaces these on debug paths but does not consult them
+	 * for resolution. Useful for "why did the operator see THIS page?"
+	 * postmortems.
+	 */
+	readonly pageUrl?: string;
+	readonly reason?: string;
 }
 
 interface BaseRegisterArgs extends RegisterMetadataArgs {
-  /**
-   * Interaction id (e.g. `int_…`) of the manual_action this page handoff
-   * belongs to. The composite `(runId, interactionId)` is the registry key;
-   * a single run may host multiple manual_action interactions over its
-   * lifetime, each bound to its own page identity.
-   */
-  readonly interactionId: string;
-  /** Stable run id (e.g. `run_…`) shared between connector and server. */
-  readonly runId: string;
+	/**
+	 * Interaction id (e.g. `int_…`) of the manual_action this page handoff
+	 * belongs to. The composite `(runId, interactionId)` is the registry key;
+	 * a single run may host multiple manual_action interactions over its
+	 * lifetime, each bound to its own page identity.
+	 */
+	readonly interactionId: string;
+	/** Stable run id (e.g. `run_…`) shared between connector and server. */
+	readonly runId: string;
 }
 
 export interface CdpRegisterArgs extends BaseRegisterArgs {
-  /**
-   * CDP remains the default to preserve existing callers that only pass
-   * `wsUrl`.
-   */
-  readonly backend?: "cdp";
-  /**
-   * Page-target CDP WebSocket URL. MUST target an allowed local/container
-   * CDP host (`127.0.0.1`, `localhost`, or managed n.eko host `neko`) or
-   * the registration is short-circuited locally; the server enforces the
-   * same constraint.
-   */
-  readonly wsUrl: string;
+	/**
+	 * CDP remains the default to preserve existing callers that only pass
+	 * `wsUrl`.
+	 */
+	readonly backend?: "cdp";
+	/**
+	 * Page-target CDP WebSocket URL. MUST target an allowed local/container
+	 * CDP host (`127.0.0.1`, `localhost`, or managed n.eko host `neko`) or
+	 * the registration is short-circuited locally; the server enforces the
+	 * same constraint.
+	 */
+	readonly wsUrl: string;
 }
 
 export type NekoTargetDescriptor = Readonly<Record<string, unknown>>;
 
 export interface NekoRegisterArgs extends BaseRegisterArgs {
-  readonly backend: "neko";
-  /**
-   * Opaque n.eko target descriptor owned by the reference server. It is not
-   * a CDP bearer URL, so the client forwards it without CDP wsUrl
-   * validation.
-   */
-  readonly descriptor: NekoTargetDescriptor;
+	readonly backend: "neko";
+	/**
+	 * Opaque n.eko target descriptor owned by the reference server. It is not
+	 * a CDP bearer URL, so the client forwards it without CDP wsUrl
+	 * validation.
+	 */
+	readonly descriptor: NekoTargetDescriptor;
 }
 
 /**
@@ -139,33 +139,33 @@ export type RegisterArgs = CdpRegisterArgs;
 export type StreamingTargetRegisterArgs = RegisterArgs | NekoRegisterArgs;
 
 export interface UnregisterArgs {
-  readonly interactionId: string;
-  readonly runId: string;
+	readonly interactionId: string;
+	readonly runId: string;
 }
 
 export interface RegistrationClient {
-  /**
-   * PUT /admin/runs/:runId/interactions/:interactionId/streaming-target
-   *
-   * Idempotent: same-value re-PUT for an existing key succeeds silently;
-   * different-value PUT replaces the prior value (the server logs a
-   * diagnostic warn). Returns true on 2xx, false on any failure
-   * (network, HTTP, validation). Never throws.
-   */
-  register: (args: StreamingTargetRegisterArgs) => Promise<boolean>;
-  /**
-   * DELETE /admin/runs/:runId/interactions/:interactionId/streaming-target
-   * Returns true on 2xx, false on any failure. Never throws. Cleanup is
-   * best-effort; a stale record will be evicted by the server's TTL.
-   */
-  unregister: (args: UnregisterArgs) => Promise<boolean>;
+	/**
+	 * PUT /admin/runs/:runId/interactions/:interactionId/streaming-target
+	 *
+	 * Idempotent: same-value re-PUT for an existing key succeeds silently;
+	 * different-value PUT replaces the prior value (the server logs a
+	 * diagnostic warn). Returns true on 2xx, false on any failure
+	 * (network, HTTP, validation). Never throws.
+	 */
+	register: (args: StreamingTargetRegisterArgs) => Promise<boolean>;
+	/**
+	 * DELETE /admin/runs/:runId/interactions/:interactionId/streaming-target
+	 * Returns true on 2xx, false on any failure. Never throws. Cleanup is
+	 * best-effort; a stale record will be evicted by the server's TTL.
+	 */
+	unregister: (args: UnregisterArgs) => Promise<boolean>;
 }
 
 const defaultLogger: RegistrationLogger = {
-  warn(message, data) {
-    const suffix = data ? ` ${JSON.stringify(data)}` : "";
-    process.stderr.write(`[streaming-registration] ${message}${suffix}\n`);
-  },
+	warn(message, data) {
+		const suffix = data ? ` ${JSON.stringify(data)}` : "";
+		process.stderr.write(`[streaming-registration] ${message}${suffix}\n`);
+	},
 };
 
 /**
@@ -177,155 +177,190 @@ const defaultLogger: RegistrationLogger = {
  * process for a destination outside the known local/container CDP boundary.
  */
 function isAllowedCdpWsUrl(wsUrl: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(wsUrl);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    return false;
-  }
-  return ALLOWED_CDP_TARGET_HOSTS.has(parsed.hostname);
+	let parsed: URL;
+	try {
+		parsed = new URL(wsUrl);
+	} catch {
+		return false;
+	}
+	if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+		return false;
+	}
+	return ALLOWED_CDP_TARGET_HOSTS.has(parsed.hostname);
 }
 
 function isDescriptorObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function addOptionalMetadata(
-  body: Record<string, unknown>,
-  { pageUrl, pageTitle, reason }: RegisterMetadataArgs
+	body: Record<string, unknown>,
+	{ pageUrl, pageTitle, reason }: RegisterMetadataArgs,
 ): void {
-  if (typeof pageUrl === "string" && pageUrl.length > 0) {
-    body.page_url = pageUrl;
-  }
-  if (typeof pageTitle === "string" && pageTitle.length > 0) {
-    body.page_title = pageTitle;
-  }
-  if (typeof reason === "string" && reason.length > 0) {
-    body.reason = reason;
-  }
+	if (typeof pageUrl === "string" && pageUrl.length > 0) {
+		body.page_url = pageUrl;
+	}
+	if (typeof pageTitle === "string" && pageTitle.length > 0) {
+		body.page_title = pageTitle;
+	}
+	if (typeof reason === "string" && reason.length > 0) {
+		body.reason = reason;
+	}
 }
 
 /**
  * Construct a registration client bound to a base URL and device token.
  * The client never throws; all errors are logged + returned as `false`.
  */
-export function createRegistrationClient(options: CreateRegistrationClientOptions): RegistrationClient {
-  if (!options.baseUrl) {
-    throw new Error("createRegistrationClient: baseUrl required");
-  }
-  if (!options.deviceToken) {
-    throw new Error("createRegistrationClient: deviceToken required");
-  }
-  const baseUrl = new URL(options.baseUrl);
-  const fetchImpl: typeof fetch = options.fetch ?? globalThis.fetch;
-  const logger: RegistrationLogger = options.logger ?? defaultLogger;
-  const authHeader = `Bearer ${options.deviceToken}`;
+export function createRegistrationClient(
+	options: CreateRegistrationClientOptions,
+): RegistrationClient {
+	if (!options.baseUrl) {
+		throw new Error("createRegistrationClient: baseUrl required");
+	}
+	if (!options.deviceToken) {
+		throw new Error("createRegistrationClient: deviceToken required");
+	}
+	const baseUrl = new URL(options.baseUrl);
+	const fetchImpl: typeof fetch = options.fetch ?? globalThis.fetch;
+	const logger: RegistrationLogger = options.logger ?? defaultLogger;
+	const authHeader = `Bearer ${options.deviceToken}`;
 
-  if (typeof fetchImpl !== "function") {
-    throw new Error("createRegistrationClient: no fetch implementation available");
-  }
+	if (typeof fetchImpl !== "function") {
+		throw new Error(
+			"createRegistrationClient: no fetch implementation available",
+		);
+	}
 
-  return {
-    async register(args: StreamingTargetRegisterArgs): Promise<boolean> {
-      const { runId, interactionId } = args;
-      if (!runId) {
-        logger.warn("register skipped: runId is empty");
-        return false;
-      }
-      if (!interactionId) {
-        logger.warn("register skipped: interactionId is empty", { runId });
-        return false;
-      }
+	return {
+		async register(args: StreamingTargetRegisterArgs): Promise<boolean> {
+			const { runId, interactionId } = args;
+			if (!runId) {
+				logger.warn("register skipped: runId is empty");
+				return false;
+			}
+			if (!interactionId) {
+				logger.warn("register skipped: interactionId is empty", { runId });
+				return false;
+			}
 
-      let method: "POST" | "PUT";
-      let body: Record<string, unknown>;
-      if (args.backend === "neko") {
-        if (!isDescriptorObject(args.descriptor)) {
-          logger.warn("register skipped: neko descriptor is not an object", { runId, interactionId });
-          return false;
-        }
-        method = "POST";
-        body = { backend: "neko", descriptor: args.descriptor };
-      } else {
-        const { wsUrl } = args;
-        if (!isAllowedCdpWsUrl(wsUrl)) {
-          // We deliberately do NOT log the rejected URL — the path component
-          // is a bearer secret. Just say what failed.
-          logger.warn("register skipped: wsUrl host is not allowed", { runId, interactionId });
-          return false;
-        }
-        method = "PUT";
-        body = { ws_url: wsUrl };
-      }
-      addOptionalMetadata(body, args);
+			let method: "POST" | "PUT";
+			let body: Record<string, unknown>;
+			if (args.backend === "neko") {
+				if (!isDescriptorObject(args.descriptor)) {
+					logger.warn("register skipped: neko descriptor is not an object", {
+						runId,
+						interactionId,
+					});
+					return false;
+				}
+				method = "POST";
+				body = { backend: "neko", descriptor: args.descriptor };
+			} else {
+				const { wsUrl } = args;
+				if (!isAllowedCdpWsUrl(wsUrl)) {
+					// We deliberately do NOT log the rejected URL — the path component
+					// is a bearer secret. Just say what failed.
+					logger.warn("register skipped: wsUrl host is not allowed", {
+						runId,
+						interactionId,
+					});
+					return false;
+				}
+				method = "PUT";
+				body = { ws_url: wsUrl };
+			}
+			addOptionalMetadata(body, args);
 
-      let response: Response;
-      try {
-        response = await fetchImpl(new URL(REGISTRATION_PATH(runId, interactionId), baseUrl), {
-          method,
-          headers: {
-            accept: "application/json",
-            authorization: authHeader,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(body),
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn("register failed (network error)", { runId, interactionId, error: message });
-        return false;
-      }
-      if (!response.ok) {
-        // Drain the response so the underlying socket can be reused. The
-        // reference server's response shape is the standard `pdppError`
-        // envelope; we don't surface its body — the most useful signal
-        // for the operator is `status`, since 401/403 means token issue
-        // and 4xx other means client bug.
-        await response.text().catch((): undefined => undefined);
-        logger.warn("register failed", { runId, interactionId, status: response.status });
-        return false;
-      }
-      // Drain successful body too.
-      await response.text().catch((): undefined => undefined);
-      return true;
-    },
+			let response: Response;
+			try {
+				response = await fetchImpl(
+					new URL(REGISTRATION_PATH(runId, interactionId), baseUrl),
+					{
+						method,
+						headers: {
+							accept: "application/json",
+							authorization: authHeader,
+							"content-type": "application/json",
+						},
+						body: JSON.stringify(body),
+					},
+				);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				logger.warn("register failed (network error)", {
+					runId,
+					interactionId,
+					error: message,
+				});
+				return false;
+			}
+			if (!response.ok) {
+				// Drain the response so the underlying socket can be reused. The
+				// reference server's response shape is the standard `pdppError`
+				// envelope; we don't surface its body — the most useful signal
+				// for the operator is `status`, since 401/403 means token issue
+				// and 4xx other means client bug.
+				await response.text().catch((): undefined => undefined);
+				logger.warn("register failed", {
+					runId,
+					interactionId,
+					status: response.status,
+				});
+				return false;
+			}
+			// Drain successful body too.
+			await response.text().catch((): undefined => undefined);
+			return true;
+		},
 
-    async unregister({ runId, interactionId }: UnregisterArgs): Promise<boolean> {
-      if (!(runId && interactionId)) {
-        return false;
-      }
-      let response: Response;
-      try {
-        response = await fetchImpl(new URL(REGISTRATION_PATH(runId, interactionId), baseUrl), {
-          method: "DELETE",
-          headers: {
-            accept: "application/json",
-            authorization: authHeader,
-          },
-        });
-      } catch (err) {
-        // Cleanup is best-effort; warn quietly. The server's TTL sweeps
-        // stale records anyway.
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn("unregister failed (network error)", { runId, interactionId, error: message });
-        return false;
-      }
-      if (!response.ok) {
-        await response.text().catch((): undefined => undefined);
-        // 404 is the common case (server already swept the record, or
-        // we never registered) — don't elevate noise.
-        if (response.status !== 404) {
-          logger.warn("unregister failed", { runId, interactionId, status: response.status });
-        }
-        return false;
-      }
-      await response.text().catch((): undefined => undefined);
-      return true;
-    },
-  };
+		async unregister({
+			runId,
+			interactionId,
+		}: UnregisterArgs): Promise<boolean> {
+			if (!(runId && interactionId)) {
+				return false;
+			}
+			let response: Response;
+			try {
+				response = await fetchImpl(
+					new URL(REGISTRATION_PATH(runId, interactionId), baseUrl),
+					{
+						method: "DELETE",
+						headers: {
+							accept: "application/json",
+							authorization: authHeader,
+						},
+					},
+				);
+			} catch (err) {
+				// Cleanup is best-effort; warn quietly. The server's TTL sweeps
+				// stale records anyway.
+				const message = err instanceof Error ? err.message : String(err);
+				logger.warn("unregister failed (network error)", {
+					runId,
+					interactionId,
+					error: message,
+				});
+				return false;
+			}
+			if (!response.ok) {
+				await response.text().catch((): undefined => undefined);
+				// 404 is the common case (server already swept the record, or
+				// we never registered) — don't elevate noise.
+				if (response.status !== 404) {
+					logger.warn("unregister failed", {
+						runId,
+						interactionId,
+						status: response.status,
+					});
+				}
+				return false;
+			}
+			await response.text().catch((): undefined => undefined);
+			return true;
+		},
+	};
 }
 
 /** Exported for tests that want to validate URL shapes without a server. */
@@ -359,9 +394,9 @@ const STREAMING_REGISTRATION_TOKEN_ENV = "PDPP_STREAMING_REGISTRATION_TOKEN";
 const LOCAL_DEVICE_TOKEN_ENV = "PDPP_LOCAL_DEVICE_TOKEN";
 
 export interface StreamingTargetRegistrationHooks {
-  register: (args: StreamingTargetRegisterArgs) => Promise<boolean>;
-  readonly runId: string;
-  unregister: (args: UnregisterArgs) => Promise<boolean>;
+	register: (args: StreamingTargetRegisterArgs) => Promise<boolean>;
+	readonly runId: string;
+	unregister: (args: UnregisterArgs) => Promise<boolean>;
 }
 
 /**
@@ -390,35 +425,38 @@ export interface StreamingTargetRegistrationHooks {
  * the same env-var channel.
  */
 export function resolveStreamingRegistrationFromEnv(
-  env: NodeJS.ProcessEnv = process.env
+	env: NodeJS.ProcessEnv = process.env,
 ): Promise<StreamingTargetRegistrationHooks | undefined> {
-  const runId = env.PDPP_RUN_ID?.trim();
-  const baseUrl = env.PDPP_REFERENCE_BASE_URL?.trim();
-  const registrationToken = env[STREAMING_REGISTRATION_TOKEN_ENV]?.trim();
-  const deviceToken = env[LOCAL_DEVICE_TOKEN_ENV]?.trim();
-  // Per-run nonce wins over device token. The two carry different
-  // authorities; the route accepts either.
-  const bearerToken = registrationToken || deviceToken;
-  if (!(runId && baseUrl && bearerToken)) {
-    if (runId && !(baseUrl && bearerToken)) {
-      // Operator likely intended to enable streaming but hasn't wired up
-      // the bearer context yet. Surface this honestly so it's easy to
-      // diagnose. Don't include the token value or the URL itself
-      // (URL may carry an embedded token in some setups).
-      process.stderr.write(
-        "[streaming-registration] PDPP_RUN_ID set but PDPP_REFERENCE_BASE_URL or " +
-          `${STREAMING_REGISTRATION_TOKEN_ENV}/${LOCAL_DEVICE_TOKEN_ENV} missing; ` +
-          "streaming-companion target not registered for this run.\n"
-      );
-    }
-    return Promise.resolve(undefined);
-  }
-  const client = createRegistrationClient({ baseUrl, deviceToken: bearerToken });
-  return Promise.resolve({
-    runId,
-    register: (args): Promise<boolean> => client.register(args),
-    unregister: (args): Promise<boolean> => client.unregister(args),
-  });
+	const runId = env.PDPP_RUN_ID?.trim();
+	const baseUrl = env.PDPP_REFERENCE_BASE_URL?.trim();
+	const registrationToken = env[STREAMING_REGISTRATION_TOKEN_ENV]?.trim();
+	const deviceToken = env[LOCAL_DEVICE_TOKEN_ENV]?.trim();
+	// Per-run nonce wins over device token. The two carry different
+	// authorities; the route accepts either.
+	const bearerToken = registrationToken || deviceToken;
+	if (!(runId && baseUrl && bearerToken)) {
+		if (runId && !(baseUrl && bearerToken)) {
+			// Operator likely intended to enable streaming but hasn't wired up
+			// the bearer context yet. Surface this honestly so it's easy to
+			// diagnose. Don't include the token value or the URL itself
+			// (URL may carry an embedded token in some setups).
+			process.stderr.write(
+				"[streaming-registration] PDPP_RUN_ID set but PDPP_REFERENCE_BASE_URL or " +
+					`${STREAMING_REGISTRATION_TOKEN_ENV}/${LOCAL_DEVICE_TOKEN_ENV} missing; ` +
+					"streaming-companion target not registered for this run.\n",
+			);
+		}
+		return Promise.resolve(undefined);
+	}
+	const client = createRegistrationClient({
+		baseUrl,
+		deviceToken: bearerToken,
+	});
+	return Promise.resolve({
+		runId,
+		register: (args): Promise<boolean> => client.register(args),
+		unregister: (args): Promise<boolean> => client.unregister(args),
+	});
 }
 
 /** Exported for tests that want to assert env-var precedence. */

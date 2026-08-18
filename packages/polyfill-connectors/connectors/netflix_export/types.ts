@@ -33,25 +33,25 @@ export type ViewingActivitySourceSchema = "direct_history" | "full_export";
 export type DirectHistoryDateOrder = "DMY" | "MDY";
 
 export interface ViewingActivityRecord {
-  country: string | null;
-  device_type: string | null;
-  duration_seconds: number | null;
-  id: string;
-  profile_name: string | null;
-  source_schema: ViewingActivitySourceSchema;
-  title: string | null;
-  watched_at: string;
-  /** "day": watched_at is midnight UTC of a calendar day only, no real time-of-day. "instant": watched_at is a real UTC timestamp. */
-  watched_at_precision: "day" | "instant";
-  /** The original, unparsed date/timestamp string from the CSV, preserved verbatim for auditability. */
-  watched_at_raw: string;
-  [key: string]: string | null | number;
+	country: string | null;
+	device_type: string | null;
+	duration_seconds: number | null;
+	id: string;
+	profile_name: string | null;
+	source_schema: ViewingActivitySourceSchema;
+	title: string | null;
+	watched_at: string;
+	/** "day": watched_at is midnight UTC of a calendar day only, no real time-of-day. "instant": watched_at is a real UTC timestamp. */
+	watched_at_precision: "day" | "instant";
+	/** The original, unparsed date/timestamp string from the CSV, preserved verbatim for auditability. */
+	watched_at_raw: string;
+	[key: string]: string | null | number;
 }
 
 export interface StreamTimestampState {
-  last_timestamp?: string;
+	last_timestamp?: string;
 }
 
 export interface NetflixExportState {
-  viewing_activity?: StreamTimestampState;
+	viewing_activity?: StreamTimestampState;
 }

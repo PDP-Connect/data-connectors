@@ -22,19 +22,30 @@ import { glob } from "node:fs/promises";
 // B2/B5), not a local vendor addition.
 const EXCLUDED = new Set(["connectors/github/index.test.ts"]);
 
-const patterns = ["bin/**/*.test.ts", "connectors/**/*.test.ts", "src/**/*.test.ts"];
+const patterns = [
+	"bin/**/*.test.ts",
+	"connectors/**/*.test.ts",
+	"src/**/*.test.ts",
+];
 const files = [];
 for (const pattern of patterns) {
-  for await (const entry of glob(pattern)) {
-    if (!EXCLUDED.has(entry)) {
-      files.push(entry);
-    }
-  }
+	for await (const entry of glob(pattern)) {
+		if (!EXCLUDED.has(entry)) {
+			files.push(entry);
+		}
+	}
 }
 
 const child = spawn(
-  process.execPath,
-  ["--test", "--import", "tsx", "--test-concurrency=2", "--test-timeout=120000", ...files],
-  { stdio: "inherit" }
+	process.execPath,
+	[
+		"--test",
+		"--import",
+		"tsx",
+		"--test-concurrency=2",
+		"--test-timeout=120000",
+		...files,
+	],
+	{ stdio: "inherit" },
 );
 child.on("exit", (code) => process.exit(code ?? 1));

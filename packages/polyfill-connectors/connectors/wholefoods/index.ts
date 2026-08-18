@@ -9,36 +9,37 @@
  * metadata on the owner's return.
  */
 import {
-  type BrowserCollectContext,
-  type ProbeSessionArgs,
-  politeDelay,
-  runConnector,
+	type BrowserCollectContext,
+	type ProbeSessionArgs,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 const SESSION_COOKIE = /session|at-main/;
 
 runConnector({
-  name: "wholefoods",
-  browser: {},
-  validateRecord,
-  async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-    const cookies = await context.cookies("https://www.amazon.com/");
-    return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
-  },
-  async collect({ page, emit }: BrowserCollectContext): Promise<void> {
-    await page
-      .goto("https://www.amazon.com/gp/css/order-history", {
-        waitUntil: "domcontentloaded",
-        timeout: 30_000,
-      })
-      .catch((): undefined => undefined);
-    await politeDelay(2500);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "wholefoods_filter_pending",
-      message: "Amazon session reachable. Whole Foods filter + USDA nutrition lookup deferred to live session.",
-    });
-  },
+	name: "wholefoods",
+	browser: {},
+	validateRecord,
+	async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
+		const cookies = await context.cookies("https://www.amazon.com/");
+		return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
+	},
+	async collect({ page, emit }: BrowserCollectContext): Promise<void> {
+		await page
+			.goto("https://www.amazon.com/gp/css/order-history", {
+				waitUntil: "domcontentloaded",
+				timeout: 30_000,
+			})
+			.catch((): undefined => undefined);
+		await politeDelay(2500);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "wholefoods_filter_pending",
+			message:
+				"Amazon session reachable. Whole Foods filter + USDA nutrition lookup deferred to live session.",
+		});
+	},
 });

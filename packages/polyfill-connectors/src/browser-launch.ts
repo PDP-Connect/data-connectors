@@ -32,7 +32,10 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Browser, BrowserContext, chromium } from "playwright";
-import { removeChromiumSingletonResidue, withProfileLockMutex } from "./profile-lock.ts";
+import {
+	removeChromiumSingletonResidue,
+	withProfileLockMutex,
+} from "./profile-lock.ts";
 import { isRunningInContainer } from "./runtime-environment.ts";
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -44,62 +47,62 @@ const CDP_ATTACH_RACE_METHOD_RE = /Network\.setCacheDisabled/;
 const CDP_ATTACH_RACE_SESSION_CLOSED_RE = /session closed/i;
 
 export interface IsolatedBrowser {
-  browser: Browser | null;
-  context: BrowserContext;
-  release: () => Promise<void>;
+	browser: Browser | null;
+	context: BrowserContext;
+	release: () => Promise<void>;
 }
 
 export interface AcquireIsolatedBrowserOptions {
-  headless?: boolean;
-  /**
-   * Skip remote-CDP page-target cleanup before attach. Use only when the
-   * connector intentionally preserves successful pages because the page itself
-   * carries source auth state.
-   */
-  preserveRemotePagesOnAcquire?: boolean;
-  profileName: string;
-  /**
-   * When set, the launcher does NOT spawn its own Chromium. Instead it
-   * calls `patchright.chromium.connectOverCDP(remoteCdpUrl)` and returns
-   * the FIRST existing context as the connector's context. Used for
-   * connectors that need a real X server + WebRTC streaming (n.eko-hosted
-   * Chromium) so the manual_action handoff goes back to the same browser
-   * the connector was driving — not a separate headless Chrome launched
-   * inside the reference container.
-   *
-   * The release function disconnects the Patchright client; it does NOT
-   * close the remote browser. The neko container owns that lifecycle.
-   *
-   * When set, `streamingEnabled` is implied; we register the page-target
-   * wsUrl for manual_action via the standard browser-handoff helper, but
-   * the wsUrl points at the neko-hosted page through the cdp-proxy.py
-   * URL the streaming companion already knows how to attach to.
-   */
-  remoteCdpUrl?: string;
-  /**
-   * When true, the launcher launches Chromium in CDP-port mode
-   * (`--remote-debugging-port=0` plus `--remote-debugging-address=127.0.0.1`), reads
-   * the resolved random port out of `<userDataDir>/DevToolsActivePort`,
-   * and publishes `PDPP_BROWSER_CDP_HOST` / `PDPP_BROWSER_CDP_PORT` to
-   * `process.env` for the browser-binding-local handoff helper
-   * (`browser-handoff.ts`) to compose per-interaction wsUrls at
-   * `manual_action` emission time.
-   *
-   * The launcher itself does NOT register any streaming target — that
-   * is interaction-scoped and owned by the binding code that emits the
-   * manual_action. See
-   * `openspec/changes/add-run-interaction-streaming-companion/`
-   * `design-notes/interaction-scoped-target-resolution-2026-05-05.md`.
-   *
-   * Best-effort port publication: any failure (port not appearing in
-   * `DevToolsActivePort`, etc.) logs a warning and lets the browser
-   * launch succeed. The honest failure mode is "streaming unavailable
-   * for this run; records still flow."
-   *
-   * Connectors that never need streaming MUST be unaffected — leave
-   * this `false` or omit it.
-   */
-  streamingEnabled?: boolean;
+	headless?: boolean;
+	/**
+	 * Skip remote-CDP page-target cleanup before attach. Use only when the
+	 * connector intentionally preserves successful pages because the page itself
+	 * carries source auth state.
+	 */
+	preserveRemotePagesOnAcquire?: boolean;
+	profileName: string;
+	/**
+	 * When set, the launcher does NOT spawn its own Chromium. Instead it
+	 * calls `patchright.chromium.connectOverCDP(remoteCdpUrl)` and returns
+	 * the FIRST existing context as the connector's context. Used for
+	 * connectors that need a real X server + WebRTC streaming (n.eko-hosted
+	 * Chromium) so the manual_action handoff goes back to the same browser
+	 * the connector was driving — not a separate headless Chrome launched
+	 * inside the reference container.
+	 *
+	 * The release function disconnects the Patchright client; it does NOT
+	 * close the remote browser. The neko container owns that lifecycle.
+	 *
+	 * When set, `streamingEnabled` is implied; we register the page-target
+	 * wsUrl for manual_action via the standard browser-handoff helper, but
+	 * the wsUrl points at the neko-hosted page through the cdp-proxy.py
+	 * URL the streaming companion already knows how to attach to.
+	 */
+	remoteCdpUrl?: string;
+	/**
+	 * When true, the launcher launches Chromium in CDP-port mode
+	 * (`--remote-debugging-port=0` plus `--remote-debugging-address=127.0.0.1`), reads
+	 * the resolved random port out of `<userDataDir>/DevToolsActivePort`,
+	 * and publishes `PDPP_BROWSER_CDP_HOST` / `PDPP_BROWSER_CDP_PORT` to
+	 * `process.env` for the browser-binding-local handoff helper
+	 * (`browser-handoff.ts`) to compose per-interaction wsUrls at
+	 * `manual_action` emission time.
+	 *
+	 * The launcher itself does NOT register any streaming target — that
+	 * is interaction-scoped and owned by the binding code that emits the
+	 * manual_action. See
+	 * `openspec/changes/add-run-interaction-streaming-companion/`
+	 * `design-notes/interaction-scoped-target-resolution-2026-05-05.md`.
+	 *
+	 * Best-effort port publication: any failure (port not appearing in
+	 * `DevToolsActivePort`, etc.) logs a warning and lets the browser
+	 * launch succeed. The honest failure mode is "streaming unavailable
+	 * for this run; records still flow."
+	 *
+	 * Connectors that never need streaming MUST be unaffected — leave
+	 * this `false` or omit it.
+	 */
+	streamingEnabled?: boolean;
 }
 
 /**
@@ -117,13 +120,13 @@ export const HEADED_BROWSER_UNAVAILABLE_CODE = "headed_browser_unavailable";
  * actionable deployment-config error state.
  */
 export class HeadedBrowserUnavailableError extends Error {
-  readonly code: typeof HEADED_BROWSER_UNAVAILABLE_CODE;
+	readonly code: typeof HEADED_BROWSER_UNAVAILABLE_CODE;
 
-  constructor(args: { message: string }) {
-    super(args.message);
-    this.name = "HeadedBrowserUnavailableError";
-    this.code = HEADED_BROWSER_UNAVAILABLE_CODE;
-  }
+	constructor(args: { message: string }) {
+		super(args.message);
+		this.name = "HeadedBrowserUnavailableError";
+		this.code = HEADED_BROWSER_UNAVAILABLE_CODE;
+	}
 }
 
 /**
@@ -152,29 +155,29 @@ export class HeadedBrowserUnavailableError extends Error {
  *   - `{ kind: "proceed" }` otherwise.
  */
 export type ContainerHeadedBrowserGate =
-  | { readonly kind: "fail_closed" }
-  | { readonly kind: "warn_and_proceed" }
-  | { readonly kind: "proceed" };
+	| { readonly kind: "fail_closed" }
+	| { readonly kind: "warn_and_proceed" }
+	| { readonly kind: "proceed" };
 
 export interface ContainerHeadedBrowserGateInputs {
-  readonly escapeHatchEnabled: boolean;
-  readonly headless: boolean | undefined;
-  readonly inContainer: boolean;
-  /**
-   * Core's startup supervisor has installed the image-owned browser runtime
-   * and waited for its managed Xvfb display. Omitted/false preserves the
-   * fail-closed behavior for unrelated container runtimes.
-   */
-  readonly managedDisplayAvailable?: boolean;
-  /**
-   * When set, the launcher will NOT spawn a local headed Chromium — it
-   * will attach to a remote CDP endpoint (e.g. a n.eko browser surface) which
-   * already renders the browser visibly for the operator. In that case
-   * the in-container fail-closed gate does not apply: there is no
-   * invisible headed browser to fail closed against. Local headed
-   * container launches (no remoteCdpUrl) still fail closed as before.
-   */
-  readonly remoteCdpUrl?: string;
+	readonly escapeHatchEnabled: boolean;
+	readonly headless: boolean | undefined;
+	readonly inContainer: boolean;
+	/**
+	 * Core's startup supervisor has installed the image-owned browser runtime
+	 * and waited for its managed Xvfb display. Omitted/false preserves the
+	 * fail-closed behavior for unrelated container runtimes.
+	 */
+	readonly managedDisplayAvailable?: boolean;
+	/**
+	 * When set, the launcher will NOT spawn a local headed Chromium — it
+	 * will attach to a remote CDP endpoint (e.g. a n.eko browser surface) which
+	 * already renders the browser visibly for the operator. In that case
+	 * the in-container fail-closed gate does not apply: there is no
+	 * invisible headed browser to fail closed against. Local headed
+	 * container launches (no remoteCdpUrl) still fail closed as before.
+	 */
+	readonly remoteCdpUrl?: string;
 }
 
 /**
@@ -183,10 +186,10 @@ export interface ContainerHeadedBrowserGateInputs {
  * operator-side low-level callers as the existing headless escape hatch.
  */
 export function resolveDeploymentBrowserHeadless(
-  headless: boolean | undefined,
-  env: Record<string, string | undefined> = process.env
+	headless: boolean | undefined,
+	env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return headless ?? env[BROWSER_HEADLESS_ENV]?.trim() === "1";
+	return headless ?? env[BROWSER_HEADLESS_ENV]?.trim() === "1";
 }
 
 /**
@@ -196,35 +199,40 @@ export function resolveDeploymentBrowserHeadless(
  */
 const ACQUIRE_ISOLATED_BROWSER_HEADLESS_DEFAULT = false;
 
-export function decideContainerHeadedBrowserGate(inputs: ContainerHeadedBrowserGateInputs): ContainerHeadedBrowserGate {
-  const effectiveHeadless = inputs.headless ?? ACQUIRE_ISOLATED_BROWSER_HEADLESS_DEFAULT;
-  const headedRequested = effectiveHeadless === false;
-  if (!(headedRequested && inputs.inContainer)) {
-    return { kind: "proceed" };
-  }
-  // Remote-CDP attach bypasses the gate: the visible browser is owned by a
-  // separate operator-visible surface (e.g. n.eko) and the operator can see it
-  // via the streaming companion. There is no invisible headed Chromium in the
-  // reference container to fail closed against.
-  if (inputs.remoteCdpUrl && inputs.remoteCdpUrl.length > 0) {
-    return { kind: "proceed" };
-  }
-  if (inputs.managedDisplayAvailable) {
-    return { kind: "proceed" };
-  }
-  if (inputs.escapeHatchEnabled) {
-    return { kind: "warn_and_proceed" };
-  }
-  return { kind: "fail_closed" };
+export function decideContainerHeadedBrowserGate(
+	inputs: ContainerHeadedBrowserGateInputs,
+): ContainerHeadedBrowserGate {
+	const effectiveHeadless =
+		inputs.headless ?? ACQUIRE_ISOLATED_BROWSER_HEADLESS_DEFAULT;
+	const headedRequested = effectiveHeadless === false;
+	if (!(headedRequested && inputs.inContainer)) {
+		return { kind: "proceed" };
+	}
+	// Remote-CDP attach bypasses the gate: the visible browser is owned by a
+	// separate operator-visible surface (e.g. n.eko) and the operator can see it
+	// via the streaming companion. There is no invisible headed Chromium in the
+	// reference container to fail closed against.
+	if (inputs.remoteCdpUrl && inputs.remoteCdpUrl.length > 0) {
+		return { kind: "proceed" };
+	}
+	if (inputs.managedDisplayAvailable) {
+		return { kind: "proceed" };
+	}
+	if (inputs.escapeHatchEnabled) {
+		return { kind: "warn_and_proceed" };
+	}
+	return { kind: "fail_closed" };
 }
 
-export function configuredBrowserChannel(env: Record<string, string | undefined> = process.env): string | undefined {
-  const raw = env.PDPP_BROWSER_CHANNEL;
-  if (raw === undefined) {
-    return;
-  }
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+export function configuredBrowserChannel(
+	env: Record<string, string | undefined> = process.env,
+): string | undefined {
+	const raw = env.PDPP_BROWSER_CHANNEL;
+	if (raw === undefined) {
+		return;
+	}
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
@@ -278,16 +286,19 @@ export function configuredBrowserChannel(env: Record<string, string | undefined>
  * protocol errors (auth, bad URL, real crash) still fail fast.
  */
 export function isCdpAttachSessionRaceError(err: unknown): boolean {
-  let message = "";
-  if (err instanceof Error) {
-    ({ message } = err);
-  } else if (typeof err === "string") {
-    message = err;
-  }
-  if (!message) {
-    return false;
-  }
-  return CDP_ATTACH_RACE_METHOD_RE.test(message) && CDP_ATTACH_RACE_SESSION_CLOSED_RE.test(message);
+	let message = "";
+	if (err instanceof Error) {
+		({ message } = err);
+	} else if (typeof err === "string") {
+		message = err;
+	}
+	if (!message) {
+		return false;
+	}
+	return (
+		CDP_ATTACH_RACE_METHOD_RE.test(message) &&
+		CDP_ATTACH_RACE_SESSION_CLOSED_RE.test(message)
+	);
 }
 
 /**
@@ -301,7 +312,8 @@ export function isCdpAttachSessionRaceError(err: unknown): boolean {
  * lifecycle) MUST key off this typed code and MUST NOT re-derive the same
  * disposition by re-parsing error message text.
  */
-export const CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE = "browser_surface_attach_exhausted";
+export const CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE =
+	"browser_surface_attach_exhausted";
 
 /**
  * Error subclass thrown when `connectOverCdpWithRetry` gives up after
@@ -311,16 +323,20 @@ export const CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE = "browser_surface_attach_ex
  * `cause` for logs/diagnostics only).
  */
 export class CdpAttachSessionRaceExhaustedError extends Error {
-  readonly code: typeof CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
+	readonly code: typeof CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
 
-  constructor(lastError: unknown) {
-    const lastMessage = lastError instanceof Error ? lastError.message : String(lastError);
-    super(`remote CDP attach exhausted its retry budget on the attach-session race: ${lastMessage}`, {
-      cause: lastError,
-    });
-    this.name = "CdpAttachSessionRaceExhaustedError";
-    this.code = CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
-  }
+	constructor(lastError: unknown) {
+		const lastMessage =
+			lastError instanceof Error ? lastError.message : String(lastError);
+		super(
+			`remote CDP attach exhausted its retry budget on the attach-session race: ${lastMessage}`,
+			{
+				cause: lastError,
+			},
+		);
+		this.name = "CdpAttachSessionRaceExhaustedError";
+		this.code = CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
+	}
 }
 
 const REMOTE_CDP_ATTACH_MAX_ATTEMPTS = 4;
@@ -339,8 +355,14 @@ const REMOTE_CDP_ATTACH_SETTLE_MS = 250;
  * process listeners (the test drives a fake emitter directly).
  */
 export interface UnhandledRejectionHost {
-  off: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
-  on: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
+	off: (
+		event: "unhandledRejection",
+		listener: (reason: unknown) => void,
+	) => void;
+	on: (
+		event: "unhandledRejection",
+		listener: (reason: unknown) => void,
+	) => void;
 }
 
 /**
@@ -383,97 +405,100 @@ export interface UnhandledRejectionHost {
  * `host`, `setTimeoutFn`, and `clearTimeoutFn` are injected for tests.
  */
 export async function runCdpAttemptWithRaceGuard<TBrowser>({
-  connect,
-  disconnect,
-  settleMs = REMOTE_CDP_ATTACH_SETTLE_MS,
-  host = process,
-  setTimeoutFn = setTimeout,
-  clearTimeoutFn = clearTimeout,
+	connect,
+	disconnect,
+	settleMs = REMOTE_CDP_ATTACH_SETTLE_MS,
+	host = process,
+	setTimeoutFn = setTimeout,
+	clearTimeoutFn = clearTimeout,
 }: {
-  connect: () => Promise<TBrowser>;
-  disconnect?: (browser: TBrowser) => Promise<void> | void;
-  settleMs?: number;
-  host?: UnhandledRejectionHost;
-  setTimeoutFn?: typeof setTimeout;
-  clearTimeoutFn?: typeof clearTimeout;
+	connect: () => Promise<TBrowser>;
+	disconnect?: (browser: TBrowser) => Promise<void> | void;
+	settleMs?: number;
+	host?: UnhandledRejectionHost;
+	setTimeoutFn?: typeof setTimeout;
+	clearTimeoutFn?: typeof clearTimeout;
 }): Promise<TBrowser> {
-  let raceReason: unknown;
-  let settleTimer: ReturnType<typeof setTimeout> | undefined;
-  // Resolves as soon as a race rejection is observed, so we can abandon the
-  // settle window early and retry without waiting out the full delay.
-  let signalRace: (() => void) | undefined;
-  const raceObserved = new Promise<void>((resolve) => {
-    signalRace = resolve;
-  });
+	let raceReason: unknown;
+	let settleTimer: ReturnType<typeof setTimeout> | undefined;
+	// Resolves as soon as a race rejection is observed, so we can abandon the
+	// settle window early and retry without waiting out the full delay.
+	let signalRace: (() => void) | undefined;
+	const raceObserved = new Promise<void>((resolve) => {
+		signalRace = resolve;
+	});
 
-  const onUnhandledRejection = (reason: unknown): void => {
-    if (isCdpAttachSessionRaceError(reason)) {
-      raceReason = reason;
-      signalRace?.();
-      return;
-    }
-    // Not our race. Stop intercepting and re-throw so Node's default
-    // unhandled-rejection handling (process crash) still applies to unrelated
-    // failures. We must never silently swallow another subsystem's rejection.
-    host.off("unhandledRejection", onUnhandledRejection);
-    throw reason;
-  };
+	const onUnhandledRejection = (reason: unknown): void => {
+		if (isCdpAttachSessionRaceError(reason)) {
+			raceReason = reason;
+			signalRace?.();
+			return;
+		}
+		// Not our race. Stop intercepting and re-throw so Node's default
+		// unhandled-rejection handling (process crash) still applies to unrelated
+		// failures. We must never silently swallow another subsystem's rejection.
+		host.off("unhandledRejection", onUnhandledRejection);
+		throw reason;
+	};
 
-  host.on("unhandledRejection", onUnhandledRejection);
-  try {
-    let connectSettled = false;
-    const connectPromise = connect().then(
-      (connectedBrowser) => {
-        connectSettled = true;
-        return connectedBrowser;
-      },
-      (err: unknown) => {
-        connectSettled = true;
-        throw err;
-      }
-    );
-    const disconnectLateBrowser = async (lateBrowser: TBrowser): Promise<void> => {
-      if (!disconnect) {
-        return;
-      }
-      await Promise.resolve(disconnect(lateBrowser)).catch(() => undefined);
-    };
-    const browser = await Promise.race([
-      connectPromise,
-      raceObserved.then(() => {
-        // The race can happen while Patchright is still inside connectOverCDP.
-        // Do not wait for its 30s timeout; convert this attempt into the
-        // retryable race immediately. If connect later yields a Browser, close
-        // that orphaned CDP client best-effort.
-        if (!connectSettled) {
-          // biome-ignore lint/suspicious/noNestedPromises: deliberately fire-and-forget — this must not block converting the current attempt into the retryable race
-          connectPromise.then(disconnectLateBrowser, () => undefined).catch(() => undefined);
-        }
-        throw raceReason;
-      }),
-    ]);
-    // `connect` resolved, but the floated `setRequestInterception` rejection
-    // (if any) lands on a LATER tick. Hold the guard open for a brief settle
-    // window; bail early the moment a race rejection is observed.
-    await Promise.race([
-      raceObserved,
-      new Promise<void>((resolve) => {
-        settleTimer = setTimeoutFn(resolve, settleMs);
-      }),
-    ]);
-    if (raceReason !== undefined) {
-      // The just-connected browser is orphaned by the race; disconnect it
-      // best-effort so we don't leak a CDP client before the caller retries.
-      await disconnectLateBrowser(browser);
-      throw raceReason;
-    }
-    return browser;
-  } finally {
-    if (settleTimer !== undefined) {
-      clearTimeoutFn(settleTimer);
-    }
-    host.off("unhandledRejection", onUnhandledRejection);
-  }
+	host.on("unhandledRejection", onUnhandledRejection);
+	try {
+		let connectSettled = false;
+		const connectPromise = connect().then(
+			(connectedBrowser) => {
+				connectSettled = true;
+				return connectedBrowser;
+			},
+			(err: unknown) => {
+				connectSettled = true;
+				throw err;
+			},
+		);
+		const disconnectLateBrowser = async (
+			lateBrowser: TBrowser,
+		): Promise<void> => {
+			if (!disconnect) {
+				return;
+			}
+			await Promise.resolve(disconnect(lateBrowser)).catch(() => undefined);
+		};
+		const browser = await Promise.race([
+			connectPromise,
+			raceObserved.then(() => {
+				// The race can happen while Patchright is still inside connectOverCDP.
+				// Do not wait for its 30s timeout; convert this attempt into the
+				// retryable race immediately. If connect later yields a Browser, close
+				// that orphaned CDP client best-effort.
+				if (!connectSettled) {
+					connectPromise
+						.then(disconnectLateBrowser, () => undefined)
+						.catch(() => undefined);
+				}
+				throw raceReason;
+			}),
+		]);
+		// `connect` resolved, but the floated `setRequestInterception` rejection
+		// (if any) lands on a LATER tick. Hold the guard open for a brief settle
+		// window; bail early the moment a race rejection is observed.
+		await Promise.race([
+			raceObserved,
+			new Promise<void>((resolve) => {
+				settleTimer = setTimeoutFn(resolve, settleMs);
+			}),
+		]);
+		if (raceReason !== undefined) {
+			// The just-connected browser is orphaned by the race; disconnect it
+			// best-effort so we don't leak a CDP client before the caller retries.
+			await disconnectLateBrowser(browser);
+			throw raceReason;
+		}
+		return browser;
+	} finally {
+		if (settleTimer !== undefined) {
+			clearTimeoutFn(settleTimer);
+		}
+		host.off("unhandledRejection", onUnhandledRejection);
+	}
 }
 
 /**
@@ -492,52 +517,55 @@ export async function runCdpAttemptWithRaceGuard<TBrowser>({
  * policy can be unit-tested without a live browser.
  */
 export async function connectOverCdpWithRetry<TBrowser>({
-  connect,
-  disconnect,
-  profileName,
-  redactedUrl,
-  maxAttempts = REMOTE_CDP_ATTACH_MAX_ATTEMPTS,
-  retryDelayMs = REMOTE_CDP_ATTACH_RETRY_DELAY_MS,
-  sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
-  runAttempt = runCdpAttemptWithRaceGuard,
+	connect,
+	disconnect,
+	profileName,
+	redactedUrl,
+	maxAttempts = REMOTE_CDP_ATTACH_MAX_ATTEMPTS,
+	retryDelayMs = REMOTE_CDP_ATTACH_RETRY_DELAY_MS,
+	sleep = (ms: number) =>
+		new Promise<void>((resolve) => setTimeout(resolve, ms)),
+	runAttempt = runCdpAttemptWithRaceGuard,
 }: {
-  connect: () => Promise<TBrowser>;
-  disconnect?: (browser: TBrowser) => Promise<void> | void;
-  profileName: string;
-  redactedUrl: string;
-  maxAttempts?: number;
-  retryDelayMs?: number;
-  sleep?: (ms: number) => Promise<void>;
-  runAttempt?: typeof runCdpAttemptWithRaceGuard;
+	connect: () => Promise<TBrowser>;
+	disconnect?: (browser: TBrowser) => Promise<void> | void;
+	profileName: string;
+	redactedUrl: string;
+	maxAttempts?: number;
+	retryDelayMs?: number;
+	sleep?: (ms: number) => Promise<void>;
+	runAttempt?: typeof runCdpAttemptWithRaceGuard;
 }): Promise<TBrowser> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await runAttempt<TBrowser>({ connect, ...(disconnect ? { disconnect } : {}) });
-    } catch (err) {
-      lastErr = err;
-      if (!isCdpAttachSessionRaceError(err)) {
-        // A different failure entirely (auth, unreachable endpoint, real
-        // browser crash) — fail fast with its original identity, untagged.
-        throw err;
-      }
-      if (attempt === maxAttempts) {
-        // The ONLY point that knows the bounded retry budget was exhausted
-        // specifically on this narrow race. Tag it here so no downstream
-        // layer has to re-parse message text to learn the same fact.
-        // biome-ignore lint/style/useErrorCause: CdpAttachSessionRaceExhaustedError's constructor already forwards `cause` to super() internally — Biome only recognizes a literal `{ cause }` at the call site
-        throw new CdpAttachSessionRaceExhaustedError(err);
-      }
-      process.stderr.write(
-        "[browser-launch] remote CDP attach hit transient session-closed race " +
-          `profile=${profileName} url=${redactedUrl} attempt=${attempt}/${maxAttempts}; ` +
-          `retrying in ${retryDelayMs}ms\n`
-      );
-      await sleep(retryDelayMs);
-    }
-  }
-  // Unreachable: the loop either returns or throws. Rethrow defensively.
-  throw lastErr;
+	let lastErr: unknown;
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		try {
+			return await runAttempt<TBrowser>({
+				connect,
+				...(disconnect ? { disconnect } : {}),
+			});
+		} catch (err) {
+			lastErr = err;
+			if (!isCdpAttachSessionRaceError(err)) {
+				// A different failure entirely (auth, unreachable endpoint, real
+				// browser crash) — fail fast with its original identity, untagged.
+				throw err;
+			}
+			if (attempt === maxAttempts) {
+				// The ONLY point that knows the bounded retry budget was exhausted
+				// specifically on this narrow race. Tag it here so no downstream
+				// layer has to re-parse message text to learn the same fact.
+				throw new CdpAttachSessionRaceExhaustedError(err);
+			}
+			process.stderr.write(
+				"[browser-launch] remote CDP attach hit transient session-closed race " +
+					`profile=${profileName} url=${redactedUrl} attempt=${attempt}/${maxAttempts}; ` +
+					`retrying in ${retryDelayMs}ms\n`,
+			);
+			await sleep(retryDelayMs);
+		}
+	}
+	// Unreachable: the loop either returns or throws. Rethrow defensively.
+	throw lastErr;
 }
 
 /**
@@ -566,109 +594,119 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * `isCdpAttachSessionRaceError`.
  */
 export function shouldCleanRemoteCdpPageTargets({
-  preserveRemotePagesOnAcquire,
-}: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">): boolean {
-  return !preserveRemotePagesOnAcquire;
+	preserveRemotePagesOnAcquire,
+}: Pick<
+	AcquireIsolatedBrowserOptions,
+	"preserveRemotePagesOnAcquire"
+>): boolean {
+	return !preserveRemotePagesOnAcquire;
 }
 
 async function acquireRemoteCdpBrowser(
-  cdpUrl: string,
-  profileName: string,
-  options: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire"> = {}
+	cdpUrl: string,
+	profileName: string,
+	options: Pick<
+		AcquireIsolatedBrowserOptions,
+		"preserveRemotePagesOnAcquire"
+	> = {},
 ): Promise<IsolatedBrowser> {
-  // @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
-  const { chromium: localChromium }: { chromium: typeof chromium } = await import("patchright");
-  const attachStartedAt = Date.now();
-  const redactedUrl = redactCdpUrl(cdpUrl);
-  process.stderr.write(`[browser-launch] remote CDP attach start profile=${profileName} url=${redactedUrl}\n`);
-  if (shouldCleanRemoteCdpPageTargets(options)) {
-    // Remote profiles usually persist cookies; stale page targets do not need
-    // to persist. Replace pages before attach so Patchright does not auto-attach
-    // to a wedged renderer, while n.eko Chromium still keeps at least one page alive.
-    const cleanup = await closeRemoteCdpPageTargets({ cdpUrl, profileName });
-    process.stderr.write(
-      `[browser-launch] remote CDP page-target cleanup profile=${profileName} closed=${cleanup.closed} remaining=${cleanup.remaining} replacementCreated=${String(
-        cleanup.replacementCreated
-      )} skipped=${String(cleanup.skipped)}\n`
-    );
-  } else {
-    process.stderr.write(
-      `[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=preserve_remote_pages_on_acquire\n`
-    );
-  }
-  const browser = await connectOverCdpWithRetry<Browser>({
-    connect: () => localChromium.connectOverCDP(cdpUrl),
-    // If the floated `setRequestInterception` race rejects AFTER this attempt's
-    // `connectOverCDP` already returned a live Browser, that Browser is orphaned
-    // by the retry; disconnect it so we don't leak a CDP client. `.close()` on a
-    // CDP-attached client disconnects without killing the n.eko-owned browser.
-    disconnect: (b) => b.close().catch(() => undefined),
-    profileName,
-    redactedUrl,
-  });
-  const attachedAt = Date.now();
-  let releaseRequested = false;
-  const onDisconnected = (): void => {
-    process.stderr.write(
-      `[browser-launch] remote CDP disconnected profile=${profileName} elapsedMs=${Date.now() - attachedAt} releaseRequested=${String(
-        releaseRequested
-      )}\n`
-    );
-  };
-  browser.on("disconnected", onDisconnected);
-  process.stderr.write(
-    `[browser-launch] remote CDP attached profile=${profileName} elapsedMs=${Date.now() - attachStartedAt}\n`
-  );
-  const [context] = browser.contexts();
-  if (!context) {
-    await browser.close().catch(() => undefined);
-    throw new Error(
-      `acquireRemoteCdpBrowser(${profileName}): remote browser at ${cdpUrl} has no contexts; cannot attach`
-    );
-  }
-  // Publish the CDP endpoint into process.env so `browser-handoff.ts` can
-  // compose per-page wsUrls for manual_action registration. The host:port
-  // we expose to the streaming companion is the SAME url we attached on —
-  // it's what the companion's cdp-adapter will dial back through.
-  try {
-    const parsed = new URL(cdpUrl);
-    process.env.PDPP_BROWSER_CDP_HOST = parsed.hostname;
-    process.env.PDPP_BROWSER_CDP_PORT = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-  } catch (err) {
-    process.stderr.write(
-      `[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`
-    );
-  }
-  return {
-    browser,
-    context,
-    release: async (): Promise<void> => {
-      // Disconnect only. Closing the remote browser would kill the n.eko
-      // X-attached process; that lifecycle is owned by the neko container.
-      releaseRequested = true;
-      try {
-        await browser.close();
-      } catch {
-        /* ignore */
-      } finally {
-        browser.off("disconnected", onDisconnected);
-      }
-    },
-  };
+	// @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
+	const { chromium: localChromium }: { chromium: typeof chromium } =
+		await import("patchright");
+	const attachStartedAt = Date.now();
+	const redactedUrl = redactCdpUrl(cdpUrl);
+	process.stderr.write(
+		`[browser-launch] remote CDP attach start profile=${profileName} url=${redactedUrl}\n`,
+	);
+	if (shouldCleanRemoteCdpPageTargets(options)) {
+		// Remote profiles usually persist cookies; stale page targets do not need
+		// to persist. Replace pages before attach so Patchright does not auto-attach
+		// to a wedged renderer, while n.eko Chromium still keeps at least one page alive.
+		const cleanup = await closeRemoteCdpPageTargets({ cdpUrl, profileName });
+		process.stderr.write(
+			`[browser-launch] remote CDP page-target cleanup profile=${profileName} closed=${cleanup.closed} remaining=${cleanup.remaining} replacementCreated=${String(
+				cleanup.replacementCreated,
+			)} skipped=${String(cleanup.skipped)}\n`,
+		);
+	} else {
+		process.stderr.write(
+			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=preserve_remote_pages_on_acquire\n`,
+		);
+	}
+	const browser = await connectOverCdpWithRetry<Browser>({
+		connect: () => localChromium.connectOverCDP(cdpUrl),
+		// If the floated `setRequestInterception` race rejects AFTER this attempt's
+		// `connectOverCDP` already returned a live Browser, that Browser is orphaned
+		// by the retry; disconnect it so we don't leak a CDP client. `.close()` on a
+		// CDP-attached client disconnects without killing the n.eko-owned browser.
+		disconnect: (b) => b.close().catch(() => undefined),
+		profileName,
+		redactedUrl,
+	});
+	const attachedAt = Date.now();
+	let releaseRequested = false;
+	const onDisconnected = (): void => {
+		process.stderr.write(
+			`[browser-launch] remote CDP disconnected profile=${profileName} elapsedMs=${Date.now() - attachedAt} releaseRequested=${String(
+				releaseRequested,
+			)}\n`,
+		);
+	};
+	browser.on("disconnected", onDisconnected);
+	process.stderr.write(
+		`[browser-launch] remote CDP attached profile=${profileName} elapsedMs=${Date.now() - attachStartedAt}\n`,
+	);
+	const [context] = browser.contexts();
+	if (!context) {
+		await browser.close().catch(() => undefined);
+		throw new Error(
+			`acquireRemoteCdpBrowser(${profileName}): remote browser at ${cdpUrl} has no contexts; cannot attach`,
+		);
+	}
+	// Publish the CDP endpoint into process.env so `browser-handoff.ts` can
+	// compose per-page wsUrls for manual_action registration. The host:port
+	// we expose to the streaming companion is the SAME url we attached on —
+	// it's what the companion's cdp-adapter will dial back through.
+	try {
+		const parsed = new URL(cdpUrl);
+		process.env.PDPP_BROWSER_CDP_HOST = parsed.hostname;
+		process.env.PDPP_BROWSER_CDP_PORT =
+			parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+	} catch (err) {
+		process.stderr.write(
+			`[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+	}
+	return {
+		browser,
+		context,
+		release: async (): Promise<void> => {
+			// Disconnect only. Closing the remote browser would kill the n.eko
+			// X-attached process; that lifecycle is owned by the neko container.
+			releaseRequested = true;
+			try {
+				await browser.close();
+			} catch {
+				/* ignore */
+			} finally {
+				browser.off("disconnected", onDisconnected);
+			}
+		},
+	};
 }
 
 function redactCdpUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    url.username = "";
-    url.password = "";
-    url.pathname = "/";
-    url.search = "";
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return "unparseable";
-  }
+	try {
+		const url = new URL(rawUrl);
+		url.username = "";
+		url.password = "";
+		url.pathname = "/";
+		url.search = "";
+		url.hash = "";
+		return url.toString();
+	} catch {
+		return "unparseable";
+	}
 }
 
 /**
@@ -677,154 +715,166 @@ function redactCdpUrl(rawUrl: string): string {
  * instance ID when the reference runtime supplies one.
  */
 export async function acquireIsolatedBrowser({
-  profileName,
-  headless,
-  streamingEnabled,
-  remoteCdpUrl,
-  preserveRemotePagesOnAcquire,
+	profileName,
+	headless,
+	streamingEnabled,
+	remoteCdpUrl,
+	preserveRemotePagesOnAcquire,
 }: AcquireIsolatedBrowserOptions): Promise<IsolatedBrowser> {
-  if (!(profileName && PROFILE_NAME_RE.test(profileName))) {
-    throw new Error("profileName required, must be [A-Za-z0-9_-]+");
-  }
-  // Remote-CDP attach: skip the entire local-launch path. The remote
-  // browser owns its own profile and lifecycle (e.g. the n.eko container);
-  // we just attach as a CDP client.
-  if (remoteCdpUrl) {
-    return acquireRemoteCdpBrowser(
-      remoteCdpUrl,
-      profileName,
-      preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {}
-    );
-  }
-  const effectiveHeadless = resolveDeploymentBrowserHeadless(headless);
-  const profileRoot = process.env.PDPP_BROWSER_PROFILE_ROOT?.trim() || join(homedir(), ".pdpp", "profiles");
-  const isolatedDir = join(profileRoot, profileName);
-  if (!existsSync(isolatedDir)) {
-    mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
-  }
+	if (!(profileName && PROFILE_NAME_RE.test(profileName))) {
+		throw new Error("profileName required, must be [A-Za-z0-9_-]+");
+	}
+	// Remote-CDP attach: skip the entire local-launch path. The remote
+	// browser owns its own profile and lifecycle (e.g. the n.eko container);
+	// we just attach as a CDP client.
+	if (remoteCdpUrl) {
+		return acquireRemoteCdpBrowser(
+			remoteCdpUrl,
+			profileName,
+			preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {},
+		);
+	}
+	const effectiveHeadless = resolveDeploymentBrowserHeadless(headless);
+	const profileRoot =
+		process.env.PDPP_BROWSER_PROFILE_ROOT?.trim() ||
+		join(homedir(), ".pdpp", "profiles");
+	const isolatedDir = join(profileRoot, profileName);
+	if (!existsSync(isolatedDir)) {
+		mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
+	}
 
-  // Patchright "Best Practice" config; do not re-add Chromium flags
-  // patchright already manages.
-  // @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
-  const { chromium: localChromium }: { chromium: typeof chromium } = await import("patchright");
+	// Patchright "Best Practice" config; do not re-add Chromium flags
+	// patchright already manages.
+	// @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
+	const { chromium: localChromium }: { chromium: typeof chromium } =
+		await import("patchright");
 
-  // Streaming-registration mode needs Chromium to expose a TCP CDP endpoint
-  // (so the streaming companion can connect by URL later) and write
-  // `<userDataDir>/DevToolsActivePort` so we can discover the random port.
-  // Patchright 1.61.1's persistent-context path still owns its parent CDP
-  // transport through `--remote-debugging-pipe`; adding a second
-  // `--remote-debugging-port=0` is supported by Chromium and preserves the
-  // driver's pipe while publishing the companion endpoint. Bind it to
-  // loopback because the wsUrl path carries a bearer secret.
-  const baseArgs = [
-    // Workaround for microsoft/playwright#40158: headed Chrome's download
-    // bubble races Playwright's CDP-based download interception.
-    "--disable-features=DownloadBubble,DownloadBubbleV2,DownloadBubbleV3",
-  ];
-  // Optional Chromium flags from PDPP_BROWSER_EXTRA_ARGS (space-separated).
-  // Operator escape hatch for environment-specific needs that the launcher
-  // intentionally does not opinionate on. Examples:
-  //   - `--disable-gpu` when running headless under tmux without XAUTHORITY
-  //     exported (Chromium otherwise tries the X display, fails GPU init,
-  //     and the CDP child dies on the first command).
-  //   - `--proxy-server=http://...` for corporate proxies.
-  //   - Locale / font hinting flags for specific deployments.
-  // Empty by default; we want the launcher to do the right thing on a sane
-  // host without configuration.
-  const extraArgsRaw = process.env.PDPP_BROWSER_EXTRA_ARGS;
-  if (extraArgsRaw) {
-    for (const a of extraArgsRaw.split(EXTRA_BROWSER_ARGS_RE).filter(Boolean)) {
-      baseArgs.push(a);
-    }
-  }
-  // Diagnostic for the most common GPU-init failure mode we've observed in dev:
-  // tmux sessions started before the X session exported XAUTHORITY. Chromium
-  // sees DISPLAY but cannot authenticate, GPU process crashes, the parent CDP
-  // child reports "Internal server error, session closed" on the first call.
-  // We don't auto-fix (operator may have a real reason for the env shape) but
-  // we flag it once so the next operator who hits this isn't debugging blind.
-  // Core's managed Xvfb display uses `-ac`, so it does not need XAUTHORITY and
-  // skips this host/tmux diagnostic. Other X displays still get the warning.
-  // Keep this predicate identical to browserSurfaceConfigured() in
-  // reference-implementation/runtime/scheduler-readiness.ts — that module
-  // can't import this one across the package boundary, so the two checks
-  // are kept in sync by hand. Diverging here silently breaks scheduler
-  // readiness for every browser-capable Core image.
-  const managedDisplayAvailable = process.env.PDPP_RUNTIME_BROWSER === "1" && Boolean(process.env.DISPLAY);
-  if (
-    !(displayAuthWarningEmitted || managedDisplayAvailable) &&
-    process.env.DISPLAY &&
-    !process.env.XAUTHORITY &&
-    !extraArgsRaw?.includes("--disable-gpu")
-  ) {
-    displayAuthWarningEmitted = true;
-    process.stderr.write(
-      "[browser-launch] DISPLAY is set but XAUTHORITY is empty (common in tmux). " +
-        "Chromium GPU init may fail with 'session closed'. Either export XAUTHORITY " +
-        "(e.g. `export XAUTHORITY=$(systemctl --user show-environment | grep ^XAUTHORITY | cut -d= -f2)`) " +
-        "or set PDPP_BROWSER_EXTRA_ARGS=--disable-gpu before launching.\n"
-    );
-  }
-  if (streamingEnabled) {
-    baseArgs.push("--remote-debugging-address=127.0.0.1");
-    baseArgs.push("--remote-debugging-port=0");
-  }
+	// Streaming-registration mode needs Chromium to expose a TCP CDP endpoint
+	// (so the streaming companion can connect by URL later) and write
+	// `<userDataDir>/DevToolsActivePort` so we can discover the random port.
+	// Patchright 1.61.1's persistent-context path still owns its parent CDP
+	// transport through `--remote-debugging-pipe`; adding a second
+	// `--remote-debugging-port=0` is supported by Chromium and preserves the
+	// driver's pipe while publishing the companion endpoint. Bind it to
+	// loopback because the wsUrl path carries a bearer secret.
+	const baseArgs = [
+		// Workaround for microsoft/playwright#40158: headed Chrome's download
+		// bubble races Playwright's CDP-based download interception.
+		"--disable-features=DownloadBubble,DownloadBubbleV2,DownloadBubbleV3",
+	];
+	// Optional Chromium flags from PDPP_BROWSER_EXTRA_ARGS (space-separated).
+	// Operator escape hatch for environment-specific needs that the launcher
+	// intentionally does not opinionate on. Examples:
+	//   - `--disable-gpu` when running headless under tmux without XAUTHORITY
+	//     exported (Chromium otherwise tries the X display, fails GPU init,
+	//     and the CDP child dies on the first command).
+	//   - `--proxy-server=http://...` for corporate proxies.
+	//   - Locale / font hinting flags for specific deployments.
+	// Empty by default; we want the launcher to do the right thing on a sane
+	// host without configuration.
+	const extraArgsRaw = process.env.PDPP_BROWSER_EXTRA_ARGS;
+	if (extraArgsRaw) {
+		for (const a of extraArgsRaw.split(EXTRA_BROWSER_ARGS_RE).filter(Boolean)) {
+			baseArgs.push(a);
+		}
+	}
+	// Diagnostic for the most common GPU-init failure mode we've observed in dev:
+	// tmux sessions started before the X session exported XAUTHORITY. Chromium
+	// sees DISPLAY but cannot authenticate, GPU process crashes, the parent CDP
+	// child reports "Internal server error, session closed" on the first call.
+	// We don't auto-fix (operator may have a real reason for the env shape) but
+	// we flag it once so the next operator who hits this isn't debugging blind.
+	// Core's managed Xvfb display uses `-ac`, so it does not need XAUTHORITY and
+	// skips this host/tmux diagnostic. Other X displays still get the warning.
+	// Keep this predicate identical to browserSurfaceConfigured() in
+	// reference-implementation/runtime/scheduler-readiness.ts — that module
+	// can't import this one across the package boundary, so the two checks
+	// are kept in sync by hand. Diverging here silently breaks scheduler
+	// readiness for every browser-capable Core image.
+	const managedDisplayAvailable =
+		process.env.PDPP_RUNTIME_BROWSER === "1" && Boolean(process.env.DISPLAY);
+	if (
+		!(displayAuthWarningEmitted || managedDisplayAvailable) &&
+		process.env.DISPLAY &&
+		!process.env.XAUTHORITY &&
+		!extraArgsRaw?.includes("--disable-gpu")
+	) {
+		displayAuthWarningEmitted = true;
+		process.stderr.write(
+			"[browser-launch] DISPLAY is set but XAUTHORITY is empty (common in tmux). " +
+				"Chromium GPU init may fail with 'session closed'. Either export XAUTHORITY " +
+				"(e.g. `export XAUTHORITY=$(systemctl --user show-environment | grep ^XAUTHORITY | cut -d= -f2)`) " +
+				"or set PDPP_BROWSER_EXTRA_ARGS=--disable-gpu before launching.\n",
+		);
+	}
+	if (streamingEnabled) {
+		baseArgs.push("--remote-debugging-address=127.0.0.1");
+		baseArgs.push("--remote-debugging-port=0");
+	}
 
-  type PatchrightLaunchOptions = NonNullable<Parameters<typeof localChromium.launchPersistentContext>[1]> & {
-    cdpPort?: number;
-  };
-  const baseLaunchOptions: PatchrightLaunchOptions = {
-    headless: effectiveHeadless,
-    viewport: null,
-    args: baseArgs,
-  };
+	type PatchrightLaunchOptions = NonNullable<
+		Parameters<typeof localChromium.launchPersistentContext>[1]
+	> & {
+		cdpPort?: number;
+	};
+	const baseLaunchOptions: PatchrightLaunchOptions = {
+		headless: effectiveHeadless,
+		viewport: null,
+		args: baseArgs,
+	};
 
-  const explicitChannel = configuredBrowserChannel();
-  // Default to Patchright's pinned bundled Chromium so local and n.eko runs
-  // share the same browser-family posture. Operators can still opt into a
-  // branded channel explicitly with PDPP_BROWSER_CHANNEL=chrome.
-  // Cleanup-then-launch is gated by an in-process mutex keyed on the
-  // user-data-dir. The mutex is the load-bearing primitive: it guarantees
-  // PDPP never has two of its own processes launching against the same
-  // profile concurrently. Given that, any Singleton* residue we encounter
-  // is provably from a prior incarnation (e.g. previous container) and
-  // safe to remove unconditionally. See `profile-lock.ts` header comment
-  // for the design rationale and source references.
-  const context: BrowserContext = await withProfileLockMutex(isolatedDir, async () => {
-    await removeChromiumSingletonResidue(isolatedDir);
-    if (explicitChannel) {
-      return localChromium.launchPersistentContext(isolatedDir, {
-        ...baseLaunchOptions,
-        channel: explicitChannel,
-      });
-    }
-    return localChromium.launchPersistentContext(isolatedDir, baseLaunchOptions);
-  });
+	const explicitChannel = configuredBrowserChannel();
+	// Default to Patchright's pinned bundled Chromium so local and n.eko runs
+	// share the same browser-family posture. Operators can still opt into a
+	// branded channel explicitly with PDPP_BROWSER_CHANNEL=chrome.
+	// Cleanup-then-launch is gated by an in-process mutex keyed on the
+	// user-data-dir. The mutex is the load-bearing primitive: it guarantees
+	// PDPP never has two of its own processes launching against the same
+	// profile concurrently. Given that, any Singleton* residue we encounter
+	// is provably from a prior incarnation (e.g. previous container) and
+	// safe to remove unconditionally. See `profile-lock.ts` header comment
+	// for the design rationale and source references.
+	const context: BrowserContext = await withProfileLockMutex(
+		isolatedDir,
+		async () => {
+			await removeChromiumSingletonResidue(isolatedDir);
+			if (explicitChannel) {
+				return localChromium.launchPersistentContext(isolatedDir, {
+					...baseLaunchOptions,
+					channel: explicitChannel,
+				});
+			}
+			return localChromium.launchPersistentContext(
+				isolatedDir,
+				baseLaunchOptions,
+			);
+		},
+	);
 
-  // Publish the CDP host:port to env so the browser-binding-local handoff
-  // helper (`browser-handoff.ts`) can compose per-interaction wsUrls at
-  // `manual_action` emission time. The launcher does NOT register any
-  // wsUrl itself — registration is now interaction-scoped and owned by
-  // the binding code path that emits the manual_action (see
-  // `openspec/changes/add-run-interaction-streaming-companion/design-notes/`
-  // `interaction-scoped-target-resolution-2026-05-05.md`). Best-effort:
-  // failures here MUST NOT prevent the run; streaming will simply be
-  // unavailable.
-  if (streamingEnabled) {
-    await publishCdpEndpointFromLaunch({ isolatedDir });
-  }
+	// Publish the CDP host:port to env so the browser-binding-local handoff
+	// helper (`browser-handoff.ts`) can compose per-interaction wsUrls at
+	// `manual_action` emission time. The launcher does NOT register any
+	// wsUrl itself — registration is now interaction-scoped and owned by
+	// the binding code path that emits the manual_action (see
+	// `openspec/changes/add-run-interaction-streaming-companion/design-notes/`
+	// `interaction-scoped-target-resolution-2026-05-05.md`). Best-effort:
+	// failures here MUST NOT prevent the run; streaming will simply be
+	// unavailable.
+	if (streamingEnabled) {
+		await publishCdpEndpointFromLaunch({ isolatedDir });
+	}
 
-  return {
-    context,
-    browser: context.browser(),
-    release: async (): Promise<void> => {
-      try {
-        await context.close();
-      } catch {
-        /* ignore */
-      }
-    },
-  };
+	return {
+		context,
+		browser: context.browser(),
+		release: async (): Promise<void> => {
+			try {
+				await context.close();
+			} catch {
+				/* ignore */
+			}
+		},
+	};
 }
 
 /**
@@ -839,22 +889,30 @@ export async function acquireIsolatedBrowser({
  * Best-effort: if the port can't be read, log and return — streaming
  * will simply be unavailable for this run. Records still flow normally.
  */
-async function publishCdpEndpointFromLaunch({ isolatedDir }: { isolatedDir: string }): Promise<void> {
-  try {
-    const port = await readDevToolsActivePort({ userDataDir: isolatedDir, timeoutMs: 5000, pollMs: 50 });
-    if (port === null) {
-      process.stderr.write(
-        "[browser-launch] could not read DevToolsActivePort; streaming-companion will be unavailable for this run.\n"
-      );
-      return;
-    }
-    publishCdpEndpointToEnv({ host: "127.0.0.1", port });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      `[browser-launch] CDP endpoint publication failed: ${message}; streaming will be unavailable for this run.\n`
-    );
-  }
+async function publishCdpEndpointFromLaunch({
+	isolatedDir,
+}: {
+	isolatedDir: string;
+}): Promise<void> {
+	try {
+		const port = await readDevToolsActivePort({
+			userDataDir: isolatedDir,
+			timeoutMs: 5000,
+			pollMs: 50,
+		});
+		if (port === null) {
+			process.stderr.write(
+				"[browser-launch] could not read DevToolsActivePort; streaming-companion will be unavailable for this run.\n",
+			);
+			return;
+		}
+		publishCdpEndpointToEnv({ host: "127.0.0.1", port });
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		process.stderr.write(
+			`[browser-launch] CDP endpoint publication failed: ${message}; streaming will be unavailable for this run.\n`,
+		);
+	}
 }
 
 /**
@@ -873,9 +931,15 @@ async function publishCdpEndpointFromLaunch({ isolatedDir }: { isolatedDir: stri
  * the launcher does not transitively pull in the handoff module (which
  * imports playwright types) at acquisition time.
  */
-function publishCdpEndpointToEnv({ host, port }: { host: string; port: number }): void {
-  process.env.PDPP_BROWSER_CDP_HOST = host;
-  process.env.PDPP_BROWSER_CDP_PORT = String(port);
+function publishCdpEndpointToEnv({
+	host,
+	port,
+}: {
+	host: string;
+	port: number;
+}): void {
+	process.env.PDPP_BROWSER_CDP_HOST = host;
+	process.env.PDPP_BROWSER_CDP_PORT = String(port);
 }
 
 /**
@@ -901,281 +965,357 @@ function publishCdpEndpointToEnv({ host, port }: { host: string; port: number })
  * branch without a real Chromium.
  */
 export async function resolvePageTargetWsUrl({
-  userDataDir,
-  fetchImpl = globalThis.fetch,
-  timeoutMs = 5000,
-  pollMs = 50,
+	userDataDir,
+	fetchImpl = globalThis.fetch,
+	timeoutMs = 5000,
+	pollMs = 50,
 }: {
-  userDataDir: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-  pollMs?: number;
+	userDataDir: string;
+	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
+	pollMs?: number;
 }): Promise<string | null> {
-  const port = await readDevToolsActivePort({ userDataDir, timeoutMs, pollMs });
-  if (port === null) {
-    return null;
-  }
-  return await fetchPageTargetWsUrl({ port, fetchImpl });
+	const port = await readDevToolsActivePort({ userDataDir, timeoutMs, pollMs });
+	if (port === null) {
+		return null;
+	}
+	return await fetchPageTargetWsUrl({ port, fetchImpl });
 }
 
 async function readDevToolsActivePort({
-  userDataDir,
-  timeoutMs,
-  pollMs,
+	userDataDir,
+	timeoutMs,
+	pollMs,
 }: {
-  userDataDir: string;
-  timeoutMs: number;
-  pollMs: number;
+	userDataDir: string;
+	timeoutMs: number;
+	pollMs: number;
 }): Promise<number | null> {
-  const portFile = join(userDataDir, "DevToolsActivePort");
-  const deadline = Date.now() + timeoutMs;
-  // Playwright's `waitForReadyState` already blocks on `DevTools listening on …`
-  // before returning, so by the time we get here the file is almost always
-  // present. The poll loop is for the rare race where Chromium logs the line
-  // before flushing the file to disk; cap is small.
-  while (Date.now() < deadline) {
-    try {
-      const contents = await readFile(portFile, "utf8");
-      const firstLine = contents.split("\n", 1)[0]?.trim();
-      const portNum = firstLine ? Number.parseInt(firstLine, 10) : Number.NaN;
-      if (Number.isFinite(portNum) && portNum > 0) {
-        return portNum;
-      }
-    } catch {
-      // file not yet written; retry
-    }
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
-  return null;
+	const portFile = join(userDataDir, "DevToolsActivePort");
+	const deadline = Date.now() + timeoutMs;
+	// Playwright's `waitForReadyState` already blocks on `DevTools listening on …`
+	// before returning, so by the time we get here the file is almost always
+	// present. The poll loop is for the rare race where Chromium logs the line
+	// before flushing the file to disk; cap is small.
+	while (Date.now() < deadline) {
+		try {
+			const contents = await readFile(portFile, "utf8");
+			const firstLine = contents.split("\n", 1)[0]?.trim();
+			const portNum = firstLine ? Number.parseInt(firstLine, 10) : Number.NaN;
+			if (Number.isFinite(portNum) && portNum > 0) {
+				return portNum;
+			}
+		} catch {
+			// file not yet written; retry
+		}
+		await new Promise((r) => setTimeout(r, pollMs));
+	}
+	return null;
 }
 
 interface DevToolsTarget {
-  readonly id?: string;
-  readonly type?: string;
-  readonly webSocketDebuggerUrl?: string;
+	readonly id?: string;
+	readonly type?: string;
+	readonly webSocketDebuggerUrl?: string;
 }
 
 export interface RemoteCdpPageTargetCleanupResult {
-  readonly closed: number;
-  readonly remaining: number;
-  readonly replacementCreated: boolean;
-  readonly skipped: boolean;
+	readonly closed: number;
+	readonly remaining: number;
+	readonly replacementCreated: boolean;
+	readonly skipped: boolean;
 }
 
 export async function closeRemoteCdpPageTargets({
-  cdpUrl,
-  fetchImpl = globalThis.fetch,
-  profileName,
-  timeoutMs = 2000,
-  pollMs = 100,
+	cdpUrl,
+	fetchImpl = globalThis.fetch,
+	profileName,
+	timeoutMs = 2000,
+	pollMs = 100,
 }: {
-  cdpUrl: string;
-  fetchImpl?: typeof fetch;
-  profileName?: string;
-  timeoutMs?: number;
-  pollMs?: number;
+	cdpUrl: string;
+	fetchImpl?: typeof fetch;
+	profileName?: string;
+	timeoutMs?: number;
+	pollMs?: number;
 }): Promise<RemoteCdpPageTargetCleanupResult> {
-  if (typeof fetchImpl !== "function") {
-    return { closed: 0, remaining: 0, replacementCreated: false, skipped: true };
-  }
-  const baseUrl = devToolsHttpBaseUrl(cdpUrl);
-  if (!baseUrl) {
-    return { closed: 0, remaining: 0, replacementCreated: false, skipped: true };
-  }
+	if (typeof fetchImpl !== "function") {
+		return {
+			closed: 0,
+			remaining: 0,
+			replacementCreated: false,
+			skipped: true,
+		};
+	}
+	const baseUrl = devToolsHttpBaseUrl(cdpUrl);
+	if (!baseUrl) {
+		return {
+			closed: 0,
+			remaining: 0,
+			replacementCreated: false,
+			skipped: true,
+		};
+	}
 
-  const deadline = Date.now() + timeoutMs;
-  const targets = await fetchRemoteDevToolsTargets({ baseUrl, deadline, fetchImpl });
-  if (!targets) {
-    return { closed: 0, remaining: 0, replacementCreated: false, skipped: true };
-  }
+	const deadline = Date.now() + timeoutMs;
+	const targets = await fetchRemoteDevToolsTargets({
+		baseUrl,
+		deadline,
+		fetchImpl,
+	});
+	if (!targets) {
+		return {
+			closed: 0,
+			remaining: 0,
+			replacementCreated: false,
+			skipped: true,
+		};
+	}
 
-  const pageTargets = targets.filter((target) => target?.type === "page" && typeof target.id === "string" && target.id);
-  if (pageTargets.length === 0) {
-    return { closed: 0, remaining: 0, replacementCreated: false, skipped: false };
-  }
-  const staleTargetIds = new Set(pageTargets.map((target) => target.id).filter((id): id is string => Boolean(id)));
-  const replacement = await createRemoteDevToolsPageTarget({ baseUrl, deadline, fetchImpl });
-  if (!replacement?.id) {
-    return { closed: 0, remaining: staleTargetIds.size, replacementCreated: false, skipped: true };
-  }
-  staleTargetIds.delete(replacement.id);
+	const pageTargets = targets.filter(
+		(target) =>
+			target?.type === "page" && typeof target.id === "string" && target.id,
+	);
+	if (pageTargets.length === 0) {
+		return {
+			closed: 0,
+			remaining: 0,
+			replacementCreated: false,
+			skipped: false,
+		};
+	}
+	const staleTargetIds = new Set(
+		pageTargets
+			.map((target) => target.id)
+			.filter((id): id is string => Boolean(id)),
+	);
+	const replacement = await createRemoteDevToolsPageTarget({
+		baseUrl,
+		deadline,
+		fetchImpl,
+	});
+	if (!replacement?.id) {
+		return {
+			closed: 0,
+			remaining: staleTargetIds.size,
+			replacementCreated: false,
+			skipped: true,
+		};
+	}
+	staleTargetIds.delete(replacement.id);
 
-  let closed = 0;
-  for (const targetId of staleTargetIds) {
-    if (Date.now() >= deadline) {
-      break;
-    }
-    const ok = await closeRemoteDevToolsTarget({ baseUrl, deadline, fetchImpl, targetId });
-    if (ok) {
-      closed += 1;
-    }
-  }
+	let closed = 0;
+	for (const targetId of staleTargetIds) {
+		if (Date.now() >= deadline) {
+			break;
+		}
+		const ok = await closeRemoteDevToolsTarget({
+			baseUrl,
+			deadline,
+			fetchImpl,
+			targetId,
+		});
+		if (ok) {
+			closed += 1;
+		}
+	}
 
-  let remaining = Math.max(0, staleTargetIds.size - closed);
-  while (Date.now() < deadline) {
-    const latestTargets = await fetchRemoteDevToolsTargets({ baseUrl, deadline, fetchImpl });
-    if (!latestTargets) {
-      break;
-    }
-    remaining = countMatchingPageTargets(latestTargets, staleTargetIds);
-    if (remaining === 0) {
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
-  }
+	let remaining = Math.max(0, staleTargetIds.size - closed);
+	while (Date.now() < deadline) {
+		const latestTargets = await fetchRemoteDevToolsTargets({
+			baseUrl,
+			deadline,
+			fetchImpl,
+		});
+		if (!latestTargets) {
+			break;
+		}
+		remaining = countMatchingPageTargets(latestTargets, staleTargetIds);
+		if (remaining === 0) {
+			break;
+		}
+		await new Promise((resolve) =>
+			setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))),
+		);
+	}
 
-  if (profileName && remaining > 0) {
-    process.stderr.write(
-      `[browser-launch] remote CDP page-target cleanup incomplete profile=${profileName} remaining=${remaining}\n`
-    );
-  }
-  return { closed, remaining, replacementCreated: true, skipped: false };
+	if (profileName && remaining > 0) {
+		process.stderr.write(
+			`[browser-launch] remote CDP page-target cleanup incomplete profile=${profileName} remaining=${remaining}\n`,
+		);
+	}
+	return { closed, remaining, replacementCreated: true, skipped: false };
 }
 
 function devToolsHttpBaseUrl(cdpUrl: string): URL | null {
-  try {
-    const parsed = new URL(cdpUrl);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return new URL("/", parsed);
-    }
-    if (parsed.protocol === "ws:" || parsed.protocol === "wss:") {
-      parsed.protocol = parsed.protocol === "ws:" ? "http:" : "https:";
-      return new URL("/", parsed);
-    }
-  } catch {
-    return null;
-  }
-  return null;
+	try {
+		const parsed = new URL(cdpUrl);
+		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+			return new URL("/", parsed);
+		}
+		if (parsed.protocol === "ws:" || parsed.protocol === "wss:") {
+			parsed.protocol = parsed.protocol === "ws:" ? "http:" : "https:";
+			return new URL("/", parsed);
+		}
+	} catch {
+		return null;
+	}
+	return null;
 }
 
 async function fetchRemoteDevToolsTargets({
-  baseUrl,
-  deadline,
-  fetchImpl,
+	baseUrl,
+	deadline,
+	fetchImpl,
 }: {
-  baseUrl: URL;
-  deadline: number;
-  fetchImpl: typeof fetch;
+	baseUrl: URL;
+	deadline: number;
+	fetchImpl: typeof fetch;
 }): Promise<DevToolsTarget[] | null> {
-  const response = await fetchWithDeadline(new URL("/json", baseUrl).toString(), deadline, fetchImpl);
-  if (!response?.ok) {
-    return null;
-  }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return null;
-  }
-  return Array.isArray(body) ? (body as DevToolsTarget[]) : null;
+	const response = await fetchWithDeadline(
+		new URL("/json", baseUrl).toString(),
+		deadline,
+		fetchImpl,
+	);
+	if (!response?.ok) {
+		return null;
+	}
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return null;
+	}
+	return Array.isArray(body) ? (body as DevToolsTarget[]) : null;
 }
 
 async function closeRemoteDevToolsTarget({
-  baseUrl,
-  deadline,
-  fetchImpl,
-  targetId,
+	baseUrl,
+	deadline,
+	fetchImpl,
+	targetId,
 }: {
-  baseUrl: URL;
-  deadline: number;
-  fetchImpl: typeof fetch;
-  targetId: string;
+	baseUrl: URL;
+	deadline: number;
+	fetchImpl: typeof fetch;
+	targetId: string;
 }): Promise<boolean> {
-  const url = new URL(`/json/close/${encodeURIComponent(targetId)}`, baseUrl).toString();
-  const response = await fetchWithDeadline(url, deadline, fetchImpl);
-  return response?.ok === true;
+	const url = new URL(
+		`/json/close/${encodeURIComponent(targetId)}`,
+		baseUrl,
+	).toString();
+	const response = await fetchWithDeadline(url, deadline, fetchImpl);
+	return response?.ok === true;
 }
 
 async function createRemoteDevToolsPageTarget({
-  baseUrl,
-  deadline,
-  fetchImpl,
+	baseUrl,
+	deadline,
+	fetchImpl,
 }: {
-  baseUrl: URL;
-  deadline: number;
-  fetchImpl: typeof fetch;
+	baseUrl: URL;
+	deadline: number;
+	fetchImpl: typeof fetch;
 }): Promise<DevToolsTarget | null> {
-  const response = await fetchWithDeadline(new URL("/json/new?about:blank", baseUrl).toString(), deadline, fetchImpl, {
-    method: "PUT",
-  });
-  if (!response?.ok) {
-    return null;
-  }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return null;
-  }
-  return typeof body === "object" && body !== null ? (body as DevToolsTarget) : null;
+	const response = await fetchWithDeadline(
+		new URL("/json/new?about:blank", baseUrl).toString(),
+		deadline,
+		fetchImpl,
+		{
+			method: "PUT",
+		},
+	);
+	if (!response?.ok) {
+		return null;
+	}
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return null;
+	}
+	return typeof body === "object" && body !== null
+		? (body as DevToolsTarget)
+		: null;
 }
 
 async function fetchWithDeadline(
-  url: string,
-  deadline: number,
-  fetchImpl: typeof fetch,
-  init: RequestInit = {}
+	url: string,
+	deadline: number,
+	fetchImpl: typeof fetch,
+	init: RequestInit = {},
 ): Promise<Response | null> {
-  const remainingMs = Math.max(1, deadline - Date.now());
-  const controller = new AbortController();
-  let timeout: NodeJS.Timeout | null = null;
-  try {
-    const timeoutPromise = new Promise<null>((resolve) => {
-      timeout = setTimeout(() => {
-        controller.abort();
-        resolve(null);
-      }, remainingMs);
-    });
-    return await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), timeoutPromise]);
-  } catch {
-    return null;
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
+	const remainingMs = Math.max(1, deadline - Date.now());
+	const controller = new AbortController();
+	let timeout: NodeJS.Timeout | null = null;
+	try {
+		const timeoutPromise = new Promise<null>((resolve) => {
+			timeout = setTimeout(() => {
+				controller.abort();
+				resolve(null);
+			}, remainingMs);
+		});
+		return await Promise.race([
+			fetchImpl(url, { ...init, signal: controller.signal }),
+			timeoutPromise,
+		]);
+	} catch {
+		return null;
+	} finally {
+		if (timeout) {
+			clearTimeout(timeout);
+		}
+	}
 }
 
-function countMatchingPageTargets(targets: readonly DevToolsTarget[], targetIds: ReadonlySet<string>): number {
-  return targets.filter(
-    (target) => target?.type === "page" && typeof target.id === "string" && targetIds.has(target.id)
-  ).length;
+function countMatchingPageTargets(
+	targets: readonly DevToolsTarget[],
+	targetIds: ReadonlySet<string>,
+): number {
+	return targets.filter(
+		(target) =>
+			target?.type === "page" &&
+			typeof target.id === "string" &&
+			targetIds.has(target.id),
+	).length;
 }
 
 export async function fetchPageTargetWsUrl({
-  port,
-  fetchImpl = globalThis.fetch,
+	port,
+	fetchImpl = globalThis.fetch,
 }: {
-  port: number;
-  fetchImpl?: typeof fetch;
+	port: number;
+	fetchImpl?: typeof fetch;
 }): Promise<string | null> {
-  if (typeof fetchImpl !== "function") {
-    return null;
-  }
-  let response: Response;
-  try {
-    response = await fetchImpl(`http://127.0.0.1:${String(port)}/json`);
-  } catch {
-    return null;
-  }
-  if (!response.ok) {
-    return null;
-  }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(body)) {
-    return null;
-  }
-  // Prefer the first `page` target. Some Chromium builds also list `iframe`,
-  // `worker`, `service_worker`, `browser`, etc. — we want a real page.
-  const pageTarget = (body as DevToolsTarget[]).find(
-    (target) => target?.type === "page" && typeof target.webSocketDebuggerUrl === "string"
-  );
-  return pageTarget?.webSocketDebuggerUrl ?? null;
+	if (typeof fetchImpl !== "function") {
+		return null;
+	}
+	let response: Response;
+	try {
+		response = await fetchImpl(`http://127.0.0.1:${String(port)}/json`);
+	} catch {
+		return null;
+	}
+	if (!response.ok) {
+		return null;
+	}
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(body)) {
+		return null;
+	}
+	// Prefer the first `page` target. Some Chromium builds also list `iframe`,
+	// `worker`, `service_worker`, `browser`, etc. — we want a real page.
+	const pageTarget = (body as DevToolsTarget[]).find(
+		(target) =>
+			target?.type === "page" &&
+			typeof target.webSocketDebuggerUrl === "string",
+	);
+	return pageTarget?.webSocketDebuggerUrl ?? null;
 }
 
 // Module-scope so the DISPLAY-without-XAUTHORITY warning fires once per
@@ -1202,33 +1342,40 @@ let displayAuthWarningEmitted = false;
  *     the runtime uses `acquireIsolatedBrowser` against
  *     `PDPP_BROWSER_PROFILE_ROOT/<name>/` (default `~/.pdpp/profiles/<name>/`).
  */
-export async function acquireBrowserForConnector(options: AcquireIsolatedBrowserOptions): Promise<IsolatedBrowser> {
-  const effectiveHeadless = resolveDeploymentBrowserHeadless(options.headless);
-  const gate = decideContainerHeadedBrowserGate({
-    headless: effectiveHeadless,
-    inContainer: isRunningInContainer(),
-    escapeHatchEnabled: process.env.PDPP_ALLOW_HEADED_CONTAINER_BROWSER === "1",
-    managedDisplayAvailable: process.env.PDPP_RUNTIME_BROWSER === "1" && Boolean(process.env.DISPLAY?.trim()),
-    ...(options.remoteCdpUrl ? { remoteCdpUrl: options.remoteCdpUrl } : {}),
-  });
-  if (gate.kind === "fail_closed") {
-    throw new HeadedBrowserUnavailableError({
-      message:
-        "Headed (visible) browser-backed connector requested in a container without a managed browser runtime/display. " +
-        "Use the browser-capable Core image (it starts full Patchright Chromium under Xvfb), " +
-        "or run this connector in a local collector runtime that advertises a `browser` binding " +
-        "(`pdpp collector enroll --base-url <url> --code <code>` then `pdpp collector run --base-url <url> --connector <id> ...`), " +
-        "or run the provider/control-plane outside the container so the host-direct launcher can open a visible browser. " +
-        "Headless container browsers are unaffected; interactive flows must use a local collector so the operator can complete login/OTP/Cloudflare.",
-    });
-  }
-  if (gate.kind === "warn_and_proceed") {
-    process.stderr.write(
-      "[browser-launch] PDPP_ALLOW_HEADED_CONTAINER_BROWSER=1 — bypassing the in-container fail-closed gate. " +
-        "A headed Chromium in a container is invisible to the operator unless an X11/VNC bridge is in place; " +
-        "interactive flows will hang silently if the operator cannot reach the browser window.\n"
-    );
-  }
+export async function acquireBrowserForConnector(
+	options: AcquireIsolatedBrowserOptions,
+): Promise<IsolatedBrowser> {
+	const effectiveHeadless = resolveDeploymentBrowserHeadless(options.headless);
+	const gate = decideContainerHeadedBrowserGate({
+		headless: effectiveHeadless,
+		inContainer: isRunningInContainer(),
+		escapeHatchEnabled: process.env.PDPP_ALLOW_HEADED_CONTAINER_BROWSER === "1",
+		managedDisplayAvailable:
+			process.env.PDPP_RUNTIME_BROWSER === "1" &&
+			Boolean(process.env.DISPLAY?.trim()),
+		...(options.remoteCdpUrl ? { remoteCdpUrl: options.remoteCdpUrl } : {}),
+	});
+	if (gate.kind === "fail_closed") {
+		throw new HeadedBrowserUnavailableError({
+			message:
+				"Headed (visible) browser-backed connector requested in a container without a managed browser runtime/display. " +
+				"Use the browser-capable Core image (it starts full Patchright Chromium under Xvfb), " +
+				"or run this connector in a local collector runtime that advertises a `browser` binding " +
+				"(`pdpp collector enroll --base-url <url> --code <code>` then `pdpp collector run --base-url <url> --connector <id> ...`), " +
+				"or run the provider/control-plane outside the container so the host-direct launcher can open a visible browser. " +
+				"Headless container browsers are unaffected; interactive flows must use a local collector so the operator can complete login/OTP/Cloudflare.",
+		});
+	}
+	if (gate.kind === "warn_and_proceed") {
+		process.stderr.write(
+			"[browser-launch] PDPP_ALLOW_HEADED_CONTAINER_BROWSER=1 — bypassing the in-container fail-closed gate. " +
+				"A headed Chromium in a container is invisible to the operator unless an X11/VNC bridge is in place; " +
+				"interactive flows will hang silently if the operator cannot reach the browser window.\n",
+		);
+	}
 
-  return await acquireIsolatedBrowser({ ...options, headless: effectiveHeadless });
+	return await acquireIsolatedBrowser({
+		...options,
+		headless: effectiveHeadless,
+	});
 }

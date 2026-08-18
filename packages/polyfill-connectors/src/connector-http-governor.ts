@@ -3,11 +3,11 @@
 
 import type { CollectionRateProgress } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import {
-  type HttpRetryBudget,
-  type HttpRetryResponse,
-  RetryExhaustedError,
-  retryHttp,
-  TerminalHttpStatusError,
+	type HttpRetryBudget,
+	type HttpRetryResponse,
+	RetryExhaustedError,
+	retryHttp,
+	TerminalHttpStatusError,
 } from "@pdpp/connector-protocol/http-retry";
 import { type PacingSnapshot, ProviderPacing } from "./provider-pacing.ts";
 import type { ProviderPacingProfile } from "./provider-profile.ts";
@@ -63,89 +63,93 @@ import type { SendGovernor } from "./send-governor.ts";
  * reddit are Phase B (a separate research verdict) and do NOT use this factory.
  */
 export interface ConnectorHttpGovernorOptions {
-  /** Base backoff (ms) for jittered exponential delay. Default: 1000. */
-  baseDelayMs?: number;
-  /** Max bounded attempts per request (incl. the first). Default: 4. */
-  maxAttempts?: number;
-  /** Backoff ceiling (ms). Default: 60_000. */
-  maxDelayMs?: number;
-  /** Cap an honored Retry-After to this many ms. Default: 5 × 60_000. */
-  maxRetryAfterMs?: number;
-  /** Connector name, used to build the `<name>_rate_limited` terminal error. */
-  name: string;
-  /** Injectable clock for the pacing bucket (tests). */
-  now?: () => number;
-  /**
-   * Conservative slow-start DISCOVERY interval (ms) the AIMD ramp enters from on
-   * a cold start. The effective value is never below the declared provider
-   * profile floor. Unknown-quota API; start polite. Default:
-   * {@link DEFAULT_PACING_INITIAL_INTERVAL_MS} (adaptive collection is on by
-   * default). Pass `0` to opt OUT of pacing entirely (no pre-flight wait — the
-   * pre-convergence byte-identical behavior).
-   */
-  pacingInitialIntervalMs?: number;
-  /**
-   * REQUIRED per-provider profile carrying the safety-/pressure-shaped pacing
-   * quantity (`pacingMinIntervalMs`, the rate ceiling). NO cross-provider default
-   * (SLVP-ideal spec §3): a connector must declare its own ceiling from its own
-   * provider's observed behavior — omitting it is a build error, not a silent
-   * borrow of ChatGPT's account-tuned 250ms. Construct from this provider's
-   * audited per-connector profile factory in `provider-profile.ts` (e.g.
-   * `githubPacingProfile()`), each derived from the provider's documented rate
-   * limit (WI-1b; see docs/research/per-connector-rate-profiles-2026-06-13.md).
-   *
-   * @see ProviderPacingProfile
-   */
-  profile: ProviderPacingProfile;
-  /** Injectable RNG for jitter (tests). */
-  random?: () => number;
-  /**
-   * Warm-start seed: the interval the controller LEARNED at the end of a prior
-   * run, restored so the AIMD descent compounds across runs instead of resetting
-   * to the cold discovery seed at each boundary. Read it from durable connector
-   * state with {@link readPersistedPacingInterval} (which owns the staleness
-   * guard). Absent → cold start at `pacingInitialIntervalMs`.
-   */
-  restoredIntervalMs?: number | null;
-  /** Optional ratio-based retry budget (Finagle). Absent → only `maxAttempts`. */
-  retryBudget?: HttpRetryBudget;
-  /** Injectable request-retry sleep (tests). Defaults to `sleep`. */
-  retrySleep?: (ms: number) => void | Promise<void>;
-  /** Injectable sleep (tests). */
-  sleep?: (ms: number) => void | Promise<void>;
+	/** Base backoff (ms) for jittered exponential delay. Default: 1000. */
+	baseDelayMs?: number;
+	/** Max bounded attempts per request (incl. the first). Default: 4. */
+	maxAttempts?: number;
+	/** Backoff ceiling (ms). Default: 60_000. */
+	maxDelayMs?: number;
+	/** Cap an honored Retry-After to this many ms. Default: 5 × 60_000. */
+	maxRetryAfterMs?: number;
+	/** Connector name, used to build the `<name>_rate_limited` terminal error. */
+	name: string;
+	/** Injectable clock for the pacing bucket (tests). */
+	now?: () => number;
+	/**
+	 * Conservative slow-start DISCOVERY interval (ms) the AIMD ramp enters from on
+	 * a cold start. The effective value is never below the declared provider
+	 * profile floor. Unknown-quota API; start polite. Default:
+	 * {@link DEFAULT_PACING_INITIAL_INTERVAL_MS} (adaptive collection is on by
+	 * default). Pass `0` to opt OUT of pacing entirely (no pre-flight wait — the
+	 * pre-convergence byte-identical behavior).
+	 */
+	pacingInitialIntervalMs?: number;
+	/**
+	 * REQUIRED per-provider profile carrying the safety-/pressure-shaped pacing
+	 * quantity (`pacingMinIntervalMs`, the rate ceiling). NO cross-provider default
+	 * (SLVP-ideal spec §3): a connector must declare its own ceiling from its own
+	 * provider's observed behavior — omitting it is a build error, not a silent
+	 * borrow of ChatGPT's account-tuned 250ms. Construct from this provider's
+	 * audited per-connector profile factory in `provider-profile.ts` (e.g.
+	 * `githubPacingProfile()`), each derived from the provider's documented rate
+	 * limit (WI-1b; see docs/research/per-connector-rate-profiles-2026-06-13.md).
+	 *
+	 * @see ProviderPacingProfile
+	 */
+	profile: ProviderPacingProfile;
+	/** Injectable RNG for jitter (tests). */
+	random?: () => number;
+	/**
+	 * Warm-start seed: the interval the controller LEARNED at the end of a prior
+	 * run, restored so the AIMD descent compounds across runs instead of resetting
+	 * to the cold discovery seed at each boundary. Read it from durable connector
+	 * state with {@link readPersistedPacingInterval} (which owns the staleness
+	 * guard). Absent → cold start at `pacingInitialIntervalMs`.
+	 */
+	restoredIntervalMs?: number | null;
+	/** Optional ratio-based retry budget (Finagle). Absent → only `maxAttempts`. */
+	retryBudget?: HttpRetryBudget;
+	/** Injectable request-retry sleep (tests). Defaults to `sleep`. */
+	retrySleep?: (ms: number) => void | Promise<void>;
+	/** Injectable sleep (tests). */
+	sleep?: (ms: number) => void | Promise<void>;
 }
 
 export interface ConnectorHttpResult<T> extends HttpRetryResponse {
-  /** The parsed body, available on a non-retryable (typically 2xx) response. */
-  value: T;
+	/** The parsed body, available on a non-retryable (typically 2xx) response. */
+	value: T;
 }
 
 export interface ConnectorHttpGovernor {
-  /**
-   * The single pre-flight send governor. Exposed so a stacking-regression test
-   * can assert there is exactly one pre-flight wait source on the request path.
-   */
-  readonly governor: SendGovernor;
-  /**
-   * Run one logical request (with bounded inline retries) through the governor.
-   * `send` performs the transport call; `classify` maps its result to a status,
-   * optional headers, and a parsed value. On terminal 429 exhaustion throws
-   * `<name>_rate_limited`; on terminal non-429 retryable exhaustion rethrows the
-   * `RetryExhaustedError`; on a `shouldAbort` status throws
-   * `TerminalHttpStatusError` (or the caller maps it first via `classify`).
-   */
-  request: <T, R>(
-    send: () => R | Promise<R>,
-    classify: (raw: R) => { status: number; headers?: Record<string, string | undefined>; value: T }
-  ) => Promise<ConnectorHttpResult<T>>;
-  /**
-   * Operator-legible snapshot of the live rate controller, or `null` when pacing
-   * is disabled (`pacingInitialIntervalMs: 0`). `snapshot.intervalMs` is the
-   * durable value a connector persists for warm-start; pass it to
-   * {@link buildPacingStateFields} / {@link buildCollectionRateProgress}. PURE:
-   * reads only, never advances GCRA state.
-   */
-  snapshot: () => PacingSnapshot | null;
+	/**
+	 * The single pre-flight send governor. Exposed so a stacking-regression test
+	 * can assert there is exactly one pre-flight wait source on the request path.
+	 */
+	readonly governor: SendGovernor;
+	/**
+	 * Run one logical request (with bounded inline retries) through the governor.
+	 * `send` performs the transport call; `classify` maps its result to a status,
+	 * optional headers, and a parsed value. On terminal 429 exhaustion throws
+	 * `<name>_rate_limited`; on terminal non-429 retryable exhaustion rethrows the
+	 * `RetryExhaustedError`; on a `shouldAbort` status throws
+	 * `TerminalHttpStatusError` (or the caller maps it first via `classify`).
+	 */
+	request: <T, R>(
+		send: () => R | Promise<R>,
+		classify: (raw: R) => {
+			status: number;
+			headers?: Record<string, string | undefined>;
+			value: T;
+		},
+	) => Promise<ConnectorHttpResult<T>>;
+	/**
+	 * Operator-legible snapshot of the live rate controller, or `null` when pacing
+	 * is disabled (`pacingInitialIntervalMs: 0`). `snapshot.intervalMs` is the
+	 * durable value a connector persists for warm-start; pass it to
+	 * {@link buildPacingStateFields} / {@link buildCollectionRateProgress}. PURE:
+	 * reads only, never advances GCRA state.
+	 */
+	snapshot: () => PacingSnapshot | null;
 }
 
 /**
@@ -153,10 +157,10 @@ export interface ConnectorHttpGovernor {
  * existing connector `retryablePattern` cross-run contract still fires.
  */
 export class ConnectorRateLimitedError extends Error {
-  constructor(name: string, options?: ErrorOptions) {
-    super(`${name}_rate_limited`, options);
-    this.name = "ConnectorRateLimitedError";
-  }
+	constructor(name: string, options?: ErrorOptions) {
+		super(`${name}_rate_limited`, options);
+		this.name = "ConnectorRateLimitedError";
+	}
 }
 
 const DEFAULT_MAX_ATTEMPTS = 4;
@@ -183,126 +187,146 @@ export const DEFAULT_PACING_INITIAL_INTERVAL_MS = 1000;
  */
 export const DEFAULT_PACING_MIN_INTERVAL_MS = 250;
 
-export function createConnectorHttpGovernor(options: ConnectorHttpGovernorOptions): ConnectorHttpGovernor {
-  // Belt-and-braces for the spec §3 "missing field = build error" rule: the type
-  // makes `profile.pacingMinIntervalMs` required, but a JS caller (no tsc) could
-  // still omit it. Fail LOUD rather than silently borrowing a shared default —
-  // an omitted safety ceiling must never pass quietly.
-  if (
-    !options.profile ||
-    typeof options.profile.pacingMinIntervalMs !== "number" ||
-    !Number.isFinite(options.profile.pacingMinIntervalMs) ||
-    options.profile.pacingMinIntervalMs <= 0
-  ) {
-    throw new Error(
-      `createConnectorHttpGovernor({ name: "${options.name}" }) requires a per-provider ` +
-        "profile.pacingMinIntervalMs (the rate ceiling). Declare one from this provider's " +
-        "observed behavior — there is NO cross-provider default (SLVP-ideal spec §3 rule 6)."
-    );
-  }
-  // Adaptive collection is ON by default: a `{ name, profile }` call yields
-  // slow-start discovery + AIMD accelerate-under-success + ceiling-bounded
-  // back-off. Pass `pacingInitialIntervalMs: 0` to opt out of pacing entirely.
-  const pacingInitialIntervalMs = options.pacingInitialIntervalMs ?? DEFAULT_PACING_INITIAL_INTERVAL_MS;
-  // The rate ceiling comes from the REQUIRED per-provider profile — never a
-  // shared fallback (spec §3). A missing profile is a compile-time error on the
-  // options type, so by the time we are here `pacingMinIntervalMs` is always a
-  // declared, per-provider value.
-  const { pacingMinIntervalMs } = options.profile;
-  const pacingEnabled = pacingInitialIntervalMs > 0;
-  // Warm-start: seed from the prior run's learned interval when the connector
-  // restored one (already staleness-guarded by readPersistedPacingInterval).
-  const restored =
-    options.restoredIntervalMs === null ||
-    options.restoredIntervalMs === undefined ||
-    !Number.isFinite(options.restoredIntervalMs)
-      ? null
-      : options.restoredIntervalMs;
-  const pacing = new ProviderPacing({
-    initialIntervalMs: pacingInitialIntervalMs,
-    // A zero discovery interval is the explicit pacing opt-out. Do not let the
-    // provider floor turn that disabled path into a newly introduced wait.
-    minIntervalMs: pacingEnabled ? pacingMinIntervalMs : 0,
-    ...(restored === null ? {} : { restoredIntervalMs: restored }),
-    ...(options.now === undefined ? {} : { now: options.now }),
-    ...(options.sleep === undefined ? {} : { sleep: (ms: number) => Promise.resolve(options.sleep?.(ms)) }),
-  });
+export function createConnectorHttpGovernor(
+	options: ConnectorHttpGovernorOptions,
+): ConnectorHttpGovernor {
+	// Belt-and-braces for the spec §3 "missing field = build error" rule: the type
+	// makes `profile.pacingMinIntervalMs` required, but a JS caller (no tsc) could
+	// still omit it. Fail LOUD rather than silently borrowing a shared default —
+	// an omitted safety ceiling must never pass quietly.
+	if (
+		!options.profile ||
+		typeof options.profile.pacingMinIntervalMs !== "number" ||
+		!Number.isFinite(options.profile.pacingMinIntervalMs) ||
+		options.profile.pacingMinIntervalMs <= 0
+	) {
+		throw new Error(
+			`createConnectorHttpGovernor({ name: "${options.name}" }) requires a per-provider ` +
+				"profile.pacingMinIntervalMs (the rate ceiling). Declare one from this provider's " +
+				"observed behavior — there is NO cross-provider default (SLVP-ideal spec §3 rule 6).",
+		);
+	}
+	// Adaptive collection is ON by default: a `{ name, profile }` call yields
+	// slow-start discovery + AIMD accelerate-under-success + ceiling-bounded
+	// back-off. Pass `pacingInitialIntervalMs: 0` to opt out of pacing entirely.
+	const pacingInitialIntervalMs =
+		options.pacingInitialIntervalMs ?? DEFAULT_PACING_INITIAL_INTERVAL_MS;
+	// The rate ceiling comes from the REQUIRED per-provider profile — never a
+	// shared fallback (spec §3). A missing profile is a compile-time error on the
+	// options type, so by the time we are here `pacingMinIntervalMs` is always a
+	// declared, per-provider value.
+	const { pacingMinIntervalMs } = options.profile;
+	const pacingEnabled = pacingInitialIntervalMs > 0;
+	// Warm-start: seed from the prior run's learned interval when the connector
+	// restored one (already staleness-guarded by readPersistedPacingInterval).
+	const restored =
+		options.restoredIntervalMs === null ||
+		options.restoredIntervalMs === undefined ||
+		!Number.isFinite(options.restoredIntervalMs)
+			? null
+			: options.restoredIntervalMs;
+	const pacing = new ProviderPacing({
+		initialIntervalMs: pacingInitialIntervalMs,
+		// A zero discovery interval is the explicit pacing opt-out. Do not let the
+		// provider floor turn that disabled path into a newly introduced wait.
+		minIntervalMs: pacingEnabled ? pacingMinIntervalMs : 0,
+		...(restored === null ? {} : { restoredIntervalMs: restored }),
+		...(options.now === undefined ? {} : { now: options.now }),
+		...(options.sleep === undefined
+			? {}
+			: { sleep: (ms: number) => Promise.resolve(options.sleep?.(ms)) }),
+	});
 
-  // The single pre-flight wait. ProviderPacing.admit() is the ONE governor for
-  // these serial API connectors. There is deliberately no second pre-flight
-  // gate to compose with — that is the convergence invariant.
-  const governor: SendGovernor = {
-    acquire: () => pacing.admit(),
-  };
+	// The single pre-flight wait. ProviderPacing.admit() is the ONE governor for
+	// these serial API connectors. There is deliberately no second pre-flight
+	// gate to compose with — that is the convergence invariant.
+	const governor: SendGovernor = {
+		acquire: () => pacing.admit(),
+	};
 
-  const baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
-  const maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+	const baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
+	const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+	const maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+	const maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
 
-  async function request<T, R>(
-    send: () => R | Promise<R>,
-    classify: (raw: R) => { status: number; headers?: Record<string, string | undefined>; value: T }
-  ): Promise<ConnectorHttpResult<T>> {
-    try {
-      const response = await retryHttp<ConnectorHttpResult<T>>({
-        baseDelayMs,
-        // The single pre-flight gate fires before each attempt (initial + retry),
-        // so retries pass through the same governor as originals (prior-art
-        // transferable pattern #3).
-        beforeAttempt: () => governor.acquire(),
-        maxAttempts,
-        maxDelayMs,
-        maxRetryAfterMs,
-        ...(options.random === undefined ? {} : { random: options.random }),
-        ...(options.retryBudget === undefined ? {} : { retryBudget: options.retryBudget }),
-        ...((options.retrySleep ?? options.sleep) === undefined ? {} : { sleep: options.retrySleep ?? options.sleep }),
-        request: async () => {
-          const raw = await send();
-          const c = classify(raw);
-          const result: ConnectorHttpResult<T> = { status: c.status, value: c.value };
-          if (c.headers) {
-            result.headers = c.headers;
-          }
-          return result;
-        },
-        onRetry: () => {
-          // Feed the pacing AIMD with the throttle signal (multiplicative
-          // fill-rate decrease) ONLY. Crucially we do NOT forward Retry-After
-          // into the pacing bucket: `retryHttp` already sleeps the Retry-After
-          // (or jittered backoff) for this attempt. Re-queuing it as a pacing
-          // pre-flight wait would double-pay the same delay — the exact
-          // `retryAfterAlreadySlept` / `absorbedByRequestWait` guard. The
-          // backoff (post-failure) and pacing (pre-flight) stay one wait each.
-          pacing.recordThrottle({});
-        },
-      });
-      pacing.recordSuccess();
-      return response;
-    } catch (error) {
-      if (isRateLimitTerminal(error)) {
-        throw new ConnectorRateLimitedError(options.name, { cause: error });
-      }
-      throw error;
-    }
-  }
+	async function request<T, R>(
+		send: () => R | Promise<R>,
+		classify: (raw: R) => {
+			status: number;
+			headers?: Record<string, string | undefined>;
+			value: T;
+		},
+	): Promise<ConnectorHttpResult<T>> {
+		try {
+			const response = await retryHttp<ConnectorHttpResult<T>>({
+				baseDelayMs,
+				// The single pre-flight gate fires before each attempt (initial + retry),
+				// so retries pass through the same governor as originals (prior-art
+				// transferable pattern #3).
+				beforeAttempt: () => governor.acquire(),
+				maxAttempts,
+				maxDelayMs,
+				maxRetryAfterMs,
+				...(options.random === undefined ? {} : { random: options.random }),
+				...(options.retryBudget === undefined
+					? {}
+					: { retryBudget: options.retryBudget }),
+				...((options.retrySleep ?? options.sleep) === undefined
+					? {}
+					: { sleep: options.retrySleep ?? options.sleep }),
+				request: async () => {
+					const raw = await send();
+					const c = classify(raw);
+					const result: ConnectorHttpResult<T> = {
+						status: c.status,
+						value: c.value,
+					};
+					if (c.headers) {
+						result.headers = c.headers;
+					}
+					return result;
+				},
+				onRetry: () => {
+					// Feed the pacing AIMD with the throttle signal (multiplicative
+					// fill-rate decrease) ONLY. Crucially we do NOT forward Retry-After
+					// into the pacing bucket: `retryHttp` already sleeps the Retry-After
+					// (or jittered backoff) for this attempt. Re-queuing it as a pacing
+					// pre-flight wait would double-pay the same delay — the exact
+					// `retryAfterAlreadySlept` / `absorbedByRequestWait` guard. The
+					// backoff (post-failure) and pacing (pre-flight) stay one wait each.
+					pacing.recordThrottle({});
+				},
+			});
+			pacing.recordSuccess();
+			return response;
+		} catch (error) {
+			if (isRateLimitTerminal(error)) {
+				throw new ConnectorRateLimitedError(options.name, { cause: error });
+			}
+			throw error;
+		}
+	}
 
-  function snapshot(): PacingSnapshot | null {
-    return pacingEnabled ? pacing.snapshot() : null;
-  }
+	function snapshot(): PacingSnapshot | null {
+		return pacingEnabled ? pacing.snapshot() : null;
+	}
 
-  return { governor, request, snapshot };
+	return { governor, request, snapshot };
 }
 
 function isRateLimitTerminal(error: unknown): boolean {
-  if (error instanceof RetryExhaustedError) {
-    const cause = error.originalCause;
-    return typeof cause === "object" && cause !== null && (cause as { status?: number }).status === 429;
-  }
-  if (error instanceof TerminalHttpStatusError) {
-    return error.status === 429;
-  }
-  return false;
+	if (error instanceof RetryExhaustedError) {
+		const cause = error.originalCause;
+		return (
+			typeof cause === "object" &&
+			cause !== null &&
+			(cause as { status?: number }).status === 429
+		);
+	}
+	if (error instanceof TerminalHttpStatusError) {
+		return error.status === 429;
+	}
+	return false;
 }
 
 // ─── Warm-start persistence + observability helpers (shared, opt-in) ─────────
@@ -332,14 +356,14 @@ export const PACING_STATE_RECORDED_AT_KEY = "pacing_recorded_at_ms";
 export const DEFAULT_PACING_STALENESS_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 export interface PacingPersistOptions {
-  /** State sub-key for the interval. Default: {@link PACING_STATE_INTERVAL_KEY}. */
-  intervalKey?: string;
-  /** Injectable clock (tests). Default: Date.now. */
-  now?: () => number;
-  /** State sub-key for the timestamp. Default: {@link PACING_STATE_RECORDED_AT_KEY}. */
-  recordedAtKey?: string;
-  /** Staleness window (ms). Default: {@link DEFAULT_PACING_STALENESS_MS}. */
-  stalenessMs?: number;
+	/** State sub-key for the interval. Default: {@link PACING_STATE_INTERVAL_KEY}. */
+	intervalKey?: string;
+	/** Injectable clock (tests). Default: Date.now. */
+	now?: () => number;
+	/** State sub-key for the timestamp. Default: {@link PACING_STATE_RECORDED_AT_KEY}. */
+	recordedAtKey?: string;
+	/** Staleness window (ms). Default: {@link DEFAULT_PACING_STALENESS_MS}. */
+	stalenessMs?: number;
 }
 
 /**
@@ -350,28 +374,32 @@ export interface PacingPersistOptions {
  * persisted the pacing fields into (e.g. `state.messages`).
  */
 export function readPersistedPacingInterval(
-  stateSlice: Record<string, unknown> | null | undefined,
-  options: PacingPersistOptions = {}
+	stateSlice: Record<string, unknown> | null | undefined,
+	options: PacingPersistOptions = {},
 ): number | null {
-  if (!stateSlice || typeof stateSlice !== "object") {
-    return null;
-  }
-  const intervalKey = options.intervalKey ?? PACING_STATE_INTERVAL_KEY;
-  const recordedAtKey = options.recordedAtKey ?? PACING_STATE_RECORDED_AT_KEY;
-  const stalenessMs = options.stalenessMs ?? DEFAULT_PACING_STALENESS_MS;
-  const now = options.now ?? Date.now;
-  const intervalMs = stateSlice[intervalKey];
-  const recordedAtMs = stateSlice[recordedAtKey];
-  if (typeof intervalMs !== "number" || !Number.isFinite(intervalMs) || intervalMs <= 0) {
-    return null;
-  }
-  if (typeof recordedAtMs !== "number" || !Number.isFinite(recordedAtMs)) {
-    return null;
-  }
-  if (now() - recordedAtMs > stalenessMs) {
-    return null;
-  }
-  return intervalMs;
+	if (!stateSlice || typeof stateSlice !== "object") {
+		return null;
+	}
+	const intervalKey = options.intervalKey ?? PACING_STATE_INTERVAL_KEY;
+	const recordedAtKey = options.recordedAtKey ?? PACING_STATE_RECORDED_AT_KEY;
+	const stalenessMs = options.stalenessMs ?? DEFAULT_PACING_STALENESS_MS;
+	const now = options.now ?? Date.now;
+	const intervalMs = stateSlice[intervalKey];
+	const recordedAtMs = stateSlice[recordedAtKey];
+	if (
+		typeof intervalMs !== "number" ||
+		!Number.isFinite(intervalMs) ||
+		intervalMs <= 0
+	) {
+		return null;
+	}
+	if (typeof recordedAtMs !== "number" || !Number.isFinite(recordedAtMs)) {
+		return null;
+	}
+	if (now() - recordedAtMs > stalenessMs) {
+		return null;
+	}
+	return intervalMs;
 }
 
 /**
@@ -393,25 +421,25 @@ export function readPersistedPacingInterval(
  * the live account; only the CROSS-run seed is floored.
  */
 export function buildPacingStateFields(
-  governor: Pick<ConnectorHttpGovernor, "snapshot"> | null | undefined,
-  options: PacingPersistOptions = {}
+	governor: Pick<ConnectorHttpGovernor, "snapshot"> | null | undefined,
+	options: PacingPersistOptions = {},
 ): Record<string, number> {
-  const snapshot = governor?.snapshot();
-  if (!snapshot) {
-    return {};
-  }
-  const intervalKey = options.intervalKey ?? PACING_STATE_INTERVAL_KEY;
-  const recordedAtKey = options.recordedAtKey ?? PACING_STATE_RECORDED_AT_KEY;
-  const now = options.now ?? Date.now;
-  return {
-    [intervalKey]: Math.min(snapshot.intervalMs, snapshot.initialIntervalMs),
-    [recordedAtKey]: now(),
-  };
+	const snapshot = governor?.snapshot();
+	if (!snapshot) {
+		return {};
+	}
+	const intervalKey = options.intervalKey ?? PACING_STATE_INTERVAL_KEY;
+	const recordedAtKey = options.recordedAtKey ?? PACING_STATE_RECORDED_AT_KEY;
+	const now = options.now ?? Date.now;
+	return {
+		[intervalKey]: Math.min(snapshot.intervalMs, snapshot.initialIntervalMs),
+		[recordedAtKey]: now(),
+	};
 }
 
 /** Requests/min from an interval (ms); 0 interval reads as 0 rate (never ∞). */
 function ratePerMinFromInterval(intervalMs: number): number {
-  return intervalMs > 0 ? Math.round(60_000 / intervalMs) : 0;
+	return intervalMs > 0 ? Math.round(60_000 / intervalMs) : 0;
 }
 
 /**
@@ -422,20 +450,23 @@ function ratePerMinFromInterval(intervalMs: number): number {
  * caller can emit it as `{ type: "PROGRESS", collection_rate }`.
  */
 export function buildCollectionRateProgress(
-  governor: Pick<ConnectorHttpGovernor, "snapshot"> | null | undefined
+	governor: Pick<ConnectorHttpGovernor, "snapshot"> | null | undefined,
 ): CollectionRateProgress | null {
-  const snapshot = governor?.snapshot();
-  if (!snapshot) {
-    return null;
-  }
-  return {
-    ceiling_interval_ms: snapshot.minIntervalMs,
-    ceiling_rate_per_min: ratePerMinFromInterval(snapshot.minIntervalMs),
-    current_interval_ms: snapshot.intervalMs,
-    effective_rate_per_min: ratePerMinFromInterval(snapshot.intervalMs),
-    last_backoff: snapshot.lastBackoff
-      ? { at_interval_ms: snapshot.lastBackoff.atIntervalMs, reason: snapshot.lastBackoff.reason }
-      : null,
-    object: "collection_rate",
-  };
+	const snapshot = governor?.snapshot();
+	if (!snapshot) {
+		return null;
+	}
+	return {
+		ceiling_interval_ms: snapshot.minIntervalMs,
+		ceiling_rate_per_min: ratePerMinFromInterval(snapshot.minIntervalMs),
+		current_interval_ms: snapshot.intervalMs,
+		effective_rate_per_min: ratePerMinFromInterval(snapshot.intervalMs),
+		last_backoff: snapshot.lastBackoff
+			? {
+					at_interval_ms: snapshot.lastBackoff.atIntervalMs,
+					reason: snapshot.lastBackoff.reason,
+				}
+			: null,
+		object: "collection_rate",
+	};
 }

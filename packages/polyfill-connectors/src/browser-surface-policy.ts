@@ -31,39 +31,43 @@
  */
 
 export interface BrowserSurfacePolicy {
-  /** Keep the run page open after a failed run for later repair/reuse. */
-  readonly preservePageOnFailure: boolean;
-  /** Reuse and keep the run page open after a successful run. */
-  readonly preservePageOnSuccess: boolean;
-  /**
-   * Keep the managed surface *process* alive across routine idle-TTL and
-   * capacity-pressure reap. Only meaningful for connectors whose auth lives in
-   * the live browser process; always implies page preservation.
-   */
-  readonly retainSurfaceProcess: boolean;
+	/** Keep the run page open after a failed run for later repair/reuse. */
+	readonly preservePageOnFailure: boolean;
+	/** Reuse and keep the run page open after a successful run. */
+	readonly preservePageOnSuccess: boolean;
+	/**
+	 * Keep the managed surface *process* alive across routine idle-TTL and
+	 * capacity-pressure reap. Only meaningful for connectors whose auth lives in
+	 * the live browser process; always implies page preservation.
+	 */
+	readonly retainSurfaceProcess: boolean;
 }
 
-const BROWSER_SURFACE_POLICY_REGISTRY: Readonly<Record<string, BrowserSurfacePolicy>> = {
-  // ChatGPT's authenticated provider API session is held in the live browser
-  // process, not durable browser storage. It preserves both pages and retains
-  // its surface process; true process loss remains an owner browser-session
-  // repair condition rather than a silent auth loss.
-  chatgpt: {
-    preservePageOnSuccess: true,
-    preservePageOnFailure: true,
-    retainSurfaceProcess: true,
-  },
+const BROWSER_SURFACE_POLICY_REGISTRY: Readonly<
+	Record<string, BrowserSurfacePolicy>
+> = {
+	// ChatGPT's authenticated provider API session is held in the live browser
+	// process, not durable browser storage. It preserves both pages and retains
+	// its surface process; true process loss remains an owner browser-session
+	// repair condition rather than a silent auth loss.
+	chatgpt: {
+		preservePageOnSuccess: true,
+		preservePageOnFailure: true,
+		retainSurfaceProcess: true,
+	},
 };
 
 /**
  * Returns the browser-surface policy for a connector runtime name, or null when
  * the connector declares none (default cleanup semantics, no process retention).
  */
-export function browserSurfacePolicyFor(connectorName: string | null | undefined): BrowserSurfacePolicy | null {
-  if (typeof connectorName !== "string" || !connectorName) {
-    return null;
-  }
-  return BROWSER_SURFACE_POLICY_REGISTRY[connectorName] ?? null;
+export function browserSurfacePolicyFor(
+	connectorName: string | null | undefined,
+): BrowserSurfacePolicy | null {
+	if (typeof connectorName !== "string" || !connectorName) {
+		return null;
+	}
+	return BROWSER_SURFACE_POLICY_REGISTRY[connectorName] ?? null;
 }
 
 /**
@@ -72,24 +76,31 @@ export function browserSurfacePolicyFor(connectorName: string | null | undefined
  * Empty when the connector declares no policy.
  */
 export function browserConfigPreservationFor(
-  connectorName: string | null | undefined
-): Pick<BrowserSurfacePolicy, "preservePageOnSuccess" | "preservePageOnFailure"> | Record<string, never> {
-  const policy = browserSurfacePolicyFor(connectorName);
-  if (!policy) {
-    return {};
-  }
-  return {
-    preservePageOnSuccess: policy.preservePageOnSuccess,
-    preservePageOnFailure: policy.preservePageOnFailure,
-  };
+	connectorName: string | null | undefined,
+):
+	| Pick<
+			BrowserSurfacePolicy,
+			"preservePageOnSuccess" | "preservePageOnFailure"
+	  >
+	| Record<string, never> {
+	const policy = browserSurfacePolicyFor(connectorName);
+	if (!policy) {
+		return {};
+	}
+	return {
+		preservePageOnSuccess: policy.preservePageOnSuccess,
+		preservePageOnFailure: policy.preservePageOnFailure,
+	};
 }
 
 /**
  * Whether the connector's managed surface process must be retained across routine
  * idle/capacity reap. Consumed by the reference implementation's lease caller.
  */
-export function connectorRetainsSurfaceProcess(connectorName: string | null | undefined): boolean {
-  return browserSurfacePolicyFor(connectorName)?.retainSurfaceProcess === true;
+export function connectorRetainsSurfaceProcess(
+	connectorName: string | null | undefined,
+): boolean {
+	return browserSurfacePolicyFor(connectorName)?.retainSurfaceProcess === true;
 }
 
 export { BROWSER_SURFACE_POLICY_REGISTRY };

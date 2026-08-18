@@ -28,80 +28,96 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import type { BrowserContext, Locator, Page } from "playwright";
 import { ensureUsaaSession } from "../../src/auto-login/usaa.ts";
 import {
-  attachBodyResponseQueue,
-  type BodyResponseDiagnostics,
-  type BodyResponseQueue,
-  waitForOptionalBodyResponse,
+	attachBodyResponseQueue,
+	type BodyResponseDiagnostics,
+	type BodyResponseQueue,
+	waitForOptionalBodyResponse,
 } from "../../src/browser-artifact-response.ts";
 import {
-  type BrowserSurfaceManagedState,
-  browserSurfaceManagedState,
-  buildBrowserSurfaceDiagnostic,
+	type BrowserSurfaceManagedState,
+	browserSurfaceManagedState,
+	buildBrowserSurfaceDiagnostic,
 } from "../../src/browser-surface-diagnostic.ts";
 import {
-  type BrowserCollectContext,
-  type DetailGapMessage,
-  type EmittedMessage,
-  emitDetailCoverage,
-  emitDetailGap,
-  type InteractionRequest,
-  type InteractionResponse,
-  nowIso,
-  politeDelay,
-  runConnector,
-  type ValidateRecord,
+	type BrowserCollectContext,
+	type DetailGapMessage,
+	type EmittedMessage,
+	emitDetailCoverage,
+	emitDetailGap,
+	type InteractionRequest,
+	type InteractionResponse,
+	nowIso,
+	politeDelay,
+	runConnector,
+	type ValidateRecord,
 } from "../../src/connector-runtime.ts";
-import { attachDownloadQueue, type DownloadQueue } from "../../src/download-queue.ts";
-import { type FingerprintCursor, openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
+import {
+	attachDownloadQueue,
+	type DownloadQueue,
+} from "../../src/download-queue.ts";
+import {
+	type FingerprintCursor,
+	openFingerprintCursor,
+} from "../../src/fingerprint-cursor.ts";
 import { readPlaywrightDownloadBufferDetailed } from "../../src/playwright-download.ts";
 import { statementFingerprintExcludeKeys } from "../../src/statement-content-fingerprint.ts";
 import {
-  openStatementHydrationCursor,
-  readPriorStatementHydration,
-  type StatementHydration,
-  type StatementHydrationCursor,
+	openStatementHydrationCursor,
+	readPriorStatementHydration,
+	type StatementHydration,
+	type StatementHydrationCursor,
 } from "../../src/statement-hydration-carry-forward.ts";
-import { computeInboxCoverage, type InboxCoverageRow } from "./inbox-coverage.ts";
 import {
-  buildAccountRecord,
-  buildAccountStatsRecord,
-  buildCandidateStarts,
-  buildCreditCardBillingRecord,
-  buildCreditCardBillingStatsRecord,
-  buildInboxMessageRecord,
-  creditCardId,
-  hashId,
-  isoDate,
-  mmddyyyy,
-  BACKFILL_17MO as PARSERS_BACKFILL_17MO,
-  INCREMENTAL_OVERLAP_MS as PARSERS_INCREMENTAL_OVERLAP_MS,
-  parseCsv,
-  resolveAccountIdForRef,
-  rowsToTransactions,
+	computeInboxCoverage,
+	type InboxCoverageRow,
+} from "./inbox-coverage.ts";
+import {
+	buildAccountRecord,
+	buildAccountStatsRecord,
+	buildCandidateStarts,
+	buildCreditCardBillingRecord,
+	buildCreditCardBillingStatsRecord,
+	buildInboxMessageRecord,
+	creditCardId,
+	hashId,
+	isoDate,
+	mmddyyyy,
+	BACKFILL_17MO as PARSERS_BACKFILL_17MO,
+	INCREMENTAL_OVERLAP_MS as PARSERS_INCREMENTAL_OVERLAP_MS,
+	parseCsv,
+	resolveAccountIdForRef,
+	rowsToTransactions,
 } from "./parsers.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
-import { computeStatementCoverage, type StatementCoverageRow } from "./statement-coverage.ts";
-import { fileUrlForPath, hydrateStatementPdfs, parsePdfStatement } from "./statement-pdfs.ts";
+import {
+	computeStatementCoverage,
+	type StatementCoverageRow,
+} from "./statement-coverage.ts";
+import {
+	fileUrlForPath,
+	hydrateStatementPdfs,
+	parsePdfStatement,
+} from "./statement-pdfs.ts";
 import type {
-  BillingKv,
-  DashboardAccount,
-  DiagnosticCandidate,
-  DiagnosticInfo,
-  DocRow,
-  DownloadDiagnostics,
-  DownloadFailReason,
-  DriveExportOptions,
-  HydrationResult,
-  HydrationResultSuccess,
-  InboxRow,
-  IndexRow,
-  LocatedExportPage,
-  NoExportAffordanceObservation,
-  PageDiagnostics,
-  ParseMeta,
-  StatementRecord,
-  TransactionsPriorState,
-  TransactionsStreamCursor,
+	BillingKv,
+	DashboardAccount,
+	DiagnosticCandidate,
+	DiagnosticInfo,
+	DocRow,
+	DownloadDiagnostics,
+	DownloadFailReason,
+	DriveExportOptions,
+	HydrationResult,
+	HydrationResultSuccess,
+	InboxRow,
+	IndexRow,
+	LocatedExportPage,
+	NoExportAffordanceObservation,
+	PageDiagnostics,
+	ParseMeta,
+	StatementRecord,
+	TransactionsPriorState,
+	TransactionsStreamCursor,
 } from "./types.ts";
 
 // Explicit, literal-per-branch mapping from the statement-PDF download
@@ -111,35 +127,40 @@ import type {
 // reason-code completeness scan can see every emitted code statically — see
 // packages/polyfill-connectors/src/reason-display-messages.ts.
 const PDF_DOWNLOAD_SKIP_REASON: Record<DownloadFailReason, string> = {
-  direct_link_failed: "pdf_download_direct_link_failed",
-  download_click_failed: "pdf_download_click_failed",
-  download_empty: "pdf_download_empty",
-  download_timeout: "pdf_download_timeout",
-  no_download_menuitem: "pdf_download_no_download_menuitem",
-  no_options_affordance: "pdf_download_no_options_affordance",
-  options_click_failed: "pdf_download_options_click_failed",
-  persist_failed: "pdf_download_persist_failed",
-  row_missing: "pdf_download_row_missing",
+	direct_link_failed: "pdf_download_direct_link_failed",
+	download_click_failed: "pdf_download_click_failed",
+	download_empty: "pdf_download_empty",
+	download_timeout: "pdf_download_timeout",
+	no_download_menuitem: "pdf_download_no_download_menuitem",
+	no_options_affordance: "pdf_download_no_options_affordance",
+	options_click_failed: "pdf_download_options_click_failed",
+	persist_failed: "pdf_download_persist_failed",
+	row_missing: "pdf_download_row_missing",
 };
 
 const validateRecord = validateRecordRaw as ValidateRecord;
 
 /** Keep unknown-PDF diagnostics useful for recovery without persisting
  * statement text, which can contain names, merchants, amounts, and balances. */
-export function buildPdfTemplateUnknownDiagnostics(statementId: string, parseMeta: ParseMeta): Record<string, unknown> {
-  return {
-    parser_era: parseMeta.era,
-    statement_id: statementId,
-    year: parseMeta.year,
-  };
+export function buildPdfTemplateUnknownDiagnostics(
+	statementId: string,
+	parseMeta: ParseMeta,
+): Record<string, unknown> {
+	return {
+		parser_era: parseMeta.era,
+		statement_id: statementId,
+		year: parseMeta.year,
+	};
 }
 
 // ─── Module-scope regexes ────────────────────────────────────────────────
 
 const ACCOUNT_URL_PREFIXES =
-  'a[href^="/my/checking"], a[href^="/my/savings"], a[href^="/my/credit-card"], a[href^="/my/external-account"], a[href^="/my/loan"], a[href^="/my/mortgage"], a[href^="/my/investing"], a[href^="/my/retirement"]';
-const DASHBOARD_SELECTOR_WAIT = 'a[href^="/my/checking"], a[href^="/my/credit-card"], a[href^="/my/external-account"]';
-const LOGON_REDIRECT_RE = /\/my\/logon|\/access-management\/oauth2\/member\/authorize/;
+	'a[href^="/my/checking"], a[href^="/my/savings"], a[href^="/my/credit-card"], a[href^="/my/external-account"], a[href^="/my/loan"], a[href^="/my/mortgage"], a[href^="/my/investing"], a[href^="/my/retirement"]';
+const DASHBOARD_SELECTOR_WAIT =
+	'a[href^="/my/checking"], a[href^="/my/credit-card"], a[href^="/my/external-account"]';
+const LOGON_REDIRECT_RE =
+	/\/my\/logon|\/access-management\/oauth2\/member\/authorize/;
 const TRANSACTION_ACCOUNT_TYPE_RE = /checking|savings|credit-card/;
 const CREDIT_CARD_TYPE_RE = /credit-card/;
 const TEMP_DIR_PREFIX_RE = /\/[^/]+$/;
@@ -148,17 +169,20 @@ const EXPORT_BUTTON_TEXT_RE = /^\s*Export\s*$/i;
 const CSV_DOWNLOAD_HINT_RE = /filename|attachment|octet-stream|csv|export/iu;
 const CSV_HEAD_RE = /date|description|amount|transaction/iu;
 const EXPORT_DIALOG_MESSAGE_SELECTOR =
-  '[role="dialog"] [class*="errorMessage"]:not(:empty), [role="dialog"] :text-matches("no transactions|nothing to export", "i")';
+	'[role="dialog"] [class*="errorMessage"]:not(:empty), [role="dialog"] :text-matches("no transactions|nothing to export", "i")';
 const EXPORT_NO_DATA_RE = /no transactions|nothing to export/iu;
-const USAA_ACCOUNT_DETAIL_ROUTE_RE = /^\/my\/(?:checking|savings|credit-card)(?:\/|$)/u;
+const USAA_ACCOUNT_DETAIL_ROUTE_RE =
+	/^\/my\/(?:checking|savings|credit-card)(?:\/|$)/u;
 const USAA_INTERSTITIAL_ROUTE_RE =
-  /\/(?:my\/logon|access-management\/oauth2\/member\/authorize|security(?:\/|$)|challenge(?:\/|$))/iu;
-const USAA_ACCOUNT_DETAIL_MARKER_SELECTOR = ".ent-as-utility-bar, .as_credit__utility-bar";
+	/\/(?:my\/logon|access-management\/oauth2\/member\/authorize|security(?:\/|$)|challenge(?:\/|$))/iu;
+const USAA_ACCOUNT_DETAIL_MARKER_SELECTOR =
+	".ent-as-utility-bar, .as_credit__utility-bar";
 const USAA_TRANSACTION_MARKER_SELECTOR =
-  'table[aria-label*="transaction" i], [data-testid*="transaction" i], [id*="transaction" i]';
-const USAA_NAVIGATION_MARKER_SELECTOR = 'a[href*="/my/credit-card"], a[role="tab"], [role="tab"]';
+	'table[aria-label*="transaction" i], [data-testid*="transaction" i], [id*="transaction" i]';
+const USAA_NAVIGATION_MARKER_SELECTOR =
+	'a[href*="/my/credit-card"], a[role="tab"], [role="tab"]';
 const USAA_EXPORT_AFFORDANCE_SELECTOR =
-  "button.ent-as-utility-bar__item.export, button.as_credit__utility-bar-item.as_credit__export";
+	"button.ent-as-utility-bar__item.export, button.as_credit__utility-bar-item.as_credit__export";
 
 // ─── Timing + limits ────────────────────────────────────────────────────
 
@@ -195,78 +219,84 @@ export type RequestedScopes = BrowserCollectContext["requested"];
 // defined above in the existing regex block; reuse it here rather than
 // redeclare to avoid a lint collision.
 const STATEMENT_TITLE_RE = /STATEMENT/i;
-const NON_STATEMENT_TITLE_RE = /(TERMS\b|AGREEMENT\b|NOTICE\b|DISCLOSURE\b|CONDITION)/i;
+const NON_STATEMENT_TITLE_RE =
+	/(TERMS\b|AGREEMENT\b|NOTICE\b|DISCLOSURE\b|CONDITION)/i;
 
 /** Per-run dependency bag for the emit-path helpers. */
 export interface EmitDeps {
-  browserSurface?: BrowserSurfaceManagedState;
-  capture?: BrowserCollectContext["capture"];
-  /** The run-scoped credential bundle resolved by the runtime. */
-  credentials?: Readonly<Record<string, string>>;
-  emit: EmitFn;
-  emitRecord: EmitRecordFn;
-  reauthenticate?: (input: {
-    context: BrowserContext;
-    page: Page;
-    sendInteraction: BrowserCollectContext["sendInteraction"];
-  }) => Promise<void>;
-  /** Pending USAA account transaction gaps served by the runtime this run.
-   * A reached account emits recovery for its supplied gap id; this prevents a
-   * successful later export from leaving the durable gap pending forever. */
-  servedAccountTransactionGaps?: ReadonlyMap<string, string>;
+	browserSurface?: BrowserSurfaceManagedState;
+	capture?: BrowserCollectContext["capture"];
+	/** The run-scoped credential bundle resolved by the runtime. */
+	credentials?: Readonly<Record<string, string>>;
+	emit: EmitFn;
+	emitRecord: EmitRecordFn;
+	reauthenticate?: (input: {
+		context: BrowserContext;
+		page: Page;
+		sendInteraction: BrowserCollectContext["sendInteraction"];
+	}) => Promise<void>;
+	/** Pending USAA account transaction gaps served by the runtime this run.
+	 * A reached account emits recovery for its supplied gap id; this prevents a
+	 * successful later export from leaving the durable gap pending forever. */
+	servedAccountTransactionGaps?: ReadonlyMap<string, string>;
 }
 
 /** Aggregate shape from the PDF hydration pass. Exposed so the emit-
  *  path caller can thread successes/attempts into the per-run PROGRESS. */
 export interface HydrationSummary {
-  attempts: number;
-  results: Map<number, HydrationResult>;
-  successes: number;
+	attempts: number;
+	results: Map<number, HydrationResult>;
+	successes: number;
 }
 
 /** Streams scaffolded in design-notes but without live selectors. Each
  *  requested-but-deferred stream gets a SKIP_RESULT so the client sees
  *  the intent without data. */
 export const DEFERRED_STREAMS: readonly string[] = [
-  "transfers",
-  "bill_payments",
-  "scheduled_transactions",
-  "external_accounts",
+	"transfers",
+	"bill_payments",
+	"scheduled_transactions",
+	"external_accounts",
 ];
 
 /** True iff we should try to extract transactions from this statement
  *  title. USAA's document index mixes statements with agreements /
  *  disclosures — the parser only understands the former. */
 export function shouldParseStatementTitle(title: string): boolean {
-  return STATEMENT_TITLE_RE.test(title) && !NON_STATEMENT_TITLE_RE.test(title);
+	return STATEMENT_TITLE_RE.test(title) && !NON_STATEMENT_TITLE_RE.test(title);
 }
 
 /** Narrow a HydrationResult to the success branch. Used by the record-
  *  emit path to decide between a hydrated row and an index-only row. */
-export function hydrationSuccess(h: HydrationResult | undefined): HydrationResultSuccess | null {
-  if (h && "pdfPath" in h) {
-    return h;
-  }
-  return null;
+export function hydrationSuccess(
+	h: HydrationResult | undefined,
+): HydrationResultSuccess | null {
+	if (h && "pdfPath" in h) {
+		return h;
+	}
+	return null;
 }
 
 /** Build `statements` IndexRows from scraped DocRows. Rows missing a
  *  `date_delivered` are dropped — we can't reliably key them. Account
  *  resolution falls through last-four then name substring. */
-export function buildIndexRows(docs: readonly DocRow[], accounts: readonly DashboardAccount[]): IndexRow[] {
-  return docs
-    .filter((d) => d.date_delivered)
-    .map((d) => {
-      const accountReference = d.account_reference.trim() || null;
-      return {
-        rowIndex: d.rowIndex,
-        id: hashId(`${accountReference ?? ""}|${d.date_delivered}|${d.title}`),
-        account_id: resolveAccountIdForRef(accountReference ?? "", accounts),
-        title: d.title,
-        date_delivered: isoDate(d.date_delivered),
-        account_reference: accountReference,
-      };
-    });
+export function buildIndexRows(
+	docs: readonly DocRow[],
+	accounts: readonly DashboardAccount[],
+): IndexRow[] {
+	return docs
+		.filter((d) => d.date_delivered)
+		.map((d) => {
+			const accountReference = d.account_reference.trim() || null;
+			return {
+				rowIndex: d.rowIndex,
+				id: hashId(`${accountReference ?? ""}|${d.date_delivered}|${d.title}`),
+				account_id: resolveAccountIdForRef(accountReference ?? "", accounts),
+				title: d.title,
+				date_delivered: isoDate(d.date_delivered),
+				account_reference: accountReference,
+			};
+		});
 }
 
 /** Options controlling which of the two account streams emit. The entity
@@ -276,9 +306,9 @@ export function buildIndexRows(docs: readonly DocRow[], accounts: readonly Dashb
  *  `emitEntity` defaults to `true` so legacy callers (and tests that pass no
  *  options) keep emitting the entity record + STATE unchanged. */
 export interface AccountsEmitOptions {
-  emitEntity?: boolean;
-  emitStats?: boolean;
-  observedOn?: string;
+	emitEntity?: boolean;
+	emitStats?: boolean;
+	observedOn?: string;
 }
 
 /** Emit one `accounts` entity record per dashboard account (gated), and
@@ -299,107 +329,110 @@ export interface AccountsEmitOptions {
  *  is supplied (legacy callers/tests) the entity record always emits and no
  *  entity STATE is written. */
 export async function emitAccountsStream(
-  deps: EmitDeps,
-  accounts: readonly DashboardAccount[],
-  emittedAt: string,
-  fingerprintCursor?: FingerprintCursor,
-  options: AccountsEmitOptions = {}
+	deps: EmitDeps,
+	accounts: readonly DashboardAccount[],
+	emittedAt: string,
+	fingerprintCursor?: FingerprintCursor,
+	options: AccountsEmitOptions = {},
 ): Promise<void> {
-  const emitEntity = options.emitEntity ?? true;
-  const emitStats = options.emitStats ?? false;
-  const observedOn = options.observedOn ?? emittedAt.slice(0, 10);
-  // `covered` is the in-boundary accounts this entity run accounted for: emitted
-  // plus suppressed-because-unchanged. Counted independently at the loop site
-  // from objective per-record outcomes, never aliased to the emitted count —
-  // `buildAccountRecord` never drops a row, so every enumerated account reaches
-  // the gate; a future pre-gate drop would raise `considered` (accounts.length)
-  // without raising `covered`, leaving an honest `partial`.
-  let entityCovered = 0;
-  for (const a of accounts) {
-    if (emitEntity) {
-      const rec = buildAccountRecord(a, emittedAt);
-      if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
-        await deps.emitRecord("accounts", rec);
-      }
-      // Emitted or suppressed-unchanged: either way the account was accounted
-      // for. Only the fingerprint-gated entity path (not the legacy no-cursor
-      // path) declares coverage below.
-      if (fingerprintCursor) {
-        entityCovered += 1;
-      }
-    }
-    // Observation stream: append-keyed daily balance snapshot, emitted
-    // unconditionally (the runtime byte-equivalence check collapses an
-    // unchanged same-day re-pull). Not fingerprint-gated — the append key
-    // already makes same-day re-pulls idempotent.
-    if (emitStats) {
-      await deps.emitRecord("account_stats", buildAccountStatsRecord(a, observedOn));
-    }
-  }
-  if (emitStats) {
-    await deps.emit({
-      type: "STATE",
-      stream: "account_stats",
-      cursor: { observed_on: observedOn, fetched_at: nowIso() },
-    });
-    // `account_stats` is `singleton_presence`: a daily snapshot re-derived
-    // from the same full account-dashboard scan every run. buildAccountStatsRecord
-    // never drops a row, so every enumerated account is accounted for —
-    // `considered === covered === accounts.length`, including 0/0 on a
-    // genuinely empty account list (verified-empty, not unmeasured). Without
-    // this, the STATE commit above is a checkpoint with no measurement behind
-    // it, and the Collection Report reads `unknown` forever regardless of how
-    // many successful runs commit it (define-connector-progress-evidence-contract).
-    await emitDetailCoverage(deps, {
-      stream: "account_stats",
-      stateStream: "account_stats",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: accounts.length,
-      covered: accounts.length,
-    });
-  }
-  if (!emitEntity) {
-    return;
-  }
-  if (!fingerprintCursor) {
-    await deps.emit({
-      type: "STATE",
-      stream: "accounts",
-      cursor: { fetched_at: nowIso() },
-    });
-    return;
-  }
-  // The dashboard scan re-enumerates the full account boundary every run and
-  // suppresses unchanged accounts via the per-record fingerprint, so on a
-  // steady-state run `collected` is a churn-reduced subset (often 0), not a
-  // coverage count. Declare `considered = accounts.length` (the enumerated
-  // boundary) with the objective `covered` count so the Collection Report reads
-  // `complete` instead of a false `partial`
-  // (define-connector-progress-evidence-contract task 4.4). This self-coverage
-  // message (`stream === state_stream === "accounts"`, empty required/hydrated
-  // keys) describes the entity inventory; `account_stats` is an append-keyed
-  // daily observation, not an inventory, so it declares no denominator.
-  await emitDetailCoverage(deps, {
-    stream: "accounts",
-    stateStream: "accounts",
-    requiredKeys: [],
-    hydratedKeys: [],
-    considered: accounts.length,
-    covered: entityCovered,
-  });
-  // Accounts enumeration is a full dashboard scan: prune fingerprints for
-  // accounts no longer present so a re-added account re-emits.
-  fingerprintCursor.pruneStale();
-  const cursor: Record<string, unknown> = { fetched_at: nowIso() };
-  if (fingerprintCursor.size() > 0) {
-    cursor.fingerprints = fingerprintCursor.toState();
-  }
-  await deps.emit({
-    type: "STATE",
-    stream: "accounts",
-    cursor,
-  });
+	const emitEntity = options.emitEntity ?? true;
+	const emitStats = options.emitStats ?? false;
+	const observedOn = options.observedOn ?? emittedAt.slice(0, 10);
+	// `covered` is the in-boundary accounts this entity run accounted for: emitted
+	// plus suppressed-because-unchanged. Counted independently at the loop site
+	// from objective per-record outcomes, never aliased to the emitted count —
+	// `buildAccountRecord` never drops a row, so every enumerated account reaches
+	// the gate; a future pre-gate drop would raise `considered` (accounts.length)
+	// without raising `covered`, leaving an honest `partial`.
+	let entityCovered = 0;
+	for (const a of accounts) {
+		if (emitEntity) {
+			const rec = buildAccountRecord(a, emittedAt);
+			if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
+				await deps.emitRecord("accounts", rec);
+			}
+			// Emitted or suppressed-unchanged: either way the account was accounted
+			// for. Only the fingerprint-gated entity path (not the legacy no-cursor
+			// path) declares coverage below.
+			if (fingerprintCursor) {
+				entityCovered += 1;
+			}
+		}
+		// Observation stream: append-keyed daily balance snapshot, emitted
+		// unconditionally (the runtime byte-equivalence check collapses an
+		// unchanged same-day re-pull). Not fingerprint-gated — the append key
+		// already makes same-day re-pulls idempotent.
+		if (emitStats) {
+			await deps.emitRecord(
+				"account_stats",
+				buildAccountStatsRecord(a, observedOn),
+			);
+		}
+	}
+	if (emitStats) {
+		await deps.emit({
+			type: "STATE",
+			stream: "account_stats",
+			cursor: { observed_on: observedOn, fetched_at: nowIso() },
+		});
+		// `account_stats` is `singleton_presence`: a daily snapshot re-derived
+		// from the same full account-dashboard scan every run. buildAccountStatsRecord
+		// never drops a row, so every enumerated account is accounted for —
+		// `considered === covered === accounts.length`, including 0/0 on a
+		// genuinely empty account list (verified-empty, not unmeasured). Without
+		// this, the STATE commit above is a checkpoint with no measurement behind
+		// it, and the Collection Report reads `unknown` forever regardless of how
+		// many successful runs commit it (define-connector-progress-evidence-contract).
+		await emitDetailCoverage(deps, {
+			stream: "account_stats",
+			stateStream: "account_stats",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: accounts.length,
+			covered: accounts.length,
+		});
+	}
+	if (!emitEntity) {
+		return;
+	}
+	if (!fingerprintCursor) {
+		await deps.emit({
+			type: "STATE",
+			stream: "accounts",
+			cursor: { fetched_at: nowIso() },
+		});
+		return;
+	}
+	// The dashboard scan re-enumerates the full account boundary every run and
+	// suppresses unchanged accounts via the per-record fingerprint, so on a
+	// steady-state run `collected` is a churn-reduced subset (often 0), not a
+	// coverage count. Declare `considered = accounts.length` (the enumerated
+	// boundary) with the objective `covered` count so the Collection Report reads
+	// `complete` instead of a false `partial`
+	// (define-connector-progress-evidence-contract task 4.4). This self-coverage
+	// message (`stream === state_stream === "accounts"`, empty required/hydrated
+	// keys) describes the entity inventory; `account_stats` is an append-keyed
+	// daily observation, not an inventory, so it declares no denominator.
+	await emitDetailCoverage(deps, {
+		stream: "accounts",
+		stateStream: "accounts",
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered: accounts.length,
+		covered: entityCovered,
+	});
+	// Accounts enumeration is a full dashboard scan: prune fingerprints for
+	// accounts no longer present so a re-added account re-emits.
+	fingerprintCursor.pruneStale();
+	const cursor: Record<string, unknown> = { fetched_at: nowIso() };
+	if (fingerprintCursor.size() > 0) {
+		cursor.fingerprints = fingerprintCursor.toState();
+	}
+	await deps.emit({
+		type: "STATE",
+		stream: "accounts",
+		cursor,
+	});
 }
 
 /** Run the `accounts` entity and/or `account_stats` observation streams
@@ -408,27 +441,33 @@ export async function emitAccountsStream(
  *  append-keyed and needs no cursor. Extracted from `collect()` to keep that
  *  orchestrator under the cognitive-complexity budget. */
 async function maybeRunAccountsStreams(
-  deps: EmitDeps,
-  accounts: readonly DashboardAccount[],
-  state: Record<string, unknown>,
-  requested: RequestedScopes,
-  emittedAt: string
+	deps: EmitDeps,
+	accounts: readonly DashboardAccount[],
+	state: Record<string, unknown>,
+	requested: RequestedScopes,
+	emittedAt: string,
 ): Promise<void> {
-  const wantsAccounts = requested.has("accounts");
-  const wantsAccountStats = requested.has("account_stats");
-  if (!(wantsAccounts || wantsAccountStats)) {
-    return;
-  }
-  const accountsFingerprintCursor = wantsAccounts
-    ? openFingerprintCursor(state.accounts, {
-        excludeFromFingerprint: ["fetched_at"],
-        priorFingerprints: readPriorAccountFingerprints(state),
-      })
-    : undefined;
-  await emitAccountsStream(deps, accounts, emittedAt, accountsFingerprintCursor, {
-    emitEntity: wantsAccounts,
-    emitStats: wantsAccountStats,
-  });
+	const wantsAccounts = requested.has("accounts");
+	const wantsAccountStats = requested.has("account_stats");
+	if (!(wantsAccounts || wantsAccountStats)) {
+		return;
+	}
+	const accountsFingerprintCursor = wantsAccounts
+		? openFingerprintCursor(state.accounts, {
+				excludeFromFingerprint: ["fetched_at"],
+				priorFingerprints: readPriorAccountFingerprints(state),
+			})
+		: undefined;
+	await emitAccountsStream(
+		deps,
+		accounts,
+		emittedAt,
+		accountsFingerprintCursor,
+		{
+			emitEntity: wantsAccounts,
+			emitStats: wantsAccountStats,
+		},
+	);
 }
 
 /**
@@ -438,36 +477,41 @@ async function maybeRunAccountsStreams(
  * to an empty map, so the first post-deploy run rebuilds the map and
  * re-emits every account exactly once.
  */
-export function readPriorAccountFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.accounts ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+export function readPriorAccountFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.accounts ?? {}) as Record<string, unknown>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 /** Emit a SKIP_RESULT for every requested-but-deferred stream. Keeps
  *  the client informed that we understood the request but can't fulfil
  *  it in this revision — rather than silently dropping the scope. */
-export async function emitDeferredStreams(emit: EmitFn, requested: RequestedScopes): Promise<void> {
-  for (const s of DEFERRED_STREAMS) {
-    if (requested.has(s)) {
-      const msg: EmittedMessage = {
-        type: "SKIP_RESULT",
-        stream: s,
-        reason: "selectors_pending",
-        message: `${s} stream scaffolded in design-notes; click-chain or SPA-component wiring deferred.`,
-      };
-      await emit(msg);
-    }
-  }
+export async function emitDeferredStreams(
+	emit: EmitFn,
+	requested: RequestedScopes,
+): Promise<void> {
+	for (const s of DEFERRED_STREAMS) {
+		if (requested.has(s)) {
+			const msg: EmittedMessage = {
+				type: "SKIP_RESULT",
+				stream: s,
+				reason: "selectors_pending",
+				message: `${s} stream scaffolded in design-notes; click-chain or SPA-component wiring deferred.`,
+			};
+			await emit(msg);
+		}
+	}
 }
 
 /**
@@ -499,17 +543,22 @@ export async function emitDeferredStreams(emit: EmitFn, requested: RequestedScop
  * vetted reason/copy the dashboard sees and a machine-readable `outcome`
  * discriminator on the diagnostics object. No new protocol field is added.
  */
-export type ExportLadderOutcome = "export_pressure" | "source_structure_changed" | "unknown";
+export type ExportLadderOutcome =
+	| "export_pressure"
+	| "source_structure_changed"
+	| "unknown";
 
 /** Map the ladder's last diagnostic phase to a terminal outcome class. */
-export function classifyExportLadderOutcome(lastDiag: DiagnosticInfo | null): ExportLadderOutcome {
-  if (!lastDiag) {
-    return "unknown";
-  }
-  if (isFatalDiagPhase(lastDiag)) {
-    return "source_structure_changed";
-  }
-  return "export_pressure";
+export function classifyExportLadderOutcome(
+	lastDiag: DiagnosticInfo | null,
+): ExportLadderOutcome {
+	if (!lastDiag) {
+		return "unknown";
+	}
+	if (isFatalDiagPhase(lastDiag)) {
+		return "source_structure_changed";
+	}
+	return "export_pressure";
 }
 
 /**
@@ -523,166 +572,181 @@ export function classifyExportLadderOutcome(lastDiag: DiagnosticInfo | null): Ex
  * account/window into a retryable gap.
  */
 export async function emitExportFailure(
-  deps: EmitDeps,
-  a: DashboardAccount,
-  lastDiag: DiagnosticInfo | null
+	deps: EmitDeps,
+	a: DashboardAccount,
+	lastDiag: DiagnosticInfo | null,
 ): Promise<void> {
-  const isCreditCard = CREDIT_CARD_TYPE_RE.test(a.account_type);
-  const outcome = classifyExportLadderOutcome(lastDiag);
-  const isNoExportAffordance = lastDiag?.phase === "no_export_affordance";
-  let baseMessage = "USAA transaction export affordance was not found on the observed browser surface";
-  if (!isNoExportAffordance) {
-    baseMessage = lastDiag
-      ? `Export ladder exhausted (${outcome}); ${formatDiagnosticInfo(lastDiag)}`
-      : "Export dialog did not produce a download across all ranges; outcome unknown (transient pressure or shifted selectors)";
-  }
-  const ccSuffix = isCreditCard
-    ? ' (credit-card export flow not verified live 2026-04-19 — see design-notes/usaa.md "Fallback path: DOM scrape")'
-    : "";
-  // Credit-card exports keep their own unverified-flow reason regardless of
-  // outcome (the flow itself was never confirmed live), but still carry the
-  // structural-vs-pressure discriminator in diagnostics. For non-credit-card
-  // accounts, a missing affordance/dialog is reported as a distinct
-  // structure-changed reason so the dashboard stops conflating "the connector
-  // is broken" with "the export was momentarily unavailable".
-  let reason: string;
-  if (isCreditCard) {
-    reason = "credit_card_export_unverified";
-  } else if (outcome === "source_structure_changed") {
-    reason = "export_affordance_missing";
-  } else {
-    reason = "export_no_download";
-  }
-  const noExportDiagnostic = isNoExportAffordance
-    ? noExportAffordanceDiagnostic(lastDiag, deps.browserSurface ?? "unknown")
-    : null;
-  const baseDiagnostics = !isNoExportAffordance && lastDiag ? sanitizeDiagnosticInfo(lastDiag) : null;
-  const durableDiagnostics: Record<string, unknown> = noExportDiagnostic
-    ? { browser_surface: noExportDiagnostic }
-    : { outcome };
-  if (baseDiagnostics) {
-    for (const [key, value] of Object.entries(baseDiagnostics)) {
-      durableDiagnostics[key] = value;
-    }
-  }
-  await deps.emit({
-    type: "SKIP_RESULT",
-    stream: "transactions",
-    reason,
-    message: `${baseMessage}${ccSuffix}`,
-    diagnostics: durableDiagnostics,
-  });
+	const isCreditCard = CREDIT_CARD_TYPE_RE.test(a.account_type);
+	const outcome = classifyExportLadderOutcome(lastDiag);
+	const isNoExportAffordance = lastDiag?.phase === "no_export_affordance";
+	let baseMessage =
+		"USAA transaction export affordance was not found on the observed browser surface";
+	if (!isNoExportAffordance) {
+		baseMessage = lastDiag
+			? `Export ladder exhausted (${outcome}); ${formatDiagnosticInfo(lastDiag)}`
+			: "Export dialog did not produce a download across all ranges; outcome unknown (transient pressure or shifted selectors)";
+	}
+	const ccSuffix = isCreditCard
+		? ' (credit-card export flow not verified live 2026-04-19 — see design-notes/usaa.md "Fallback path: DOM scrape")'
+		: "";
+	// Credit-card exports keep their own unverified-flow reason regardless of
+	// outcome (the flow itself was never confirmed live), but still carry the
+	// structural-vs-pressure discriminator in diagnostics. For non-credit-card
+	// accounts, a missing affordance/dialog is reported as a distinct
+	// structure-changed reason so the dashboard stops conflating "the connector
+	// is broken" with "the export was momentarily unavailable".
+	let reason: string;
+	if (isCreditCard) {
+		reason = "credit_card_export_unverified";
+	} else if (outcome === "source_structure_changed") {
+		reason = "export_affordance_missing";
+	} else {
+		reason = "export_no_download";
+	}
+	const noExportDiagnostic = isNoExportAffordance
+		? noExportAffordanceDiagnostic(lastDiag, deps.browserSurface ?? "unknown")
+		: null;
+	const baseDiagnostics =
+		!isNoExportAffordance && lastDiag ? sanitizeDiagnosticInfo(lastDiag) : null;
+	const durableDiagnostics: Record<string, unknown> = noExportDiagnostic
+		? { browser_surface: noExportDiagnostic }
+		: { outcome };
+	if (baseDiagnostics) {
+		for (const [key, value] of Object.entries(baseDiagnostics)) {
+			durableDiagnostics[key] = value;
+		}
+	}
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream: "transactions",
+		reason,
+		message: `${baseMessage}${ccSuffix}`,
+		diagnostics: durableDiagnostics,
+	});
 }
 
 function sanitizeDiagnosticInfo(diag: DiagnosticInfo): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = { phase: diag.phase };
-  if (diag.diag) {
-    sanitized.page = {
-      dialogs_open: diag.diag.dialogs_open,
-      export_candidate_count: diag.diag.export_candidates.length,
-      has_utility_bar: diag.diag.has_utility_bar,
-      nav_candidate_count: diag.diag.nav_candidates.length,
-    };
-  }
-  if (diag.artifact) {
-    const sourceCounts = { cdp: 0, playwright: 0 };
-    for (const candidate of diag.artifact.candidates) {
-      sourceCounts[candidate.source] += 1;
-    }
-    sanitized.artifact = {
-      body_error_count: diag.artifact.candidates.filter((candidate) => candidate.reason === "body_error").length,
-      candidate_count: diag.artifact.candidates.length,
-      cdp_error: diag.artifact.cdpError !== null,
-      cdp_ready: diag.artifact.cdpReady,
-      matched_count: diag.artifact.candidates.filter((candidate) => candidate.reason === "matched").length,
-      source_counts: sourceCounts,
-      status_codes: [...new Set(diag.artifact.candidates.map((candidate) => candidate.status))]
-        .filter((status) => Number.isInteger(status))
-        .slice(0, 8),
-    };
-  }
-  if (diag.download) {
-    sanitized.download = {
-      bytes: typeof diag.download.bytes === "number" ? diag.download.bytes : null,
-      has_download_failure: Boolean(diag.download.downloadFailure),
-      has_save_as_error: Boolean(diag.download.saveAsError),
-      has_stream_error: Boolean(diag.download.streamError),
-      source: diag.download.source ?? null,
-    };
-  }
-  return sanitized;
+	const sanitized: Record<string, unknown> = { phase: diag.phase };
+	if (diag.diag) {
+		sanitized.page = {
+			dialogs_open: diag.diag.dialogs_open,
+			export_candidate_count: diag.diag.export_candidates.length,
+			has_utility_bar: diag.diag.has_utility_bar,
+			nav_candidate_count: diag.diag.nav_candidates.length,
+		};
+	}
+	if (diag.artifact) {
+		const sourceCounts = { cdp: 0, playwright: 0 };
+		for (const candidate of diag.artifact.candidates) {
+			sourceCounts[candidate.source] += 1;
+		}
+		sanitized.artifact = {
+			body_error_count: diag.artifact.candidates.filter(
+				(candidate) => candidate.reason === "body_error",
+			).length,
+			candidate_count: diag.artifact.candidates.length,
+			cdp_error: diag.artifact.cdpError !== null,
+			cdp_ready: diag.artifact.cdpReady,
+			matched_count: diag.artifact.candidates.filter(
+				(candidate) => candidate.reason === "matched",
+			).length,
+			source_counts: sourceCounts,
+			status_codes: [
+				...new Set(
+					diag.artifact.candidates.map((candidate) => candidate.status),
+				),
+			]
+				.filter((status) => Number.isInteger(status))
+				.slice(0, 8),
+		};
+	}
+	if (diag.download) {
+		sanitized.download = {
+			bytes:
+				typeof diag.download.bytes === "number" ? diag.download.bytes : null,
+			has_download_failure: Boolean(diag.download.downloadFailure),
+			has_save_as_error: Boolean(diag.download.saveAsError),
+			has_stream_error: Boolean(diag.download.streamError),
+			source: diag.download.source ?? null,
+		};
+	}
+	return sanitized;
 }
 
 function summarizeArtifactDiagnostics(diag: DiagnosticInfo): string | null {
-  const { artifact } = diag;
-  if (!artifact) {
-    return null;
-  }
-  const matched = artifact.candidates.filter((candidate) => candidate.reason === "matched").length;
-  const bodyErrors = artifact.candidates.filter((candidate) => candidate.reason === "body_error").length;
-  const inspected = artifact.candidates.length;
-  const parts = [
-    `artifact cdpReady=${artifact.cdpReady ? "true" : "false"} candidates=${inspected} matched=${matched} bodyErrors=${bodyErrors}`,
-  ];
-  if (artifact.cdpError) {
-    parts.push("cdpError=true");
-  }
-  return parts.join(" ");
+	const { artifact } = diag;
+	if (!artifact) {
+		return null;
+	}
+	const matched = artifact.candidates.filter(
+		(candidate) => candidate.reason === "matched",
+	).length;
+	const bodyErrors = artifact.candidates.filter(
+		(candidate) => candidate.reason === "body_error",
+	).length;
+	const inspected = artifact.candidates.length;
+	const parts = [
+		`artifact cdpReady=${artifact.cdpReady ? "true" : "false"} candidates=${inspected} matched=${matched} bodyErrors=${bodyErrors}`,
+	];
+	if (artifact.cdpError) {
+		parts.push("cdpError=true");
+	}
+	return parts.join(" ");
 }
 
 function summarizeDownloadDiagnostics(diag: DiagnosticInfo): string | null {
-  const dl = diag.download;
-  if (!dl) {
-    return null;
-  }
-  const parts: string[] = [];
-  if (typeof dl.bytes === "number") {
-    parts.push(`bytes=${dl.bytes}`);
-  }
-  if (dl.source) {
-    parts.push(`source=${dl.source}`);
-  }
-  if (dl.saveAsError) {
-    parts.push("hasSaveAsError=true");
-  }
-  if (dl.streamError) {
-    parts.push("hasStreamError=true");
-  }
-  if (dl.downloadFailure) {
-    parts.push("hasDownloadFailure=true");
-  }
-  return parts.length ? `download ${parts.join(",")}` : null;
+	const dl = diag.download;
+	if (!dl) {
+		return null;
+	}
+	const parts: string[] = [];
+	if (typeof dl.bytes === "number") {
+		parts.push(`bytes=${dl.bytes}`);
+	}
+	if (dl.source) {
+		parts.push(`source=${dl.source}`);
+	}
+	if (dl.saveAsError) {
+		parts.push("hasSaveAsError=true");
+	}
+	if (dl.streamError) {
+		parts.push("hasStreamError=true");
+	}
+	if (dl.downloadFailure) {
+		parts.push("hasDownloadFailure=true");
+	}
+	return parts.length ? `download ${parts.join(",")}` : null;
 }
 
 function formatDiagnosticInfo(diag: DiagnosticInfo): string {
-  const parts = [diag.phase];
-  parts.push(`page=${diag.diag ? "captured" : "unavailable"}`);
-  const artifact = summarizeArtifactDiagnostics(diag);
-  if (artifact) {
-    parts.push(artifact);
-  }
-  const download = summarizeDownloadDiagnostics(diag);
-  if (download) {
-    parts.push(download);
-  }
-  return parts.join("; ");
+	const parts = [diag.phase];
+	parts.push(`page=${diag.diag ? "captured" : "unavailable"}`);
+	const artifact = summarizeArtifactDiagnostics(diag);
+	if (artifact) {
+		parts.push(artifact);
+	}
+	const download = summarizeDownloadDiagnostics(diag);
+	if (download) {
+		parts.push(download);
+	}
+	return parts.join("; ");
 }
 
 type UsaaFailureCode =
-  | "credit_card_billing_scrape_failed"
-  | "hydrate_crashed"
-  | "inbox_scrape_failed"
-  | "pdf_parse_failed"
-  | "statements_scrape_failed";
+	| "credit_card_billing_scrape_failed"
+	| "hydrate_crashed"
+	| "inbox_scrape_failed"
+	| "pdf_parse_failed"
+	| "statements_scrape_failed";
 
 function failureDiagnostic(
-  failureCode: UsaaFailureCode,
-  error: unknown
+	failureCode: UsaaFailureCode,
+	error: unknown,
 ): { error_class: "Error" | "unknown"; failure_code: UsaaFailureCode } {
-  return {
-    error_class: error instanceof Error ? "Error" : "unknown",
-    failure_code: failureCode,
-  };
+	return {
+		error_class: error instanceof Error ? "Error" : "unknown",
+		failure_code: failureCode,
+	};
 }
 
 /**
@@ -709,105 +773,115 @@ function failureDiagnostic(
  *   - STATE emits exactly once after all records.
  */
 export async function emitStatementRecords(
-  deps: EmitDeps,
-  indexRows: readonly IndexRow[],
-  hydrationResults: Map<number, HydrationResult>,
-  summary: HydrationSummary,
-  fingerprintCursor?: FingerprintCursor,
-  hydrationCursor?: StatementHydrationCursor
+	deps: EmitDeps,
+	indexRows: readonly IndexRow[],
+	hydrationResults: Map<number, HydrationResult>,
+	summary: HydrationSummary,
+	fingerprintCursor?: FingerprintCursor,
+	hydrationCursor?: StatementHydrationCursor,
 ): Promise<void> {
-  // Per-run detail-coverage evidence. Each statement-document row's resolved
-  // hydration outcome (fresh, carried, or all-null) is the numerator input;
-  // `shouldParseStatementTitle` is the candidacy (denominator) input. See
-  // statement-coverage.ts. Collected here because this loop already resolves
-  // both for every row; emitted once after the loop (below).
-  const coverageRows: StatementCoverageRow[] = [];
-  for (const row of indexRows) {
-    const ok = hydrationSuccess(hydrationResults.get(row.rowIndex));
-    // On success use this run's fresh pointers; on failure carry the prior
-    // hydrated pointers forward if the statement was previously hydrated,
-    // else stay all-null.
-    let pointers: StatementHydration;
-    if (ok) {
-      pointers = {
-        document_url: fileUrlForPath(ok.pdfPath),
-        pdf_path: ok.pdfPath,
-        pdf_sha256: ok.pdfSha256,
-        pdf_text_sha256: ok.content.pdf_text_sha256,
-        pdf_page_count: ok.content.pdf_page_count,
-      };
-    } else if (hydrationCursor) {
-      pointers = hydrationCursor.resolveOnFailure(row.id);
-    } else {
-      pointers = { document_url: null, pdf_path: null, pdf_sha256: null, pdf_text_sha256: null, pdf_page_count: null };
-    }
-    coverageRows.push({ id: row.id, isCandidate: shouldParseStatementTitle(row.title), pointers });
-    const rec: StatementRecord = {
-      id: row.id,
-      account_id: row.account_id,
-      title: row.title,
-      date_delivered: row.date_delivered,
-      account_reference: row.account_reference,
-      document_url: pointers.document_url,
-      pdf_sha256: pointers.pdf_sha256,
-      pdf_path: pointers.pdf_path,
-      pdf_text_sha256: pointers.pdf_text_sha256 ?? null,
-      pdf_page_count: pointers.pdf_page_count ?? null,
-      fetched_at: nowIso(),
-    };
-    // Record the resolved pointers (fresh, carried, or all-null) so the
-    // next run's prior map stays complete and the prune step is correct.
-    hydrationCursor?.note(row.id, pointers);
-    // Gate on a per-statement fingerprint that excludes the run-clock
-    // `fetched_at`. A statement's identity fields (id, account_id, title,
-    // date_delivered) are immutable, and pdf_path/pdf_sha256/document_url
-    // are content-addressed (the path embeds the sha256 prefix), so a
-    // re-hydrated identical statement produces a byte-identical body
-    // modulo `fetched_at`. With carry-forward, a transient failure also
-    // produces a body identical to the prior hydrated one, so the cursor
-    // suppresses the re-emit. Without this gate every run appended a fresh
-    // version of every statement (~15 versions/record of pure run-clock
-    // churn). When no cursor is supplied (legacy callers/tests) the
-    // record always emits.
-    if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
-      await deps.emitRecord("statements", rec);
-    }
-  }
-  // Statements is a full scan of the documents index: prune fingerprints
-  // (and the carried hydration pointers, in lockstep) for statements no
-  // longer listed so a re-appearance re-emits and a delisted statement
-  // stops being carried forever.
-  fingerprintCursor?.pruneStale();
-  hydrationCursor?.pruneStale();
-  // Honest per-run detail coverage for the statement-PDF detail pass. Emitted
-  // only when the run saw at least one statement-document row (a real
-  // denominator). Each gap candidate (a statement whose PDF is not present this
-  // run) is a pending, retryable DETAIL_GAP — so the run reads "partial, will
-  // retry" instead of "complete", and the runtime's coverage-completeness
-  // invariant (required === hydrated ∪ pending-gap) holds. Reference-only:
-  // these reuse DETAIL_GAP / DETAIL_COVERAGE without promoting them to portable
-  // protocol. Strictly additive — no statement RECORD or STATE changes.
-  await emitStatementCoverage(deps, coverageRows);
-  const progressMsg = {
-    type: "PROGRESS",
-    stream: "statements",
-    message: `Hydrated ${summary.successes}/${summary.attempts || indexRows.length} PDFs`,
-    count: summary.successes,
-    total: summary.attempts || indexRows.length,
-  } as const;
-  await deps.emit(progressMsg);
-  const cursor: Record<string, unknown> = { fetched_at: nowIso() };
-  if (fingerprintCursor && fingerprintCursor.size() > 0) {
-    cursor.fingerprints = fingerprintCursor.toState();
-  }
-  if (hydrationCursor && hydrationCursor.size() > 0) {
-    cursor.hydration = hydrationCursor.toState();
-  }
-  await deps.emit({
-    type: "STATE",
-    stream: "statements",
-    cursor,
-  });
+	// Per-run detail-coverage evidence. Each statement-document row's resolved
+	// hydration outcome (fresh, carried, or all-null) is the numerator input;
+	// `shouldParseStatementTitle` is the candidacy (denominator) input. See
+	// statement-coverage.ts. Collected here because this loop already resolves
+	// both for every row; emitted once after the loop (below).
+	const coverageRows: StatementCoverageRow[] = [];
+	for (const row of indexRows) {
+		const ok = hydrationSuccess(hydrationResults.get(row.rowIndex));
+		// On success use this run's fresh pointers; on failure carry the prior
+		// hydrated pointers forward if the statement was previously hydrated,
+		// else stay all-null.
+		let pointers: StatementHydration;
+		if (ok) {
+			pointers = {
+				document_url: fileUrlForPath(ok.pdfPath),
+				pdf_path: ok.pdfPath,
+				pdf_sha256: ok.pdfSha256,
+				pdf_text_sha256: ok.content.pdf_text_sha256,
+				pdf_page_count: ok.content.pdf_page_count,
+			};
+		} else if (hydrationCursor) {
+			pointers = hydrationCursor.resolveOnFailure(row.id);
+		} else {
+			pointers = {
+				document_url: null,
+				pdf_path: null,
+				pdf_sha256: null,
+				pdf_text_sha256: null,
+				pdf_page_count: null,
+			};
+		}
+		coverageRows.push({
+			id: row.id,
+			isCandidate: shouldParseStatementTitle(row.title),
+			pointers,
+		});
+		const rec: StatementRecord = {
+			id: row.id,
+			account_id: row.account_id,
+			title: row.title,
+			date_delivered: row.date_delivered,
+			account_reference: row.account_reference,
+			document_url: pointers.document_url,
+			pdf_sha256: pointers.pdf_sha256,
+			pdf_path: pointers.pdf_path,
+			pdf_text_sha256: pointers.pdf_text_sha256 ?? null,
+			pdf_page_count: pointers.pdf_page_count ?? null,
+			fetched_at: nowIso(),
+		};
+		// Record the resolved pointers (fresh, carried, or all-null) so the
+		// next run's prior map stays complete and the prune step is correct.
+		hydrationCursor?.note(row.id, pointers);
+		// Gate on a per-statement fingerprint that excludes the run-clock
+		// `fetched_at`. A statement's identity fields (id, account_id, title,
+		// date_delivered) are immutable, and pdf_path/pdf_sha256/document_url
+		// are content-addressed (the path embeds the sha256 prefix), so a
+		// re-hydrated identical statement produces a byte-identical body
+		// modulo `fetched_at`. With carry-forward, a transient failure also
+		// produces a body identical to the prior hydrated one, so the cursor
+		// suppresses the re-emit. Without this gate every run appended a fresh
+		// version of every statement (~15 versions/record of pure run-clock
+		// churn). When no cursor is supplied (legacy callers/tests) the
+		// record always emits.
+		if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
+			await deps.emitRecord("statements", rec);
+		}
+	}
+	// Statements is a full scan of the documents index: prune fingerprints
+	// (and the carried hydration pointers, in lockstep) for statements no
+	// longer listed so a re-appearance re-emits and a delisted statement
+	// stops being carried forever.
+	fingerprintCursor?.pruneStale();
+	hydrationCursor?.pruneStale();
+	// Honest per-run detail coverage for the statement-PDF detail pass. Emitted
+	// only when the run saw at least one statement-document row (a real
+	// denominator). Each gap candidate (a statement whose PDF is not present this
+	// run) is a pending, retryable DETAIL_GAP — so the run reads "partial, will
+	// retry" instead of "complete", and the runtime's coverage-completeness
+	// invariant (required === hydrated ∪ pending-gap) holds. Reference-only:
+	// these reuse DETAIL_GAP / DETAIL_COVERAGE without promoting them to portable
+	// protocol. Strictly additive — no statement RECORD or STATE changes.
+	await emitStatementCoverage(deps, coverageRows);
+	const progressMsg = {
+		type: "PROGRESS",
+		stream: "statements",
+		message: `Hydrated ${summary.successes}/${summary.attempts || indexRows.length} PDFs`,
+		count: summary.successes,
+		total: summary.attempts || indexRows.length,
+	} as const;
+	await deps.emit(progressMsg);
+	const cursor: Record<string, unknown> = { fetched_at: nowIso() };
+	if (fingerprintCursor && fingerprintCursor.size() > 0) {
+		cursor.fingerprints = fingerprintCursor.toState();
+	}
+	if (hydrationCursor && hydrationCursor.size() > 0) {
+		cursor.hydration = hydrationCursor.toState();
+	}
+	await deps.emit({
+		type: "STATE",
+		stream: "statements",
+		cursor,
+	});
 }
 
 /**
@@ -830,14 +904,14 @@ export async function emitStatementRecords(
  * permanently unmeasured on an every-run-empty account.
  */
 export async function emitStatementCoverage(
-  deps: EmitDeps,
-  coverageRows: readonly StatementCoverageRow[]
+	deps: EmitDeps,
+	coverageRows: readonly StatementCoverageRow[],
 ): Promise<void> {
-  const result = computeStatementCoverage(coverageRows);
-  for (const gap of result.gaps) {
-    await deps.emit(gap);
-  }
-  await emitDetailCoverage(deps, result.coverage);
+	const result = computeStatementCoverage(coverageRows);
+	for (const gap of result.gaps) {
+		await deps.emit(gap);
+	}
+	await emitDetailCoverage(deps, result.coverage);
 }
 
 /**
@@ -846,19 +920,21 @@ export async function emitStatementCoverage(
  * empty map, so the first post-deploy run rebuilds the map and re-emits
  * every statement exactly once.
  */
-export function readPriorStatementFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.statements ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+export function readPriorStatementFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.statements ?? {}) as Record<string, unknown>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 /**
@@ -871,19 +947,21 @@ export function readPriorStatementFingerprints(state: Record<string, unknown>): 
  * empty map, so the first post-deploy run rebuilds the map and re-emits
  * every in-window transaction exactly once.
  */
-export function readPriorTransactionFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.transactions ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+export function readPriorTransactionFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.transactions ?? {}) as Record<string, unknown>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 /**
@@ -893,19 +971,21 @@ export function readPriorTransactionFingerprints(state: Record<string, unknown>)
  * first post-deploy run rebuilds the map and re-emits every still-listed
  * message exactly once.
  */
-export function readPriorInboxMessageFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.inbox_messages ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+export function readPriorInboxMessageFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.inbox_messages ?? {}) as Record<string, unknown>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 // ─── Account extraction from the /my/usaa dashboard ───────────────────────
@@ -927,362 +1007,417 @@ export function readPriorInboxMessageFingerprints(state: Record<string, unknown>
  * budget closes. See `UsaaRunState`.
  */
 export async function extractAccounts(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  streamState: UsaaRunState
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	streamState: UsaaRunState,
 ): Promise<DashboardAccount[]> {
-  const nav = await gotoOrRepairSession(
-    deps,
-    context,
-    page,
-    sendInteraction,
-    "https://www.usaa.com/my/usaa",
-    { timeout: DASHBOARD_NAV_TIMEOUT_MS },
-    "accounts",
-    streamState
-  );
-  if (!nav.ok) {
-    streamState.sessionDeadMidRun = true;
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "accounts",
-      reason: "session_dead_reauth_failed",
-      message: "USAA session expired before accounts could be extracted and re-auth failed.",
-    });
-    return [];
-  }
-  await page
-    .waitForSelector(DASHBOARD_SELECTOR_WAIT, {
-      timeout: DASHBOARD_SELECTOR_TIMEOUT_MS,
-    })
-    .catch((): undefined => undefined);
-  await politeDelay(DASHBOARD_SETTLE_DELAY_MS);
-  return page.evaluate((linkSelector: string): DashboardAccount[] => {
-    // biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-    const WHITESPACE_RE = /\s+/g;
-    const SKIP_TEXT_RE = /^(Get started|Add account|View|Manage|Open|Apply|Browse)/i;
-    const TYPE_URL_RE = /^\/my\/([^/?]+)/;
-    const ACCOUNT_ID_RE = /(?:accountId|acctId)=([^&]+)/;
-    const LAST4_RE = /\*(\d{4})/;
-    const ENDING_IN_RE = /\bEnding in\b|\bending in\b/i;
-    const DOLLAR_RE = /\$([\d,]+\.\d{2})/g;
-    const COMMA_RE_LOCAL = /,/g;
-    // biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+	const nav = await gotoOrRepairSession(
+		deps,
+		context,
+		page,
+		sendInteraction,
+		"https://www.usaa.com/my/usaa",
+		{ timeout: DASHBOARD_NAV_TIMEOUT_MS },
+		"accounts",
+		streamState,
+	);
+	if (!nav.ok) {
+		streamState.sessionDeadMidRun = true;
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "accounts",
+			reason: "session_dead_reauth_failed",
+			message:
+				"USAA session expired before accounts could be extracted and re-auth failed.",
+		});
+		return [];
+	}
+	await page
+		.waitForSelector(DASHBOARD_SELECTOR_WAIT, {
+			timeout: DASHBOARD_SELECTOR_TIMEOUT_MS,
+		})
+		.catch((): undefined => undefined);
+	await politeDelay(DASHBOARD_SETTLE_DELAY_MS);
+	return page.evaluate((linkSelector: string): DashboardAccount[] => {
+		// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+		const WHITESPACE_RE = /\s+/g;
+		const SKIP_TEXT_RE =
+			/^(Get started|Add account|View|Manage|Open|Apply|Browse)/i;
+		const TYPE_URL_RE = /^\/my\/([^/?]+)/;
+		const ACCOUNT_ID_RE = /(?:accountId|acctId)=([^&]+)/;
+		const LAST4_RE = /\*(\d{4})/;
+		const ENDING_IN_RE = /\bEnding in\b|\bending in\b/i;
+		const DOLLAR_RE = /\$([\d,]+\.\d{2})/g;
+		const COMMA_RE_LOCAL = /,/g;
+		// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
 
-    const out: DashboardAccount[] = [];
-    const links = [...document.querySelectorAll<HTMLElement>(linkSelector)];
-    for (const a of links) {
-      const href = a.getAttribute("href") || "";
-      const text = (a.innerText || "").replace(WHITESPACE_RE, " ").trim();
-      // Skip nav/CTA links that happen to match the URL prefix but have generic text.
-      if (!text || text.length < 12 || SKIP_TEXT_RE.test(text)) {
-        continue;
-      }
-      const typeMatch = href.match(TYPE_URL_RE);
-      const accountType = typeMatch?.[1] ?? "unknown";
-      const idMatch = href.match(ACCOUNT_ID_RE);
-      const accountId = idMatch?.[1] ? decodeURIComponent(idMatch[1]) : null;
-      const last4Match = text.match(LAST4_RE);
-      const splitByEnding = text.split(ENDING_IN_RE);
-      const namePart = splitByEnding[0] ?? "";
-      const name = namePart.trim();
-      const amounts = [...text.matchAll(DOLLAR_RE)]
-        .map((m) => (m[1] ? m[1] : null))
-        .filter((v): v is string => Boolean(v));
-      const [firstAmount] = amounts;
-      const balanceCents = firstAmount ? Math.round(Number(firstAmount.replace(COMMA_RE_LOCAL, "")) * 100) : null;
-      out.push({
-        account_id_raw: accountId,
-        account_url: href,
-        account_type: accountType,
-        name: name || null,
-        last_four: last4Match?.[1] ?? null,
-        balance_cents: balanceCents,
-        raw_text: text.slice(0, 200),
-      });
-    }
-    return out;
-  }, ACCOUNT_URL_PREFIXES);
+		const out: DashboardAccount[] = [];
+		const links = [...document.querySelectorAll<HTMLElement>(linkSelector)];
+		for (const a of links) {
+			const href = a.getAttribute("href") || "";
+			const text = (a.innerText || "").replace(WHITESPACE_RE, " ").trim();
+			// Skip nav/CTA links that happen to match the URL prefix but have generic text.
+			if (!text || text.length < 12 || SKIP_TEXT_RE.test(text)) {
+				continue;
+			}
+			const typeMatch = href.match(TYPE_URL_RE);
+			const accountType = typeMatch?.[1] ?? "unknown";
+			const idMatch = href.match(ACCOUNT_ID_RE);
+			const accountId = idMatch?.[1] ? decodeURIComponent(idMatch[1]) : null;
+			const last4Match = text.match(LAST4_RE);
+			const splitByEnding = text.split(ENDING_IN_RE);
+			const namePart = splitByEnding[0] ?? "";
+			const name = namePart.trim();
+			const amounts = [...text.matchAll(DOLLAR_RE)]
+				.map((m) => (m[1] ? m[1] : null))
+				.filter((v): v is string => Boolean(v));
+			const [firstAmount] = amounts;
+			const balanceCents = firstAmount
+				? Math.round(Number(firstAmount.replace(COMMA_RE_LOCAL, "")) * 100)
+				: null;
+			out.push({
+				account_id_raw: accountId,
+				account_url: href,
+				account_type: accountType,
+				name: name || null,
+				last_four: last4Match?.[1] ?? null,
+				balance_cents: balanceCents,
+				raw_text: text.slice(0, 200),
+			});
+		}
+		return out;
+	}, ACCOUNT_URL_PREFIXES);
 }
 
 // ─── CSV export driver for transactions ───────────────────────────────────
 
 async function findExportAffordance(page: Page): Promise<Locator | null> {
-  const bankClass = page.locator("button.ent-as-utility-bar__item.export");
-  if (await bankClass.count().catch((): number => 0)) {
-    return bankClass.first();
-  }
+	const bankClass = page.locator("button.ent-as-utility-bar__item.export");
+	if (await bankClass.count().catch((): number => 0)) {
+		return bankClass.first();
+	}
 
-  const creditClass = page.locator("button.as_credit__utility-bar-item.as_credit__export");
-  if (await creditClass.count().catch((): number => 0)) {
-    return creditClass.first();
-  }
+	const creditClass = page.locator(
+		"button.as_credit__utility-bar-item.as_credit__export",
+	);
+	if (await creditClass.count().catch((): number => 0)) {
+		return creditClass.first();
+	}
 
-  const buttonText = page.locator('button, [role="button"]').filter({ hasText: EXPORT_BUTTON_TEXT_RE });
-  if (await buttonText.count().catch((): number => 0)) {
-    return buttonText.first();
-  }
+	const buttonText = page
+		.locator('button, [role="button"]')
+		.filter({ hasText: EXPORT_BUTTON_TEXT_RE });
+	if (await buttonText.count().catch((): number => 0)) {
+		return buttonText.first();
+	}
 
-  return null;
+	return null;
 }
 
 /** Classify in memory only; no URL or route fragment reaches durable evidence. */
 export function classifyUsaaNoExportRoute(
-  value: string,
-  hasKnownAccountOrTransactionMarker: boolean
+	value: string,
+	hasKnownAccountOrTransactionMarker: boolean,
 ): NoExportAffordanceObservation["route"] {
-  try {
-    const url = new URL(value);
-    if (url.hostname !== "www.usaa.com") {
-      return "unknown";
-    }
-    if (USAA_INTERSTITIAL_ROUTE_RE.test(url.pathname)) {
-      return "interstitial";
-    }
-    return USAA_ACCOUNT_DETAIL_ROUTE_RE.test(url.pathname) && hasKnownAccountOrTransactionMarker
-      ? "expected"
-      : "unknown";
-  } catch {
-    return "unknown";
-  }
+	try {
+		const url = new URL(value);
+		if (url.hostname !== "www.usaa.com") {
+			return "unknown";
+		}
+		if (USAA_INTERSTITIAL_ROUTE_RE.test(url.pathname)) {
+			return "interstitial";
+		}
+		return USAA_ACCOUNT_DETAIL_ROUTE_RE.test(url.pathname) &&
+			hasKnownAccountOrTransactionMarker
+			? "expected"
+			: "unknown";
+	} catch {
+		return "unknown";
+	}
 }
 
-async function captureNoExportAffordanceObservation(page: Page): Promise<NoExportAffordanceObservation> {
-  const counts = await page
-    .evaluate(
-      ({ accountDetail, exportAffordance, navigation, transaction }) => ({
-        account_detail_marker_count: document.querySelectorAll(accountDetail).length,
-        navigation_marker_count: document.querySelectorAll(navigation).length,
-        target_count: document.querySelectorAll(exportAffordance).length,
-        transaction_marker_count: document.querySelectorAll(transaction).length,
-      }),
-      {
-        accountDetail: USAA_ACCOUNT_DETAIL_MARKER_SELECTOR,
-        exportAffordance: USAA_EXPORT_AFFORDANCE_SELECTOR,
-        navigation: USAA_NAVIGATION_MARKER_SELECTOR,
-        transaction: USAA_TRANSACTION_MARKER_SELECTOR,
-      }
-    )
-    .catch(() => ({
-      account_detail_marker_count: 0,
-      navigation_marker_count: 0,
-      target_count: 0,
-      transaction_marker_count: 0,
-    }));
-  const hasKnownAccountOrTransactionMarker =
-    counts.account_detail_marker_count > 0 || counts.transaction_marker_count > 0;
-  return {
-    ...counts,
-    route: classifyUsaaNoExportRoute(page.url(), hasKnownAccountOrTransactionMarker),
-  };
+async function captureNoExportAffordanceObservation(
+	page: Page,
+): Promise<NoExportAffordanceObservation> {
+	const counts = await page
+		.evaluate(
+			({ accountDetail, exportAffordance, navigation, transaction }) => ({
+				account_detail_marker_count:
+					document.querySelectorAll(accountDetail).length,
+				navigation_marker_count: document.querySelectorAll(navigation).length,
+				target_count: document.querySelectorAll(exportAffordance).length,
+				transaction_marker_count: document.querySelectorAll(transaction).length,
+			}),
+			{
+				accountDetail: USAA_ACCOUNT_DETAIL_MARKER_SELECTOR,
+				exportAffordance: USAA_EXPORT_AFFORDANCE_SELECTOR,
+				navigation: USAA_NAVIGATION_MARKER_SELECTOR,
+				transaction: USAA_TRANSACTION_MARKER_SELECTOR,
+			},
+		)
+		.catch(() => ({
+			account_detail_marker_count: 0,
+			navigation_marker_count: 0,
+			target_count: 0,
+			transaction_marker_count: 0,
+		}));
+	const hasKnownAccountOrTransactionMarker =
+		counts.account_detail_marker_count > 0 ||
+		counts.transaction_marker_count > 0;
+	return {
+		...counts,
+		route: classifyUsaaNoExportRoute(
+			page.url(),
+			hasKnownAccountOrTransactionMarker,
+		),
+	};
 }
 
-function noExportAffordanceDiagnostic(diag: DiagnosticInfo | null, managedSurface: BrowserSurfaceManagedState) {
-  const observation = diag?.no_export_observation;
-  const diagnostic = buildBrowserSurfaceDiagnostic({
-    accountDetailMarkerCount: observation?.account_detail_marker_count,
-    kind: "usaa_transaction_export",
-    managedSurface,
-    navigationMarkerCount: observation?.navigation_marker_count,
-    parserCount: 0,
-    readCount: 1,
-    route: observation?.route ?? "unknown",
-    targetCount: observation?.target_count,
-    transactionMarkerCount: observation?.transaction_marker_count,
-    verifiedEmptyMarkerCount: 0,
-    waitOutcome: "not_needed",
-  });
-  if (!diagnostic) {
-    throw new Error("closed USAA browser-surface diagnostic input was invalid");
-  }
-  return diagnostic;
+function noExportAffordanceDiagnostic(
+	diag: DiagnosticInfo | null,
+	managedSurface: BrowserSurfaceManagedState,
+) {
+	const observation = diag?.no_export_observation;
+	const diagnostic = buildBrowserSurfaceDiagnostic({
+		accountDetailMarkerCount: observation?.account_detail_marker_count,
+		kind: "usaa_transaction_export",
+		managedSurface,
+		navigationMarkerCount: observation?.navigation_marker_count,
+		parserCount: 0,
+		readCount: 1,
+		route: observation?.route ?? "unknown",
+		targetCount: observation?.target_count,
+		transactionMarkerCount: observation?.transaction_marker_count,
+		verifiedEmptyMarkerCount: 0,
+		waitOutcome: "not_needed",
+	});
+	if (!diagnostic) {
+		throw new Error("closed USAA browser-surface diagnostic input was invalid");
+	}
+	return diagnostic;
 }
 
 class SessionDeadRedirectError extends Error {
-  readonly observation: NoExportAffordanceObservation;
+	readonly observation: NoExportAffordanceObservation;
 
-  constructor(observation: NoExportAffordanceObservation) {
-    super("session_dead_redirect_to_logon");
-    this.name = "SessionDeadRedirectError";
-    this.observation = observation;
-  }
+	constructor(observation: NoExportAffordanceObservation) {
+		super("session_dead_redirect_to_logon");
+		this.name = "SessionDeadRedirectError";
+		this.observation = observation;
+	}
 }
 
 function capturePageDiagnostics(page: Page): Promise<PageDiagnostics | null> {
-  return page
-    .evaluate((): PageDiagnostics => {
-      // biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-      const WS_RE = /\s+/g;
-      const EXPORT_OR_DL_RE = /export|download/i;
-      // biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+	return page
+		.evaluate((): PageDiagnostics => {
+			// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+			const WS_RE = /\s+/g;
+			const EXPORT_OR_DL_RE = /export|download/i;
+			// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
 
-      const take = (sel: string, max = 8): DiagnosticCandidate[] => {
-        const els = [...document.querySelectorAll<HTMLElement>(sel)];
-        return els.slice(0, max).map((el) => ({
-          tag: el.tagName,
-          text: (el.innerText || "").replace(WS_RE, " ").trim().slice(0, 50),
-          cls: (el.className ? String(el.className) : "").slice(0, 80),
-          id: el.id || null,
-        }));
-      };
-      return {
-        url: location.href,
-        title: document.title,
-        has_utility_bar: Boolean(document.querySelector('.ent-as-utility-bar, [class*="utility-bar" i]')),
-        export_candidates: take('button, [role="button"]').filter((c) => EXPORT_OR_DL_RE.test(c.text)),
-        nav_candidates: take('a[href*="/my/credit-card"], a[role="tab"], [role="tab"]'),
-        dialogs_open: document.querySelectorAll('[role="dialog"]').length,
-      };
-    })
-    .catch((): PageDiagnostics | null => null);
+			const take = (sel: string, max = 8): DiagnosticCandidate[] => {
+				const els = [...document.querySelectorAll<HTMLElement>(sel)];
+				return els.slice(0, max).map((el) => ({
+					tag: el.tagName,
+					text: (el.innerText || "").replace(WS_RE, " ").trim().slice(0, 50),
+					cls: (el.className ? String(el.className) : "").slice(0, 80),
+					id: el.id || null,
+				}));
+			};
+			return {
+				url: location.href,
+				title: document.title,
+				has_utility_bar: Boolean(
+					document.querySelector(
+						'.ent-as-utility-bar, [class*="utility-bar" i]',
+					),
+				),
+				export_candidates: take('button, [role="button"]').filter((c) =>
+					EXPORT_OR_DL_RE.test(c.text),
+				),
+				nav_candidates: take(
+					'a[href*="/my/credit-card"], a[role="tab"], [role="tab"]',
+				),
+				dialogs_open: document.querySelectorAll('[role="dialog"]').length,
+			};
+		})
+		.catch((): PageDiagnostics | null => null);
 }
 
 async function locateExportPage(
-  page: Page,
-  accountUrl: string,
-  settleDelayMs: number
+	page: Page,
+	accountUrl: string,
+	settleDelayMs: number,
 ): Promise<LocatedExportPage | null> {
-  const candidates = [accountUrl];
+	const candidates = [accountUrl];
 
-  const seen = new Set<string>();
-  for (const url of candidates) {
-    if (seen.has(url)) {
-      continue;
-    }
-    seen.add(url);
-    try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: ACCOUNT_NAV_TIMEOUT_MS,
-      });
-    } catch {
-      continue;
-    }
-    await politeDelay(settleDelayMs);
-    const finalUrl = page.url();
-    if (LOGON_REDIRECT_RE.test(finalUrl)) {
-      throw new SessionDeadRedirectError(await captureNoExportAffordanceObservation(page));
-    }
-    const btn = await findExportAffordance(page);
-    if (btn) {
-      return { url, export: btn };
-    }
-  }
-  return null;
+	const seen = new Set<string>();
+	for (const url of candidates) {
+		if (seen.has(url)) {
+			continue;
+		}
+		seen.add(url);
+		try {
+			await page.goto(url, {
+				waitUntil: "domcontentloaded",
+				timeout: ACCOUNT_NAV_TIMEOUT_MS,
+			});
+		} catch {
+			continue;
+		}
+		await politeDelay(settleDelayMs);
+		const finalUrl = page.url();
+		if (LOGON_REDIRECT_RE.test(finalUrl)) {
+			throw new SessionDeadRedirectError(
+				await captureNoExportAffordanceObservation(page),
+			);
+		}
+		const btn = await findExportAffordance(page);
+		if (btn) {
+			return { url, export: btn };
+		}
+	}
+	return null;
 }
 
 const DIALOG_HTML_WS_RE = /\s+/g;
 
 async function emitExportClickFailedDiagnostic(
-  page: Page,
-  onDiagnostics: DriveExportOptions["onDiagnostics"],
-  err: unknown
+	page: Page,
+	onDiagnostics: DriveExportOptions["onDiagnostics"],
+	err: unknown,
 ): Promise<void> {
-  if (!onDiagnostics) {
-    return;
-  }
-  const diag = await capturePageDiagnostics(page);
-  const msg = err instanceof Error ? err.message : String(err);
-  onDiagnostics({
-    phase: "export_click_failed",
-    diag,
-    error: msg.slice(0, ID_TEXT_SNIP),
-  });
+	if (!onDiagnostics) {
+		return;
+	}
+	const diag = await capturePageDiagnostics(page);
+	const msg = err instanceof Error ? err.message : String(err);
+	onDiagnostics({
+		phase: "export_click_failed",
+		diag,
+		error: msg.slice(0, ID_TEXT_SNIP),
+	});
 }
 
 async function emitDialogUnexpectedShapeDiagnostic(
-  page: Page,
-  onDiagnostics: NonNullable<DriveExportOptions["onDiagnostics"]>
+	page: Page,
+	onDiagnostics: NonNullable<DriveExportOptions["onDiagnostics"]>,
 ): Promise<void> {
-  const base = await capturePageDiagnostics(page);
-  const dialogHtml = await page
-    .locator('[role="dialog"]')
-    .first()
-    .innerHTML()
-    .catch((): string | null => null);
-  const preview = dialogHtml ? dialogHtml.replace(DIALOG_HTML_WS_RE, " ").slice(0, HTML_PREVIEW_MAX) : null;
-  onDiagnostics({
-    phase: "export_dialog_unexpected_shape",
-    diag: base
-      ? { ...base, dialog_html_preview: preview }
-      : {
-          url: "",
-          title: "",
-          has_utility_bar: false,
-          export_candidates: [],
-          nav_candidates: [],
-          dialogs_open: 0,
-          dialog_html_preview: preview,
-        },
-  });
+	const base = await capturePageDiagnostics(page);
+	const dialogHtml = await page
+		.locator('[role="dialog"]')
+		.first()
+		.innerHTML()
+		.catch((): string | null => null);
+	const preview = dialogHtml
+		? dialogHtml.replace(DIALOG_HTML_WS_RE, " ").slice(0, HTML_PREVIEW_MAX)
+		: null;
+	onDiagnostics({
+		phase: "export_dialog_unexpected_shape",
+		diag: base
+			? { ...base, dialog_html_preview: preview }
+			: {
+					url: "",
+					title: "",
+					has_utility_bar: false,
+					export_candidates: [],
+					nav_candidates: [],
+					dialogs_open: 0,
+					dialog_html_preview: preview,
+				},
+	});
 }
 
 /** Click Export, then confirm the date-range selector rendered. */
-async function openExportDialog(page: Page, located: LocatedExportPage, options: DriveExportOptions): Promise<boolean> {
-  const { onDiagnostics } = options;
-  try {
-    await located.export.click({ timeout: EXPORT_CLICK_TIMEOUT_MS });
-  } catch (err) {
-    await emitExportClickFailedDiagnostic(page, onDiagnostics, err);
-    return false;
-  }
-  await politeDelay(EXPORT_DIALOG_DELAY_MS);
+async function openExportDialog(
+	page: Page,
+	located: LocatedExportPage,
+	options: DriveExportOptions,
+): Promise<boolean> {
+	const { onDiagnostics } = options;
+	try {
+		await located.export.click({ timeout: EXPORT_CLICK_TIMEOUT_MS });
+	} catch (err) {
+		await emitExportClickFailedDiagnostic(page, onDiagnostics, err);
+		return false;
+	}
+	await politeDelay(EXPORT_DIALOG_DELAY_MS);
 
-  const selectCount = await page
-    .locator('[role="dialog"] select[name="selectionType"], select[name="selectionType"]')
-    .count()
-    .catch((): number => 0);
-  if (!selectCount) {
-    if (onDiagnostics) {
-      await emitDialogUnexpectedShapeDiagnostic(page, onDiagnostics);
-    }
-    // Capture before Escape: the keypress below can dismiss/mutate the
-    // dialog surface, so the checkpoint must run on the still-intact page.
-    await captureExportCheckpoint(page, options, "dialog-not-open");
-    await page.keyboard.press("Escape").catch((): undefined => undefined);
-    return false;
-  }
-  return true;
+	const selectCount = await page
+		.locator(
+			'[role="dialog"] select[name="selectionType"], select[name="selectionType"]',
+		)
+		.count()
+		.catch((): number => 0);
+	if (!selectCount) {
+		if (onDiagnostics) {
+			await emitDialogUnexpectedShapeDiagnostic(page, onDiagnostics);
+		}
+		// Capture before Escape: the keypress below can dismiss/mutate the
+		// dialog surface, so the checkpoint must run on the still-intact page.
+		await captureExportCheckpoint(page, options, "dialog-not-open");
+		await page.keyboard.press("Escape").catch((): undefined => undefined);
+		return false;
+	}
+	return true;
 }
 
 /** Fill the date-range inputs via select → clear → type. */
-async function fillExportDateRange(page: Page, sinceDate: string, untilDate: string): Promise<void> {
-  await page.selectOption('select[name="selectionType"]', "date-range").catch((): string[] => []);
-  await politeDelay(EXPORT_STATE_DELAY_MS);
+async function fillExportDateRange(
+	page: Page,
+	sinceDate: string,
+	untilDate: string,
+): Promise<void> {
+	await page
+		.selectOption('select[name="selectionType"]', "date-range")
+		.catch((): string[] => []);
+	await politeDelay(EXPORT_STATE_DELAY_MS);
 
-  const fromIn = page.locator('input[name="fromDate"], input[name="startDate"]').first();
-  const endIn = page.locator('input[name="endDate"]').first();
-  await fromIn.click().catch((): undefined => undefined);
-  await page.keyboard.press("Control+A").catch((): undefined => undefined);
-  await page.keyboard.press("Delete").catch((): undefined => undefined);
-  await fromIn.pressSequentially(mmddyyyy(sinceDate), { delay: KEY_TYPE_DELAY_MS }).catch((): undefined => undefined);
-  await endIn.click().catch((): undefined => undefined);
-  await page.keyboard.press("Control+A").catch((): undefined => undefined);
-  await page.keyboard.press("Delete").catch((): undefined => undefined);
-  await endIn.pressSequentially(mmddyyyy(untilDate), { delay: KEY_TYPE_DELAY_MS }).catch((): undefined => undefined);
-  await politeDelay(EXPORT_STATE_DELAY_MS);
-  await politeDelay(EXPORT_STATE_DELAY_MS);
+	const fromIn = page
+		.locator('input[name="fromDate"], input[name="startDate"]')
+		.first();
+	const endIn = page.locator('input[name="endDate"]').first();
+	await fromIn.click().catch((): undefined => undefined);
+	await page.keyboard.press("Control+A").catch((): undefined => undefined);
+	await page.keyboard.press("Delete").catch((): undefined => undefined);
+	await fromIn
+		.pressSequentially(mmddyyyy(sinceDate), { delay: KEY_TYPE_DELAY_MS })
+		.catch((): undefined => undefined);
+	await endIn.click().catch((): undefined => undefined);
+	await page.keyboard.press("Control+A").catch((): undefined => undefined);
+	await page.keyboard.press("Delete").catch((): undefined => undefined);
+	await endIn
+		.pressSequentially(mmddyyyy(untilDate), { delay: KEY_TYPE_DELAY_MS })
+		.catch((): undefined => undefined);
+	await politeDelay(EXPORT_STATE_DELAY_MS);
+	await politeDelay(EXPORT_STATE_DELAY_MS);
 }
 
-async function captureExportCheckpoint(page: Page, options: DriveExportOptions, suffix: string): Promise<void> {
-  if (!(options.capture && options.captureLabel)) {
-    return;
-  }
-  await options.capture.captureDom(page, `${options.captureLabel}-${suffix}`).catch((): undefined => undefined);
+async function captureExportCheckpoint(
+	page: Page,
+	options: DriveExportOptions,
+	suffix: string,
+): Promise<void> {
+	if (!(options.capture && options.captureLabel)) {
+		return;
+	}
+	await options.capture
+		.captureDom(page, `${options.captureLabel}-${suffix}`)
+		.catch((): undefined => undefined);
 }
 
 type ExportSubmitOutcome =
-  | { buffer: Buffer; kind: "artifact"; suggestedFilename: string | null }
-  | {
-      kind: "artifact_failed";
-      artifact: BodyResponseDiagnostics;
-      download: DownloadDiagnostics | null;
-      error: string;
-    }
-  | { kind: "dialog_error"; message: string }
-  | { kind: "empty"; message: string };
+	| { buffer: Buffer; kind: "artifact"; suggestedFilename: string | null }
+	| {
+			kind: "artifact_failed";
+			artifact: BodyResponseDiagnostics;
+			download: DownloadDiagnostics | null;
+			error: string;
+	  }
+	| { kind: "dialog_error"; message: string }
+	| { kind: "empty"; message: string };
 
 /**
  * Error subclass used by `waitForCsvArtifact` so failure callers can read
@@ -1290,18 +1425,25 @@ type ExportSubmitOutcome =
  * remote `failure()`, byte count, fallback source) without re-deriving it.
  */
 class CsvArtifactError extends Error {
-  readonly download: DownloadDiagnostics | null;
-  constructor(message: string, download: DownloadDiagnostics | null, cause?: unknown) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "CsvArtifactError";
-    this.download = download;
-  }
+	readonly download: DownloadDiagnostics | null;
+	constructor(
+		message: string,
+		download: DownloadDiagnostics | null,
+		cause?: unknown,
+	) {
+		super(message, cause === undefined ? undefined : { cause });
+		this.name = "CsvArtifactError";
+		this.download = download;
+	}
 }
 
-type DriveExportResult = { kind: "artifact"; path: string } | { kind: "empty" } | { kind: "failed" };
+type DriveExportResult =
+	| { kind: "artifact"; path: string }
+	| { kind: "empty" }
+	| { kind: "failed" };
 
 export function isNoDataExportMessage(text: string): boolean {
-  return EXPORT_NO_DATA_RE.test(text);
+	return EXPORT_NO_DATA_RE.test(text);
 }
 
 /**
@@ -1316,220 +1458,288 @@ export function isNoDataExportMessage(text: string): boolean {
 const ANALYTICS_HOST_RE = /^https?:\/\/(da|smetrics|tags|tms)\.usaa\.com\//iu;
 const ANALYTICS_CONTENT_TYPE_RE = /image\/gif/iu;
 
-function isAnalyticsBeacon(headers: Record<string, string>, url: string): boolean {
-  if (ANALYTICS_HOST_RE.test(url)) {
-    return true;
-  }
-  const contentType = headers["content-type"]?.toLowerCase() ?? "";
-  return ANALYTICS_CONTENT_TYPE_RE.test(contentType);
+function isAnalyticsBeacon(
+	headers: Record<string, string>,
+	url: string,
+): boolean {
+	if (ANALYTICS_HOST_RE.test(url)) {
+		return true;
+	}
+	const contentType = headers["content-type"]?.toLowerCase() ?? "";
+	return ANALYTICS_CONTENT_TYPE_RE.test(contentType);
 }
 
 function attachCsvResponseQueue(page: Page): BodyResponseQueue {
-  return attachBodyResponseQueue(page, {
-    isExpectedBody(body, headers) {
-      if (body.length === 0) {
-        return false;
-      }
-      const contentType = headers["content-type"]?.toLowerCase() ?? "";
-      if (contentType.includes("text/html") || contentType.includes("application/json")) {
-        return false;
-      }
-      const head = body.subarray(0, 2048).toString("utf8");
-      return CSV_HEAD_RE.test(head) && head.includes(",");
-    },
-    shouldInspect(headers, url) {
-      if (isAnalyticsBeacon(headers, url)) {
-        return false;
-      }
-      const hint = `${headers["content-disposition"] ?? ""} ${headers["content-type"] ?? ""} ${url}`;
-      return CSV_DOWNLOAD_HINT_RE.test(hint);
-    },
-  });
+	return attachBodyResponseQueue(page, {
+		isExpectedBody(body, headers) {
+			if (body.length === 0) {
+				return false;
+			}
+			const contentType = headers["content-type"]?.toLowerCase() ?? "";
+			if (
+				contentType.includes("text/html") ||
+				contentType.includes("application/json")
+			) {
+				return false;
+			}
+			const head = body.subarray(0, 2048).toString("utf8");
+			return CSV_HEAD_RE.test(head) && head.includes(",");
+		},
+		shouldInspect(headers, url) {
+			if (isAnalyticsBeacon(headers, url)) {
+				return false;
+			}
+			const hint = `${headers["content-disposition"] ?? ""} ${headers["content-type"] ?? ""} ${url}`;
+			return CSV_DOWNLOAD_HINT_RE.test(hint);
+		},
+	});
 }
 
 async function snapshotDownloadFailure(
-  download: Pick<import("playwright").Download, "url" | "suggestedFilename" | "failure">
+	download: Pick<
+		import("playwright").Download,
+		"url" | "suggestedFilename" | "failure"
+	>,
 ): Promise<DownloadDiagnostics> {
-  const failure = await download.failure().catch((): null => null);
-  let url: string | null;
-  try {
-    url = download.url();
-  } catch {
-    url = null;
-  }
-  let suggestedFilename: string | null;
-  try {
-    suggestedFilename = download.suggestedFilename();
-  } catch {
-    suggestedFilename = null;
-  }
-  return { url, suggestedFilename, downloadFailure: failure };
+	const failure = await download.failure().catch((): null => null);
+	let url: string | null;
+	try {
+		url = download.url();
+	} catch {
+		url = null;
+	}
+	let suggestedFilename: string | null;
+	try {
+		suggestedFilename = download.suggestedFilename();
+	} catch {
+		suggestedFilename = null;
+	}
+	return { url, suggestedFilename, downloadFailure: failure };
 }
 
 async function waitForCsvArtifact(
-  downloadQueue: DownloadQueue,
-  responseQueue: BodyResponseQueue
+	downloadQueue: DownloadQueue,
+	responseQueue: BodyResponseQueue,
 ): Promise<{ buffer: Buffer; suggestedFilename: string | null }> {
-  const responsePromise = responseQueue.waitForNextResponse({ timeoutMs: DOWNLOAD_TIMEOUT_MS });
-  const downloadPromise = downloadQueue.waitForNextDownload({ timeoutMs: DOWNLOAD_TIMEOUT_MS });
-  const result = await Promise.any([
-    responsePromise.then((response) => ({ kind: "response" as const, response })),
-    downloadPromise.then((downloadResult) => ({ download: downloadResult, kind: "download" as const })),
-  ]);
-  if (result.kind === "response") {
-    return { buffer: result.response.body, suggestedFilename: result.response.suggestedFilename };
-  }
-  const { download } = result;
-  try {
-    const { buffer, outcome } = await readPlaywrightDownloadBufferDetailed(download);
-    if (buffer.length > 0) {
-      return { buffer, suggestedFilename: download.suggestedFilename() };
-    }
-    // saveAs + createReadStream both produced zero bytes. Capture the
-    // download-side evidence (URL, suggested filename, remote failure)
-    // before falling through to the response-queue grace window.
-    const baseDiag = await snapshotDownloadFailure(download);
-    const downloadDiag: DownloadDiagnostics = {
-      ...baseDiag,
-      bytes: outcome.bytes,
-      source: outcome.source,
-      saveAsError: outcome.saveAsError ?? null,
-      streamError: outcome.streamError ?? null,
-    };
-    const response = await waitForOptionalBodyResponse(responsePromise, RESPONSE_FALLBACK_GRACE_MS);
-    if (response) {
-      return { buffer: response.body, suggestedFilename: response.suggestedFilename };
-    }
-    throw new CsvArtifactError("download_empty", downloadDiag);
-  } catch (err) {
-    if (err instanceof CsvArtifactError) {
-      throw err;
-    }
-    const baseDiag = await snapshotDownloadFailure(download).catch((): DownloadDiagnostics => ({}));
-    const downloadDiag: DownloadDiagnostics = {
-      ...baseDiag,
-      bytes: 0,
-      saveAsError: err instanceof Error ? err.message : String(err),
-    };
-    const response = await waitForOptionalBodyResponse(responsePromise, RESPONSE_FALLBACK_GRACE_MS);
-    if (response) {
-      return { buffer: response.body, suggestedFilename: response.suggestedFilename };
-    }
-    // biome-ignore lint/style/useErrorCause: CsvArtifactError's 3rd constructor arg forwards to super(message, { cause })
-    throw new CsvArtifactError(err instanceof Error ? err.message : String(err), downloadDiag, err);
-  }
+	const responsePromise = responseQueue.waitForNextResponse({
+		timeoutMs: DOWNLOAD_TIMEOUT_MS,
+	});
+	const downloadPromise = downloadQueue.waitForNextDownload({
+		timeoutMs: DOWNLOAD_TIMEOUT_MS,
+	});
+	const result = await Promise.any([
+		responsePromise.then((response) => ({
+			kind: "response" as const,
+			response,
+		})),
+		downloadPromise.then((downloadResult) => ({
+			download: downloadResult,
+			kind: "download" as const,
+		})),
+	]);
+	if (result.kind === "response") {
+		return {
+			buffer: result.response.body,
+			suggestedFilename: result.response.suggestedFilename,
+		};
+	}
+	const { download } = result;
+	try {
+		const { buffer, outcome } =
+			await readPlaywrightDownloadBufferDetailed(download);
+		if (buffer.length > 0) {
+			return { buffer, suggestedFilename: download.suggestedFilename() };
+		}
+		// saveAs + createReadStream both produced zero bytes. Capture the
+		// download-side evidence (URL, suggested filename, remote failure)
+		// before falling through to the response-queue grace window.
+		const baseDiag = await snapshotDownloadFailure(download);
+		const downloadDiag: DownloadDiagnostics = {
+			...baseDiag,
+			bytes: outcome.bytes,
+			source: outcome.source,
+			saveAsError: outcome.saveAsError ?? null,
+			streamError: outcome.streamError ?? null,
+		};
+		const response = await waitForOptionalBodyResponse(
+			responsePromise,
+			RESPONSE_FALLBACK_GRACE_MS,
+		);
+		if (response) {
+			return {
+				buffer: response.body,
+				suggestedFilename: response.suggestedFilename,
+			};
+		}
+		throw new CsvArtifactError("download_empty", downloadDiag);
+	} catch (err) {
+		if (err instanceof CsvArtifactError) {
+			throw err;
+		}
+		const baseDiag = await snapshotDownloadFailure(download).catch(
+			(): DownloadDiagnostics => ({}),
+		);
+		const downloadDiag: DownloadDiagnostics = {
+			...baseDiag,
+			bytes: 0,
+			saveAsError: err instanceof Error ? err.message : String(err),
+		};
+		const response = await waitForOptionalBodyResponse(
+			responsePromise,
+			RESPONSE_FALLBACK_GRACE_MS,
+		);
+		if (response) {
+			return {
+				buffer: response.body,
+				suggestedFilename: response.suggestedFilename,
+			};
+		}
+		throw new CsvArtifactError(
+			err instanceof Error ? err.message : String(err),
+			downloadDiag,
+			err,
+		);
+	}
 }
 
 /** Submit the export dialog, race the downloadable artifact against an inline error. */
 async function submitExportAndAwait(page: Page): Promise<ExportSubmitOutcome> {
-  const downloadQueue = attachDownloadQueue(page);
-  const responseQueue = attachCsvResponseQueue(page);
-  await responseQueue.ready;
+	const downloadQueue = attachDownloadQueue(page);
+	const responseQueue = attachCsvResponseQueue(page);
+	await responseQueue.ready;
 
-  const submit = page.locator('[role="dialog"] button[type="submit"]').first();
-  try {
-    await submit.click().catch((): undefined => undefined);
+	const submit = page.locator('[role="dialog"] button[type="submit"]').first();
+	try {
+		await submit.click().catch((): undefined => undefined);
 
-    const dialogMessage = page.locator(EXPORT_DIALOG_MESSAGE_SELECTOR).first();
-    const readDialogOutcome = async (): Promise<ExportSubmitOutcome> => {
-      const message = ((await dialogMessage.textContent().catch((): string | null => null)) ?? "").trim();
-      return isNoDataExportMessage(message) ? { kind: "empty", message } : { kind: "dialog_error", message };
-    };
-    const errorPromise = page
-      .locator(EXPORT_DIALOG_MESSAGE_SELECTOR)
-      .first()
-      .waitFor({ state: "visible", timeout: DOWNLOAD_TIMEOUT_MS })
-      .then(readDialogOutcome)
-      .catch((): Promise<never> => new Promise((): void => undefined));
+		const dialogMessage = page.locator(EXPORT_DIALOG_MESSAGE_SELECTOR).first();
+		const readDialogOutcome = async (): Promise<ExportSubmitOutcome> => {
+			const message = (
+				(await dialogMessage.textContent().catch((): string | null => null)) ??
+				""
+			).trim();
+			return isNoDataExportMessage(message)
+				? { kind: "empty", message }
+				: { kind: "dialog_error", message };
+		};
+		const errorPromise = page
+			.locator(EXPORT_DIALOG_MESSAGE_SELECTOR)
+			.first()
+			.waitFor({ state: "visible", timeout: DOWNLOAD_TIMEOUT_MS })
+			.then(readDialogOutcome)
+			.catch((): Promise<never> => new Promise((): void => undefined));
 
-    return await Promise.race<ExportSubmitOutcome>([
-      waitForCsvArtifact(downloadQueue, responseQueue).then(
-        (artifact): ExportSubmitOutcome => ({
-          buffer: artifact.buffer,
-          kind: "artifact",
-          suggestedFilename: artifact.suggestedFilename,
-        })
-      ),
-      errorPromise,
-    ]);
-  } catch (err) {
-    return {
-      artifact: responseQueue.diagnostics(),
-      download: err instanceof CsvArtifactError ? err.download : null,
-      error: err instanceof Error ? err.message : String(err),
-      kind: "artifact_failed",
-    };
-  } finally {
-    downloadQueue.detach();
-    responseQueue.detach();
-  }
+		return await Promise.race<ExportSubmitOutcome>([
+			waitForCsvArtifact(downloadQueue, responseQueue).then(
+				(artifact): ExportSubmitOutcome => ({
+					buffer: artifact.buffer,
+					kind: "artifact",
+					suggestedFilename: artifact.suggestedFilename,
+				}),
+			),
+			errorPromise,
+		]);
+	} catch (err) {
+		return {
+			artifact: responseQueue.diagnostics(),
+			download: err instanceof CsvArtifactError ? err.download : null,
+			error: err instanceof Error ? err.message : String(err),
+			kind: "artifact_failed",
+		};
+	} finally {
+		downloadQueue.detach();
+		responseQueue.detach();
+	}
 }
 
-async function noExportAffordanceFailure(page: Page, options: DriveExportOptions): Promise<DriveExportResult> {
-  await captureExportCheckpoint(page, options, "no-export-affordance");
-  if (options.onDiagnostics) {
-    const noExportObservation = await captureNoExportAffordanceObservation(page);
-    options.onDiagnostics({ diag: null, no_export_observation: noExportObservation, phase: "no_export_affordance" });
-  }
-  return { kind: "failed" };
+async function noExportAffordanceFailure(
+	page: Page,
+	options: DriveExportOptions,
+): Promise<DriveExportResult> {
+	await captureExportCheckpoint(page, options, "no-export-affordance");
+	if (options.onDiagnostics) {
+		const noExportObservation =
+			await captureNoExportAffordanceObservation(page);
+		options.onDiagnostics({
+			diag: null,
+			no_export_observation: noExportObservation,
+			phase: "no_export_affordance",
+		});
+	}
+	return { kind: "failed" };
 }
 
 export async function driveExport(
-  page: Page,
-  accountUrl: string,
-  options: DriveExportOptions
+	page: Page,
+	accountUrl: string,
+	options: DriveExportOptions,
 ): Promise<DriveExportResult> {
-  const { sinceDate, untilDate, onDiagnostics } = options;
-  const located = await locateExportPage(page, accountUrl, options.settleDelayMs ?? ACCOUNT_SETTLE_DELAY_MS);
-  if (!located) {
-    return noExportAffordanceFailure(page, options);
-  }
+	const { sinceDate, untilDate, onDiagnostics } = options;
+	const located = await locateExportPage(
+		page,
+		accountUrl,
+		options.settleDelayMs ?? ACCOUNT_SETTLE_DELAY_MS,
+	);
+	if (!located) {
+		return noExportAffordanceFailure(page, options);
+	}
 
-  const dialogOpen = await openExportDialog(page, located, options);
-  if (!dialogOpen) {
-    return { kind: "failed" };
-  }
+	const dialogOpen = await openExportDialog(page, located, options);
+	if (!dialogOpen) {
+		return { kind: "failed" };
+	}
 
-  await fillExportDateRange(page, sinceDate, untilDate);
-  await captureExportCheckpoint(page, options, "before-submit");
+	await fillExportDateRange(page, sinceDate, untilDate);
+	await captureExportCheckpoint(page, options, "before-submit");
 
-  const tempDir = mkdtempSync(join(tmpdir(), "usaa-export-"));
-  const outcome = await submitExportAndAwait(page);
-  if (outcome.kind === "empty" || outcome.kind === "dialog_error") {
-    rmSync(tempDir, { recursive: true, force: true });
-    await captureExportCheckpoint(page, options, outcome.kind === "empty" ? "source-empty" : "dialog-error");
-    let dialogDiag: PageDiagnostics | null = null;
-    if (outcome.kind === "dialog_error" && onDiagnostics) {
-      dialogDiag = await capturePageDiagnostics(page);
-    }
-    await page
-      .locator('[role="dialog"] #export-cancel-button')
-      .click()
-      .catch((): undefined => undefined);
-    if (outcome.kind === "dialog_error" && onDiagnostics) {
-      onDiagnostics({ diag: dialogDiag, error: outcome.message, phase: "export_dialog_error" });
-    }
-    return outcome.kind === "empty" ? { kind: "empty" } : { kind: "failed" };
-  }
-  if (outcome.kind === "artifact_failed") {
-    rmSync(tempDir, { recursive: true, force: true });
-    await captureExportCheckpoint(page, options, "artifact-failed");
-    if (onDiagnostics) {
-      const diag = await capturePageDiagnostics(page);
-      onDiagnostics({
-        artifact: outcome.artifact,
-        diag,
-        download: outcome.download,
-        error: outcome.error,
-        phase: "export_artifact_wait_failed",
-      });
-    }
-    return { kind: "failed" };
-  }
-  const suggested = (outcome.suggestedFilename || "usaa-export.csv").replace(UNSAFE_FILENAME_RE, "_");
-  const targetPath = join(tempDir, suggested);
-  await writeFile(targetPath, outcome.buffer);
-  return { kind: "artifact", path: targetPath };
+	const tempDir = mkdtempSync(join(tmpdir(), "usaa-export-"));
+	const outcome = await submitExportAndAwait(page);
+	if (outcome.kind === "empty" || outcome.kind === "dialog_error") {
+		rmSync(tempDir, { recursive: true, force: true });
+		await captureExportCheckpoint(
+			page,
+			options,
+			outcome.kind === "empty" ? "source-empty" : "dialog-error",
+		);
+		let dialogDiag: PageDiagnostics | null = null;
+		if (outcome.kind === "dialog_error" && onDiagnostics) {
+			dialogDiag = await capturePageDiagnostics(page);
+		}
+		await page
+			.locator('[role="dialog"] #export-cancel-button')
+			.click()
+			.catch((): undefined => undefined);
+		if (outcome.kind === "dialog_error" && onDiagnostics) {
+			onDiagnostics({
+				diag: dialogDiag,
+				error: outcome.message,
+				phase: "export_dialog_error",
+			});
+		}
+		return outcome.kind === "empty" ? { kind: "empty" } : { kind: "failed" };
+	}
+	if (outcome.kind === "artifact_failed") {
+		rmSync(tempDir, { recursive: true, force: true });
+		await captureExportCheckpoint(page, options, "artifact-failed");
+		if (onDiagnostics) {
+			const diag = await capturePageDiagnostics(page);
+			onDiagnostics({
+				artifact: outcome.artifact,
+				diag,
+				download: outcome.download,
+				error: outcome.error,
+				phase: "export_artifact_wait_failed",
+			});
+		}
+		return { kind: "failed" };
+	}
+	const suggested = (outcome.suggestedFilename || "usaa-export.csv").replace(
+		UNSAFE_FILENAME_RE,
+		"_",
+	);
+	const targetPath = join(tempDir, suggested);
+	await writeFile(targetPath, outcome.buffer);
+	return { kind: "artifact", path: targetPath };
 }
 
 // parseCsv + rowsToTransactions live in ./parsers.ts.
@@ -1537,7 +1747,7 @@ export async function driveExport(
 // ─── Stream orchestration helpers ────────────────────────────────────────
 
 interface StatementsSubDeps extends EmitDeps {
-  page: Page;
+	page: Page;
 }
 
 /**
@@ -1554,8 +1764,8 @@ interface StatementsSubDeps extends EmitDeps {
  * `gotoOrRepairSession` is the sole spender of this budget — see there.
  */
 export interface UsaaRunState {
-  sessionDeadMidRun: boolean;
-  sessionRepairAttempted: boolean;
+	sessionDeadMidRun: boolean;
+	sessionRepairAttempted: boolean;
 }
 
 /** Backward-compatible alias: this state started out transactions-specific
@@ -1565,10 +1775,13 @@ type TransactionsStreamState = UsaaRunState;
 /** Latch `streamState.sessionDeadMidRun` from a stream's session-alive
  *  result. Extracted so `collect()`'s per-stream gating reads as one call
  *  per stream instead of a repeated inline `if (!x) { ...= true }`. */
-function latchSessionDead(streamState: TransactionsStreamState, sessionAlive: boolean): void {
-  if (!sessionAlive) {
-    streamState.sessionDeadMidRun = true;
-  }
+function latchSessionDead(
+	streamState: TransactionsStreamState,
+	sessionAlive: boolean,
+): void {
+	if (!sessionAlive) {
+		streamState.sessionDeadMidRun = true;
+	}
 }
 
 /**
@@ -1583,52 +1796,60 @@ function latchSessionDead(streamState: TransactionsStreamState, sessionAlive: bo
  * `gotoOrRepairSession`.
  */
 async function reauthAfterSessionLapse(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  _accountName: string | null,
-  streamState: UsaaRunState,
-  observation?: NoExportAffordanceObservation
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	_accountName: string | null,
+	streamState: UsaaRunState,
+	observation?: NoExportAffordanceObservation,
 ): Promise<boolean> {
-  if (streamState.sessionRepairAttempted) {
-    return false;
-  }
-  streamState.sessionRepairAttempted = true;
-  await deps.emit({
-    type: "PROGRESS",
-    stream: "transactions",
-    message: "Session lapsed during transactions; re-authenticating before retry",
-  });
-  try {
-    if (deps.reauthenticate) {
-      await deps.reauthenticate({ context, page, sendInteraction });
-    } else {
-      await ensureUsaaSession({
-        capture: deps.capture ?? null,
-        context,
-        ...(deps.credentials === undefined ? {} : { credentials: deps.credentials }),
-        page,
-        sendInteraction,
-      });
-    }
-    return true;
-  } catch {
-    const diagnostic = observation
-      ? noExportAffordanceDiagnostic(
-          { diag: null, no_export_observation: observation, phase: "no_export_affordance" },
-          deps.browserSurface ?? "unknown"
-        )
-      : null;
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "transactions",
-      reason: "session_dead_reauth_failed",
-      message: "USAA session expired mid-run and re-auth failed. Remaining accounts and statements skipped.",
-      ...(diagnostic ? { diagnostics: { browser_surface: diagnostic } } : {}),
-    });
-    return false;
-  }
+	if (streamState.sessionRepairAttempted) {
+		return false;
+	}
+	streamState.sessionRepairAttempted = true;
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "transactions",
+		message:
+			"Session lapsed during transactions; re-authenticating before retry",
+	});
+	try {
+		if (deps.reauthenticate) {
+			await deps.reauthenticate({ context, page, sendInteraction });
+		} else {
+			await ensureUsaaSession({
+				capture: deps.capture ?? null,
+				context,
+				...(deps.credentials === undefined
+					? {}
+					: { credentials: deps.credentials }),
+				page,
+				sendInteraction,
+			});
+		}
+		return true;
+	} catch {
+		const diagnostic = observation
+			? noExportAffordanceDiagnostic(
+					{
+						diag: null,
+						no_export_observation: observation,
+						phase: "no_export_affordance",
+					},
+					deps.browserSurface ?? "unknown",
+				)
+			: null;
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "session_dead_reauth_failed",
+			message:
+				"USAA session expired mid-run and re-auth failed. Remaining accounts and statements skipped.",
+			...(diagnostic ? { diagnostics: { browser_surface: diagnostic } } : {}),
+		});
+		return false;
+	}
 }
 
 /**
@@ -1662,317 +1883,363 @@ async function reauthAfterSessionLapse(
  * equivalent export-dialog diagnostic to capture.
  */
 export async function gotoOrRepairSession(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  url: string,
-  navOptions: { timeout: number },
-  streamForProgress: string,
-  streamState: UsaaRunState,
-  /** Set when the caller already navigated to `url` and confirmed the
-   *  logon bounce itself (e.g. `navigateToCardOrGap`, which needs the
-   *  distinct "goto rejected" vs "goto landed on logon" cases either way) —
-   *  skips this function's own redundant first navigation. */
-  alreadyLandedOnLogon = false
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	url: string,
+	navOptions: { timeout: number },
+	streamForProgress: string,
+	streamState: UsaaRunState,
+	/** Set when the caller already navigated to `url` and confirmed the
+	 *  logon bounce itself (e.g. `navigateToCardOrGap`, which needs the
+	 *  distinct "goto rejected" vs "goto landed on logon" cases either way) —
+	 *  skips this function's own redundant first navigation. */
+	alreadyLandedOnLogon = false,
 ): Promise<{ ok: true } | { ok: false }> {
-  if (!alreadyLandedOnLogon) {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: navOptions.timeout });
-    if (!LOGON_REDIRECT_RE.test(page.url())) {
-      return { ok: true };
-    }
-  }
-  if (streamState.sessionRepairAttempted) {
-    return { ok: false };
-  }
-  streamState.sessionRepairAttempted = true;
-  await deps.emit({
-    type: "PROGRESS",
-    stream: streamForProgress,
-    message: "Session lapsed mid-run; re-authenticating before retry",
-  });
-  try {
-    if (deps.reauthenticate) {
-      await deps.reauthenticate({ context, page, sendInteraction });
-    } else {
-      await ensureUsaaSession({
-        capture: deps.capture ?? null,
-        context,
-        ...(deps.credentials === undefined ? {} : { credentials: deps.credentials }),
-        page,
-        sendInteraction,
-      });
-    }
-  } catch {
-    return { ok: false };
-  }
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: navOptions.timeout });
-  return LOGON_REDIRECT_RE.test(page.url()) ? { ok: false } : { ok: true };
+	if (!alreadyLandedOnLogon) {
+		await page.goto(url, {
+			waitUntil: "domcontentloaded",
+			timeout: navOptions.timeout,
+		});
+		if (!LOGON_REDIRECT_RE.test(page.url())) {
+			return { ok: true };
+		}
+	}
+	if (streamState.sessionRepairAttempted) {
+		return { ok: false };
+	}
+	streamState.sessionRepairAttempted = true;
+	await deps.emit({
+		type: "PROGRESS",
+		stream: streamForProgress,
+		message: "Session lapsed mid-run; re-authenticating before retry",
+	});
+	try {
+		if (deps.reauthenticate) {
+			await deps.reauthenticate({ context, page, sendInteraction });
+		} else {
+			await ensureUsaaSession({
+				capture: deps.capture ?? null,
+				context,
+				...(deps.credentials === undefined
+					? {}
+					: { credentials: deps.credentials }),
+				page,
+				sendInteraction,
+			});
+		}
+	} catch {
+		return { ok: false };
+	}
+	await page.goto(url, {
+		waitUntil: "domcontentloaded",
+		timeout: navOptions.timeout,
+	});
+	return LOGON_REDIRECT_RE.test(page.url()) ? { ok: false } : { ok: true };
 }
 
 interface ExportLadderResult {
-  csvPath: string | null;
-  exportEmpty: boolean;
-  lastDiag: DiagnosticInfo | null;
-  usedSince: string | null;
+	csvPath: string | null;
+	exportEmpty: boolean;
+	lastDiag: DiagnosticInfo | null;
+	usedSince: string | null;
 }
 
 /** Try each candidate `sinceDate` in the ladder; stop on success or fatal diagnostic. */
 interface LadderAttemptArgs {
-  a: DashboardAccount;
-  accountOrdinal: number;
-  accountTotal: number;
-  attemptOrdinal: number;
-  attemptTotal: number;
-  context: BrowserContext;
-  deps: EmitDeps;
-  onDiagnostics: (info: DiagnosticInfo) => void;
-  onSessionDead: () => void;
-  page: Page;
-  sendInteraction: BrowserCollectContext["sendInteraction"];
-  settleDelayMs?: number;
-  sinceDate: string;
-  streamState: UsaaRunState;
-  todayIso: string;
+	a: DashboardAccount;
+	accountOrdinal: number;
+	accountTotal: number;
+	attemptOrdinal: number;
+	attemptTotal: number;
+	context: BrowserContext;
+	deps: EmitDeps;
+	onDiagnostics: (info: DiagnosticInfo) => void;
+	onSessionDead: () => void;
+	page: Page;
+	sendInteraction: BrowserCollectContext["sendInteraction"];
+	settleDelayMs?: number;
+	sinceDate: string;
+	streamState: UsaaRunState;
+	todayIso: string;
 }
 
 export type AttemptOutcome =
-  | { kind: "empty" }
-  | { kind: "retry" }
-  | { kind: "session_dead" }
-  | { kind: "success"; csvPath: string };
+	| { kind: "empty" }
+	| { kind: "retry" }
+	| { kind: "session_dead" }
+	| { kind: "success"; csvPath: string };
 
-function exportCaptureLabel(a: DashboardAccount, sinceDate: string, untilDate: string): string {
-  const account = `${a.name ?? a.account_type}-${a.last_four ?? "unknown"}`;
-  return `transaction-export-${account}-${sinceDate}-to-${untilDate}`;
+function exportCaptureLabel(
+	a: DashboardAccount,
+	sinceDate: string,
+	untilDate: string,
+): string {
+	const account = `${a.name ?? a.account_type}-${a.last_four ?? "unknown"}`;
+	return `transaction-export-${account}-${sinceDate}-to-${untilDate}`;
 }
 
 /** Run one iteration of the backfill ladder: drive export + translate errors. */
 export async function runSingleLadderAttempt({
-  deps,
-  context,
-  page,
-  sendInteraction,
-  a,
-  accountOrdinal,
-  accountTotal,
-  attemptOrdinal,
-  attemptTotal,
-  sinceDate,
-  streamState,
-  todayIso,
-  onDiagnostics,
-  onSessionDead,
-  settleDelayMs,
+	deps,
+	context,
+	page,
+	sendInteraction,
+	a,
+	accountOrdinal,
+	accountTotal,
+	attemptOrdinal,
+	attemptTotal,
+	sinceDate,
+	streamState,
+	todayIso,
+	onDiagnostics,
+	onSessionDead,
+	settleDelayMs,
 }: LadderAttemptArgs): Promise<AttemptOutcome> {
-  await deps.emit({
-    type: "PROGRESS",
-    stream: "transactions",
-    message: `Export wait: account ${accountOrdinal}/${accountTotal}, window ${attemptOrdinal}/${attemptTotal}`,
-  });
-  try {
-    const exportResult = await driveExport(page, `https://www.usaa.com${a.account_url}`, {
-      sinceDate,
-      untilDate: todayIso,
-      accountType: a.account_type,
-      capture: deps.capture ?? null,
-      captureLabel: exportCaptureLabel(a, sinceDate, todayIso),
-      onDiagnostics,
-      ...(settleDelayMs === undefined ? {} : { settleDelayMs }),
-    });
-    if (exportResult.kind === "artifact") {
-      return { kind: "success", csvPath: exportResult.path };
-    }
-    return exportResult.kind === "empty" ? { kind: "empty" } : { kind: "retry" };
-  } catch (err) {
-    if (err instanceof SessionDeadRedirectError) {
-      const ok = await reauthAfterSessionLapse(
-        deps,
-        context,
-        page,
-        sendInteraction,
-        a.name,
-        streamState,
-        err.observation
-      );
-      if (ok) {
-        return { kind: "retry" };
-      }
-      onSessionDead();
-      return { kind: "session_dead" };
-    }
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "transactions",
-      reason: "export_error",
-      message: `Export error: account ${accountOrdinal}/${accountTotal}, window ${attemptOrdinal}/${attemptTotal}; retry by runtime`,
-    });
-    return { kind: "retry" };
-  }
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "transactions",
+		message: `Export wait: account ${accountOrdinal}/${accountTotal}, window ${attemptOrdinal}/${attemptTotal}`,
+	});
+	try {
+		const exportResult = await driveExport(
+			page,
+			`https://www.usaa.com${a.account_url}`,
+			{
+				sinceDate,
+				untilDate: todayIso,
+				accountType: a.account_type,
+				capture: deps.capture ?? null,
+				captureLabel: exportCaptureLabel(a, sinceDate, todayIso),
+				onDiagnostics,
+				...(settleDelayMs === undefined ? {} : { settleDelayMs }),
+			},
+		);
+		if (exportResult.kind === "artifact") {
+			return { kind: "success", csvPath: exportResult.path };
+		}
+		return exportResult.kind === "empty"
+			? { kind: "empty" }
+			: { kind: "retry" };
+	} catch (err) {
+		if (err instanceof SessionDeadRedirectError) {
+			const ok = await reauthAfterSessionLapse(
+				deps,
+				context,
+				page,
+				sendInteraction,
+				a.name,
+				streamState,
+				err.observation,
+			);
+			if (ok) {
+				return { kind: "retry" };
+			}
+			onSessionDead();
+			return { kind: "session_dead" };
+		}
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "export_error",
+			message: `Export error: account ${accountOrdinal}/${accountTotal}, window ${attemptOrdinal}/${attemptTotal}; retry by runtime`,
+		});
+		return { kind: "retry" };
+	}
 }
 
 function isFatalDiagPhase(diag: DiagnosticInfo | null): diag is DiagnosticInfo {
-  return Boolean(diag && (diag.phase === "no_export_affordance" || diag.phase === "export_dialog_unexpected_shape"));
+	return Boolean(
+		diag &&
+			(diag.phase === "no_export_affordance" ||
+				diag.phase === "export_dialog_unexpected_shape"),
+	);
 }
 
 async function tryExportLadder(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  a: DashboardAccount,
-  accountOrdinal: number,
-  accountTotal: number,
-  candidateStarts: readonly string[],
-  todayIso: string,
-  streamState: UsaaRunState,
-  onSessionDead: () => void
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	a: DashboardAccount,
+	accountOrdinal: number,
+	accountTotal: number,
+	candidateStarts: readonly string[],
+	todayIso: string,
+	streamState: UsaaRunState,
+	onSessionDead: () => void,
 ): Promise<ExportLadderResult> {
-  // Wrap in an object so TS tracks the mutation performed by the onDiagnostics
-  // closure; a bare `let lastDiag` would narrow to `null` at read sites.
-  const diagBox: { current: DiagnosticInfo | null } = { current: null };
-  const onDiagnostics = (info: DiagnosticInfo): void => {
-    diagBox.current = info;
-  };
-  for (let i = 0; i < candidateStarts.length; i += 1) {
-    const sinceDate = candidateStarts[i];
-    if (!sinceDate) {
-      continue;
-    }
-    const outcome = await runSingleLadderAttempt({
-      deps,
-      context,
-      page,
-      sendInteraction,
-      a,
-      accountOrdinal,
-      accountTotal,
-      attemptOrdinal: i + 1,
-      attemptTotal: candidateStarts.length,
-      sinceDate,
-      streamState,
-      todayIso,
-      onDiagnostics,
-      onSessionDead,
-    });
-    if (outcome.kind === "session_dead") {
-      return { csvPath: null, exportEmpty: false, usedSince: null, lastDiag: diagBox.current };
-    }
-    if (outcome.kind === "success") {
-      return { csvPath: outcome.csvPath, exportEmpty: false, usedSince: sinceDate, lastDiag: diagBox.current };
-    }
-    if (outcome.kind === "empty") {
-      await deps.emit({
-        type: "PROGRESS",
-        stream: "transactions",
-        message: `Export complete: no transactions for account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}`,
-      });
-      return { csvPath: null, exportEmpty: true, usedSince: sinceDate, lastDiag: diagBox.current };
-    }
-    const diagNow = diagBox.current;
-    if (diagNow) {
-      await deps.emit({
-        type: "PROGRESS",
-        stream: "transactions",
-        message: `Export diagnostic: account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}, ${formatDiagnosticInfo(diagNow)}`,
-      });
-    }
-    if (isFatalDiagPhase(diagNow)) {
-      await deps.emit({
-        type: "PROGRESS",
-        stream: "transactions",
-        message: `Export diagnostic: ${diagNow.phase}; skipping retries for account ${accountOrdinal}/${accountTotal}`,
-      });
-      break;
-    }
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "transactions",
-      message: `Retrying export with shorter range for account ${accountOrdinal}/${accountTotal}`,
-    });
-  }
-  return { csvPath: null, exportEmpty: false, usedSince: null, lastDiag: diagBox.current };
+	// Wrap in an object so TS tracks the mutation performed by the onDiagnostics
+	// closure; a bare `let lastDiag` would narrow to `null` at read sites.
+	const diagBox: { current: DiagnosticInfo | null } = { current: null };
+	const onDiagnostics = (info: DiagnosticInfo): void => {
+		diagBox.current = info;
+	};
+	for (let i = 0; i < candidateStarts.length; i += 1) {
+		const sinceDate = candidateStarts[i];
+		if (!sinceDate) {
+			continue;
+		}
+		const outcome = await runSingleLadderAttempt({
+			deps,
+			context,
+			page,
+			sendInteraction,
+			a,
+			accountOrdinal,
+			accountTotal,
+			attemptOrdinal: i + 1,
+			attemptTotal: candidateStarts.length,
+			sinceDate,
+			streamState,
+			todayIso,
+			onDiagnostics,
+			onSessionDead,
+		});
+		if (outcome.kind === "session_dead") {
+			return {
+				csvPath: null,
+				exportEmpty: false,
+				usedSince: null,
+				lastDiag: diagBox.current,
+			};
+		}
+		if (outcome.kind === "success") {
+			return {
+				csvPath: outcome.csvPath,
+				exportEmpty: false,
+				usedSince: sinceDate,
+				lastDiag: diagBox.current,
+			};
+		}
+		if (outcome.kind === "empty") {
+			await deps.emit({
+				type: "PROGRESS",
+				stream: "transactions",
+				message: `Export complete: no transactions for account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}`,
+			});
+			return {
+				csvPath: null,
+				exportEmpty: true,
+				usedSince: sinceDate,
+				lastDiag: diagBox.current,
+			};
+		}
+		const diagNow = diagBox.current;
+		if (diagNow) {
+			await deps.emit({
+				type: "PROGRESS",
+				stream: "transactions",
+				message: `Export diagnostic: account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}, ${formatDiagnosticInfo(diagNow)}`,
+			});
+		}
+		if (isFatalDiagPhase(diagNow)) {
+			await deps.emit({
+				type: "PROGRESS",
+				stream: "transactions",
+				message: `Export diagnostic: ${diagNow.phase}; skipping retries for account ${accountOrdinal}/${accountTotal}`,
+			});
+			break;
+		}
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "transactions",
+			message: `Retrying export with shorter range for account ${accountOrdinal}/${accountTotal}`,
+		});
+	}
+	return {
+		csvPath: null,
+		exportEmpty: false,
+		usedSince: null,
+		lastDiag: diagBox.current,
+	};
 }
 
 interface CsvTransactionEmitResult {
-  dataRows: number;
-  latest: string | null;
-  usableCount: number;
+	dataRows: number;
+	latest: string | null;
+	usableCount: number;
 }
 
 /** Parse the downloaded CSV, emit each transaction, and return parse outcome metadata. */
 export async function emitCsvTransactions(
-  deps: EmitDeps,
-  csvPath: string,
-  a: DashboardAccount,
-  priorLastDate: string | null,
-  accountOrdinal: number,
-  accountTotal: number,
-  fingerprintCursor?: FingerprintCursor
+	deps: EmitDeps,
+	csvPath: string,
+	a: DashboardAccount,
+	priorLastDate: string | null,
+	accountOrdinal: number,
+	accountTotal: number,
+	fingerprintCursor?: FingerprintCursor,
 ): Promise<CsvTransactionEmitResult> {
-  const text = await readFile(csvPath, "utf8");
-  const rows = parseCsv(text);
-  const txnAccountId = a.account_id_raw || a.last_four || "unknown";
-  const txns = rowsToTransactions(rows, {
-    accountId: txnAccountId,
-    accountName: a.name,
-    fetchedAt: nowIso(),
-  });
-  // A CSV that was downloaded (so not the known-empty export path) but whose
-  // data rows produced zero usable transactions is a silent coverage loss:
-  // parseCsv returned only a header/garbage, or every data row failed the
-  // header/shape checks in rowsToTransactions. Surface a bounded SKIP_RESULT
-  // by account ordinal (never the account number / last-four) so the run does
-  // not look complete. The caller also refuses to advance this account's
-  // transaction cursor on this outcome, so a parser fix can recover the gap.
-  // `rows.length` is the raw parsed line count; we report data-row count
-  // (rows beyond the header) to keep the number meaningful.
-  const dataRows = Math.max(0, rows.length - 1);
-  if (txns.length === 0) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "transactions",
-      reason: dataRows > 0 ? "csv_no_usable_transactions" : "csv_no_data_rows",
-      message:
-        dataRows > 0
-          ? `CSV parsed no usable transactions from ${dataRows} data row(s) for account ${accountOrdinal}/${accountTotal} (header mismatch or unparseable rows)`
-          : `CSV had no data rows for account ${accountOrdinal}/${accountTotal}`,
-      diagnostics: { account_ordinal: accountOrdinal, account_total: accountTotal, data_rows: dataRows },
-    });
-  }
-  let latest: string | null = priorLastDate;
-  for (const t of txns) {
-    // Gate on a per-transaction fingerprint that excludes the run-clock
-    // `fetched_at`. A posted transaction's identity
-    // (id = hashId(accountId|date|amount|original|#ord)) and its fields are
-    // immutable, but the incremental export re-downloads an overlapping
-    // date window (INCREMENTAL_OVERLAP_MS) every run and re-emits each
-    // transaction with a fresh `fetched_at`. With this gate an already-seen
-    // transaction whose body is byte-identical modulo `fetched_at` is
-    // suppressed; a genuinely-new transaction (new id) or a real field move
-    // is a fingerprint boundary and still emits.
-    //
-    // NOTE: transactions is a PARTIAL scan (per-account overlapping
-    // windows + statement-PDF subsets), so this cursor is never
-    // `pruneStale()`d — pruning ids the run did not look at would drop
-    // their fingerprints and re-churn them on the next overlapping window.
-    if (!fingerprintCursor || fingerprintCursor.shouldEmit(t)) {
-      await deps.emitRecord("transactions", t);
-    }
-    if (!latest || t.date > latest) {
-      latest = t.date;
-    }
-  }
-  await unlink(csvPath).catch((): undefined => undefined);
-  const dir = csvPath.replace(TEMP_DIR_PREFIX_RE, "");
-  await readdir(dir)
-    .then((f): void => {
-      if (!f.length) {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    })
-    .catch((): undefined => undefined);
-  return { dataRows, latest, usableCount: txns.length };
+	const text = await readFile(csvPath, "utf8");
+	const rows = parseCsv(text);
+	const txnAccountId = a.account_id_raw || a.last_four || "unknown";
+	const txns = rowsToTransactions(rows, {
+		accountId: txnAccountId,
+		accountName: a.name,
+		fetchedAt: nowIso(),
+	});
+	// A CSV that was downloaded (so not the known-empty export path) but whose
+	// data rows produced zero usable transactions is a silent coverage loss:
+	// parseCsv returned only a header/garbage, or every data row failed the
+	// header/shape checks in rowsToTransactions. Surface a bounded SKIP_RESULT
+	// by account ordinal (never the account number / last-four) so the run does
+	// not look complete. The caller also refuses to advance this account's
+	// transaction cursor on this outcome, so a parser fix can recover the gap.
+	// `rows.length` is the raw parsed line count; we report data-row count
+	// (rows beyond the header) to keep the number meaningful.
+	const dataRows = Math.max(0, rows.length - 1);
+	if (txns.length === 0) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: dataRows > 0 ? "csv_no_usable_transactions" : "csv_no_data_rows",
+			message:
+				dataRows > 0
+					? `CSV parsed no usable transactions from ${dataRows} data row(s) for account ${accountOrdinal}/${accountTotal} (header mismatch or unparseable rows)`
+					: `CSV had no data rows for account ${accountOrdinal}/${accountTotal}`,
+			diagnostics: {
+				account_ordinal: accountOrdinal,
+				account_total: accountTotal,
+				data_rows: dataRows,
+			},
+		});
+	}
+	let latest: string | null = priorLastDate;
+	for (const t of txns) {
+		// Gate on a per-transaction fingerprint that excludes the run-clock
+		// `fetched_at`. A posted transaction's identity
+		// (id = hashId(accountId|date|amount|original|#ord)) and its fields are
+		// immutable, but the incremental export re-downloads an overlapping
+		// date window (INCREMENTAL_OVERLAP_MS) every run and re-emits each
+		// transaction with a fresh `fetched_at`. With this gate an already-seen
+		// transaction whose body is byte-identical modulo `fetched_at` is
+		// suppressed; a genuinely-new transaction (new id) or a real field move
+		// is a fingerprint boundary and still emits.
+		//
+		// NOTE: transactions is a PARTIAL scan (per-account overlapping
+		// windows + statement-PDF subsets), so this cursor is never
+		// `pruneStale()`d — pruning ids the run did not look at would drop
+		// their fingerprints and re-churn them on the next overlapping window.
+		if (!fingerprintCursor || fingerprintCursor.shouldEmit(t)) {
+			await deps.emitRecord("transactions", t);
+		}
+		if (!latest || t.date > latest) {
+			latest = t.date;
+		}
+	}
+	await unlink(csvPath).catch((): undefined => undefined);
+	const dir = csvPath.replace(TEMP_DIR_PREFIX_RE, "");
+	await readdir(dir)
+		.then((f): void => {
+			if (!f.length) {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		})
+		.catch((): undefined => undefined);
+	return { dataRows, latest, usableCount: txns.length };
 }
 
 /**
@@ -1998,8 +2265,13 @@ export async function emitCsvTransactions(
  * keeping the denominator honest for a partial-run cutoff.
  */
 export type AccountTransactionOutcome =
-  | { accountId: string; kind: "gap"; reason: DetailGapMessage["reason"]; errorClass: string }
-  | { accountId: string; kind: "hydrated" | "no_activity" };
+	| {
+			accountId: string;
+			kind: "gap";
+			reason: DetailGapMessage["reason"];
+			errorClass: string;
+	  }
+	| { accountId: string; kind: "hydrated" | "no_activity" };
 
 /** Build the retryable DETAIL_GAP for a USAA transaction account whose CSV
  *  export failed this run — the ladder produced no download, or the CSV had
@@ -2010,26 +2282,26 @@ export type AccountTransactionOutcome =
  *  runtime persists one resumable gap per failed key and the per-account
  *  coverage stays honest. */
 export function buildAccountTransactionDetailGap(outcome: {
-  accountId: string;
-  errorClass: string;
-  reason: DetailGapMessage["reason"];
+	accountId: string;
+	errorClass: string;
+	reason: DetailGapMessage["reason"];
 }): DetailGapMessage {
-  return {
-    type: "DETAIL_GAP",
-    stream: "transactions",
-    parent_stream: "accounts",
-    record_key: outcome.accountId,
-    status: "pending",
-    reason: outcome.reason,
-    detail_locator: {
-      kind: "usaa.account",
-      account_id: outcome.accountId,
-    },
-    retryable: true,
-    reference_only: true,
-    detail: { class: outcome.errorClass },
-    last_error: { class: outcome.errorClass },
-  };
+	return {
+		type: "DETAIL_GAP",
+		stream: "transactions",
+		parent_stream: "accounts",
+		record_key: outcome.accountId,
+		status: "pending",
+		reason: outcome.reason,
+		detail_locator: {
+			kind: "usaa.account",
+			account_id: outcome.accountId,
+		},
+		retryable: true,
+		reference_only: true,
+		detail: { class: outcome.errorClass },
+		last_error: { class: outcome.errorClass },
+	};
 }
 
 /**
@@ -2038,35 +2310,35 @@ export function buildAccountTransactionDetailGap(outcome: {
  * one, or accepting a foreign/malformed locator, could close unrelated work.
  */
 export function buildServedAccountTransactionGapLookup(
-  detailGaps: readonly BrowserCollectContext["detailGaps"][number][]
+	detailGaps: readonly BrowserCollectContext["detailGaps"][number][],
 ): Map<string, string> {
-  const lookup = new Map<string, string>();
-  for (const gap of detailGaps) {
-    if (gap.stream !== "transactions" || gap.status !== "pending") {
-      continue;
-    }
-    const locator = gap.detail_locator;
-    if (locator?.kind !== "usaa.account") {
-      continue;
-    }
-    const accountId = locator.account_id;
-    const recordKey = gap.record_key;
-    if (
-      typeof accountId !== "string" ||
-      accountId.length === 0 ||
-      typeof recordKey !== "string" ||
-      recordKey.length === 0 ||
-      recordKey !== accountId ||
-      typeof gap.gap_id !== "string" ||
-      !gap.gap_id
-    ) {
-      continue;
-    }
-    if (!lookup.has(accountId)) {
-      lookup.set(accountId, gap.gap_id);
-    }
-  }
-  return lookup;
+	const lookup = new Map<string, string>();
+	for (const gap of detailGaps) {
+		if (gap.stream !== "transactions" || gap.status !== "pending") {
+			continue;
+		}
+		const locator = gap.detail_locator;
+		if (locator?.kind !== "usaa.account") {
+			continue;
+		}
+		const accountId = locator.account_id;
+		const recordKey = gap.record_key;
+		if (
+			typeof accountId !== "string" ||
+			accountId.length === 0 ||
+			typeof recordKey !== "string" ||
+			recordKey.length === 0 ||
+			recordKey !== accountId ||
+			typeof gap.gap_id !== "string" ||
+			!gap.gap_id
+		) {
+			continue;
+		}
+		if (!lookup.has(accountId)) {
+			lookup.set(accountId, gap.gap_id);
+		}
+	}
+	return lookup;
 }
 
 /**
@@ -2075,29 +2347,29 @@ export function buildServedAccountTransactionGapLookup(
  * account coverage; a fresh `gap` is deliberately re-deferred instead.
  */
 export async function recoverServedAccountTransactionGaps(
-  deps: EmitDeps,
-  outcomes: readonly AccountTransactionOutcome[]
+	deps: EmitDeps,
+	outcomes: readonly AccountTransactionOutcome[],
 ): Promise<void> {
-  const served = deps.servedAccountTransactionGaps;
-  if (!served || served.size === 0) {
-    return;
-  }
-  for (const outcome of outcomes) {
-    if (outcome.kind !== "hydrated" && outcome.kind !== "no_activity") {
-      continue;
-    }
-    const gapId = served.get(outcome.accountId);
-    if (!gapId) {
-      continue;
-    }
-    await deps.emit({
-      type: "DETAIL_GAP_RECOVERED",
-      reference_only: true,
-      gap_id: gapId,
-      stream: "transactions",
-      record_key: outcome.accountId,
-    });
-  }
+	const served = deps.servedAccountTransactionGaps;
+	if (!served || served.size === 0) {
+		return;
+	}
+	for (const outcome of outcomes) {
+		if (outcome.kind !== "hydrated" && outcome.kind !== "no_activity") {
+			continue;
+		}
+		const gapId = served.get(outcome.accountId);
+		if (!gapId) {
+			continue;
+		}
+		await deps.emit({
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: gapId,
+			stream: "transactions",
+			record_key: outcome.accountId,
+		});
+	}
 }
 
 /**
@@ -2129,36 +2401,38 @@ export async function recoverServedAccountTransactionGaps(
  * never silently advanced past an unreached account.
  */
 export async function emitTransactionsDetailCoverage(
-  deps: EmitDeps,
-  outcomes: readonly AccountTransactionOutcome[],
-  enumerationComplete: boolean
+	deps: EmitDeps,
+	outcomes: readonly AccountTransactionOutcome[],
+	enumerationComplete: boolean,
 ): Promise<void> {
-  // A partial sweep's `outcomes` (whatever accounts were reached before a
-  // session death) is never the true denominator, even when non-empty — so
-  // suppress unconditionally on `!enumerationComplete`, not only when
-  // `outcomes` happens to also be empty.
-  if (!enumerationComplete) {
-    return;
-  }
-  const requiredKeys = outcomes.map((o) => o.accountId);
-  const hydratedKeys = outcomes
-    .filter((o) => o.kind === "hydrated" || o.kind === "no_activity")
-    .map((o) => o.accountId);
-  const gapKeys = outcomes.filter((o) => o.kind === "gap").map((o) => o.accountId);
-  await emitDetailCoverage(deps, {
-    stream: "transactions",
-    stateStream: "accounts",
-    requiredKeys,
-    hydratedKeys,
-    gapKeys,
-    considered: outcomes.length,
-    covered: hydratedKeys.length,
-  });
+	// A partial sweep's `outcomes` (whatever accounts were reached before a
+	// session death) is never the true denominator, even when non-empty — so
+	// suppress unconditionally on `!enumerationComplete`, not only when
+	// `outcomes` happens to also be empty.
+	if (!enumerationComplete) {
+		return;
+	}
+	const requiredKeys = outcomes.map((o) => o.accountId);
+	const hydratedKeys = outcomes
+		.filter((o) => o.kind === "hydrated" || o.kind === "no_activity")
+		.map((o) => o.accountId);
+	const gapKeys = outcomes
+		.filter((o) => o.kind === "gap")
+		.map((o) => o.accountId);
+	await emitDetailCoverage(deps, {
+		stream: "transactions",
+		stateStream: "accounts",
+		requiredKeys,
+		hydratedKeys,
+		gapKeys,
+		considered: outcomes.length,
+		covered: hydratedKeys.length,
+	});
 }
 
 export interface AccountTransactionResult {
-  last_date: string | null;
-  outcome: AccountTransactionOutcome;
+	last_date: string | null;
+	outcome: AccountTransactionOutcome;
 }
 
 /**
@@ -2186,173 +2460,204 @@ export interface AccountTransactionResult {
  * nothing.
  */
 export function classifyCsvTransactionResult(
-  accountId: string,
-  priorLastDate: string | null,
-  usedSince: string | null,
-  csvResult: { dataRows: number; latest: string | null; usableCount: number }
+	accountId: string,
+	priorLastDate: string | null,
+	usedSince: string | null,
+	csvResult: { dataRows: number; latest: string | null; usableCount: number },
 ): AccountTransactionResult {
-  if (csvResult.usableCount > 0) {
-    return {
-      last_date: csvResult.latest || usedSince || null,
-      outcome: { accountId, kind: "hydrated" },
-    };
-  }
-  if (csvResult.dataRows === 0) {
-    return {
-      last_date: priorLastDate,
-      outcome: { accountId, kind: "no_activity" },
-    };
-  }
-  return {
-    last_date: priorLastDate,
-    outcome: { accountId, kind: "gap", reason: "temporary_unavailable", errorClass: "csv_no_usable_transactions" },
-  };
+	if (csvResult.usableCount > 0) {
+		return {
+			last_date: csvResult.latest || usedSince || null,
+			outcome: { accountId, kind: "hydrated" },
+		};
+	}
+	if (csvResult.dataRows === 0) {
+		return {
+			last_date: priorLastDate,
+			outcome: { accountId, kind: "no_activity" },
+		};
+	}
+	return {
+		last_date: priorLastDate,
+		outcome: {
+			accountId,
+			kind: "gap",
+			reason: "temporary_unavailable",
+			errorClass: "csv_no_usable_transactions",
+		},
+	};
 }
 
 async function processAccountTransactions(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  a: DashboardAccount,
-  priorLastDate: string | null,
-  sinceDateCfg: string | undefined,
-  seventeenMonthsAgo: string,
-  streamState: TransactionsStreamState,
-  accountOrdinal: number,
-  accountTotal: number,
-  fingerprintCursor?: FingerprintCursor
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	a: DashboardAccount,
+	priorLastDate: string | null,
+	sinceDateCfg: string | undefined,
+	seventeenMonthsAgo: string,
+	streamState: TransactionsStreamState,
+	accountOrdinal: number,
+	accountTotal: number,
+	fingerprintCursor?: FingerprintCursor,
 ): Promise<AccountTransactionResult | null> {
-  const accountId = a.account_id_raw || a.last_four || "unknown";
-  const desiredSince = priorLastDate
-    ? new Date(Date.parse(priorLastDate) - INCREMENTAL_OVERLAP_MS).toISOString().slice(0, 10)
-    : (sinceDateCfg ?? seventeenMonthsAgo);
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const candidateStarts = buildCandidateStarts(desiredSince);
+	const accountId = a.account_id_raw || a.last_four || "unknown";
+	const desiredSince = priorLastDate
+		? new Date(Date.parse(priorLastDate) - INCREMENTAL_OVERLAP_MS)
+				.toISOString()
+				.slice(0, 10)
+		: (sinceDateCfg ?? seventeenMonthsAgo);
+	const todayIso = new Date().toISOString().slice(0, 10);
+	const candidateStarts = buildCandidateStarts(desiredSince);
 
-  const { csvPath, exportEmpty, usedSince, lastDiag } = await tryExportLadder(
-    deps,
-    context,
-    page,
-    sendInteraction,
-    a,
-    accountOrdinal,
-    accountTotal,
-    candidateStarts,
-    todayIso,
-    streamState,
-    () => {
-      streamState.sessionDeadMidRun = true;
-    }
-  );
-  if (streamState.sessionDeadMidRun) {
-    return null;
-  }
-  if (!csvPath) {
-    if (exportEmpty) {
-      return {
-        last_date: priorLastDate || usedSince || null,
-        outcome: { accountId, kind: "no_activity" },
-      };
-    }
-    await emitExportFailure(deps, a, lastDiag);
-    return {
-      last_date: priorLastDate,
-      outcome: { accountId, kind: "gap", reason: "temporary_unavailable", errorClass: "export_no_download" },
-    };
-  }
-  const csvResult = await emitCsvTransactions(
-    deps,
-    csvPath,
-    a,
-    priorLastDate,
-    accountOrdinal,
-    accountTotal,
-    fingerprintCursor
-  );
-  return classifyCsvTransactionResult(accountId, priorLastDate, usedSince, csvResult);
+	const { csvPath, exportEmpty, usedSince, lastDiag } = await tryExportLadder(
+		deps,
+		context,
+		page,
+		sendInteraction,
+		a,
+		accountOrdinal,
+		accountTotal,
+		candidateStarts,
+		todayIso,
+		streamState,
+		() => {
+			streamState.sessionDeadMidRun = true;
+		},
+	);
+	if (streamState.sessionDeadMidRun) {
+		return null;
+	}
+	if (!csvPath) {
+		if (exportEmpty) {
+			return {
+				last_date: priorLastDate || usedSince || null,
+				outcome: { accountId, kind: "no_activity" },
+			};
+		}
+		await emitExportFailure(deps, a, lastDiag);
+		return {
+			last_date: priorLastDate,
+			outcome: {
+				accountId,
+				kind: "gap",
+				reason: "temporary_unavailable",
+				errorClass: "export_no_download",
+			},
+		};
+	}
+	const csvResult = await emitCsvTransactions(
+		deps,
+		csvPath,
+		a,
+		priorLastDate,
+		accountOrdinal,
+		accountTotal,
+		fingerprintCursor,
+	);
+	return classifyCsvTransactionResult(
+		accountId,
+		priorLastDate,
+		usedSince,
+		csvResult,
+	);
 }
 
 async function runTransactionsStream(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  accounts: readonly DashboardAccount[],
-  state: Record<string, unknown>,
-  requested: BrowserCollectContext["requested"],
-  streamState: TransactionsStreamState,
-  fingerprintCursor?: FingerprintCursor
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	accounts: readonly DashboardAccount[],
+	state: Record<string, unknown>,
+	requested: BrowserCollectContext["requested"],
+	streamState: TransactionsStreamState,
+	fingerprintCursor?: FingerprintCursor,
 ): Promise<TransactionsStreamCursor> {
-  const stream = requested.get("transactions");
-  const sinceDateCfg = stream?.time_range?.since?.slice(0, 10);
-  const seventeenMonthsAgo = new Date(Date.now() - BACKFILL_17MO).toISOString().slice(0, 10);
+	const stream = requested.get("transactions");
+	const sinceDateCfg = stream?.time_range?.since?.slice(0, 10);
+	const seventeenMonthsAgo = new Date(Date.now() - BACKFILL_17MO)
+		.toISOString()
+		.slice(0, 10);
 
-  const priorStateForTxns = (state.transactions as TransactionsPriorState | undefined) ?? {};
-  const transactionsCursor: TransactionsStreamCursor = { ...priorStateForTxns };
+	const priorStateForTxns =
+		(state.transactions as TransactionsPriorState | undefined) ?? {};
+	const transactionsCursor: TransactionsStreamCursor = { ...priorStateForTxns };
 
-  const transactionAccounts = accounts.filter((a) => TRANSACTION_ACCOUNT_TYPE_RE.test(a.account_type));
-  const outcomes: AccountTransactionOutcome[] = [];
-  for (let i = 0; i < transactionAccounts.length; i += 1) {
-    const a = transactionAccounts[i];
-    if (!a) {
-      continue;
-    }
-    if (streamState.sessionDeadMidRun) {
-      await deps.emit({
-        type: "PROGRESS",
-        stream: "transactions",
-        message: `Session died mid-run; skipping remaining ${transactionAccounts.length - i} account(s)`,
-      });
-      break;
-    }
-    const accountKey = a.account_id_raw || "";
-    const perAccState = priorStateForTxns[accountKey];
-    const priorLastDate = perAccState?.last_date ?? null;
-    const result = await processAccountTransactions(
-      deps,
-      context,
-      page,
-      sendInteraction,
-      a,
-      priorLastDate,
-      sinceDateCfg,
-      seventeenMonthsAgo,
-      streamState,
-      i + 1,
-      transactionAccounts.length,
-      fingerprintCursor
-    );
-    if (!result) {
-      // Session died mid-attempt: the account was never reached, so it is
-      // excluded from `outcomes` entirely (see AccountTransactionOutcome
-      // doc) rather than recorded as a gap.
-      continue;
-    }
-    outcomes.push(result.outcome);
-    if (result.outcome.kind === "gap") {
-      await deps.emit(buildAccountTransactionDetailGap(result.outcome));
-    }
-    if (result.last_date === null) {
-      // No cursor advance to record this account (e.g. a gap with no
-      // prior watermark) — preserve prior behavior of leaving the cursor
-      // untouched rather than writing a null watermark.
-      continue;
-    }
-    transactionsCursor[accountKey || a.last_four || "unknown"] = { last_date: result.last_date };
-    await deps.emit({
-      type: "STATE",
-      stream: "transactions",
-      cursor: withTransactionFingerprints(transactionsCursor, fingerprintCursor),
-    });
-  }
-  // The loop above only `break`s on a session death; reaching here without
-  // one means every transaction-eligible account was attempted (including
-  // the zero-eligible-accounts case, where the loop body never ran at all),
-  // so the denominator this run enumerated is genuinely complete.
-  await recoverServedAccountTransactionGaps(deps, outcomes);
-  await emitTransactionsDetailCoverage(deps, outcomes, !streamState.sessionDeadMidRun);
-  return transactionsCursor;
+	const transactionAccounts = accounts.filter((a) =>
+		TRANSACTION_ACCOUNT_TYPE_RE.test(a.account_type),
+	);
+	const outcomes: AccountTransactionOutcome[] = [];
+	for (let i = 0; i < transactionAccounts.length; i += 1) {
+		const a = transactionAccounts[i];
+		if (!a) {
+			continue;
+		}
+		if (streamState.sessionDeadMidRun) {
+			await deps.emit({
+				type: "PROGRESS",
+				stream: "transactions",
+				message: `Session died mid-run; skipping remaining ${transactionAccounts.length - i} account(s)`,
+			});
+			break;
+		}
+		const accountKey = a.account_id_raw || "";
+		const perAccState = priorStateForTxns[accountKey];
+		const priorLastDate = perAccState?.last_date ?? null;
+		const result = await processAccountTransactions(
+			deps,
+			context,
+			page,
+			sendInteraction,
+			a,
+			priorLastDate,
+			sinceDateCfg,
+			seventeenMonthsAgo,
+			streamState,
+			i + 1,
+			transactionAccounts.length,
+			fingerprintCursor,
+		);
+		if (!result) {
+			// Session died mid-attempt: the account was never reached, so it is
+			// excluded from `outcomes` entirely (see AccountTransactionOutcome
+			// doc) rather than recorded as a gap.
+			continue;
+		}
+		outcomes.push(result.outcome);
+		if (result.outcome.kind === "gap") {
+			await deps.emit(buildAccountTransactionDetailGap(result.outcome));
+		}
+		if (result.last_date === null) {
+			// No cursor advance to record this account (e.g. a gap with no
+			// prior watermark) — preserve prior behavior of leaving the cursor
+			// untouched rather than writing a null watermark.
+			continue;
+		}
+		transactionsCursor[accountKey || a.last_four || "unknown"] = {
+			last_date: result.last_date,
+		};
+		await deps.emit({
+			type: "STATE",
+			stream: "transactions",
+			cursor: withTransactionFingerprints(
+				transactionsCursor,
+				fingerprintCursor,
+			),
+		});
+	}
+	// The loop above only `break`s on a session death; reaching here without
+	// one means every transaction-eligible account was attempted (including
+	// the zero-eligible-accounts case, where the loop body never ran at all),
+	// so the denominator this run enumerated is genuinely complete.
+	await recoverServedAccountTransactionGaps(deps, outcomes);
+	await emitTransactionsDetailCoverage(
+		deps,
+		outcomes,
+		!streamState.sessionDeadMidRun,
+	);
+	return transactionsCursor;
 }
 
 /** Attach the carried-forward per-transaction fingerprint map to the
@@ -2362,190 +2667,208 @@ async function runTransactionsStream(
  *  `readPriorTransactionFingerprints`. NOT pruned: transactions is a
  *  partial scan (see emitCsvTransactions). */
 function withTransactionFingerprints(
-  cursor: TransactionsStreamCursor,
-  fingerprintCursor?: FingerprintCursor
+	cursor: TransactionsStreamCursor,
+	fingerprintCursor?: FingerprintCursor,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...cursor };
-  if (fingerprintCursor && fingerprintCursor.size() > 0) {
-    out.fingerprints = fingerprintCursor.toState();
-  }
-  return out;
+	const out: Record<string, unknown> = { ...cursor };
+	if (fingerprintCursor && fingerprintCursor.size() > 0) {
+		out.fingerprints = fingerprintCursor.toState();
+	}
+	return out;
 }
 
 // ─── Statements stream helpers ──────────────────────────────────────────
 
 function scrapeStatementsIndex(page: Page): Promise<DocRow[]> {
-  return page.evaluate((): DocRow[] => {
-    // biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-    const WS_RE = /\s+/g;
-    // biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+	return page.evaluate((): DocRow[] => {
+		// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+		const WS_RE = /\s+/g;
+		// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
 
-    interface El {
-      innerText?: string;
-      querySelectorAll: (s: string) => El[];
-    }
+		interface El {
+			innerText?: string;
+			querySelectorAll: (s: string) => El[];
+		}
 
-    const t = document.querySelector("table") as El | null;
-    if (!t) {
-      return [];
-    }
-    return [...t.querySelectorAll("tbody tr")].map((tr: El, rowIndex: number) => {
-      const cells = [...tr.querySelectorAll("td")] as El[];
-      const [c0, c1, c2] = cells;
-      return {
-        rowIndex,
-        title: (c0?.innerText || "").replace(WS_RE, " ").trim(),
-        date_delivered: (c1?.innerText || "").trim(),
-        account_reference: (c2?.innerText || "").trim(),
-      };
-    });
-  });
+		const t = document.querySelector("table") as El | null;
+		if (!t) {
+			return [];
+		}
+		return [...t.querySelectorAll("tbody tr")].map(
+			(tr: El, rowIndex: number) => {
+				const cells = [...tr.querySelectorAll("td")] as El[];
+				const [c0, c1, c2] = cells;
+				return {
+					rowIndex,
+					title: (c0?.innerText || "").replace(WS_RE, " ").trim(),
+					date_delivered: (c1?.innerText || "").trim(),
+					account_reference: (c2?.innerText || "").trim(),
+				};
+			},
+		);
+	});
 }
 
-async function hydratePdfsForIndex(deps: StatementsSubDeps, indexRows: readonly IndexRow[]): Promise<HydrationSummary> {
-  const results = new Map<number, HydrationResult>();
-  let attempts = 0;
-  let successes = 0;
+async function hydratePdfsForIndex(
+	deps: StatementsSubDeps,
+	indexRows: readonly IndexRow[],
+): Promise<HydrationSummary> {
+	const results = new Map<number, HydrationResult>();
+	let attempts = 0;
+	let successes = 0;
 
-  try {
-    const hydrated = await hydrateStatementPdfs({
-      page: deps.page,
-      statements: indexRows as IndexRow[],
-      onProgress: ({ index, total }) => {
-        attempts = index + 1;
-        // Fire-and-forget: hydrateStatementPdfs signature is sync callback.
-        // Swallowing the promise keeps the emit ordering best-effort; a
-        // failed write would be caught by the outer try/catch on next await.
-        deps
-          .emit({
-            type: "PROGRESS",
-            stream: "statements",
-            message: `Downloading statement PDF ${index + 1}/${total}`,
-          })
-          .catch((): undefined => undefined);
-      },
-      onSkip: ({ statement, reason, diag }) => {
-        results.set(statement.rowIndex, { err: reason, diag });
-        deps
-          .emit({
-            type: "SKIP_RESULT",
-            stream: "statements",
-            reason: PDF_DOWNLOAD_SKIP_REASON[reason],
-            message: `Statement PDF download skipped at row ${statement.rowIndex + 1}: ${reason}`,
-            diagnostics: diag,
-          })
-          .catch((): undefined => undefined);
-      },
-    });
-    for (const h of hydrated) {
-      successes += 1;
-      results.set(h.statement.rowIndex, {
-        pdfPath: h.pdfPath,
-        pdfSha256: h.pdfSha256,
-        content: h.content,
-        buffer: h.buffer,
-      });
-    }
-  } catch (err) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "statements",
-      reason: "hydrate_crashed",
-      message: "Statement PDF hydration failed; retry by runtime",
-      diagnostics: failureDiagnostic("hydrate_crashed", err),
-    });
-  }
-  return { attempts, successes, results };
+	try {
+		const hydrated = await hydrateStatementPdfs({
+			page: deps.page,
+			statements: indexRows as IndexRow[],
+			onProgress: ({ index, total }) => {
+				attempts = index + 1;
+				// Fire-and-forget: hydrateStatementPdfs signature is sync callback.
+				// Swallowing the promise keeps the emit ordering best-effort; a
+				// failed write would be caught by the outer try/catch on next await.
+				deps
+					.emit({
+						type: "PROGRESS",
+						stream: "statements",
+						message: `Downloading statement PDF ${index + 1}/${total}`,
+					})
+					.catch((): undefined => undefined);
+			},
+			onSkip: ({ statement, reason, diag }) => {
+				results.set(statement.rowIndex, { err: reason, diag });
+				deps
+					.emit({
+						type: "SKIP_RESULT",
+						stream: "statements",
+						reason: PDF_DOWNLOAD_SKIP_REASON[reason],
+						message: `Statement PDF download skipped at row ${statement.rowIndex + 1}: ${reason}`,
+						diagnostics: diag,
+					})
+					.catch((): undefined => undefined);
+			},
+		});
+		for (const h of hydrated) {
+			successes += 1;
+			results.set(h.statement.rowIndex, {
+				pdfPath: h.pdfPath,
+				pdfSha256: h.pdfSha256,
+				content: h.content,
+				buffer: h.buffer,
+			});
+		}
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "statements",
+			reason: "hydrate_crashed",
+			message: "Statement PDF hydration failed; retry by runtime",
+			diagnostics: failureDiagnostic("hydrate_crashed", err),
+		});
+	}
+	return { attempts, successes, results };
 }
 
 interface PdfParseCounters {
-  parsedStatements: number;
-  pdfTxnCount: number;
-  unknownTemplates: number;
+	parsedStatements: number;
+	pdfTxnCount: number;
+	unknownTemplates: number;
 }
 
 async function processPdfStatementRow(
-  deps: EmitDeps,
-  row: IndexRow,
-  ok: HydrationResultSuccess,
-  accountById: Map<string, DashboardAccount>,
-  counters: PdfParseCounters,
-  fingerprintCursor?: FingerprintCursor
+	deps: EmitDeps,
+	row: IndexRow,
+	ok: HydrationResultSuccess,
+	accountById: Map<string, DashboardAccount>,
+	counters: PdfParseCounters,
+	fingerprintCursor?: FingerprintCursor,
 ): Promise<void> {
-  const title = row.title || "";
-  if (!shouldParseStatementTitle(title)) {
-    return;
-  }
-  const period = (row.date_delivered || "").slice(0, 7) || null;
-  const acct = row.account_id ? accountById.get(row.account_id) : null;
-  const accountName = acct?.name ?? row.account_reference ?? null;
-  try {
-    const { txns, parseMeta } = await parsePdfStatement({
-      buffer: ok.buffer,
-      accountId: row.account_id || row.account_reference || "unknown",
-      accountName,
-      period,
-    });
-    if (!txns.length) {
-      counters.unknownTemplates += 1;
-      await deps.emit({
-        type: "SKIP_RESULT",
-        stream: "transactions",
-        reason: "pdf_template_unknown",
-        message: `PDF statement parse skipped at row ${row.rowIndex + 1}: no parser matched (era=${parseMeta.era})`,
-        diagnostics: buildPdfTemplateUnknownDiagnostics(row.id, parseMeta),
-      });
-      return;
-    }
-    for (const t of txns) {
-      // Same per-transaction fingerprint gate as the CSV path (excludes
-      // run-clock `fetched_at`). PDF and CSV hash the same logical
-      // transaction to the same id, so a transaction already emitted from
-      // either source is suppressed on a re-parse whose body is identical
-      // modulo `fetched_at`. Re-parsing the same statement PDFs every run
-      // was appending a fresh version per transaction.
-      if (!fingerprintCursor || fingerprintCursor.shouldEmit({ ...t })) {
-        await deps.emitRecord("transactions", { ...t });
-      }
-      counters.pdfTxnCount += 1;
-    }
-    counters.parsedStatements += 1;
-  } catch (err) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "transactions",
-      reason: "pdf_parse_failed",
-      message: `PDF statement parse failed at row ${row.rowIndex + 1}; retry by runtime`,
-      diagnostics: failureDiagnostic("pdf_parse_failed", err),
-    });
-  }
+	const title = row.title || "";
+	if (!shouldParseStatementTitle(title)) {
+		return;
+	}
+	const period = (row.date_delivered || "").slice(0, 7) || null;
+	const acct = row.account_id ? accountById.get(row.account_id) : null;
+	const accountName = acct?.name ?? row.account_reference ?? null;
+	try {
+		const { txns, parseMeta } = await parsePdfStatement({
+			buffer: ok.buffer,
+			accountId: row.account_id || row.account_reference || "unknown",
+			accountName,
+			period,
+		});
+		if (!txns.length) {
+			counters.unknownTemplates += 1;
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "transactions",
+				reason: "pdf_template_unknown",
+				message: `PDF statement parse skipped at row ${row.rowIndex + 1}: no parser matched (era=${parseMeta.era})`,
+				diagnostics: buildPdfTemplateUnknownDiagnostics(row.id, parseMeta),
+			});
+			return;
+		}
+		for (const t of txns) {
+			// Same per-transaction fingerprint gate as the CSV path (excludes
+			// run-clock `fetched_at`). PDF and CSV hash the same logical
+			// transaction to the same id, so a transaction already emitted from
+			// either source is suppressed on a re-parse whose body is identical
+			// modulo `fetched_at`. Re-parsing the same statement PDFs every run
+			// was appending a fresh version per transaction.
+			if (!fingerprintCursor || fingerprintCursor.shouldEmit({ ...t })) {
+				await deps.emitRecord("transactions", { ...t });
+			}
+			counters.pdfTxnCount += 1;
+		}
+		counters.parsedStatements += 1;
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "pdf_parse_failed",
+			message: `PDF statement parse failed at row ${row.rowIndex + 1}; retry by runtime`,
+			diagnostics: failureDiagnostic("pdf_parse_failed", err),
+		});
+	}
 }
 
 async function emitPdfStatementTransactions(
-  deps: EmitDeps,
-  indexRows: readonly IndexRow[],
-  hydrationResults: Map<number, HydrationResult>,
-  accounts: readonly DashboardAccount[],
-  fingerprintCursor?: FingerprintCursor
+	deps: EmitDeps,
+	indexRows: readonly IndexRow[],
+	hydrationResults: Map<number, HydrationResult>,
+	accounts: readonly DashboardAccount[],
+	fingerprintCursor?: FingerprintCursor,
 ): Promise<void> {
-  const accountById = new Map<string, DashboardAccount>(
-    accounts
-      .filter((a): a is DashboardAccount & { account_id_raw: string } => Boolean(a.account_id_raw))
-      .map((a) => [a.account_id_raw, a])
-  );
-  const counters: PdfParseCounters = { pdfTxnCount: 0, parsedStatements: 0, unknownTemplates: 0 };
-  for (const row of indexRows) {
-    const ok = hydrationSuccess(hydrationResults.get(row.rowIndex));
-    if (!ok) {
-      continue;
-    }
-    await processPdfStatementRow(deps, row, ok, accountById, counters, fingerprintCursor);
-  }
-  await deps.emit({
-    type: "PROGRESS",
-    stream: "transactions",
-    message: `PDF parse complete: ${counters.pdfTxnCount} transaction(s) across ${counters.parsedStatements} statement(s) (${counters.unknownTemplates} unknown templates)`,
-  });
+	const accountById = new Map<string, DashboardAccount>(
+		accounts
+			.filter((a): a is DashboardAccount & { account_id_raw: string } =>
+				Boolean(a.account_id_raw),
+			)
+			.map((a) => [a.account_id_raw, a]),
+	);
+	const counters: PdfParseCounters = {
+		pdfTxnCount: 0,
+		parsedStatements: 0,
+		unknownTemplates: 0,
+	};
+	for (const row of indexRows) {
+		const ok = hydrationSuccess(hydrationResults.get(row.rowIndex));
+		if (!ok) {
+			continue;
+		}
+		await processPdfStatementRow(
+			deps,
+			row,
+			ok,
+			accountById,
+			counters,
+			fingerprintCursor,
+		);
+	}
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "transactions",
+		message: `PDF parse complete: ${counters.pdfTxnCount} transaction(s) across ${counters.parsedStatements} statement(s) (${counters.unknownTemplates} unknown templates)`,
+	});
 }
 
 /**
@@ -2562,105 +2885,112 @@ async function emitPdfStatementTransactions(
  * means only "not confirmed dead."
  */
 export async function runStatementsStream(
-  deps: StatementsSubDeps,
-  context: BrowserContext,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  accounts: readonly DashboardAccount[],
-  requested: BrowserCollectContext["requested"],
-  streamState: UsaaRunState,
-  statementsFingerprintCursor?: FingerprintCursor,
-  transactionsFingerprintCursor?: FingerprintCursor,
-  statementsHydrationCursor?: StatementHydrationCursor
+	deps: StatementsSubDeps,
+	context: BrowserContext,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	accounts: readonly DashboardAccount[],
+	requested: BrowserCollectContext["requested"],
+	streamState: UsaaRunState,
+	statementsFingerprintCursor?: FingerprintCursor,
+	transactionsFingerprintCursor?: FingerprintCursor,
+	statementsHydrationCursor?: StatementHydrationCursor,
 ): Promise<boolean> {
-  try {
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "statements",
-      message: "Fetching statements index",
-    });
-    const nav = await gotoOrRepairSession(
-      deps,
-      context,
-      deps.page,
-      sendInteraction,
-      "https://www.usaa.com/my/documents",
-      { timeout: DOCUMENTS_NAV_TIMEOUT_MS },
-      "statements",
-      streamState
-    );
-    if (!nav.ok) {
-      await deps.emit({
-        type: "SKIP_RESULT",
-        stream: "statements",
-        reason: "session_dead_reauth_failed",
-        message: "USAA session expired mid-run and re-auth failed. Statements skipped.",
-      });
-      return false;
-    }
-    await politeDelay(DOCUMENTS_SETTLE_DELAY_MS);
+	try {
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "statements",
+			message: "Fetching statements index",
+		});
+		const nav = await gotoOrRepairSession(
+			deps,
+			context,
+			deps.page,
+			sendInteraction,
+			"https://www.usaa.com/my/documents",
+			{ timeout: DOCUMENTS_NAV_TIMEOUT_MS },
+			"statements",
+			streamState,
+		);
+		if (!nav.ok) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "statements",
+				reason: "session_dead_reauth_failed",
+				message:
+					"USAA session expired mid-run and re-auth failed. Statements skipped.",
+			});
+			return false;
+		}
+		await politeDelay(DOCUMENTS_SETTLE_DELAY_MS);
 
-    const docs = await scrapeStatementsIndex(deps.page);
-    const indexRows = buildIndexRows(docs, accounts);
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "statements",
-      message: `Found ${indexRows.length} statement index row(s)`,
-    });
-    const summary = await hydratePdfsForIndex(deps, indexRows);
+		const docs = await scrapeStatementsIndex(deps.page);
+		const indexRows = buildIndexRows(docs, accounts);
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "statements",
+			message: `Found ${indexRows.length} statement index row(s)`,
+		});
+		const summary = await hydratePdfsForIndex(deps, indexRows);
 
-    if (requested.has("statements")) {
-      await emitStatementRecords(
-        deps,
-        indexRows,
-        summary.results,
-        summary,
-        statementsFingerprintCursor,
-        statementsHydrationCursor
-      );
-    }
-    if (requested.has("transactions")) {
-      await emitPdfStatementTransactions(deps, indexRows, summary.results, accounts, transactionsFingerprintCursor);
-    }
-    return true;
-  } catch (err) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "statements",
-      reason: "scrape_failed",
-      message: "Statements scrape failed; retry by runtime",
-      diagnostics: failureDiagnostic("statements_scrape_failed", err),
-    });
-    return true;
-  }
+		if (requested.has("statements")) {
+			await emitStatementRecords(
+				deps,
+				indexRows,
+				summary.results,
+				summary,
+				statementsFingerprintCursor,
+				statementsHydrationCursor,
+			);
+		}
+		if (requested.has("transactions")) {
+			await emitPdfStatementTransactions(
+				deps,
+				indexRows,
+				summary.results,
+				accounts,
+				transactionsFingerprintCursor,
+			);
+		}
+		return true;
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "statements",
+			reason: "scrape_failed",
+			message: "Statements scrape failed; retry by runtime",
+			diagnostics: failureDiagnostic("statements_scrape_failed", err),
+		});
+		return true;
+	}
 }
 
 // ─── Inbox stream ───────────────────────────────────────────────────────
 
 function scrapeInboxRows(page: Page): Promise<InboxRow[]> {
-  return page.evaluate((): InboxRow[] => {
-    // biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-    const WS_RE = /\s+/g;
-    // biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+	return page.evaluate((): InboxRow[] => {
+		// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+		const WS_RE = /\s+/g;
+		// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
 
-    interface El {
-      innerText?: string;
-      querySelectorAll: (s: string) => El[];
-    }
+		interface El {
+			innerText?: string;
+			querySelectorAll: (s: string) => El[];
+		}
 
-    const t = document.querySelector("table") as El | null;
-    if (!t) {
-      return [];
-    }
-    return [...t.querySelectorAll("tbody tr")].map((tr: El) => {
-      const cells = [...tr.querySelectorAll("td")] as El[];
-      const [c0, c1, c2] = cells;
-      return {
-        status: (c0?.innerText || "").replace(WS_RE, " ").trim(),
-        date_short: (c1?.innerText || "").replace(WS_RE, " ").trim(),
-        preview: (c2?.innerText || "").replace(WS_RE, " ").trim(),
-      };
-    });
-  });
+		const t = document.querySelector("table") as El | null;
+		if (!t) {
+			return [];
+		}
+		return [...t.querySelectorAll("tbody tr")].map((tr: El) => {
+			const cells = [...tr.querySelectorAll("td")] as El[];
+			const [c0, c1, c2] = cells;
+			return {
+				status: (c0?.innerText || "").replace(WS_RE, " ").trim(),
+				date_short: (c1?.innerText || "").replace(WS_RE, " ").trim(),
+				preview: (c2?.innerText || "").replace(WS_RE, " ").trim(),
+			};
+		});
+	});
 }
 
 /**
@@ -2674,126 +3004,129 @@ function scrapeInboxRows(page: Page): Promise<InboxRow[]> {
  * also returns `true`.
  */
 export async function runInboxStream(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  state: Record<string, unknown>,
-  streamState: UsaaRunState
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	state: Record<string, unknown>,
+	streamState: UsaaRunState,
 ): Promise<boolean> {
-  try {
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "inbox_messages",
-      message: "Fetching inbox",
-    });
-    const nav = await gotoOrRepairSession(
-      deps,
-      context,
-      page,
-      sendInteraction,
-      "https://www.usaa.com/my/inbox",
-      { timeout: INBOX_NAV_TIMEOUT_MS },
-      "inbox_messages",
-      streamState
-    );
-    if (!nav.ok) {
-      await deps.emit({
-        type: "SKIP_RESULT",
-        stream: "inbox_messages",
-        reason: "session_dead_reauth_failed",
-        message: "USAA session expired mid-run and re-auth failed. Inbox skipped.",
-      });
-      return false;
-    }
-    await politeDelay(DOCUMENTS_SETTLE_DELAY_MS);
-    const msgs = await scrapeInboxRows(page);
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "inbox_messages",
-      message: `Found ${msgs.length} inbox row(s)`,
-    });
-    // Per-message fingerprint cursor (excludes the run-clock `fetched_at`).
-    // The inbox page is re-scraped in full every run, so without this gate
-    // each still-listed message appended a fresh version differing only in
-    // `fetched_at`. A genuine read → unread / unread → read status flip is
-    // a fingerprint boundary and re-emits; only a byte-identical re-scrape
-    // modulo `fetched_at` is suppressed.
-    const fingerprintCursor = openFingerprintCursor(state.inbox_messages, {
-      excludeFromFingerprint: ["fetched_at"],
-      priorFingerprints: readPriorInboxMessageFingerprints(state),
-    });
-    const year = new Date().getFullYear();
-    const resolvedRows: InboxCoverageRow[] = [];
-    for (const m of msgs) {
-      const record = buildInboxMessageRecord(m, year, nowIso());
-      resolvedRows.push({ resolved: record !== null });
-      if (!record) {
-        continue;
-      }
-      if (fingerprintCursor.shouldEmit(record)) {
-        await deps.emitRecord("inbox_messages", record);
-      }
-    }
-    // The inbox listing is a full scan of the inbox page: prune fingerprints
-    // for messages no longer listed so a re-appearance re-emits.
-    fingerprintCursor.pruneStale();
-    const cursor: Record<string, unknown> = { fetched_at: nowIso() };
-    if (fingerprintCursor.size() > 0) {
-      cursor.fingerprints = fingerprintCursor.toState();
-    }
-    await deps.emit({
-      type: "STATE",
-      stream: "inbox_messages",
-      cursor,
-    });
-    // `inbox_messages` is `checkpoint_window`: a full re-scan of the inbox
-    // page every run. See inbox-coverage.ts for why `covered` is an objective
-    // per-row accounting rather than `msgs.length` — a row dropped for an
-    // unparseable date must lower `covered` below `considered`, reading an
-    // honest `partial`, not a false `complete`. `considered: 0` when the
-    // inbox genuinely holds nothing is verified-empty, not unmeasured.
-    const inboxCoverage = computeInboxCoverage(resolvedRows);
-    await emitDetailCoverage(deps, {
-      stream: "inbox_messages",
-      stateStream: "inbox_messages",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: inboxCoverage.considered,
-      covered: inboxCoverage.covered,
-    });
-    return true;
-  } catch (err) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "inbox_messages",
-      reason: "scrape_failed",
-      message: "Inbox scrape failed; retry by runtime",
-      diagnostics: failureDiagnostic("inbox_scrape_failed", err),
-    });
-    return true;
-  }
+	try {
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "inbox_messages",
+			message: "Fetching inbox",
+		});
+		const nav = await gotoOrRepairSession(
+			deps,
+			context,
+			page,
+			sendInteraction,
+			"https://www.usaa.com/my/inbox",
+			{ timeout: INBOX_NAV_TIMEOUT_MS },
+			"inbox_messages",
+			streamState,
+		);
+		if (!nav.ok) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "inbox_messages",
+				reason: "session_dead_reauth_failed",
+				message:
+					"USAA session expired mid-run and re-auth failed. Inbox skipped.",
+			});
+			return false;
+		}
+		await politeDelay(DOCUMENTS_SETTLE_DELAY_MS);
+		const msgs = await scrapeInboxRows(page);
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "inbox_messages",
+			message: `Found ${msgs.length} inbox row(s)`,
+		});
+		// Per-message fingerprint cursor (excludes the run-clock `fetched_at`).
+		// The inbox page is re-scraped in full every run, so without this gate
+		// each still-listed message appended a fresh version differing only in
+		// `fetched_at`. A genuine read → unread / unread → read status flip is
+		// a fingerprint boundary and re-emits; only a byte-identical re-scrape
+		// modulo `fetched_at` is suppressed.
+		const fingerprintCursor = openFingerprintCursor(state.inbox_messages, {
+			excludeFromFingerprint: ["fetched_at"],
+			priorFingerprints: readPriorInboxMessageFingerprints(state),
+		});
+		const year = new Date().getFullYear();
+		const resolvedRows: InboxCoverageRow[] = [];
+		for (const m of msgs) {
+			const record = buildInboxMessageRecord(m, year, nowIso());
+			resolvedRows.push({ resolved: record !== null });
+			if (!record) {
+				continue;
+			}
+			if (fingerprintCursor.shouldEmit(record)) {
+				await deps.emitRecord("inbox_messages", record);
+			}
+		}
+		// The inbox listing is a full scan of the inbox page: prune fingerprints
+		// for messages no longer listed so a re-appearance re-emits.
+		fingerprintCursor.pruneStale();
+		const cursor: Record<string, unknown> = { fetched_at: nowIso() };
+		if (fingerprintCursor.size() > 0) {
+			cursor.fingerprints = fingerprintCursor.toState();
+		}
+		await deps.emit({
+			type: "STATE",
+			stream: "inbox_messages",
+			cursor,
+		});
+		// `inbox_messages` is `checkpoint_window`: a full re-scan of the inbox
+		// page every run. See inbox-coverage.ts for why `covered` is an objective
+		// per-row accounting rather than `msgs.length` — a row dropped for an
+		// unparseable date must lower `covered` below `considered`, reading an
+		// honest `partial`, not a false `complete`. `considered: 0` when the
+		// inbox genuinely holds nothing is verified-empty, not unmeasured.
+		const inboxCoverage = computeInboxCoverage(resolvedRows);
+		await emitDetailCoverage(deps, {
+			stream: "inbox_messages",
+			stateStream: "inbox_messages",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: inboxCoverage.considered,
+			covered: inboxCoverage.covered,
+		});
+		return true;
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "inbox_messages",
+			reason: "scrape_failed",
+			message: "Inbox scrape failed; retry by runtime",
+			diagnostics: failureDiagnostic("inbox_scrape_failed", err),
+		});
+		return true;
+	}
 }
 
 // ─── Credit-card billing stream ─────────────────────────────────────────
 
 function scrapeCreditCardBilling(page: Page): Promise<BillingKv> {
-  return page.evaluate((): BillingKv => {
-    interface El {
-      innerText?: string;
-      nextElementSibling?: El | null;
-    }
-    const kv: BillingKv = {};
-    const labels = [...document.querySelectorAll("dt, .label, .field-label")] as El[];
-    for (const el of labels) {
-      const label = (el.innerText || "").trim();
-      const value = (el.nextElementSibling?.innerText || "").trim();
-      if (label && value && !kv[label]) {
-        kv[label] = value;
-      }
-    }
-    return kv;
-  });
+	return page.evaluate((): BillingKv => {
+		interface El {
+			innerText?: string;
+			nextElementSibling?: El | null;
+		}
+		const kv: BillingKv = {};
+		const labels = [
+			...document.querySelectorAll("dt, .label, .field-label"),
+		] as El[];
+		for (const el of labels) {
+			const label = (el.innerText || "").trim();
+			const value = (el.nextElementSibling?.innerText || "").trim();
+			if (label && value && !kv[label]) {
+				kv[label] = value;
+			}
+		}
+		return kv;
+	});
 }
 
 /**
@@ -2803,19 +3136,24 @@ function scrapeCreditCardBilling(page: Page): Promise<BillingKv> {
  * an empty map, so the first post-deploy run rebuilds the map and re-emits
  * every card exactly once.
  */
-export function readPriorCreditCardBillingFingerprints(state: Record<string, unknown>): Map<string, string> {
-  const streamState = (state.credit_card_billing ?? {}) as Record<string, unknown>;
-  const raw = streamState.fingerprints;
-  const out = new Map<string, string>();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out.set(id, value);
-    }
-  }
-  return out;
+export function readPriorCreditCardBillingFingerprints(
+	state: Record<string, unknown>,
+): Map<string, string> {
+	const streamState = (state.credit_card_billing ?? {}) as Record<
+		string,
+		unknown
+	>;
+	const raw = streamState.fingerprints;
+	const out = new Map<string, string>();
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 0) {
+			out.set(id, value);
+		}
+	}
+	return out;
 }
 
 /** Which of the two credit-card streams to emit. The entity
@@ -2823,10 +3161,10 @@ export function readPriorCreditCardBillingFingerprints(state: Record<string, unk
  *  are independently scoped. `observedOn` is the UTC sample date. The entity
  *  cursor is only supplied when the entity is requested. */
 export interface CreditCardBillingEmitOptions {
-  emitEntity: boolean;
-  emitStats: boolean;
-  fingerprintCursor: FingerprintCursor | undefined;
-  observedOn: string;
+	emitEntity: boolean;
+	emitStats: boolean;
+	fingerprintCursor: FingerprintCursor | undefined;
+	observedOn: string;
 }
 
 /** The credit-card boundary both streams enumerate: dashboard accounts whose
@@ -2835,8 +3173,10 @@ export interface CreditCardBillingEmitOptions {
  *  creditCardAccounts(accounts).length`, including 0 when the owner holds no
  *  credit cards) is independently unit-testable without driving a live page
  *  through `runCreditCardBillingStream`'s multi-second per-card settle delay. */
-export function creditCardAccounts(accounts: readonly DashboardAccount[]): DashboardAccount[] {
-  return accounts.filter((a) => CREDIT_CARD_TYPE_RE.test(a.account_type));
+export function creditCardAccounts(
+	accounts: readonly DashboardAccount[],
+): DashboardAccount[] {
+	return accounts.filter((a) => CREDIT_CARD_TYPE_RE.test(a.account_type));
 }
 
 /** Emit a retryable DETAIL_GAP for one card whose page navigation failed,
@@ -2845,26 +3185,29 @@ export function creditCardAccounts(accounts: readonly DashboardAccount[]): Dashb
  *  `temporary_unavailable`) — a navigation failure is always retried on the
  *  next run, so it is recoverable, not terminal. */
 async function emitCreditCardNavFailureGaps(
-  deps: EmitDeps,
-  cardId: string,
-  { emitEntity, emitStats }: Pick<CreditCardBillingEmitOptions, "emitEntity" | "emitStats">
+	deps: EmitDeps,
+	cardId: string,
+	{
+		emitEntity,
+		emitStats,
+	}: Pick<CreditCardBillingEmitOptions, "emitEntity" | "emitStats">,
 ): Promise<void> {
-  if (emitEntity) {
-    await emitDetailGap(deps, {
-      stream: "credit_card_billing",
-      recordKey: cardId,
-      reason: "temporary_unavailable",
-      locator: { kind: "usaa.credit_card_billing", card_id: cardId },
-    });
-  }
-  if (emitStats) {
-    await emitDetailGap(deps, {
-      stream: "credit_card_billing_stats",
-      recordKey: cardId,
-      reason: "temporary_unavailable",
-      locator: { kind: "usaa.credit_card_billing_stats", card_id: cardId },
-    });
-  }
+	if (emitEntity) {
+		await emitDetailGap(deps, {
+			stream: "credit_card_billing",
+			recordKey: cardId,
+			reason: "temporary_unavailable",
+			locator: { kind: "usaa.credit_card_billing", card_id: cardId },
+		});
+	}
+	if (emitStats) {
+		await emitDetailGap(deps, {
+			stream: "credit_card_billing_stats",
+			recordKey: cardId,
+			reason: "temporary_unavailable",
+			locator: { kind: "usaa.credit_card_billing_stats", card_id: cardId },
+		});
+	}
 }
 
 /** Outcome of navigating to one card's page:
@@ -2897,44 +3240,47 @@ type CardNavOutcome = "nav_failed" | "ok" | "session_dead";
  *  the gap — see `CardNavOutcome` for how the caller must react to each
  *  outcome. */
 async function navigateToCardOrGap(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  a: DashboardAccount,
-  cardId: string,
-  streamState: UsaaRunState,
-  options: Pick<CreditCardBillingEmitOptions, "emitEntity" | "emitStats">
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	a: DashboardAccount,
+	cardId: string,
+	streamState: UsaaRunState,
+	options: Pick<CreditCardBillingEmitOptions, "emitEntity" | "emitStats">,
 ): Promise<CardNavOutcome> {
-  const url = `https://www.usaa.com${a.account_url}`;
-  const navigated = await page
-    .goto(url, { waitUntil: "domcontentloaded", timeout: ACCOUNT_NAV_TIMEOUT_MS })
-    .then((): true => true)
-    .catch((): false => false);
-  const landedOnLogon = navigated && LOGON_REDIRECT_RE.test(page.url());
-  if (navigated && !landedOnLogon) {
-    return "ok";
-  }
-  if (landedOnLogon) {
-    const nav = await gotoOrRepairSession(
-      deps,
-      context,
-      page,
-      sendInteraction,
-      url,
-      { timeout: ACCOUNT_NAV_TIMEOUT_MS },
-      "credit_card_billing",
-      streamState,
-      /* alreadyLandedOnLogon */ true
-    );
-    if (nav.ok) {
-      return "ok";
-    }
-    await emitCreditCardNavFailureGaps(deps, cardId, options);
-    return "session_dead";
-  }
-  await emitCreditCardNavFailureGaps(deps, cardId, options);
-  return "nav_failed";
+	const url = `https://www.usaa.com${a.account_url}`;
+	const navigated = await page
+		.goto(url, {
+			waitUntil: "domcontentloaded",
+			timeout: ACCOUNT_NAV_TIMEOUT_MS,
+		})
+		.then((): true => true)
+		.catch((): false => false);
+	const landedOnLogon = navigated && LOGON_REDIRECT_RE.test(page.url());
+	if (navigated && !landedOnLogon) {
+		return "ok";
+	}
+	if (landedOnLogon) {
+		const nav = await gotoOrRepairSession(
+			deps,
+			context,
+			page,
+			sendInteraction,
+			url,
+			{ timeout: ACCOUNT_NAV_TIMEOUT_MS },
+			"credit_card_billing",
+			streamState,
+			/* alreadyLandedOnLogon */ true,
+		);
+		if (nav.ok) {
+			return "ok";
+		}
+		await emitCreditCardNavFailureGaps(deps, cardId, options);
+		return "session_dead";
+	}
+	await emitCreditCardNavFailureGaps(deps, cardId, options);
+	return "nav_failed";
 }
 
 /** Scrape and emit one successfully-navigated card's billing detail onto
@@ -2948,23 +3294,26 @@ async function navigateToCardOrGap(
  *  re-pulls are idempotent and a later day appends a new point in the
  *  series. */
 async function emitCreditCardBillingForCard(
-  deps: EmitDeps,
-  page: Page,
-  a: DashboardAccount,
-  options: CreditCardBillingEmitOptions
+	deps: EmitDeps,
+	page: Page,
+	a: DashboardAccount,
+	options: CreditCardBillingEmitOptions,
 ): Promise<void> {
-  const { emitEntity, emitStats, fingerprintCursor, observedOn } = options;
-  await politeDelay(CC_SETTLE_DELAY_MS);
-  const billing = await scrapeCreditCardBilling(page);
-  if (emitEntity) {
-    const rec = buildCreditCardBillingRecord(a, billing, nowIso());
-    if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
-      await deps.emitRecord("credit_card_billing", rec);
-    }
-  }
-  if (emitStats) {
-    await deps.emitRecord("credit_card_billing_stats", buildCreditCardBillingStatsRecord(a, billing, observedOn));
-  }
+	const { emitEntity, emitStats, fingerprintCursor, observedOn } = options;
+	await politeDelay(CC_SETTLE_DELAY_MS);
+	const billing = await scrapeCreditCardBilling(page);
+	if (emitEntity) {
+		const rec = buildCreditCardBillingRecord(a, billing, nowIso());
+		if (!fingerprintCursor || fingerprintCursor.shouldEmit(rec)) {
+			await deps.emitRecord("credit_card_billing", rec);
+		}
+	}
+	if (emitStats) {
+		await deps.emitRecord(
+			"credit_card_billing_stats",
+			buildCreditCardBillingStatsRecord(a, billing, observedOn),
+		);
+	}
 }
 
 /** Exported (in addition to being called from `collect()`) purely so its
@@ -2972,129 +3321,141 @@ async function emitCreditCardBillingForCard(
  *  never emit coverage after a caught scrape failure, only after a
  *  successful enumeration. See singleton-checkpoint-coverage.test.ts. */
 export async function runCreditCardBillingStream(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  accounts: readonly DashboardAccount[],
-  streamState: UsaaRunState,
-  options: CreditCardBillingEmitOptions
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	accounts: readonly DashboardAccount[],
+	streamState: UsaaRunState,
+	options: CreditCardBillingEmitOptions,
 ): Promise<void> {
-  const { emitEntity, emitStats, fingerprintCursor, observedOn } = options;
-  try {
-    await deps.emit({
-      type: "PROGRESS",
-      stream: "credit_card_billing",
-      message: "Fetching credit card billing details",
-    });
-    const cards = creditCardAccounts(accounts);
-    // Cards whose per-card page navigation failed (plain nav failure OR the
-    // session died): excluded from `covered` on both streams (see
-    // navigateToCardOrGap / emitCreditCardNavFailureGaps). `considered`
-    // below is always the full `cards.length`, so cards never reached
-    // because the loop broke early on a session death are still accounted
-    // for — added to this set below, not silently dropped from the
-    // denominator.
-    const navFailedIds = new Set<string>();
-    for (const a of cards) {
-      const cardId = creditCardId(a);
-      const outcome = await navigateToCardOrGap(deps, context, page, sendInteraction, a, cardId, streamState, {
-        emitEntity,
-        emitStats,
-      });
-      if (outcome === "ok") {
-        await emitCreditCardBillingForCard(deps, page, a, options);
-        continue;
-      }
-      navFailedIds.add(cardId);
-      if (outcome === "session_dead") {
-        // The run-scoped repair budget (gotoOrRepairSession/streamState) is
-        // now spent and failed: every remaining card would land on the same
-        // dead logon page, not its own real card page. Gap every remaining
-        // card up front (a plain `continue` would silently re-attempt a nav
-        // per remaining card against a session already known dead) and stop
-        // — this is the fix for the N-cards-N-logins defect: at most one
-        // automated bank login attempt across the whole credit-card loop
-        // (indeed across the whole run), never one per card.
-        streamState.sessionDeadMidRun = true;
-        for (const remaining of cards.slice(cards.indexOf(a) + 1)) {
-          navFailedIds.add(creditCardId(remaining));
-          await emitCreditCardNavFailureGaps(deps, creditCardId(remaining), { emitEntity, emitStats });
-        }
-        break;
-      }
-    }
-    if (emitStats) {
-      await deps.emit({
-        type: "STATE",
-        stream: "credit_card_billing_stats",
-        cursor: { observed_on: observedOn, fetched_at: nowIso() },
-      });
-      // `credit_card_billing_stats` is `singleton_presence`, re-derived from the
-      // same full credit-card-account boundary (`cards`) every run.
-      // buildCreditCardBillingStatsRecord never drops a row, so every card in
-      // the boundary is accounted for except one whose navigation failed this
-      // run (excluded above, reported as a DETAIL_GAP instead) —
-      // `considered === cards.length`, `covered === considered -
-      // navFailedIds.size`, including 0/0 when the account genuinely holds no
-      // credit cards (verified-empty). See the matching account_stats comment
-      // in emitAccountsStream for why a bare STATE commit is not proof alone.
-      await emitDetailCoverage(deps, {
-        stream: "credit_card_billing_stats",
-        stateStream: "credit_card_billing_stats",
-        requiredKeys: [],
-        hydratedKeys: [],
-        considered: cards.length,
-        covered: cards.length - navFailedIds.size,
-      });
-    }
-    if (!emitEntity) {
-      return;
-    }
-    if (!fingerprintCursor) {
-      await deps.emit({
-        type: "STATE",
-        stream: "credit_card_billing",
-        cursor: { fetched_at: nowIso() },
-      });
-      return;
-    }
-    // Credit-card billing is a full scan of the credit-card accounts: prune
-    // fingerprints for cards no longer present so a re-added card re-emits.
-    fingerprintCursor.pruneStale();
-    const cursor: Record<string, unknown> = { fetched_at: nowIso() };
-    if (fingerprintCursor.size() > 0) {
-      cursor.fingerprints = fingerprintCursor.toState();
-    }
-    await deps.emit({
-      type: "STATE",
-      stream: "credit_card_billing",
-      cursor,
-    });
-    // `credit_card_billing` is `checkpoint_window`: a full re-scan of the
-    // credit-card accounts every run. buildCreditCardBillingRecord never
-    // drops a row (unlike inbox_messages' date-parse guard), so every card
-    // enumerated this run is accounted for except one whose navigation
-    // failed (excluded above) — `considered === cards.length`, `covered ===
-    // considered - navFailedIds.size`, including 0/0 when there are no
-    // credit cards (verified-empty, not unmeasured).
-    await emitDetailCoverage(deps, {
-      stream: "credit_card_billing",
-      stateStream: "credit_card_billing",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: cards.length,
-      covered: cards.length - navFailedIds.size,
-    });
-  } catch (err) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "credit_card_billing",
-      reason: "scrape_failed",
-      message: "Credit-card billing scrape failed; retry by runtime",
-      diagnostics: failureDiagnostic("credit_card_billing_scrape_failed", err),
-    });
-  }
+	const { emitEntity, emitStats, fingerprintCursor, observedOn } = options;
+	try {
+		await deps.emit({
+			type: "PROGRESS",
+			stream: "credit_card_billing",
+			message: "Fetching credit card billing details",
+		});
+		const cards = creditCardAccounts(accounts);
+		// Cards whose per-card page navigation failed (plain nav failure OR the
+		// session died): excluded from `covered` on both streams (see
+		// navigateToCardOrGap / emitCreditCardNavFailureGaps). `considered`
+		// below is always the full `cards.length`, so cards never reached
+		// because the loop broke early on a session death are still accounted
+		// for — added to this set below, not silently dropped from the
+		// denominator.
+		const navFailedIds = new Set<string>();
+		for (const a of cards) {
+			const cardId = creditCardId(a);
+			const outcome = await navigateToCardOrGap(
+				deps,
+				context,
+				page,
+				sendInteraction,
+				a,
+				cardId,
+				streamState,
+				{
+					emitEntity,
+					emitStats,
+				},
+			);
+			if (outcome === "ok") {
+				await emitCreditCardBillingForCard(deps, page, a, options);
+				continue;
+			}
+			navFailedIds.add(cardId);
+			if (outcome === "session_dead") {
+				// The run-scoped repair budget (gotoOrRepairSession/streamState) is
+				// now spent and failed: every remaining card would land on the same
+				// dead logon page, not its own real card page. Gap every remaining
+				// card up front (a plain `continue` would silently re-attempt a nav
+				// per remaining card against a session already known dead) and stop
+				// — this is the fix for the N-cards-N-logins defect: at most one
+				// automated bank login attempt across the whole credit-card loop
+				// (indeed across the whole run), never one per card.
+				streamState.sessionDeadMidRun = true;
+				for (const remaining of cards.slice(cards.indexOf(a) + 1)) {
+					navFailedIds.add(creditCardId(remaining));
+					await emitCreditCardNavFailureGaps(deps, creditCardId(remaining), {
+						emitEntity,
+						emitStats,
+					});
+				}
+				break;
+			}
+		}
+		if (emitStats) {
+			await deps.emit({
+				type: "STATE",
+				stream: "credit_card_billing_stats",
+				cursor: { observed_on: observedOn, fetched_at: nowIso() },
+			});
+			// `credit_card_billing_stats` is `singleton_presence`, re-derived from the
+			// same full credit-card-account boundary (`cards`) every run.
+			// buildCreditCardBillingStatsRecord never drops a row, so every card in
+			// the boundary is accounted for except one whose navigation failed this
+			// run (excluded above, reported as a DETAIL_GAP instead) —
+			// `considered === cards.length`, `covered === considered -
+			// navFailedIds.size`, including 0/0 when the account genuinely holds no
+			// credit cards (verified-empty). See the matching account_stats comment
+			// in emitAccountsStream for why a bare STATE commit is not proof alone.
+			await emitDetailCoverage(deps, {
+				stream: "credit_card_billing_stats",
+				stateStream: "credit_card_billing_stats",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: cards.length,
+				covered: cards.length - navFailedIds.size,
+			});
+		}
+		if (!emitEntity) {
+			return;
+		}
+		if (!fingerprintCursor) {
+			await deps.emit({
+				type: "STATE",
+				stream: "credit_card_billing",
+				cursor: { fetched_at: nowIso() },
+			});
+			return;
+		}
+		// Credit-card billing is a full scan of the credit-card accounts: prune
+		// fingerprints for cards no longer present so a re-added card re-emits.
+		fingerprintCursor.pruneStale();
+		const cursor: Record<string, unknown> = { fetched_at: nowIso() };
+		if (fingerprintCursor.size() > 0) {
+			cursor.fingerprints = fingerprintCursor.toState();
+		}
+		await deps.emit({
+			type: "STATE",
+			stream: "credit_card_billing",
+			cursor,
+		});
+		// `credit_card_billing` is `checkpoint_window`: a full re-scan of the
+		// credit-card accounts every run. buildCreditCardBillingRecord never
+		// drops a row (unlike inbox_messages' date-parse guard), so every card
+		// enumerated this run is accounted for except one whose navigation
+		// failed (excluded above) — `considered === cards.length`, `covered ===
+		// considered - navFailedIds.size`, including 0/0 when there are no
+		// credit cards (verified-empty, not unmeasured).
+		await emitDetailCoverage(deps, {
+			stream: "credit_card_billing",
+			stateStream: "credit_card_billing",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: cards.length,
+			covered: cards.length - navFailedIds.size,
+		});
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "credit_card_billing",
+			reason: "scrape_failed",
+			message: "Credit-card billing scrape failed; retry by runtime",
+			diagnostics: failureDiagnostic("credit_card_billing_scrape_failed", err),
+		});
+	}
 }
 
 /** Run the `credit_card_billing` entity and/or `credit_card_billing_stats`
@@ -3103,75 +3464,86 @@ export async function runCreditCardBillingStream(
  *  `collect()` to keep that orchestrator under the cognitive-complexity
  *  budget. */
 async function maybeRunCreditCardBillingStreams(
-  deps: EmitDeps,
-  context: BrowserContext,
-  page: Page,
-  sendInteraction: BrowserCollectContext["sendInteraction"],
-  accounts: readonly DashboardAccount[],
-  state: Record<string, unknown>,
-  requested: RequestedScopes,
-  emittedAt: string,
-  streamState: UsaaRunState
+	deps: EmitDeps,
+	context: BrowserContext,
+	page: Page,
+	sendInteraction: BrowserCollectContext["sendInteraction"],
+	accounts: readonly DashboardAccount[],
+	state: Record<string, unknown>,
+	requested: RequestedScopes,
+	emittedAt: string,
+	streamState: UsaaRunState,
 ): Promise<void> {
-  const wantsCardBilling = requested.has("credit_card_billing");
-  const wantsCardBillingStats = requested.has("credit_card_billing_stats");
-  if (!(wantsCardBilling || wantsCardBillingStats)) {
-    return;
-  }
-  const billingFingerprintCursor = wantsCardBilling
-    ? openFingerprintCursor(state.credit_card_billing, {
-        excludeFromFingerprint: ["fetched_at"],
-        priorFingerprints: readPriorCreditCardBillingFingerprints(state),
-      })
-    : undefined;
-  await runCreditCardBillingStream(deps, context, page, sendInteraction, accounts, streamState, {
-    emitEntity: wantsCardBilling,
-    emitStats: wantsCardBillingStats,
-    fingerprintCursor: billingFingerprintCursor,
-    observedOn: emittedAt.slice(0, 10),
-  });
+	const wantsCardBilling = requested.has("credit_card_billing");
+	const wantsCardBillingStats = requested.has("credit_card_billing_stats");
+	if (!(wantsCardBilling || wantsCardBillingStats)) {
+		return;
+	}
+	const billingFingerprintCursor = wantsCardBilling
+		? openFingerprintCursor(state.credit_card_billing, {
+				excludeFromFingerprint: ["fetched_at"],
+				priorFingerprints: readPriorCreditCardBillingFingerprints(state),
+			})
+		: undefined;
+	await runCreditCardBillingStream(
+		deps,
+		context,
+		page,
+		sendInteraction,
+		accounts,
+		streamState,
+		{
+			emitEntity: wantsCardBilling,
+			emitStats: wantsCardBillingStats,
+			fingerprintCursor: billingFingerprintCursor,
+			observedOn: emittedAt.slice(0, 10),
+		},
+	);
 }
 
 // ─── Connector entry point ────────────────────────────────────────────────
 
-export const USAA_RETRYABLE_PATTERN = /ECONN|ETIMEDOUT|timeout|source_unavailable/i;
+export const USAA_RETRYABLE_PATTERN =
+	/ECONN|ETIMEDOUT|timeout|source_unavailable/i;
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime
 // and block the Node event loop on stdin. Only fires when this module
 // IS the process entry point (i.e. `tsx connectors/usaa/index.ts`).
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "usaa",
-    retryablePattern: USAA_RETRYABLE_PATTERN,
-    validateRecord,
-    auth: { kind: "env", required: ["USAA_USERNAME", "USAA_PASSWORD"] },
-    browser: { profileName: "usaa" },
-    async ensureSession({
-      capture,
-      context,
-      credentials,
-      onCredentialSubmit,
-      page,
-      sendInteraction,
-    }: {
-      capture?: EmitDeps["capture"];
-      context: BrowserContext;
-      credentials: Readonly<Record<string, string>>;
-      onCredentialSubmit: () => void;
-      page: Page;
-      sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
-    }): Promise<void> {
-      await ensureUsaaSession({
-        capture: capture ?? null,
-        context,
-        credentials,
-        onCredentialSubmit,
-        page,
-        sendInteraction,
-      });
-    },
-    collect: collectUsaa,
-  });
+	runConnector({
+		name: "usaa",
+		retryablePattern: USAA_RETRYABLE_PATTERN,
+		validateRecord,
+		auth: { kind: "env", required: ["USAA_USERNAME", "USAA_PASSWORD"] },
+		browser: { profileName: "usaa" },
+		async ensureSession({
+			capture,
+			context,
+			credentials,
+			onCredentialSubmit,
+			page,
+			sendInteraction,
+		}: {
+			capture?: EmitDeps["capture"];
+			context: BrowserContext;
+			credentials: Readonly<Record<string, string>>;
+			onCredentialSubmit: () => void;
+			page: Page;
+			sendInteraction: (
+				req: InteractionRequest,
+			) => Promise<InteractionResponse>;
+		}): Promise<void> {
+			await ensureUsaaSession({
+				capture: capture ?? null,
+				context,
+				credentials,
+				onCredentialSubmit,
+				page,
+				sendInteraction,
+			});
+		},
+		collect: collectUsaa,
+	});
 }
 
 /**
@@ -3185,163 +3557,198 @@ if (isMainModule(import.meta.url)) {
  * unit behavior already covered in `late-auth-self-heal.test.ts`).
  */
 export async function collectUsaa(ctx: BrowserCollectContext): Promise<void> {
-  const {
-    state,
-    requested,
-    context,
-    page,
-    emit,
-    emitRecord,
-    progress,
-    capture,
-    sendInteraction,
-    emittedAt,
-    browserSurface,
-  } = ctx;
-  const deps: EmitDeps = {
-    browserSurface: browserSurfaceManagedState(browserSurface),
-    capture,
-    credentials: ctx.credentials,
-    emit,
-    emitRecord,
-    servedAccountTransactionGaps: buildServedAccountTransactionGapLookup(ctx.detailGaps),
-  };
+	const {
+		state,
+		requested,
+		context,
+		page,
+		emit,
+		emitRecord,
+		progress,
+		capture,
+		sendInteraction,
+		emittedAt,
+		browserSurface,
+	} = ctx;
+	const deps: EmitDeps = {
+		browserSurface: browserSurfaceManagedState(browserSurface),
+		capture,
+		credentials: ctx.credentials,
+		emit,
+		emitRecord,
+		servedAccountTransactionGaps: buildServedAccountTransactionGapLookup(
+			ctx.detailGaps,
+		),
+	};
 
-  // Run-scoped state shared across every stream below, constructed
-  // BEFORE the first stream (accounts) runs — see `UsaaRunState`. This
-  // is both the cross-stream "session died, skip the rest" latch AND the
-  // sole run-scoped budget for automated session repair, so a session
-  // death detected at ANY stage (including the very first dashboard
-  // load) is visible to every later stage and spends the same one-shot
-  // repair budget instead of each stage/card independently attempting
-  // (and, pre-fix, re-attempting) a bank login.
-  const streamState: UsaaRunState = { sessionDeadMidRun: false, sessionRepairAttempted: false };
+	// Run-scoped state shared across every stream below, constructed
+	// BEFORE the first stream (accounts) runs — see `UsaaRunState`. This
+	// is both the cross-stream "session died, skip the rest" latch AND the
+	// sole run-scoped budget for automated session repair, so a session
+	// death detected at ANY stage (including the very first dashboard
+	// load) is visible to every later stage and spends the same one-shot
+	// repair budget instead of each stage/card independently attempting
+	// (and, pre-fix, re-attempting) a bank login.
+	const streamState: UsaaRunState = {
+		sessionDeadMidRun: false,
+		sessionRepairAttempted: false,
+	};
 
-  // ACCOUNTS — extract from dashboard; emit optionally based on requested.
-  await progress("Extracting accounts from dashboard");
-  if (capture) {
-    await capture.captureDom(page, "dashboard-accounts");
-  }
-  const accounts = await extractAccounts(deps, context, page, sendInteraction, streamState);
-  await progress(`Found ${accounts.length} account(s)`);
+	// ACCOUNTS — extract from dashboard; emit optionally based on requested.
+	await progress("Extracting accounts from dashboard");
+	if (capture) {
+		await capture.captureDom(page, "dashboard-accounts");
+	}
+	const accounts = await extractAccounts(
+		deps,
+		context,
+		page,
+		sendInteraction,
+		streamState,
+	);
+	await progress(`Found ${accounts.length} account(s)`);
 
-  await maybeRunAccountsStreams(deps, accounts, state, requested, emittedAt);
+	await maybeRunAccountsStreams(deps, accounts, state, requested, emittedAt);
 
-  // Per-transaction fingerprint cursor (excludes the run-clock
-  // `fetched_at`). One cursor shared across BOTH transaction emit paths
-  // (CSV export + PDF-statement parse) for the whole stream — record
-  // ids (`hashId(accountId|date|amount|original|#ord)`) are globally
-  // unique and the two paths hash the same logical transaction to the
-  // same id. Only opened when transactions are requested. NOT pruned:
-  // transactions is a partial scan (see emitCsvTransactions).
-  const transactionsFingerprintCursor = requested.has("transactions")
-    ? openFingerprintCursor(state.transactions, {
-        excludeFromFingerprint: ["fetched_at"],
-        priorFingerprints: readPriorTransactionFingerprints(state),
-      })
-    : undefined;
+	// Per-transaction fingerprint cursor (excludes the run-clock
+	// `fetched_at`). One cursor shared across BOTH transaction emit paths
+	// (CSV export + PDF-statement parse) for the whole stream — record
+	// ids (`hashId(accountId|date|amount|original|#ord)`) are globally
+	// unique and the two paths hash the same logical transaction to the
+	// same id. Only opened when transactions are requested. NOT pruned:
+	// transactions is a partial scan (see emitCsvTransactions).
+	const transactionsFingerprintCursor = requested.has("transactions")
+		? openFingerprintCursor(state.transactions, {
+				excludeFromFingerprint: ["fetched_at"],
+				priorFingerprints: readPriorTransactionFingerprints(state),
+			})
+		: undefined;
 
-  // TRANSACTIONS — drive Export per account where applicable. Capture
-  // the advanced per-account watermark cursor so the final transactions
-  // STATE write below preserves the incremental `last_date` progress
-  // (not just the fingerprint map).
-  let transactionsCursorAfterCsv: TransactionsStreamCursor =
-    (state.transactions as TransactionsPriorState | undefined) ?? {};
-  if (requested.has("transactions")) {
-    transactionsCursorAfterCsv = await runTransactionsStream(
-      deps,
-      context,
-      page,
-      sendInteraction,
-      accounts,
-      state,
-      requested,
-      streamState,
-      transactionsFingerprintCursor
-    );
-  }
+	// TRANSACTIONS — drive Export per account where applicable. Capture
+	// the advanced per-account watermark cursor so the final transactions
+	// STATE write below preserves the incremental `last_date` progress
+	// (not just the fingerprint map).
+	let transactionsCursorAfterCsv: TransactionsStreamCursor =
+		(state.transactions as TransactionsPriorState | undefined) ?? {};
+	if (requested.has("transactions")) {
+		transactionsCursorAfterCsv = await runTransactionsStream(
+			deps,
+			context,
+			page,
+			sendInteraction,
+			accounts,
+			state,
+			requested,
+			streamState,
+			transactionsFingerprintCursor,
+		);
+	}
 
-  // STATEMENTS — scrape /my/documents + hydrate PDFs + (optionally) parse txns.
-  // Per-statement fingerprint cursor (excludes the run-clock `fetched_at`)
-  // so unchanged statements stop appending a new version every run. Only
-  // opened when `statements` is requested; a transactions-only run does
-  // not touch the statements STATE. The PDF-statement transaction parse
-  // shares the transactions fingerprint cursor.
-  if ((requested.has("statements") || requested.has("transactions")) && !streamState.sessionDeadMidRun) {
-    const statementsFingerprintCursor = requested.has("statements")
-      ? openFingerprintCursor(state.statements, {
-          // Content-gated: when the record carries a positive content
-          // fingerprint (pdf_text_sha256 + pdf_page_count), the blob/
-          // acquisition-identity fields are excluded too, so an RC4-style
-          // re-encryption re-download with unchanged content is a no-op;
-          // when the content fields are absent (legacy/index-only), only
-          // `fetched_at` is excluded (conservative fallback).
-          resolveExcludeFromFingerprint: statementFingerprintExcludeKeys,
-          priorFingerprints: readPriorStatementFingerprints(state),
-        })
-      : undefined;
-    // Carry-forward of prior hydrated PDF pointers: seeded from the prior
-    // statements STATE so a transient re-download failure re-emits the
-    // prior content-addressed pointers instead of null.
-    const statementsHydrationCursor = requested.has("statements")
-      ? openStatementHydrationCursor(readPriorStatementHydration(state.statements))
-      : undefined;
-    latchSessionDead(
-      streamState,
-      await runStatementsStream(
-        { ...deps, page },
-        context,
-        sendInteraction,
-        accounts,
-        requested,
-        streamState,
-        statementsFingerprintCursor,
-        transactionsFingerprintCursor,
-        statementsHydrationCursor
-      )
-    );
-  }
+	// STATEMENTS — scrape /my/documents + hydrate PDFs + (optionally) parse txns.
+	// Per-statement fingerprint cursor (excludes the run-clock `fetched_at`)
+	// so unchanged statements stop appending a new version every run. Only
+	// opened when `statements` is requested; a transactions-only run does
+	// not touch the statements STATE. The PDF-statement transaction parse
+	// shares the transactions fingerprint cursor.
+	if (
+		(requested.has("statements") || requested.has("transactions")) &&
+		!streamState.sessionDeadMidRun
+	) {
+		const statementsFingerprintCursor = requested.has("statements")
+			? openFingerprintCursor(state.statements, {
+					// Content-gated: when the record carries a positive content
+					// fingerprint (pdf_text_sha256 + pdf_page_count), the blob/
+					// acquisition-identity fields are excluded too, so an RC4-style
+					// re-encryption re-download with unchanged content is a no-op;
+					// when the content fields are absent (legacy/index-only), only
+					// `fetched_at` is excluded (conservative fallback).
+					resolveExcludeFromFingerprint: statementFingerprintExcludeKeys,
+					priorFingerprints: readPriorStatementFingerprints(state),
+				})
+			: undefined;
+		// Carry-forward of prior hydrated PDF pointers: seeded from the prior
+		// statements STATE so a transient re-download failure re-emits the
+		// prior content-addressed pointers instead of null.
+		const statementsHydrationCursor = requested.has("statements")
+			? openStatementHydrationCursor(
+					readPriorStatementHydration(state.statements),
+				)
+			: undefined;
+		latchSessionDead(
+			streamState,
+			await runStatementsStream(
+				{ ...deps, page },
+				context,
+				sendInteraction,
+				accounts,
+				requested,
+				streamState,
+				statementsFingerprintCursor,
+				transactionsFingerprintCursor,
+				statementsHydrationCursor,
+			),
+		);
+	}
 
-  // Persist the merged per-transaction fingerprint map (CSV + PDF paths)
-  // once both have run, on top of the advanced per-account watermarks.
-  // The per-account STATE writes inside runTransactionsStream only saw
-  // the CSV-so-far map; this final write is authoritative and carries
-  // the PDF-path fingerprints forward too. NOT pruned (partial scan).
-  // Skipped if the session died mid-run so we never narrow a map a
-  // partial run could not fully rebuild.
-  if (requested.has("transactions") && !streamState.sessionDeadMidRun && transactionsFingerprintCursor) {
-    await emit({
-      type: "STATE",
-      stream: "transactions",
-      cursor: withTransactionFingerprints(transactionsCursorAfterCsv, transactionsFingerprintCursor),
-    });
-  }
+	// Persist the merged per-transaction fingerprint map (CSV + PDF paths)
+	// once both have run, on top of the advanced per-account watermarks.
+	// The per-account STATE writes inside runTransactionsStream only saw
+	// the CSV-so-far map; this final write is authoritative and carries
+	// the PDF-path fingerprints forward too. NOT pruned (partial scan).
+	// Skipped if the session died mid-run so we never narrow a map a
+	// partial run could not fully rebuild.
+	if (
+		requested.has("transactions") &&
+		!streamState.sessionDeadMidRun &&
+		transactionsFingerprintCursor
+	) {
+		await emit({
+			type: "STATE",
+			stream: "transactions",
+			cursor: withTransactionFingerprints(
+				transactionsCursorAfterCsv,
+				transactionsFingerprintCursor,
+			),
+		});
+	}
 
-  // INBOX_MESSAGES — scrape /my/inbox.
-  if (requested.has("inbox_messages") && !streamState.sessionDeadMidRun) {
-    latchSessionDead(streamState, await runInboxStream(deps, context, page, sendInteraction, state, streamState));
-  }
+	// INBOX_MESSAGES — scrape /my/inbox.
+	if (requested.has("inbox_messages") && !streamState.sessionDeadMidRun) {
+		latchSessionDead(
+			streamState,
+			await runInboxStream(
+				deps,
+				context,
+				page,
+				sendInteraction,
+				state,
+				streamState,
+			),
+		);
+	}
 
-  // CREDIT_CARD_BILLING — entity (identity/settings) + optional
-  // `credit_card_billing_stats` observation. See
-  // `maybeRunCreditCardBillingStreams`.
-  if (!streamState.sessionDeadMidRun) {
-    await maybeRunCreditCardBillingStreams(
-      deps,
-      context,
-      page,
-      sendInteraction,
-      accounts,
-      state,
-      requested,
-      emittedAt,
-      streamState
-    );
-  }
+	// CREDIT_CARD_BILLING — entity (identity/settings) + optional
+	// `credit_card_billing_stats` observation. See
+	// `maybeRunCreditCardBillingStreams`.
+	if (!streamState.sessionDeadMidRun) {
+		await maybeRunCreditCardBillingStreams(
+			deps,
+			context,
+			page,
+			sendInteraction,
+			accounts,
+			state,
+			requested,
+			emittedAt,
+			streamState,
+		);
+	}
 
-  await emitDeferredStreams(emit, requested);
+	await emitDeferredStreams(emit, requested);
 
-  if (streamState.sessionDeadMidRun) {
-    throw new Error("usaa session expired mid-run; re-run with fresh auth to complete");
-  }
+	if (streamState.sessionDeadMidRun) {
+		throw new Error(
+			"usaa session expired mid-run; re-run with fresh auth to complete",
+		);
+	}
 }

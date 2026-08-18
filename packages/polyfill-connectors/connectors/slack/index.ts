@@ -59,88 +59,94 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
-import { describeConnectorArtifactRoot, resolveConnectorArtifactDir } from "../../src/connector-artifact-root.ts";
+import {
+	describeConnectorArtifactRoot,
+	resolveConnectorArtifactDir,
+} from "../../src/connector-artifact-root.ts";
 import { readOptions } from "../../src/connector-options.ts";
 import {
-  buildDetailCoverageMessage,
-  buildDetailGap,
-  buildFullScanCoverageMessage,
-  type CollectContext,
-  type DetailGapMessage,
-  type DetailGapStartEntry,
-  type EmittedMessage,
-  nowIso,
-  type RecordData,
-  runConnector,
+	buildDetailCoverageMessage,
+	buildDetailGap,
+	buildFullScanCoverageMessage,
+	type CollectContext,
+	type DetailGapMessage,
+	type DetailGapStartEntry,
+	type EmittedMessage,
+	nowIso,
+	type RecordData,
+	runConnector,
 } from "../../src/connector-runtime.ts";
-import { type FingerprintCursor, openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
 import {
-  buildCanvasRecord,
-  buildChannelCanvasIndex,
-  buildChannelMembershipRecord,
-  buildChannelRecord,
-  buildChannelStatsRecord,
-  buildDmReadStateRecord,
-  buildFileRecord,
-  buildMessageAttachmentRecords,
-  buildMessageRecord,
-  buildReactionRecords,
-  buildReminderRecord,
-  buildStarRecord,
-  buildUserGroupRecord,
-  buildUserRecord,
-  buildWorkspaceRecord,
-  extractMessageTimeRange,
-  parseBlob,
-  parseMessageRow,
-  selectCommittedMaxTs,
-  toSlackTime,
-  WORKSPACE_LIST_ARROW,
+	type FingerprintCursor,
+	openFingerprintCursor,
+} from "../../src/fingerprint-cursor.ts";
+import {
+	buildCanvasRecord,
+	buildChannelCanvasIndex,
+	buildChannelMembershipRecord,
+	buildChannelRecord,
+	buildChannelStatsRecord,
+	buildDmReadStateRecord,
+	buildFileRecord,
+	buildMessageAttachmentRecords,
+	buildMessageRecord,
+	buildReactionRecords,
+	buildReminderRecord,
+	buildStarRecord,
+	buildUserGroupRecord,
+	buildUserRecord,
+	buildWorkspaceRecord,
+	extractMessageTimeRange,
+	parseBlob,
+	parseMessageRow,
+	selectCommittedMaxTs,
+	toSlackTime,
+	WORKSPACE_LIST_ARROW,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import {
-  fetchAllReminders,
-  fetchAllStars,
-  fetchAllUserGroups,
-  fetchDmReadStates,
-  SLACK_API_RETRYABLE_FAILURE_RE,
-  SlackApiAuthError,
+	fetchAllReminders,
+	fetchAllStars,
+	fetchAllUserGroups,
+	fetchDmReadStates,
+	SLACK_API_RETRYABLE_FAILURE_RE,
+	SlackApiAuthError,
 } from "./slack-api.ts";
 import type {
-  CanvasRow,
-  ChannelRow,
-  ChannelUserRow,
-  FileRow,
-  MessageRow,
-  MessagesState,
-  SlackdumpRunResult,
-  UserRow,
-  WorkspaceRow,
+	CanvasRow,
+	ChannelRow,
+	ChannelUserRow,
+	FileRow,
+	MessageRow,
+	MessagesState,
+	SlackdumpRunResult,
+	UserRow,
+	WorkspaceRow,
 } from "./types.ts";
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return typeof error === "object" && error !== null && "code" in error;
+	return typeof error === "object" && error !== null && "code" in error;
 }
 
 function resolveSlackdumpBin(): string {
-  return process.env.SLACKDUMP_BIN || "slackdump";
+	return process.env.SLACKDUMP_BIN || "slackdump";
 }
 
 export function formatSlackdumpMissingError(bin: string): string {
-  return [
-    `slackdump binary not found: ${bin}`,
-    "Install slackdump and either put it on PATH or set SLACKDUMP_BIN to its absolute path.",
-    "Docker: the stock reference image does not bundle AGPL-3.0 slackdump; build a derived image that installs it or mount the binary into the container and set SLACKDUMP_BIN to that in-container path.",
-  ].join(" ");
+	return [
+		`slackdump binary not found: ${bin}`,
+		"Install slackdump and either put it on PATH or set SLACKDUMP_BIN to its absolute path.",
+		"Docker: the stock reference image does not bundle AGPL-3.0 slackdump; build a derived image that installs it or mount the binary into the container and set SLACKDUMP_BIN to that in-container path.",
+	].join(" ");
 }
 
 // safeAll: typed SQL wrapper. Rows returned as unknown[] → caller casts.
 function safeAll<T>(db: DatabaseSync, sql: string): T[] {
-  try {
-    return db.prepare(sql).all() as T[];
-  } catch {
-    return [];
-  }
+	try {
+		return db.prepare(sql).all() as T[];
+	} catch {
+		return [];
+	}
 }
 
 const SOURCE_PARTITION_MISSING_REASON = "source_partition_missing";
@@ -150,138 +156,146 @@ const SLACK_TS_PATTERN = /^(\d+)\.(\d{6})$/;
 const ISO_FRACTION_PATTERN = /\.(\d{1,6})/;
 
 function normalizeStringRecord(value: unknown): Record<string, string> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value)) {
-    if (typeof k === "string" && k && typeof v === "string" && v) {
-      out[k] = v;
-    }
-  }
-  return out;
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return {};
+	}
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(value)) {
+		if (typeof k === "string" && k && typeof v === "string" && v) {
+			out[k] = v;
+		}
+	}
+	return out;
 }
 
 function normalizeStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return [...new Set(value.filter((v): v is string => typeof v === "string" && v.length > 0))].sort();
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return [
+		...new Set(
+			value.filter((v): v is string => typeof v === "string" && v.length > 0),
+		),
+	].sort();
 }
 
-function readPriorObservedChannelIds(messagesState: MessagesState | undefined): string[] {
-  return [
-    ...new Set([
-      ...normalizeStringArray(messagesState?.observed_channel_ids),
-      ...Object.keys(normalizeStringRecord(messagesState?.channel_last_ts)),
-    ]),
-  ].sort();
+function readPriorObservedChannelIds(
+	messagesState: MessagesState | undefined,
+): string[] {
+	return [
+		...new Set([
+			...normalizeStringArray(messagesState?.observed_channel_ids),
+			...Object.keys(normalizeStringRecord(messagesState?.channel_last_ts)),
+		]),
+	].sort();
 }
 
 function currentArchiveChannelIds(db: DatabaseSync): string[] {
-  const channels = safeAll<{ id: string }>(
-    db,
-    `
+	const channels = safeAll<{ id: string }>(
+		db,
+		`
     SELECT DISTINCT ID AS id
     FROM CHANNEL
     WHERE ID IS NOT NULL AND ID != ''
-  `
-  ).map((r) => r.id);
-  const messageChannels = safeAll<{ id: string }>(
-    db,
-    `
+  `,
+	).map((r) => r.id);
+	const messageChannels = safeAll<{ id: string }>(
+		db,
+		`
     SELECT DISTINCT CHANNEL_ID AS id
     FROM MESSAGE
     WHERE CHANNEL_ID IS NOT NULL AND CHANNEL_ID != ''
-  `
-  ).map((r) => r.id);
-  return [...new Set([...channels, ...messageChannels])].sort();
+  `,
+	).map((r) => r.id);
+	return [...new Set([...channels, ...messageChannels])].sort();
 }
 
 function missingPreviouslyObservedChannelIds(
-  priorObservedChannelIds: readonly string[],
-  currentChannelIds: readonly string[]
+	priorObservedChannelIds: readonly string[],
+	currentChannelIds: readonly string[],
 ): string[] {
-  const current = new Set(currentChannelIds);
-  return priorObservedChannelIds.filter((id) => !current.has(id)).sort();
+	const current = new Set(currentChannelIds);
+	return priorObservedChannelIds.filter((id) => !current.has(id)).sort();
 }
 
 async function emitMissingChannelDiagnostic(
-  emit: CollectContext["emit"],
-  missingChannelIds: readonly string[]
+	emit: CollectContext["emit"],
+	missingChannelIds: readonly string[],
 ): Promise<void> {
-  if (missingChannelIds.length === 0) {
-    return;
-  }
-  const visibleIds = missingChannelIds.slice(0, MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC);
-  await emit({
-    type: "SKIP_RESULT",
-    stream: "messages",
-    reason: SOURCE_PARTITION_MISSING_REASON,
-    message:
-      missingChannelIds.length === 1
-        ? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
-        : `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
-    diagnostics: {
-      missing_channel_ids: visibleIds,
-      missing_count: missingChannelIds.length,
-      truncated: visibleIds.length < missingChannelIds.length,
-    },
-    recovery_hint: {
-      action: "retry_by_runtime",
-      retryable: true,
-    },
-  });
+	if (missingChannelIds.length === 0) {
+		return;
+	}
+	const visibleIds = missingChannelIds.slice(
+		0,
+		MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC,
+	);
+	await emit({
+		type: "SKIP_RESULT",
+		stream: "messages",
+		reason: SOURCE_PARTITION_MISSING_REASON,
+		message:
+			missingChannelIds.length === 1
+				? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
+				: `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
+		diagnostics: {
+			missing_channel_ids: visibleIds,
+			missing_count: missingChannelIds.length,
+			truncated: visibleIds.length < missingChannelIds.length,
+		},
+		recovery_hint: {
+			action: "retry_by_runtime",
+			retryable: true,
+		},
+	});
 }
 
 function selectCommittedChannelLastTs(
-  priorChannelLastTs: Record<string, string>,
-  runChannelMaxTs: Record<string, string>
+	priorChannelLastTs: Record<string, string>,
+	runChannelMaxTs: Record<string, string>,
 ): Record<string, string> {
-  const out: Record<string, string> = { ...priorChannelLastTs };
-  for (const [channelId, ts] of Object.entries(runChannelMaxTs)) {
-    if (!out[channelId] || ts > out[channelId]) {
-      out[channelId] = ts;
-    }
-  }
-  return out;
+	const out: Record<string, string> = { ...priorChannelLastTs };
+	for (const [channelId, ts] of Object.entries(runChannelMaxTs)) {
+		if (!out[channelId] || ts > out[channelId]) {
+			out[channelId] = ts;
+		}
+	}
+	return out;
 }
 
 async function emitMessageRecordScopedByChannel(deps: {
-  channelIds: ReadonlySet<string>;
-  emitRecord: CollectContext["emitRecord"];
-  record: RecordData;
+	channelIds: ReadonlySet<string>;
+	emitRecord: CollectContext["emitRecord"];
+	record: RecordData;
 }): Promise<void> {
-  if (
-    // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
-    deps.record.id == null ||
-    typeof deps.record.channel_id !== "string" ||
-    !deps.channelIds.has(deps.record.channel_id)
-  ) {
-    return;
-  }
-  await deps.emitRecord("messages", deps.record, { skipResourceFilter: true });
+	if (
+		deps.record.id == null ||
+		typeof deps.record.channel_id !== "string" ||
+		!deps.channelIds.has(deps.record.channel_id)
+	) {
+		return;
+	}
+	await deps.emitRecord("messages", deps.record, { skipResourceFilter: true });
 }
 
 interface SlackdumpProgressSnapshot {
-  archiveBytes: number;
-  archiveMtimeMs: number;
+	archiveBytes: number;
+	archiveMtimeMs: number;
 }
 
 function existingFileSize(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
+	try {
+		return statSync(path).size;
+	} catch {
+		return 0;
+	}
 }
 
 function existingFileMtimeMs(path: string): number {
-  try {
-    return statSync(path).mtimeMs;
-  } catch {
-    return 0;
-  }
+	try {
+		return statSync(path).mtimeMs;
+	} catch {
+		return 0;
+	}
 }
 
 // Filesystem-only: this is read on every poll tick WHILE slackdump is still
@@ -298,50 +312,61 @@ function existingFileMtimeMs(path: string): number {
 // return stale or torn state — false progress data — which is worse than no
 // data. Stat-ing the file is the only observation that can never contend
 // with the writer.
-export function readSlackdumpProgressSnapshot(sqlitePath: string): SlackdumpProgressSnapshot | null {
-  const paths = [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
-  const archiveBytes = paths.reduce((sum, path) => sum + existingFileSize(path), 0);
-  if (archiveBytes === 0) {
-    return null;
-  }
-  // mtime, not just size, because SQLite WAL mode can checkpoint (fold the
-  // WAL back into the main file and reuse its allocation) on every commit,
-  // keeping combined main+WAL+SHM byte size flat across real, committed
-  // writes (confirmed directly: two committed inserts, combined size
-  // unchanged both times, mtime advanced both times). Byte size alone would
-  // silently miss that progress and let the stall watchdog time out a
-  // healthy long-running dump.
-  const archiveMtimeMs = Math.max(...paths.map(existingFileMtimeMs));
-  return { archiveBytes, archiveMtimeMs };
+export function readSlackdumpProgressSnapshot(
+	sqlitePath: string,
+): SlackdumpProgressSnapshot | null {
+	const paths = [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
+	const archiveBytes = paths.reduce(
+		(sum, path) => sum + existingFileSize(path),
+		0,
+	);
+	if (archiveBytes === 0) {
+		return null;
+	}
+	// mtime, not just size, because SQLite WAL mode can checkpoint (fold the
+	// WAL back into the main file and reuse its allocation) on every commit,
+	// keeping combined main+WAL+SHM byte size flat across real, committed
+	// writes (confirmed directly: two committed inserts, combined size
+	// unchanged both times, mtime advanced both times). Byte size alone would
+	// silently miss that progress and let the stall watchdog time out a
+	// healthy long-running dump.
+	const archiveMtimeMs = Math.max(...paths.map(existingFileMtimeMs));
+	return { archiveBytes, archiveMtimeMs };
 }
 
 export function slackdumpProgressChanged(
-  previous: SlackdumpProgressSnapshot | null,
-  current: SlackdumpProgressSnapshot | null
+	previous: SlackdumpProgressSnapshot | null,
+	current: SlackdumpProgressSnapshot | null,
 ): boolean {
-  if (!current) {
-    return false;
-  }
-  if (!previous) {
-    return true;
-  }
-  return current.archiveBytes !== previous.archiveBytes || current.archiveMtimeMs !== previous.archiveMtimeMs;
+	if (!current) {
+		return false;
+	}
+	if (!previous) {
+		return true;
+	}
+	return (
+		current.archiveBytes !== previous.archiveBytes ||
+		current.archiveMtimeMs !== previous.archiveMtimeMs
+	);
 }
 
-function formatSlackdumpProgress(label: string, snapshot: SlackdumpProgressSnapshot): string {
-  return `Slack slackdump ${label} progress: archive_bytes=${snapshot.archiveBytes}`;
+function formatSlackdumpProgress(
+	label: string,
+	snapshot: SlackdumpProgressSnapshot,
+): string {
+	return `Slack slackdump ${label} progress: archive_bytes=${snapshot.archiveBytes}`;
 }
 
 function redactSlackdumpOutput(output: string, env: NodeJS.ProcessEnv): string {
-  let redacted = output;
-  for (const secret of [env.SLACK_TOKEN, env.SLACK_COOKIE]) {
-    if (secret) {
-      redacted = redacted.replaceAll(secret, "[REDACTED]");
-    }
-  }
-  // Keep diagnostics safe even if a child prints only a token-shaped value or
-  // wraps the known credential before the exact replacement above can match.
-  return redacted.replace(/xox[a-z]-[^\s"'`]+/giu, "[REDACTED]");
+	let redacted = output;
+	for (const secret of [env.SLACK_TOKEN, env.SLACK_COOKIE]) {
+		if (secret) {
+			redacted = redacted.replaceAll(secret, "[REDACTED]");
+		}
+	}
+	// Keep diagnostics safe even if a child prints only a token-shaped value or
+	// wraps the known credential before the exact replacement above can match.
+	return redacted.replace(/xox[a-z]-[^\s"'`]+/giu, "[REDACTED]");
 }
 
 // `SLACKDUMP_TIMEOUT_MS` is a STALL budget, not a total-runtime cap: it bounds
@@ -364,134 +389,151 @@ function redactSlackdumpOutput(output: string, env: NodeJS.ProcessEnv): string {
 // for operators who want one; it is unset (unbounded) by default so a
 // progressing dump is never killed for merely taking a long time.
 export function runSlackdump(
-  args: string[],
-  {
-    env,
-    maxRuntimeMs = Number(process.env.SLACKDUMP_MAX_RUNTIME_MS) || Number.POSITIVE_INFINITY,
-    progress,
-    progressIntervalMs = Number(process.env.SLACKDUMP_PROGRESS_INTERVAL_MS) || 60_000,
-    progressLabel = args[0] ?? "run",
-    sqlitePath,
-    timeoutMs = Number(process.env.SLACKDUMP_TIMEOUT_MS) || 24 * 60 * 60 * 1000,
-  }: {
-    env: NodeJS.ProcessEnv;
-    maxRuntimeMs?: number;
-    progress?: CollectContext["progress"];
-    progressIntervalMs?: number;
-    progressLabel?: string;
-    sqlitePath?: string;
-    timeoutMs?: number;
-  }
+	args: string[],
+	{
+		env,
+		maxRuntimeMs = Number(process.env.SLACKDUMP_MAX_RUNTIME_MS) ||
+			Number.POSITIVE_INFINITY,
+		progress,
+		progressIntervalMs = Number(process.env.SLACKDUMP_PROGRESS_INTERVAL_MS) ||
+			60_000,
+		progressLabel = args[0] ?? "run",
+		sqlitePath,
+		timeoutMs = Number(process.env.SLACKDUMP_TIMEOUT_MS) || 24 * 60 * 60 * 1000,
+	}: {
+		env: NodeJS.ProcessEnv;
+		maxRuntimeMs?: number;
+		progress?: CollectContext["progress"];
+		progressIntervalMs?: number;
+		progressLabel?: string;
+		sqlitePath?: string;
+		timeoutMs?: number;
+	},
 ): Promise<SlackdumpRunResult> {
-  return new Promise((resolve, reject) => {
-    const bin = resolveSlackdumpBin();
-    const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let lastProgressSnapshot: SlackdumpProgressSnapshot | null = sqlitePath
-      ? readSlackdumpProgressSnapshot(sqlitePath)
-      : null;
-    child.stdout?.on("data", (d: Buffer) => {
-      stdout += d.toString();
-    });
-    child.stderr?.on("data", (d: Buffer) => {
-      stderr += d.toString();
-    });
-    // Stall detection polls the archive on its own cadence, independent of the
-    // `progress` callback: a slow or absent reporter must never decide whether
-    // the run is still alive. The poll must be quick enough to rearm the budget
-    // several times over before it expires, so a short budget tightens the poll
-    // — but it never runs SLOWER than the configured reporting interval, or
-    // reports would be throttled by a mechanism that exists to watch for
-    // silence.
-    const stallPollMs = Number.isFinite(timeoutMs)
-      ? Math.max(1, Math.min(progressIntervalMs, timeoutMs / 4))
-      : progressIntervalMs;
-    let lastAdvanceAt = Date.now();
-    // Snapshot dedicated to stall detection. Kept separate from
-    // `lastProgressSnapshot` so that suppressing a *report* (no `progress`
-    // callback, or a report that throws) can never suppress a stall rearm.
-    let lastStallSnapshot = lastProgressSnapshot;
+	return new Promise((resolve, reject) => {
+		const bin = resolveSlackdumpBin();
+		const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		let lastProgressSnapshot: SlackdumpProgressSnapshot | null = sqlitePath
+			? readSlackdumpProgressSnapshot(sqlitePath)
+			: null;
+		child.stdout?.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		child.stderr?.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		// Stall detection polls the archive on its own cadence, independent of the
+		// `progress` callback: a slow or absent reporter must never decide whether
+		// the run is still alive. The poll must be quick enough to rearm the budget
+		// several times over before it expires, so a short budget tightens the poll
+		// — but it never runs SLOWER than the configured reporting interval, or
+		// reports would be throttled by a mechanism that exists to watch for
+		// silence.
+		const stallPollMs = Number.isFinite(timeoutMs)
+			? Math.max(1, Math.min(progressIntervalMs, timeoutMs / 4))
+			: progressIntervalMs;
+		let lastAdvanceAt = Date.now();
+		// Snapshot dedicated to stall detection. Kept separate from
+		// `lastProgressSnapshot` so that suppressing a *report* (no `progress`
+		// callback, or a report that throws) can never suppress a stall rearm.
+		let lastStallSnapshot = lastProgressSnapshot;
 
-    const observeProgress = (): void => {
-      if (!sqlitePath) {
-        return;
-      }
-      const snapshot = readSlackdumpProgressSnapshot(sqlitePath);
-      if (slackdumpProgressChanged(lastStallSnapshot, snapshot)) {
-        lastStallSnapshot = snapshot;
-        lastAdvanceAt = Date.now();
-      }
-      if (!(progress && slackdumpProgressChanged(lastProgressSnapshot, snapshot))) {
-        return;
-      }
-      lastProgressSnapshot = snapshot;
-      if (!snapshot) {
-        return;
-      }
-      progress(formatSlackdumpProgress(progressLabel, snapshot), {
-        stream: "messages",
-      }).catch(() => undefined);
-    };
+		const observeProgress = (): void => {
+			if (!sqlitePath) {
+				return;
+			}
+			const snapshot = readSlackdumpProgressSnapshot(sqlitePath);
+			if (slackdumpProgressChanged(lastStallSnapshot, snapshot)) {
+				lastStallSnapshot = snapshot;
+				lastAdvanceAt = Date.now();
+			}
+			if (
+				!(progress && slackdumpProgressChanged(lastProgressSnapshot, snapshot))
+			) {
+				return;
+			}
+			lastProgressSnapshot = snapshot;
+			if (!snapshot) {
+				return;
+			}
+			progress(formatSlackdumpProgress(progressLabel, snapshot), {
+				stream: "messages",
+			}).catch(() => undefined);
+		};
 
-    const progressTimer =
-      sqlitePath && Number.isFinite(stallPollMs) && stallPollMs > 0 ? setInterval(observeProgress, stallPollMs) : null;
-    progressTimer?.unref?.();
+		const progressTimer =
+			sqlitePath && Number.isFinite(stallPollMs) && stallPollMs > 0
+				? setInterval(observeProgress, stallPollMs)
+				: null;
+		progressTimer?.unref?.();
 
-    const startedAt = Date.now();
-    // Without an observable archive there is no progress signal, so the budget
-    // can only be a total-runtime deadline (prior behavior).
-    const stallDetectable = progressTimer !== null;
-    const deadlineTimer = setInterval(
-      () => {
-        const now = Date.now();
-        if (now - startedAt >= maxRuntimeMs) {
-          finishTimedOut("slackdump_max_runtime");
-          return;
-        }
-        const idleSince = stallDetectable ? lastAdvanceAt : startedAt;
-        if (now - idleSince >= timeoutMs) {
-          finishTimedOut("slackdump_timeout");
-        }
-      },
-      Math.max(1, Math.min(stallPollMs, Number.isFinite(timeoutMs) ? timeoutMs : stallPollMs))
-    );
-    deadlineTimer.unref?.();
+		const startedAt = Date.now();
+		// Without an observable archive there is no progress signal, so the budget
+		// can only be a total-runtime deadline (prior behavior).
+		const stallDetectable = progressTimer !== null;
+		const deadlineTimer = setInterval(
+			() => {
+				const now = Date.now();
+				if (now - startedAt >= maxRuntimeMs) {
+					finishTimedOut("slackdump_max_runtime");
+					return;
+				}
+				const idleSince = stallDetectable ? lastAdvanceAt : startedAt;
+				if (now - idleSince >= timeoutMs) {
+					finishTimedOut("slackdump_timeout");
+				}
+			},
+			Math.max(
+				1,
+				Math.min(
+					stallPollMs,
+					Number.isFinite(timeoutMs) ? timeoutMs : stallPollMs,
+				),
+			),
+		);
+		deadlineTimer.unref?.();
 
-    const clearTimers = (): void => {
-      clearInterval(deadlineTimer);
-      if (progressTimer) {
-        clearInterval(progressTimer);
-      }
-    };
+		const clearTimers = (): void => {
+			clearInterval(deadlineTimer);
+			if (progressTimer) {
+				clearInterval(progressTimer);
+			}
+		};
 
-    function finishTimedOut(reason: string): void {
-      clearTimers();
-      child.kill();
-      // Keep "timeout" in the message so SLACK_RETRYABLE_FAILURE_RE classifies
-      // both shapes retryable — a stalled or over-long dump resumes against the
-      // durable archive rather than restarting from zero.
-      reject(new Error(reason));
-    }
+		function finishTimedOut(reason: string): void {
+			clearTimers();
+			child.kill();
+			// Keep "timeout" in the message so SLACK_RETRYABLE_FAILURE_RE classifies
+			// both shapes retryable — a stalled or over-long dump resumes against the
+			// durable archive rather than restarting from zero.
+			reject(new Error(reason));
+		}
 
-    child.on("exit", (code) => {
-      clearTimers();
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        const detail = redactSlackdumpOutput(`${stderr}\n${stdout}`, env).slice(0, 400);
-        reject(new Error(`slackdump_exit_${code}${detail ? `: ${detail}` : ""}`));
-      }
-    });
-    child.on("error", (e) => {
-      clearTimers();
-      if (isErrnoException(e) && e.code === "ENOENT") {
-        reject(new Error(formatSlackdumpMissingError(bin)));
-        return;
-      }
-      reject(e);
-    });
-  });
+		child.on("exit", (code) => {
+			clearTimers();
+			if (code === 0) {
+				resolve({ stdout, stderr });
+			} else {
+				const detail = redactSlackdumpOutput(`${stderr}\n${stdout}`, env).slice(
+					0,
+					400,
+				);
+				reject(
+					new Error(`slackdump_exit_${code}${detail ? `: ${detail}` : ""}`),
+				);
+			}
+		});
+		child.on("error", (e) => {
+			clearTimers();
+			if (isErrnoException(e) && e.code === "ENOENT") {
+				reject(new Error(formatSlackdumpMissingError(bin)));
+				return;
+			}
+			reject(e);
+		});
+	});
 }
 
 /**
@@ -500,46 +542,49 @@ export function runSlackdump(
  * exists.
  */
 async function ensureWorkspaceCached({
-  token,
-  cookie,
-  env,
+	token,
+	cookie,
+	env,
 }: {
-  token: string;
-  cookie: string;
-  env: NodeJS.ProcessEnv;
+	token: string;
+	cookie: string;
+	env: NodeJS.ProcessEnv;
 }): Promise<void> {
-  try {
-    const { stdout } = await runSlackdump(["workspace", "list"], {
-      env,
-      timeoutMs: 10_000,
-    });
-    if (WORKSPACE_LIST_ARROW.test(stdout)) {
-      return;
-    }
-  } catch {
-    /* fall through to register */
-  }
-  await runSlackdump(["workspace", "new", "-token", token, "-cookie", cookie, "-no-encryption"], {
-    env,
-    timeoutMs: 30_000,
-  });
+	try {
+		const { stdout } = await runSlackdump(["workspace", "list"], {
+			env,
+			timeoutMs: 10_000,
+		});
+		if (WORKSPACE_LIST_ARROW.test(stdout)) {
+			return;
+		}
+	} catch {
+		/* fall through to register */
+	}
+	await runSlackdump(
+		["workspace", "new", "-token", token, "-cookie", cookie, "-no-encryption"],
+		{
+			env,
+			timeoutMs: 30_000,
+		},
+	);
 }
 
 // ─── Option parsing / credentials ──────────────────────────────────────
 
 interface SlackCredentials {
-  cookie: string;
-  token: string;
-  workspace: string;
+	cookie: string;
+	token: string;
+	workspace: string;
 }
 
 interface SlackOpts {
-  CHANNEL_ALLOWLIST: string[];
-  CHANNEL_TYPES: string[];
-  LOOKBACK_DAYS: number;
-  MEMBER_ONLY: boolean;
-  RECLAIM_UPLOADS: boolean;
-  SKIP_FILES: boolean;
+	CHANNEL_ALLOWLIST: string[];
+	CHANNEL_TYPES: string[];
+	LOOKBACK_DAYS: number;
+	MEMBER_ONLY: boolean;
+	RECLAIM_UPLOADS: boolean;
+	SKIP_FILES: boolean;
 }
 
 // `slackdump_max_runtime` is listed explicitly because it is the one timeout
@@ -547,7 +592,7 @@ interface SlackOpts {
 // same reason a stall is: the archive is durable, so the next attempt resumes
 // against banked work instead of restarting a multi-hour dump from zero.
 export const SLACK_RETRYABLE_FAILURE_RE =
-  /ECONN|ETIMEDOUT|timeout|slackdump_max_runtime|slackdump_exit_6|slack_rate_limited/i;
+	/ECONN|ETIMEDOUT|timeout|slackdump_max_runtime|slackdump_exit_6|slack_rate_limited/i;
 
 const SLACKDUMP_CLIENT_TOKEN_PREFIX = "xoxc-";
 const SLACKDUMP_D_COOKIE_PREFIX = "xoxd-";
@@ -560,95 +605,116 @@ const SLACKDUMP_CREDENTIAL_MAX_LENGTH = 4096;
 const INVALID_PERCENT_ESCAPE_RE = /%(?![0-9a-f]{2})/iu;
 
 function hasControlCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
-      return true;
-    }
-  }
-  return false;
+	for (const character of value) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+			return true;
+		}
+	}
+	return false;
 }
 
-function normalizeSlackOpaqueValue(raw: string, prefix: string | null, invalidCode: string): string {
-  const value = raw.trim();
-  if (
-    !value ||
-    (prefix !== null && !value.startsWith(prefix)) ||
-    value.length > SLACKDUMP_CREDENTIAL_MAX_LENGTH ||
-    hasControlCharacter(value)
-  ) {
-    throw new Error(invalidCode);
-  }
-  return value;
+function normalizeSlackOpaqueValue(
+	raw: string,
+	prefix: string | null,
+	invalidCode: string,
+): string {
+	const value = raw.trim();
+	if (
+		!value ||
+		(prefix !== null && !value.startsWith(prefix)) ||
+		value.length > SLACKDUMP_CREDENTIAL_MAX_LENGTH ||
+		hasControlCharacter(value)
+	) {
+		throw new Error(invalidCode);
+	}
+	return value;
 }
 
 export function normalizeSlackWorkspace(raw: string): string {
-  const workspace = raw.trim().toLowerCase();
-  if (!SLACK_WORKSPACE_RE.test(workspace)) {
-    throw new Error("slack_workspace_invalid");
-  }
-  return workspace;
+	const workspace = raw.trim().toLowerCase();
+	if (!SLACK_WORKSPACE_RE.test(workspace)) {
+		throw new Error("slack_workspace_invalid");
+	}
+	return workspace;
 }
 
 export function normalizeSlackToken(raw: string): string {
-  return normalizeSlackOpaqueValue(raw, SLACKDUMP_CLIENT_TOKEN_PREFIX, "slack_token_invalid");
+	return normalizeSlackOpaqueValue(
+		raw,
+		SLACKDUMP_CLIENT_TOKEN_PREFIX,
+		"slack_token_invalid",
+	);
 }
 
 export function normalizeSlackCookie(raw: string): string {
-  let cookie = raw.trim();
-  if (cookie.startsWith("d=")) {
-    cookie = cookie.slice(2).trim();
-  }
-  const normalized = normalizeSlackOpaqueValue(cookie, SLACKDUMP_D_COOKIE_PREFIX, "slack_cookie_invalid");
-  if (INVALID_PERCENT_ESCAPE_RE.test(normalized)) {
-    throw new Error("slack_cookie_invalid");
-  }
-  return normalized;
+	let cookie = raw.trim();
+	if (cookie.startsWith("d=")) {
+		cookie = cookie.slice(2).trim();
+	}
+	const normalized = normalizeSlackOpaqueValue(
+		cookie,
+		SLACKDUMP_D_COOKIE_PREFIX,
+		"slack_cookie_invalid",
+	);
+	if (INVALID_PERCENT_ESCAPE_RE.test(normalized)) {
+		throw new Error("slack_cookie_invalid");
+	}
+	return normalized;
 }
 
-export function extractSlackCredentials(credentials: Record<string, string>): SlackCredentials {
-  const rawWorkspace = typeof credentials.SLACK_WORKSPACE === "string" ? credentials.SLACK_WORKSPACE : "";
-  const rawToken = typeof credentials.SLACK_TOKEN === "string" ? credentials.SLACK_TOKEN : "";
-  const rawCookie = typeof credentials.SLACK_COOKIE === "string" ? credentials.SLACK_COOKIE : "";
-  if (!(rawWorkspace.trim() && rawToken.trim() && rawCookie.trim())) {
-    throw new Error("slack_credentials_missing");
-  }
-  return {
-    workspace: normalizeSlackWorkspace(rawWorkspace),
-    token: normalizeSlackToken(rawToken),
-    cookie: normalizeSlackCookie(rawCookie),
-  };
+export function extractSlackCredentials(
+	credentials: Record<string, string>,
+): SlackCredentials {
+	const rawWorkspace =
+		typeof credentials.SLACK_WORKSPACE === "string"
+			? credentials.SLACK_WORKSPACE
+			: "";
+	const rawToken =
+		typeof credentials.SLACK_TOKEN === "string" ? credentials.SLACK_TOKEN : "";
+	const rawCookie =
+		typeof credentials.SLACK_COOKIE === "string"
+			? credentials.SLACK_COOKIE
+			: "";
+	if (!(rawWorkspace.trim() && rawToken.trim() && rawCookie.trim())) {
+		throw new Error("slack_credentials_missing");
+	}
+	return {
+		workspace: normalizeSlackWorkspace(rawWorkspace),
+		token: normalizeSlackToken(rawToken),
+		cookie: normalizeSlackCookie(rawCookie),
+	};
 }
 
 function readSlackOptions(): SlackOpts {
-  const parsed = readOptions(
-    // readOptions reads from START.connector_options today; scope+state here
-    // is preserved for the forward-compatible migration path documented on
-    // the function.
-    null,
-    {
-      envPrefix: "SLACK_",
-      fields: {
-        LOOKBACK_DAYS: { parse: "int", default: 7 },
-        CHANNEL_ALLOWLIST: { parse: "csv", default: [] },
-        CHANNEL_TYPES: {
-          parse: "csv",
-          default: ["public", "private", "im", "mpim"],
-        },
-        MEMBER_ONLY: { parse: "bool", default: true },
-        SKIP_FILES: { parse: "bool", default: true },
-        RECLAIM_UPLOADS: { parse: "bool", default: false },
-      },
-    }
-  ) as Record<string, unknown>;
-  return {
-    LOOKBACK_DAYS: parsed.LOOKBACK_DAYS as number,
-    CHANNEL_ALLOWLIST: parsed.CHANNEL_ALLOWLIST as string[],
-    CHANNEL_TYPES: parsed.CHANNEL_TYPES as string[],
-    MEMBER_ONLY: parsed.MEMBER_ONLY as boolean,
-    SKIP_FILES: parsed.SKIP_FILES as boolean,
-    RECLAIM_UPLOADS: parsed.RECLAIM_UPLOADS as boolean,
-  };
+	const parsed = readOptions(
+		// readOptions reads from START.connector_options today; scope+state here
+		// is preserved for the forward-compatible migration path documented on
+		// the function.
+		null,
+		{
+			envPrefix: "SLACK_",
+			fields: {
+				LOOKBACK_DAYS: { parse: "int", default: 7 },
+				CHANNEL_ALLOWLIST: { parse: "csv", default: [] },
+				CHANNEL_TYPES: {
+					parse: "csv",
+					default: ["public", "private", "im", "mpim"],
+				},
+				MEMBER_ONLY: { parse: "bool", default: true },
+				SKIP_FILES: { parse: "bool", default: true },
+				RECLAIM_UPLOADS: { parse: "bool", default: false },
+			},
+		},
+	) as Record<string, unknown>;
+	return {
+		LOOKBACK_DAYS: parsed.LOOKBACK_DAYS as number,
+		CHANNEL_ALLOWLIST: parsed.CHANNEL_ALLOWLIST as string[],
+		CHANNEL_TYPES: parsed.CHANNEL_TYPES as string[],
+		MEMBER_ONLY: parsed.MEMBER_ONLY as boolean,
+		SKIP_FILES: parsed.SKIP_FILES as boolean,
+		RECLAIM_UPLOADS: parsed.RECLAIM_UPLOADS as boolean,
+	};
 }
 
 /**
@@ -660,26 +726,30 @@ function readSlackOptions(): SlackOpts {
  * workspace with that literal name and fail.
  */
 function buildChildEnv(token: string, cookie: string): NodeJS.ProcessEnv {
-  const childEnv: NodeJS.ProcessEnv = {
-    SLACK_TOKEN: token,
-    SLACK_COOKIE: cookie,
-  };
-  for (const [k, v] of Object.entries(process.env)) {
-    if (k !== "SLACK_WORKSPACE" && k !== "SLACK_TOKEN" && k !== "SLACK_COOKIE") {
-      childEnv[k] = v;
-    }
-  }
-  return childEnv;
+	const childEnv: NodeJS.ProcessEnv = {
+		SLACK_TOKEN: token,
+		SLACK_COOKIE: cookie,
+	};
+	for (const [k, v] of Object.entries(process.env)) {
+		if (
+			k !== "SLACK_WORKSPACE" &&
+			k !== "SLACK_TOKEN" &&
+			k !== "SLACK_COOKIE"
+		) {
+			childEnv[k] = v;
+		}
+	}
+	return childEnv;
 }
 
 // ─── Slackdump invocation ──────────────────────────────────────────────
 
 interface ArchivePaths {
-  archivePath: string;
-  dumpDir: string;
-  /** One-line disclosure of where the archive root came from; logged once per run. */
-  rootDisclosure: string;
-  sqlitePath: string;
+	archivePath: string;
+	dumpDir: string;
+	/** One-line disclosure of where the archive root came from; logged once per run. */
+	rootDisclosure: string;
+	sqlitePath: string;
 }
 
 // The archive is the connector's most expensive durable artifact: slackdump
@@ -689,16 +759,16 @@ interface ArchivePaths {
 // from zero. It now sits under the shared deployment-owned artifact root
 // (src/connector-artifact-root.ts), which lands inside /var/lib/pdpp on Core.
 function resolveArchivePaths(workspace: string): ArchivePaths {
-  const resolved = resolveConnectorArtifactDir("slack", [workspace]);
-  const archivePath = join(resolved.root, "archive");
-  // default DB name under the archive dir
-  const sqlitePath = join(archivePath, "slackdump.sqlite");
-  return {
-    dumpDir: resolved.root,
-    archivePath,
-    sqlitePath,
-    rootDisclosure: describeConnectorArtifactRoot(resolved),
-  };
+	const resolved = resolveConnectorArtifactDir("slack", [workspace]);
+	const archivePath = join(resolved.root, "archive");
+	// default DB name under the archive dir
+	const sqlitePath = join(archivePath, "slackdump.sqlite");
+	return {
+		dumpDir: resolved.root,
+		archivePath,
+		sqlitePath,
+		rootDisclosure: describeConnectorArtifactRoot(resolved),
+	};
 }
 
 // slackdump downloads file-attachment bytes into `<archive>/__uploads/` (only
@@ -707,34 +777,34 @@ function resolveArchivePaths(workspace: string): ArchivePaths {
 // streams emit metadata only, and PDPP has no blob copy. See the reclaim
 // escape hatch below.
 function resolveUploadsDir(archivePath: string): string {
-  return join(archivePath, "__uploads");
+	return join(archivePath, "__uploads");
 }
 
 // Sum a directory's byte size with a bounded recursive walk. Best-effort:
 // unreadable entries are skipped (returns what it could measure). Used only for
 // observability and reclaim reporting, never on a hot path.
 function directorySizeBytes(dir: string): number {
-  let total = 0;
-  let stack: string[] = [dir];
-  while (stack.length > 0) {
-    const current = stack.pop() as string;
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else {
-        total += existingFileSize(full);
-      }
-    }
-  }
-  stack = [];
-  return total;
+	let total = 0;
+	let stack: string[] = [dir];
+	while (stack.length > 0) {
+		const current = stack.pop() as string;
+		let entries: import("node:fs").Dirent[];
+		try {
+			entries = readdirSync(current, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			const full = join(current, entry.name);
+			if (entry.isDirectory()) {
+				stack.push(full);
+			} else {
+				total += existingFileSize(full);
+			}
+		}
+	}
+	stack = [];
+	return total;
 }
 
 // One-way reclaim of the `__uploads/` residue for a workspace archive. Only
@@ -748,139 +818,158 @@ function directorySizeBytes(dir: string): number {
 // on the still-present FILE row), so this is unrecoverable. It is opt-in
 // (SLACK_RECLAIM_UPLOADS=1) precisely because it is lossy.
 export async function reclaimUploads(archivePath: string): Promise<number> {
-  const uploadsDir = resolveUploadsDir(archivePath);
-  if (!existsSync(uploadsDir)) {
-    return 0;
-  }
-  const reclaimedBytes = directorySizeBytes(uploadsDir);
-  await rm(uploadsDir, { recursive: true, force: true });
-  return reclaimedBytes;
+	const uploadsDir = resolveUploadsDir(archivePath);
+	if (!existsSync(uploadsDir)) {
+		return 0;
+	}
+	const reclaimedBytes = directorySizeBytes(uploadsDir);
+	await rm(uploadsDir, { recursive: true, force: true });
+	return reclaimedBytes;
 }
 
-function resolveScopedArchivePaths(base: ArchivePaths, positionalChannels: readonly string[]): ArchivePaths {
-  if (positionalChannels.length === 0) {
-    return base;
-  }
-  const normalized = [...new Set(positionalChannels)].sort();
-  const digest = createHash("sha256").update(JSON.stringify(normalized)).digest("hex").slice(0, 12);
-  const archivePath = join(base.dumpDir, "archive-scoped", digest);
-  return {
-    dumpDir: base.dumpDir,
-    archivePath,
-    sqlitePath: join(archivePath, "slackdump.sqlite"),
-    rootDisclosure: base.rootDisclosure,
-  };
+function resolveScopedArchivePaths(
+	base: ArchivePaths,
+	positionalChannels: readonly string[],
+): ArchivePaths {
+	if (positionalChannels.length === 0) {
+		return base;
+	}
+	const normalized = [...new Set(positionalChannels)].sort();
+	const digest = createHash("sha256")
+		.update(JSON.stringify(normalized))
+		.digest("hex")
+		.slice(0, 12);
+	const archivePath = join(base.dumpDir, "archive-scoped", digest);
+	return {
+		dumpDir: base.dumpDir,
+		archivePath,
+		sqlitePath: join(archivePath, "slackdump.sqlite"),
+		rootDisclosure: base.rootDisclosure,
+	};
 }
 
 interface SelectedScopedArchive {
-  channelIds: readonly string[];
-  paths: ArchivePaths;
+	channelIds: readonly string[];
+	paths: ArchivePaths;
 }
 
 function listExistingScopedArchivePaths(base: ArchivePaths): ArchivePaths[] {
-  const scopedRoot = join(base.dumpDir, "archive-scoped");
-  if (!existsSync(scopedRoot)) {
-    return [];
-  }
-  return readdirSync(scopedRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const archivePath = join(scopedRoot, entry.name);
-      return {
-        archivePath,
-        dumpDir: base.dumpDir,
-        sqlitePath: join(archivePath, "slackdump.sqlite"),
-        rootDisclosure: base.rootDisclosure,
-      };
-    })
-    .filter((paths) => existsSync(paths.sqlitePath))
-    .sort((a, b) => a.archivePath.localeCompare(b.archivePath));
+	const scopedRoot = join(base.dumpDir, "archive-scoped");
+	if (!existsSync(scopedRoot)) {
+		return [];
+	}
+	return readdirSync(scopedRoot, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => {
+			const archivePath = join(scopedRoot, entry.name);
+			return {
+				archivePath,
+				dumpDir: base.dumpDir,
+				sqlitePath: join(archivePath, "slackdump.sqlite"),
+				rootDisclosure: base.rootDisclosure,
+			};
+		})
+		.filter((paths) => existsSync(paths.sqlitePath))
+		.sort((a, b) => a.archivePath.localeCompare(b.archivePath));
 }
 
 function readArchiveChannelIds(sqlitePath: string): string[] {
-  if (!existsSync(sqlitePath)) {
-    return [];
-  }
-  const db = new DatabaseSync(sqlitePath, { readOnly: true });
-  try {
-    return currentArchiveChannelIds(db);
-  } finally {
-    db.close();
-  }
+	if (!existsSync(sqlitePath)) {
+		return [];
+	}
+	const db = new DatabaseSync(sqlitePath, { readOnly: true });
+	try {
+		return currentArchiveChannelIds(db);
+	} finally {
+		db.close();
+	}
 }
 
-function selectScopedArchivesForChannels(base: ArchivePaths, channelIds: readonly string[]): SelectedScopedArchive[] {
-  const remaining = new Set(channelIds);
-  if (remaining.size === 0) {
-    return [];
-  }
-  const candidates = listExistingScopedArchivePaths(base)
-    .map((paths) => ({
-      channelIds: readArchiveChannelIds(paths.sqlitePath).filter((id) => remaining.has(id)),
-      paths,
-    }))
-    .filter((candidate) => candidate.channelIds.length > 0)
-    .sort(
-      (a, b) => b.channelIds.length - a.channelIds.length || a.paths.archivePath.localeCompare(b.paths.archivePath)
-    );
+function selectScopedArchivesForChannels(
+	base: ArchivePaths,
+	channelIds: readonly string[],
+): SelectedScopedArchive[] {
+	const remaining = new Set(channelIds);
+	if (remaining.size === 0) {
+		return [];
+	}
+	const candidates = listExistingScopedArchivePaths(base)
+		.map((paths) => ({
+			channelIds: readArchiveChannelIds(paths.sqlitePath).filter((id) =>
+				remaining.has(id),
+			),
+			paths,
+		}))
+		.filter((candidate) => candidate.channelIds.length > 0)
+		.sort(
+			(a, b) =>
+				b.channelIds.length - a.channelIds.length ||
+				a.paths.archivePath.localeCompare(b.paths.archivePath),
+		);
 
-  const selected: SelectedScopedArchive[] = [];
-  for (const candidate of candidates) {
-    const covers = candidate.channelIds.filter((id) => remaining.has(id));
-    if (covers.length === 0) {
-      continue;
-    }
-    selected.push({ channelIds: covers.sort(), paths: candidate.paths });
-    for (const id of covers) {
-      remaining.delete(id);
-    }
-    if (remaining.size === 0) {
-      break;
-    }
-  }
-  return selected;
+	const selected: SelectedScopedArchive[] = [];
+	for (const candidate of candidates) {
+		const covers = candidate.channelIds.filter((id) => remaining.has(id));
+		if (covers.length === 0) {
+			continue;
+		}
+		selected.push({ channelIds: covers.sort(), paths: candidate.paths });
+		for (const id of covers) {
+			remaining.delete(id);
+		}
+		if (remaining.size === 0) {
+			break;
+		}
+	}
+	return selected;
 }
 
 function unionStrings(...values: ReadonlyArray<readonly string[]>): string[] {
-  return [...new Set(values.flat())].sort();
+	return [...new Set(values.flat())].sort();
 }
 
-function mergeMessagesPassResults(left: MessagesPassResult, right: MessagesPassResult): MessagesPassResult {
-  return {
-    channelMaxTs: selectCommittedChannelLastTs(left.channelMaxTs, right.channelMaxTs),
-    maxMessageTs: selectMaxSlackTs(left.maxMessageTs, right.maxMessageTs),
-    considered: left.considered + right.considered,
-  };
+function mergeMessagesPassResults(
+	left: MessagesPassResult,
+	right: MessagesPassResult,
+): MessagesPassResult {
+	return {
+		channelMaxTs: selectCommittedChannelLastTs(
+			left.channelMaxTs,
+			right.channelMaxTs,
+		),
+		maxMessageTs: selectMaxSlackTs(left.maxMessageTs, right.maxMessageTs),
+		considered: left.considered + right.considered,
+	};
 }
 
 interface ArchiveRuntimeDeps {
-  childEnv: NodeJS.ProcessEnv;
-  cookie: string;
-  opts: SlackOpts;
-  progress: CollectContext["progress"];
-  timeFrom: string | null;
-  timeTo: string | null;
-  token: string;
+	childEnv: NodeJS.ProcessEnv;
+	cookie: string;
+	opts: SlackOpts;
+	progress: CollectContext["progress"];
+	timeFrom: string | null;
+	timeTo: string | null;
+	token: string;
 }
 
 interface MessageSourceCacheReconciliation {
-  currentChannelIds: string[];
-  missingChannelIds: string[];
-  // Every scoped-archive path this run created or read via
-  // repairMissingScopedArchive, INCLUDING a successful repair that recovered
-  // no matching channel (and so is absent from `scopedArchives`). Reclaim
-  // must cover this set too — the archive's __uploads/ residue exists
-  // regardless of whether the repair helped this run's message pass.
-  reclaimedRepairArchivePaths: string[];
-  // Updated `scoped_archive_resumed_at` map (archive path -> ISO timestamp of
-  // the last actual, SUCCESSFULLY COMPLETED `resume` invocation) to commit
-  // into STATE. Only an archive whose resume this run actually finished
-  // without error advances its timestamp; throttled-and-skipped archives
-  // keep their existing (possibly absent) timestamp UNCHANGED, and a failed
-  // attempt keeps its existing timestamp UNCHANGED too — a failure is owed
-  // work, not completed work, and must never be recorded as if it were.
-  scopedArchiveResumedAt: Record<string, string>;
-  scopedArchives: SelectedScopedArchive[];
+	currentChannelIds: string[];
+	missingChannelIds: string[];
+	// Every scoped-archive path this run created or read via
+	// repairMissingScopedArchive, INCLUDING a successful repair that recovered
+	// no matching channel (and so is absent from `scopedArchives`). Reclaim
+	// must cover this set too — the archive's __uploads/ residue exists
+	// regardless of whether the repair helped this run's message pass.
+	reclaimedRepairArchivePaths: string[];
+	// Updated `scoped_archive_resumed_at` map (archive path -> ISO timestamp of
+	// the last actual, SUCCESSFULLY COMPLETED `resume` invocation) to commit
+	// into STATE. Only an archive whose resume this run actually finished
+	// without error advances its timestamp; throttled-and-skipped archives
+	// keep their existing (possibly absent) timestamp UNCHANGED, and a failed
+	// attempt keeps its existing timestamp UNCHANGED too — a failure is owed
+	// work, not completed work, and must never be recorded as if it were.
+	scopedArchiveResumedAt: Record<string, string>;
+	scopedArchives: SelectedScopedArchive[];
 }
 
 // `resume -lookback pNd` cannot discover a message older than `now - N days`
@@ -892,18 +981,22 @@ interface MessageSourceCacheReconciliation {
 // heuristic guess: it is a direct consequence of slackdump's own documented
 // `-lookback` semantics, not a wall-clock timeout on the connector's own
 // patience.
-function archiveDueForResume(lastResumedAtIso: string | undefined, lookbackDays: number, nowIsoValue: string): boolean {
-  if (!lastResumedAtIso) {
-    return true;
-  }
-  const last = Date.parse(lastResumedAtIso);
-  const now = Date.parse(nowIsoValue);
-  if (!(Number.isFinite(last) && Number.isFinite(now))) {
-    return true;
-  }
-  const elapsedMs = now - last;
-  const lookbackMs = lookbackDays * 24 * 60 * 60 * 1000;
-  return elapsedMs >= lookbackMs;
+function archiveDueForResume(
+	lastResumedAtIso: string | undefined,
+	lookbackDays: number,
+	nowIsoValue: string,
+): boolean {
+	if (!lastResumedAtIso) {
+		return true;
+	}
+	const last = Date.parse(lastResumedAtIso);
+	const now = Date.parse(nowIsoValue);
+	if (!(Number.isFinite(last) && Number.isFinite(now))) {
+		return true;
+	}
+	const elapsedMs = now - last;
+	const lookbackMs = lookbackDays * 24 * 60 * 60 * 1000;
+	return elapsedMs >= lookbackMs;
 }
 
 // One-time upgrade compatibility: `base_archive_resumed_at` did not exist
@@ -929,23 +1022,31 @@ function archiveDueForResume(lastResumedAtIso: string | undefined, lookbackDays:
 // timestamp would produce, applied one run later than an already-migrated
 // connection would see it.
 function deriveMigratedBaseArchiveResumedAt(deps: {
-  archivePath: string;
-  isUnscopedMessageBoundary: boolean;
-  messagesState: MessagesState | undefined;
-  nowIso: string;
-  priorArchive: string | undefined;
+	archivePath: string;
+	isUnscopedMessageBoundary: boolean;
+	messagesState: MessagesState | undefined;
+	nowIso: string;
+	priorArchive: string | undefined;
 }): string | undefined {
-  const { archivePath, isUnscopedMessageBoundary, messagesState, nowIso: nowIsoValue, priorArchive } = deps;
-  if (!isUnscopedMessageBoundary) {
-    return;
-  }
-  if (priorArchive !== archivePath) {
-    return;
-  }
-  const provenPriorSuccess = Boolean(
-    messagesState?.last_ts || Object.keys(normalizeStringRecord(messagesState?.channel_last_ts)).length > 0
-  );
-  return provenPriorSuccess ? nowIsoValue : undefined;
+	const {
+		archivePath,
+		isUnscopedMessageBoundary,
+		messagesState,
+		nowIso: nowIsoValue,
+		priorArchive,
+	} = deps;
+	if (!isUnscopedMessageBoundary) {
+		return;
+	}
+	if (priorArchive !== archivePath) {
+		return;
+	}
+	const provenPriorSuccess = Boolean(
+		messagesState?.last_ts ||
+			Object.keys(normalizeStringRecord(messagesState?.channel_last_ts))
+				.length > 0,
+	);
+	return provenPriorSuccess ? nowIsoValue : undefined;
 }
 
 // A failed resume must surface as durable, governor-paced recovery evidence
@@ -961,17 +1062,20 @@ function deriveMigratedBaseArchiveResumedAt(deps: {
 // cross-run source-pressure cooldown (only `rate_limited`/`upstream_pressure`
 // do), so an unrelated recoverable stream's pacing is never affected by a
 // stuck scoped archive.
-function buildScopedArchiveResumeGap(archivePath: string, message: string): DetailGapMessage {
-  return buildDetailGap({
-    stream: "messages",
-    recordKey: archivePath,
-    reason: "temporary_unavailable",
-    locator: {
-      kind: "slack.scoped_archive_resume",
-      archive_path: archivePath,
-    },
-    error: { class: "scoped_archive_resume_failed", message },
-  });
+function buildScopedArchiveResumeGap(
+	archivePath: string,
+	message: string,
+): DetailGapMessage {
+	return buildDetailGap({
+		stream: "messages",
+		recordKey: archivePath,
+		reason: "temporary_unavailable",
+		locator: {
+			kind: "slack.scoped_archive_resume",
+			archive_path: archivePath,
+		},
+		error: { class: "scoped_archive_resume_failed", message },
+	});
 }
 
 // Emitted once a previously-gapped archive resumes successfully, so the
@@ -982,12 +1086,15 @@ function buildScopedArchiveResumeGap(archivePath: string, message: string): Deta
 // the read side of that identity — no separate connector-local bookkeeping
 // needed.
 function findPendingScopedArchiveResumeGap(
-  detailGaps: readonly DetailGapStartEntry[],
-  archivePath: string
+	detailGaps: readonly DetailGapStartEntry[],
+	archivePath: string,
 ): DetailGapStartEntry | undefined {
-  return detailGaps.find(
-    (gap) => gap.stream === "messages" && gap.status === "pending" && String(gap.record_key ?? "") === archivePath
-  );
+	return detailGaps.find(
+		(gap) =>
+			gap.stream === "messages" &&
+			gap.status === "pending" &&
+			String(gap.record_key ?? "") === archivePath,
+	);
 }
 
 // Distinct facts, never conflated: a throttled unit was never attempted; a
@@ -997,132 +1104,148 @@ function findPendingScopedArchiveResumeGap(
 // that did not pay off and must stay owed, not silently treated as done for
 // a full lookback window (that conflation was the live-REVISE defect this
 // type exists to make structurally impossible).
-type RefreshScopedArchiveOutcome = { kind: "failed"; message: string } | { kind: "resumed" } | { kind: "throttled" };
+type RefreshScopedArchiveOutcome =
+	| { kind: "failed"; message: string }
+	| { kind: "resumed" }
+	| { kind: "throttled" };
 
 interface RefreshScopedArchiveResult {
-  outcome: RefreshScopedArchiveOutcome;
+	outcome: RefreshScopedArchiveOutcome;
 }
 
 async function refreshScopedArchive(
-  archive: SelectedScopedArchive,
-  deps: ArchiveRuntimeDeps,
-  options: { dueForResume: boolean }
+	archive: SelectedScopedArchive,
+	deps: ArchiveRuntimeDeps,
+	options: { dueForResume: boolean },
 ): Promise<RefreshScopedArchiveResult> {
-  const { childEnv, cookie, opts, progress, timeFrom, timeTo, token } = deps;
-  if (!options.dueForResume) {
-    progress(
-      `Slack: scoped archive at ${archive.paths.archivePath} not due for resume yet ` +
-        `(last resumed within lookback=p${String(opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
-      { stream: "messages" }
-    );
-    return { outcome: { kind: "throttled" } };
-  }
-  const useResume = existsSync(archive.paths.archivePath);
-  try {
-    await ensureArchiveOnDisk({
-      archivePath: archive.paths.archivePath,
-      childEnv,
-      cookie,
-      opts,
-      positionalChannels: [...archive.channelIds],
-      priorArchive: undefined,
-      progress,
-      resumeTarget: useResume ? archive.paths.archivePath : null,
-      sqlitePath: archive.paths.sqlitePath,
-      timeFrom,
-      timeTo,
-      token,
-      useResume,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    progress(`Slack: scoped archive refresh failed for ${String(archive.channelIds.length)} channel(s): ${message}`, {
-      stream: "messages",
-    });
-    // Do NOT stamp scoped_archive_resumed_at on this path: the attempt did
-    // not durably complete, so this archive is still owed a resume. Retry
-    // pacing for the failure itself belongs to the existing DETAIL_GAP /
-    // recovery-governor path (see the caller), not a connector-local
-    // suppression window meant only for genuinely-completed work.
-    return { outcome: { kind: "failed", message } };
-  }
-  return { outcome: { kind: "resumed" } };
+	const { childEnv, cookie, opts, progress, timeFrom, timeTo, token } = deps;
+	if (!options.dueForResume) {
+		progress(
+			`Slack: scoped archive at ${archive.paths.archivePath} not due for resume yet ` +
+				`(last resumed within lookback=p${String(opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
+			{ stream: "messages" },
+		);
+		return { outcome: { kind: "throttled" } };
+	}
+	const useResume = existsSync(archive.paths.archivePath);
+	try {
+		await ensureArchiveOnDisk({
+			archivePath: archive.paths.archivePath,
+			childEnv,
+			cookie,
+			opts,
+			positionalChannels: [...archive.channelIds],
+			priorArchive: undefined,
+			progress,
+			resumeTarget: useResume ? archive.paths.archivePath : null,
+			sqlitePath: archive.paths.sqlitePath,
+			timeFrom,
+			timeTo,
+			token,
+			useResume,
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		progress(
+			`Slack: scoped archive refresh failed for ${String(archive.channelIds.length)} channel(s): ${message}`,
+			{
+				stream: "messages",
+			},
+		);
+		// Do NOT stamp scoped_archive_resumed_at on this path: the attempt did
+		// not durably complete, so this archive is still owed a resume. Retry
+		// pacing for the failure itself belongs to the existing DETAIL_GAP /
+		// recovery-governor path (see the caller), not a connector-local
+		// suppression window meant only for genuinely-completed work.
+		return { outcome: { kind: "failed", message } };
+	}
+	return { outcome: { kind: "resumed" } };
 }
 
 interface ScopedArchiveRepairResult {
-  // The repair-target archive path — always known (resolveScopedArchivePaths
-  // is a pure digest of missingChannelIds), independent of whether the
-  // attempt succeeded. This is the SAME `record_key`/reclaim identity a
-  // refresh-path archive uses: repeated failed repair attempts for the same
-  // missing-channel set upsert one durable gap row, not one per run, exactly
-  // like an existing-archive refresh failure.
-  archivePath: string;
-  // The refresh path's own outcome vocabulary — "resumed" here means
-  // "ensureArchiveOnDisk completed for this repair attempt," never a
-  // conflation with a successful CHANNEL recovery (see `selected`, which is
-  // the separate, repair-specific fact). Unifies the failed/resumed
-  // distinction (and its typed-gap/timestamp handling) across both the
-  // existing-archive-refresh and new-repair-attempt call sites through the
-  // same `applyScopedArchiveRefreshOutcome` helper — one invariant, one
-  // enforcement point, not two independently-maintained copies.
-  outcome: RefreshScopedArchiveOutcome;
-  // Non-null only when the repair recovered at least one of the requested
-  // missing channel IDs — the shape the message-family merge pass needs.
-  // Independent of `outcome`: a "resumed" repair can still recover zero
-  // channels (see the empty-repair-archive test), which is why reclaim
-  // coverage (task 7.1) reads `archivePath`, not `selected`.
-  selected: SelectedScopedArchive | null;
+	// The repair-target archive path — always known (resolveScopedArchivePaths
+	// is a pure digest of missingChannelIds), independent of whether the
+	// attempt succeeded. This is the SAME `record_key`/reclaim identity a
+	// refresh-path archive uses: repeated failed repair attempts for the same
+	// missing-channel set upsert one durable gap row, not one per run, exactly
+	// like an existing-archive refresh failure.
+	archivePath: string;
+	// The refresh path's own outcome vocabulary — "resumed" here means
+	// "ensureArchiveOnDisk completed for this repair attempt," never a
+	// conflation with a successful CHANNEL recovery (see `selected`, which is
+	// the separate, repair-specific fact). Unifies the failed/resumed
+	// distinction (and its typed-gap/timestamp handling) across both the
+	// existing-archive-refresh and new-repair-attempt call sites through the
+	// same `applyScopedArchiveRefreshOutcome` helper — one invariant, one
+	// enforcement point, not two independently-maintained copies.
+	outcome: RefreshScopedArchiveOutcome;
+	// Non-null only when the repair recovered at least one of the requested
+	// missing channel IDs — the shape the message-family merge pass needs.
+	// Independent of `outcome`: a "resumed" repair can still recover zero
+	// channels (see the empty-repair-archive test), which is why reclaim
+	// coverage (task 7.1) reads `archivePath`, not `selected`.
+	selected: SelectedScopedArchive | null;
 }
 
 async function repairMissingScopedArchive(
-  baseArchivePaths: ArchivePaths,
-  missingChannelIds: readonly string[],
-  deps: ArchiveRuntimeDeps
+	baseArchivePaths: ArchivePaths,
+	missingChannelIds: readonly string[],
+	deps: ArchiveRuntimeDeps,
 ): Promise<ScopedArchiveRepairResult> {
-  const { childEnv, cookie, opts, progress, timeFrom, timeTo, token } = deps;
-  const repairPaths = resolveScopedArchivePaths(baseArchivePaths, missingChannelIds);
-  const useResume = existsSync(repairPaths.archivePath);
-  try {
-    await ensureArchiveOnDisk({
-      archivePath: repairPaths.archivePath,
-      childEnv,
-      cookie,
-      opts,
-      positionalChannels: [...missingChannelIds],
-      priorArchive: undefined,
-      progress,
-      resumeTarget: useResume ? repairPaths.archivePath : null,
-      sqlitePath: repairPaths.sqlitePath,
-      timeFrom,
-      timeTo,
-      token,
-      useResume,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    progress(
-      `Slack: scoped archive auto-reconcile failed for ${String(missingChannelIds.length)} channel(s): ${message}`,
-      {
-        stream: "messages",
-      }
-    );
-    // ensureArchiveOnDisk threw: nothing durable was created/read this run
-    // (or a pre-existing archive from a prior run is left as-is, already
-    // covered by its own prior reclaim registration). `selected: null` keeps
-    // this failed attempt out of the message-pass merge and the caller's
-    // `scoped_archive_resumed_at` advance; `outcome: "failed"` is what
-    // routes this into the SAME typed-gap path a refresh failure uses.
-    return { archivePath: repairPaths.archivePath, outcome: { kind: "failed", message }, selected: null };
-  }
+	const { childEnv, cookie, opts, progress, timeFrom, timeTo, token } = deps;
+	const repairPaths = resolveScopedArchivePaths(
+		baseArchivePaths,
+		missingChannelIds,
+	);
+	const useResume = existsSync(repairPaths.archivePath);
+	try {
+		await ensureArchiveOnDisk({
+			archivePath: repairPaths.archivePath,
+			childEnv,
+			cookie,
+			opts,
+			positionalChannels: [...missingChannelIds],
+			priorArchive: undefined,
+			progress,
+			resumeTarget: useResume ? repairPaths.archivePath : null,
+			sqlitePath: repairPaths.sqlitePath,
+			timeFrom,
+			timeTo,
+			token,
+			useResume,
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		progress(
+			`Slack: scoped archive auto-reconcile failed for ${String(missingChannelIds.length)} channel(s): ${message}`,
+			{
+				stream: "messages",
+			},
+		);
+		// ensureArchiveOnDisk threw: nothing durable was created/read this run
+		// (or a pre-existing archive from a prior run is left as-is, already
+		// covered by its own prior reclaim registration). `selected: null` keeps
+		// this failed attempt out of the message-pass merge and the caller's
+		// `scoped_archive_resumed_at` advance; `outcome: "failed"` is what
+		// routes this into the SAME typed-gap path a refresh failure uses.
+		return {
+			archivePath: repairPaths.archivePath,
+			outcome: { kind: "failed", message },
+			selected: null,
+		};
+	}
 
-  const repairedChannelIds = readArchiveChannelIds(repairPaths.sqlitePath).filter((id) =>
-    missingChannelIds.includes(id)
-  );
-  return {
-    archivePath: repairPaths.archivePath,
-    outcome: { kind: "resumed" },
-    selected: repairedChannelIds.length > 0 ? { channelIds: repairedChannelIds, paths: repairPaths } : null,
-  };
+	const repairedChannelIds = readArchiveChannelIds(
+		repairPaths.sqlitePath,
+	).filter((id) => missingChannelIds.includes(id));
+	return {
+		archivePath: repairPaths.archivePath,
+		outcome: { kind: "resumed" },
+		selected:
+			repairedChannelIds.length > 0
+				? { channelIds: repairedChannelIds, paths: repairPaths }
+				: null,
+	};
 }
 
 /**
@@ -1135,256 +1258,307 @@ async function repairMissingScopedArchive(
  * flat case, not a nested conditional.
  */
 async function applyScopedArchiveRefreshOutcome(
-  outcome: RefreshScopedArchiveOutcome,
-  ctx: {
-    archivePath: string;
-    detailGaps: readonly DetailGapStartEntry[];
-    emit: CollectContext["emit"];
-    nowIso: string;
-    scopedArchiveResumedAt: Record<string, string>;
-  }
+	outcome: RefreshScopedArchiveOutcome,
+	ctx: {
+		archivePath: string;
+		detailGaps: readonly DetailGapStartEntry[];
+		emit: CollectContext["emit"];
+		nowIso: string;
+		scopedArchiveResumedAt: Record<string, string>;
+	},
 ): Promise<string> {
-  const { archivePath, detailGaps, emit, nowIso: nowIsoValue, scopedArchiveResumedAt } = ctx;
-  if (outcome.kind === "throttled") {
-    return "throttled, not owed";
-  }
-  if (outcome.kind === "failed") {
-    // The attempt did not durably complete — this is owed work, not
-    // completed work. Never stamp scoped_archive_resumed_at here (that
-    // would silently suppress retries for a full lookback window despite
-    // nothing having actually succeeded). Instead, surface a typed,
-    // durable, governor-paced recovery fact: the SAME (stream, record_key)
-    // identity upserts on repeat failures rather than spamming a new row
-    // per run, and the runtime's own recovery/quarantine machinery — not
-    // connector-local suppression — owns how and when this gets retried.
-    await emit(buildScopedArchiveResumeGap(archivePath, outcome.message));
-    return "failed, gap recorded";
-  }
-  // outcome.kind === "resumed": only a genuinely completed resume may
-  // advance the throttle timestamp — this is the exact fact a failure must
-  // NOT produce.
-  scopedArchiveResumedAt[archivePath] = nowIsoValue;
-  // Close out any durable gap this archive previously opened: the problem
-  // has cleared, so the governor's pending row must not sit open forever
-  // after a later success.
-  const pendingGap = findPendingScopedArchiveResumeGap(detailGaps, archivePath);
-  if (pendingGap) {
-    await emit({
-      type: "DETAIL_GAP_RECOVERED",
-      reference_only: true,
-      gap_id: pendingGap.gap_id,
-      record_key: archivePath,
-      stream: "messages",
-    });
-  }
-  return "resumed";
+	const {
+		archivePath,
+		detailGaps,
+		emit,
+		nowIso: nowIsoValue,
+		scopedArchiveResumedAt,
+	} = ctx;
+	if (outcome.kind === "throttled") {
+		return "throttled, not owed";
+	}
+	if (outcome.kind === "failed") {
+		// The attempt did not durably complete — this is owed work, not
+		// completed work. Never stamp scoped_archive_resumed_at here (that
+		// would silently suppress retries for a full lookback window despite
+		// nothing having actually succeeded). Instead, surface a typed,
+		// durable, governor-paced recovery fact: the SAME (stream, record_key)
+		// identity upserts on repeat failures rather than spamming a new row
+		// per run, and the runtime's own recovery/quarantine machinery — not
+		// connector-local suppression — owns how and when this gets retried.
+		await emit(buildScopedArchiveResumeGap(archivePath, outcome.message));
+		return "failed, gap recorded";
+	}
+	// outcome.kind === "resumed": only a genuinely completed resume may
+	// advance the throttle timestamp — this is the exact fact a failure must
+	// NOT produce.
+	scopedArchiveResumedAt[archivePath] = nowIsoValue;
+	// Close out any durable gap this archive previously opened: the problem
+	// has cleared, so the governor's pending row must not sit open forever
+	// after a later success.
+	const pendingGap = findPendingScopedArchiveResumeGap(detailGaps, archivePath);
+	if (pendingGap) {
+		await emit({
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: pendingGap.gap_id,
+			record_key: archivePath,
+			stream: "messages",
+		});
+	}
+	return "resumed";
 }
 
 async function reconcileMessageSourceCache(deps: {
-  archiveRuntime: ArchiveRuntimeDeps;
-  baseArchivePaths: ArchivePaths;
-  baseChannelIds: readonly string[];
-  detailGaps: readonly DetailGapStartEntry[];
-  emit: CollectContext["emit"];
-  isUnscopedMessageBoundary: boolean;
-  messageFamilyRequested: boolean;
-  nowIso: string;
-  priorObservedChannelIds: readonly string[];
-  priorScopedArchiveResumedAt: Record<string, string>;
+	archiveRuntime: ArchiveRuntimeDeps;
+	baseArchivePaths: ArchivePaths;
+	baseChannelIds: readonly string[];
+	detailGaps: readonly DetailGapStartEntry[];
+	emit: CollectContext["emit"];
+	isUnscopedMessageBoundary: boolean;
+	messageFamilyRequested: boolean;
+	nowIso: string;
+	priorObservedChannelIds: readonly string[];
+	priorScopedArchiveResumedAt: Record<string, string>;
 }): Promise<MessageSourceCacheReconciliation> {
-  const {
-    archiveRuntime,
-    baseArchivePaths,
-    baseChannelIds,
-    detailGaps,
-    emit,
-    isUnscopedMessageBoundary,
-    messageFamilyRequested,
-    nowIso: nowIsoValue,
-    priorObservedChannelIds,
-    priorScopedArchiveResumedAt,
-  } = deps;
-  if (!(messageFamilyRequested && isUnscopedMessageBoundary)) {
-    return {
-      currentChannelIds: [...baseChannelIds],
-      missingChannelIds: [],
-      scopedArchives: [],
-      reclaimedRepairArchivePaths: [],
-      scopedArchiveResumedAt: priorScopedArchiveResumedAt,
-    };
-  }
+	const {
+		archiveRuntime,
+		baseArchivePaths,
+		baseChannelIds,
+		detailGaps,
+		emit,
+		isUnscopedMessageBoundary,
+		messageFamilyRequested,
+		nowIso: nowIsoValue,
+		priorObservedChannelIds,
+		priorScopedArchiveResumedAt,
+	} = deps;
+	if (!(messageFamilyRequested && isUnscopedMessageBoundary)) {
+		return {
+			currentChannelIds: [...baseChannelIds],
+			missingChannelIds: [],
+			scopedArchives: [],
+			reclaimedRepairArchivePaths: [],
+			scopedArchiveResumedAt: priorScopedArchiveResumedAt,
+		};
+	}
 
-  // Source-cache auto-reconciliation: if an unscoped run proves that a
-  // previously observed channel is absent from the main workspace archive,
-  // refresh an isolated scoped archive for the missing partition and include
-  // that archive in this run's message pass. Existing scoped archives count as
-  // part of the source cache, so the normal hourly run can heal cache topology
-  // without asking the owner to reconnect credentials.
-  //
-  // Finite by construction, not by a wall-clock cap: `baseMissingChannelIds`
-  // and `selectScopedArchivesForChannels`'s result are both computed ONCE,
-  // up front, from this run's already-fixed `priorObservedChannelIds` (a
-  // committed STATE array) and `baseChannelIds` (this run's own archive scan)
-  // — a plain array difference, not a query that can grow mid-run. The loop
-  // below iterates that fixed list exactly once per entry (no re-selection,
-  // no re-scan), and the optional single repair attempt after it runs at most
-  // once more. The repair-unit count is therefore known before any subprocess
-  // runs, and each unit's own Slack-API-side scope is bounded by
-  // `SLACK_LOOKBACK_DAYS` (passed to slackdump as `-lookback p<N>d`) — the
-  // actual finite bound on backlog a single `resume` call can touch. Reported
-  // as progress before/after each unit so this bound is a legible number in
-  // run evidence, not just elapsed time.
-  const baseMissingChannelIds = missingPreviouslyObservedChannelIds(priorObservedChannelIds, baseChannelIds);
-  const scopedArchives = selectScopedArchivesForChannels(baseArchivePaths, baseMissingChannelIds);
-  // Channels selectScopedArchivesForChannels could NOT cover from an existing
-  // scoped archive: exactly the set that determines (before any subprocess
-  // runs) whether the single repair attempt below will fire. Computed the
-  // same way selectScopedArchivesForChannels computes its own `remaining`, so
-  // this count is exact, not a heuristic.
-  const uncoveredAfterSelection = baseMissingChannelIds.filter(
-    (id) => !scopedArchives.some((archive) => archive.channelIds.includes(id))
-  );
-  const willAttemptRepair = uncoveredAfterSelection.length > 0;
-  const repairUnitCount = scopedArchives.length + (willAttemptRepair ? 1 : 0);
-  const lookbackDays = archiveRuntime.opts.LOOKBACK_DAYS;
-  const lookbackWindow = `p${lookbackDays}d`;
-  const dueForResumeCount = scopedArchives.filter((archive) =>
-    archiveDueForResume(priorScopedArchiveResumedAt[archive.paths.archivePath], lookbackDays, nowIsoValue)
-  ).length;
-  archiveRuntime.progress(
-    `Slack: scoped-archive-reconcile selected ${String(repairUnitCount)} repair unit(s) ` +
-      `(${String(scopedArchives.length)} existing scoped archive(s), ${String(dueForResumeCount)} due for resume + ` +
-      `${String(scopedArchives.length - dueForResumeCount)} throttled (not yet due) + ` +
-      `${String(willAttemptRepair ? 1 : 0)} new-repair attempt(s) for ` +
-      `${String(uncoveredAfterSelection.length)} uncovered channel(s)), ` +
-      `each bounded to lookback=${lookbackWindow}`,
-    { stream: "messages" }
-  );
-  let completedRepairUnits = 0;
-  const scopedArchiveResumedAt = { ...priorScopedArchiveResumedAt };
-  for (const archive of scopedArchives) {
-    const dueForResume = archiveDueForResume(
-      scopedArchiveResumedAt[archive.paths.archivePath],
-      lookbackDays,
-      nowIsoValue
-    );
-    const result = await refreshScopedArchive(archive, archiveRuntime, { dueForResume });
-    const outcomeLabel = await applyScopedArchiveRefreshOutcome(result.outcome, {
-      archivePath: archive.paths.archivePath,
-      detailGaps,
-      emit,
-      nowIso: nowIsoValue,
-      scopedArchiveResumedAt,
-    });
-    completedRepairUnits += 1;
-    archiveRuntime.progress(
-      `Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
-        `(${outcomeLabel})`,
-      { stream: "messages" }
-    );
-  }
+	// Source-cache auto-reconciliation: if an unscoped run proves that a
+	// previously observed channel is absent from the main workspace archive,
+	// refresh an isolated scoped archive for the missing partition and include
+	// that archive in this run's message pass. Existing scoped archives count as
+	// part of the source cache, so the normal hourly run can heal cache topology
+	// without asking the owner to reconnect credentials.
+	//
+	// Finite by construction, not by a wall-clock cap: `baseMissingChannelIds`
+	// and `selectScopedArchivesForChannels`'s result are both computed ONCE,
+	// up front, from this run's already-fixed `priorObservedChannelIds` (a
+	// committed STATE array) and `baseChannelIds` (this run's own archive scan)
+	// — a plain array difference, not a query that can grow mid-run. The loop
+	// below iterates that fixed list exactly once per entry (no re-selection,
+	// no re-scan), and the optional single repair attempt after it runs at most
+	// once more. The repair-unit count is therefore known before any subprocess
+	// runs, and each unit's own Slack-API-side scope is bounded by
+	// `SLACK_LOOKBACK_DAYS` (passed to slackdump as `-lookback p<N>d`) — the
+	// actual finite bound on backlog a single `resume` call can touch. Reported
+	// as progress before/after each unit so this bound is a legible number in
+	// run evidence, not just elapsed time.
+	const baseMissingChannelIds = missingPreviouslyObservedChannelIds(
+		priorObservedChannelIds,
+		baseChannelIds,
+	);
+	const scopedArchives = selectScopedArchivesForChannels(
+		baseArchivePaths,
+		baseMissingChannelIds,
+	);
+	// Channels selectScopedArchivesForChannels could NOT cover from an existing
+	// scoped archive: exactly the set that determines (before any subprocess
+	// runs) whether the single repair attempt below will fire. Computed the
+	// same way selectScopedArchivesForChannels computes its own `remaining`, so
+	// this count is exact, not a heuristic.
+	const uncoveredAfterSelection = baseMissingChannelIds.filter(
+		(id) => !scopedArchives.some((archive) => archive.channelIds.includes(id)),
+	);
+	const willAttemptRepair = uncoveredAfterSelection.length > 0;
+	const repairUnitCount = scopedArchives.length + (willAttemptRepair ? 1 : 0);
+	const lookbackDays = archiveRuntime.opts.LOOKBACK_DAYS;
+	const lookbackWindow = `p${lookbackDays}d`;
+	const dueForResumeCount = scopedArchives.filter((archive) =>
+		archiveDueForResume(
+			priorScopedArchiveResumedAt[archive.paths.archivePath],
+			lookbackDays,
+			nowIsoValue,
+		),
+	).length;
+	archiveRuntime.progress(
+		`Slack: scoped-archive-reconcile selected ${String(repairUnitCount)} repair unit(s) ` +
+			`(${String(scopedArchives.length)} existing scoped archive(s), ${String(dueForResumeCount)} due for resume + ` +
+			`${String(scopedArchives.length - dueForResumeCount)} throttled (not yet due) + ` +
+			`${String(willAttemptRepair ? 1 : 0)} new-repair attempt(s) for ` +
+			`${String(uncoveredAfterSelection.length)} uncovered channel(s)), ` +
+			`each bounded to lookback=${lookbackWindow}`,
+		{ stream: "messages" },
+	);
+	let completedRepairUnits = 0;
+	const scopedArchiveResumedAt = { ...priorScopedArchiveResumedAt };
+	for (const archive of scopedArchives) {
+		const dueForResume = archiveDueForResume(
+			scopedArchiveResumedAt[archive.paths.archivePath],
+			lookbackDays,
+			nowIsoValue,
+		);
+		const result = await refreshScopedArchive(archive, archiveRuntime, {
+			dueForResume,
+		});
+		const outcomeLabel = await applyScopedArchiveRefreshOutcome(
+			result.outcome,
+			{
+				archivePath: archive.paths.archivePath,
+				detailGaps,
+				emit,
+				nowIso: nowIsoValue,
+				scopedArchiveResumedAt,
+			},
+		);
+		completedRepairUnits += 1;
+		archiveRuntime.progress(
+			`Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
+				`(${outcomeLabel})`,
+			{ stream: "messages" },
+		);
+	}
 
-  let scopedChannelIds = unionStrings(...scopedArchives.map((archive) => archive.channelIds));
-  let currentChannelIds = unionStrings(baseChannelIds, scopedChannelIds);
-  let missingChannelIds = missingPreviouslyObservedChannelIds(priorObservedChannelIds, currentChannelIds);
-  const reclaimedRepairArchivePaths: string[] = [];
+	let scopedChannelIds = unionStrings(
+		...scopedArchives.map((archive) => archive.channelIds),
+	);
+	let currentChannelIds = unionStrings(baseChannelIds, scopedChannelIds);
+	let missingChannelIds = missingPreviouslyObservedChannelIds(
+		priorObservedChannelIds,
+		currentChannelIds,
+	);
+	const reclaimedRepairArchivePaths: string[] = [];
 
-  if (missingChannelIds.length > 0) {
-    const repair = await repairMissingScopedArchive(baseArchivePaths, missingChannelIds, archiveRuntime);
-    // Same outcome type, same enforcement point as the existing-archive
-    // refresh loop above: one invariant (only "resumed" advances the
-    // timestamp; only "failed" emits a DETAIL_GAP; a later "resumed" closes
-    // out any pending gap via DETAIL_GAP_RECOVERED), not two independently
-    // maintained copies that could drift out of sync with each other.
-    const outcomeLabel = await applyScopedArchiveRefreshOutcome(repair.outcome, {
-      archivePath: repair.archivePath,
-      detailGaps,
-      emit,
-      nowIso: nowIsoValue,
-      scopedArchiveResumedAt,
-    });
-    completedRepairUnits += 1;
-    archiveRuntime.progress(
-      `Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
-        `(${outcomeLabel})`,
-      { stream: "messages" }
-    );
-    // A successful repair (outcome "resumed" — ensureArchiveOnDisk did not
-    // throw) created/read durable bytes at repair.archivePath regardless of
-    // whether a matching channel was recovered — that archive's __uploads/
-    // must still be reclaimable. A FAILED attempt must NOT be reclaimed:
-    // ensureArchiveOnDisk can leave partial files on disk before throwing,
-    // and there is no durable-commit receipt for a failed attempt (task 7.1's
-    // "failed-before-durable runs delete nothing" invariant — preserved here
-    // by gating on the outcome, not on `archivePath` truthiness, since
-    // `archivePath` is now always non-null regardless of success/failure).
-    if (repair.outcome.kind === "resumed") {
-      reclaimedRepairArchivePaths.push(repair.archivePath);
-    }
-    if (repair.selected) {
-      scopedArchives.push(repair.selected);
-      scopedChannelIds = unionStrings(scopedChannelIds, repair.selected.channelIds);
-      currentChannelIds = unionStrings(baseChannelIds, scopedChannelIds);
-      missingChannelIds = missingPreviouslyObservedChannelIds(priorObservedChannelIds, currentChannelIds);
-    }
-  }
+	if (missingChannelIds.length > 0) {
+		const repair = await repairMissingScopedArchive(
+			baseArchivePaths,
+			missingChannelIds,
+			archiveRuntime,
+		);
+		// Same outcome type, same enforcement point as the existing-archive
+		// refresh loop above: one invariant (only "resumed" advances the
+		// timestamp; only "failed" emits a DETAIL_GAP; a later "resumed" closes
+		// out any pending gap via DETAIL_GAP_RECOVERED), not two independently
+		// maintained copies that could drift out of sync with each other.
+		const outcomeLabel = await applyScopedArchiveRefreshOutcome(
+			repair.outcome,
+			{
+				archivePath: repair.archivePath,
+				detailGaps,
+				emit,
+				nowIso: nowIsoValue,
+				scopedArchiveResumedAt,
+			},
+		);
+		completedRepairUnits += 1;
+		archiveRuntime.progress(
+			`Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
+				`(${outcomeLabel})`,
+			{ stream: "messages" },
+		);
+		// A successful repair (outcome "resumed" — ensureArchiveOnDisk did not
+		// throw) created/read durable bytes at repair.archivePath regardless of
+		// whether a matching channel was recovered — that archive's __uploads/
+		// must still be reclaimable. A FAILED attempt must NOT be reclaimed:
+		// ensureArchiveOnDisk can leave partial files on disk before throwing,
+		// and there is no durable-commit receipt for a failed attempt (task 7.1's
+		// "failed-before-durable runs delete nothing" invariant — preserved here
+		// by gating on the outcome, not on `archivePath` truthiness, since
+		// `archivePath` is now always non-null regardless of success/failure).
+		if (repair.outcome.kind === "resumed") {
+			reclaimedRepairArchivePaths.push(repair.archivePath);
+		}
+		if (repair.selected) {
+			scopedArchives.push(repair.selected);
+			scopedChannelIds = unionStrings(
+				scopedChannelIds,
+				repair.selected.channelIds,
+			);
+			currentChannelIds = unionStrings(baseChannelIds, scopedChannelIds);
+			missingChannelIds = missingPreviouslyObservedChannelIds(
+				priorObservedChannelIds,
+				currentChannelIds,
+			);
+		}
+	}
 
-  archiveRuntime.progress(
-    `Slack: scoped-archive-reconcile finished: ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) completed, 0 remaining`,
-    { stream: "messages" }
-  );
+	archiveRuntime.progress(
+		`Slack: scoped-archive-reconcile finished: ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) completed, 0 remaining`,
+		{ stream: "messages" },
+	);
 
-  return { currentChannelIds, missingChannelIds, scopedArchives, reclaimedRepairArchivePaths, scopedArchiveResumedAt };
+	return {
+		currentChannelIds,
+		missingChannelIds,
+		scopedArchives,
+		reclaimedRepairArchivePaths,
+		scopedArchiveResumedAt,
+	};
 }
 
-function messageFamilyRequestedOnly(requested: CollectContext["requested"]): CollectContext["requested"] {
-  return new Map(
-    [...requested].filter(([stream]) => ["message_attachments", "messages", "reactions"].includes(stream))
-  ) as CollectContext["requested"];
+function messageFamilyRequestedOnly(
+	requested: CollectContext["requested"],
+): CollectContext["requested"] {
+	return new Map(
+		[...requested].filter(([stream]) =>
+			["message_attachments", "messages", "reactions"].includes(stream),
+		),
+	) as CollectContext["requested"];
 }
 
 async function mergeScopedMessageArchivePasses(deps: {
-  credentials: SlackCredentials;
-  emit: CollectContext["emit"];
-  messageResult: MessagesPassResult;
-  requested: CollectContext["requested"];
-  scopedArchives: readonly SelectedScopedArchive[];
-  state: CollectContext["state"];
-  streamDeps: StreamDeps;
+	credentials: SlackCredentials;
+	emit: CollectContext["emit"];
+	messageResult: MessagesPassResult;
+	requested: CollectContext["requested"];
+	scopedArchives: readonly SelectedScopedArchive[];
+	state: CollectContext["state"];
+	streamDeps: StreamDeps;
 }): Promise<MessagesPassResult> {
-  let merged = deps.messageResult;
-  // Message-family only: this pass merges scoped-archive resume results for
-  // messages/reactions/message_attachments. stars/user_groups/reminders/
-  // dm_read_states are never in this filtered `requested` set, so
-  // `deps.credentials`/`deps.emit` are threaded for type consistency but
-  // unused here.
-  const requested = messageFamilyRequestedOnly(deps.streamDeps.requested);
-  const sinceTs = parseSinceTs(deps.requested, "messages");
-  for (const archive of deps.scopedArchives) {
-    if (!existsSync(archive.paths.sqlitePath)) {
-      continue;
-    }
-    const scopedDb = new DatabaseSync(archive.paths.sqlitePath, { readOnly: true });
-    try {
-      merged = mergeMessagesPassResults(
-        merged,
-        await runRequestedStreams(
-          { ...deps.streamDeps, db: scopedDb, requested },
-          deps.state,
-          deps.credentials,
-          deps.emit,
-          {
-            allowLegacyMessageCursorFallback: false,
-            ignoreMessageChannelCursors: false,
-            sinceTs: sinceTs ?? null,
-          }
-        )
-      );
-    } finally {
-      scopedDb.close();
-    }
-  }
-  return merged;
+	let merged = deps.messageResult;
+	// Message-family only: this pass merges scoped-archive resume results for
+	// messages/reactions/message_attachments. stars/user_groups/reminders/
+	// dm_read_states are never in this filtered `requested` set, so
+	// `deps.credentials`/`deps.emit` are threaded for type consistency but
+	// unused here.
+	const requested = messageFamilyRequestedOnly(deps.streamDeps.requested);
+	const sinceTs = parseSinceTs(deps.requested, "messages");
+	for (const archive of deps.scopedArchives) {
+		if (!existsSync(archive.paths.sqlitePath)) {
+			continue;
+		}
+		const scopedDb = new DatabaseSync(archive.paths.sqlitePath, {
+			readOnly: true,
+		});
+		try {
+			merged = mergeMessagesPassResults(
+				merged,
+				await runRequestedStreams(
+					{ ...deps.streamDeps, db: scopedDb, requested },
+					deps.state,
+					deps.credentials,
+					deps.emit,
+					{
+						allowLegacyMessageCursorFallback: false,
+						ignoreMessageChannelCursors: false,
+						sinceTs: sinceTs ?? null,
+					},
+				),
+			);
+		} finally {
+			scopedDb.close();
+		}
+	}
+	return merged;
 }
 
 /**
@@ -1396,111 +1570,140 @@ async function mergeScopedMessageArchivePasses(deps: {
  * out 1.1 GB archive turns into "finish the rest" rather than "restart".
  */
 function pickResumeTarget(
-  state: CollectContext["state"],
-  archivePath: string,
-  { allowStateArchive = true }: { allowStateArchive?: boolean } = {}
+	state: CollectContext["state"],
+	archivePath: string,
+	{ allowStateArchive = true }: { allowStateArchive?: boolean } = {},
 ): { resumeTarget: string | null; priorArchive: string | undefined } {
-  // STATE is stream-keyed per Collection Profile: state is returned as
-  // { <stream>: <cursor>, ... }. We write `archive_dir` into the messages
-  // stream's cursor, so reads must qualify by that stream.
-  const messagesState = state.messages as MessagesState | undefined;
-  const legacyArchiveDir = (state as Record<string, unknown>).archive_dir as string | undefined;
-  const priorArchive = messagesState?.archive_dir || legacyArchiveDir; // fallback for pre-fix state
-  const discoveredArchive = existsSync(archivePath) ? archivePath : null;
-  const resumeTarget = allowStateArchive && priorArchive && existsSync(priorArchive) ? priorArchive : discoveredArchive;
-  return { resumeTarget, priorArchive };
+	// STATE is stream-keyed per Collection Profile: state is returned as
+	// { <stream>: <cursor>, ... }. We write `archive_dir` into the messages
+	// stream's cursor, so reads must qualify by that stream.
+	const messagesState = state.messages as MessagesState | undefined;
+	const legacyArchiveDir = (state as Record<string, unknown>).archive_dir as
+		| string
+		| undefined;
+	const priorArchive = messagesState?.archive_dir || legacyArchiveDir; // fallback for pre-fix state
+	const discoveredArchive = existsSync(archivePath) ? archivePath : null;
+	const resumeTarget =
+		allowStateArchive && priorArchive && existsSync(priorArchive)
+			? priorArchive
+			: discoveredArchive;
+	return { resumeTarget, priorArchive };
 }
 
 interface ArchiveArgsInput {
-  apiConfigPath: string;
-  archivePath: string;
-  opts: SlackOpts;
-  positionalChannels: string[];
-  timeFrom: string | null;
-  timeTo: string | null;
+	apiConfigPath: string;
+	archivePath: string;
+	opts: SlackOpts;
+	positionalChannels: string[];
+	timeFrom: string | null;
+	timeTo: string | null;
 }
 
 function buildArchiveArgs(input: ArchiveArgsInput): string[] {
-  const { apiConfigPath, archivePath, opts, positionalChannels, timeFrom, timeTo } = input;
-  const args = ["archive", "-y", "-no-encryption", "-api-config", apiConfigPath, "-o", archivePath];
-  const tf = toSlackTime(timeFrom);
-  const tt = toSlackTime(timeTo);
-  if (tf) {
-    args.push("-time-from", tf);
-  }
-  if (tt) {
-    args.push("-time-to", tt);
-  }
-  if (opts.MEMBER_ONLY) {
-    args.push("-member-only");
-  }
-  if (opts.SKIP_FILES) {
-    args.push("-files=false");
-  }
-  // NOTE: CHANNEL_TYPES maps to `list channels -chan-types`; archive has
-  // no equivalent flag. We filter post-fetch via channel.is_im/is_mpim/etc.
-  args.push(...positionalChannels);
-  return args;
+	const {
+		apiConfigPath,
+		archivePath,
+		opts,
+		positionalChannels,
+		timeFrom,
+		timeTo,
+	} = input;
+	const args = [
+		"archive",
+		"-y",
+		"-no-encryption",
+		"-api-config",
+		apiConfigPath,
+		"-o",
+		archivePath,
+	];
+	const tf = toSlackTime(timeFrom);
+	const tt = toSlackTime(timeTo);
+	if (tf) {
+		args.push("-time-from", tf);
+	}
+	if (tt) {
+		args.push("-time-to", tt);
+	}
+	if (opts.MEMBER_ONLY) {
+		args.push("-member-only");
+	}
+	if (opts.SKIP_FILES) {
+		args.push("-files=false");
+	}
+	// NOTE: CHANNEL_TYPES maps to `list channels -chan-types`; archive has
+	// no equivalent flag. We filter post-fetch via channel.is_im/is_mpim/etc.
+	args.push(...positionalChannels);
+	return args;
 }
 
 interface RunArchiveDeps {
-  apiConfigPath: string;
-  archivePath: string;
-  childEnv: NodeJS.ProcessEnv;
-  opts: SlackOpts;
-  positionalChannels: string[];
-  priorArchive: string | undefined;
-  progress: CollectContext["progress"];
-  resumeTarget: string | null;
-  sqlitePath: string;
-  timeFrom: string | null;
-  timeTo: string | null;
-  useResume: boolean;
+	apiConfigPath: string;
+	archivePath: string;
+	childEnv: NodeJS.ProcessEnv;
+	opts: SlackOpts;
+	positionalChannels: string[];
+	priorArchive: string | undefined;
+	progress: CollectContext["progress"];
+	resumeTarget: string | null;
+	sqlitePath: string;
+	timeFrom: string | null;
+	timeTo: string | null;
+	useResume: boolean;
 }
 
 async function runArchiveOrResume(deps: RunArchiveDeps): Promise<void> {
-  const { childEnv, apiConfigPath, archivePath, opts, priorArchive, progress, resumeTarget, useResume } = deps;
-  progress(
-    useResume
-      ? `Resuming slackdump at ${resumeTarget}${priorArchive ? "" : " (discovered on disk)"}`
-      : `Running slackdump archive → ${archivePath}`
-  );
-  if (useResume && resumeTarget) {
-    // `resume` does not accept `-y` (unlike `archive`): passing it aborts
-    // with "flag provided but not defined".
-    // `-lookback` uses ISO 8601 duration syntax (e.g. "p1w", "p30d"), not
-    // Go's `72h` — slackdump parses it with its own `p`-prefixed parser.
-    const args = [
-      "resume",
-      "-no-encryption",
-      "-api-config",
-      apiConfigPath,
-      "-lookback",
-      `p${opts.LOOKBACK_DAYS}d`,
-      resumeTarget,
-    ];
-    await runSlackdump(args, {
-      env: childEnv,
-      progress,
-      progressLabel: "resume",
-      sqlitePath: deps.sqlitePath,
-    });
-    return;
-  }
-  const args = buildArchiveArgs({
-    apiConfigPath,
-    archivePath,
-    opts,
-    positionalChannels: deps.positionalChannels,
-    timeFrom: deps.timeFrom,
-    timeTo: deps.timeTo,
-  });
-  await runSlackdump(args, {
-    env: childEnv,
-    progress,
-    progressLabel: "archive",
-    sqlitePath: deps.sqlitePath,
-  });
+	const {
+		childEnv,
+		apiConfigPath,
+		archivePath,
+		opts,
+		priorArchive,
+		progress,
+		resumeTarget,
+		useResume,
+	} = deps;
+	progress(
+		useResume
+			? `Resuming slackdump at ${resumeTarget}${priorArchive ? "" : " (discovered on disk)"}`
+			: `Running slackdump archive → ${archivePath}`,
+	);
+	if (useResume && resumeTarget) {
+		// `resume` does not accept `-y` (unlike `archive`): passing it aborts
+		// with "flag provided but not defined".
+		// `-lookback` uses ISO 8601 duration syntax (e.g. "p1w", "p30d"), not
+		// Go's `72h` — slackdump parses it with its own `p`-prefixed parser.
+		const args = [
+			"resume",
+			"-no-encryption",
+			"-api-config",
+			apiConfigPath,
+			"-lookback",
+			`p${opts.LOOKBACK_DAYS}d`,
+			resumeTarget,
+		];
+		await runSlackdump(args, {
+			env: childEnv,
+			progress,
+			progressLabel: "resume",
+			sqlitePath: deps.sqlitePath,
+		});
+		return;
+	}
+	const args = buildArchiveArgs({
+		apiConfigPath,
+		archivePath,
+		opts,
+		positionalChannels: deps.positionalChannels,
+		timeFrom: deps.timeFrom,
+		timeTo: deps.timeTo,
+	});
+	await runSlackdump(args, {
+		env: childEnv,
+		progress,
+		progressLabel: "archive",
+		sqlitePath: deps.sqlitePath,
+	});
 }
 
 // ─── Cross-stream messages pass (sqlite-free, testable) ───────────────
@@ -1512,36 +1715,43 @@ async function runArchiveOrResume(deps: RunArchiveDeps): Promise<void> {
  * without opening a DB. Mirrors the gmail/chase/usaa EmitDeps shape.
  */
 export interface MessagesPassDeps {
-  emitRecord: (stream: string, data: RecordData) => Promise<void>;
-  emittedAt: string;
-  progress: CollectContext["progress"];
-  requested: CollectContext["requested"];
+	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emittedAt: string;
+	progress: CollectContext["progress"];
+	requested: CollectContext["requested"];
 }
 
 export interface MessagesPassResult {
-  channelMaxTs: Record<string, string>;
-  considered: number;
-  maxMessageTs: string | null;
+	channelMaxTs: Record<string, string>;
+	considered: number;
+	maxMessageTs: string | null;
 }
 
-function selectMaxSlackTs(current: string | null, candidate: string | null): string | null {
-  if (!candidate) {
-    return current;
-  }
-  if (!current || candidate > current) {
-    return candidate;
-  }
-  return current;
+function selectMaxSlackTs(
+	current: string | null,
+	candidate: string | null,
+): string | null {
+	if (!candidate) {
+		return current;
+	}
+	if (!current || candidate > current) {
+		return candidate;
+	}
+	return current;
 }
 
-function recordChannelMaxTs(channelMaxTs: Record<string, string>, channelId: string, ts: string | null): void {
-  if (!ts) {
-    return;
-  }
-  const current = channelMaxTs[channelId];
-  if (!current || ts > current) {
-    channelMaxTs[channelId] = ts;
-  }
+function recordChannelMaxTs(
+	channelMaxTs: Record<string, string>,
+	channelId: string,
+	ts: string | null,
+): void {
+	if (!ts) {
+		return;
+	}
+	const current = channelMaxTs[channelId];
+	if (!current || ts > current) {
+		channelMaxTs[channelId] = ts;
+	}
 }
 
 /**
@@ -1573,52 +1783,52 @@ function recordChannelMaxTs(channelMaxTs: Record<string, string>, channelId: str
  *     (buildMessageRowsQuery), so this function only emits in-scope rows.
  */
 export async function emitMessagesPass(
-  deps: MessagesPassDeps,
-  rows: Iterable<MessageRow>,
-  priorTs: string | null
+	deps: MessagesPassDeps,
+	rows: Iterable<MessageRow>,
+	priorTs: string | null,
 ): Promise<MessagesPassResult> {
-  if (priorTs) {
-    // Row count is intentionally omitted: rows is now a streamed iterator
-    // (see iterateMessageRows) so the total is unknown without materializing
-    // the whole MESSAGE table, which is exactly the heap pressure this pass
-    // avoids. The "incremental"/priorTs signal callers wire to the UI is
-    // unchanged.
-    deps.progress(`incremental: filtering messages newer than ${priorTs}`, {
-      stream: "messages",
-    });
-  }
+	if (priorTs) {
+		// Row count is intentionally omitted: rows is now a streamed iterator
+		// (see iterateMessageRows) so the total is unknown without materializing
+		// the whole MESSAGE table, which is exactly the heap pressure this pass
+		// avoids. The "incremental"/priorTs signal callers wire to the UI is
+		// unchanged.
+		deps.progress(`incremental: filtering messages newer than ${priorTs}`, {
+			stream: "messages",
+		});
+	}
 
-  const wantMessages = deps.requested.has("messages");
-  const wantReactions = deps.requested.has("reactions");
-  const wantMsgAttachments = deps.requested.has("message_attachments");
+	const wantMessages = deps.requested.has("messages");
+	const wantReactions = deps.requested.has("reactions");
+	const wantMsgAttachments = deps.requested.has("message_attachments");
 
-  const channelMaxTs: Record<string, string> = {};
-  let maxMessageTs: string | null = null;
-  let considered = 0;
-  for (const r of rows) {
-    considered += 1;
-    const parsed = parseMessageRow(r, nowIso());
-    const { ts } = parsed;
-    // Track the max ts seen in this run for the post-loop STATE emit.
-    // Slack ts is a fixed-shape "seconds.micros" string; string compare
-    // matches numeric order because both halves are zero-padded by Slack.
-    maxMessageTs = selectMaxSlackTs(maxMessageTs, ts);
-    recordChannelMaxTs(channelMaxTs, r.CHANNEL_ID, ts);
-    if (wantMessages) {
-      await deps.emitRecord("messages", buildMessageRecord(parsed));
-    }
-    if (wantReactions) {
-      for (const rec of buildReactionRecords(parsed)) {
-        await deps.emitRecord("reactions", rec);
-      }
-    }
-    if (wantMsgAttachments) {
-      for (const rec of buildMessageAttachmentRecords(parsed)) {
-        await deps.emitRecord("message_attachments", rec);
-      }
-    }
-  }
-  return { channelMaxTs, maxMessageTs, considered };
+	const channelMaxTs: Record<string, string> = {};
+	let maxMessageTs: string | null = null;
+	let considered = 0;
+	for (const r of rows) {
+		considered += 1;
+		const parsed = parseMessageRow(r, nowIso());
+		const { ts } = parsed;
+		// Track the max ts seen in this run for the post-loop STATE emit.
+		// Slack ts is a fixed-shape "seconds.micros" string; string compare
+		// matches numeric order because both halves are zero-padded by Slack.
+		maxMessageTs = selectMaxSlackTs(maxMessageTs, ts);
+		recordChannelMaxTs(channelMaxTs, r.CHANNEL_ID, ts);
+		if (wantMessages) {
+			await deps.emitRecord("messages", buildMessageRecord(parsed));
+		}
+		if (wantReactions) {
+			for (const rec of buildReactionRecords(parsed)) {
+				await deps.emitRecord("reactions", rec);
+			}
+		}
+		if (wantMsgAttachments) {
+			for (const rec of buildMessageAttachmentRecords(parsed)) {
+				await deps.emitRecord("message_attachments", rec);
+			}
+		}
+	}
+	return { channelMaxTs, maxMessageTs, considered };
 }
 
 // ─── Per-stream helpers ────────────────────────────────────────────────
@@ -1636,20 +1846,22 @@ export async function emitMessagesPass(
  * untouched (their `pruneStale` is never called).
  */
 export interface StreamDeps {
-  db: DatabaseSync;
-  /**
-   * Protocol-message side-channel (non-RECORD). Used today only to declare a
-   * list stream's enumerated `considered` denominator via a self-coverage
-   * DETAIL_COVERAGE (see `declareListConsidered`). Narrowed to the single
-   * message kind this connector emits through it so a future RECORD emit can't
-   * accidentally route here instead of `emitRecord`.
-   */
-  emit: (msg: Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }>) => Promise<void>;
-  emitRecord: (stream: string, data: RecordData) => Promise<void>;
-  emittedAt: string;
-  fingerprintCursors: Map<string, FingerprintCursor>;
-  progress: CollectContext["progress"];
-  requested: CollectContext["requested"];
+	db: DatabaseSync;
+	/**
+	 * Protocol-message side-channel (non-RECORD). Used today only to declare a
+	 * list stream's enumerated `considered` denominator via a self-coverage
+	 * DETAIL_COVERAGE (see `declareListConsidered`). Narrowed to the single
+	 * message kind this connector emits through it so a future RECORD emit can't
+	 * accidentally route here instead of `emitRecord`.
+	 */
+	emit: (
+		msg: Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }>,
+	) => Promise<void>;
+	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emittedAt: string;
+	fingerprintCursors: Map<string, FingerprintCursor>;
+	progress: CollectContext["progress"];
+	requested: CollectContext["requested"];
 }
 
 /**
@@ -1684,41 +1896,48 @@ export interface StreamDeps {
  * this; it leaves `considered` unknown rather than fabricating a denominator.
  */
 async function declareListConsidered(
-  deps: StreamDeps,
-  stream: string,
-  considered: number,
-  covered?: number
+	deps: StreamDeps,
+	stream: string,
+	considered: number,
+	covered?: number,
 ): Promise<void> {
-  if (!Number.isInteger(considered) || considered < 0) {
-    return;
-  }
-  await deps.emit(
-    buildDetailCoverageMessage({
-      stream,
-      stateStream: stream,
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered,
-      ...(typeof covered === "number" && Number.isInteger(covered) && covered >= 0 ? { covered } : {}),
-    })
-  );
+	if (!Number.isInteger(considered) || considered < 0) {
+		return;
+	}
+	await deps.emit(
+		buildDetailCoverageMessage({
+			stream,
+			stateStream: stream,
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered,
+			...(typeof covered === "number" &&
+			Number.isInteger(covered) &&
+			covered >= 0
+				? { covered }
+				: {}),
+		}),
+	);
 }
 
-async function declareMessageFamilyCoverage(deps: StreamDeps, considered: number): Promise<void> {
-  for (const stream of ["reactions", "message_attachments"] as const) {
-    if (deps.requested.has(stream)) {
-      await deps.emit(
-        buildDetailCoverageMessage({
-          stream,
-          stateStream: "messages",
-          requiredKeys: [],
-          hydratedKeys: [],
-          considered,
-          covered: considered,
-        })
-      );
-    }
-  }
+async function declareMessageFamilyCoverage(
+	deps: StreamDeps,
+	considered: number,
+): Promise<void> {
+	for (const stream of ["reactions", "message_attachments"] as const) {
+		if (deps.requested.has(stream)) {
+			await deps.emit(
+				buildDetailCoverageMessage({
+					stream,
+					stateStream: "messages",
+					requiredKeys: [],
+					hydratedKeys: [],
+					considered,
+					covered: considered,
+				}),
+			);
+		}
+	}
 }
 
 /**
@@ -1745,7 +1964,13 @@ async function declareMessageFamilyCoverage(deps: StreamDeps, considered: number
  * `fetched_at` exclusion. A membership only re-emits when it actually
  * appears or disappears.
  */
-export const FINGERPRINTED_STREAMS = ["workspace", "users", "files", "channel_memberships", "channels"] as const;
+export const FINGERPRINTED_STREAMS = [
+	"workspace",
+	"users",
+	"files",
+	"channel_memberships",
+	"channels",
+] as const;
 type FingerprintedStream = (typeof FINGERPRINTED_STREAMS)[number];
 
 /**
@@ -1762,12 +1987,15 @@ type FingerprintedStream = (typeof FINGERPRINTED_STREAMS)[number];
  *     excluding fetched_at means the fingerprint moves only when a
  *     membership is added or removed.
  */
-export const FINGERPRINT_EXCLUDE: Record<FingerprintedStream, readonly string[]> = {
-  workspace: ["fetched_at"],
-  users: [],
-  files: [],
-  channel_memberships: ["fetched_at"],
-  channels: [],
+export const FINGERPRINT_EXCLUDE: Record<
+	FingerprintedStream,
+	readonly string[]
+> = {
+	workspace: ["fetched_at"],
+	users: [],
+	files: [],
+	channel_memberships: ["fetched_at"],
+	channels: [],
 };
 
 /**
@@ -1782,28 +2010,28 @@ export const FINGERPRINT_EXCLUDE: Record<FingerprintedStream, readonly string[]>
  * fingerprinted; the cursor leaves its state alone).
  */
 export async function emitWithFingerprint(
-  deps: StreamDeps,
-  stream: FingerprintedStream,
-  record: RecordData
+	deps: StreamDeps,
+	stream: FingerprintedStream,
+	record: RecordData,
 ): Promise<boolean> {
-  const cursor = deps.fingerprintCursors.get(stream);
-  if (!cursor) {
-    // Programmer error: the collect() bootstrap opens a cursor for every
-    // fingerprinted stream regardless of whether it was requested, so this
-    // branch shouldn't fire. Fall back to a raw emit rather than throw.
-    await deps.emitRecord(stream, record);
-    return true;
-  }
-  if (!cursor.shouldEmit(record)) {
-    // Suppressed because the record was unchanged since the prior run. The item
-    // is still COVERED — the run accounted for it and confirmed it needs no new
-    // version — so the caller counts it toward the `covered` numerator even
-    // though no RECORD was emitted. This is the line that lets a steady-state
-    // full-sync run read `complete` instead of a false `partial`.
-    return false;
-  }
-  await deps.emitRecord(stream, record);
-  return true;
+	const cursor = deps.fingerprintCursors.get(stream);
+	if (!cursor) {
+		// Programmer error: the collect() bootstrap opens a cursor for every
+		// fingerprinted stream regardless of whether it was requested, so this
+		// branch shouldn't fire. Fall back to a raw emit rather than throw.
+		await deps.emitRecord(stream, record);
+		return true;
+	}
+	if (!cursor.shouldEmit(record)) {
+		// Suppressed because the record was unchanged since the prior run. The item
+		// is still COVERED — the run accounted for it and confirmed it needs no new
+		// version — so the caller counts it toward the `covered` numerator even
+		// though no RECORD was emitted. This is the line that lets a steady-state
+		// full-sync run read `complete` instead of a false `partial`.
+		return false;
+	}
+	await deps.emitRecord(stream, record);
+	return true;
 }
 
 /**
@@ -1817,127 +2045,148 @@ export async function emitWithFingerprint(
  * shortfall reads an honest `partial` rather than being assumed complete.
  */
 async function runFingerprintedFullSync<Row>(
-  deps: StreamDeps,
-  stream: FingerprintedStream,
-  rows: readonly Row[],
-  buildRecord: (row: Row) => RecordData
+	deps: StreamDeps,
+	stream: FingerprintedStream,
+	rows: readonly Row[],
+	buildRecord: (row: Row) => RecordData,
 ): Promise<{ considered: number; covered: number }> {
-  let covered = 0;
-  for (const r of rows) {
-    // Every row that reaches the emit helper is covered (emitted or
-    // suppressed-unchanged); `emitWithFingerprint` never drops an enumerated row.
-    await emitWithFingerprint(deps, stream, buildRecord(r));
-    covered += 1;
-  }
-  return { considered: rows.length, covered };
+	let covered = 0;
+	for (const r of rows) {
+		// Every row that reaches the emit helper is covered (emitted or
+		// suppressed-unchanged); `emitWithFingerprint` never drops an enumerated row.
+		await emitWithFingerprint(deps, stream, buildRecord(r));
+		covered += 1;
+	}
+	return { considered: rows.length, covered };
 }
 
 async function runWorkspaceStream(deps: StreamDeps): Promise<void> {
-  const rows = safeAll<WorkspaceRow>(
-    deps.db,
-    "SELECT ID, TEAM, TEAM_ID, USERNAME, USER_ID, URL, ENTERPRISE_ID, DATA FROM WORKSPACE"
-  );
-  const { considered, covered } = await runFingerprintedFullSync(deps, "workspace", rows, (r) =>
-    buildWorkspaceRecord(r, deps.emittedAt)
-  );
-  await declareListConsidered(deps, "workspace", considered, covered);
+	const rows = safeAll<WorkspaceRow>(
+		deps.db,
+		"SELECT ID, TEAM, TEAM_ID, USERNAME, USER_ID, URL, ENTERPRISE_ID, DATA FROM WORKSPACE",
+	);
+	const { considered, covered } = await runFingerprintedFullSync(
+		deps,
+		"workspace",
+		rows,
+		(r) => buildWorkspaceRecord(r, deps.emittedAt),
+	);
+	await declareListConsidered(deps, "workspace", considered, covered);
 }
 
 export async function runChannelsStream(deps: StreamDeps): Promise<void> {
-  // Dedupe across chunks; keep the latest (max CHUNK_ID) snapshot per ID.
-  let rowIterator: Iterator<Record<string, unknown>>;
-  try {
-    const rawRows = deps.db
-      .prepare(
-        `
+	// Dedupe across chunks; keep the latest (max CHUNK_ID) snapshot per ID.
+	let rowIterator: Iterator<Record<string, unknown>>;
+	try {
+		const rawRows = deps.db
+			.prepare(
+				`
     SELECT c.ID AS id, c.NAME AS name, c.DATA AS data
     FROM CHANNEL c
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM CHANNEL GROUP BY ID) m
       ON m.ID = c.ID AND m.mx = c.CHUNK_ID
-  `
-      )
-      .iterate() as IterableIterator<Record<string, unknown>>;
-    rowIterator = rawRows[Symbol.iterator]();
-  } catch {
-    // A failed archive enumeration is not an empty archive. Leave coverage
-    // unmeasured so the shared projection exposes the exact run failure.
-    return;
-  }
-  const observedOn = deps.emittedAt.slice(0, 10);
-  const wantsChannels = deps.requested.has("channels");
-  let channelsConsidered = 0;
-  let channelsCovered = 0;
-  while (true) {
-    let nextRow: IteratorResult<Record<string, unknown>>;
-    try {
-      nextRow = rowIterator.next();
-    } catch {
-      // A mid-scan read failure cannot prove that the inventory was complete.
-      return;
-    }
-    if (nextRow.done) {
-      break;
-    }
-    channelsConsidered += 1;
-    const raw = nextRow.value;
-    const r: ChannelRow = {
-      id: raw.id as string,
-      name: (raw.name as string | null) ?? null,
-      data: (raw.data as Uint8Array | string | null) ?? null,
-    };
-    if (wantsChannels) {
-      // Entity record: fingerprinted so unchanged structural fields don't re-emit.
-      // Every enumerated channel row is accounted for (emitted or
-      // suppressed-unchanged), so it counts toward the `covered` numerator.
-      const entityRec = buildChannelRecord(r);
-      await emitWithFingerprint(deps, "channels", entityRec);
-      channelsCovered += 1;
-    }
-    // Stats record: append-keyed observation (one per channel per day).
-    if (deps.requested.has("channel_stats")) {
-      await deps.emitRecord("channel_stats", buildChannelStatsRecord(r, observedOn));
-    }
-  }
-  // `channels` is a fingerprint-suppressed full-sync stream: it re-enumerates the
-  // whole channel inventory every run and suppresses unchanged rows. Declaring
-  // the enumerated row count with `covered = channelsCovered` lets a
-  // steady-state run read `complete` instead of a false `partial`. `channel_stats`
-  // is append-keyed (one observation per channel per day), not an inventory, so it
-  // declares no denominator. The denominators are measured at the query site,
-  // never aliased to the emitted count.
-  if (wantsChannels) {
-    await declareListConsidered(deps, "channels", channelsConsidered, channelsCovered);
-  }
-  if (deps.requested.has("channel_stats")) {
-    await deps.emit(buildFullScanCoverageMessage("channel_stats", channelsConsidered));
-  }
+  `,
+			)
+			.iterate() as IterableIterator<Record<string, unknown>>;
+		rowIterator = rawRows[Symbol.iterator]();
+	} catch {
+		// A failed archive enumeration is not an empty archive. Leave coverage
+		// unmeasured so the shared projection exposes the exact run failure.
+		return;
+	}
+	const observedOn = deps.emittedAt.slice(0, 10);
+	const wantsChannels = deps.requested.has("channels");
+	let channelsConsidered = 0;
+	let channelsCovered = 0;
+	while (true) {
+		let nextRow: IteratorResult<Record<string, unknown>>;
+		try {
+			nextRow = rowIterator.next();
+		} catch {
+			// A mid-scan read failure cannot prove that the inventory was complete.
+			return;
+		}
+		if (nextRow.done) {
+			break;
+		}
+		channelsConsidered += 1;
+		const raw = nextRow.value;
+		const r: ChannelRow = {
+			id: raw.id as string,
+			name: (raw.name as string | null) ?? null,
+			data: (raw.data as Uint8Array | string | null) ?? null,
+		};
+		if (wantsChannels) {
+			// Entity record: fingerprinted so unchanged structural fields don't re-emit.
+			// Every enumerated channel row is accounted for (emitted or
+			// suppressed-unchanged), so it counts toward the `covered` numerator.
+			const entityRec = buildChannelRecord(r);
+			await emitWithFingerprint(deps, "channels", entityRec);
+			channelsCovered += 1;
+		}
+		// Stats record: append-keyed observation (one per channel per day).
+		if (deps.requested.has("channel_stats")) {
+			await deps.emitRecord(
+				"channel_stats",
+				buildChannelStatsRecord(r, observedOn),
+			);
+		}
+	}
+	// `channels` is a fingerprint-suppressed full-sync stream: it re-enumerates the
+	// whole channel inventory every run and suppresses unchanged rows. Declaring
+	// the enumerated row count with `covered = channelsCovered` lets a
+	// steady-state run read `complete` instead of a false `partial`. `channel_stats`
+	// is append-keyed (one observation per channel per day), not an inventory, so it
+	// declares no denominator. The denominators are measured at the query site,
+	// never aliased to the emitted count.
+	if (wantsChannels) {
+		await declareListConsidered(
+			deps,
+			"channels",
+			channelsConsidered,
+			channelsCovered,
+		);
+	}
+	if (deps.requested.has("channel_stats")) {
+		await deps.emit(
+			buildFullScanCoverageMessage("channel_stats", channelsConsidered),
+		);
+	}
 }
 
 async function runChannelMembershipsStream(deps: StreamDeps): Promise<void> {
-  const rows = safeAll<ChannelUserRow>(
-    deps.db,
-    `
+	const rows = safeAll<ChannelUserRow>(
+		deps.db,
+		`
     SELECT DISTINCT CHANNEL_ID, USER_ID FROM CHANNEL_USER
-  `
-  );
-  const { considered, covered } = await runFingerprintedFullSync(deps, "channel_memberships", rows, (r) =>
-    buildChannelMembershipRecord(r, deps.emittedAt)
-  );
-  await declareListConsidered(deps, "channel_memberships", considered, covered);
+  `,
+	);
+	const { considered, covered } = await runFingerprintedFullSync(
+		deps,
+		"channel_memberships",
+		rows,
+		(r) => buildChannelMembershipRecord(r, deps.emittedAt),
+	);
+	await declareListConsidered(deps, "channel_memberships", considered, covered);
 }
 
 export async function runUsersStream(deps: StreamDeps): Promise<void> {
-  const rows = safeAll<UserRow>(
-    deps.db,
-    `
+	const rows = safeAll<UserRow>(
+		deps.db,
+		`
     SELECT u.ID AS id, u.USERNAME AS username, u.DATA AS data
     FROM S_USER u
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM S_USER GROUP BY ID) m
       ON m.ID = u.ID AND m.mx = u.CHUNK_ID
-  `
-  );
-  const { considered, covered } = await runFingerprintedFullSync(deps, "users", rows, buildUserRecord);
-  await declareListConsidered(deps, "users", considered, covered);
+  `,
+	);
+	const { considered, covered } = await runFingerprintedFullSync(
+		deps,
+		"users",
+		rows,
+		buildUserRecord,
+	);
+	await declareListConsidered(deps, "users", considered, covered);
 }
 
 /**
@@ -1953,9 +2202,9 @@ export async function runUsersStream(deps: StreamDeps): Promise<void> {
  * cardinality is members/files/channels, not message volume.
  */
 interface MessageCursorThresholds {
-  channelLastTs: Record<string, string>;
-  legacyLastTs: string | null;
-  sinceTs: string | null;
+	channelLastTs: Record<string, string>;
+	legacyLastTs: string | null;
+	sinceTs: string | null;
 }
 
 /**
@@ -1964,95 +2213,103 @@ interface MessageCursorThresholds {
  * Handles variable-width epochs (pre-2001: 9 digits, current: 10 digits).
  */
 function parseSlackTs(ts: string): [number, number] {
-  const match = ts.match(SLACK_TS_PATTERN);
-  if (!(match?.[1] && match[2])) {
-    throw new Error(`Invalid Slack ts format: ${ts} (expected "seconds.microseconds")`);
-  }
-  const epochSeconds = Number.parseInt(match[1], 10);
-  const microseconds = Number.parseInt(match[2], 10);
-  if (!(Number.isFinite(epochSeconds) && Number.isFinite(microseconds))) {
-    throw new Error(`Invalid Slack ts components: ${ts}`);
-  }
-  return [epochSeconds, microseconds];
+	const match = ts.match(SLACK_TS_PATTERN);
+	if (!(match?.[1] && match[2])) {
+		throw new Error(
+			`Invalid Slack ts format: ${ts} (expected "seconds.microseconds")`,
+		);
+	}
+	const epochSeconds = Number.parseInt(match[1], 10);
+	const microseconds = Number.parseInt(match[2], 10);
+	if (!(Number.isFinite(epochSeconds) && Number.isFinite(microseconds))) {
+		throw new Error(`Invalid Slack ts components: ${ts}`);
+	}
+	return [epochSeconds, microseconds];
 }
 
-export function buildMessageRowsQuery(thresholds: MessageCursorThresholds): { params: string[]; sql: string } {
-  const channelThresholds = Object.entries(thresholds.channelLastTs)
-    .filter(([channelId, ts]) => channelId.length > 0 && ts.length > 0)
-    .sort(([a], [b]) => a.localeCompare(b));
-  const params: string[] = [];
-  const thresholdCte =
-    channelThresholds.length > 0
-      ? `thresholds(channel_id, last_ts) AS (
+export function buildMessageRowsQuery(thresholds: MessageCursorThresholds): {
+	params: string[];
+	sql: string;
+} {
+	const channelThresholds = Object.entries(thresholds.channelLastTs)
+		.filter(([channelId, ts]) => channelId.length > 0 && ts.length > 0)
+		.sort(([a], [b]) => a.localeCompare(b));
+	const params: string[] = [];
+	const thresholdCte =
+		channelThresholds.length > 0
+			? `thresholds(channel_id, last_ts) AS (
       VALUES ${channelThresholds
-        .map(([channelId, ts]) => {
-          params.push(channelId, ts);
-          return "(?, ?)";
-        })
-        .join(", ")}
+				.map(([channelId, ts]) => {
+					params.push(channelId, ts);
+					return "(?, ?)";
+				})
+				.join(", ")}
     )`
-      : "";
-  // The cursor predicate is pushed INTO the `latest` dedup CTE (not applied in
-  // an outer WHERE after the aggregation). The archive's MESSAGE table grows
-  // unbounded and has no (CHANNEL_ID, TS) index, so a `GROUP BY CHANNEL_ID, TS`
-  // over the whole table is a full scan + sort on every run — the dominant
-  // cost that made steady-state runs grow with archive size while only ~200
-  // rows were new. Filtering by TS before the GROUP BY restricts the
-  // aggregation to rows newer than the committed cursor.
-  //
-  // This is emit-identical to filtering after aggregation: any (CHANNEL_ID, TS)
-  // we emit has TS > threshold, so every chunk sharing that (CHANNEL_ID, TS)
-  // also has TS > threshold and survives the filter — the MAX(CHUNK_ID) pick is
-  // unchanged. Pairs at/below the threshold are dropped by both shapes. The
-  // no-cursor first run has no predicate and keeps the full aggregation.
-  //
-  // collection_scope.since is a declared boundary (ISO 8601 instant, converted
-  // to Slack ts format via parseIsoInstantToSlackTs). Unlike cursor predicates
-  // (which are monotonically advancing commitments), a since boundary is a
-  // declarative claim "only collect from this point onward." If supplied, it is
-  // composed with cursor predicates via AND: a row must pass both to be included.
-  //
-  // Slack's ts format is "seconds.microseconds" where seconds is Unix epoch
-  // (variable-width: 9 digits pre-2001, 10 digits 2001-2286, 11+ digits later).
-  // To compare timestamps correctly across variable-width epochs, we use numeric
-  // comparison: extract CAST(SUBSTR(m.TS, 1, INSTR(m.TS, '.') - 1) AS INTEGER)
-  // for seconds, then compare numerically. If seconds match, compare microseconds
-  // (the 6-digit suffix). This is exact and handles all epoch widths correctly.
-  const dedupJoin = channelThresholds.length > 0 ? "LEFT JOIN thresholds t ON t.channel_id = m.CHANNEL_ID" : "";
-  let dedupWhere = "";
-  if (channelThresholds.length > 0 && thresholds.legacyLastTs) {
-    dedupWhere = "WHERE m.TS > COALESCE(t.last_ts, ?)";
-    params.push(thresholds.legacyLastTs);
-  } else if (channelThresholds.length > 0) {
-    dedupWhere = "WHERE t.last_ts IS NULL OR m.TS > t.last_ts";
-  } else if (thresholds.legacyLastTs) {
-    dedupWhere = "WHERE m.TS > ?";
-    params.push(thresholds.legacyLastTs);
-  }
-  // Compose since boundary (if supplied) with cursor predicates via AND.
-  // sinceTs is the production output of parseIsoInstantToSlackTs, which
-  // guarantees "seconds.microseconds" format with 6-digit fractional seconds.
-  // Parse it into numeric components for exact comparison.
-  if (thresholds.sinceTs !== null) {
-    const [sinceSecs, sinceMicros] = parseSlackTs(thresholds.sinceTs);
-    // Numeric comparison: m.TS >= sinceTs means either:
-    //   (epochSecs > sinceSecs) OR (epochSecs == sinceSecs AND microsecs >= sinceMicros)
-    const sincePredicate = `(
+			: "";
+	// The cursor predicate is pushed INTO the `latest` dedup CTE (not applied in
+	// an outer WHERE after the aggregation). The archive's MESSAGE table grows
+	// unbounded and has no (CHANNEL_ID, TS) index, so a `GROUP BY CHANNEL_ID, TS`
+	// over the whole table is a full scan + sort on every run — the dominant
+	// cost that made steady-state runs grow with archive size while only ~200
+	// rows were new. Filtering by TS before the GROUP BY restricts the
+	// aggregation to rows newer than the committed cursor.
+	//
+	// This is emit-identical to filtering after aggregation: any (CHANNEL_ID, TS)
+	// we emit has TS > threshold, so every chunk sharing that (CHANNEL_ID, TS)
+	// also has TS > threshold and survives the filter — the MAX(CHUNK_ID) pick is
+	// unchanged. Pairs at/below the threshold are dropped by both shapes. The
+	// no-cursor first run has no predicate and keeps the full aggregation.
+	//
+	// collection_scope.since is a declared boundary (ISO 8601 instant, converted
+	// to Slack ts format via parseIsoInstantToSlackTs). Unlike cursor predicates
+	// (which are monotonically advancing commitments), a since boundary is a
+	// declarative claim "only collect from this point onward." If supplied, it is
+	// composed with cursor predicates via AND: a row must pass both to be included.
+	//
+	// Slack's ts format is "seconds.microseconds" where seconds is Unix epoch
+	// (variable-width: 9 digits pre-2001, 10 digits 2001-2286, 11+ digits later).
+	// To compare timestamps correctly across variable-width epochs, we use numeric
+	// comparison: extract CAST(SUBSTR(m.TS, 1, INSTR(m.TS, '.') - 1) AS INTEGER)
+	// for seconds, then compare numerically. If seconds match, compare microseconds
+	// (the 6-digit suffix). This is exact and handles all epoch widths correctly.
+	const dedupJoin =
+		channelThresholds.length > 0
+			? "LEFT JOIN thresholds t ON t.channel_id = m.CHANNEL_ID"
+			: "";
+	let dedupWhere = "";
+	if (channelThresholds.length > 0 && thresholds.legacyLastTs) {
+		dedupWhere = "WHERE m.TS > COALESCE(t.last_ts, ?)";
+		params.push(thresholds.legacyLastTs);
+	} else if (channelThresholds.length > 0) {
+		dedupWhere = "WHERE t.last_ts IS NULL OR m.TS > t.last_ts";
+	} else if (thresholds.legacyLastTs) {
+		dedupWhere = "WHERE m.TS > ?";
+		params.push(thresholds.legacyLastTs);
+	}
+	// Compose since boundary (if supplied) with cursor predicates via AND.
+	// sinceTs is the production output of parseIsoInstantToSlackTs, which
+	// guarantees "seconds.microseconds" format with 6-digit fractional seconds.
+	// Parse it into numeric components for exact comparison.
+	if (thresholds.sinceTs !== null) {
+		const [sinceSecs, sinceMicros] = parseSlackTs(thresholds.sinceTs);
+		// Numeric comparison: m.TS >= sinceTs means either:
+		//   (epochSecs > sinceSecs) OR (epochSecs == sinceSecs AND microsecs >= sinceMicros)
+		const sincePredicate = `(
         CAST(SUBSTR(m.TS, 1, INSTR(m.TS, '.') - 1) AS INTEGER) > ? OR
         (CAST(SUBSTR(m.TS, 1, INSTR(m.TS, '.') - 1) AS INTEGER) = ? AND
          CAST(SUBSTR(m.TS, INSTR(m.TS, '.') + 1) AS INTEGER) >= ?)
       )`;
-    params.push(String(sinceSecs), String(sinceSecs), String(sinceMicros));
-    if (dedupWhere) {
-      dedupWhere = `${dedupWhere} AND ${sincePredicate}`;
-    } else {
-      dedupWhere = `WHERE ${sincePredicate}`;
-    }
-  }
+		params.push(String(sinceSecs), String(sinceSecs), String(sinceMicros));
+		if (dedupWhere) {
+			dedupWhere = `${dedupWhere} AND ${sincePredicate}`;
+		} else {
+			dedupWhere = `WHERE ${sincePredicate}`;
+		}
+	}
 
-  return {
-    params,
-    sql: `
+	return {
+		params,
+		sql: `
     WITH ${thresholdCte ? `${thresholdCte},` : ""}
     latest AS (
       SELECT m.CHANNEL_ID, m.TS, MAX(m.CHUNK_ID) AS mx
@@ -2065,32 +2322,35 @@ export function buildMessageRowsQuery(thresholds: MessageCursorThresholds): { pa
     FROM MESSAGE m
     JOIN latest ON latest.CHANNEL_ID = m.CHANNEL_ID AND latest.TS = m.TS AND latest.mx = m.CHUNK_ID
   `,
-  };
+	};
 }
 
-function* iterateMessageRows(db: DatabaseSync, thresholds: MessageCursorThresholds): Iterable<MessageRow> {
-  const { sql, params } = buildMessageRowsQuery(thresholds);
-  // Slackdump can store the same (CHANNEL_ID, TS) message across multiple
-  // CHUNK_IDs (e.g. from channel enumeration + subsequent thread fetch).
-  // Pick the latest chunk's row per (CHANNEL_ID, TS) to avoid duplicate
-  // RECORDs on the wire.
-  const stmt = db.prepare(sql);
-  // node:sqlite stmt.iterate(...) yields Record<string, SQLOutputValue> one
-  // row at a time. Our typed shape is a subset (we SELECT named columns);
-  // rebuild each row explicitly to narrow SQLOutputValue into our column
-  // shape. Cheap: 7 fields per row, and the runtime has already produced
-  // the row.
-  for (const raw of stmt.iterate(...params)) {
-    yield {
-      CHANNEL_ID: raw.CHANNEL_ID as string,
-      TS: raw.TS as string,
-      THREAD_TS: (raw.THREAD_TS as string | null) ?? null,
-      IS_PARENT: (raw.IS_PARENT as number | null) ?? null,
-      TXT: (raw.TXT as string | null) ?? null,
-      NUM_FILES: (raw.NUM_FILES as number | null) ?? null,
-      DATA: raw.DATA as Uint8Array | string | null,
-    };
-  }
+function* iterateMessageRows(
+	db: DatabaseSync,
+	thresholds: MessageCursorThresholds,
+): Iterable<MessageRow> {
+	const { sql, params } = buildMessageRowsQuery(thresholds);
+	// Slackdump can store the same (CHANNEL_ID, TS) message across multiple
+	// CHUNK_IDs (e.g. from channel enumeration + subsequent thread fetch).
+	// Pick the latest chunk's row per (CHANNEL_ID, TS) to avoid duplicate
+	// RECORDs on the wire.
+	const stmt = db.prepare(sql);
+	// node:sqlite stmt.iterate(...) yields Record<string, SQLOutputValue> one
+	// row at a time. Our typed shape is a subset (we SELECT named columns);
+	// rebuild each row explicitly to narrow SQLOutputValue into our column
+	// shape. Cheap: 7 fields per row, and the runtime has already produced
+	// the row.
+	for (const raw of stmt.iterate(...params)) {
+		yield {
+			CHANNEL_ID: raw.CHANNEL_ID as string,
+			TS: raw.TS as string,
+			THREAD_TS: (raw.THREAD_TS as string | null) ?? null,
+			IS_PARENT: (raw.IS_PARENT as number | null) ?? null,
+			TXT: (raw.TXT as string | null) ?? null,
+			NUM_FILES: (raw.NUM_FILES as number | null) ?? null,
+			DATA: raw.DATA as Uint8Array | string | null,
+		};
+	}
 }
 
 /**
@@ -2106,16 +2366,19 @@ function* iterateMessageRows(db: DatabaseSync, thresholds: MessageCursorThreshol
  * `emitMessagesPass` from this file so integration.test.ts can drive
  * it without opening sqlite.
  */
-function runMessagesUnifiedPass(deps: StreamDeps, thresholds: MessageCursorThresholds): Promise<MessagesPassResult> {
-  // Slack message TS strings collate lexically the same way they order
-  // chronologically (fixed-width integer-dot-decimal), so string > works.
-  // iterateMessageRows is a lazy generator: emitMessagesPass pulls one row
-  // at a time, so the unbounded MESSAGE table never lands in heap at once.
-  // The since boundary (if supplied) is baked into the SQL WHERE clause by
-  // buildMessageRowsQuery, so rows are already filtered to the declared
-  // collection_scope.since boundary.
-  const rows = iterateMessageRows(deps.db, thresholds);
-  return emitMessagesPass(deps, rows, thresholds.legacyLastTs);
+function runMessagesUnifiedPass(
+	deps: StreamDeps,
+	thresholds: MessageCursorThresholds,
+): Promise<MessagesPassResult> {
+	// Slack message TS strings collate lexically the same way they order
+	// chronologically (fixed-width integer-dot-decimal), so string > works.
+	// iterateMessageRows is a lazy generator: emitMessagesPass pulls one row
+	// at a time, so the unbounded MESSAGE table never lands in heap at once.
+	// The since boundary (if supplied) is baked into the SQL WHERE clause by
+	// buildMessageRowsQuery, so rows are already filtered to the declared
+	// collection_scope.since boundary.
+	const rows = iterateMessageRows(deps.db, thresholds);
+	return emitMessagesPass(deps, rows, thresholds.legacyLastTs);
 }
 
 /**
@@ -2141,26 +2404,30 @@ function runMessagesUnifiedPass(deps: StreamDeps, thresholds: MessageCursorThres
  * produce fixed-width output consistently).
  */
 export function parseIsoInstantToSlackTs(instant: string): string {
-  const epochMs = Date.parse(instant);
-  if (Number.isNaN(epochMs)) {
-    throw new Error(`Invalid ISO 8601 instant: ${instant}`);
-  }
-  const epochSeconds = Math.floor(epochMs / 1000);
-  if (!Number.isFinite(epochSeconds)) {
-    throw new Error(`Invalid epoch seconds (non-finite): ${epochSeconds}`);
-  }
-  if (epochSeconds < 0) {
-    throw new Error(`Timestamp is before Unix epoch (negative): ${epochSeconds}`);
-  }
-  // Extract fractional seconds (milliseconds or microseconds) from the ISO instant.
-  // ISO format examples:
-  //   "2026-08-09T22:26:25.500Z" (3 decimal places, milliseconds)
-  //   "2026-08-09T22:26:25.123456Z" (6 decimal places, microseconds)
-  //   "2026-08-09T22:26:25Z" (no decimal, no fraction)
-  // Regex captures up to 6 fractional digits; pad with trailing zeros to 6.
-  const fracMatch = instant.match(ISO_FRACTION_PATTERN);
-  const fractionalPart = fracMatch?.[1] ? fracMatch[1].padEnd(6, "0") : "000000";
-  return `${epochSeconds}.${fractionalPart}`;
+	const epochMs = Date.parse(instant);
+	if (Number.isNaN(epochMs)) {
+		throw new Error(`Invalid ISO 8601 instant: ${instant}`);
+	}
+	const epochSeconds = Math.floor(epochMs / 1000);
+	if (!Number.isFinite(epochSeconds)) {
+		throw new Error(`Invalid epoch seconds (non-finite): ${epochSeconds}`);
+	}
+	if (epochSeconds < 0) {
+		throw new Error(
+			`Timestamp is before Unix epoch (negative): ${epochSeconds}`,
+		);
+	}
+	// Extract fractional seconds (milliseconds or microseconds) from the ISO instant.
+	// ISO format examples:
+	//   "2026-08-09T22:26:25.500Z" (3 decimal places, milliseconds)
+	//   "2026-08-09T22:26:25.123456Z" (6 decimal places, microseconds)
+	//   "2026-08-09T22:26:25Z" (no decimal, no fraction)
+	// Regex captures up to 6 fractional digits; pad with trailing zeros to 6.
+	const fracMatch = instant.match(ISO_FRACTION_PATTERN);
+	const fractionalPart = fracMatch?.[1]
+		? fracMatch[1].padEnd(6, "0")
+		: "000000";
+	return `${epochSeconds}.${fractionalPart}`;
 }
 
 /**
@@ -2177,93 +2444,106 @@ export function parseIsoInstantToSlackTs(instant: string): string {
  * Used by mergeScopedMessageArchivePasses to enforce the declared collection
  * scope boundary when reading from persistent archive.
  */
-function parseSinceTs(requested: CollectContext["requested"], stream: string): string | null {
-  const since = requested.get(stream)?.time_range?.since;
-  if (since === null || since === undefined) {
-    return null; // Absent bound: unbounded collection.
-  }
-  if (typeof since !== "string") {
-    throw new Error(`Expected string for collection_scope.since, got ${typeof since}: ${String(since)}`);
-  }
-  // Present since: throw on any validation error (not silent null).
-  return parseIsoInstantToSlackTs(since);
+function parseSinceTs(
+	requested: CollectContext["requested"],
+	stream: string,
+): string | null {
+	const since = requested.get(stream)?.time_range?.since;
+	if (since === null || since === undefined) {
+		return null; // Absent bound: unbounded collection.
+	}
+	if (typeof since !== "string") {
+		throw new Error(
+			`Expected string for collection_scope.since, got ${typeof since}: ${String(since)}`,
+		);
+	}
+	// Present since: throw on any validation error (not silent null).
+	return parseIsoInstantToSlackTs(since);
 }
 
-function messageProgressLabel(channelCursorCount: number, priorTs: string | null): string {
-  if (channelCursorCount > 0) {
-    return `Slack: emitting messages from ${String(channelCursorCount)} channel cursor(s)`;
-  }
-  if (priorTs) {
-    return `Slack: emitting messages newer than ${priorTs}`;
-  }
-  return "Slack: emitting all messages (full pass)";
+function messageProgressLabel(
+	channelCursorCount: number,
+	priorTs: string | null,
+): string {
+	if (channelCursorCount > 0) {
+		return `Slack: emitting messages from ${String(channelCursorCount)} channel cursor(s)`;
+	}
+	if (priorTs) {
+		return `Slack: emitting messages newer than ${priorTs}`;
+	}
+	return "Slack: emitting all messages (full pass)";
 }
 
 export async function runFilesStream(deps: StreamDeps): Promise<void> {
-  // Exclude quip/canvas files from the generic `files` stream — they are
-  // first-class records in the `canvases` stream (v0.3). Other file modes
-  // (hosted, snippet, external, tombstone) still flow here.
-  const rows = safeAll<FileRow>(
-    deps.db,
-    `
+	// Exclude quip/canvas files from the generic `files` stream — they are
+	// first-class records in the `canvases` stream (v0.3). Other file modes
+	// (hosted, snippet, external, tombstone) still flow here.
+	const rows = safeAll<FileRow>(
+		deps.db,
+		`
     SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.MODE AS mode, f.DATA AS data
     FROM FILE f
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM FILE GROUP BY ID) m
       ON m.ID = f.ID AND m.mx = f.CHUNK_ID
     WHERE f.MODE != 'quip'
-  `
-  );
-  const { considered, covered } = await runFingerprintedFullSync(deps, "files", rows, buildFileRecord);
-  await declareListConsidered(deps, "files", considered, covered);
+  `,
+	);
+	const { considered, covered } = await runFingerprintedFullSync(
+		deps,
+		"files",
+		rows,
+		buildFileRecord,
+	);
+	await declareListConsidered(deps, "files", considered, covered);
 }
 
 export async function runCanvasesStream(deps: StreamDeps): Promise<void> {
-  // Canvases are stored as FILE rows with MODE='quip' (mimetype
-  // application/vnd.slack-docs). A single canvas can appear multiple times
-  // across CHUNK_IDs (channel share + thread shares); dedupe on file ID by
-  // picking the latest chunk. We also look up the owning channel's
-  // properties.canvas blob to surface is_empty / quip_thread_id, which sit
-  // on the channel record rather than the file record.
-  //
-  // The archive does NOT include canvas BODY content — only metadata and
-  // an authenticated files.slack.com URL. `content_markdown` is therefore
-  // always null here; if/when slackdump or an API-layer fallback fetches
-  // the body, this field is where it belongs.
-  const canvasRows = safeAll<CanvasRow>(
-    deps.db,
-    `
+	// Canvases are stored as FILE rows with MODE='quip' (mimetype
+	// application/vnd.slack-docs). A single canvas can appear multiple times
+	// across CHUNK_IDs (channel share + thread shares); dedupe on file ID by
+	// picking the latest chunk. We also look up the owning channel's
+	// properties.canvas blob to surface is_empty / quip_thread_id, which sit
+	// on the channel record rather than the file record.
+	//
+	// The archive does NOT include canvas BODY content — only metadata and
+	// an authenticated files.slack.com URL. `content_markdown` is therefore
+	// always null here; if/when slackdump or an API-layer fallback fetches
+	// the body, this field is where it belongs.
+	const canvasRows = safeAll<CanvasRow>(
+		deps.db,
+		`
     SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.CHANNEL_ID AS channel_id,
            f.MESSAGE_ID AS message_id, f.DATA AS data
     FROM FILE f
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM FILE GROUP BY ID) m
       ON m.ID = f.ID AND m.mx = f.CHUNK_ID
     WHERE f.MODE = 'quip'
-  `
-  );
-  const chanRows = safeAll<ChannelRow>(
-    deps.db,
-    `
+  `,
+	);
+	const chanRows = safeAll<ChannelRow>(
+		deps.db,
+		`
     SELECT c.ID AS id, c.DATA AS data
     FROM CHANNEL c
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM CHANNEL GROUP BY ID) m
       ON m.ID = c.ID AND m.mx = c.CHUNK_ID
-  `
-  );
-  const channelCanvasIndex = buildChannelCanvasIndex(chanRows);
-  for (const r of canvasRows) {
-    await deps.emitRecord("canvases", buildCanvasRecord(r, channelCanvasIndex));
-  }
-  // `canvases` is the one Slack stream where `considered` is objectively
-  // honest: it full-syncs every run (NOT fingerprint-suppressed, unlike
-  // workspace/users/files/channels/channel_memberships), and every enumerated
-  // `canvasRows` row is emitted unconditionally — so `collected` equals the
-  // enumerated quip-file inventory, never a churn-reduced subset. Declaring
-  // `canvasRows.length` (the deduped MODE='quip' count read at the query site)
-  // as `considered` lets the report read a real `complete` when every canvas
-  // emitted, and an honest `partial` if a canvas was weighed but dropped (e.g.
-  // by record-shape validation). The denominator is measured here, never
-  // aliased to the emitted count.
-  await deps.emit(buildFullScanCoverageMessage("canvases", canvasRows.length));
+  `,
+	);
+	const channelCanvasIndex = buildChannelCanvasIndex(chanRows);
+	for (const r of canvasRows) {
+		await deps.emitRecord("canvases", buildCanvasRecord(r, channelCanvasIndex));
+	}
+	// `canvases` is the one Slack stream where `considered` is objectively
+	// honest: it full-syncs every run (NOT fingerprint-suppressed, unlike
+	// workspace/users/files/channels/channel_memberships), and every enumerated
+	// `canvasRows` row is emitted unconditionally — so `collected` equals the
+	// enumerated quip-file inventory, never a churn-reduced subset. Declaring
+	// `canvasRows.length` (the deduped MODE='quip' count read at the query site)
+	// as `considered` lets the report read a real `complete` when every canvas
+	// emitted, and an honest `partial` if a canvas was weighed but dropped (e.g.
+	// by record-shape validation). The denominator is measured here, never
+	// aliased to the emitted count.
+	await deps.emit(buildFullScanCoverageMessage("canvases", canvasRows.length));
 }
 
 /**
@@ -2272,28 +2552,40 @@ export async function runCanvasesStream(deps: StreamDeps): Promise<void> {
  * direct Slack Web API calls using the same session credential the
  * connector already captured for slackdump.
  */
-export async function runStarsStream(deps: StreamDeps, token: string, cookie: string): Promise<void> {
-  const items = await fetchAllStars(token, cookie);
-  for (const item of items) {
-    await deps.emitRecord("stars", buildStarRecord(item));
-  }
-  await deps.emit(buildFullScanCoverageMessage("stars", items.length));
+export async function runStarsStream(
+	deps: StreamDeps,
+	token: string,
+	cookie: string,
+): Promise<void> {
+	const items = await fetchAllStars(token, cookie);
+	for (const item of items) {
+		await deps.emitRecord("stars", buildStarRecord(item));
+	}
+	await deps.emit(buildFullScanCoverageMessage("stars", items.length));
 }
 
-export async function runUserGroupsStream(deps: StreamDeps, token: string, cookie: string): Promise<void> {
-  const groups = await fetchAllUserGroups(token, cookie);
-  for (const g of groups) {
-    await deps.emitRecord("user_groups", buildUserGroupRecord(g));
-  }
-  await deps.emit(buildFullScanCoverageMessage("user_groups", groups.length));
+export async function runUserGroupsStream(
+	deps: StreamDeps,
+	token: string,
+	cookie: string,
+): Promise<void> {
+	const groups = await fetchAllUserGroups(token, cookie);
+	for (const g of groups) {
+		await deps.emitRecord("user_groups", buildUserGroupRecord(g));
+	}
+	await deps.emit(buildFullScanCoverageMessage("user_groups", groups.length));
 }
 
-export async function runRemindersStream(deps: StreamDeps, token: string, cookie: string): Promise<void> {
-  const reminders = await fetchAllReminders(token, cookie);
-  for (const r of reminders) {
-    await deps.emitRecord("reminders", buildReminderRecord(r));
-  }
-  await deps.emit(buildFullScanCoverageMessage("reminders", reminders.length));
+export async function runRemindersStream(
+	deps: StreamDeps,
+	token: string,
+	cookie: string,
+): Promise<void> {
+	const reminders = await fetchAllReminders(token, cookie);
+	for (const r of reminders) {
+		await deps.emitRecord("reminders", buildReminderRecord(r));
+	}
+	await deps.emit(buildFullScanCoverageMessage("reminders", reminders.length));
 }
 
 /**
@@ -2302,23 +2594,23 @@ export async function runRemindersStream(deps: StreamDeps, token: string, cookie
  * depend on `channels` also being requested this run.
  */
 function currentDmMpimChannelIds(db: DatabaseSync): string[] {
-  const rows = safeAll<ChannelRow>(
-    db,
-    `
+	const rows = safeAll<ChannelRow>(
+		db,
+		`
     SELECT c.ID AS id, c.DATA AS data
     FROM CHANNEL c
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM CHANNEL GROUP BY ID) m
       ON m.ID = c.ID AND m.mx = c.CHUNK_ID
-  `
-  );
-  const ids: string[] = [];
-  for (const r of rows) {
-    const d = parseBlob(r.data);
-    if (d.is_im || d.is_mpim) {
-      ids.push(r.id);
-    }
-  }
-  return ids.sort((a, b) => a.localeCompare(b));
+  `,
+	);
+	const ids: string[] = [];
+	for (const r of rows) {
+		const d = parseBlob(r.data);
+		if (d.is_im || d.is_mpim) {
+			ids.push(r.id);
+		}
+	}
+	return ids.sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -2328,25 +2620,34 @@ function currentDmMpimChannelIds(db: DatabaseSync): string[] {
  * would multiply calls with no stream-relevant payoff. See design.md
  * Decision 3.
  */
-export async function runDmReadStatesStream(deps: StreamDeps, token: string, cookie: string): Promise<void> {
-  const dmChannelIds = currentDmMpimChannelIds(deps.db);
-  const states = await fetchDmReadStates(token, cookie, dmChannelIds);
-  for (const state of states) {
-    await deps.emitRecord("dm_read_states", buildDmReadStateRecord(state, deps.emittedAt));
-  }
-  await deps.emit(buildFullScanCoverageMessage("dm_read_states", states.length));
+export async function runDmReadStatesStream(
+	deps: StreamDeps,
+	token: string,
+	cookie: string,
+): Promise<void> {
+	const dmChannelIds = currentDmMpimChannelIds(deps.db);
+	const states = await fetchDmReadStates(token, cookie, dmChannelIds);
+	for (const state of states) {
+		await deps.emitRecord(
+			"dm_read_states",
+			buildDmReadStateRecord(state, deps.emittedAt),
+		);
+	}
+	await deps.emit(
+		buildFullScanCoverageMessage("dm_read_states", states.length),
+	);
 }
 
 interface StateEmitDeps {
-  archivePath: string;
-  baseArchiveResumedAt: Record<string, string>;
-  channelLastTs: Record<string, string>;
-  committedMaxTs: string | null;
-  emit: CollectContext["emit"];
-  fingerprintCursors: Map<string, FingerprintCursor>;
-  observedChannelIds: readonly string[];
-  requested: CollectContext["requested"];
-  scopedArchiveResumedAt: Record<string, string>;
+	archivePath: string;
+	baseArchiveResumedAt: Record<string, string>;
+	channelLastTs: Record<string, string>;
+	committedMaxTs: string | null;
+	emit: CollectContext["emit"];
+	fingerprintCursors: Map<string, FingerprintCursor>;
+	observedChannelIds: readonly string[];
+	requested: CollectContext["requested"];
+	scopedArchiveResumedAt: Record<string, string>;
 }
 
 /**
@@ -2368,61 +2669,61 @@ interface StateEmitDeps {
  *   marker for visibility.
  */
 function emitStateCheckpoints(deps: StateEmitDeps): void {
-  deps.emit({
-    type: "STATE",
-    stream: "messages",
-    cursor: {
-      last_ts: deps.committedMaxTs,
-      channel_last_ts: deps.channelLastTs,
-      observed_channel_ids: [...deps.observedChannelIds].sort(),
-      archive_dir: deps.archivePath,
-      base_archive_resumed_at: deps.baseArchiveResumedAt,
-      scoped_archive_resumed_at: deps.scopedArchiveResumedAt,
-      fetched_at: nowIso(),
-    },
-  });
-  for (const stream of [
-    "channels",
-    "channel_stats",
-    "channel_memberships",
-    "users",
-    "files",
-    "canvases",
-    "workspace",
-    "stars",
-    "user_groups",
-    "reminders",
-    "dm_read_states",
-  ]) {
-    if (deps.requested.has(stream)) {
-      const cursor: Record<string, unknown> = { synced_at: nowIso() };
-      const fingerprintCursor = deps.fingerprintCursors.get(stream);
-      if (fingerprintCursor && fingerprintCursor.size() > 0) {
-        cursor.fingerprints = fingerprintCursor.toState();
-      }
-      deps.emit({
-        type: "STATE",
-        stream,
-        cursor,
-      });
-    }
-  }
+	deps.emit({
+		type: "STATE",
+		stream: "messages",
+		cursor: {
+			last_ts: deps.committedMaxTs,
+			channel_last_ts: deps.channelLastTs,
+			observed_channel_ids: [...deps.observedChannelIds].sort(),
+			archive_dir: deps.archivePath,
+			base_archive_resumed_at: deps.baseArchiveResumedAt,
+			scoped_archive_resumed_at: deps.scopedArchiveResumedAt,
+			fetched_at: nowIso(),
+		},
+	});
+	for (const stream of [
+		"channels",
+		"channel_stats",
+		"channel_memberships",
+		"users",
+		"files",
+		"canvases",
+		"workspace",
+		"stars",
+		"user_groups",
+		"reminders",
+		"dm_read_states",
+	]) {
+		if (deps.requested.has(stream)) {
+			const cursor: Record<string, unknown> = { synced_at: nowIso() };
+			const fingerprintCursor = deps.fingerprintCursors.get(stream);
+			if (fingerprintCursor && fingerprintCursor.size() > 0) {
+				cursor.fingerprints = fingerprintCursor.toState();
+			}
+			deps.emit({
+				type: "STATE",
+				stream,
+				cursor,
+			});
+		}
+	}
 }
 
 interface EnsureArchiveDeps {
-  archivePath: string;
-  childEnv: NodeJS.ProcessEnv;
-  cookie: string;
-  opts: SlackOpts;
-  positionalChannels: string[];
-  priorArchive: string | undefined;
-  progress: CollectContext["progress"];
-  resumeTarget: string | null;
-  sqlitePath: string;
-  timeFrom: string | null;
-  timeTo: string | null;
-  token: string;
-  useResume: boolean;
+	archivePath: string;
+	childEnv: NodeJS.ProcessEnv;
+	cookie: string;
+	opts: SlackOpts;
+	positionalChannels: string[];
+	priorArchive: string | undefined;
+	progress: CollectContext["progress"];
+	resumeTarget: string | null;
+	sqlitePath: string;
+	timeFrom: string | null;
+	timeTo: string | null;
+	token: string;
+	useResume: boolean;
 }
 
 /**
@@ -2437,47 +2738,56 @@ interface EnsureArchiveDeps {
  * instead of leaving the data stranded.
  */
 async function ensureArchiveOnDisk(deps: EnsureArchiveDeps): Promise<void> {
-  const { archivePath, sqlitePath, progress, childEnv, token, cookie } = deps;
-  const skipSlackdump = process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1";
-  try {
-    if (skipSlackdump) {
-      progress(`Skipping slackdump refresh (PDPP_SLACK_SKIP_SLACKDUMP=1); reading existing archive at ${archivePath}`);
-      if (!existsSync(sqlitePath)) {
-        throw new Error(`PDPP_SLACK_SKIP_SLACKDUMP=1 but no archive found at ${sqlitePath}`);
-      }
-    } else {
-      progress(`Ensuring slackdump workspace is cached (SLACKDUMP_BIN=${process.env.SLACKDUMP_BIN || "<unset>"})`);
-      await ensureWorkspaceCached({ token, cookie, env: childEnv });
-      // WHY we ship an API-limits config: slackdump's defaults set tier_3 /
-      // tier_4 retries to 3, which exhausts quickly on bot-heavy channels
-      // (thousands of threads × even a low rate of 500 Internal Server Errors
-      // from Slack = process aborts with exit 6). Bumping those retries to 20
-      // aligns them with tier_2 (rate-limit retries), letting the same
-      // exponential-backoff policy ride out server-side hiccups. See
-      // config/slackdump-api-config.toml.
-      const apiConfigPath = new URL("../../config/slackdump-api-config.toml", import.meta.url).pathname;
-      await runArchiveOrResume({
-        apiConfigPath,
-        archivePath,
-        childEnv,
-        opts: deps.opts,
-        positionalChannels: deps.positionalChannels,
-        priorArchive: deps.priorArchive,
-        progress,
-        resumeTarget: deps.resumeTarget,
-        sqlitePath: deps.sqlitePath,
-        timeFrom: deps.timeFrom,
-        timeTo: deps.timeTo,
-        useResume: deps.useResume,
-      });
-    }
-  } catch (e) {
-    const m = e instanceof Error ? e.message : String(e);
-    throw new Error(`slackdump failed: ${m}`, { cause: e });
-  }
-  if (!existsSync(sqlitePath)) {
-    throw new Error(`slackdump output not found at ${sqlitePath}`);
-  }
+	const { archivePath, sqlitePath, progress, childEnv, token, cookie } = deps;
+	const skipSlackdump = process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1";
+	try {
+		if (skipSlackdump) {
+			progress(
+				`Skipping slackdump refresh (PDPP_SLACK_SKIP_SLACKDUMP=1); reading existing archive at ${archivePath}`,
+			);
+			if (!existsSync(sqlitePath)) {
+				throw new Error(
+					`PDPP_SLACK_SKIP_SLACKDUMP=1 but no archive found at ${sqlitePath}`,
+				);
+			}
+		} else {
+			progress(
+				`Ensuring slackdump workspace is cached (SLACKDUMP_BIN=${process.env.SLACKDUMP_BIN || "<unset>"})`,
+			);
+			await ensureWorkspaceCached({ token, cookie, env: childEnv });
+			// WHY we ship an API-limits config: slackdump's defaults set tier_3 /
+			// tier_4 retries to 3, which exhausts quickly on bot-heavy channels
+			// (thousands of threads × even a low rate of 500 Internal Server Errors
+			// from Slack = process aborts with exit 6). Bumping those retries to 20
+			// aligns them with tier_2 (rate-limit retries), letting the same
+			// exponential-backoff policy ride out server-side hiccups. See
+			// config/slackdump-api-config.toml.
+			const apiConfigPath = new URL(
+				"../../config/slackdump-api-config.toml",
+				import.meta.url,
+			).pathname;
+			await runArchiveOrResume({
+				apiConfigPath,
+				archivePath,
+				childEnv,
+				opts: deps.opts,
+				positionalChannels: deps.positionalChannels,
+				priorArchive: deps.priorArchive,
+				progress,
+				resumeTarget: deps.resumeTarget,
+				sqlitePath: deps.sqlitePath,
+				timeFrom: deps.timeFrom,
+				timeTo: deps.timeTo,
+				useResume: deps.useResume,
+			});
+		}
+	} catch (e) {
+		const m = e instanceof Error ? e.message : String(e);
+		throw new Error(`slackdump failed: ${m}`, { cause: e });
+	}
+	if (!existsSync(sqlitePath)) {
+		throw new Error(`slackdump output not found at ${sqlitePath}`);
+	}
 }
 
 /**
@@ -2486,25 +2796,31 @@ async function ensureArchiveOnDisk(deps: EnsureArchiveDeps): Promise<void> {
  * have separate paths and their own reconciliation lifecycle.
  */
 async function refreshBaseArchiveIfDue(
-  deps: EnsureArchiveDeps & {
-    isUnscopedMessageBoundary: boolean;
-    lastResumedAt: string | undefined;
-    nowIso: string;
-  }
+	deps: EnsureArchiveDeps & {
+		isUnscopedMessageBoundary: boolean;
+		lastResumedAt: string | undefined;
+		nowIso: string;
+	},
 ): Promise<boolean> {
-  const baseResumeDue =
-    !(deps.isUnscopedMessageBoundary && deps.useResume) ||
-    archiveDueForResume(deps.lastResumedAt, deps.opts.LOOKBACK_DAYS, deps.nowIso);
-  if (baseResumeDue) {
-    await timedPhase(deps.progress, "slackdump-subprocess", () => ensureArchiveOnDisk(deps));
-    return deps.isUnscopedMessageBoundary && deps.useResume;
-  }
-  deps.progress(
-    `Slack: base archive at ${deps.archivePath} not due for resume yet ` +
-      `(last resumed within lookback=p${String(deps.opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
-    { stream: "messages" }
-  );
-  return false;
+	const baseResumeDue =
+		!(deps.isUnscopedMessageBoundary && deps.useResume) ||
+		archiveDueForResume(
+			deps.lastResumedAt,
+			deps.opts.LOOKBACK_DAYS,
+			deps.nowIso,
+		);
+	if (baseResumeDue) {
+		await timedPhase(deps.progress, "slackdump-subprocess", () =>
+			ensureArchiveOnDisk(deps),
+		);
+		return deps.isUnscopedMessageBoundary && deps.useResume;
+	}
+	deps.progress(
+		`Slack: base archive at ${deps.archivePath} not due for resume yet ` +
+			`(last resumed within lookback=p${String(deps.opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
+		{ stream: "messages" },
+	);
+	return false;
 }
 
 /**
@@ -2527,37 +2843,42 @@ async function refreshBaseArchiveIfDue(
  * connector-local rather than a `connector-runtime.ts` primitive.
  */
 export async function runOptionalStream(
-  emit: CollectContext["emit"],
-  stream: string,
-  run: () => Promise<void>
+	emit: CollectContext["emit"],
+	stream: string,
+	run: () => Promise<void>,
 ): Promise<void> {
-  try {
-    await run();
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    // `action: "retry_by_runtime"` is a claim that retrying can help: true for
-    // a transient failure, false for a durable auth rejection (retrying the
-    // same call with the same rejected session repeats the same outcome
-    // forever). `mapSkipCoverageCondition` (reference-implementation/server/
-    // connector-coverage-policy.ts) checks `action` before any reason text,
-    // so an unconditional "retry_by_runtime" here would misclassify a
-    // persistent slack_auth_failed as a self-healing retryable_gap.
-    //
-    // Classified by `instanceof SlackApiAuthError`, not by matching `message`
-    // text — a typed marker can't silently drift out of sync with the throw
-    // site the way a regex copy-pasted across files can.
-    const isAuthFailure = e instanceof SlackApiAuthError;
-    await emit({
-      type: "SKIP_RESULT",
-      stream,
-      reason: OPTIONAL_STREAM_FAILED_REASON,
-      message: `Slack: ${stream} failed and was skipped (optional stream): ${message}`,
-      recovery_hint: isAuthFailure
-        ? { action: "refresh_credentials", retryable: false }
-        : { action: "retry_by_runtime", retryable: SLACK_API_RETRYABLE_FAILURE_RE.test(message) },
-      ...(isAuthFailure && e.slackApiErrorCode ? { diagnostics: { slack_api_error_code: e.slackApiErrorCode } } : {}),
-    });
-  }
+	try {
+		await run();
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		// `action: "retry_by_runtime"` is a claim that retrying can help: true for
+		// a transient failure, false for a durable auth rejection (retrying the
+		// same call with the same rejected session repeats the same outcome
+		// forever). `mapSkipCoverageCondition` (reference-implementation/server/
+		// connector-coverage-policy.ts) checks `action` before any reason text,
+		// so an unconditional "retry_by_runtime" here would misclassify a
+		// persistent slack_auth_failed as a self-healing retryable_gap.
+		//
+		// Classified by `instanceof SlackApiAuthError`, not by matching `message`
+		// text — a typed marker can't silently drift out of sync with the throw
+		// site the way a regex copy-pasted across files can.
+		const isAuthFailure = e instanceof SlackApiAuthError;
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: OPTIONAL_STREAM_FAILED_REASON,
+			message: `Slack: ${stream} failed and was skipped (optional stream): ${message}`,
+			recovery_hint: isAuthFailure
+				? { action: "refresh_credentials", retryable: false }
+				: {
+						action: "retry_by_runtime",
+						retryable: SLACK_API_RETRYABLE_FAILURE_RE.test(message),
+					},
+			...(isAuthFailure && e.slackApiErrorCode
+				? { diagnostics: { slack_api_error_code: e.slackApiErrorCode } }
+				: {}),
+		});
+	}
 }
 
 /**
@@ -2565,94 +2886,116 @@ export async function runOptionalStream(
  * order. Returns the max message TS for the post-loop STATE checkpoint.
  */
 export async function runRequestedStreams(
-  deps: StreamDeps,
-  state: CollectContext["state"],
-  credentials: SlackCredentials,
-  emit: CollectContext["emit"],
-  options: {
-    allowLegacyMessageCursorFallback?: boolean;
-    ignoreMessageChannelCursors?: boolean;
-    sinceTs?: string | null;
-  } = {}
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	credentials: SlackCredentials,
+	emit: CollectContext["emit"],
+	options: {
+		allowLegacyMessageCursorFallback?: boolean;
+		ignoreMessageChannelCursors?: boolean;
+		sinceTs?: string | null;
+	} = {},
 ): Promise<MessagesPassResult> {
-  if (deps.requested.has("workspace")) {
-    deps.progress("Slack: emitting workspace record", { stream: "workspace" });
-    await runWorkspaceStream(deps);
-  }
-  if (deps.requested.has("channels") || deps.requested.has("channel_stats")) {
-    deps.progress("Slack: emitting channels", { stream: "channels" });
-    await runChannelsStream(deps);
-  }
-  if (deps.requested.has("channel_memberships")) {
-    deps.progress("Slack: emitting channel memberships", { stream: "channel_memberships" });
-    await runChannelMembershipsStream(deps);
-  }
-  if (deps.requested.has("users")) {
-    deps.progress("Slack: emitting users", { stream: "users" });
-    await runUsersStream(deps);
-  }
-  // Messages, reactions, message_attachments share one pass for efficiency.
-  let result: MessagesPassResult = { channelMaxTs: {}, maxMessageTs: null, considered: 0 };
-  if (deps.requested.has("messages") || deps.requested.has("reactions") || deps.requested.has("message_attachments")) {
-    const messagesState = state.messages as MessagesState | undefined;
-    const priorTs = options.allowLegacyMessageCursorFallback === false ? null : (messagesState?.last_ts ?? null);
-    const channelLastTs = options.ignoreMessageChannelCursors
-      ? {}
-      : normalizeStringRecord(messagesState?.channel_last_ts);
-    deps.progress(messageProgressLabel(Object.keys(channelLastTs).length, priorTs), { stream: "messages" });
-    result = await runMessagesUnifiedPass(deps, {
-      channelLastTs,
-      legacyLastTs: priorTs,
-      sinceTs: options.sinceTs ?? null,
-    });
-    // One archive traversal supplies the parent denominator. Reactions and
-    // attachments ride this checkpoint window via manifest state_stream and
-    // must not receive a fabricated child-row denominator.
-    await deps.emit(
-      buildDetailCoverageMessage({
-        stream: "messages",
-        stateStream: "messages",
-        requiredKeys: [],
-        hydratedKeys: [],
-        considered: result.considered,
-        covered: result.considered,
-      })
-    );
-    // Reactions and message attachments are derived from the same retained
-    // MESSAGE rows. Declare that archive enumeration as their measured
-    // checkpoint boundary too; never use the child-record counts, which are
-    // not the boundary this pass enumerates.
-    await declareMessageFamilyCoverage(deps, result.considered);
-  }
-  if (deps.requested.has("files")) {
-    deps.progress("Slack: emitting files", { stream: "files" });
-    await runFilesStream(deps);
-  }
-  if (deps.requested.has("canvases")) {
-    deps.progress("Slack: emitting canvases", { stream: "canvases" });
-    await runCanvasesStream(deps);
-  }
-  if (deps.requested.has("stars")) {
-    deps.progress("Slack: emitting stars", { stream: "stars" });
-    await runOptionalStream(emit, "stars", () => runStarsStream(deps, credentials.token, credentials.cookie));
-  }
-  if (deps.requested.has("user_groups")) {
-    deps.progress("Slack: emitting user groups", { stream: "user_groups" });
-    await runOptionalStream(emit, "user_groups", () =>
-      runUserGroupsStream(deps, credentials.token, credentials.cookie)
-    );
-  }
-  if (deps.requested.has("reminders")) {
-    deps.progress("Slack: emitting reminders", { stream: "reminders" });
-    await runOptionalStream(emit, "reminders", () => runRemindersStream(deps, credentials.token, credentials.cookie));
-  }
-  if (deps.requested.has("dm_read_states")) {
-    deps.progress("Slack: emitting DM read states", { stream: "dm_read_states" });
-    await runOptionalStream(emit, "dm_read_states", () =>
-      runDmReadStatesStream(deps, credentials.token, credentials.cookie)
-    );
-  }
-  return result;
+	if (deps.requested.has("workspace")) {
+		deps.progress("Slack: emitting workspace record", { stream: "workspace" });
+		await runWorkspaceStream(deps);
+	}
+	if (deps.requested.has("channels") || deps.requested.has("channel_stats")) {
+		deps.progress("Slack: emitting channels", { stream: "channels" });
+		await runChannelsStream(deps);
+	}
+	if (deps.requested.has("channel_memberships")) {
+		deps.progress("Slack: emitting channel memberships", {
+			stream: "channel_memberships",
+		});
+		await runChannelMembershipsStream(deps);
+	}
+	if (deps.requested.has("users")) {
+		deps.progress("Slack: emitting users", { stream: "users" });
+		await runUsersStream(deps);
+	}
+	// Messages, reactions, message_attachments share one pass for efficiency.
+	let result: MessagesPassResult = {
+		channelMaxTs: {},
+		maxMessageTs: null,
+		considered: 0,
+	};
+	if (
+		deps.requested.has("messages") ||
+		deps.requested.has("reactions") ||
+		deps.requested.has("message_attachments")
+	) {
+		const messagesState = state.messages as MessagesState | undefined;
+		const priorTs =
+			options.allowLegacyMessageCursorFallback === false
+				? null
+				: (messagesState?.last_ts ?? null);
+		const channelLastTs = options.ignoreMessageChannelCursors
+			? {}
+			: normalizeStringRecord(messagesState?.channel_last_ts);
+		deps.progress(
+			messageProgressLabel(Object.keys(channelLastTs).length, priorTs),
+			{ stream: "messages" },
+		);
+		result = await runMessagesUnifiedPass(deps, {
+			channelLastTs,
+			legacyLastTs: priorTs,
+			sinceTs: options.sinceTs ?? null,
+		});
+		// One archive traversal supplies the parent denominator. Reactions and
+		// attachments ride this checkpoint window via manifest state_stream and
+		// must not receive a fabricated child-row denominator.
+		await deps.emit(
+			buildDetailCoverageMessage({
+				stream: "messages",
+				stateStream: "messages",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: result.considered,
+				covered: result.considered,
+			}),
+		);
+		// Reactions and message attachments are derived from the same retained
+		// MESSAGE rows. Declare that archive enumeration as their measured
+		// checkpoint boundary too; never use the child-record counts, which are
+		// not the boundary this pass enumerates.
+		await declareMessageFamilyCoverage(deps, result.considered);
+	}
+	if (deps.requested.has("files")) {
+		deps.progress("Slack: emitting files", { stream: "files" });
+		await runFilesStream(deps);
+	}
+	if (deps.requested.has("canvases")) {
+		deps.progress("Slack: emitting canvases", { stream: "canvases" });
+		await runCanvasesStream(deps);
+	}
+	if (deps.requested.has("stars")) {
+		deps.progress("Slack: emitting stars", { stream: "stars" });
+		await runOptionalStream(emit, "stars", () =>
+			runStarsStream(deps, credentials.token, credentials.cookie),
+		);
+	}
+	if (deps.requested.has("user_groups")) {
+		deps.progress("Slack: emitting user groups", { stream: "user_groups" });
+		await runOptionalStream(emit, "user_groups", () =>
+			runUserGroupsStream(deps, credentials.token, credentials.cookie),
+		);
+	}
+	if (deps.requested.has("reminders")) {
+		deps.progress("Slack: emitting reminders", { stream: "reminders" });
+		await runOptionalStream(emit, "reminders", () =>
+			runRemindersStream(deps, credentials.token, credentials.cookie),
+		);
+	}
+	if (deps.requested.has("dm_read_states")) {
+		deps.progress("Slack: emitting DM read states", {
+			stream: "dm_read_states",
+		});
+		await runOptionalStream(emit, "dm_read_states", () =>
+			runDmReadStatesStream(deps, credentials.token, credentials.cookie),
+		);
+	}
+	return result;
 }
 
 // ─── Phase timing observability ────────────────────────────────────────
@@ -2665,26 +3008,38 @@ type ProgressFn = CollectContext["progress"];
 // number in run evidence, not an assumption — the diagnosis the archive-cost
 // investigation needed. `now()` uses Date.now via an injected clock so tests
 // stay deterministic.
-async function timedPhase<T>(progress: ProgressFn, phase: string, run: () => Promise<T>): Promise<T> {
-  const started = Date.now();
-  try {
-    return await run();
-  } finally {
-    progress(`Slack phase timing: ${phase} took ${Date.now() - started}ms`);
-  }
+async function timedPhase<T>(
+	progress: ProgressFn,
+	phase: string,
+	run: () => Promise<T>,
+): Promise<T> {
+	const started = Date.now();
+	try {
+		return await run();
+	} finally {
+		progress(`Slack phase timing: ${phase} took ${Date.now() - started}ms`);
+	}
 }
 
 // End-of-run archive size snapshot: the sqlite (+ sidecars) byte size and the
 // `__uploads/` residue presence/size. Makes the steady-state disk bound
 // observable and shows whether reclaim would free anything.
-function reportArchiveSizeSnapshot(progress: ProgressFn, sqlitePath: string, archivePath: string): void {
-  const sqliteBytes =
-    existingFileSize(sqlitePath) + existingFileSize(`${sqlitePath}-wal`) + existingFileSize(`${sqlitePath}-shm`);
-  const uploadsDir = resolveUploadsDir(archivePath);
-  const uploadsBytes = existsSync(uploadsDir) ? directorySizeBytes(uploadsDir) : 0;
-  progress(
-    `Slack archive size: sqlite=${sqliteBytes}B uploads=${uploadsBytes}B (uploads are attachment bytes the connector does not ingest)`
-  );
+function reportArchiveSizeSnapshot(
+	progress: ProgressFn,
+	sqlitePath: string,
+	archivePath: string,
+): void {
+	const sqliteBytes =
+		existingFileSize(sqlitePath) +
+		existingFileSize(`${sqlitePath}-wal`) +
+		existingFileSize(`${sqlitePath}-shm`);
+	const uploadsDir = resolveUploadsDir(archivePath);
+	const uploadsBytes = existsSync(uploadsDir)
+		? directorySizeBytes(uploadsDir)
+		: 0;
+	progress(
+		`Slack archive size: sqlite=${sqliteBytes}B uploads=${uploadsBytes}B (uploads are attachment bytes the connector does not ingest)`,
+	);
 }
 
 // ─── Entry ─────────────────────────────────────────────────────────────
@@ -2693,278 +3048,334 @@ function reportArchiveSizeSnapshot(progress: ProgressFn, sqlitePath: string, arc
 // and block the Node event loop on stdin. Only fires when this module
 // IS the process entry point (i.e. `tsx connectors/slack/index.ts`).
 if (isMainModule(import.meta.url)) {
-  // Set by collect() when SLACK_RECLAIM_UPLOADS=1, consumed by onDurableCommit
-  // AFTER the runtime acknowledges durable ingest. Carrying it via a closure
-  // keeps the reclaim commit-gated (post-ack) without threading run state
-  // through the runtime protocol. Lists every archive this run actually read
-  // (the base/scoped archive plus any reconciled scoped archives) so reclaim
-  // is not silently confined to one path while other archives' __uploads/
-  // residue survives untouched.
-  let reclaimPlan: readonly string[] | null = null;
+	// Set by collect() when SLACK_RECLAIM_UPLOADS=1, consumed by onDurableCommit
+	// AFTER the runtime acknowledges durable ingest. Carrying it via a closure
+	// keeps the reclaim commit-gated (post-ack) without threading run state
+	// through the runtime protocol. Lists every archive this run actually read
+	// (the base/scoped archive plus any reconciled scoped archives) so reclaim
+	// is not silently confined to one path while other archives' __uploads/
+	// residue survives untouched.
+	let reclaimPlan: readonly string[] | null = null;
 
-  runConnector({
-    name: "slack",
-    retryablePattern: SLACK_RETRYABLE_FAILURE_RE,
-    timeRangeField: "sent_at",
-    validateRecord,
-    auth: {
-      kind: "env",
-      required: ["SLACK_WORKSPACE", "SLACK_TOKEN", "SLACK_COOKIE"],
-    },
-    // Runs only on a successful run, after durable ingest ack, before exit.
-    // MUST NOT call `progress`/`emit` — the runtime has already consumed this
-    // run's DONE and torn down its message loop; any further stdout JSONL
-    // (including PROGRESS) fails the ALREADY-SUCCEEDED run as
-    // connector_protocol_violation ("Connector emitted PROGRESS after DONE").
-    // Report via the stderr-only `log` the runtime hands in instead.
-    async onDurableCommit(log): Promise<void> {
-      if (!reclaimPlan || reclaimPlan.length === 0) {
-        return;
-      }
-      for (const archivePath of reclaimPlan) {
-        const reclaimedBytes = await reclaimUploads(archivePath);
-        log(
-          `Slack reclaim: removed __uploads/ at ${archivePath} after durable commit, reclaimed ${reclaimedBytes}B ` +
-            "(one-way: PDPP holds no copy; slackdump will not re-download these files)"
-        );
-      }
-    },
-    async collect(ctx: CollectContext): Promise<void> {
-      const { state, requested, credentials, emit, progress } = ctx;
+	runConnector({
+		name: "slack",
+		retryablePattern: SLACK_RETRYABLE_FAILURE_RE,
+		timeRangeField: "sent_at",
+		validateRecord,
+		auth: {
+			kind: "env",
+			required: ["SLACK_WORKSPACE", "SLACK_TOKEN", "SLACK_COOKIE"],
+		},
+		// Runs only on a successful run, after durable ingest ack, before exit.
+		// MUST NOT call `progress`/`emit` — the runtime has already consumed this
+		// run's DONE and torn down its message loop; any further stdout JSONL
+		// (including PROGRESS) fails the ALREADY-SUCCEEDED run as
+		// connector_protocol_violation ("Connector emitted PROGRESS after DONE").
+		// Report via the stderr-only `log` the runtime hands in instead.
+		async onDurableCommit(log): Promise<void> {
+			if (!reclaimPlan || reclaimPlan.length === 0) {
+				return;
+			}
+			for (const archivePath of reclaimPlan) {
+				const reclaimedBytes = await reclaimUploads(archivePath);
+				log(
+					`Slack reclaim: removed __uploads/ at ${archivePath} after durable commit, reclaimed ${reclaimedBytes}B ` +
+						"(one-way: PDPP holds no copy; slackdump will not re-download these files)",
+				);
+			}
+		},
+		async collect(ctx: CollectContext): Promise<void> {
+			const { state, requested, credentials, emit, progress } = ctx;
 
-      const { workspace, token, cookie } = extractSlackCredentials(credentials);
-      const opts = readSlackOptions();
+			const { workspace, token, cookie } = extractSlackCredentials(credentials);
+			const opts = readSlackOptions();
 
-      // Resource filters (pre-fetch: pass as positional args; post-fetch: enforce too)
-      const resFilters = new Map<string, ReadonlySet<string> | null>();
-      for (const [n, r] of requested) {
-        resFilters.set(n, resourceSet(r));
-      }
+			// Resource filters (pre-fetch: pass as positional args; post-fetch: enforce too)
+			const resFilters = new Map<string, ReadonlySet<string> | null>();
+			for (const [n, r] of requested) {
+				resFilters.set(n, resourceSet(r));
+			}
 
-      const childEnv = buildChildEnv(token, cookie);
-      const msgResFilter = resFilters.get("messages");
-      const positionalChannels: string[] = [...(msgResFilter ? [...msgResFilter] : []), ...opts.CHANNEL_ALLOWLIST];
-      const messageFamilyRequested =
-        requested.has("messages") || requested.has("reactions") || requested.has("message_attachments");
-      const isUnscopedMessageBoundary = positionalChannels.length === 0;
-      const messagesScope = requested.get("messages");
-      const baseArchivePaths = resolveArchivePaths(workspace);
-      const { dumpDir } = baseArchivePaths;
-      // State the archive root before any work: on the local-development
-      // fallback this is the run log's only warning that the archive is not
-      // on a deployment-managed volume.
-      progress(baseArchivePaths.rootDisclosure);
-      const { archivePath, sqlitePath } = resolveScopedArchivePaths(baseArchivePaths, positionalChannels);
-      await mkdir(dumpDir, { recursive: true });
+			const childEnv = buildChildEnv(token, cookie);
+			const msgResFilter = resFilters.get("messages");
+			const positionalChannels: string[] = [
+				...(msgResFilter ? [...msgResFilter] : []),
+				...opts.CHANNEL_ALLOWLIST,
+			];
+			const messageFamilyRequested =
+				requested.has("messages") ||
+				requested.has("reactions") ||
+				requested.has("message_attachments");
+			const isUnscopedMessageBoundary = positionalChannels.length === 0;
+			const messagesScope = requested.get("messages");
+			const baseArchivePaths = resolveArchivePaths(workspace);
+			const { dumpDir } = baseArchivePaths;
+			// State the archive root before any work: on the local-development
+			// fallback this is the run log's only warning that the archive is not
+			// on a deployment-managed volume.
+			progress(baseArchivePaths.rootDisclosure);
+			const { archivePath, sqlitePath } = resolveScopedArchivePaths(
+				baseArchivePaths,
+				positionalChannels,
+			);
+			await mkdir(dumpDir, { recursive: true });
 
-      const { resumeTarget, priorArchive } = pickResumeTarget(state, archivePath, {
-        allowStateArchive: isUnscopedMessageBoundary,
-      });
-      const useResume = Boolean(resumeTarget);
-      const messagesState = state.messages as MessagesState | undefined;
-      const priorBaseArchiveResumedAt = normalizeStringRecord(messagesState?.base_archive_resumed_at);
-      const baseArchiveResumedAt = { ...priorBaseArchiveResumedAt };
-      // Upgrade compatibility: a connection whose base archive already
-      // completed a real resume BEFORE this throttle shipped has no
-      // `base_archive_resumed_at` entry yet. Without this, the absent entry
-      // reads as "due" and the first post-upgrade run replays the entire
-      // base archive once more — the exact live defect this closes. Only
-      // fires when prior STATE proves a genuinely completed base-archive
-      // run (never from archive presence alone, which an interrupted/failed
-      // run leaves behind too) and never overrides an existing real fact.
-      const migratedBaseArchiveResumedAt =
-        priorBaseArchiveResumedAt[archivePath] === undefined
-          ? deriveMigratedBaseArchiveResumedAt({
-              archivePath,
-              isUnscopedMessageBoundary,
-              messagesState,
-              nowIso: ctx.emittedAt,
-              priorArchive,
-            })
-          : undefined;
-      if (migratedBaseArchiveResumedAt) {
-        baseArchiveResumedAt[archivePath] = migratedBaseArchiveResumedAt;
-        progress(
-          `Slack: base archive at ${archivePath} has no base_archive_resumed_at fact yet but prior STATE proves ` +
-            "a completed resume before this throttle shipped — seeding the throttle from this run instead of " +
-            "replaying the archive",
-          { stream: "messages" }
-        );
-      }
-      // Map time_range from messages stream scope into -time-from / -time-to.
-      const { timeFrom, timeTo } = extractMessageTimeRange(
-        messagesScope?.time_range as { from?: string | null; to?: string | null } | undefined
-      );
+			const { resumeTarget, priorArchive } = pickResumeTarget(
+				state,
+				archivePath,
+				{
+					allowStateArchive: isUnscopedMessageBoundary,
+				},
+			);
+			const useResume = Boolean(resumeTarget);
+			const messagesState = state.messages as MessagesState | undefined;
+			const priorBaseArchiveResumedAt = normalizeStringRecord(
+				messagesState?.base_archive_resumed_at,
+			);
+			const baseArchiveResumedAt = { ...priorBaseArchiveResumedAt };
+			// Upgrade compatibility: a connection whose base archive already
+			// completed a real resume BEFORE this throttle shipped has no
+			// `base_archive_resumed_at` entry yet. Without this, the absent entry
+			// reads as "due" and the first post-upgrade run replays the entire
+			// base archive once more — the exact live defect this closes. Only
+			// fires when prior STATE proves a genuinely completed base-archive
+			// run (never from archive presence alone, which an interrupted/failed
+			// run leaves behind too) and never overrides an existing real fact.
+			const migratedBaseArchiveResumedAt =
+				priorBaseArchiveResumedAt[archivePath] === undefined
+					? deriveMigratedBaseArchiveResumedAt({
+							archivePath,
+							isUnscopedMessageBoundary,
+							messagesState,
+							nowIso: ctx.emittedAt,
+							priorArchive,
+						})
+					: undefined;
+			if (migratedBaseArchiveResumedAt) {
+				baseArchiveResumedAt[archivePath] = migratedBaseArchiveResumedAt;
+				progress(
+					`Slack: base archive at ${archivePath} has no base_archive_resumed_at fact yet but prior STATE proves ` +
+						"a completed resume before this throttle shipped — seeding the throttle from this run instead of " +
+						"replaying the archive",
+					{ stream: "messages" },
+				);
+			}
+			// Map time_range from messages stream scope into -time-from / -time-to.
+			const { timeFrom, timeTo } = extractMessageTimeRange(
+				messagesScope?.time_range as
+					| { from?: string | null; to?: string | null }
+					| undefined,
+			);
 
-      const baseResumeCompleted = await refreshBaseArchiveIfDue({
-        archivePath,
-        childEnv,
-        cookie,
-        isUnscopedMessageBoundary,
-        lastResumedAt: migratedBaseArchiveResumedAt ?? priorBaseArchiveResumedAt[archivePath],
-        nowIso: ctx.emittedAt,
-        opts,
-        positionalChannels,
-        priorArchive,
-        progress,
-        resumeTarget,
-        sqlitePath,
-        timeFrom,
-        timeTo,
-        token,
-        useResume,
-      });
-      // This reaches durable STATE only if the entire run commits. A failed
-      // resume, or a later failed run, therefore remains owed and retryable.
-      if (baseResumeCompleted) {
-        baseArchiveResumedAt[archivePath] = ctx.emittedAt;
-      }
+			const baseResumeCompleted = await refreshBaseArchiveIfDue({
+				archivePath,
+				childEnv,
+				cookie,
+				isUnscopedMessageBoundary,
+				lastResumedAt:
+					migratedBaseArchiveResumedAt ??
+					priorBaseArchiveResumedAt[archivePath],
+				nowIso: ctx.emittedAt,
+				opts,
+				positionalChannels,
+				priorArchive,
+				progress,
+				resumeTarget,
+				sqlitePath,
+				timeFrom,
+				timeTo,
+				token,
+				useResume,
+			});
+			// This reaches durable STATE only if the entire run commits. A failed
+			// resume, or a later failed run, therefore remains owed and retryable.
+			if (baseResumeCompleted) {
+				baseArchiveResumedAt[archivePath] = ctx.emittedAt;
+			}
 
-      const db = await timedPhase(progress, "archive-open", () =>
-        Promise.resolve(new DatabaseSync(sqlitePath, { readOnly: true }))
-      );
-      // One per-record fingerprint cursor per fingerprinted stream. The
-      // primitive seeds itself from the prior cursor so a record we skip
-      // this run carries its fingerprint forward into the next STATE
-      // write — without that, a single skipped record would drop from
-      // STATE on the next write and re-emit on the run after.
-      const fingerprintCursors = new Map<string, FingerprintCursor>();
-      for (const stream of FINGERPRINTED_STREAMS) {
-        fingerprintCursors.set(
-          stream,
-          openFingerprintCursor(state[stream], {
-            excludeFromFingerprint: FINGERPRINT_EXCLUDE[stream],
-          })
-        );
-      }
-      const deps: StreamDeps = {
-        db,
-        // Narrow the ctx.emit union to the single message kind StreamDeps.emit
-        // accepts (DETAIL_COVERAGE). runConnector's emit accepts the full
-        // EmittedMessage union, so this is a contravariant widening at the call
-        // boundary, not a coercion of message shape.
-        emit: (msg) => emit(msg),
-        emitRecord: (stream, data) =>
-          stream === "messages" && msgResFilter
-            ? emitMessageRecordScopedByChannel({
-                channelIds: msgResFilter,
-                emitRecord: ctx.emitRecord,
-                record: data,
-              })
-            : ctx.emitRecord(stream, data),
-        emittedAt: ctx.emittedAt,
-        fingerprintCursors,
-        progress,
-        requested,
-      };
-      const priorChannelLastTs = normalizeStringRecord(messagesState?.channel_last_ts);
-      const priorObservedChannelIds = readPriorObservedChannelIds(messagesState);
-      const priorScopedArchiveResumedAt = normalizeStringRecord(messagesState?.scoped_archive_resumed_at);
-      const baseChannelIds = currentArchiveChannelIds(db);
-      // Each missing-channel partition drives its own slackdump `resume`
-      // subprocess (real Slack API backlog catch-up per channel, gated by
-      // Slack's own rate limits) — cost that was previously invisible: it
-      // runs between the `slackdump-subprocess` and `read-and-emit` phases
-      // but was not itself timed, so it silently inflated total run wall-
-      // clock outside every reported phase. Each scoped archive is further
-      // throttled to at most one actual resume per SLACK_LOOKBACK_DAYS (see
-      // archiveDueForResume) so a permanently-missing-but-actively-
-      // growing channel's archive doesn't get a full resync every run.
-      const reconciledSourceCache = await timedPhase(progress, "scoped-archive-reconcile", () =>
-        reconcileMessageSourceCache({
-          archiveRuntime: { childEnv, cookie, opts, progress, timeFrom, timeTo, token },
-          baseArchivePaths,
-          baseChannelIds,
-          detailGaps: ctx.detailGaps,
-          emit,
-          isUnscopedMessageBoundary,
-          messageFamilyRequested,
-          nowIso: ctx.emittedAt,
-          priorObservedChannelIds,
-          priorScopedArchiveResumedAt,
-        })
-      );
+			const db = await timedPhase(progress, "archive-open", () =>
+				Promise.resolve(new DatabaseSync(sqlitePath, { readOnly: true })),
+			);
+			// One per-record fingerprint cursor per fingerprinted stream. The
+			// primitive seeds itself from the prior cursor so a record we skip
+			// this run carries its fingerprint forward into the next STATE
+			// write — without that, a single skipped record would drop from
+			// STATE on the next write and re-emit on the run after.
+			const fingerprintCursors = new Map<string, FingerprintCursor>();
+			for (const stream of FINGERPRINTED_STREAMS) {
+				fingerprintCursors.set(
+					stream,
+					openFingerprintCursor(state[stream], {
+						excludeFromFingerprint: FINGERPRINT_EXCLUDE[stream],
+					}),
+				);
+			}
+			const deps: StreamDeps = {
+				db,
+				// Narrow the ctx.emit union to the single message kind StreamDeps.emit
+				// accepts (DETAIL_COVERAGE). runConnector's emit accepts the full
+				// EmittedMessage union, so this is a contravariant widening at the call
+				// boundary, not a coercion of message shape.
+				emit: (msg) => emit(msg),
+				emitRecord: (stream, data) =>
+					stream === "messages" && msgResFilter
+						? emitMessageRecordScopedByChannel({
+								channelIds: msgResFilter,
+								emitRecord: ctx.emitRecord,
+								record: data,
+							})
+						: ctx.emitRecord(stream, data),
+				emittedAt: ctx.emittedAt,
+				fingerprintCursors,
+				progress,
+				requested,
+			};
+			const priorChannelLastTs = normalizeStringRecord(
+				messagesState?.channel_last_ts,
+			);
+			const priorObservedChannelIds =
+				readPriorObservedChannelIds(messagesState);
+			const priorScopedArchiveResumedAt = normalizeStringRecord(
+				messagesState?.scoped_archive_resumed_at,
+			);
+			const baseChannelIds = currentArchiveChannelIds(db);
+			// Each missing-channel partition drives its own slackdump `resume`
+			// subprocess (real Slack API backlog catch-up per channel, gated by
+			// Slack's own rate limits) — cost that was previously invisible: it
+			// runs between the `slackdump-subprocess` and `read-and-emit` phases
+			// but was not itself timed, so it silently inflated total run wall-
+			// clock outside every reported phase. Each scoped archive is further
+			// throttled to at most one actual resume per SLACK_LOOKBACK_DAYS (see
+			// archiveDueForResume) so a permanently-missing-but-actively-
+			// growing channel's archive doesn't get a full resync every run.
+			const reconciledSourceCache = await timedPhase(
+				progress,
+				"scoped-archive-reconcile",
+				() =>
+					reconcileMessageSourceCache({
+						archiveRuntime: {
+							childEnv,
+							cookie,
+							opts,
+							progress,
+							timeFrom,
+							timeTo,
+							token,
+						},
+						baseArchivePaths,
+						baseChannelIds,
+						detailGaps: ctx.detailGaps,
+						emit,
+						isUnscopedMessageBoundary,
+						messageFamilyRequested,
+						nowIso: ctx.emittedAt,
+						priorObservedChannelIds,
+						priorScopedArchiveResumedAt,
+					}),
+			);
 
-      if (reconciledSourceCache.missingChannelIds.length > 0) {
-        await emitMissingChannelDiagnostic(emit, reconciledSourceCache.missingChannelIds);
-      }
+			if (reconciledSourceCache.missingChannelIds.length > 0) {
+				await emitMissingChannelDiagnostic(
+					emit,
+					reconciledSourceCache.missingChannelIds,
+				);
+			}
 
-      // Register the opt-in __uploads reclaim once every archive this run
-      // actually read is known: the base/scoped archive, every scoped archive
-      // reconcileMessageSourceCache refreshed or repaired AND folded into the
-      // message pass, plus any repair attempt that successfully created/read
-      // an archive but recovered no matching channel (reclaimedRepairArchivePaths
-      // — deduped against scopedArchives since a successful, channel-matching
-      // repair appears in both). Without the last set, a successful-but-empty
-      // repair's __uploads/ residue would be silently excluded forever even
-      // though this run genuinely created/read that archive. The actual
-      // deletion happens in onDurableCommit (post durable-ingest ack), never
-      // here — so nothing is deleted ahead of a commit receipt.
-      reclaimPlan = opts.RECLAIM_UPLOADS
-        ? [
-            ...new Set([
-              archivePath,
-              ...reconciledSourceCache.scopedArchives.map((archive) => archive.paths.archivePath),
-              ...reconciledSourceCache.reclaimedRepairArchivePaths,
-            ]),
-          ]
-        : null;
+			// Register the opt-in __uploads reclaim once every archive this run
+			// actually read is known: the base/scoped archive, every scoped archive
+			// reconcileMessageSourceCache refreshed or repaired AND folded into the
+			// message pass, plus any repair attempt that successfully created/read
+			// an archive but recovered no matching channel (reclaimedRepairArchivePaths
+			// — deduped against scopedArchives since a successful, channel-matching
+			// repair appears in both). Without the last set, a successful-but-empty
+			// repair's __uploads/ residue would be silently excluded forever even
+			// though this run genuinely created/read that archive. The actual
+			// deletion happens in onDurableCommit (post durable-ingest ack), never
+			// here — so nothing is deleted ahead of a commit receipt.
+			reclaimPlan = opts.RECLAIM_UPLOADS
+				? [
+						...new Set([
+							archivePath,
+							...reconciledSourceCache.scopedArchives.map(
+								(archive) => archive.paths.archivePath,
+							),
+							...reconciledSourceCache.reclaimedRepairArchivePaths,
+						]),
+					]
+				: null;
 
-      let messageResult = await timedPhase(progress, "read-and-emit", () =>
-        runRequestedStreams(deps, state, { workspace, token, cookie }, emit, {
-          allowLegacyMessageCursorFallback: isUnscopedMessageBoundary,
-          ignoreMessageChannelCursors: Boolean(msgResFilter && msgResFilter.size > 0),
-          sinceTs: parseSinceTs(requested, "messages"),
-        })
-      );
-      if (messageFamilyRequested && isUnscopedMessageBoundary && reconciledSourceCache.scopedArchives.length > 0) {
-        messageResult = await mergeScopedMessageArchivePasses({
-          credentials: { workspace, token, cookie },
-          emit,
-          messageResult,
-          requested,
-          scopedArchives: reconciledSourceCache.scopedArchives,
-          state,
-          streamDeps: deps,
-        });
-      }
+			let messageResult = await timedPhase(progress, "read-and-emit", () =>
+				runRequestedStreams(deps, state, { workspace, token, cookie }, emit, {
+					allowLegacyMessageCursorFallback: isUnscopedMessageBoundary,
+					ignoreMessageChannelCursors: Boolean(
+						msgResFilter && msgResFilter.size > 0,
+					),
+					sinceTs: parseSinceTs(requested, "messages"),
+				}),
+			);
+			if (
+				messageFamilyRequested &&
+				isUnscopedMessageBoundary &&
+				reconciledSourceCache.scopedArchives.length > 0
+			) {
+				messageResult = await mergeScopedMessageArchivePasses({
+					credentials: { workspace, token, cookie },
+					emit,
+					messageResult,
+					requested,
+					scopedArchives: reconciledSourceCache.scopedArchives,
+					state,
+					streamDeps: deps,
+				});
+			}
 
-      // Drop fingerprint entries for IDs that disappeared from the source
-      // since the prior run on streams we actually requested. Streams the
-      // caller did not exercise keep their full carry-forward — an
-      // unrequested stream's cursor must not be silently wiped.
-      for (const stream of FINGERPRINTED_STREAMS) {
-        if (requested.has(stream)) {
-          fingerprintCursors.get(stream)?.pruneStale();
-        }
-      }
+			// Drop fingerprint entries for IDs that disappeared from the source
+			// since the prior run on streams we actually requested. Streams the
+			// caller did not exercise keep their full carry-forward — an
+			// unrequested stream's cursor must not be silently wiped.
+			for (const stream of FINGERPRINTED_STREAMS) {
+				if (requested.has(stream)) {
+					fingerprintCursors.get(stream)?.pruneStale();
+				}
+			}
 
-      const priorMaxTs = messagesState?.last_ts || null;
-      const committedMaxTs = selectCommittedMaxTs(priorMaxTs, messageResult.maxMessageTs);
-      const committedChannelLastTs = selectCommittedChannelLastTs(priorChannelLastTs, messageResult.channelMaxTs);
-      const observedChannelIds =
-        messageFamilyRequested && isUnscopedMessageBoundary
-          ? [
-              ...new Set([...reconciledSourceCache.currentChannelIds, ...reconciledSourceCache.missingChannelIds]),
-            ].sort()
-          : priorObservedChannelIds;
-      const stateArchivePath = isUnscopedMessageBoundary ? archivePath : (messagesState?.archive_dir ?? archivePath);
-      emitStateCheckpoints({
-        archivePath: stateArchivePath,
-        baseArchiveResumedAt,
-        channelLastTs: committedChannelLastTs,
-        committedMaxTs,
-        emit,
-        fingerprintCursors,
-        observedChannelIds,
-        requested,
-        scopedArchiveResumedAt: reconciledSourceCache.scopedArchiveResumedAt,
-      });
+			const priorMaxTs = messagesState?.last_ts || null;
+			const committedMaxTs = selectCommittedMaxTs(
+				priorMaxTs,
+				messageResult.maxMessageTs,
+			);
+			const committedChannelLastTs = selectCommittedChannelLastTs(
+				priorChannelLastTs,
+				messageResult.channelMaxTs,
+			);
+			const observedChannelIds =
+				messageFamilyRequested && isUnscopedMessageBoundary
+					? [
+							...new Set([
+								...reconciledSourceCache.currentChannelIds,
+								...reconciledSourceCache.missingChannelIds,
+							]),
+						].sort()
+					: priorObservedChannelIds;
+			const stateArchivePath = isUnscopedMessageBoundary
+				? archivePath
+				: (messagesState?.archive_dir ?? archivePath);
+			emitStateCheckpoints({
+				archivePath: stateArchivePath,
+				baseArchiveResumedAt,
+				channelLastTs: committedChannelLastTs,
+				committedMaxTs,
+				emit,
+				fingerprintCursors,
+				observedChannelIds,
+				requested,
+				scopedArchiveResumedAt: reconciledSourceCache.scopedArchiveResumedAt,
+			});
 
-      // End-of-run size snapshot: makes the steady-state disk bound and any
-      // reclaimable residue visible in run evidence.
-      db.close();
-      reportArchiveSizeSnapshot(progress, sqlitePath, archivePath);
-    },
-  });
+			// End-of-run size snapshot: makes the steady-state disk bound and any
+			// reclaimable residue visible in run evidence.
+			db.close();
+			reportArchiveSizeSnapshot(progress, sqlitePath, archivePath);
+		},
+	});
 }

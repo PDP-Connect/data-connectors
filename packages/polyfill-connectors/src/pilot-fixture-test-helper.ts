@@ -29,29 +29,36 @@ const PKG_ROOT = join(__dirname, "..");
 const JSONL_EXT_RE = /\.jsonl$/;
 
 export interface PilotFixtureTestArgs {
-  /** Connector directory name under `connectors/` (also matches the
-   *  `fixtures/<connector>/` directory). */
-  connector: string;
-  /** Pilot fixtures lock record shape only; behavioral evidence belongs in focused connector tests. */
-  evidence?: "shape-only";
-  /** Validator from the connector's `schemas.ts`. */
-  validateRecord: ValidateRecord;
+	/** Connector directory name under `connectors/` (also matches the
+	 *  `fixtures/<connector>/` directory). */
+	connector: string;
+	/** Pilot fixtures lock record shape only; behavioral evidence belongs in focused connector tests. */
+	evidence?: "shape-only";
+	/** Validator from the connector's `schemas.ts`. */
+	validateRecord: ValidateRecord;
 }
 
 interface PilotManifest {
-  streams?: Array<{ name?: unknown }>;
+	streams?: Array<{ name?: unknown }>;
 }
 
 function readManifestStreamNames(connector: string): string[] {
-  const manifestPath = join(PKG_ROOT, "manifests", `${connector}.json`);
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as PilotManifest;
-  assert.ok(Array.isArray(manifest.streams), `${manifestPath}: manifest streams must be an array`);
-  const names = manifest.streams.map((stream) => stream.name);
-  assert.ok(
-    names.every((name): name is string => typeof name === "string" && name.length > 0),
-    `${manifestPath}: every manifest stream must have a non-empty name`
-  );
-  return names as string[];
+	const manifestPath = join(PKG_ROOT, "manifests", `${connector}.json`);
+	const manifest = JSON.parse(
+		readFileSync(manifestPath, "utf8"),
+	) as PilotManifest;
+	assert.ok(
+		Array.isArray(manifest.streams),
+		`${manifestPath}: manifest streams must be an array`,
+	);
+	const names = manifest.streams.map((stream) => stream.name);
+	assert.ok(
+		names.every(
+			(name): name is string => typeof name === "string" && name.length > 0,
+		),
+		`${manifestPath}: every manifest stream must have a non-empty name`,
+	);
+	return names as string[];
 }
 
 /**
@@ -70,81 +77,108 @@ function readManifestStreamNames(connector: string): string[] {
  *   - Per-row schema failure → fails the test with the issue list and
  *     the offending record's id.
  */
-export function registerPilotFixtureTests(args: PilotFixtureTestArgs & { expectMissing?: boolean }): void {
-  const { connector, evidence = "shape-only", validateRecord, expectMissing = false } = args;
-  const recordsDir = join(PKG_ROOT, "fixtures", connector, "scrubbed", "pilot-real-shape", "records");
+export function registerPilotFixtureTests(
+	args: PilotFixtureTestArgs & { expectMissing?: boolean },
+): void {
+	const {
+		connector,
+		evidence = "shape-only",
+		validateRecord,
+		expectMissing = false,
+	} = args;
+	const recordsDir = join(
+		PKG_ROOT,
+		"fixtures",
+		connector,
+		"scrubbed",
+		"pilot-real-shape",
+		"records",
+	);
 
-  if (!existsSync(recordsDir)) {
-    if (expectMissing) {
-      return;
-    }
-    test(`pilot-real-shape/${connector}: fixture directory exists`, () => {
-      assert.fail(
-        `expected pilot-real-shape fixtures at ${recordsDir}; either author them or pass expectMissing:true to opt out`
-      );
-    });
-    return;
-  }
+	if (!existsSync(recordsDir)) {
+		if (expectMissing) {
+			return;
+		}
+		test(`pilot-real-shape/${connector}: fixture directory exists`, () => {
+			assert.fail(
+				`expected pilot-real-shape fixtures at ${recordsDir}; either author them or pass expectMissing:true to opt out`,
+			);
+		});
+		return;
+	}
 
-  // Compare canonical stream names, not filenames. Sorting the suffix-bearing
-  // names makes `user.jsonl`/`user_stats.jsonl` order differently from the
-  // manifest's stream names because punctuation participates in collation.
-  const fixtureStreams = readdirSync(recordsDir)
-    .filter((f) => f.endsWith(".jsonl"))
-    .map((filename) => filename.replace(JSONL_EXT_RE, ""))
-    .sort((left, right) => left.localeCompare(right));
-  const declaredStreams = readManifestStreamNames(connector).sort((left, right) => left.localeCompare(right));
+	// Compare canonical stream names, not filenames. Sorting the suffix-bearing
+	// names makes `user.jsonl`/`user_stats.jsonl` order differently from the
+	// manifest's stream names because punctuation participates in collation.
+	const fixtureStreams = readdirSync(recordsDir)
+		.filter((f) => f.endsWith(".jsonl"))
+		.map((filename) => filename.replace(JSONL_EXT_RE, ""))
+		.sort((left, right) => left.localeCompare(right));
+	const declaredStreams = readManifestStreamNames(connector).sort(
+		(left, right) => left.localeCompare(right),
+	);
 
-  test(`pilot-real-shape/${connector}/${evidence}: fixture inventory matches manifest`, () => {
-    assert.deepEqual(
-      fixtureStreams,
-      declaredStreams,
-      `${connector}: ${evidence} fixtures must contain exactly one .jsonl file for every manifest stream`
-    );
-    assert.equal(
-      new Set(declaredStreams).size,
-      declaredStreams.length,
-      `${connector}: manifest stream names must be unique for an exact fixture inventory`
-    );
-  });
+	test(`pilot-real-shape/${connector}/${evidence}: fixture inventory matches manifest`, () => {
+		assert.deepEqual(
+			fixtureStreams,
+			declaredStreams,
+			`${connector}: ${evidence} fixtures must contain exactly one .jsonl file for every manifest stream`,
+		);
+		assert.equal(
+			new Set(declaredStreams).size,
+			declaredStreams.length,
+			`${connector}: manifest stream names must be unique for an exact fixture inventory`,
+		);
+	});
 
-  if (fixtureStreams.length === 0) {
-    test(`pilot-real-shape/${connector}/${evidence}: at least one stream fixture exists`, () => {
-      assert.fail(`expected ≥1 .jsonl file under ${recordsDir}, found 0`);
-    });
-    return;
-  }
+	if (fixtureStreams.length === 0) {
+		test(`pilot-real-shape/${connector}/${evidence}: at least one stream fixture exists`, () => {
+			assert.fail(`expected ≥1 .jsonl file under ${recordsDir}, found 0`);
+		});
+		return;
+	}
 
-  for (const stream of fixtureStreams) {
-    const filename = `${stream}.jsonl`;
-    const filePath = join(recordsDir, filename);
-    test(`pilot-real-shape/${connector}/${stream}: ${evidence} record shape passes validateRecord`, () => {
-      const lines = readFileSync(filePath, "utf8")
-        .split("\n")
-        .filter((l) => l.trim());
-      assert.ok(lines.length > 0, `${filename} is empty — pilot fixture must have ≥1 record`);
-      const failures: Array<{ id: unknown; issues: { path: string; message: string }[] }> = [];
-      for (const line of lines) {
-        let data: Record<string, unknown>;
-        try {
-          data = JSON.parse(line) as Record<string, unknown>;
-        } catch (err) {
-          assert.fail(`${filename}: invalid JSON line: ${(err as Error).message}\n  ${line.slice(0, 120)}`);
-        }
-        const result = validateRecord(stream, data);
-        if (!result.ok) {
-          failures.push({ id: data.id ?? null, issues: result.issues });
-        }
-      }
-      if (failures.length > 0) {
-        const detail = failures
-          .slice(0, 3)
-          .map(
-            (f) => `  id=${JSON.stringify(f.id)} issues=${f.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`
-          )
-          .join("\n");
-        assert.fail(`${filename}: ${failures.length}/${lines.length} records failed schema:\n${detail}`);
-      }
-    });
-  }
+	for (const stream of fixtureStreams) {
+		const filename = `${stream}.jsonl`;
+		const filePath = join(recordsDir, filename);
+		test(`pilot-real-shape/${connector}/${stream}: ${evidence} record shape passes validateRecord`, () => {
+			const lines = readFileSync(filePath, "utf8")
+				.split("\n")
+				.filter((l) => l.trim());
+			assert.ok(
+				lines.length > 0,
+				`${filename} is empty — pilot fixture must have ≥1 record`,
+			);
+			const failures: Array<{
+				id: unknown;
+				issues: { path: string; message: string }[];
+			}> = [];
+			for (const line of lines) {
+				let data: Record<string, unknown>;
+				try {
+					data = JSON.parse(line) as Record<string, unknown>;
+				} catch (err) {
+					assert.fail(
+						`${filename}: invalid JSON line: ${(err as Error).message}\n  ${line.slice(0, 120)}`,
+					);
+				}
+				const result = validateRecord(stream, data);
+				if (!result.ok) {
+					failures.push({ id: data.id ?? null, issues: result.issues });
+				}
+			}
+			if (failures.length > 0) {
+				const detail = failures
+					.slice(0, 3)
+					.map(
+						(f) =>
+							`  id=${JSON.stringify(f.id)} issues=${f.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`,
+					)
+					.join("\n");
+				assert.fail(
+					`${filename}: ${failures.length}/${lines.length} records failed schema:\n${detail}`,
+				);
+			}
+		});
+	}
 }

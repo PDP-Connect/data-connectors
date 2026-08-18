@@ -48,18 +48,18 @@ import { existsSync } from "node:fs";
 const DOCKER_ENV_SENTINEL = "/.dockerenv";
 
 export interface ContainerDetectionEnv {
-  PDPP_FORCE_CONTAINER?: string;
+	PDPP_FORCE_CONTAINER?: string;
 }
 
 export interface ContainerDetectionDeps {
-  fileExists?: (path: string) => boolean;
+	fileExists?: (path: string) => boolean;
 }
 
 function readFlag(value: string | undefined, expected: string): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  return value.trim() === expected;
+	if (value === undefined) {
+		return false;
+	}
+	return value.trim() === expected;
 }
 
 /**
@@ -69,19 +69,19 @@ function readFlag(value: string | undefined, expected: string): boolean {
  * outcome deterministically without touching the host filesystem.
  */
 export function isRunningInContainer(
-  env: NodeJS.ProcessEnv | ContainerDetectionEnv = process.env,
-  deps: ContainerDetectionDeps = {}
+	env: NodeJS.ProcessEnv | ContainerDetectionEnv = process.env,
+	deps: ContainerDetectionDeps = {},
 ): boolean {
-  if (readFlag(env.PDPP_FORCE_CONTAINER, "1")) {
-    return true;
-  }
-  const fileExists = deps.fileExists ?? existsSync;
-  try {
-    return fileExists(DOCKER_ENV_SENTINEL);
-  } catch {
-    // existsSync is documented as never throwing, but a wrapped fs in
-    // tests might. Treat any error as "not detected" rather than
-    // claiming we are in a container.
-    return false;
-  }
+	if (readFlag(env.PDPP_FORCE_CONTAINER, "1")) {
+		return true;
+	}
+	const fileExists = deps.fileExists ?? existsSync;
+	try {
+		return fileExists(DOCKER_ENV_SENTINEL);
+	} catch {
+		// existsSync is documented as never throwing, but a wrapped fs in
+		// tests might. Treat any error as "not detected" rather than
+		// claiming we are in a container.
+		return false;
+	}
 }

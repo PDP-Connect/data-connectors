@@ -42,9 +42,16 @@ const ICAL_ID_RE = /^[0-9a-f]{24}$/; // hashId: 24-char sha256 hex slice
 const ICAL_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/; // permissive; mailto: payloads are loose
 
-const icalIdSchema = z.string().regex(ICAL_ID_RE, "must be a 24-char hex iCal record id");
-const icalDateSchema = z.string().regex(ICAL_DATE_RE, "must be an ISO-8601 datetime prefix");
-const emailSchema = z.string().regex(EMAIL_RE, "must look like an email address").max(320);
+const icalIdSchema = z
+	.string()
+	.regex(ICAL_ID_RE, "must be a 24-char hex iCal record id");
+const icalDateSchema = z
+	.string()
+	.regex(ICAL_DATE_RE, "must be an ISO-8601 datetime prefix");
+const emailSchema = z
+	.string()
+	.regex(EMAIL_RE, "must look like an email address")
+	.max(320);
 
 /**
  * One attendee, as built by `applyAttendee`. `email` is required (the builder
@@ -52,9 +59,9 @@ const emailSchema = z.string().regex(EMAIL_RE, "must look like an email address"
  * and `role` (ROLE) are free-form/short and nullable.
  */
 const attendeeSchema = z.object({
-  email: emailSchema,
-  name: pdppSafeText.max(500).nullable(),
-  role: z.string().min(1).max(64).nullable(),
+	email: emailSchema,
+	name: pdppSafeText.max(500).nullable(),
+	role: z.string().min(1).max(64).nullable(),
 });
 
 /**
@@ -62,26 +69,26 @@ const attendeeSchema = z.object({
  * Cursor: start (latest_start).
  */
 export const eventsSchema = z.object({
-  id: icalIdSchema,
-  calendar_name: pdppSafeText.max(500),
-  summary: pdppSafeText.max(4000).nullable(),
-  description: pdppSafeText.max(100_000).nullable(),
-  location: pdppSafeText.max(4000).nullable(),
-  start: icalDateSchema,
-  end: icalDateSchema.nullable(),
-  all_day: z.boolean(),
-  organizer_email: emailSchema.nullable(),
-  attendees: z.array(attendeeSchema),
-  status: z.string().min(1).max(64).nullable(),
-  rrule: z.string().min(1).max(2000).nullable(),
-  uid: pdppSafeText.max(2000),
+	id: icalIdSchema,
+	calendar_name: pdppSafeText.max(500),
+	summary: pdppSafeText.max(4000).nullable(),
+	description: pdppSafeText.max(100_000).nullable(),
+	location: pdppSafeText.max(4000).nullable(),
+	start: icalDateSchema,
+	end: icalDateSchema.nullable(),
+	all_day: z.boolean(),
+	organizer_email: emailSchema.nullable(),
+	attendees: z.array(attendeeSchema),
+	status: z.string().min(1).max(64).nullable(),
+	rrule: z.string().min(1).max(2000).nullable(),
+	uid: pdppSafeText.max(2000),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  events: eventsSchema,
+	events: eventsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
