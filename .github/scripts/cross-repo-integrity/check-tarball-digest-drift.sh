@@ -27,10 +27,69 @@ PDPP_DIR="${3:-}"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
-
-echo "== Installing data-connect's collector-runtime + connector-protocol workspaces (fresh cache) =="
 FRESH_CACHE="$WORKDIR/npm-cache"
 mkdir -p "$FRESH_CACHE"
+
+# Neither collector-runtime nor connector-protocol declares `typescript` as its own
+# devDependency — it's hoisted from the data-connect workspace ROOT's devDependencies,
+# which a -w-scoped install deliberately doesn't pull in (that would drag in the whole
+# app: vite, tailwind, vitest, a git-sourced dep, ...). Each package's `build` script
+# shells out to `npx tsc`, so without a resolvable `tsc` binary, npx silently
+# auto-installs and runs the unrelated npm package literally named `tsc` instead of the
+# TypeScript compiler.
+#
+# This MUST run and land on PATH before the workspace install below, not after: on
+# npm 10.x (what Node 22, this job's pinned version, ships — confirmed by reproducing
+# locally under nvm's 22.23.2/npm 10.9.8, where npm 12 did not show this), `--ignore-scripts`
+# does not suppress a workspace package's own `prepare` lifecycle hook the way it does on
+# npm 12 — connector-protocol's `"prepare": "npm run build"` fires DURING `npm install -w
+# ...` itself, before this script ever reaches its own build loop. Installing typescript
+# into an isolated scratch package (not data-connect's own tree) sidesteps its git-sourced
+# root dependency and keeps this job's install narrow.
+echo "== Installing typescript into an isolated scratch dir (data-connect's own root devDependency) =="
+TSC_SHIM="$WORKDIR/tsc-shim"
+mkdir -p "$TSC_SHIM"
+TSC_VERSION="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_DIR")"
+(
+  cd "$TSC_SHIM"
+  npm init -y > /dev/null
+  npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@$TSC_VERSION"
+)
+if [[ ! -x "$TSC_SHIM/node_modules/.bin/tsc" ]]; then
+  echo "FAIL: typescript shim install did not produce an executable tsc at $TSC_SHIM/node_modules/.bin/tsc" >&2
+  ls -la "$TSC_SHIM/node_modules/.bin/" >&2 || echo "(node_modules/.bin does not exist)" >&2
+  exit 1
+fi
+export PATH="$TSC_SHIM/node_modules/.bin:$PATH"
+echo "== typescript shim ready: $(command -v tsc) ($("$TSC_SHIM/node_modules/.bin/tsc" --version)) =="
+
+# --ignore-scripts does not suppress a -w-targeted workspace's OWN `prepare` script on
+# npm 10.x (confirmed via a minimal repro: a workspace with a `prepare` script that
+# writes a sentinel runs it despite --ignore-scripts, npm 10.9.8 — a real npm defect for
+# this exact case, not this script's own bug). Both packages here declare `"prepare":
+# "npm run build"`, and running that mid-install — before npm has finished creating the
+# OTHER workspace's node_modules/@pdpp/* symlink — produces a broken, half-typechecked
+# dist/ for whichever package installs second, which the drift check would then compare
+# against a tarball packed from that same broken dist/ (self-consistent, silently wrong).
+# Work around it by neutralizing each package's prepare script for the duration of this
+# install only, then restoring the original file with git checkout before packing — the
+# packed tarball must contain the SAME package.json data-connect actually ships, or its
+# digest won't mean anything.
+echo "== Temporarily neutralizing prepare scripts (npm 10.x --ignore-scripts gap for -w installs) =="
+node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+for (const pkg of ["collector-runtime", "connector-protocol"]) {
+  const pkgJsonPath = path.join(process.argv[1], "packages", pkg, "package.json");
+  const data = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+  if (data.scripts?.prepare) {
+    data.scripts.prepare = "true";
+    fs.writeFileSync(pkgJsonPath, JSON.stringify(data, null, 2) + "\n");
+  }
+}
+' "$DATA_CONNECT_DIR"
+
+echo "== Installing data-connect's collector-runtime + connector-protocol workspaces (fresh cache) =="
 (
   cd "$DATA_CONNECT_DIR"
   npm install \
@@ -40,10 +99,32 @@ mkdir -p "$FRESH_CACHE"
     -w packages/collector-runtime -w packages/connector-protocol
 )
 
+echo "== Restoring package.json (undoing the prepare neutralization) =="
+(
+  cd "$DATA_CONNECT_DIR"
+  git checkout -- packages/collector-runtime/package.json packages/connector-protocol/package.json
+)
+
 REPACK_OUT="$WORKDIR/repack-out"
 mkdir -p "$REPACK_OUT"
 
-for pkg in collector-runtime connector-protocol; do
+# Copy the shimmed typescript straight into each package's OWN node_modules instead of
+# relying on PATH: npx's local-node_modules/.bin lookup is unconditional (checked first,
+# every time), whereas PATH-based resolution proved unreliable in this exact job on the
+# hosted GitHub Actions runner even though every element of it (the shim itself, the
+# PATH export, the inline PATH= prefix on `npm run build`) reproduced correctly across
+# multiple fresh local clones under the identical npm 10.9.8 — never narrowed down beyond
+# "works locally, not on the runner". Not committed anywhere; each package's node_modules
+# lives only in this ephemeral $WORKDIR-adjacent checkout.
+for pkg in connector-protocol collector-runtime; do
+  mkdir -p "$DATA_CONNECT_DIR/packages/$pkg/node_modules/.bin"
+  cp -r "$TSC_SHIM/node_modules/typescript" "$DATA_CONNECT_DIR/packages/$pkg/node_modules/typescript"
+  ln -sf ../typescript/bin/tsc "$DATA_CONNECT_DIR/packages/$pkg/node_modules/.bin/tsc"
+done
+
+# connector-protocol first: collector-runtime imports its compiled type declarations, so
+# building collector-runtime before connector-protocol's dist/ exists fails typecheck.
+for pkg in connector-protocol collector-runtime; do
   echo "== Building + packing @pdpp/$pkg from data-connect @ pinned SHA =="
   (
     cd "$DATA_CONNECT_DIR/packages/$pkg"

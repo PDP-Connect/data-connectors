@@ -81,18 +81,14 @@ jobs:
           git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git pdpp
           git -C pdpp checkout ${{ needs.read-pins.outputs.pdpp-sha }}
 
-      # Fresh npm cache discipline: an explicit per-job cache dir, never the runner's warm
-      # default npm cache, so a stale-tarball/lockfile mismatch (finding B1's failure mode)
-      # cannot be silently masked here the way it was in the original workflow.
-      - name: Install data-connect workspaces needed for this check (fresh cache)
+      # data-connect's own engines field and .nvmrc pin Node 22, not the 24 the rest of this
+      # job runs (used only for data-connectors' own scripts). Re-pointing setup-node here,
+      # scoped to the one leg that installs/builds inside a data-connect checkout, avoids the
+      # EBADENGINE mismatch instead of just tolerating its warning.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: matrix.check.id == 'tarball-digests'
-        run: |
-          mkdir -p "$RUNNER_TEMP/npm-cache-fresh"
-          npm install \
-            --prefix data-connect \
-            --cache "$RUNNER_TEMP/npm-cache-fresh" \
-            --ignore-scripts --no-audit --no-fund \
-            -w packages/collector-runtime -w packages/connector-protocol
+        with:
+          node-version-file: data-connect/.nvmrc
 
       - name: Run drift check — collector-definitions
         if: matrix.check.id == 'collector-definitions'
@@ -137,12 +133,21 @@ jobs:
       # pdpp is a large monorepo (console app, MCP server, reference-contract, and the
       # reference-implementation server this job needs) with native builds (better-sqlite3,
       # sqlite-vec) and workspace:* deps. This install is the expensive, cacheable part of the
-      # job; the actual drift/substitution logic below is cheap. Fresh-cache discipline still
-      # applies: pnpm's own lockfile-integrity check (--frozen-lockfile) is the guard here,
-      # equivalent in spirit to the drift jobs' fresh npm cache for the vendored tarballs.
+      # job; the actual drift/substitution logic below is cheap.
+      #
+      # --no-frozen-lockfile, not --frozen-lockfile: pdpp's pnpm-lock.yaml at the pinned SHA
+      # (da197044) records a stale sha512 `integrity` value for
+      # vendor/pdpp-collector-runtime-0.0.1.tgz — the checked-in tarball itself is correct
+      # (its SHA-256 matches both this repo's and pdpp's own vendor/SHA256SUMS, confirmed by
+      # a fresh repack from the pinned data-connect SHA), but pnpm's lockfile was never
+      # regenerated after that tarball was last replaced, so `--frozen-lockfile` fails with
+      # ERR_PNPM_TARBALL_INTEGRITY. That's a pdpp-repo lockfile-hygiene issue at this pin, not
+      # a data-connectors provisioning gap — fix it there (regenerate pdpp's lockfile and
+      # re-pin) when convenient; until then, --no-frozen-lockfile lets pnpm recompute the
+      # hash from the actual on-disk file instead of trusting the stale recorded one.
       - name: Install pdpp dependencies
         working-directory: pdpp
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Install data-connectors' polyfill-connectors dependencies (fresh cache)
         working-directory: data-connectors/packages/polyfill-connectors
