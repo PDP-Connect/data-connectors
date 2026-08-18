@@ -139,10 +139,39 @@ echo "== Freshly packed digests =="
 
 FAILED=0
 
+# Why content-manifest comparison instead of raw tarball digest equality:
+#
+# `npm pack` output is NOT byte-reproducible across npm versions for identical package
+# contents — the gzip layer and tar/pack metadata (e.g. mtimes, header padding, gzip
+# compression-level/OS-byte defaults) vary between npm releases even when every file inside
+# is byte-for-byte the same. The tarballs committed under vendor/ here were packed locally
+# with a different npm than this CI job's pinned Node/npm, so comparing raw sha256sum of the
+# .tgz files is comparing packer-metadata noise, not the thing we actually care about.
+#
+# The real invariant is CONTENT identity: does the fresh repack from the pinned data-connect
+# SHA contain the exact same files with the exact same bytes as the committed tarball? So
+# instead of hashing the .tgz as a blob, extract both tarballs and compare a sorted manifest
+# of per-file sha256 over their extracted contents. This is portable across npm/tar versions
+# by construction and gives a useful per-file diff on failure instead of one opaque digest
+# mismatch.
+#
+# vendor/SHA256SUMS is NOT redundant with this: it stays as the provenance record attesting
+# to the exact committed artifact bytes (what was actually vendored, sha256'd at commit
+# time) — a fixed reference for "is the file in this repo still the file we vendored, bit for
+# bit". This check answers a different question: "does that committed artifact's CONTENT
+# still match what data-connect's pinned SHA produces today", independent of which npm
+# version did the packing on either side.
+extracted_manifest() {
+  local tarball="$1"
+  local dest="$2"
+  mkdir -p "$dest"
+  tar -xzf "$tarball" -C "$dest"
+  ( cd "$dest" && find . -type f -print0 | sort -z | xargs -0 sha256sum )
+}
+
 check_against_sumfile() {
   local label="$1"
   local sumfile="$2"
-  local tarball_dir="$3"
 
   if [[ ! -f "$sumfile" ]]; then
     echo "FAIL: $label — SHA256SUMS not found at $sumfile"
@@ -150,9 +179,11 @@ check_against_sumfile() {
     return
   fi
 
+  local sumfile_dir
+  sumfile_dir="$(dirname "$sumfile")"
+
   while IFS= read -r line; do
-    local recorded_hash tarball_name
-    recorded_hash="$(awk '{print $1}' <<<"$line")"
+    local tarball_name
     tarball_name="$(awk '{print $2}' <<<"$line")"
     tarball_name="$(basename "$tarball_name")"
 
@@ -160,29 +191,44 @@ check_against_sumfile() {
     [[ "$tarball_name" == pdpp-reference-contract-*.tgz ]] && continue
 
     local fresh_tarball="$REPACK_OUT/$tarball_name"
+    local committed_tarball="$sumfile_dir/$tarball_name"
+
     if [[ ! -f "$fresh_tarball" ]]; then
       echo "FAIL: $label — $tarball_name is recorded in $sumfile but was not produced by a fresh repack"
       FAILED=1
       continue
     fi
+    if [[ ! -f "$committed_tarball" ]]; then
+      echo "FAIL: $label — $tarball_name is recorded in $sumfile but not present at $committed_tarball"
+      FAILED=1
+      continue
+    fi
 
-    local fresh_hash
-    fresh_hash="$(sha256sum "$fresh_tarball" | awk '{print $1}')"
-    if [[ "$fresh_hash" != "$recorded_hash" ]]; then
-      echo "FAIL: $label — $tarball_name digest mismatch"
-      echo "  recorded:       $recorded_hash"
-      echo "  fresh repack:   $fresh_hash"
+    local committed_extract_dir="$WORKDIR/extract/$label-committed-$tarball_name"
+    local fresh_extract_dir="$WORKDIR/extract/$label-fresh-$tarball_name"
+    local committed_manifest="$WORKDIR/manifest-$label-committed-$tarball_name.txt"
+    local fresh_manifest="$WORKDIR/manifest-$label-fresh-$tarball_name.txt"
+
+    extracted_manifest "$committed_tarball" "$committed_extract_dir" > "$committed_manifest"
+    extracted_manifest "$fresh_tarball" "$fresh_extract_dir" > "$fresh_manifest"
+
+    if ! diff -u "$committed_manifest" "$fresh_manifest" > "$WORKDIR/manifest-diff-$label-$tarball_name.txt"; then
+      echo "FAIL: $label — $tarball_name content manifest mismatch (committed vs fresh repack)"
+      echo "  committed tarball:  $committed_tarball"
+      echo "  fresh repack:       $fresh_tarball"
+      echo "  per-file diff (path sha256sum format, committed vs fresh):"
+      sed 's/^/    /' "$WORKDIR/manifest-diff-$label-$tarball_name.txt"
       FAILED=1
     else
-      echo "OK: $label — $tarball_name matches fresh repack ($fresh_hash)"
+      echo "OK: $label — $tarball_name content matches fresh repack (per-file sha256 manifest identical)"
     fi
   done < "$sumfile"
 }
 
-check_against_sumfile "data-connectors" "$DATA_CONNECTORS_DIR/packages/polyfill-connectors/vendor/SHA256SUMS" "$DATA_CONNECTORS_DIR/packages/polyfill-connectors/vendor"
+check_against_sumfile "data-connectors" "$DATA_CONNECTORS_DIR/packages/polyfill-connectors/vendor/SHA256SUMS"
 
 if [[ -n "$PDPP_DIR" ]]; then
-  check_against_sumfile "pdpp" "$PDPP_DIR/vendor/SHA256SUMS" "$PDPP_DIR/vendor"
+  check_against_sumfile "pdpp" "$PDPP_DIR/vendor/SHA256SUMS"
 else
   echo "SKIP: no pdpp checkout provided — pdpp/vendor/SHA256SUMS not checked"
 fi
