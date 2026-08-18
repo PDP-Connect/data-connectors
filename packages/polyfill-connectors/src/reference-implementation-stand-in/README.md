@@ -17,7 +17,7 @@ copy instead.
 
 | Stand-in file | Source path | Source commit |
 |---|---|---|
-| `runtime/recovery-reason-codes.ts` | `reference-implementation/runtime/recovery-reason-codes.ts` | `27f6eb6a6fae671a04835c145e869efa8d457c9f` (`PDP-Connect/pdpp`, branch `manifest-reconciliation`) |
+| `runtime/recovery-reason-codes.ts` | `reference-implementation/runtime/recovery-reason-codes.ts` | `e6135fb2fc8dbc5ac38dd7609a6c2a544b394e72` (`PDP-Connect/pdpp`, branch `move-r-pdpp-removal`) |
 
 Byte-identical copy, confirmed by diff against the source commit before copying.
 

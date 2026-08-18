@@ -31,6 +31,19 @@
  * format as non-compliant, so this script filters exactly those four
  * diagnostics — nothing else — out of the result.
  *
+ * src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts is a
+ * different class of exception, same mechanism: it's a documented
+ * byte-for-byte copy of pdpp's reference-implementation/runtime/
+ * recovery-reason-codes.ts (see that directory's README.md), enforced by
+ * .github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs's
+ * raw SHA-256 comparison against pdpp's canonical file at the pinned SHA.
+ * pdpp formats that file with 2-space indentation, not this package's tabs
+ * — reformatting it here would silently break byte-identity with the
+ * upstream source on the next `biome check --write .`, which is exactly the
+ * drift that motivated this exception. Keep this file out of Biome's write
+ * path for as long as the stand-in exists (see its README's "Removal
+ * trigger").
+ *
  * Re-collapse into biome.jsonc's files.includes/overrides (removing this
  * wrapper) the moment a Biome release fixes either bug above.
  */
@@ -47,6 +60,10 @@ const TWITTER_ARCHIVE_JS_FIXTURES = new Set([
 	"connectors/twitter_archive/__fixtures__/archive-files/data/tweets.js",
 	"connectors/twitter_archive/__fixtures__/archive-files/empty/data/tweets.js",
 	"connectors/twitter_archive/__fixtures__/archive-files/legacy/data/tweet.js",
+]);
+
+const REFERENCE_CONTRACT_STAND_IN_FILES = new Set([
+	"src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts",
 ]);
 
 interface BiomeDiagnostic {
@@ -81,7 +98,8 @@ function main(): void {
 		(d) =>
 			d.category === "format" &&
 			d.location?.path &&
-			TWITTER_ARCHIVE_JS_FIXTURES.has(d.location.path),
+			(TWITTER_ARCHIVE_JS_FIXTURES.has(d.location.path) ||
+				REFERENCE_CONTRACT_STAND_IN_FILES.has(d.location.path)),
 	);
 	const remaining = report.diagnostics.filter(
 		(d) => !allowedFormatExceptions.includes(d),
@@ -90,7 +108,7 @@ function main(): void {
 
 	if (allowedFormatExceptions.length > 0) {
 		console.log(
-			`[check-biome] ${allowedFormatExceptions.length} format finding(s) in the checked-in Twitter archive .js fixture exception list — expected, not a failure (see this script's header comment).`,
+			`[check-biome] ${allowedFormatExceptions.length} format finding(s) in the checked-in Twitter archive .js fixture / reference-contract stand-in exception list — expected, not a failure (see this script's header comment).`,
 		);
 	}
 
