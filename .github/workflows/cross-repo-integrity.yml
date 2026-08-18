@@ -134,10 +134,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # polyfill-connectors declares "engines": {"node": ">=24 <25"} — test both the minimum
-        # accepted version and the current one so a >=24-only feature that happens to also need
-        # a later 24.x patch doesn't slip through on the newer runner alone.
-        node-version: ["24.0.0", "24.19.0"]
+        # polyfill-connectors declares "engines": {"node": ">=24.11.1 <25"} — test both the
+        # minimum accepted version and the current one so a >=24-only feature that happens to
+        # also need a later 24.x patch doesn't slip through on the newer runner alone.
+        #
+        # The floor is 24.11.1, not 24.0.0: connectors/github/index.test.ts's
+        # drainConnectorInstanceIndexWork assertion (reference-implementation/server/records.ts,
+        # a fixed 5000ms deadline in pdpp, not this repo) reliably times out on Node 24.0.0
+        # through 24.11.0 and reliably passes (~1s, not a near-miss) from 24.11.1 onward.
+        # Bisected locally against the real RI at the pinned pdpp SHA on 2026-08-18; each
+        # boundary re-run at least 3x. Do not lower this floor without re-bisecting, and do not
+        # "fix" the timeout here — it lives in pdpp.
+        node-version: ["24.11.1", "24.19.0"]
     steps:
       - name: Checkout data-connectors (this repo, current ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
