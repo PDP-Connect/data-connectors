@@ -1,0 +1,169 @@
+name: Cross-Repo Integrity
+
+# Gate B finding B5: cross-repository drift CI is the cutover mechanism, not cleanup. It must
+# exist and be required before the coordinated pdpp/data-connect/data-connectors merge, per
+# /home/tnunamak/code/pdpp/local/PDPP-full-stack-gateB-deep-redteam-2026-08-17.md finding B5.
+#
+# It also closes finding B2's two remaining excluded tests
+# (connectors/github/index.test.ts, bin/orchestrate.ts typecheck) per that finding's own
+# "acceptable transitional mechanism" and per
+# /home/tnunamak/.tmp/reorg-0814/gateB-b2-tests-report.md's spec for this job.
+#
+# All three repos are checked out at the EXPLICIT pinned SHAs declared in
+# .github/cross-repo-pins.json (data-connect, pdpp) plus this repo's own checkout — never a
+# mutable branch or default ref. Update the pin file deliberately when a source repo's
+# canonical head moves; this workflow will not silently track it.
+
+on:
+  push:
+    branches: [move-a-polyfill-connectors]
+  workflow_dispatch: {}
+
+concurrency:
+  group: cross-repo-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  read-pins:
+    name: Read pinned SHAs
+    runs-on: ubuntu-latest
+    outputs:
+      data-connect-sha: ${{ steps.pins.outputs.data-connect-sha }}
+      pdpp-sha: ${{ steps.pins.outputs.pdpp-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/cross-repo-pins.json
+          sparse-checkout-cone-mode: false
+
+      - name: Parse .github/cross-repo-pins.json
+        id: pins
+        run: |
+          echo "data-connect-sha=$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].sha')" >> "$GITHUB_OUTPUT"
+          echo "pdpp-sha=$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].sha')" >> "$GITHUB_OUTPUT"
+
+  drift-checks:
+    name: Drift — ${{ matrix.check.label }}
+    needs: read-pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - id: collector-definitions
+            label: local-collector definitions snapshot
+          - id: connector-sources
+            label: vendored connector sources
+          - id: tarball-digests
+            label: vendored tarball digests
+          - id: reference-contract
+            label: reference-contract stand-in
+    steps:
+      - name: Checkout data-connectors (this repo, current ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: data-connectors
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Checkout data-connect @ pinned SHA
+        if: matrix.check.id != 'reference-contract'
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/data-connect.git data-connect
+          git -C data-connect checkout ${{ needs.read-pins.outputs.data-connect-sha }}
+
+      - name: Checkout pdpp @ pinned SHA
+        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git pdpp
+          git -C pdpp checkout ${{ needs.read-pins.outputs.pdpp-sha }}
+
+      # Fresh npm cache discipline: an explicit per-job cache dir, never the runner's warm
+      # default npm cache, so a stale-tarball/lockfile mismatch (finding B1's failure mode)
+      # cannot be silently masked here the way it was in the original workflow.
+      - name: Install data-connect workspaces needed for this check (fresh cache)
+        if: matrix.check.id == 'tarball-digests'
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-cache-fresh"
+          npm install \
+            --prefix data-connect \
+            --cache "$RUNNER_TEMP/npm-cache-fresh" \
+            --ignore-scripts --no-audit --no-fund \
+            -w packages/collector-runtime -w packages/connector-protocol
+
+      - name: Run drift check — collector-definitions
+        if: matrix.check.id == 'collector-definitions'
+        run: node data-connectors/.github/scripts/cross-repo-integrity/check-collector-definitions-drift.mjs data-connect data-connectors
+
+      - name: Run drift check — connector-sources
+        if: matrix.check.id == 'connector-sources'
+        run: node data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
+
+      - name: Run drift check — tarball-digests
+        if: matrix.check.id == 'tarball-digests'
+        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp
+
+      - name: Run drift check — reference-contract
+        if: matrix.check.id == 'reference-contract'
+        run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
+
+  integration:
+    name: Integration — github/index.test.ts + bin/orchestrate.ts against the real RI
+    needs: read-pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout data-connectors (this repo, current ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: data-connectors
+
+      - name: Checkout pdpp @ pinned SHA
+        run: |
+          git clone https://github.com/PDP-Connect/pdpp.git pdpp
+          git -C pdpp checkout ${{ needs.read-pins.outputs.pdpp-sha }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
+        with:
+          version: 10
+
+      # pdpp is a large monorepo (console app, MCP server, reference-contract, and the
+      # reference-implementation server this job needs) with native builds (better-sqlite3,
+      # sqlite-vec) and workspace:* deps. This install is the expensive, cacheable part of the
+      # job; the actual drift/substitution logic below is cheap. Fresh-cache discipline still
+      # applies: pnpm's own lockfile-integrity check (--frozen-lockfile) is the guard here,
+      # equivalent in spirit to the drift jobs' fresh npm cache for the vendored tarballs.
+      - name: Install pdpp dependencies
+        working-directory: pdpp
+        run: pnpm install --frozen-lockfile
+
+      - name: Install data-connectors' polyfill-connectors dependencies (fresh cache)
+        working-directory: data-connectors/packages/polyfill-connectors
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-cache-fresh"
+          npm ci --cache "$RUNNER_TEMP/npm-cache-fresh" --ignore-scripts
+
+      - name: Run integration job
+        run: |
+          bash data-connectors/.github/scripts/cross-repo-integrity/run-integration-job.sh \
+            "$GITHUB_WORKSPACE/pdpp" \
+            "$GITHUB_WORKSPACE/data-connectors" \
+            "$RUNNER_TEMP/integration-scratch"
+
+      # TODO (see run-integration-job.sh's own TODO output): `bin/orchestrate.ts run
+      # <connector>` end-to-end, landing real records through the embedded RS, needs live
+      # credentials for a real provider. This job proves typecheck and the github connector's
+      # full test suite against the real RI (67/67 as of this task); it does not yet prove a
+      # live orchestrate run. Wiring that requires a deliberate decision on which connector,
+      # where its CI credential comes from, and whether that credential is safe to hold in
+      # this repository's Actions secrets — out of scope for this pass.

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema#",
+  "description": "Explicit pinned SHAs for the cross-repository integrity workflow (.github/workflows/cross-repo-integrity.yml). Update deliberately, in the same PR as the change that requires a new pin, never silently.",
+  "repos": {
+    "data-connect": {
+      "owner": "PDP-Connect",
+      "repo": "data-connect",
+      "sha": "525fffa6f7756b785700219afcaaacc4492a0819",
+      "note": "Corrected Move R head: runtime/protocol tarballs currently vendored into both pdpp and data-connectors were packed from this commit. Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
+    },
+    "pdpp": {
+      "owner": "PDP-Connect",
+      "repo": "pdpp",
+      "sha": "da197044a67bb8bedf9f570464abf0903898f504",
+      "branch": "move-r-pdpp-removal",
+      "note": "Head of move-r-pdpp-removal as of 2026-08-17. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout."
+    }
+  }
+}
