@@ -6,7 +6,7 @@
 	"license": "Apache-2.0",
 	"type": "module",
 	"engines": {
-		"node": ">=24.11.1 <25"
+		"node": ">=24.15.0 <25"
 	},
 	"exports": {
 		"./collectors": "./src/collector-registry.ts",

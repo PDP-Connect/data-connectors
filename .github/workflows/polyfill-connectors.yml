@@ -1,29 +1,80 @@
 name: Polyfill Connectors
 
+# Required-check design mirrors .github/workflows/cross-repo-integrity.yml (see that file's
+# top-of-file comment for the full citation trail — PDPP-gateB-final-closure-deep-redteam-2026-08-18.md
+# finding B1 / hardening 12.3): no `pull_request.paths` filter (a required workflow skipped via
+# path filtering leaves its check permanently "Pending" and blocks merging), a `changes` job
+# that always runs and computes relevance via plain `git diff`, the real `verify` job gated on
+# that relevance via `needs`+`if`, and one stable always-produced `gate` job
+# ("Polyfill Connectors Gate") that is the only context named in branch protection — never
+# `verify + test` directly, since GitHub's implicit `success()` on a bare job-level `if:`
+# (github/docs#4823) would otherwise let a broken `changes` job silently report green instead
+# of failing.
+
 on:
   push:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
       - ".github/workflows/polyfill-connectors.yml"
-  pull_request:
-    paths:
-      - "packages/polyfill-connectors/**"
-      - ".github/workflows/polyfill-connectors.yml"
+  pull_request: {}
   workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 concurrency:
   group: polyfill-connectors-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine whether relevant paths changed
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
+          else
+            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
+          fi
+
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
     name: verify + test
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -55,3 +106,32 @@ jobs:
         # scripts/run-tests.mjs and tsconfig.json for the file list and the
         # reinstatement note (that package isn't part of Move A's scope).
         run: npm run test
+
+  gate:
+    name: Polyfill Connectors Gate
+    needs: [changes, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate all job results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          echo "changes: $CHANGES_RESULT"
+          echo "verify:  $VERIFY_RESULT"
+
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
+            exit 1
+          fi
+
+          case "$VERIFY_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::verify reported '$VERIFY_RESULT' — expected 'success' or 'skipped'"
+              exit 1
+              ;;
+          esac
+
+          echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."
