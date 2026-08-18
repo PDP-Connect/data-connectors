@@ -11,9 +11,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "d255f8b942ee8e3a786d5193b170d29e0642cba6",
+      "sha": "5f988cf9898d73ec8fde4dc6adf64219ac3ae80f",
       "branch": "move-r-pdpp-removal",
-      "note": "Head of move-r-pdpp-removal as of 2026-08-18, after fixing terminal-run-commit-collector-restart.test.ts's missing executionRoot on CollectorRunConfig. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Re-pinned 2026-08-18 after the owner-journey harness fix."
+      "note": "Head of move-r-pdpp-removal as of 2026-08-18, after that branch resynced its own vendored tarballs (same stale-prepare-script drift class check-tarball-digest-drift.sh's new content-manifest comparison caught on this repo's side) and ported the executionRoot wiring to this repo's connector copy. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Re-pinned 2026-08-18, superseding the prior d255f8b9 pin, as this branch's final head for this task."
     }
   }
 }
