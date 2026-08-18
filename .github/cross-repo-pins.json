@@ -5,15 +5,15 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "21b81930742a57412a9990edbb6ad857deebcb22",
-      "note": "Move R head after syncing all 6 vendored bundled-connector sources (apple_photos, google_messages, claude_code, codex, google_takeout, imessage) to data-connectors' canonical copies (formatting + dead biome-ignore cleanups + one executionRoot call-site fix that had drifted). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
+      "sha": "177adedcf169a03c3bd75c315304238aa1ccc181",
+      "note": "Move R head after syncing all 6 vendored bundled-connector sources (apple_photos, google_messages, claude_code, codex, google_takeout, imessage) to data-connectors' canonical copies (formatting + dead biome-ignore cleanups + one executionRoot call-site fix that had drifted). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests. Re-pinned 2026-08-18 after the DCO signoff rebase (tree byte-identical; SHAs rewritten)."
     },
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "e6135fb2fc8dbc5ac38dd7609a6c2a544b394e72",
+      "sha": "d255f8b942ee8e3a786d5193b170d29e0642cba6",
       "branch": "move-r-pdpp-removal",
-      "note": "Head of move-r-pdpp-removal as of 2026-08-18, after fixing terminal-run-commit-collector-restart.test.ts's missing executionRoot on CollectorRunConfig. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout."
+      "note": "Head of move-r-pdpp-removal as of 2026-08-18, after fixing terminal-run-commit-collector-restart.test.ts's missing executionRoot on CollectorRunConfig. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Re-pinned 2026-08-18 after the owner-journey harness fix."
     }
   }
 }
