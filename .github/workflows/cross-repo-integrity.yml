@@ -15,8 +15,28 @@ name: Cross-Repo Integrity
 # canonical head moves; this workflow will not silently track it.
 
 on:
+  pull_request:
+    paths:
+      - "packages/polyfill-connectors/**"
+      - ".github/cross-repo-pins.json"
+      - ".github/scripts/cross-repo-integrity/**"
+      - ".github/workflows/cross-repo-integrity.yml"
   push:
-    branches: [move-a-polyfill-connectors]
+    # move-a-polyfill-connectors is kept only until #36 merges, so this workflow keeps running
+    # on that PR; remove it from this list once #36 merges. GitHub Actions applies one `paths`
+    # filter across every branch in a single `push` trigger, so this branch is now path-filtered
+    # too instead of running on every push (previously unfiltered) — low risk since #36's
+    # remaining commits touch these same paths.
+    branches: [move-a-polyfill-connectors, main]
+    paths:
+      - "packages/polyfill-connectors/**"
+      - ".github/cross-repo-pins.json"
+      - ".github/scripts/cross-repo-integrity/**"
+      - ".github/workflows/cross-repo-integrity.yml"
+  schedule:
+    # Weekly, to catch the pinned source repos (data-connect, pdpp) drifting even when nothing
+    # in this repo changes.
+    - cron: "0 6 * * 1"
   workflow_dispatch: {}
 
 concurrency:
