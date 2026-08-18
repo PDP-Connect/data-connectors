@@ -7,12 +7,15 @@
  * manifest (`reason_display_messages`, read per-connector by
  * `connectorReasonDisplayMessages` in this file's sibling module) or covered
  * by the reference implementation's small, closed set of RI-normalized
- * generic recovery codes (`RUNTIME_GENERIC_REASON_CODES` in
- * `reference-implementation/runtime/display-messages.ts`, imported here by
- * relative path — the connector package has no build/runtime dependency on
- * `pdpp-reference-implementation`; this is a test-only cross-reference,
- * mirroring how several `reference-implementation/test/*.ts` files already
- * reach into this package's `src/` the same way). Lookup is scoped by
+ * generic recovery codes (`RUNTIME_GENERIC_REASON_CODES`, imported here from
+ * `./reference-implementation-stand-in/runtime/recovery-reason-codes.ts` — a
+ * byte-identical, dependency-free copy of
+ * `reference-implementation/runtime/recovery-reason-codes.ts`; see that
+ * directory's README for exact source provenance and why only this one
+ * module was vendored, not the rest of `reference-implementation`. The
+ * connector package still has no build/runtime dependency on
+ * `pdpp-reference-implementation` — this remains a test-only cross-reference).
+ * Lookup is scoped by
  * connector: two connectors emitting the same literal reason code are
  * independent facts, each checked against its OWN manifest declaration —
  * connector A's copy for `selector_drift` never counts toward connector B's
@@ -43,7 +46,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { RUNTIME_GENERIC_REASON_CODES } from "../../../reference-implementation/runtime/recovery-reason-codes.ts";
+import { RUNTIME_GENERIC_REASON_CODES } from "./reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import { DETAIL_GAP_MESSAGE_REASON_LITERALS, scanConnectorForReasonEmissions } from "./reason-emission-scan.ts";
 

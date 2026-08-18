@@ -29,17 +29,46 @@ rejected outright rather than treated as a partial win.
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
   resolves against the public registry and 404s (neither is published). `@pdpp/connector-protocol`
   is handled by pinning it too (see `overrides` below). `@pdpp/reference-contract` is a large
-  contract package (route manifests, OpenAPI generation, validators) — out of scope for this
-  move — but `collector-runtime`'s non-test code (`src/local-device-client.ts`) genuinely imports
-  one function from it, `canonicalTerminalRunCommitEnvelope` (`@pdpp/reference-contract/common`).
-  This tarball is a minimal private stand-in carrying only that function and its sibling
-  `canonicalTerminalRunCommitJson`, copied byte-for-byte from the real package's
-  `src/common/terminal-run-commit.ts` at the same pinned commit. Delete it once the real
-  `@pdpp/reference-contract` is available to this repo.
+  contract package (route manifests, OpenAPI generation, validators) — this stand-in carries only
+  a minimal subset, documented in full in `../src/reference-implementation-stand-in/`'s sibling
+  and this file's provenance table below:
+
+  - `common/index.ts` — `canonicalTerminalRunCommitEnvelope`/`canonicalTerminalRunCommitJson`,
+    the one function `collector-runtime`'s non-test code (`src/local-device-client.ts`) actually
+    calls.
+  - `evidence/index.ts`, `evidence/coherence.ts`, `evidence/collection-scope.ts` — added when
+    Gate B finding B2 restored `polyfill-connectors`' excluded semantic/conformance tests
+    (`connectors/_conformance/coverage-conformance.test.ts`,
+    `connectors/groupme/attachment-detail-coverage.test.ts`,
+    `connectors/ynab/collect-terminal-coverage.test.ts`,
+    `src/collector-scope-contract.test.ts`), which import `evaluateStreamCoherence` and
+    `collectionScopeFingerprint` from `@pdpp/reference-contract/evidence`. `coherence.ts` and
+    `collection-scope.ts` are each self-documented in the real package as deliberately
+    dependency-free leaves (neither imports anything, not even sibling contract modules —
+    confirmed by inspecting both files at the pinned commit). The stand-in's `evidence/index.ts`
+    barrel deliberately does NOT re-export the real barrel's other two modules
+    (`named-collection-scope.ts`, `scope-narrowing-authority.ts`): no restored test needs them,
+    and `scope-narrowing-authority.ts` is not a zero-dependency leaf (it imports
+    `collection-scope.ts`), so it was left out rather than speculatively vendored.
+
+  Provenance for every copied file:
+
+  | Stand-in file | Source path | Source commit |
+  |---|---|---|
+  | `common/index.ts` | `packages/reference-contract/src/common/terminal-run-commit.ts` | `7b46f9a0ee28fafb421018ff283a329e4623e44a` (identical bytes carried forward through `27f6eb6a6fae671a04835c145e869efa8d457c9f`, reconfirmed by diff) |
+  | `evidence/coherence.ts` | `packages/reference-contract/src/evidence/coherence.ts` | `27f6eb6a6fae671a04835c145e869efa8d457c9f` (`PDP-Connect/pdpp`, branch `manifest-reconciliation`) |
+  | `evidence/collection-scope.ts` | `packages/reference-contract/src/evidence/collection-scope.ts` | `27f6eb6a6fae671a04835c145e869efa8d457c9f` |
+  | `evidence/index.ts` | hand-written barrel, not copied from the real package | n/a |
+
+  This tarball remains a minimal private stand-in, not an independent contract implementation.
+  Delete it once the real `@pdpp/reference-contract` is available to this repo.
 - Because `@pdpp/collector-runtime`'s dependency declarations point at the public registry
   (`"*"`), not at these vendor files, `package.json`'s `overrides` field is what actually forces
   npm to substitute the local tarballs for `@pdpp/connector-protocol` and `@pdpp/reference-contract`
-  wherever `@pdpp/collector-runtime` depends on them — a plain nested `file:` dependency in
+  wherever `@pdpp/collector-runtime` depends on them. `polyfill-connectors` ALSO depends on
+  `@pdpp/reference-contract` directly (`dependencies`, not just `overrides`) since its own
+  restored tests import `@pdpp/reference-contract/evidence` and `/common` by package name, not
+  only transitively through `collector-runtime`. A plain nested `file:` dependency in
   `collector-runtime`'s own `package.json` isn't an option since that file lives inside the
   already-packed tarball we don't control.
 - sha256 (informational, alongside npm's own tarball integrity hash recorded in
@@ -48,17 +77,34 @@ rejected outright rather than treated as a partial win.
   ```
   34f55c3402e013774a18b688ffcabc559ffdc02d238b19257612c1dc4b813d06  pdpp-collector-runtime-0.0.1.tgz
   931660f8560a7c52cd89fb01a648268b0fb2985f53ba2d4fe99ddcc97690bd1c  pdpp-connector-protocol-0.0.1.tgz
-  5c9168ad2a872163b14e98da9cb29b685f474886d661bc2f3e564a8399770aa5  pdpp-reference-contract-0.0.1.tgz
+  b636fbddb849ea17d66c7e010d9773e97b922de653c54ab4d9d9ba0db53e0c9e  pdpp-reference-contract-0.0.1.tgz
   ```
 
-`package.json` references the two Move A packages directly via `file:./vendor/<name>.tgz`
-dependencies, npm's supported local-tarball dependency form, and the transitive
-`@pdpp/connector-protocol` / `@pdpp/reference-contract` pins via `overrides`.
+  (`pdpp-reference-contract-0.0.1.tgz`'s digest changed from the prior `5c9168ad...` when the
+  `evidence/` subpath was added for Gate B finding B2; `package-lock.json` was regenerated in the
+  same change — see the closure report for the exact before/after.)
+
+`package.json` references the two Move A packages plus `@pdpp/reference-contract` directly via
+`file:./vendor/<name>.tgz` dependencies, npm's supported local-tarball dependency form, and the
+transitive `@pdpp/connector-protocol` / `@pdpp/reference-contract` pins for
+`@pdpp/collector-runtime` via `overrides`.
+
+## What this vendor tree does NOT cover
+
+Two of the eight tests Gate B finding B2 restored need `reference-implementation` SERVER modules
+(`server/db.ts`, `server/records.ts`, `server/postgres-storage.ts`,
+`server/stores/connector-instance-store.ts`, and a dynamic import of `runtime/index.ts`), not a
+narrow leaf contract. Those are thousands of lines each with deep transitive dependencies into
+auth, search indexing, and storage backends — not a minimal-stand-in candidate. See
+`../src/reference-implementation-stand-in/README.md` for the full reasoning and the required
+cross-repository closure mechanism for those two files
+(`connectors/github/index.test.ts`, `bin/orchestrate.ts`).
 
 ## Removal trigger
 
 This is transitional. Once `@pdpp/collector-runtime` and `@pdpp/connector-protocol` publish
-(from `PDP-Connect/data-connect`, to whatever registry that repo settles on), delete this
-directory and switch `package.json` back to normal semver-range registry dependencies. Until
-then, drift between these tarballs and the pinned commit is bounded only by re-running the pack
-step by hand — there is no automated freshness check.
+(from `PDP-Connect/data-connect`, to whatever registry that repo settles on) and the real
+`@pdpp/reference-contract` becomes consumable by this repo, delete this directory and switch
+`package.json` back to normal semver-range registry dependencies. Until then, drift between
+these tarballs and the pinned commit is bounded only by re-running the pack step by hand — there
+is no automated freshness check.

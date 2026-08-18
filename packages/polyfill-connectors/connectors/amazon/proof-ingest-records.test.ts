@@ -4,7 +4,7 @@
 /**
  * Locks the committed, parser-derived browser-collector proof fixture.
  *
- * The reference-implementation deterministic proof
+ * In the monorepo, a reference-implementation deterministic proof
  * (`reference-implementation/test/browser-collector-ingest-proof.test.js`)
  * ingests Amazon records through the real device-exporter `browser_collector`
  * path. Those records must be the connector's OWN output, not a hand-authored
@@ -12,12 +12,18 @@
  * DOM-dependent connector parsers, so the RI test cannot import them directly.
  *
  * This test lives in the polyfill-connectors package (whose tsconfig has DOM
- * lib), runs the real parsers over the committed, already-scrubbed DOM fixture,
- * and asserts the result EXACTLY matches the committed JSON the RI test reads
- * (`reference-implementation/test/fixtures/amazon-browser-collector-proof-records.json`).
- * If the parsers or record builders drift, this test fails and the JSON must be
- * regenerated (set `PDPP_REGEN_PROOF_FIXTURE=1`), keeping the RI proof's input
- * faithful to the connector without coupling the two packages' type programs.
+ * lib), runs the real parsers over the committed, already-scrubbed DOM
+ * fixture, and asserts the result EXACTLY matches the committed JSON
+ * (`fixtures/amazon/scrubbed/pilot-real-shape/amazon-browser-collector-proof-records.json`,
+ * byte-identical to the file the RI test reads at
+ * `reference-implementation/test/fixtures/amazon-browser-collector-proof-records.json`
+ * in the monorepo — copied in here rather than left at that sibling path since
+ * `reference-implementation` does not exist in this repository post-move; the
+ * required cross-repository CI job for this pairing is documented in the Gate
+ * B2 closure report). If the parsers or record builders drift, this test
+ * fails and the JSON must be regenerated (set `PDPP_REGEN_PROOF_FIXTURE=1`),
+ * keeping the RI proof's input faithful to the connector without coupling the
+ * two packages' type programs.
  *
  * The fixture carries only scrubbed/synthetic data (the source DOM uses
  * `[REDACTED_NAME]` / `[REDACTED_ADDRESS]` and synthetic ASINs/order id).
@@ -41,7 +47,7 @@ const SCRUBBED_ORDERS_DOM = new URL(
   import.meta.url
 );
 const PROOF_RECORDS_JSON = new URL(
-  "../../../../reference-implementation/test/fixtures/amazon-browser-collector-proof-records.json",
+  "../../fixtures/amazon/scrubbed/pilot-real-shape/amazon-browser-collector-proof-records.json",
   import.meta.url
 );
 const EMITTED_AT = "2026-06-01T00:00:00.000Z";

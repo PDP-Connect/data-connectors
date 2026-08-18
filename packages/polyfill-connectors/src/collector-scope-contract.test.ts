@@ -337,9 +337,7 @@ test("(d) evidence measured under one boundary stops describing a changed one", 
 });
 
 test("the runner's fingerprint matches the contract's, so server and collector agree", async () => {
-  const { collectionScopeFingerprint: contractFingerprint } = await import(
-    "../../reference-contract/src/evidence/collection-scope.ts"
-  );
+  const { collectionScopeFingerprint: contractFingerprint } = await import("@pdpp/reference-contract/evidence");
   for (const scope of [
     null,
     { since: SINCE },
