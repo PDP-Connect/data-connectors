@@ -154,20 +154,13 @@ jobs:
       # reference-implementation server this job needs) with native builds (better-sqlite3,
       # sqlite-vec) and workspace:* deps. This install is the expensive, cacheable part of the
       # job; the actual drift/substitution logic below is cheap.
-      #
-      # --no-frozen-lockfile, not --frozen-lockfile: pdpp's pnpm-lock.yaml at the pinned SHA
-      # (da197044) records a stale sha512 `integrity` value for
-      # vendor/pdpp-collector-runtime-0.0.1.tgz — the checked-in tarball itself is correct
-      # (its SHA-256 matches both this repo's and pdpp's own vendor/SHA256SUMS, confirmed by
-      # a fresh repack from the pinned data-connect SHA), but pnpm's lockfile was never
-      # regenerated after that tarball was last replaced, so `--frozen-lockfile` fails with
-      # ERR_PNPM_TARBALL_INTEGRITY. That's a pdpp-repo lockfile-hygiene issue at this pin, not
-      # a data-connectors provisioning gap — fix it there (regenerate pdpp's lockfile and
-      # re-pin) when convenient; until then, --no-frozen-lockfile lets pnpm recompute the
-      # hash from the actual on-disk file instead of trusting the stale recorded one.
       - name: Install pdpp dependencies
         working-directory: pdpp
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert pdpp install left the checkout clean
+        working-directory: pdpp
+        run: git diff --exit-code
 
       - name: Install data-connectors' polyfill-connectors dependencies (fresh cache)
         working-directory: data-connectors/packages/polyfill-connectors
