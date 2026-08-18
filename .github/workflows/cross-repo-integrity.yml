@@ -127,10 +127,17 @@ jobs:
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
 
   integration:
-    name: Integration — github/index.test.ts + bin/orchestrate.ts against the real RI
+    name: Integration (Node ${{ matrix.node-version }}) — github/index.test.ts + bin/orchestrate.ts against the real RI
     needs: read-pins
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # polyfill-connectors declares "engines": {"node": ">=24 <25"} — test both the minimum
+        # accepted version and the current one so a >=24-only feature that happens to also need
+        # a later 24.x patch doesn't slip through on the newer runner alone.
+        node-version: ["24.0.0", "24.19.0"]
     steps:
       - name: Checkout data-connectors (this repo, current ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,7 +151,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
 
       - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
         with:
