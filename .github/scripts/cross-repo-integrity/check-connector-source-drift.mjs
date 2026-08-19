@@ -4,10 +4,18 @@
 
 /**
  * Drift job (b): vendored connector sources in data-connect vs this repo's canonical
- * connector files, for the six connectors data-connect's local-collector bundle currently
- * duplicates (see LOCAL_COLLECTOR_DEFINITIONS in
- * packages/polyfill-connectors/src/collector-registry.ts): claude_code, codex,
- * google_takeout, imessage, apple_photos, google_messages.
+ * connector files, for whichever connectors data-connect's local-collector bundle currently
+ * duplicates.
+ *
+ * The bundled-connector set is derived from this repo's own canonical registry
+ * (packages/polyfill-connectors/src/collector-registry.ts's LOCAL_COLLECTOR_DEFINITIONS),
+ * not hard-coded here: per the reviewer's "derive connector coverage instead of hard-coding
+ * six IDs" hardening finding (2026-08-18 final-v2 red-team), a hard-coded list can silently
+ * fall out of sync with a registry change that adds or removes a bundled connector, leaving
+ * newly-bundled source outside byte-drift checking. That set is then asserted equal to the
+ * product bundle actually present under data-connect's vendored connectors directory —
+ * a mismatch (registry added/removed a connector but the vendored bundle didn't follow, or
+ * vice versa) is itself a drift failure, not silently ignored.
  *
  * data-connect carries a transitional copy of each connector's non-test source files at
  * packages/polyfill-connectors/connectors/<id>/ (finding S1's "transitional selected
@@ -20,19 +28,61 @@
  * bundle executes).
  *
  * Usage:
- *   node check-connector-source-drift.mjs <data-connect-checkout> <data-connectors-checkout>
+ *   node --experimental-strip-types check-connector-source-drift.mjs <data-connect-checkout> <data-connectors-checkout>
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
-
-const BUNDLED_CONNECTORS = ["claude_code", "codex", "google_takeout", "imessage", "apple_photos", "google_messages"];
+import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const [, , dataConnectDir, dataConnectorsDir] = process.argv;
 
 if (!dataConnectDir || !dataConnectorsDir) {
   console.error("usage: check-connector-source-drift.mjs <data-connect-checkout> <data-connectors-checkout>");
+  process.exit(1);
+}
+
+const registryPath = resolve(dataConnectorsDir, "packages/polyfill-connectors/src/collector-registry.ts");
+if (!existsSync(registryPath)) {
+  console.error(`FAIL: canonical collector-registry.ts not found at ${registryPath}`);
+  process.exit(1);
+}
+
+// The registry module's own relative imports (../connectors/<id>/collector-definition.ts)
+// resolve correctly as long as we import it from its real on-disk location, so no scratch
+// tree is needed here (unlike check-collector-definitions-drift.mjs, which must run
+// data-connect's generator against a synthetic sibling layout). Every value these modules
+// import from @pdpp/connector-protocol is `import type` only, so
+// --experimental-strip-types erases it without needing that package installed.
+const registryModule = await import(pathToFileURL(registryPath).href);
+const BUNDLED_CONNECTORS = registryModule.LOCAL_COLLECTOR_DEFINITIONS.map((d) => d.connector_id);
+
+if (BUNDLED_CONNECTORS.length === 0) {
+  console.error(`FAIL: canonical collector-registry.ts's LOCAL_COLLECTOR_DEFINITIONS is empty at ${registryPath}`);
+  process.exit(1);
+}
+
+const vendoredConnectorsRoot = join(dataConnectDir, "packages/polyfill-connectors/connectors");
+const vendoredConnectorDirs = existsSync(vendoredConnectorsRoot)
+  ? readdirSync(vendoredConnectorsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort()
+  : [];
+const registryConnectorSet = new Set(BUNDLED_CONNECTORS);
+const vendoredConnectorSet = new Set(vendoredConnectorDirs);
+const missingFromVendored = BUNDLED_CONNECTORS.filter((id) => !vendoredConnectorSet.has(id));
+const extraInVendored = vendoredConnectorDirs.filter((id) => !registryConnectorSet.has(id));
+
+if (missingFromVendored.length > 0 || extraInVendored.length > 0) {
+  console.error("FAIL: the canonical registry's bundled-connector set does not match data-connect's vendored connectors directory.");
+  if (missingFromVendored.length > 0) {
+    console.error(`  in canonical registry but not vendored in data-connect: ${missingFromVendored.join(", ")}`);
+  }
+  if (extraInVendored.length > 0) {
+    console.error(`  vendored in data-connect but not in canonical registry: ${extraInVendored.join(", ")}`);
+  }
   process.exit(1);
 }
 

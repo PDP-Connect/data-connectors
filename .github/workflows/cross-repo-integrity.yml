@@ -254,7 +254,7 @@ jobs:
 
       - name: Run drift check — connector-sources
         if: matrix.check.id == 'connector-sources'
-        run: node data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
+        run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
 
       - name: Run drift check — tarball-digests
         if: matrix.check.id == 'tarball-digests'
@@ -390,8 +390,26 @@ jobs:
             pin-output: data-connect-sha
             # Canonical paths that back drift jobs (a) collector-definitions, (b)
             # connector-sources, (c) tarball-digests — see .github/cross-repo-pins.json's
-            # own note on data-connect's pin.
-            paths: "packages/collector-runtime packages/connector-protocol"
+            # own note on data-connect's pin. Per reviewer finding "freshness coverage omits
+            # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
+            # data-connect path those three jobs actually compare, not just the
+            # runtime/protocol tarball-digest source: the definitions-snapshot generator +
+            # its committed output back job (a), and the six vendored connector directories
+            # back job (b). Keep this list and check-connector-source-drift.mjs's
+            # registry-derived connector-ID set in sync — that script now asserts its
+            # comparison set against the canonical registry, but this workflow's path list is
+            # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
+            paths: >-
+              packages/collector-runtime
+              packages/connector-protocol
+              packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
+              packages/local-collector/src/generated/collector-definitions.generated.ts
+              packages/polyfill-connectors/connectors/claude_code
+              packages/polyfill-connectors/connectors/codex
+              packages/polyfill-connectors/connectors/google_takeout
+              packages/polyfill-connectors/connectors/imessage
+              packages/polyfill-connectors/connectors/apple_photos
+              packages/polyfill-connectors/connectors/google_messages
           - id: pdpp
             label: pdpp
             url: https://github.com/PDP-Connect/pdpp.git
@@ -482,12 +500,24 @@ jobs:
             exit 1
           fi
 
-          # read-pins always runs (no `if:`); drift-checks/integration skip when this PR's own
-          # diff is irrelevant; pin-freshness skips only if `changes` itself didn't succeed
-          # (already checked above, so by this point it always actually runs too). None of
-          # them should ever land on anything but "success" or "skipped" — "failure" or
-          # "cancelled" is a real problem this gate must catch.
-          for result in "$READ_PINS_RESULT" "$DRIFT_CHECKS_RESULT" "$INTEGRATION_RESULT" "$PIN_FRESHNESS_RESULT"; do
+          # read-pins always runs (no `if:`) and pin-freshness always runs once `changes`
+          # succeeds (already confirmed above) — neither has a legitimate "skipped" outcome,
+          # so both must land on exactly "success". Per reviewer finding "the aggregate gate
+          # contains a bounded fail-open condition" (2026-08-18 final-v2 red-team): treating
+          # their skip as acceptable would silently accept a future dependency/condition
+          # regression that unexpectedly skips pin parsing or freshness checking — precisely
+          # the class of failure this gate exists to catch. Only drift-checks/integration may
+          # legitimately skip, gated as they are on this PR's own relevance.
+          for result_name in "READ_PINS_RESULT:$READ_PINS_RESULT" "PIN_FRESHNESS_RESULT:$PIN_FRESHNESS_RESULT"; do
+            name="${result_name%%:*}"
+            result="${result_name#*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name reported '$result' — required jobs read-pins and pin-freshness must be 'success', not merely 'success or skipped'"
+              exit 1
+            fi
+          done
+
+          for result in "$DRIFT_CHECKS_RESULT" "$INTEGRATION_RESULT"; do
             case "$result" in
               success|skipped) ;;
               *)
@@ -497,4 +527,4 @@ jobs:
             esac
           done
 
-          echo "Cross-Repo Integrity Gate: all required jobs succeeded or were correctly skipped as irrelevant."
+          echo "Cross-Repo Integrity Gate: all required jobs succeeded (read-pins, pin-freshness) or were correctly skipped as irrelevant (drift-checks, integration)."

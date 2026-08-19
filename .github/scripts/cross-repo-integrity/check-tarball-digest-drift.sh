@@ -161,11 +161,66 @@ FAILED=0
 # bit". This check answers a different question: "does that committed artifact's CONTENT
 # still match what data-connect's pinned SHA produces today", independent of which npm
 # version did the packing on either side.
+# Per reviewer hardening finding "safely inspect tarballs before extraction"
+# (2026-08-18 final-v2 red-team): both operands here can be PR-controlled (the "committed"
+# tarball is read straight from the checkout being tested, which is exactly the untrusted
+# input a malicious PR could replace) and this workflow has no secrets to protect, but a
+# malformed archive can still attack the ephemeral runner (path traversal writing outside
+# $dest, absolute-path overwrite, symlink/hardlink/device-node tricks, a decompression-bomb
+# member) or make this required check unreliable. Inspect every member's path/type/size with
+# `tar -tvzf` BEFORE any extraction, rejecting anything that isn't a plain file or directory
+# at a safe relative path, then extract with restrictive options as defense in depth.
+MAX_MEMBER_BYTES=$((256 * 1024 * 1024))
+
+preflight_tarball() {
+  local tarball="$1"
+  local listing
+  listing="$(tar -tvzf "$tarball")"
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    local type_char="${line:0:1}"
+    # GNU tar -tv format: "<perms> <owner>/<group> <size> <date> <time> <path>[ -> <link target>]"
+    local size
+    size="$(awk '{print $3}' <<<"$line")"
+    local path
+    path="$(awk '{ for (i=6; i<NF; i++) printf "%s ", $i; print $NF }' <<<"$line")"
+    path="${path%% -> *}"
+
+    case "$type_char" in
+      d) ;; # directory
+      -) ;; # regular file
+      *)
+        echo "FAIL: $tarball — member '$path' has disallowed type '$type_char' (only regular files and directories are allowed; no symlinks, hardlinks, or device/special files)" >&2
+        return 1
+        ;;
+    esac
+
+    if [[ "$path" == /* ]]; then
+      echo "FAIL: $tarball — member '$path' has an absolute path" >&2
+      return 1
+    fi
+    if [[ "$path" == *".."* ]]; then
+      echo "FAIL: $tarball — member '$path' contains a '..' path segment" >&2
+      return 1
+    fi
+    if [[ "$size" =~ ^[0-9]+$ ]] && (( size > MAX_MEMBER_BYTES )); then
+      echo "FAIL: $tarball — member '$path' is $size bytes, exceeding the $MAX_MEMBER_BYTES-byte preflight limit" >&2
+      return 1
+    fi
+  done <<<"$listing"
+}
+
 extracted_manifest() {
   local tarball="$1"
   local dest="$2"
   mkdir -p "$dest"
-  tar -xzf "$tarball" -C "$dest"
+  if ! preflight_tarball "$tarball"; then
+    echo "FAIL: $tarball failed archive preflight validation — refusing to extract" >&2
+    return 1
+  fi
+  tar -xzf "$tarball" -C "$dest" --no-same-owner --no-same-permissions --no-overwrite-dir
   ( cd "$dest" && find . -type f -print0 | sort -z | xargs -0 sha256sum )
 }
 
