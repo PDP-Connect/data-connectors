@@ -5,16 +5,16 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "9ef24d461dab0ee536abf4a15685c4b896d0d5be",
+      "sha": "9155e57ae47ab145214eb10551ed2c2185d7098a",
       "branch": "main",
-      "note": "Post-activation head of PDP-Connect/data-connect main as of 2026-08-20, verified via `gh api repos/PDP-Connect/data-connect/branches/main` at pin time. This is the merge commit of the activation PR (#29) that flipped consumer_pin_required false -> true in .github/consumer-drift-signal-config.json. Supersedes the prior b31bf312 pin (PR #26, move-r-collector-runtime): the branch field now points at main because the coordinated cutover is live and the consumer-side enforcement this pin backs (data-connect's own pin-required check) is active. Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
+      "note": "Head of PDP-Connect/data-connect main as of 2026-08-20, verified via `gh api repos/PDP-Connect/data-connect/branches/main` at pin time. This is the merge commit of PR #30, which ports three hunks pdpp's own rebase of fix/preservation-fixes-0819 had dropped (bare-specifier package validation, iMessage fixture date fix, connector-spawn tsx-resolution hardening). Supersedes the prior 9ef24d46 pin (PR #29, consumer-pin-required activation): only packages/collector-runtime changed between the two pins (see this repo's vendor/SHA256SUMS refresh in the same PR that updated this field). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
     },
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "a0924e9a4338550f945bd50a02fa1cf0cd4e8cec",
+      "sha": "5eacd82e2f9822b555bda869429b842be66b1ff7",
       "branch": "main",
-      "note": "Post-activation head of PDP-Connect/pdpp main as of 2026-08-20, verified via `gh api repos/PDP-Connect/pdpp/branches/main` at pin time. This is the merge commit of the activation PR (#170) that flipped consumer_pin_required false -> true in .github/consumer-drift-signal-config.json. Supersedes the prior dc5c878e pin (PR #155, move-r-pdpp-removal): the branch field now points at main because the coordinated cutover is live and the consumer-side enforcement this pin backs (pdpp's own pin-required check) is active. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout."
+      "note": "Head of PDP-Connect/pdpp main as of 2026-08-20, verified via `gh api repos/PDP-Connect/pdpp/branches/main` at pin time. This is the merge commit of PR #171, which refreshed pdpp's own vendor/pdpp-collector-runtime-0.0.1.tgz to match data-connect's new pin above (both moves are part of the same coordinated data-connect PR #30 repin). Required here: drift job (c) (vendored tarball digests) checks pdpp's vendor/SHA256SUMS against a fresh repack from the data-connect pin too, and pdpp's tarball at the PRIOR a0924e9a pin predates PR #171, so it would fail that comparison without this move. packages/reference-contract (what this pin otherwise backs, for drift job (d)) did not change in PR #171. Supersedes the prior a0924e9a pin (PR #170, consumer-pin-required activation)."
     }
   }
 }

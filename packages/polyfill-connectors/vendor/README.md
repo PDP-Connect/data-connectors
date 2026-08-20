@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`177adedcf169a03c3bd75c315304238aa1ccc181` (see `.github/cross-repo-pins.json`). This package
+`9155e57ae47ab145214eb10551ed2c2185d7098a` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,12 +22,12 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@177adedcf169a03c3bd75c315304238aa1ccc181`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Resynced 2026-08-18 after
-  `check-tarball-digest-drift.sh`'s new content-manifest comparison (see that script's own
-  comment for why raw tarball digest equality across npm versions was replaced) caught the
-  previously-committed tarballs still carrying a stale `"prepare": "npm run build"` package.json
-  field that data-connect's own `ab2146c` removed before the pin above was set.
+  `PDP-Connect/data-connect@9155e57ae47ab145214eb10551ed2c2185d7098a`, workspace packages
+  `packages/collector-runtime` and `packages/connector-protocol`. Resynced 2026-08-20 to pick up
+  data-connect PR #30 (port of pdpp's dropped preservation-fixes-0819 hunks: bare-specifier
+  package validation, iMessage fixture date fix, connector-spawn tsx-resolution hardening).
+  Only collector-runtime's contents changed; connector-protocol's tarball is byte-identical to
+  the prior vendored copy.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
@@ -79,7 +79,7 @@ rejected outright rather than treated as a partial win.
   `package-lock.json` once installed):
 
   ```
-  34443a3576f16c48049922fe53438e890cdfbbde67c0725a3a7fdca17ded042e  pdpp-collector-runtime-0.0.1.tgz
+  e78fecd8c4ef74860cbeb3eb356b6c738e396f8d00fee21d5fdb8269604215e5  pdpp-collector-runtime-0.0.1.tgz
   0173b91526c4ee5a8ebe8c8c67848758b4112d46cadbd72bb7cf1c90f5389905  pdpp-connector-protocol-0.0.1.tgz
   b636fbddb849ea17d66c7e010d9773e97b922de653c54ab4d9d9ba0db53e0c9e  pdpp-reference-contract-0.0.1.tgz
   ```
