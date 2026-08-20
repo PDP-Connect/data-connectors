@@ -1,0 +1,94 @@
+{
+	"compilerOptions": {
+		// Language + module (Node ESM)
+		"target": "ES2023",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"moduleDetection": "force",
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"esModuleInterop": true,
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"forceConsistentCasingInFileNames": true,
+
+		// Strictness: the 2026 "strict-plus" baseline. Every flag here catches
+		// a class of bug that 'strict: true' alone does not.
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": true,
+		"noImplicitOverride": true,
+		// noPropertyAccessFromIndexSignature forces process.env['X'] bracket
+		// access, which Biome's useLiteralKeys rejects. Leaving off —
+		// Biome's stance (prefer dot-access) matches mainstream style.
+		"noPropertyAccessFromIndexSignature": false,
+		"noFallthroughCasesInSwitch": true,
+		"noImplicitReturns": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"allowUnreachableCode": false,
+		"allowUnusedLabels": false,
+		"useUnknownInCatchVariables": true,
+
+		// Dev ergonomics — no emit, type-check only. Bundling (if ever
+		// published) happens via a separate build step.
+		"noEmit": true,
+		"skipLibCheck": true,
+		"types": ["node"],
+
+		// We run .ts directly via tsx; no emitted .js to import. Biome's
+		// useImportExtensions enforces explicit .ts extensions on local
+		// imports, and tsx/Node strip them at load time. This matches
+		// Playwright/Stripe/Vercel/vitest's convention for source-only
+		// TypeScript packages.
+		"allowImportingTsExtensions": true
+	},
+	"include": [
+		"src/**/*.ts",
+		"connectors/**/*.ts",
+		"bin/**/*.ts",
+		"bench/**/*.ts",
+		"types/**/*.d.ts"
+	],
+	// __fixtures__/ holds hand-crafted HTML/JSON used by parser tests; they
+	// aren't TypeScript. fixtures/ holds gitignored live captures (except the
+	// committed pilot-real-shape/ subtrees, which are JSON/HTML data, not
+	// TypeScript, so this exclude doesn't affect them). Tests (*.test.ts) ARE
+	// included so typecheck covers them — earlier they were excluded, which
+	// let test-side type errors slip through.
+	//
+	// connectors/github/index.test.ts and bin/orchestrate.ts are the two
+	// remaining exclusions (Gate B finding B2). Both import the actual
+	// reference-implementation SERVER, not a narrow leaf contract:
+	//   - index.test.ts: server/db.ts, server/records.ts.
+	//   - orchestrate.ts: server/postgres-storage.ts (STATIC import, line 18)
+	//     and server/stores/connector-instance-store.ts (STATIC import, line
+	//     19) for isPostgresStorageBackend/admitOwnerRunConnection/
+	//     createPostgresConnectorInstanceStore/createSqliteConnectorInstanceStore
+	//     — these are resolved at typecheck time, not only at the dynamic
+	//     `import(".../reference-implementation/runtime/index.ts")` its `run`
+	//     command performs at call time. postgres-storage.ts itself imports
+	//     connector-key.ts/record-rejection-replay-key.ts/storage-generation.ts,
+	//     and connector-instance-store.ts imports back from
+	//     postgres-storage.ts — neither is a documented, dependency-free leaf
+	//     the way reference-contract's coherence.ts/collection-scope.ts or
+	//     reference-implementation's own recovery-reason-codes.ts are (see
+	//     src/reference-implementation-stand-in/README.md). Bridging
+	//     orchestrate.ts's typecheck honestly would mean vendoring a
+	//     non-trivial slice of the RI storage layer, not a two-function
+	//     stand-in — the same reasoning that keeps index.test.ts excluded.
+	//     Typecheck-only was the originally proposed scope for this file, but
+	//     turned out not to be achievable without that vendoring; it stays
+	//     excluded from both typecheck and the runner pending the same
+	//     required cross-repository semantic CI job that closes B2/B5.
+	// See src/reference-implementation-stand-in/README.md for the full
+	// reasoning and the Gate B2 closure report for the required job shape.
+	"exclude": [
+		"node_modules",
+		"fixtures",
+		"**/__fixtures__",
+		"connectors/github/index.test.ts",
+		"bin/orchestrate.ts"
+	]
+}

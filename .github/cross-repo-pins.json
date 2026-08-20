@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema#",
+  "description": "Explicit pinned SHAs for the cross-repository integrity workflow (.github/workflows/cross-repo-integrity.yml). Update deliberately, in the same PR as the change that requires a new pin, never silently.",
+  "repos": {
+    "data-connect": {
+      "owner": "PDP-Connect",
+      "repo": "data-connect",
+      "sha": "b31bf31216b2f6ba099a5abe072987fad33def9a",
+      "branch": "move-r-collector-runtime",
+      "note": "Live head of PDP-Connect/data-connect PR #26 (move-r-collector-runtime) as of 2026-08-18, verified via `gh pr view 26 --repo PDP-Connect/data-connect --json headRefOid` at pin time, all checks green (build matrix incl. macos-15-intel, pack-install-run, DCO, Check data-connectors' recorded pin). Supersedes the prior c4cd24fe pin: #26 expanded consumer-drift-signal.yml's watched paths to all three duplicate classes (definitions snapshot generator/generated file, six vendored connector dirs, runtime/protocol) with a registry-derived assertion against the hard-coded connector list, added a fail-closed activation switch (.github/consumer-drift-signal-config.json), added persist-credentials: false to all checkouts, and self-triggers on the workflow + config file (Gate B prodfix correction, gateB-final-v2 red-team). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
+    },
+    "pdpp": {
+      "owner": "PDP-Connect",
+      "repo": "pdpp",
+      "sha": "dc5c878e34ad5f94f4e30c84045820cb43ebd673",
+      "branch": "move-r-pdpp-removal",
+      "note": "Live head of PDP-Connect/pdpp PR #155 (move-r-pdpp-removal) as of 2026-08-18, verified via `gh pr view 155 --repo PDP-Connect/pdpp --json headRefOid` at pin time, all checks green. Still contains reference-implementation/ (RI server) and packages/reference-contract/ (canonical contract source) pre-removal. Source of truth for drift job (d) reference-contract stand-in comparison, and for the integration job's RI-server checkout. Supersedes the prior ce162a56 pin: #155 added a fail-closed activation switch (.github/consumer-drift-signal-config.json), persist-credentials: false on consumer-drift-signal.yml's checkout, and self-triggers on the workflow + config file (Gate B prodfix correction, gateB-final-v2 red-team)."
+    }
+  }
+}

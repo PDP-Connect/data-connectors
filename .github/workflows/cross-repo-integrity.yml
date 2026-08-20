@@ -1,0 +1,530 @@
+name: Cross-Repo Integrity
+
+# Gate B finding B5: cross-repository drift CI is the cutover mechanism, not cleanup. It must
+# exist and be required before the coordinated pdpp/data-connect/data-connectors merge, per
+# /home/tnunamak/code/pdpp/local/PDPP-full-stack-gateB-deep-redteam-2026-08-17.md finding B5.
+#
+# It also closes finding B2's two remaining excluded tests
+# (connectors/github/index.test.ts, bin/orchestrate.ts typecheck) per that finding's own
+# "acceptable transitional mechanism" and per
+# /home/tnunamak/.tmp/reorg-0814/gateB-b2-tests-report.md's spec for this job.
+#
+# All three repos are checked out at the EXPLICIT pinned SHAs declared in
+# .github/cross-repo-pins.json (data-connect, pdpp) plus this repo's own checkout — never a
+# mutable branch or default ref for the DRIFT COMPARISON jobs. Update the pin file
+# deliberately when a source repo's canonical head moves; this workflow will not silently
+# track it for those jobs. The `pin-freshness` job below is the deliberate exception: it reads
+# each producer's CURRENT default-branch head on purpose, specifically to detect when the pin
+# has gone stale relative to it (see that job's own comment).
+#
+# Required-check design (per PDPP-gateB-final-closure-deep-redteam-2026-08-18.md finding B1):
+# do NOT require this workflow's dynamic per-job/matrix names directly. GitHub's own docs are
+# explicit that when a required WORKFLOW is skipped via `pull_request.paths` filtering, its
+# checks stay "Pending" forever and block merging — "Handling skipped but required checks",
+# https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks:
+# "Associated checks stay in a 'Pending' state and block merging"; recommended fix: "Avoid
+# requiring workflows that can be skipped." So this workflow now has NO `pull_request.paths`
+# filter at all — it always runs on every `pull_request` to `main`. The `changes` job (always
+# run, no `if:`) computes relevance via plain `git diff` against the PR's merge-base; the
+# expensive drift-checks/integration jobs are gated with `needs: changes` + a job-level `if:`
+# on that relevance. (`read-pins` and `pin-freshness` are NOT relevance-gated — see their own
+# comments below for why.) A job skipped via job-level `if:` reports conclusion "skipped",
+# which GitHub's Actions "Status checks"
+# reference page confirms counts as "Success" for required-check purposes ("A job that is
+# skipped will report its status as 'Success'. It will not prevent a pull request from
+# merging, even if it is a required check.",
+# https://docs.github.com/en/pull-requests/reference/status-checks).
+#
+# That "skipped == Success" behavior is also why NONE of the per-job names are required
+# directly: GitHub adds an implicit `success()` to any job-level `if:` that doesn't already
+# call a status function (github/docs#4823), so if `changes` itself fails (script bug,
+# checkout failure), every downstream job is skipped-as-Success too — silently green, not
+# merely pending. The `gate` job below is the single stable, always-produced (`if: always()`)
+# required context: it explicitly inspects `needs.*.result` for every job in this workflow
+# (including `changes`) and is the only context named in the branch-protection payload
+# (alongside DCO and polyfill-connectors.yml's own equivalent gate). See finding 12.3.
+
+on:
+  pull_request: {}
+  push:
+    # move-a-polyfill-connectors is kept only until #36 merges, so this workflow keeps running
+    # on that PR; remove it from this list once #36 merges. GitHub Actions applies one `paths`
+    # filter across every branch in a single `push` trigger, so this branch is now path-filtered
+    # too instead of running on every push (previously unfiltered) — low risk since #36's
+    # remaining commits touch these same paths.
+    branches: [move-a-polyfill-connectors, main]
+    paths:
+      - "packages/polyfill-connectors/**"
+      - ".github/cross-repo-pins.json"
+      - ".github/scripts/cross-repo-integrity/**"
+      - ".github/workflows/cross-repo-integrity.yml"
+  schedule:
+    # Weekly. NOTE (corrects a previously-false claim in this comment, per reviewer finding
+    # B2): this schedule reruns the drift-checks/integration jobs against the PINNED SHAs —
+    # it re-proves the current pin is internally consistent, but it CANNOT by itself detect
+    # that a producer's canonical source (data-connect/main, pdpp/main) has moved past the
+    # pin, because it clones the same immutable pinned commit every time. Producer-source
+    # staleness detection is the separate `pin-freshness` job below, which deliberately reads
+    # each producer's CURRENT default-branch head and is what actually catches drift on this
+    # schedule.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-repo-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine whether relevant paths changed
+        id: filter
+        env:
+          # For pull_request, diff against the PR's actual merge-base (not github.base_ref's
+          # branch tip, which can be several commits ahead of what this PR is based on) so a
+          # base-branch commit landing after the PR opened doesn't get attributed to this PR's
+          # diff. For push/schedule/workflow_dispatch this job's output is unused by the drift
+          # jobs (push keeps its own path filter above; schedule/workflow_dispatch always want
+          # the heavy jobs to run), so the exact diff range there doesn't matter.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
+          else
+            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
+          fi
+
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|\.github/cross-repo-pins\.json$|\.github/scripts/cross-repo-integrity/|\.github/workflows/cross-repo-integrity\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  read-pins:
+    name: Read pinned SHAs
+    # Always runs unconditionally (no path filter, no `changes` gate): it's cheap (a sparse
+    # checkout + `node -p`), and `pin-freshness` below needs the pin SHAs on every trigger
+    # regardless of whether this PR's own diff touches a relevant path.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      data-connect-sha: ${{ steps.pins.outputs.data-connect-sha }}
+      pdpp-sha: ${{ steps.pins.outputs.pdpp-sha }}
+      data-connect-track-ref: ${{ steps.pins.outputs.data-connect-track-ref }}
+      pdpp-track-ref: ${{ steps.pins.outputs.pdpp-track-ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/cross-repo-pins.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Parse and validate .github/cross-repo-pins.json
+        id: pins
+        run: |
+          DATA_CONNECT_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].sha')"
+          PDPP_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].sha')"
+          # During a coordinated cutover, a pin can deliberately track an unmerged PR-head
+          # branch rather than the producer's main (see cross-repo-pins.json's own "branch"
+          # field, and MERGE-RUNBOOK-v2.md Step 7's note on removing it once main is
+          # canonical again). pin-freshness must compare against THIS ref, not unconditionally
+          # against main — main and the tracked PR branch are expected to disagree during that
+          # window, and that disagreement is not staleness.
+          DATA_CONNECT_TRACK_REF="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].branch ?? "main"')"
+          PDPP_TRACK_REF="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].branch ?? "main"')"
+
+          # Pin values are shell-interpolated into `git checkout` and cloned-repo commands by
+          # downstream jobs. Reject anything that isn't exactly 40 lowercase hex characters
+          # before it ever reaches a shell — no symbolic refs, no option-like strings (e.g.
+          # "--upload-pack=..."), no whitespace, no other JSON type coerced to a string.
+          for name_sha in "data-connect:$DATA_CONNECT_SHA" "pdpp:$PDPP_SHA"; do
+            name="${name_sha%%:*}"
+            sha="${name_sha#*:}"
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::cross-repo-pins.json repos.$name.sha is not exactly 40 lowercase hex characters: '$sha'" >&2
+              exit 1
+            fi
+          done
+
+          # Track-ref values are also shell-interpolated (into `git rev-parse origin/<ref>` in
+          # pin-freshness). Reject anything that isn't a plausible branch-name token — no
+          # option-like strings, no whitespace, no shell metacharacters.
+          for name_ref in "data-connect:$DATA_CONNECT_TRACK_REF" "pdpp:$PDPP_TRACK_REF"; do
+            name="${name_ref%%:*}"
+            ref="${name_ref#*:}"
+            if ! [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$ref" == -* ]]; then
+              echo "::error::cross-repo-pins.json repos.$name.branch is not a plausible branch name: '$ref'" >&2
+              exit 1
+            fi
+          done
+
+          echo "data-connect-sha=$DATA_CONNECT_SHA" >> "$GITHUB_OUTPUT"
+          echo "data-connect-track-ref=$DATA_CONNECT_TRACK_REF" >> "$GITHUB_OUTPUT"
+          echo "pdpp-track-ref=$PDPP_TRACK_REF" >> "$GITHUB_OUTPUT"
+          echo "pdpp-sha=$PDPP_SHA" >> "$GITHUB_OUTPUT"
+
+  drift-checks:
+    name: Drift — ${{ matrix.check.label }}
+    needs: [changes, read-pins]
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - id: collector-definitions
+            label: local-collector definitions snapshot
+          - id: connector-sources
+            label: vendored connector sources
+          - id: tarball-digests
+            label: vendored tarball digests
+          - id: reference-contract
+            label: reference-contract stand-in
+    steps:
+      - name: Checkout data-connectors (this repo, current ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: data-connectors
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Checkout data-connect @ pinned SHA
+        if: matrix.check.id != 'reference-contract'
+        env:
+          DATA_CONNECT_SHA: ${{ needs.read-pins.outputs.data-connect-sha }}
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/data-connect.git data-connect
+          git -C data-connect checkout --detach "$DATA_CONNECT_SHA"
+          RESOLVED="$(git -C data-connect rev-parse HEAD)"
+          if [ "$RESOLVED" != "$DATA_CONNECT_SHA" ]; then
+            echo "::error::data-connect checked out to $RESOLVED, not the requested pin $DATA_CONNECT_SHA" >&2
+            exit 1
+          fi
+
+      - name: Checkout pdpp @ pinned SHA
+        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
+        env:
+          PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git pdpp
+          git -C pdpp checkout --detach "$PDPP_SHA"
+          RESOLVED="$(git -C pdpp rev-parse HEAD)"
+          if [ "$RESOLVED" != "$PDPP_SHA" ]; then
+            echo "::error::pdpp checked out to $RESOLVED, not the requested pin $PDPP_SHA" >&2
+            exit 1
+          fi
+
+      # data-connect's own engines field and .nvmrc pin Node 22, not the 24 the rest of this
+      # job runs (used only for data-connectors' own scripts). Re-pointing setup-node here,
+      # scoped to the one leg that installs/builds inside a data-connect checkout, avoids the
+      # EBADENGINE mismatch instead of just tolerating its warning.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.check.id == 'tarball-digests'
+        with:
+          node-version-file: data-connect/.nvmrc
+
+      - name: Run drift check — collector-definitions
+        if: matrix.check.id == 'collector-definitions'
+        run: node data-connectors/.github/scripts/cross-repo-integrity/check-collector-definitions-drift.mjs data-connect data-connectors
+
+      - name: Run drift check — connector-sources
+        if: matrix.check.id == 'connector-sources'
+        run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
+
+      - name: Run drift check — tarball-digests
+        if: matrix.check.id == 'tarball-digests'
+        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp
+
+      - name: Run drift check — reference-contract
+        if: matrix.check.id == 'reference-contract'
+        run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
+
+  integration:
+    name: Integration (Node ${{ matrix.node-version }}) — github/index.test.ts + bin/orchestrate.ts against the real RI
+    needs: [changes, read-pins]
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The full integrated stack's floor is set by the LOWEST version every participating
+        # package supports: the pinned pdpp head (.github/cross-repo-pins.json) declares
+        # "engines": {"node": ">=24.15.0"}. Per
+        # PDPP-gateB-final-closure-deep-redteam-2026-08-18.md finding B3, the previous 24.11.1
+        # leg ran below pdpp's declared floor and its own CI log recorded unsupported-engine
+        # warnings (root workspace, MCP-server prep) — a green run below a dependency's
+        # declared support contract does not prove that version is a supported integrated
+        # floor. polyfill-connectors' OWN package.json engines field is now also
+        # ">=24.15.0 <25" (raised from ">=24.11.1 <25" in the same correction, so its declared
+        # floor and this matrix's floor agree) — do not lower either independently.
+        #
+        # The original 24.11.1 boundary was bisected locally against the real RI at the pinned
+        # pdpp SHA on 2026-08-18 (each boundary re-run at least 3x) to find the point after
+        # which connectors/github/index.test.ts's drainConnectorInstanceIndexWork assertion
+        # (reference-implementation/server/records.ts's fixed 5000ms deadline, a pdpp-side
+        # constant, not this repo's) reliably passes (~1s) instead of reliably timing out. That
+        # bisect is why the floor is a specific patch version and not just "24" — it is
+        # superseded here only because it landed below pdpp's own declared floor, not because
+        # it was wrong about the timeout boundary itself. Do not lower this matrix's floor
+        # without re-bisecting against a pdpp head whose engines field also permits the lower
+        # version.
+        node-version: ["24.15.0", "24.19.0"]
+    steps:
+      - name: Checkout data-connectors (this repo, current ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: data-connectors
+          persist-credentials: false
+
+      - name: Checkout pdpp @ pinned SHA
+        env:
+          PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
+        run: |
+          git clone https://github.com/PDP-Connect/pdpp.git pdpp
+          git -C pdpp checkout --detach "$PDPP_SHA"
+          RESOLVED="$(git -C pdpp rev-parse HEAD)"
+          if [ "$RESOLVED" != "$PDPP_SHA" ]; then
+            echo "::error::pdpp checked out to $RESOLVED, not the requested pin $PDPP_SHA" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
+        with:
+          version: 10
+
+      # pdpp is a large monorepo (console app, MCP server, reference-contract, and the
+      # reference-implementation server this job needs) with native builds (better-sqlite3,
+      # sqlite-vec) and workspace:* deps. This install is the expensive, cacheable part of the
+      # job; the actual drift/substitution logic below is cheap.
+      - name: Install pdpp dependencies
+        working-directory: pdpp
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert pdpp install left the checkout clean
+        working-directory: pdpp
+        run: git diff --exit-code
+
+      - name: Install data-connectors' polyfill-connectors dependencies (fresh cache)
+        working-directory: data-connectors/packages/polyfill-connectors
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-cache-fresh"
+          npm ci --cache "$RUNNER_TEMP/npm-cache-fresh" --ignore-scripts
+
+      - name: Run integration job
+        run: |
+          bash data-connectors/.github/scripts/cross-repo-integrity/run-integration-job.sh \
+            "$GITHUB_WORKSPACE/pdpp" \
+            "$GITHUB_WORKSPACE/data-connectors" \
+            "$RUNNER_TEMP/integration-scratch"
+
+      # TODO (see run-integration-job.sh's own TODO output): `bin/orchestrate.ts run
+      # <connector>` end-to-end, landing real records through the embedded RS, needs live
+      # credentials for a real provider. This job proves typecheck and the github connector's
+      # full test suite against the real RI (67/67 as of this task); it does not yet prove a
+      # live orchestrate run. Wiring that requires a deliberate decision on which connector,
+      # where its CI credential comes from, and whether that credential is safe to hold in
+      # this repository's Actions secrets — out of scope for this pass.
+
+  pin-freshness:
+    name: Pin freshness — ${{ matrix.repo.label }}
+    # Producer-source freshness detection (Gate B finding B2): the drift-checks/integration
+    # jobs above compare the consumer tree against the PINNED commit, which proves internal
+    # consistency but, by construction, cannot detect that the producer's OWN tracked branch
+    # has since moved past that pin. This job deliberately does the opposite: it reads each
+    # producer's CURRENT tracked-ref head (main normally, or the exact PR-head branch named
+    # in cross-repo-pins.json's "branch" field during a coordinated cutover — see read-pins'
+    # comment on why that distinction matters) and diffs it against the pinned commit,
+    # restricted to the exact canonical paths that pin actually backs, so it fails precisely
+    # when — and only when — a change relevant to this repo's drift jobs has landed on the
+    # TRACKED ref without a matching repin. Runs regardless of THIS PR's own relevance
+    # (`changes.outputs.relevant` gates the drift-checks/integration jobs, not this one): a
+    # stale pin is a fact about the producer repos, independent of what this PR touches. It
+    # only skips if `changes` itself failed to run (`needs.changes.result == 'success'`),
+    # same as every other downstream job.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - id: data-connect
+            label: data-connect
+            url: https://github.com/PDP-Connect/data-connect.git
+            pin-output: data-connect-sha
+            # Canonical paths that back drift jobs (a) collector-definitions, (b)
+            # connector-sources, (c) tarball-digests — see .github/cross-repo-pins.json's
+            # own note on data-connect's pin. Per reviewer finding "freshness coverage omits
+            # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
+            # data-connect path those three jobs actually compare, not just the
+            # runtime/protocol tarball-digest source: the definitions-snapshot generator +
+            # its committed output back job (a), and the six vendored connector directories
+            # back job (b). Keep this list and check-connector-source-drift.mjs's
+            # registry-derived connector-ID set in sync — that script now asserts its
+            # comparison set against the canonical registry, but this workflow's path list is
+            # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
+            paths: >-
+              packages/collector-runtime
+              packages/connector-protocol
+              packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
+              packages/local-collector/src/generated/collector-definitions.generated.ts
+              packages/polyfill-connectors/connectors/claude_code
+              packages/polyfill-connectors/connectors/codex
+              packages/polyfill-connectors/connectors/google_takeout
+              packages/polyfill-connectors/connectors/imessage
+              packages/polyfill-connectors/connectors/apple_photos
+              packages/polyfill-connectors/connectors/google_messages
+          - id: pdpp
+            label: pdpp
+            url: https://github.com/PDP-Connect/pdpp.git
+            pin-output: pdpp-sha
+            # Canonical paths that back drift job (d) reference-contract + the integration
+            # job's RI-server checkout — see .github/cross-repo-pins.json's own note on
+            # pdpp's pin.
+            paths: "packages/reference-contract reference-implementation"
+    needs: [changes, read-pins]
+    if: always() && needs.changes.result == 'success'
+    steps:
+      - name: Clone ${{ matrix.repo.id }} (full history, no checkout)
+        run: git clone --filter=blob:none --no-checkout "${{ matrix.repo.url }}" "${{ matrix.repo.id }}"
+
+      - name: Compare pinned commit against its tracked ref for relevant paths
+        working-directory: ${{ matrix.repo.id }}
+        env:
+          PINNED_SHA: ${{ matrix.repo.id == 'data-connect' && needs.read-pins.outputs.data-connect-sha || needs.read-pins.outputs.pdpp-sha }}
+          # The ref this pin is meant to track right now: main once the pin is on the
+          # producer's canonical trunk, or the exact PR-head branch named in
+          # cross-repo-pins.json's "branch" field during a coordinated cutover, when main and
+          # that branch are EXPECTED to disagree (see read-pins' own comment on why comparing
+          # unconditionally against main here would be a false positive, not real staleness).
+          TRACK_REF: ${{ matrix.repo.id == 'data-connect' && needs.read-pins.outputs.data-connect-track-ref || needs.read-pins.outputs.pdpp-track-ref }}
+          RELEVANT_PATHS: ${{ matrix.repo.paths }}
+        run: |
+          if ! [[ "$PINNED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pinned SHA for ${{ matrix.repo.id }} is not 40 lowercase hex characters: '$PINNED_SHA'" >&2
+            exit 1
+          fi
+          if ! [[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$TRACK_REF" == -* ]]; then
+            echo "::error::tracked ref for ${{ matrix.repo.id }} is not a plausible branch name: '$TRACK_REF'" >&2
+            exit 1
+          fi
+
+          git fetch --filter=blob:none origin "$TRACK_REF"
+          CURRENT_HEAD="$(git rev-parse FETCH_HEAD)"
+
+          if [ "$CURRENT_HEAD" = "$PINNED_SHA" ]; then
+            echo "Pin is exactly at ${{ matrix.repo.id }}'s current $TRACK_REF ($CURRENT_HEAD) — trivially fresh."
+            exit 0
+          fi
+
+          DIFF="$(git diff --name-only "$PINNED_SHA" "$CURRENT_HEAD" -- $RELEVANT_PATHS)"
+
+          if [ -n "$DIFF" ]; then
+            echo "::error::pin stale for relevant source paths — ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) has changed these paths since the pinned commit ($PINNED_SHA):"
+            echo "$DIFF"
+            exit 1
+          fi
+
+          echo "Pin ($PINNED_SHA) unchanged relative to ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) across: $RELEVANT_PATHS"
+
+  gate:
+    name: Cross-Repo Integrity Gate
+    # The single stable, always-produced required context (Gate B finding B1 / hardening
+    # 12.3): required workflows must never be path-filtered (see the top-of-file comment), and
+    # required CONTEXTS must never be a dynamic per-job/matrix name, because GitHub's implicit
+    # `success()` on any bare job-level `if:` (github/docs#4823) means a failure in an upstream
+    # job (e.g. `changes`) makes everything downstream report "skipped" == "Success" — silently
+    # green, not merely pending. This job runs unconditionally (`if: always()`) and explicitly
+    # inspects every other job's `result`, so it is the one context that actually distinguishes
+    # "irrelevant PR, nothing needed to run" from "something that should have run did not."
+    needs: [changes, read-pins, drift-checks, integration, pin-freshness]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate all job results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          READ_PINS_RESULT: ${{ needs.read-pins.result }}
+          DRIFT_CHECKS_RESULT: ${{ needs.drift-checks.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          PIN_FRESHNESS_RESULT: ${{ needs['pin-freshness'].result }}
+        run: |
+          echo "changes:       $CHANGES_RESULT"
+          echo "read-pins:     $READ_PINS_RESULT"
+          echo "drift-checks:  $DRIFT_CHECKS_RESULT"
+          echo "integration:   $INTEGRATION_RESULT"
+          echo "pin-freshness: $PIN_FRESHNESS_RESULT"
+
+          # `changes` has no `if:` — it must always actually succeed. Any other result here
+          # (failure, cancelled, or — should not be reachable — skipped) means the relevance
+          # computation itself is broken, so nothing downstream can be trusted regardless of
+          # what it reports.
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
+            exit 1
+          fi
+
+          # read-pins always runs (no `if:`) and pin-freshness always runs once `changes`
+          # succeeds (already confirmed above) — neither has a legitimate "skipped" outcome,
+          # so both must land on exactly "success". Per reviewer finding "the aggregate gate
+          # contains a bounded fail-open condition" (2026-08-18 final-v2 red-team): treating
+          # their skip as acceptable would silently accept a future dependency/condition
+          # regression that unexpectedly skips pin parsing or freshness checking — precisely
+          # the class of failure this gate exists to catch. Only drift-checks/integration may
+          # legitimately skip, gated as they are on this PR's own relevance.
+          for result_name in "READ_PINS_RESULT:$READ_PINS_RESULT" "PIN_FRESHNESS_RESULT:$PIN_FRESHNESS_RESULT"; do
+            name="${result_name%%:*}"
+            result="${result_name#*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name reported '$result' — required jobs read-pins and pin-freshness must be 'success', not merely 'success or skipped'"
+              exit 1
+            fi
+          done
+
+          for result in "$DRIFT_CHECKS_RESULT" "$INTEGRATION_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::a required job reported '$result' — expected 'success' or 'skipped'"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "Cross-Repo Integrity Gate: all required jobs succeeded (read-pins, pin-freshness) or were correctly skipped as irrelevant (drift-checks, integration)."
