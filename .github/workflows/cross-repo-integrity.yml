@@ -47,12 +47,7 @@ name: Cross-Repo Integrity
 on:
   pull_request: {}
   push:
-    # move-a-polyfill-connectors is kept only until #36 merges, so this workflow keeps running
-    # on that PR; remove it from this list once #36 merges. GitHub Actions applies one `paths`
-    # filter across every branch in a single `push` trigger, so this branch is now path-filtered
-    # too instead of running on every push (previously unfiltered) — low risk since #36's
-    # remaining commits touch these same paths.
-    branches: [move-a-polyfill-connectors, main]
+    branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
       - ".github/cross-repo-pins.json"
