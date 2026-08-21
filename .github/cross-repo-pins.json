@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema#",
-  "description": "Explicit pinned SHAs for the cross-repository integrity workflow (.github/workflows/cross-repo-integrity.yml). Update deliberately, in the same PR as the change that requires a new pin, never silently.",
+  "description": "Explicit pinned SHAs for the cross-repository integrity workflow (.github/workflows/cross-repo-integrity.yml). Update deliberately, in the same PR as the change that requires a new pin, never silently. NOTE: drift job (c) 'vendored tarball digests', referenced in the notes below, was retired once @pdpp/collector-runtime and @pdpp/connector-protocol started publishing to npm from data-connect (PDP-Connect/data-connect#32) instead of being vendored as committed tarballs here — the notes are left as-written since they're a record of past pin decisions, not live job documentation.",
   "repos": {
     "data-connect": {
       "owner": "PDP-Connect",

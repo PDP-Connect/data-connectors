@@ -187,14 +187,20 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      # Retired: drift job (c) "vendored tarball digests" (@pdpp/collector-runtime and
+      # @pdpp/connector-protocol against a fresh repack from data-connect's pinned SHA — see
+      # check-tarball-digest-drift.sh, removed by this same change). Both packages now
+      # publish to npm from data-connect (PDP-Connect/data-connect#32) and this repo depends
+      # on them by semver range instead of a vendored tarball, so there is no committed
+      # tarball left for that job to compare against. @pdpp/reference-contract is unaffected
+      # and still checked by the reference-contract leg below — it stays a hand-maintained
+      # vendored stand-in, per pdpp's own policy of keeping it unpublished.
       matrix:
         check:
           - id: collector-definitions
             label: local-collector definitions snapshot
           - id: connector-sources
             label: vendored connector sources
-          - id: tarball-digests
-            label: vendored tarball digests
           - id: reference-contract
             label: reference-contract stand-in
     steps:
@@ -222,7 +228,7 @@ jobs:
           fi
 
       - name: Checkout pdpp @ pinned SHA
-        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
+        if: matrix.check.id == 'reference-contract'
         env:
           PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
         run: |
@@ -234,15 +240,6 @@ jobs:
             exit 1
           fi
 
-      # data-connect's own engines field and .nvmrc pin Node 22, not the 24 the rest of this
-      # job runs (used only for data-connectors' own scripts). Re-pointing setup-node here,
-      # scoped to the one leg that installs/builds inside a data-connect checkout, avoids the
-      # EBADENGINE mismatch instead of just tolerating its warning.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: matrix.check.id == 'tarball-digests'
-        with:
-          node-version-file: data-connect/.nvmrc
-
       - name: Run drift check — collector-definitions
         if: matrix.check.id == 'collector-definitions'
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-collector-definitions-drift.mjs data-connect data-connectors
@@ -250,10 +247,6 @@ jobs:
       - name: Run drift check — connector-sources
         if: matrix.check.id == 'connector-sources'
         run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
-
-      - name: Run drift check — tarball-digests
-        if: matrix.check.id == 'tarball-digests'
-        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp
 
       - name: Run drift check — reference-contract
         if: matrix.check.id == 'reference-contract'
@@ -383,20 +376,25 @@ jobs:
             label: data-connect
             url: https://github.com/PDP-Connect/data-connect.git
             pin-output: data-connect-sha
-            # Canonical paths that back drift jobs (a) collector-definitions, (b)
-            # connector-sources, (c) tarball-digests — see .github/cross-repo-pins.json's
-            # own note on data-connect's pin. Per reviewer finding "freshness coverage omits
+            # Canonical paths that back drift jobs (a) collector-definitions and (b)
+            # connector-sources — see .github/cross-repo-pins.json's own note on
+            # data-connect's pin. Per reviewer finding "freshness coverage omits
             # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
-            # data-connect path those three jobs actually compare, not just the
-            # runtime/protocol tarball-digest source: the definitions-snapshot generator +
-            # its committed output back job (a), and the six vendored connector directories
-            # back job (b). Keep this list and check-connector-source-drift.mjs's
+            # data-connect path those jobs actually compare: the definitions-snapshot
+            # generator + its committed output back job (a), and the six vendored connector
+            # directories back job (b). Keep this list and check-connector-source-drift.mjs's
             # registry-derived connector-ID set in sync — that script now asserts its
             # comparison set against the canonical registry, but this workflow's path list is
             # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
+            #
+            # packages/collector-runtime and packages/connector-protocol used to be listed
+            # here too, backing the now-retired drift job (c) tarball-digests (see this
+            # workflow's drift-checks matrix, and check-tarball-digest-drift.sh's own removal
+            # note): once both packages publish to npm from data-connect
+            # (PDP-Connect/data-connect#32), this repo depends on them by semver instead of a
+            # vendored tarball rebuilt from a pinned commit, so there is nothing left for a
+            # tarball-digest comparison to check.
             paths: >-
-              packages/collector-runtime
-              packages/connector-protocol
               packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
               packages/local-collector/src/generated/collector-definitions.generated.ts
               packages/polyfill-connectors/connectors/claude_code

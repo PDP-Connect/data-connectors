@@ -31,8 +31,8 @@
 		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noUnnecessaryConditions-expiry"
 	},
 	"dependencies": {
-		"@pdpp/collector-runtime": "file:./vendor/pdpp-collector-runtime-0.0.1.tgz",
-		"@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
+		"@pdpp/collector-runtime": ">=0.0.1 <1.0.0",
+		"@pdpp/connector-protocol": ">=0.0.1 <1.0.0",
 		"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz",
 		"@streamparser/json": "^0.0.23",
 		"better-sqlite3": "^13.0.3",
@@ -59,7 +59,6 @@
 	},
 	"overrides": {
 		"@pdpp/collector-runtime": {
-			"@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
 			"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz"
 		}
 	}
