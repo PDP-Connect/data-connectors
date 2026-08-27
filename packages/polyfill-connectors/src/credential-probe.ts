@@ -51,8 +51,8 @@ export type CredentialValidationMode = "synchronous" | "first_sync";
  * any echoed value.
  */
 export interface CredentialProbeContext {
-  readonly connectorInstanceId?: string | null;
-  readonly setupFields?: Readonly<Record<string, string>> | null;
+	readonly connectorInstanceId?: string | null;
+	readonly setupFields?: Readonly<Record<string, string>> | null;
 }
 
 /**
@@ -62,8 +62,8 @@ export interface CredentialProbeContext {
  *   - `detail`: an optional short non-secret note (e.g. plan, account type).
  */
 export interface CredentialProbeIdentity {
-  readonly detail?: string | null;
-  readonly identity: string;
+	readonly detail?: string | null;
+	readonly identity: string;
 }
 
 /**
@@ -76,14 +76,18 @@ export interface CredentialProbeIdentity {
  * credential).
  */
 export class CredentialProbeError extends Error {
-  readonly code: string;
-  readonly retryable: boolean;
-  constructor(code: string, message: string, options?: { retryable?: boolean }) {
-    super(message);
-    this.name = "CredentialProbeError";
-    this.code = code;
-    this.retryable = options?.retryable ?? false;
-  }
+	readonly code: string;
+	readonly retryable: boolean;
+	constructor(
+		code: string,
+		message: string,
+		options?: { retryable?: boolean },
+	) {
+		super(message);
+		this.name = "CredentialProbeError";
+		this.code = code;
+		this.retryable = options?.retryable ?? false;
+	}
 }
 
 /**
@@ -99,14 +103,14 @@ export type CredentialProbeTransport = Record<string, unknown>;
  * `CredentialProbeError`. A probe MUST NOT log, return, or embed the secret.
  */
 export type ConnectorCredentialProbe = (args: {
-  readonly context: CredentialProbeContext;
-  readonly secret: string;
-  readonly transport: CredentialProbeTransport;
+	readonly context: CredentialProbeContext;
+	readonly secret: string;
+	readonly transport: CredentialProbeTransport;
 }) => Promise<CredentialProbeIdentity>;
 
 export interface ConnectorCredentialProbeDescriptor {
-  readonly credentialKind: StaticSecretCredentialKind;
-  readonly probe: ConnectorCredentialProbe;
+	readonly credentialKind: StaticSecretCredentialKind;
+	readonly probe: ConnectorCredentialProbe;
 }
 
 // ─── Gmail probe ─────────────────────────────────────────────────────────
@@ -118,52 +122,60 @@ export interface ConnectorCredentialProbeDescriptor {
  * implementation (imapflow) stays out of this module and out of tests.
  */
 export interface GmailProbeTransport {
-  /**
-   * Attempt an IMAP LOGIN. Resolves when authentication succeeds; rejects with
-   * any error when it does not (the orchestration maps that to a typed,
-   * owner-voiced rejection). Implementations MUST close the session.
-   */
-  imapLogin: (args: { address: string; password: string }) => Promise<void>;
+	/**
+	 * Attempt an IMAP LOGIN. Resolves when authentication succeeds; rejects with
+	 * any error when it does not (the orchestration maps that to a typed,
+	 * owner-voiced rejection). Implementations MUST close the session.
+	 */
+	imapLogin: (args: { address: string; password: string }) => Promise<void>;
 }
 
-function gmailAddressFromContext(context: CredentialProbeContext): string | null {
-  const fields = context.setupFields;
-  if (!fields) {
-    return null;
-  }
-  const value = fields.account_email ?? fields.gmail_address ?? fields.email;
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+function gmailAddressFromContext(
+	context: CredentialProbeContext,
+): string | null {
+	const fields = context.setupFields;
+	if (!fields) {
+		return null;
+	}
+	const value = fields.account_email ?? fields.gmail_address ?? fields.email;
+	return typeof value === "string" && value.trim().length > 0
+		? value.trim()
+		: null;
 }
 
-const gmailProbe: ConnectorCredentialProbe = async ({ context, secret, transport }) => {
-  const address = gmailAddressFromContext(context);
-  if (!address) {
-    throw new CredentialProbeError(
-      "gmail_address_missing",
-      "Enter the Gmail address for this mailbox so the app password can be checked."
-    );
-  }
-  const imapTransport = transport as Partial<GmailProbeTransport>;
-  if (typeof imapTransport.imapLogin !== "function") {
-    throw new CredentialProbeError(
-      "gmail_probe_transport_missing",
-      "Gmail validation is unavailable on this instance right now. Try again, or skip validation and start the first sync."
-    );
-  }
-  try {
-    await imapTransport.imapLogin({ address, password: secret });
-  } catch {
-    // imapflow surfaces a bad app password as an authentication failure. The
-    // owner-causal reading is "Google rejected this app password" — never the
-    // raw IMAP error, never the secret. Deliberately no `cause`: attaching
-    // the raw error would leak it back out through the error chain.
-    // biome-ignore lint/style/useErrorCause: intentional — the raw IMAP error must not be attached (it can carry the secret)
-    throw new CredentialProbeError(
-      "gmail_credential_rejected",
-      "Google rejected this app password for that mailbox. Check the Gmail address and create a fresh app password, then try again."
-    );
-  }
-  return { identity: address, detail: null };
+const gmailProbe: ConnectorCredentialProbe = async ({
+	context,
+	secret,
+	transport,
+}) => {
+	const address = gmailAddressFromContext(context);
+	if (!address) {
+		throw new CredentialProbeError(
+			"gmail_address_missing",
+			"Enter the Gmail address for this mailbox so the app password can be checked.",
+		);
+	}
+	const imapTransport = transport as Partial<GmailProbeTransport>;
+	if (typeof imapTransport.imapLogin !== "function") {
+		throw new CredentialProbeError(
+			"gmail_probe_transport_missing",
+			"Gmail validation is unavailable on this instance right now. Try again, or skip validation and start the first sync.",
+		);
+	}
+	try {
+		await imapTransport.imapLogin({ address, password: secret });
+	} catch {
+		// imapflow surfaces a bad app password as an authentication failure. The
+		// owner-causal reading is "Google rejected this app password" — never the
+		// raw IMAP error, never the secret. Deliberately no `cause`: attaching
+		// the raw error would leak it back out through the error chain.
+		// biome-ignore lint/style/useErrorCause: intentional — the raw IMAP error must not be attached (it can carry the secret)
+		throw new CredentialProbeError(
+			"gmail_credential_rejected",
+			"Google rejected this app password for that mailbox. Check the Gmail address and create a fresh app password, then try again.",
+		);
+	}
+	return { identity: address, detail: null };
 };
 
 // ─── GitHub probe ────────────────────────────────────────────────────────
@@ -175,61 +187,64 @@ const gmailProbe: ConnectorCredentialProbe = async ({ context, secret, transport
  * and tests never hit github.com.
  */
 export interface GithubProbeResponse {
-  readonly login?: string | null;
-  readonly status: number;
+	readonly login?: string | null;
+	readonly status: number;
 }
 
 export interface GithubProbeTransport {
-  /** Perform an authenticated `GET /user`. Returns status + parsed login. */
-  getUser: (args: { token: string }) => Promise<GithubProbeResponse>;
+	/** Perform an authenticated `GET /user`. Returns status + parsed login. */
+	getUser: (args: { token: string }) => Promise<GithubProbeResponse>;
 }
 
 const githubProbe: ConnectorCredentialProbe = async ({ secret, transport }) => {
-  const ghTransport = transport as Partial<GithubProbeTransport>;
-  if (typeof ghTransport.getUser !== "function") {
-    throw new CredentialProbeError(
-      "github_probe_transport_missing",
-      "GitHub validation is unavailable on this instance right now. Try again, or skip validation and start the first sync."
-    );
-  }
-  let response: GithubProbeResponse;
-  try {
-    response = await ghTransport.getUser({ token: secret });
-  } catch {
-    // biome-ignore lint/style/useErrorCause: intentional — the raw transport error can echo the request (including the token) and must not be attached
-    throw new CredentialProbeError(
-      "github_unreachable",
-      "Could not reach GitHub to check this token. Try again in a moment.",
-      { retryable: true }
-    );
-  }
-  if (response.status === 401) {
-    throw new CredentialProbeError(
-      "github_credential_rejected",
-      "GitHub rejected this token — it may be expired or revoked. Create a new token and try again."
-    );
-  }
-  if (response.status === 403) {
-    throw new CredentialProbeError(
-      "github_credential_insufficient",
-      "GitHub accepted this token but refused the account check — the token may be missing the required scope. Create a token with read access to your profile."
-    );
-  }
-  if (response.status < 200 || response.status >= 300) {
-    throw new CredentialProbeError(
-      "github_unreachable",
-      "GitHub returned an unexpected response while checking this token. Try again in a moment.",
-      { retryable: true }
-    );
-  }
-  const login = typeof response.login === "string" && response.login.trim().length > 0 ? response.login.trim() : null;
-  if (!login) {
-    throw new CredentialProbeError(
-      "github_identity_unavailable",
-      "GitHub accepted this token but did not return an account login. Try a token tied to a user account."
-    );
-  }
-  return { identity: login, detail: null };
+	const ghTransport = transport as Partial<GithubProbeTransport>;
+	if (typeof ghTransport.getUser !== "function") {
+		throw new CredentialProbeError(
+			"github_probe_transport_missing",
+			"GitHub validation is unavailable on this instance right now. Try again, or skip validation and start the first sync.",
+		);
+	}
+	let response: GithubProbeResponse;
+	try {
+		response = await ghTransport.getUser({ token: secret });
+	} catch {
+		// biome-ignore lint/style/useErrorCause: intentional — the raw transport error can echo the request (including the token) and must not be attached
+		throw new CredentialProbeError(
+			"github_unreachable",
+			"Could not reach GitHub to check this token. Try again in a moment.",
+			{ retryable: true },
+		);
+	}
+	if (response.status === 401) {
+		throw new CredentialProbeError(
+			"github_credential_rejected",
+			"GitHub rejected this token — it may be expired or revoked. Create a new token and try again.",
+		);
+	}
+	if (response.status === 403) {
+		throw new CredentialProbeError(
+			"github_credential_insufficient",
+			"GitHub accepted this token but refused the account check — the token may be missing the required scope. Create a token with read access to your profile.",
+		);
+	}
+	if (response.status < 200 || response.status >= 300) {
+		throw new CredentialProbeError(
+			"github_unreachable",
+			"GitHub returned an unexpected response while checking this token. Try again in a moment.",
+			{ retryable: true },
+		);
+	}
+	const login =
+		typeof response.login === "string" && response.login.trim().length > 0
+			? response.login.trim()
+			: null;
+	if (!login) {
+		throw new CredentialProbeError(
+			"github_identity_unavailable",
+			"GitHub accepted this token but did not return an account login. Try a token tied to a user account.",
+		);
+	}
+	return { identity: login, detail: null };
 };
 
 // ─── Registry ──────────────────────────────────────────────────────────────
@@ -240,14 +255,27 @@ const githubProbe: ConnectorCredentialProbe = async ({ secret, transport }) => {
  * are canonical connector keys (post-registry-prefix strip), matching
  * `STATIC_SECRET_CONNECTOR_REGISTRY`.
  */
-export const CREDENTIAL_PROBE_REGISTRY: Readonly<Record<string, ConnectorCredentialProbeDescriptor>> = Object.freeze({
-  gmail: Object.freeze({ credentialKind: "app_password" as const, probe: gmailProbe }),
-  github: Object.freeze({ credentialKind: "personal_access_token" as const, probe: githubProbe }),
+export const CREDENTIAL_PROBE_REGISTRY: Readonly<
+	Record<string, ConnectorCredentialProbeDescriptor>
+> = Object.freeze({
+	gmail: Object.freeze({
+		credentialKind: "app_password" as const,
+		probe: gmailProbe,
+	}),
+	github: Object.freeze({
+		credentialKind: "personal_access_token" as const,
+		probe: githubProbe,
+	}),
 });
 
 /** True when the connector advertises a synchronous credential probe. */
-export function hasCredentialProbe(connectorKey: string | null | undefined): boolean {
-  return typeof connectorKey === "string" && Object.hasOwn(CREDENTIAL_PROBE_REGISTRY, connectorKey);
+export function hasCredentialProbe(
+	connectorKey: string | null | undefined,
+): boolean {
+	return (
+		typeof connectorKey === "string" &&
+		Object.hasOwn(CREDENTIAL_PROBE_REGISTRY, connectorKey)
+	);
 }
 
 /**
@@ -256,8 +284,10 @@ export function hasCredentialProbe(connectorKey: string | null | undefined): boo
  * validate at `first_sync`. This is the single source the setup planner,
  * descriptor route, owner-agent intent, and CLI projection all read.
  */
-export function credentialValidationMode(connectorKey: string | null | undefined): CredentialValidationMode {
-  return hasCredentialProbe(connectorKey) ? "synchronous" : "first_sync";
+export function credentialValidationMode(
+	connectorKey: string | null | undefined,
+): CredentialValidationMode {
+	return hasCredentialProbe(connectorKey) ? "synchronous" : "first_sync";
 }
 
 /**
@@ -273,24 +303,27 @@ export function credentialValidationMode(connectorKey: string | null | undefined
  * network implementation, in tests a deterministic double.
  */
 export async function probeCredential(args: {
-  readonly connectorKey: string;
-  readonly context?: CredentialProbeContext;
-  readonly secret: string;
-  readonly transport: CredentialProbeTransport;
+	readonly connectorKey: string;
+	readonly context?: CredentialProbeContext;
+	readonly secret: string;
+	readonly transport: CredentialProbeTransport;
 }): Promise<CredentialProbeIdentity> {
-  const descriptor = CREDENTIAL_PROBE_REGISTRY[args.connectorKey];
-  if (!descriptor) {
-    throw new CredentialProbeError(
-      "no_credential_probe",
-      `Connector '${args.connectorKey}' has no synchronous credential probe.`
-    );
-  }
-  if (typeof args.secret !== "string" || args.secret.length === 0) {
-    throw new CredentialProbeError("probe_secret_invalid", "A non-empty provider secret is required to validate.");
-  }
-  return await descriptor.probe({
-    context: args.context ?? {},
-    secret: args.secret,
-    transport: args.transport,
-  });
+	const descriptor = CREDENTIAL_PROBE_REGISTRY[args.connectorKey];
+	if (!descriptor) {
+		throw new CredentialProbeError(
+			"no_credential_probe",
+			`Connector '${args.connectorKey}' has no synchronous credential probe.`,
+		);
+	}
+	if (typeof args.secret !== "string" || args.secret.length === 0) {
+		throw new CredentialProbeError(
+			"probe_secret_invalid",
+			"A non-empty provider secret is required to validate.",
+		);
+	}
+	return await descriptor.probe({
+		context: args.context ?? {},
+		secret: args.secret,
+		transport: args.transport,
+	});
 }

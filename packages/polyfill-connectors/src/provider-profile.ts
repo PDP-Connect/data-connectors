@@ -46,15 +46,15 @@
  * with no profile is a `tsc` error — the spec's "missing field = build error".
  */
 export interface ProviderPacingProfile {
-  /**
-   * THE ONE OWNER NUMBER: the rate ceiling — the fastest inter-request interval
-   * (= maximum sustained rate) the AIMD additive-increase loop may ever reach.
-   * Required, NO cross-provider default (spec §3): ChatGPT's account-tuned 250ms
-   * is meaningless for a provider that sends Retry-After or rate-limits by
-   * slowdown rather than 429. Each connector author authors this below their
-   * provider's observed behavioral flagging threshold.
-   */
-  readonly pacingMinIntervalMs: number;
+	/**
+	 * THE ONE OWNER NUMBER: the rate ceiling — the fastest inter-request interval
+	 * (= maximum sustained rate) the AIMD additive-increase loop may ever reach.
+	 * Required, NO cross-provider default (spec §3): ChatGPT's account-tuned 250ms
+	 * is meaningless for a provider that sends Retry-After or rate-limits by
+	 * slowdown rather than 429. Each connector author authors this below their
+	 * provider's observed behavioral flagging threshold.
+	 */
+	readonly pacingMinIntervalMs: number;
 }
 
 /**
@@ -67,13 +67,13 @@ export interface ProviderPacingProfile {
  * borrowing ChatGPT's attempt budget.
  */
 export interface ProviderTerminalGapProfile {
-  /**
-   * Bounded recovery-attempt budget: after this many `in_progress` attempts
-   * against a NON-transient error (404/410/permanent-403/401), a gap transitions
-   * `pending → terminal`. Per-provider — retrying a deleted resource is pure
-   * waste, and the right budget depends on the provider's own error semantics.
-   */
-  readonly maxRecoveryAttempts: number;
+	/**
+	 * Bounded recovery-attempt budget: after this many `in_progress` attempts
+	 * against a NON-transient error (404/410/permanent-403/401), a gap transitions
+	 * `pending → terminal`. Per-provider — retrying a deleted resource is pure
+	 * waste, and the right budget depends on the provider's own error semantics.
+	 */
+	readonly maxRecoveryAttempts: number;
 }
 
 /**
@@ -84,13 +84,13 @@ export interface ProviderTerminalGapProfile {
  * borrowing ChatGPT's cycle budget.
  */
 export interface ProviderCooldownProfile {
-  /**
-   * No-progress escalation ceiling: after this many consecutive cooldown cycles
-   * with ZERO forward progress and ZERO gap recovery, the connection escalates
-   * `cooling_off → needs_attention` (the dead-but-429ing provider). Per-provider —
-   * it is derived from the provider's observed recovery-window length.
-   */
-  readonly maxCooldownCycles: number;
+	/**
+	 * No-progress escalation ceiling: after this many consecutive cooldown cycles
+	 * with ZERO forward progress and ZERO gap recovery, the connection escalates
+	 * `cooling_off → needs_attention` (the dead-but-429ing provider). Per-provider —
+	 * it is derived from the provider's observed recovery-window length.
+	 */
+	readonly maxCooldownCycles: number;
 }
 
 /**
@@ -102,7 +102,10 @@ export interface ProviderCooldownProfile {
  * consumed by a loop, so adding them here without a consumer would be dead
  * declaration. They are listed in the spec, not stubbed here.
  */
-export interface ProviderProfile extends ProviderPacingProfile, ProviderTerminalGapProfile, ProviderCooldownProfile {}
+export interface ProviderProfile
+	extends ProviderPacingProfile,
+		ProviderTerminalGapProfile,
+		ProviderCooldownProfile {}
 
 // ─── Audited per-connector pacing profiles (WI-1b, §3 / §9-C5) ───────────────
 //
@@ -126,7 +129,7 @@ export interface ProviderProfile extends ProviderPacingProfile, ProviderTerminal
  * Doc: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
  */
 export function githubPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 1000 };
+	return { pacingMinIntervalMs: 1000 };
 }
 
 /**
@@ -137,7 +140,7 @@ export function githubPacingProfile(): ProviderPacingProfile {
  * Doc: https://developers.notion.com/reference/request-limits
  */
 export function notionPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 500 };
+	return { pacingMinIntervalMs: 500 };
 }
 
 /**
@@ -149,7 +152,7 @@ export function notionPacingProfile(): ProviderPacingProfile {
  * Doc: https://cloud.ouraring.com/docs/error-handling
  */
 export function ouraPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 250 };
+	return { pacingMinIntervalMs: 250 };
 }
 
 /**
@@ -161,7 +164,7 @@ export function ouraPacingProfile(): ProviderPacingProfile {
  * Doc: https://developer.spotify.com/documentation/web-api/concepts/rate-limits
  */
 export function spotifyPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 500 };
+	return { pacingMinIntervalMs: 500 };
 }
 
 /**
@@ -175,7 +178,7 @@ export function spotifyPacingProfile(): ProviderPacingProfile {
  * Doc: https://developers.strava.com/docs/rate-limits/
  */
 export function stravaPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 10_000 };
+	return { pacingMinIntervalMs: 10_000 };
 }
 
 /**
@@ -188,7 +191,7 @@ export function stravaPacingProfile(): ProviderPacingProfile {
  * Doc: https://api.ynab.com/ (Usage → Rate Limiting)
  */
 export function ynabPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 20_000 };
+	return { pacingMinIntervalMs: 20_000 };
 }
 
 /**
@@ -206,7 +209,7 @@ export function ynabPacingProfile(): ProviderPacingProfile {
  * https://docs.slack.dev/reference/methods/reminders.list
  */
 export function slackApiPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 3000 };
+	return { pacingMinIntervalMs: 3000 };
 }
 
 /**
@@ -226,7 +229,7 @@ export function slackApiPacingProfile(): ProviderPacingProfile {
  * Derived 2026-08-07: no published limit, use policy default.
  */
 export function steamPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 250 };
+	return { pacingMinIntervalMs: 250 };
 }
 
 /**
@@ -255,11 +258,15 @@ export function steamPacingProfile(): ProviderPacingProfile {
 const GOOGLE_CALENDAR_CONTACTS_PACING_MIN_INTERVAL_MS = 200;
 
 export function google_calendarPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: GOOGLE_CALENDAR_CONTACTS_PACING_MIN_INTERVAL_MS };
+	return {
+		pacingMinIntervalMs: GOOGLE_CALENDAR_CONTACTS_PACING_MIN_INTERVAL_MS,
+	};
 }
 
 export function google_contactsPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: GOOGLE_CALENDAR_CONTACTS_PACING_MIN_INTERVAL_MS };
+	return {
+		pacingMinIntervalMs: GOOGLE_CALENDAR_CONTACTS_PACING_MIN_INTERVAL_MS,
+	};
 }
 
 /**
@@ -270,7 +277,7 @@ export function google_contactsPacingProfile(): ProviderPacingProfile {
  * Doc: https://dev.groupme.com/docs/v3 (rate limits not specified)
  */
 export function groupmePacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 1000 };
+	return { pacingMinIntervalMs: 1000 };
 }
 
 /**
@@ -283,5 +290,5 @@ export function groupmePacingProfile(): ProviderPacingProfile {
  * Reference: Authority doc §10 (Jellyfin v10.11.11, self-hosted, no documented limits).
  */
 export function jellyfinPacingProfile(): ProviderPacingProfile {
-  return { pacingMinIntervalMs: 100 };
+	return { pacingMinIntervalMs: 100 };
 }

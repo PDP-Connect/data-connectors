@@ -27,31 +27,42 @@ import type { Page } from "playwright";
 import { ensureHebSession, probeHebSession } from "../../src/auto-login/heb.ts";
 import { manualAction } from "../../src/browser-handoff.ts";
 import {
-  type BrowserCollectContext,
-  buildDetailGap,
-  emitDetailCoverage,
-  type ProbeSessionArgs,
-  politeDelay,
-  runConnector,
+	type BrowserCollectContext,
+	buildDetailGap,
+	emitDetailCoverage,
+	type ProbeSessionArgs,
+	politeDelay,
+	runConnector,
 } from "../../src/connector-runtime.ts";
-import { type FingerprintCursor, openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
-import { walkPagesWithCeiling } from "../../src/page-ceiling.ts";
-import { type OrderItemTally, summarizeItemCounts } from "./item-count-anchor.ts";
 import {
-  buildOrderItemRecord,
-  buildOrderRecord,
-  diagnoseEmptyListPage,
-  isIncapsulaBlocked,
-  looksLoggedOut,
-  mergeOrdersListPage,
-  parseOrderDate,
-  parseOrderDetailDom,
-  parseOrdersListDom,
-  parseOrdersListStructured,
-  resolveMaxPage,
+	type FingerprintCursor,
+	openFingerprintCursor,
+} from "../../src/fingerprint-cursor.ts";
+import { walkPagesWithCeiling } from "../../src/page-ceiling.ts";
+import {
+	type OrderItemTally,
+	summarizeItemCounts,
+} from "./item-count-anchor.ts";
+import {
+	buildOrderItemRecord,
+	buildOrderRecord,
+	diagnoseEmptyListPage,
+	isIncapsulaBlocked,
+	looksLoggedOut,
+	mergeOrdersListPage,
+	parseOrderDate,
+	parseOrderDetailDom,
+	parseOrdersListDom,
+	parseOrdersListStructured,
+	resolveMaxPage,
 } from "./parsers.ts";
 import { listPageOrderShape, validateRecord } from "./schemas.ts";
-import type { ListPageDiagnostics, ListPageOrder, MaxPageResolution, OrderDetail } from "./types.ts";
+import type {
+	ListPageDiagnostics,
+	ListPageOrder,
+	MaxPageResolution,
+	OrderDetail,
+} from "./types.ts";
 
 const SESSION_COOKIE_RE = /session|hebuser|heb-session/;
 const NAV_TIMEOUT_MS = 30_000;
@@ -77,8 +88,10 @@ export const HEB_REPAIR_RETRY_DELAY_MIN_MS = 1500;
 export const HEB_REPAIR_RETRY_DELAY_MAX_MS = 2500;
 
 async function hydrationWait(): Promise<void> {
-  const jitter = HEB_HYDRATION_WAIT_MIN_MS + Math.random() * (HEB_HYDRATION_WAIT_MAX_MS - HEB_HYDRATION_WAIT_MIN_MS);
-  await politeDelay(jitter);
+	const jitter =
+		HEB_HYDRATION_WAIT_MIN_MS +
+		Math.random() * (HEB_HYDRATION_WAIT_MAX_MS - HEB_HYDRATION_WAIT_MIN_MS);
+	await politeDelay(jitter);
 }
 
 /**
@@ -93,20 +106,22 @@ async function hydrationWait(): Promise<void> {
  * rather than silently assuming the more restrictive unattended posture,
  * which would make local development impossible to test against.
  */
-export function hebAllowsInteractiveAuthRepair(env: NodeJS.ProcessEnv = process.env): boolean {
-  const triggerKind = env.PDPP_RUN_TRIGGER_KIND?.trim();
-  if (!triggerKind) {
-    return true;
-  }
-  return triggerKind === "manual";
+export function hebAllowsInteractiveAuthRepair(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const triggerKind = env.PDPP_RUN_TRIGGER_KIND?.trim();
+	if (!triggerKind) {
+		return true;
+	}
+	return triggerKind === "manual";
 }
 
 type DetailFailureKind =
-  | "deferred_budget"
-  | "navigation_failed_non_retryable"
-  | "navigation_retry_exhausted"
-  | "parse_missing"
-  | "session_repair_required";
+	| "deferred_budget"
+	| "navigation_failed_non_retryable"
+	| "navigation_retry_exhausted"
+	| "parse_missing"
+	| "session_repair_required";
 
 export type HebDetailGapReason = "retry_exhausted" | "temporary_unavailable";
 
@@ -116,53 +131,65 @@ export type HebDetailGapReason = "retry_exhausted" | "temporary_unavailable";
  * "Copy Amazon's exhaustive DetailFailureKind -> RecoveryClass switch shape").
  */
 export type HebRecoveryClass =
-  | "run_cap_deferred"
-  | "transient_no_progress"
-  | "owner_repair_required"
-  | "connector_defect";
+	| "run_cap_deferred"
+	| "transient_no_progress"
+	| "owner_repair_required"
+	| "connector_defect";
 
 /** Compile-time-exhaustive guard: a switch that reaches this branch has an
  *  unhandled DetailFailureKind, which is a type error at the call site (the
  *  `never` parameter cannot accept a real value), not a silent runtime
  *  fallback. */
 function assertNever(kind: never): never {
-  throw new Error(`unhandled DetailFailureKind: ${String(kind)}`);
+	throw new Error(`unhandled DetailFailureKind: ${String(kind)}`);
 }
 
-export function reasonForDetailFailure(kind: DetailFailureKind): HebDetailGapReason {
-  switch (kind) {
-    case "navigation_retry_exhausted":
-    case "deferred_budget":
-      return "retry_exhausted";
-    case "parse_missing":
-    case "session_repair_required":
-    case "navigation_failed_non_retryable":
-      return "temporary_unavailable";
-    default:
-      return assertNever(kind);
-  }
+export function reasonForDetailFailure(
+	kind: DetailFailureKind,
+): HebDetailGapReason {
+	switch (kind) {
+		case "navigation_retry_exhausted":
+		case "deferred_budget":
+			return "retry_exhausted";
+		case "parse_missing":
+		case "session_repair_required":
+		case "navigation_failed_non_retryable":
+			return "temporary_unavailable";
+		default:
+			return assertNever(kind);
+	}
 }
 
-export function classifyHebDetailFailure(kind: DetailFailureKind): HebRecoveryClass {
-  switch (kind) {
-    case "deferred_budget":
-      return "run_cap_deferred";
-    case "session_repair_required":
-      return "owner_repair_required";
-    case "navigation_retry_exhausted":
-    case "parse_missing":
-      return "transient_no_progress";
-    case "navigation_failed_non_retryable":
-      return "connector_defect";
-    default:
-      return assertNever(kind);
-  }
+export function classifyHebDetailFailure(
+	kind: DetailFailureKind,
+): HebRecoveryClass {
+	switch (kind) {
+		case "deferred_budget":
+			return "run_cap_deferred";
+		case "session_repair_required":
+			return "owner_repair_required";
+		case "navigation_retry_exhausted":
+		case "parse_missing":
+			return "transient_no_progress";
+		case "navigation_failed_non_retryable":
+			return "connector_defect";
+		default:
+			return assertNever(kind);
+	}
 }
 
 export type DetailFetchResult =
-  | { detail: OrderDetail; status: "hydrated" }
-  | { failureKind: DetailFailureKind; reason: HebDetailGapReason; status: "deferred" }
-  | { failureKind: DetailFailureKind; reason: HebDetailGapReason; status: "failed" };
+	| { detail: OrderDetail; status: "hydrated" }
+	| {
+			failureKind: DetailFailureKind;
+			reason: HebDetailGapReason;
+			status: "deferred";
+	  }
+	| {
+			failureKind: DetailFailureKind;
+			reason: HebDetailGapReason;
+			status: "failed";
+	  };
 
 const SIGNIN_URL_RE = /\/(sign-in|login|challenge|checkpoint)/i;
 // Amazon's navigation-retry shape (connectors/amazon/index.ts): retry only
@@ -176,84 +203,91 @@ const DETAIL_RETRY_MIN_TIMEOUT_MS = 1500;
 const DETAIL_RETRY_FACTOR = 2;
 
 async function navigateToOrderDetail(page: Page, url: string): Promise<void> {
-  await pRetry(
-    async (): Promise<void> => {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
-    },
-    {
-      retries: DETAIL_RETRY_COUNT,
-      minTimeout: DETAIL_RETRY_MIN_TIMEOUT_MS,
-      factor: DETAIL_RETRY_FACTOR,
-      shouldRetry: ({ error }): boolean => RETRYABLE_ERROR_RE.test(error.message),
-    }
-  );
+	await pRetry(
+		async (): Promise<void> => {
+			await page.goto(url, {
+				waitUntil: "domcontentloaded",
+				timeout: NAV_TIMEOUT_MS,
+			});
+		},
+		{
+			retries: DETAIL_RETRY_COUNT,
+			minTimeout: DETAIL_RETRY_MIN_TIMEOUT_MS,
+			factor: DETAIL_RETRY_FACTOR,
+			shouldRetry: ({ error }): boolean =>
+				RETRYABLE_ERROR_RE.test(error.message),
+		},
+	);
 }
 
 export interface HydrationDeps {
-  /** Optional deterministic seam for unit tests; production omits it and
-   *  therefore keeps the 1500–2500ms polite hydration wait. */
-  waitForHydration?: (() => Promise<void>) | undefined;
+	/** Optional deterministic seam for unit tests; production omits it and
+	 *  therefore keeps the 1500–2500ms polite hydration wait. */
+	waitForHydration?: (() => Promise<void>) | undefined;
 }
 
 export async function fetchOrderDetail(
-  page: Page,
-  orderId: string,
-  deps: HydrationDeps = {}
+	page: Page,
+	orderId: string,
+	deps: HydrationDeps = {},
 ): Promise<DetailFetchResult> {
-  const url = `https://www.heb.com/my-account/order-history/${orderId}`;
-  try {
-    await navigateToOrderDetail(page, url);
-  } catch (err) {
-    // pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
-    // transport errors consume the retry budget — a non-retryable error
-    // (e.g. "page closed", ERR_ABORTED) reaches here after exactly one
-    // attempt. That is a distinct failure from genuinely exhausting the
-    // retry budget on a transient error, so it must not be reported as
-    // navigation_retry_exhausted (a false reason that also routes it into
-    // the retryable pending-gap class).
-    const message = err instanceof Error ? err.message : String(err);
-    const failureKind: DetailFailureKind = RETRYABLE_ERROR_RE.test(message)
-      ? "navigation_retry_exhausted"
-      : "navigation_failed_non_retryable";
-    return {
-      failureKind,
-      reason: reasonForDetailFailure(failureKind),
-      status: "failed",
-    };
-  }
-  await (deps.waitForHydration ?? hydrationWait)();
+	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
+	try {
+		await navigateToOrderDetail(page, url);
+	} catch (err) {
+		// pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
+		// transport errors consume the retry budget — a non-retryable error
+		// (e.g. "page closed", ERR_ABORTED) reaches here after exactly one
+		// attempt. That is a distinct failure from genuinely exhausting the
+		// retry budget on a transient error, so it must not be reported as
+		// navigation_retry_exhausted (a false reason that also routes it into
+		// the retryable pending-gap class).
+		const message = err instanceof Error ? err.message : String(err);
+		const failureKind: DetailFailureKind = RETRYABLE_ERROR_RE.test(message)
+			? "navigation_retry_exhausted"
+			: "navigation_failed_non_retryable";
+		return {
+			failureKind,
+			reason: reasonForDetailFailure(failureKind),
+			status: "failed",
+		};
+	}
+	await (deps.waitForHydration ?? hydrationWait)();
 
-  const landedUrl = page.url();
-  const html = await page.content().catch((): string => "");
-  // Same looksLoggedOut() helper the deep probe uses (URL AND password-form
-  // check) — not just the URL pattern — so a login form served at the
-  // original order URL (not just a redirect to a sign-in path) is also
-  // recognized as a dead session instead of falling through to parse_missing.
-  if (SIGNIN_URL_RE.test(landedUrl) || (html && looksLoggedOut(landedUrl, html))) {
-    return {
-      failureKind: "session_repair_required",
-      reason: reasonForDetailFailure("session_repair_required"),
-      status: "failed",
-    };
-  }
+	const landedUrl = page.url();
+	const html = await page.content().catch((): string => "");
+	// Same looksLoggedOut() helper the deep probe uses (URL AND password-form
+	// check) — not just the URL pattern — so a login form served at the
+	// original order URL (not just a redirect to a sign-in path) is also
+	// recognized as a dead session instead of falling through to parse_missing.
+	if (
+		SIGNIN_URL_RE.test(landedUrl) ||
+		(html && looksLoggedOut(landedUrl, html))
+	) {
+		return {
+			failureKind: "session_repair_required",
+			reason: reasonForDetailFailure("session_repair_required"),
+			status: "failed",
+		};
+	}
 
-  if (!html || isIncapsulaBlocked(html)) {
-    return {
-      failureKind: "session_repair_required",
-      reason: reasonForDetailFailure("session_repair_required"),
-      status: "failed",
-    };
-  }
+	if (!html || isIncapsulaBlocked(html)) {
+		return {
+			failureKind: "session_repair_required",
+			reason: reasonForDetailFailure("session_repair_required"),
+			status: "failed",
+		};
+	}
 
-  const detail = parseOrderDetailDom(html);
-  if (!detail) {
-    return {
-      failureKind: "parse_missing",
-      reason: reasonForDetailFailure("parse_missing"),
-      status: "failed",
-    };
-  }
-  return { detail, status: "hydrated" };
+	const detail = parseOrderDetailDom(html);
+	if (!detail) {
+		return {
+			failureKind: "parse_missing",
+			reason: reasonForDetailFailure("parse_missing"),
+			status: "failed",
+		};
+	}
+	return { detail, status: "hydrated" };
 }
 
 // ─── List-page extraction with shape-check ────────────────────────────────
@@ -267,35 +301,38 @@ export async function fetchOrderDetail(
  * SKIP_RESULT, it is never silently substituted with a possibly-stale DOM
  * row without going through the same check.
  */
-async function extractAndShapeCheckOrders(html: string, emit: BrowserCollectContext["emit"]): Promise<ListPageOrder[]> {
-  if (!html) {
-    return [];
-  }
-  const domOrders = parseOrdersListDom(html);
-  const structuredOrders = parseOrdersListStructured(html);
-  const rawOrders = mergeOrdersListPage(structuredOrders, domOrders);
-  const orders: ListPageOrder[] = [];
-  for (const r of rawOrders) {
-    const parsed = listPageOrderShape.safeParse(r);
-    if (parsed.success) {
-      orders.push({ ...(parsed.data as ListPageOrder), source: r.source });
-    } else {
-      await emit({
-        type: "SKIP_RESULT",
-        stream: "orders",
-        reason: "list_page_shape_check_failed",
-        message: `list card ${r.orderId}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
-        diagnostics: { card: r, issues: parsed.error.issues, source: r.source },
-      });
-    }
-  }
-  return orders;
+async function extractAndShapeCheckOrders(
+	html: string,
+	emit: BrowserCollectContext["emit"],
+): Promise<ListPageOrder[]> {
+	if (!html) {
+		return [];
+	}
+	const domOrders = parseOrdersListDom(html);
+	const structuredOrders = parseOrdersListStructured(html);
+	const rawOrders = mergeOrdersListPage(structuredOrders, domOrders);
+	const orders: ListPageOrder[] = [];
+	for (const r of rawOrders) {
+		const parsed = listPageOrderShape.safeParse(r);
+		if (parsed.success) {
+			orders.push({ ...(parsed.data as ListPageOrder), source: r.source });
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "orders",
+				reason: "list_page_shape_check_failed",
+				message: `list card ${r.orderId}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+				diagnostics: { card: r, issues: parsed.error.issues, source: r.source },
+			});
+		}
+	}
+	return orders;
 }
 
 type EmptyListPageAction = "abort" | "terminal";
 interface EmptyListPageClassification {
-  action: EmptyListPageAction;
-  reason: string;
+	action: EmptyListPageAction;
+	reason: string;
 }
 
 /**
@@ -308,7 +345,7 @@ interface EmptyListPageClassification {
  * retract.
  */
 export interface PriorOrdersEvidence {
-  hasPriorOrders: boolean;
+	hasPriorOrders: boolean;
 }
 
 /** Owner-facing message for the one classification whose whole point is to be
@@ -317,9 +354,9 @@ export interface PriorOrdersEvidence {
  *  Stored records are untouched — this connector never deletes, tombstones, or
  *  overwrites on an empty page; it only declines to advance. */
 export const HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE =
-  "H-E-B reported no order history, but PDPP previously collected orders for this account. " +
-  "Your stored orders are retained and untouched. This run was stopped instead of recording " +
-  "an empty history, because a page showing no orders cannot prove the history is gone.";
+	"H-E-B reported no order history, but PDPP previously collected orders for this account. " +
+	"Your stored orders are retained and untouched. This run was stopped instead of recording " +
+	"an empty history, because a page showing no orders cannot prove the history is gone.";
 
 /**
  * Classify a zero-order list page: distinguish a genuine end-of-list from
@@ -338,118 +375,123 @@ export const HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE =
  * absent or contradictory resolution remains non-terminal.
  */
 export function classifyEmptyListPage(
-  diag: ListPageDiagnostics,
-  pageNum: number,
-  maxPageResolution: MaxPageResolution,
-  priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false }
+	diag: ListPageDiagnostics,
+	pageNum: number,
+	maxPageResolution: MaxPageResolution,
+	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): EmptyListPageClassification {
-  if (diag.incapsula_block || diag.password_form) {
-    return { action: "abort", reason: "source_auth_or_challenge" };
-  }
-  // A connection that has already collected orders can never prove itself
-  // empty. `hasPriorOrders` is this connection's own prior `orders` checkpoint
-  // — durable evidence that H-E-B previously listed orders for this account —
-  // threaded in explicitly by `collect()` rather than read from ambient state,
-  // so this branch stays pure and unit-testable.
-  //
-  // Without this check, a connection holding 41 orders could complete a run as
-  // "succeeded, considered:0, covered:0, checkpoint committed", replacing a
-  // measured coverage claim with a fabricated proven-zero. The two causes are
-  // indistinguishable from the page alone — H-E-B may have purged the history
-  // upstream (making our stored copy the only copy), or the page may render
-  // empty for a degraded session — so the run fails loudly and lets a human
-  // decide, rather than guessing.
-  //
-  // Ordering: BELOW the block/auth check (an established block is the more
-  // specific diagnosis and keeps its own reason), and ABOVE the empty_state
-  // branch, so a source-authored empty state cannot short-circuit past it.
-  if (diag.empty_state && priorOrdersEvidence.hasPriorOrders) {
-    return { action: "abort", reason: "heb_empty_history_after_prior_orders" };
-  }
-  // H-E-B's own empty-state component, rendered inside the order-results
-  // container, is the source asserting the history is empty. Trust it as
-  // terminal proof: it is positive evidence, unlike every check below, which
-  // can only infer emptiness from things being absent.
-  //
-  // Ordering is load-bearing in both directions. It must stay BELOW the
-  // block/auth check, so a challenge page can never be laundered into a proven
-  // empty result. It must stay ABOVE the `selector_drift` check, because a
-  // genuinely empty page trips that check: the empty-state component's own
-  // CSS-module class names match `[class*="order" i]`, producing
-  // `order_cards: 0, any_card: 4` — the drift signature. Before this branch
-  // existed, every zero-order run aborted as `selector_drift`, which reads as
-  // "H-E-B changed their markup" and sends recovery at a selector rewrite that
-  // could never succeed, because the markup is fine and the history is empty.
-  //
-  // Terminal here means "stop paginating, and count this as proven-empty
-  // coverage" — honest because order history is account-wide (verified: a
-  // single scrape of one connection returned orders from four different H-E-B
-  // stores, so the selected store context does not scope what is listed).
-  if (diag.empty_state) {
-    return { action: "terminal", reason: "source_reported_empty" };
-  }
-  if (diag.order_cards === 0 && diag.any_card > 0) {
-    return { action: "abort", reason: "selector_drift" };
-  }
-  if (maxPageResolution.kind === "absent") {
-    return { action: "abort", reason: "pagination_metadata_absent" };
-  }
-  if (maxPageResolution.kind === "contradictory") {
-    return { action: "abort", reason: "pagination_metadata_contradictory" };
-  }
-  if (pageNum <= maxPageResolution.value) {
-    return { action: "abort", reason: "empty_page_before_max_page" };
-  }
-  return { action: "terminal", reason: "pagination_exhausted" };
+	if (diag.incapsula_block || diag.password_form) {
+		return { action: "abort", reason: "source_auth_or_challenge" };
+	}
+	// A connection that has already collected orders can never prove itself
+	// empty. `hasPriorOrders` is this connection's own prior `orders` checkpoint
+	// — durable evidence that H-E-B previously listed orders for this account —
+	// threaded in explicitly by `collect()` rather than read from ambient state,
+	// so this branch stays pure and unit-testable.
+	//
+	// Without this check, a connection holding 41 orders could complete a run as
+	// "succeeded, considered:0, covered:0, checkpoint committed", replacing a
+	// measured coverage claim with a fabricated proven-zero. The two causes are
+	// indistinguishable from the page alone — H-E-B may have purged the history
+	// upstream (making our stored copy the only copy), or the page may render
+	// empty for a degraded session — so the run fails loudly and lets a human
+	// decide, rather than guessing.
+	//
+	// Ordering: BELOW the block/auth check (an established block is the more
+	// specific diagnosis and keeps its own reason), and ABOVE the empty_state
+	// branch, so a source-authored empty state cannot short-circuit past it.
+	if (diag.empty_state && priorOrdersEvidence.hasPriorOrders) {
+		return { action: "abort", reason: "heb_empty_history_after_prior_orders" };
+	}
+	// H-E-B's own empty-state component, rendered inside the order-results
+	// container, is the source asserting the history is empty. Trust it as
+	// terminal proof: it is positive evidence, unlike every check below, which
+	// can only infer emptiness from things being absent.
+	//
+	// Ordering is load-bearing in both directions. It must stay BELOW the
+	// block/auth check, so a challenge page can never be laundered into a proven
+	// empty result. It must stay ABOVE the `selector_drift` check, because a
+	// genuinely empty page trips that check: the empty-state component's own
+	// CSS-module class names match `[class*="order" i]`, producing
+	// `order_cards: 0, any_card: 4` — the drift signature. Before this branch
+	// existed, every zero-order run aborted as `selector_drift`, which reads as
+	// "H-E-B changed their markup" and sends recovery at a selector rewrite that
+	// could never succeed, because the markup is fine and the history is empty.
+	//
+	// Terminal here means "stop paginating, and count this as proven-empty
+	// coverage" — honest because order history is account-wide (verified: a
+	// single scrape of one connection returned orders from four different H-E-B
+	// stores, so the selected store context does not scope what is listed).
+	if (diag.empty_state) {
+		return { action: "terminal", reason: "source_reported_empty" };
+	}
+	if (diag.order_cards === 0 && diag.any_card > 0) {
+		return { action: "abort", reason: "selector_drift" };
+	}
+	if (maxPageResolution.kind === "absent") {
+		return { action: "abort", reason: "pagination_metadata_absent" };
+	}
+	if (maxPageResolution.kind === "contradictory") {
+		return { action: "abort", reason: "pagination_metadata_contradictory" };
+	}
+	if (pageNum <= maxPageResolution.value) {
+		return { action: "abort", reason: "empty_page_before_max_page" };
+	}
+	return { action: "terminal", reason: "pagination_exhausted" };
 }
 
 async function reportEmptyPageDiagnostics(
-  page: Page,
-  pageNum: number,
-  emit: BrowserCollectContext["emit"],
-  priorOrdersEvidence: PriorOrdersEvidence
+	page: Page,
+	pageNum: number,
+	emit: BrowserCollectContext["emit"],
+	priorOrdersEvidence: PriorOrdersEvidence,
 ): Promise<EmptyListPageClassification> {
-  const html = await page.content().catch((): string => "");
-  const diag = diagnoseEmptyListPage(html, page.url());
-  const maxPageResolution = resolveMaxPage(html);
-  const classification = classifyEmptyListPage(diag, pageNum, maxPageResolution, priorOrdersEvidence);
-  if (classification.action === "terminal") {
-    return classification;
-  }
-  await emit({
-    type: "SKIP_RESULT",
-    stream: "orders",
-    reason: classification.reason,
-    message:
-      classification.reason === "heb_empty_history_after_prior_orders"
-        ? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
-        : `H-E-B list page ${pageNum}: empty page is not a proven terminal page (${classification.reason}).`,
-    diagnostics: {
-      any_card: diag.any_card,
-      body_preview: "",
-      empty_state: diag.empty_state,
-      has_prior_orders: priorOrdersEvidence.hasPriorOrders,
-      incapsula_block: diag.incapsula_block,
-      max_page_resolution: maxPageResolution,
-      order_cards: diag.order_cards,
-      password_form: diag.password_form,
-      title: "",
-      url: "",
-    },
-  });
-  return classification;
+	const html = await page.content().catch((): string => "");
+	const diag = diagnoseEmptyListPage(html, page.url());
+	const maxPageResolution = resolveMaxPage(html);
+	const classification = classifyEmptyListPage(
+		diag,
+		pageNum,
+		maxPageResolution,
+		priorOrdersEvidence,
+	);
+	if (classification.action === "terminal") {
+		return classification;
+	}
+	await emit({
+		type: "SKIP_RESULT",
+		stream: "orders",
+		reason: classification.reason,
+		message:
+			classification.reason === "heb_empty_history_after_prior_orders"
+				? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
+				: `H-E-B list page ${pageNum}: empty page is not a proven terminal page (${classification.reason}).`,
+		diagnostics: {
+			any_card: diag.any_card,
+			body_preview: "",
+			empty_state: diag.empty_state,
+			has_prior_orders: priorOrdersEvidence.hasPriorOrders,
+			incapsula_block: diag.incapsula_block,
+			max_page_resolution: maxPageResolution,
+			order_cards: diag.order_cards,
+			password_form: diag.password_form,
+			title: "",
+			url: "",
+		},
+	});
+	return classification;
 }
 
 // ─── Coverage accounting (order_items detail hydration) ───────────────────
 
 export interface OrderItemsCoverage {
-  gap: string[];
-  hydrated: string[];
-  required: string[];
+	gap: string[];
+	hydrated: string[];
+	required: string[];
 }
 
 export function newOrderItemsCoverage(): OrderItemsCoverage {
-  return { gap: [], hydrated: [], required: [] };
+	return { gap: [], hydrated: [], required: [] };
 }
 
 /**
@@ -469,13 +511,13 @@ export function newOrderItemsCoverage(): OrderItemsCoverage {
  * considered, but not covered.
  */
 export interface OrdersCoverage {
-  considered: string[];
-  covered: string[];
-  dateDropped: string[];
+	considered: string[];
+	covered: string[];
+	dateDropped: string[];
 }
 
 export function newOrdersCoverage(): OrdersCoverage {
-  return { considered: [], covered: [], dateDropped: [] };
+	return { considered: [], covered: [], dateDropped: [] };
 }
 
 /**
@@ -488,29 +530,37 @@ export function newOrdersCoverage(): OrdersCoverage {
  */
 export type DetailOutcome = "hydrated" | "gap";
 
-export function recordDetailOutcome(coverage: OrderItemsCoverage, orderId: string, outcome: DetailOutcome): void {
-  coverage.required.push(orderId);
-  if (outcome === "hydrated") {
-    coverage.hydrated.push(orderId);
-  } else {
-    coverage.gap.push(orderId);
-  }
+export function recordDetailOutcome(
+	coverage: OrderItemsCoverage,
+	orderId: string,
+	outcome: DetailOutcome,
+): void {
+	coverage.required.push(orderId);
+	if (outcome === "hydrated") {
+		coverage.hydrated.push(orderId);
+	} else {
+		coverage.gap.push(orderId);
+	}
 }
 
 function buildHebDetailGap(
-  orderId: string,
-  reason: HebDetailGapReason,
-  failureKind: DetailFailureKind,
-  orderDate?: string | undefined
+	orderId: string,
+	reason: HebDetailGapReason,
+	failureKind: DetailFailureKind,
+	orderDate?: string | undefined,
 ) {
-  return buildDetailGap({
-    stream: "order_items",
-    parentStream: "orders",
-    recordKey: orderId,
-    reason,
-    locator: { kind: "heb.order_detail", order_id: orderId, ...(orderDate ? { order_date: orderDate } : {}) },
-    error: { class: classifyHebDetailFailure(failureKind) },
-  });
+	return buildDetailGap({
+		stream: "order_items",
+		parentStream: "orders",
+		recordKey: orderId,
+		reason,
+		locator: {
+			kind: "heb.order_detail",
+			order_id: orderId,
+			...(orderDate ? { order_date: orderDate } : {}),
+		},
+		error: { class: classifyHebDetailFailure(failureKind) },
+	});
 }
 
 /**
@@ -524,29 +574,29 @@ function buildHebDetailGap(
  * branches on the same decision.
  */
 export interface RunFlags {
-  detailAttempts: number;
-  isManualRun: boolean;
-  manualRepairAttempted: boolean;
-  sessionRepairRequired: boolean;
+	detailAttempts: number;
+	isManualRun: boolean;
+	manualRepairAttempted: boolean;
+	sessionRepairRequired: boolean;
 }
 
 export interface EmitDeps extends HydrationDeps {
-  capture?: BrowserCollectContext["capture"];
-  emit: BrowserCollectContext["emit"];
-  emitRecord: BrowserCollectContext["emitRecord"];
-  emittedAt: string;
-  /** Per-order declared-vs-collected item counts, accumulated across the run
-   *  and rolled up into the `order_items` completeness anchor. Optional so
-   *  existing callers and tests that do not exercise the anchor need no
-   *  change. */
-  itemCountTallies?: OrderItemTally[] | undefined;
-  orderItemsCoverage: OrderItemsCoverage | undefined;
-  ordersCoverage: OrdersCoverage | undefined;
-  ordersFingerprintCursor: FingerprintCursor | undefined;
-  progress: BrowserCollectContext["progress"];
-  sendInteraction: BrowserCollectContext["sendInteraction"];
-  wantsItems: boolean;
-  wantsOrders: boolean;
+	capture?: BrowserCollectContext["capture"];
+	emit: BrowserCollectContext["emit"];
+	emitRecord: BrowserCollectContext["emitRecord"];
+	emittedAt: string;
+	/** Per-order declared-vs-collected item counts, accumulated across the run
+	 *  and rolled up into the `order_items` completeness anchor. Optional so
+	 *  existing callers and tests that do not exercise the anchor need no
+	 *  change. */
+	itemCountTallies?: OrderItemTally[] | undefined;
+	orderItemsCoverage: OrderItemsCoverage | undefined;
+	ordersCoverage: OrdersCoverage | undefined;
+	ordersFingerprintCursor: FingerprintCursor | undefined;
+	progress: BrowserCollectContext["progress"];
+	sendInteraction: BrowserCollectContext["sendInteraction"];
+	wantsItems: boolean;
+	wantsOrders: boolean;
 }
 
 /** Dependencies for the owner-started manual repair attempt — kept separate
@@ -554,17 +604,19 @@ export interface EmitDeps extends HydrationDeps {
  *  emit/record-scoped, and tests exercising `resolveOrderDetail` without a
  *  repair scenario should not need to stub these. */
 export interface RepairDeps extends HydrationDeps {
-  capture?: BrowserCollectContext["capture"];
-  sendInteraction: BrowserCollectContext["sendInteraction"];
-  /** Optional deterministic seam for tests; production retains the polite
-   *  1500–2500ms post-repair delay by omitting this dependency. */
-  waitForRepairRetry?: () => Promise<void>;
+	capture?: BrowserCollectContext["capture"];
+	sendInteraction: BrowserCollectContext["sendInteraction"];
+	/** Optional deterministic seam for tests; production retains the polite
+	 *  1500–2500ms post-repair delay by omitting this dependency. */
+	waitForRepairRetry?: () => Promise<void>;
 }
 
 async function waitForRepairRetry(): Promise<void> {
-  await politeDelay(
-    HEB_REPAIR_RETRY_DELAY_MIN_MS + Math.random() * (HEB_REPAIR_RETRY_DELAY_MAX_MS - HEB_REPAIR_RETRY_DELAY_MIN_MS)
-  );
+	await politeDelay(
+		HEB_REPAIR_RETRY_DELAY_MIN_MS +
+			Math.random() *
+				(HEB_REPAIR_RETRY_DELAY_MAX_MS - HEB_REPAIR_RETRY_DELAY_MIN_MS),
+	);
 }
 
 /**
@@ -579,28 +631,32 @@ async function waitForRepairRetry(): Promise<void> {
  * thrown/rejected manualAction still consumes the one-shot budget rather
  * than being retried.
  */
-async function attemptManualSessionRepair(page: Page, deps: RepairDeps, flags: RunFlags): Promise<boolean> {
-  flags.manualRepairAttempted = true;
-  try {
-    await manualAction(
-      {
-        ...(deps.capture ? { capture: deps.capture } : {}),
-        message:
-          "H-E-B needs you to sign back in or complete a challenge so this run can keep collecting your order details.",
-        page,
-        reason: "login",
-      },
-      deps.sendInteraction
-    );
-  } catch {
-    return false;
-  }
-  const recovered = await probeHebSession(page);
-  if (!recovered) {
-    return false;
-  }
-  await (deps.waitForRepairRetry ?? waitForRepairRetry)();
-  return true;
+async function attemptManualSessionRepair(
+	page: Page,
+	deps: RepairDeps,
+	flags: RunFlags,
+): Promise<boolean> {
+	flags.manualRepairAttempted = true;
+	try {
+		await manualAction(
+			{
+				...(deps.capture ? { capture: deps.capture } : {}),
+				message:
+					"H-E-B needs you to sign back in or complete a challenge so this run can keep collecting your order details.",
+				page,
+				reason: "login",
+			},
+			deps.sendInteraction,
+		);
+	} catch {
+		return false;
+	}
+	const recovered = await probeHebSession(page);
+	if (!recovered) {
+		return false;
+	}
+	await (deps.waitForRepairRetry ?? waitForRepairRetry)();
+	return true;
 }
 
 /**
@@ -624,44 +680,51 @@ async function attemptManualSessionRepair(page: Page, deps: RepairDeps, flags: R
  * budget in `flags` cannot be spent twice by the two call sites.
  */
 export async function resolveOrderDetail(
-  page: Page,
-  flags: RunFlags,
-  orderId: string,
-  repairDeps?: RepairDeps
+	page: Page,
+	flags: RunFlags,
+	orderId: string,
+	repairDeps?: RepairDeps,
 ): Promise<DetailFetchResult> {
-  if (flags.sessionRepairRequired) {
-    if (flags.isManualRun && !flags.manualRepairAttempted && repairDeps) {
-      const recovered = await attemptManualSessionRepair(page, repairDeps, flags);
-      if (recovered) {
-        flags.sessionRepairRequired = false;
-        flags.detailAttempts += 1;
-        const retryResult = await fetchOrderDetail(page, orderId, repairDeps);
-        if (retryResult.status === "failed" && retryResult.failureKind === "session_repair_required") {
-          // A second challenge right after a successful re-probe — latch for
-          // the rest of the run rather than spending a second attempt.
-          flags.sessionRepairRequired = true;
-        }
-        return retryResult;
-      }
-      // Repair itself failed (manualAction rejected or re-probe still dead):
-      // latch permanently and fall through to the deferred response below.
-      flags.sessionRepairRequired = true;
-    }
-    return Promise.resolve({
-      failureKind: "session_repair_required",
-      reason: reasonForDetailFailure("session_repair_required"),
-      status: "deferred",
-    });
-  }
-  if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
-    return Promise.resolve({
-      failureKind: "deferred_budget",
-      reason: reasonForDetailFailure("deferred_budget"),
-      status: "deferred",
-    });
-  }
-  flags.detailAttempts += 1;
-  return fetchOrderDetail(page, orderId, repairDeps);
+	if (flags.sessionRepairRequired) {
+		if (flags.isManualRun && !flags.manualRepairAttempted && repairDeps) {
+			const recovered = await attemptManualSessionRepair(
+				page,
+				repairDeps,
+				flags,
+			);
+			if (recovered) {
+				flags.sessionRepairRequired = false;
+				flags.detailAttempts += 1;
+				const retryResult = await fetchOrderDetail(page, orderId, repairDeps);
+				if (
+					retryResult.status === "failed" &&
+					retryResult.failureKind === "session_repair_required"
+				) {
+					// A second challenge right after a successful re-probe — latch for
+					// the rest of the run rather than spending a second attempt.
+					flags.sessionRepairRequired = true;
+				}
+				return retryResult;
+			}
+			// Repair itself failed (manualAction rejected or re-probe still dead):
+			// latch permanently and fall through to the deferred response below.
+			flags.sessionRepairRequired = true;
+		}
+		return Promise.resolve({
+			failureKind: "session_repair_required",
+			reason: reasonForDetailFailure("session_repair_required"),
+			status: "deferred",
+		});
+	}
+	if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+		return Promise.resolve({
+			failureKind: "deferred_budget",
+			reason: reasonForDetailFailure("deferred_budget"),
+			status: "deferred",
+		});
+	}
+	flags.detailAttempts += 1;
+	return fetchOrderDetail(page, orderId, repairDeps);
 }
 
 // ─── Old-gap recovery (drains pending order_items detail gaps) ────────────
@@ -670,173 +733,234 @@ export async function resolveOrderDetail(
 // before new forward scanning").
 
 function readRecoverableHebOrderDetailGap(
-  gap: BrowserCollectContext["detailGaps"][number]
-): { gapId: string; orderDate: string | undefined; orderId: string; recordKey: string | number } | null {
-  if (gap.stream !== "order_items" || gap.status !== "pending") {
-    return null;
-  }
-  const locator = gap.detail_locator;
-  if (locator?.kind !== "heb.order_detail") {
-    return null;
-  }
-  const orderId = locator.order_id;
-  if (typeof orderId !== "string" || orderId.length === 0) {
-    return null;
-  }
-  const orderDate =
-    typeof locator.order_date === "string" && locator.order_date.length > 0 ? locator.order_date : undefined;
-  return { gapId: gap.gap_id, orderDate, orderId, recordKey: gap.record_key ?? orderId };
+	gap: BrowserCollectContext["detailGaps"][number],
+): {
+	gapId: string;
+	orderDate: string | undefined;
+	orderId: string;
+	recordKey: string | number;
+} | null {
+	if (gap.stream !== "order_items" || gap.status !== "pending") {
+		return null;
+	}
+	const locator = gap.detail_locator;
+	if (locator?.kind !== "heb.order_detail") {
+		return null;
+	}
+	const orderId = locator.order_id;
+	if (typeof orderId !== "string" || orderId.length === 0) {
+		return null;
+	}
+	const orderDate =
+		typeof locator.order_date === "string" && locator.order_date.length > 0
+			? locator.order_date
+			: undefined;
+	return {
+		gapId: gap.gap_id,
+		orderDate,
+		orderId,
+		recordKey: gap.record_key ?? orderId,
+	};
 }
 
 export interface HebDetailRecoveryDeps extends HydrationDeps {
-  capture?: BrowserCollectContext["capture"];
-  detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
-  emit: BrowserCollectContext["emit"];
-  emitRecord: BrowserCollectContext["emitRecord"];
-  emittedAt: string;
-  requestDetailGapPage?: BrowserCollectContext["requestDetailGapPage"] | undefined;
-  sendInteraction: BrowserCollectContext["sendInteraction"];
+	capture?: BrowserCollectContext["capture"];
+	detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
+	emit: BrowserCollectContext["emit"];
+	emitRecord: BrowserCollectContext["emitRecord"];
+	emittedAt: string;
+	requestDetailGapPage?:
+		| BrowserCollectContext["requestDetailGapPage"]
+		| undefined;
+	sendInteraction: BrowserCollectContext["sendInteraction"];
 }
 
 async function recoverPendingOrderItemDetailGapPage(
-  page: Page,
-  deps: HebDetailRecoveryDeps,
-  flags: RunFlags,
-  gaps: readonly BrowserCollectContext["detailGaps"][number][]
+	page: Page,
+	deps: HebDetailRecoveryDeps,
+	flags: RunFlags,
+	gaps: readonly BrowserCollectContext["detailGaps"][number][],
 ): Promise<{ recovered: number; reDeferred: number; skipped: number }> {
-  let recovered = 0;
-  let reDeferred = 0;
-  let skipped = 0;
-  for (const gap of gaps) {
-    const locator = readRecoverableHebOrderDetailGap(gap);
-    if (!locator) {
-      if (gap.stream === "order_items" && gap.status === "pending") {
-        skipped += 1;
-      }
-      continue;
-    }
-    const result = await resolveOrderDetail(page, flags, locator.orderId, {
-      ...(deps.capture ? { capture: deps.capture } : {}),
-      sendInteraction: deps.sendInteraction,
-      waitForHydration: deps.waitForHydration,
-    });
-    if (result.status === "hydrated") {
-      if (!locator.orderDate) {
-        // A legacy/pre-fix gap carries no trustworthy order_date in its
-        // locator (order_items.order_date is a required, non-null schema
-        // field, so we cannot emit an item record here without inventing
-        // one). Retain the pending gap unchanged rather than fabricate the
-        // current run date as the owner-visible purchase date — a future
-        // run whose gap does carry a real date will recover it properly.
-        await deps.emit(
-          buildHebDetailGap(locator.orderId, "temporary_unavailable", "parse_missing", locator.orderDate)
-        );
-        reDeferred += 1;
-        continue;
-      }
-      for (const [itemIndex, item] of result.detail.items.entries()) {
-        await deps.emitRecord(
-          "order_items",
-          buildOrderItemRecord(locator.orderId, locator.orderDate, item, itemIndex, deps.emittedAt)
-        );
-      }
-      await deps.emit({
-        type: "DETAIL_GAP_RECOVERED",
-        reference_only: true,
-        gap_id: locator.gapId,
-        stream: "order_items",
-        record_key: locator.recordKey,
-      });
-      recovered += 1;
-      continue;
-    }
-    if (result.status === "failed" && result.failureKind === "session_repair_required") {
-      flags.sessionRepairRequired = true;
-    }
-    await deps.emit(buildHebDetailGap(locator.orderId, result.reason, result.failureKind, locator.orderDate));
-    reDeferred += 1;
-  }
-  return { recovered, reDeferred, skipped };
+	let recovered = 0;
+	let reDeferred = 0;
+	let skipped = 0;
+	for (const gap of gaps) {
+		const locator = readRecoverableHebOrderDetailGap(gap);
+		if (!locator) {
+			if (gap.stream === "order_items" && gap.status === "pending") {
+				skipped += 1;
+			}
+			continue;
+		}
+		const result = await resolveOrderDetail(page, flags, locator.orderId, {
+			...(deps.capture ? { capture: deps.capture } : {}),
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		});
+		if (result.status === "hydrated") {
+			if (!locator.orderDate) {
+				// A legacy/pre-fix gap carries no trustworthy order_date in its
+				// locator (order_items.order_date is a required, non-null schema
+				// field, so we cannot emit an item record here without inventing
+				// one). Retain the pending gap unchanged rather than fabricate the
+				// current run date as the owner-visible purchase date — a future
+				// run whose gap does carry a real date will recover it properly.
+				await deps.emit(
+					buildHebDetailGap(
+						locator.orderId,
+						"temporary_unavailable",
+						"parse_missing",
+						locator.orderDate,
+					),
+				);
+				reDeferred += 1;
+				continue;
+			}
+			for (const [itemIndex, item] of result.detail.items.entries()) {
+				await deps.emitRecord(
+					"order_items",
+					buildOrderItemRecord(
+						locator.orderId,
+						locator.orderDate,
+						item,
+						itemIndex,
+						deps.emittedAt,
+					),
+				);
+			}
+			await deps.emit({
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: locator.gapId,
+				stream: "order_items",
+				record_key: locator.recordKey,
+			});
+			recovered += 1;
+			continue;
+		}
+		if (
+			result.status === "failed" &&
+			result.failureKind === "session_repair_required"
+		) {
+			flags.sessionRepairRequired = true;
+		}
+		await deps.emit(
+			buildHebDetailGap(
+				locator.orderId,
+				result.reason,
+				result.failureKind,
+				locator.orderDate,
+			),
+		);
+		reDeferred += 1;
+	}
+	return { recovered, reDeferred, skipped };
 }
 
 export async function recoverPendingOrderItemDetailGaps(
-  page: Page,
-  deps: HebDetailRecoveryDeps,
-  flags: RunFlags
+	page: Page,
+	deps: HebDetailRecoveryDeps,
+	flags: RunFlags,
 ): Promise<{ recovered: number; stoppedWithPending: boolean }> {
-  let recovered = 0;
-  let gaps = deps.detailGaps;
-  while (gaps.length > 0) {
-    const result = await recoverPendingOrderItemDetailGapPage(page, deps, flags, gaps);
-    recovered += result.recovered;
-    if (!deps.requestDetailGapPage) {
-      return { recovered, stoppedWithPending: result.reDeferred + result.skipped > 0 };
-    }
-    if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
-      return { recovered, stoppedWithPending: true };
-    }
-    gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
-  }
-  return { recovered, stoppedWithPending: false };
+	let recovered = 0;
+	let gaps = deps.detailGaps;
+	while (gaps.length > 0) {
+		const result = await recoverPendingOrderItemDetailGapPage(
+			page,
+			deps,
+			flags,
+			gaps,
+		);
+		recovered += result.recovered;
+		if (!deps.requestDetailGapPage) {
+			return {
+				recovered,
+				stoppedWithPending: result.reDeferred + result.skipped > 0,
+			};
+		}
+		if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
+			return { recovered, stoppedWithPending: true };
+		}
+		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
+	}
+	return { recovered, stoppedWithPending: false };
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
-  page: Page,
-  deps: HebDetailRecoveryDeps,
-  flags: RunFlags,
-  options: { recoveryOnly?: boolean; wantsItems: boolean }
-): Promise<{ recovered: number; stoppedWithPending: boolean; suppressForward: boolean }> {
-  if (!options.wantsItems) {
-    return { recovered: 0, stoppedWithPending: false, suppressForward: options.recoveryOnly === true };
-  }
-  const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
-  const detailBudgetExhausted = flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
-  return {
-    ...recovery,
-    suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
-  };
+	page: Page,
+	deps: HebDetailRecoveryDeps,
+	flags: RunFlags,
+	options: { recoveryOnly?: boolean; wantsItems: boolean },
+): Promise<{
+	recovered: number;
+	stoppedWithPending: boolean;
+	suppressForward: boolean;
+}> {
+	if (!options.wantsItems) {
+		return {
+			recovered: 0,
+			stoppedWithPending: false,
+			suppressForward: options.recoveryOnly === true,
+		};
+	}
+	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
+	const detailBudgetExhausted =
+		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
+	return {
+		...recovery,
+		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+	};
 }
 
 /** Emit the order record + per-item detail records for a single list-page order. */
 async function emitOrderAndItems(
-  deps: EmitDeps,
-  listOrder: ListPageOrder,
-  detail: OrderDetail | null,
-  orderDate: string
+	deps: EmitDeps,
+	listOrder: ListPageOrder,
+	detail: OrderDetail | null,
+	orderDate: string,
 ): Promise<void> {
-  if (deps.wantsOrders) {
-    const orderRecord = buildOrderRecord(listOrder, orderDate, deps.emittedAt);
-    if (!deps.ordersFingerprintCursor || deps.ordersFingerprintCursor.shouldEmit(orderRecord)) {
-      await deps.emitRecord("orders", orderRecord);
-    }
-    // A fingerprint-suppressed re-scrape and a fresh emit are both a real
-    // accounting decision for this order's `orders` record, so both count as
-    // covered.
-    if (deps.ordersCoverage) {
-      deps.ordersCoverage.considered.push(listOrder.orderId);
-      deps.ordersCoverage.covered.push(listOrder.orderId);
-    }
-  }
-  if (deps.wantsItems && detail) {
-    for (const [itemIndex, item] of detail.items.entries()) {
-      await deps.emitRecord(
-        "order_items",
-        buildOrderItemRecord(listOrder.orderId, orderDate, item, itemIndex, deps.emittedAt)
-      );
-    }
-    // Completeness anchor: H-E-B's own list card declared how many items
-    // this order has. Recording the pair here — declared (list page) vs
-    // collected (detail page) — lets the run compare two independent source
-    // surfaces instead of trusting the detail page alone. Only orders whose
-    // detail actually hydrated are tallied; a gapped order is already
-    // reported as a DETAIL_GAP and must not also be counted as an item
-    // shortfall.
-    deps.itemCountTallies?.push({
-      orderId: listOrder.orderId,
-      declaredItemCount: listOrder.itemCount,
-      collectedItemCount: detail.items.length,
-    });
-  }
+	if (deps.wantsOrders) {
+		const orderRecord = buildOrderRecord(listOrder, orderDate, deps.emittedAt);
+		if (
+			!deps.ordersFingerprintCursor ||
+			deps.ordersFingerprintCursor.shouldEmit(orderRecord)
+		) {
+			await deps.emitRecord("orders", orderRecord);
+		}
+		// A fingerprint-suppressed re-scrape and a fresh emit are both a real
+		// accounting decision for this order's `orders` record, so both count as
+		// covered.
+		if (deps.ordersCoverage) {
+			deps.ordersCoverage.considered.push(listOrder.orderId);
+			deps.ordersCoverage.covered.push(listOrder.orderId);
+		}
+	}
+	if (deps.wantsItems && detail) {
+		for (const [itemIndex, item] of detail.items.entries()) {
+			await deps.emitRecord(
+				"order_items",
+				buildOrderItemRecord(
+					listOrder.orderId,
+					orderDate,
+					item,
+					itemIndex,
+					deps.emittedAt,
+				),
+			);
+		}
+		// Completeness anchor: H-E-B's own list card declared how many items
+		// this order has. Recording the pair here — declared (list page) vs
+		// collected (detail page) — lets the run compare two independent source
+		// surfaces instead of trusting the detail page alone. Only orders whose
+		// detail actually hydrated are tallied; a gapped order is already
+		// reported as a DETAIL_GAP and must not also be counted as an item
+		// shortfall.
+		deps.itemCountTallies?.push({
+			orderId: listOrder.orderId,
+			declaredItemCount: listOrder.itemCount,
+			collectedItemCount: detail.items.length,
+		});
+	}
 }
 
 /** Process one list-page order: fetch detail (if in scope), account for
@@ -846,66 +970,92 @@ async function emitOrderAndItems(
  *  needed), account for coverage, and emit a gap on a non-hydrated outcome.
  *  Split out to keep `processListOrder`'s own cognitive complexity bounded. */
 async function fetchDetailAndRecordCoverage(
-  page: Page,
-  deps: EmitDeps,
-  flags: RunFlags,
-  listOrder: ListPageOrder,
-  orderDate: string
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	listOrder: ListPageOrder,
+	orderDate: string,
 ): Promise<OrderDetail | null> {
-  const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
-    ...(deps.capture ? { capture: deps.capture } : {}),
-    sendInteraction: deps.sendInteraction,
-    waitForHydration: deps.waitForHydration,
-  });
-  if (result.status === "failed" && result.failureKind === "session_repair_required") {
-    flags.sessionRepairRequired = true;
-  }
-  if (deps.orderItemsCoverage) {
-    const outcome: DetailOutcome = result.status === "hydrated" ? "hydrated" : "gap";
-    recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
-    if (result.status !== "hydrated") {
-      await deps.emit(buildHebDetailGap(listOrder.orderId, result.reason, result.failureKind, orderDate));
-    }
-  }
-  return result.status === "hydrated" ? result.detail : null;
+	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
+		...(deps.capture ? { capture: deps.capture } : {}),
+		sendInteraction: deps.sendInteraction,
+		waitForHydration: deps.waitForHydration,
+	});
+	if (
+		result.status === "failed" &&
+		result.failureKind === "session_repair_required"
+	) {
+		flags.sessionRepairRequired = true;
+	}
+	if (deps.orderItemsCoverage) {
+		const outcome: DetailOutcome =
+			result.status === "hydrated" ? "hydrated" : "gap";
+		recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
+		if (result.status !== "hydrated") {
+			await deps.emit(
+				buildHebDetailGap(
+					listOrder.orderId,
+					result.reason,
+					result.failureKind,
+					orderDate,
+				),
+			);
+		}
+	}
+	return result.status === "hydrated" ? result.detail : null;
 }
 
 export async function processListOrder(
-  page: Page,
-  deps: EmitDeps,
-  flags: RunFlags,
-  listOrder: ListPageOrder
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	listOrder: ListPageOrder,
 ): Promise<void> {
-  const orderDate = parseOrderDate(listOrder.orderDateRaw);
-  if (!orderDate) {
-    await deps.emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "unparseable_order_date",
-      message: `Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
-      diagnostics: { order_id: listOrder.orderId },
-    });
-    // Unparseable order dates cannot reach the detail hydration lane. When
-    // order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
-    // by actionable evidence; the order was enumerated by the list scan, so
-    // it must still join the required denominator.
-    if (deps.wantsItems && deps.orderItemsCoverage) {
-      recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "gap");
-      await deps.emit(buildHebDetailGap(listOrder.orderId, "temporary_unavailable", "parse_missing", undefined));
-    }
-    // The list scan still enumerated this order, so the `orders` denominator
-    // must not silently drop it: considered, but not covered (no accounting
-    // decision was made for its `orders` record).
-    if (deps.ordersCoverage) {
-      deps.ordersCoverage.considered.push(listOrder.orderId);
-      deps.ordersCoverage.dateDropped.push(listOrder.orderId);
-    }
-    return;
-  }
+	const orderDate = parseOrderDate(listOrder.orderDateRaw);
+	if (!orderDate) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "unparseable_order_date",
+			message: `Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
+			diagnostics: { order_id: listOrder.orderId },
+		});
+		// Unparseable order dates cannot reach the detail hydration lane. When
+		// order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
+		// by actionable evidence; the order was enumerated by the list scan, so
+		// it must still join the required denominator.
+		if (deps.wantsItems && deps.orderItemsCoverage) {
+			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "gap");
+			await deps.emit(
+				buildHebDetailGap(
+					listOrder.orderId,
+					"temporary_unavailable",
+					"parse_missing",
+					undefined,
+				),
+			);
+		}
+		// The list scan still enumerated this order, so the `orders` denominator
+		// must not silently drop it: considered, but not covered (no accounting
+		// decision was made for its `orders` record).
+		if (deps.ordersCoverage) {
+			deps.ordersCoverage.considered.push(listOrder.orderId);
+			deps.ordersCoverage.dateDropped.push(listOrder.orderId);
+		}
+		return;
+	}
 
-  const detail = deps.wantsItems ? await fetchDetailAndRecordCoverage(page, deps, flags, listOrder, orderDate) : null;
+	const detail = deps.wantsItems
+		? await fetchDetailAndRecordCoverage(
+				page,
+				deps,
+				flags,
+				listOrder,
+				orderDate,
+			)
+		: null;
 
-  await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	await emitOrderAndItems(deps, listOrder, detail, orderDate);
 }
 
 /**
@@ -917,8 +1067,8 @@ export async function processListOrder(
  * on a truncated scan — see `buildOrdersStateCursor`.
  */
 export interface ForwardScanResult {
-  newestOrderDate: string | null;
-  truncated: boolean;
+	newestOrderDate: string | null;
+	truncated: boolean;
 }
 
 /**
@@ -930,89 +1080,101 @@ export interface ForwardScanResult {
  * bounded prefix is never mistaken for a finished walk.
  */
 export async function runForwardScan(
-  page: Page,
-  deps: EmitDeps,
-  flags: RunFlags,
-  boundary: string | null,
-  priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false }
+	page: Page,
+	deps: EmitDeps,
+	flags: RunFlags,
+	boundary: string | null,
+	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<ForwardScanResult> {
-  let newestOrderDate: string | null = null;
-  // Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
-  // a pagination-boundary repeat (the last order on page N reappearing as the
-  // first order on page N+1) would otherwise be processed twice — double
-  // list/item records and two DETAIL_GAPs for one logical order (S5).
-  const seenOrderIds = new Set<string>();
-  // The pagination max H-E-B advertised on the last list page actually read.
-  // Retained past the loop so the ceiling exit can measure how much of the
-  // source's own advertised list this run never traversed.
-  let advertisedMaxPage: number | null = null;
-  // Which of the loop's two exits fired. `runForwardScan` can stop because it
-  // reached the end of the list (honest completion: `pageNum > maxPage`, a
-  // terminal page, or a full page past the resume boundary) or because it hit
-  // the blast-radius ceiling. Those are NOT the same claim, and until this
-  // flag existed nothing downstream could tell them apart — a 50-page prefix
-  // of a 60-page list reported exactly the coverage of a finished walk.
-  const walk = await walkPagesWithCeiling({
-    maxPages: MAX_LIST_PAGES,
-    fetchPage: async (pageNum) => {
-      const listPage = await loadListPage(page, pageNum, deps.emit, priorOrdersEvidence, deps.waitForHydration);
-      if (listPage === "terminal") {
-        return false;
-      }
-      // Pagination max is captured from THIS page's own HTML inside
-      // loadListPage(), before the per-order loop below can navigate the
-      // shared page to any order-detail URL (fix for the item-enriched scan
-      // silently truncating after page 1: detail HTML has no pagination nav).
-      const { maxPage, orders } = listPage;
-      advertisedMaxPage = maxPage;
+	let newestOrderDate: string | null = null;
+	// Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
+	// a pagination-boundary repeat (the last order on page N reappearing as the
+	// first order on page N+1) would otherwise be processed twice — double
+	// list/item records and two DETAIL_GAPs for one logical order (S5).
+	const seenOrderIds = new Set<string>();
+	// The pagination max H-E-B advertised on the last list page actually read.
+	// Retained past the loop so the ceiling exit can measure how much of the
+	// source's own advertised list this run never traversed.
+	let advertisedMaxPage: number | null = null;
+	// Which of the loop's two exits fired. `runForwardScan` can stop because it
+	// reached the end of the list (honest completion: `pageNum > maxPage`, a
+	// terminal page, or a full page past the resume boundary) or because it hit
+	// the blast-radius ceiling. Those are NOT the same claim, and until this
+	// flag existed nothing downstream could tell them apart — a 50-page prefix
+	// of a 60-page list reported exactly the coverage of a finished walk.
+	const walk = await walkPagesWithCeiling({
+		maxPages: MAX_LIST_PAGES,
+		fetchPage: async (pageNum) => {
+			const listPage = await loadListPage(
+				page,
+				pageNum,
+				deps.emit,
+				priorOrdersEvidence,
+				deps.waitForHydration,
+			);
+			if (listPage === "terminal") {
+				return false;
+			}
+			// Pagination max is captured from THIS page's own HTML inside
+			// loadListPage(), before the per-order loop below can navigate the
+			// shared page to any order-detail URL (fix for the item-enriched scan
+			// silently truncating after page 1: detail HTML has no pagination nav).
+			const { maxPage, orders } = listPage;
+			advertisedMaxPage = maxPage;
 
-      await deps.progress(`H-E-B list page ${pageNum}: found ${orders.length} orders`, { stream: "orders" });
+			await deps.progress(
+				`H-E-B list page ${pageNum}: found ${orders.length} orders`,
+				{ stream: "orders" },
+			);
 
-      const pageOrderDates: (string | null)[] = [];
-      for (const listOrder of orders) {
-        const orderDate = parseOrderDate(listOrder.orderDateRaw);
-        // The boundary/pagination-stop decision considers every order date on
-        // the page, repeats included — only the actual processing (which emits
-        // records/gaps) is deduped below.
-        pageOrderDates.push(orderDate);
-        if (orderDate && (!newestOrderDate || orderDate > newestOrderDate)) {
-          newestOrderDate = orderDate;
-        }
-        if (seenOrderIds.has(listOrder.orderId)) {
-          continue;
-        }
-        seenOrderIds.add(listOrder.orderId);
-        await processListOrder(page, deps, flags, listOrder);
-      }
+			const pageOrderDates: (string | null)[] = [];
+			for (const listOrder of orders) {
+				const orderDate = parseOrderDate(listOrder.orderDateRaw);
+				// The boundary/pagination-stop decision considers every order date on
+				// the page, repeats included — only the actual processing (which emits
+				// records/gaps) is deduped below.
+				pageOrderDates.push(orderDate);
+				if (orderDate && (!newestOrderDate || orderDate > newestOrderDate)) {
+					newestOrderDate = orderDate;
+				}
+				if (seenOrderIds.has(listOrder.orderId)) {
+					continue;
+				}
+				seenOrderIds.add(listOrder.orderId);
+				await processListOrder(page, deps, flags, listOrder);
+			}
 
-      if (shouldStopPaginating(pageOrderDates, boundary)) {
-        await deps.progress(`H-E-B list page ${pageNum}: full page older than checkpoint boundary; stopping`, {
-          stream: "orders",
-        });
-        return false;
-      }
+			if (shouldStopPaginating(pageOrderDates, boundary)) {
+				await deps.progress(
+					`H-E-B list page ${pageNum}: full page older than checkpoint boundary; stopping`,
+					{
+						stream: "orders",
+					},
+				);
+				return false;
+			}
 
-      if (pageNum >= maxPage) {
-        // EXIT A — honest completion. The walk reached the end of the list as
-        // H-E-B's own pagination nav advertised it; there is no untraversed
-        // tail, so coverage may legitimately read complete.
-        return false;
-      }
-      if (pageNum >= MAX_LIST_PAGES) {
-        // The shared walker marks this as truncated because the provider still
-        // advertises another page after the permitted prefix.
-        return true;
-      }
-      await politeDelay(LIST_PAGE_POLITE_DELAY_MS);
-      return true;
-    },
-  });
+			if (pageNum >= maxPage) {
+				// EXIT A — honest completion. The walk reached the end of the list as
+				// H-E-B's own pagination nav advertised it; there is no untraversed
+				// tail, so coverage may legitimately read complete.
+				return false;
+			}
+			if (pageNum >= MAX_LIST_PAGES) {
+				// The shared walker marks this as truncated because the provider still
+				// advertises another page after the permitted prefix.
+				return true;
+			}
+			await politeDelay(LIST_PAGE_POLITE_DELAY_MS);
+			return true;
+		},
+	});
 
-  if (walk.truncated) {
-    await reportListPageCeiling(deps, advertisedMaxPage);
-  }
+	if (walk.truncated) {
+		await reportListPageCeiling(deps, advertisedMaxPage);
+	}
 
-  return { newestOrderDate, truncated: walk.truncated };
+	return { newestOrderDate, truncated: walk.truncated };
 }
 
 /**
@@ -1037,47 +1199,57 @@ export async function runForwardScan(
  * the stream short — "I stopped early and cannot say how much is left" must
  * not read as complete either.
  */
-async function reportListPageCeiling(deps: EmitDeps, advertisedMaxPage: number | null): Promise<void> {
-  const unreadPages =
-    advertisedMaxPage !== null && advertisedMaxPage > MAX_LIST_PAGES ? advertisedMaxPage - MAX_LIST_PAGES : 1;
+async function reportListPageCeiling(
+	deps: EmitDeps,
+	advertisedMaxPage: number | null,
+): Promise<void> {
+	const unreadPages =
+		advertisedMaxPage !== null && advertisedMaxPage > MAX_LIST_PAGES
+			? advertisedMaxPage - MAX_LIST_PAGES
+			: 1;
 
-  if (deps.ordersCoverage) {
-    for (let i = 0; i < unreadPages; i += 1) {
-      // Considered-but-not-covered: enumerated as owed by the source's own
-      // pagination, never fetched by this run.
-      deps.ordersCoverage.considered.push(`unread_list_page_${MAX_LIST_PAGES + i + 1}`);
-    }
-  }
+	if (deps.ordersCoverage) {
+		for (let i = 0; i < unreadPages; i += 1) {
+			// Considered-but-not-covered: enumerated as owed by the source's own
+			// pagination, never fetched by this run.
+			deps.ordersCoverage.considered.push(
+				`unread_list_page_${MAX_LIST_PAGES + i + 1}`,
+			);
+		}
+	}
 
-  await deps.progress(
-    `H-E-B order-history scan stopped at its ${MAX_LIST_PAGES}-page limit with more pages available; ` +
-      "this run covered only the most recent orders",
-    { stream: "orders" }
-  );
+	await deps.progress(
+		`H-E-B order-history scan stopped at its ${MAX_LIST_PAGES}-page limit with more pages available; ` +
+			"this run covered only the most recent orders",
+		{ stream: "orders" },
+	);
 
-  // `..._deferred` is load-bearing, not decorative: the reference
-  // implementation classifies a skip by reason (see
-  // `mapSkipCoverageCondition`), and only a `deferred`-matching reason maps to
-  // the `deferred` axis. A reason matching none of its patterns would fall
-  // through to `terminal_gap` — "this data is permanently unreachable" — which
-  // would be a different lie: the untraversed tail is still fetchable, it was
-  // postponed by a budget, not lost.
-  await deps.emit({
-    type: "SKIP_RESULT",
-    stream: "orders",
-    reason: "older_pages_deferred_page_budget",
-    message: "Stopped after the most recent orders; older orders were not read in this run",
-    diagnostics: {
-      max_list_pages: MAX_LIST_PAGES,
-      ...(advertisedMaxPage === null ? {} : { advertised_max_page: advertisedMaxPage }),
-      unread_pages: unreadPages,
-    },
-  });
+	// `..._deferred` is load-bearing, not decorative: the reference
+	// implementation classifies a skip by reason (see
+	// `mapSkipCoverageCondition`), and only a `deferred`-matching reason maps to
+	// the `deferred` axis. A reason matching none of its patterns would fall
+	// through to `terminal_gap` — "this data is permanently unreachable" — which
+	// would be a different lie: the untraversed tail is still fetchable, it was
+	// postponed by a budget, not lost.
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream: "orders",
+		reason: "older_pages_deferred_page_budget",
+		message:
+			"Stopped after the most recent orders; older orders were not read in this run",
+		diagnostics: {
+			max_list_pages: MAX_LIST_PAGES,
+			...(advertisedMaxPage === null
+				? {}
+				: { advertised_max_page: advertisedMaxPage }),
+			unread_pages: unreadPages,
+		},
+	});
 }
 
 interface LoadedListPage {
-  maxPage: number;
-  orders: ListPageOrder[];
+	maxPage: number;
+	orders: ListPageOrder[];
 }
 
 /** Navigate to and extract one order-history list page. Returns "terminal"
@@ -1095,58 +1267,69 @@ interface LoadedListPage {
  *  page to order-detail URLs while processing this page's orders, which
  *  overwrites `page.content()` with detail HTML that has no pagination nav. */
 async function loadListPage(
-  page: Page,
-  pageNum: number,
-  emit: BrowserCollectContext["emit"],
-  priorOrdersEvidence: PriorOrdersEvidence,
-  waitForHydration?: () => Promise<void>
+	page: Page,
+	pageNum: number,
+	emit: BrowserCollectContext["emit"],
+	priorOrdersEvidence: PriorOrdersEvidence,
+	waitForHydration?: () => Promise<void>,
 ): Promise<LoadedListPage | "terminal"> {
-  const url = `https://www.heb.com/my-account/your-orders?page=${pageNum}`;
-  const navigation = await page
-    .goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
-    .then(() => ({ ok: true as const }))
-    .catch((error: unknown) => ({ error, ok: false as const }));
-  if (!navigation.ok) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "orders",
-      reason: "list_page_navigation_failed",
-      message: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
-      diagnostics: { error_class: navigation.error instanceof Error ? "Error" : "unknown" },
-    });
-    throw new Error("heb_empty_list_page_navigation_failed", { cause: navigation.error });
-  }
-  await (waitForHydration ?? hydrationWait)();
-  await page
-    .waitForSelector('a[href*="/my-account/order-history/HEB"]', {
-      timeout: LIST_PAGE_WAIT_MS,
-      state: "attached",
-    })
-    .catch((): undefined => undefined);
+	const url = `https://www.heb.com/my-account/your-orders?page=${pageNum}`;
+	const navigation = await page
+		.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
+		.then(() => ({ ok: true as const }))
+		.catch((error: unknown) => ({ error, ok: false as const }));
+	if (!navigation.ok) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "list_page_navigation_failed",
+			message: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
+			diagnostics: {
+				error_class: navigation.error instanceof Error ? "Error" : "unknown",
+			},
+		});
+		throw new Error("heb_empty_list_page_navigation_failed", {
+			cause: navigation.error,
+		});
+	}
+	await (waitForHydration ?? hydrationWait)();
+	await page
+		.waitForSelector('a[href*="/my-account/order-history/HEB"]', {
+			timeout: LIST_PAGE_WAIT_MS,
+			state: "attached",
+		})
+		.catch((): undefined => undefined);
 
-  const html = await page.content().catch((): string => "");
-  const orders = await extractAndShapeCheckOrders(html, emit);
-  if (orders.length > 0) {
-    const maxPageResolution = resolveMaxPage(html);
-    if (maxPageResolution.kind !== "resolved") {
-      const reason =
-        maxPageResolution.kind === "absent" ? "pagination_metadata_absent" : "pagination_metadata_contradictory";
-      await emit({
-        type: "SKIP_RESULT",
-        stream: "orders",
-        reason,
-        message: `H-E-B list page ${pageNum}: ${orders.length} orders parsed but maxPage could not be resolved (${reason}); refusing to silently assume a single-page result.`,
-        diagnostics: { max_page_resolution: maxPageResolution },
-      });
-      throw new Error(`heb_empty_list_page_${reason}`);
-    }
-    return { maxPage: maxPageResolution.value, orders };
-  }
-  const classification = await reportEmptyPageDiagnostics(page, pageNum, emit, priorOrdersEvidence);
-  if (classification.action === "terminal") {
-    return "terminal";
-  }
-  throw new Error(`heb_empty_list_page_${classification.reason}`);
+	const html = await page.content().catch((): string => "");
+	const orders = await extractAndShapeCheckOrders(html, emit);
+	if (orders.length > 0) {
+		const maxPageResolution = resolveMaxPage(html);
+		if (maxPageResolution.kind !== "resolved") {
+			const reason =
+				maxPageResolution.kind === "absent"
+					? "pagination_metadata_absent"
+					: "pagination_metadata_contradictory";
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "orders",
+				reason,
+				message: `H-E-B list page ${pageNum}: ${orders.length} orders parsed but maxPage could not be resolved (${reason}); refusing to silently assume a single-page result.`,
+				diagnostics: { max_page_resolution: maxPageResolution },
+			});
+			throw new Error(`heb_empty_list_page_${reason}`);
+		}
+		return { maxPage: maxPageResolution.value, orders };
+	}
+	const classification = await reportEmptyPageDiagnostics(
+		page,
+		pageNum,
+		emit,
+		priorOrdersEvidence,
+	);
+	if (classification.action === "terminal") {
+		return "terminal";
+	}
+	throw new Error(`heb_empty_list_page_${classification.reason}`);
 }
 
 /** Build the next `orders` STATE cursor from this run's newest order_date
@@ -1165,29 +1348,35 @@ async function loadListPage(
  *  makes the next run re-walk from where coverage was genuinely proven.
  */
 export function buildOrdersStateCursor(
-  newestOrderDate: string | null,
-  ordersState: OrdersStateShape,
-  ordersFingerprintCursor: FingerprintCursor | undefined,
-  truncated = false
+	newestOrderDate: string | null,
+	ordersState: OrdersStateShape,
+	ordersFingerprintCursor: FingerprintCursor | undefined,
+	truncated = false,
 ): OrdersStateShape {
-  const nextCheckpoint = truncated ? ordersState.checkpoint : (newestOrderDate ?? ordersState.checkpoint);
-  const cursor: OrdersStateShape = nextCheckpoint === undefined ? {} : { checkpoint: nextCheckpoint };
-  if (ordersFingerprintCursor && ordersFingerprintCursor.size() > 0) {
-    cursor.fingerprints = ordersFingerprintCursor.toState();
-  }
-  return cursor;
+	const nextCheckpoint = truncated
+		? ordersState.checkpoint
+		: (newestOrderDate ?? ordersState.checkpoint);
+	const cursor: OrdersStateShape =
+		nextCheckpoint === undefined ? {} : { checkpoint: nextCheckpoint };
+	if (ordersFingerprintCursor && ordersFingerprintCursor.size() > 0) {
+		cursor.fingerprints = ordersFingerprintCursor.toState();
+	}
+	return cursor;
 }
 
-export async function emitOrderItemsCoverage(deps: EmitDeps, coverage: OrderItemsCoverage): Promise<void> {
-  await emitDetailCoverage(deps, {
-    stream: "order_items",
-    stateStream: "orders",
-    requiredKeys: coverage.required,
-    hydratedKeys: coverage.hydrated,
-    gapKeys: coverage.gap,
-    considered: coverage.required.length,
-    covered: coverage.hydrated.length,
-  });
+export async function emitOrderItemsCoverage(
+	deps: EmitDeps,
+	coverage: OrderItemsCoverage,
+): Promise<void> {
+	await emitDetailCoverage(deps, {
+		stream: "order_items",
+		stateStream: "orders",
+		requiredKeys: coverage.required,
+		hydratedKeys: coverage.hydrated,
+		gapKeys: coverage.gap,
+		considered: coverage.required.length,
+		covered: coverage.hydrated.length,
+	});
 }
 
 /**
@@ -1201,22 +1390,25 @@ export async function emitOrderItemsCoverage(deps: EmitDeps, coverage: OrderItem
  * (H-E-B usage is often genuinely light) still reads as measured, not
  * unknown.
  */
-export async function emitOrdersCoverage(deps: EmitDeps, coverage: OrdersCoverage): Promise<void> {
-  await emitDetailCoverage(deps, {
-    stream: "orders",
-    stateStream: "orders",
-    requiredKeys: [],
-    hydratedKeys: [],
-    considered: coverage.considered.length,
-    covered: coverage.covered.length,
-  });
+export async function emitOrdersCoverage(
+	deps: EmitDeps,
+	coverage: OrdersCoverage,
+): Promise<void> {
+	await emitDetailCoverage(deps, {
+		stream: "orders",
+		stateStream: "orders",
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered: coverage.considered.length,
+		covered: coverage.covered.length,
+	});
 }
 
 // ─── Checkpoint / incremental planning ─────────────────────────────────────
 
 export interface OrdersStateShape {
-  checkpoint?: string;
-  fingerprints?: Record<string, string>;
+	checkpoint?: string;
+	fingerprints?: Record<string, string>;
 }
 
 /**
@@ -1231,8 +1423,10 @@ export interface OrdersStateShape {
  * emitted no new records: the checkpoint's existence is the claim that H-E-B
  * once listed orders for this account.
  */
-export function priorOrdersEvidenceFromState(ordersState: { checkpoint?: string }): PriorOrdersEvidence {
-  return { hasPriorOrders: Boolean(ordersState.checkpoint) };
+export function priorOrdersEvidenceFromState(ordersState: {
+	checkpoint?: string;
+}): PriorOrdersEvidence {
+	return { hasPriorOrders: Boolean(ordersState.checkpoint) };
 }
 
 /**
@@ -1242,15 +1436,19 @@ export function priorOrdersEvidenceFromState(ordersState: { checkpoint?: string 
  * catches status transitions on recently-seen orders (design doc "Collector
  * plan" §4). Returns null (scan everything) when there is no prior checkpoint.
  */
-export function resumeBoundary(priorCheckpoint: string | undefined): string | null {
-  if (!priorCheckpoint) {
-    return null;
-  }
-  const d = new Date(priorCheckpoint);
-  if (Number.isNaN(d.getTime())) {
-    return null;
-  }
-  return new Date(d.getTime() - CHECKPOINT_OVERLAP_DAYS * MS_PER_DAY).toISOString().slice(0, 10);
+export function resumeBoundary(
+	priorCheckpoint: string | undefined,
+): string | null {
+	if (!priorCheckpoint) {
+		return null;
+	}
+	const d = new Date(priorCheckpoint);
+	if (Number.isNaN(d.getTime())) {
+		return null;
+	}
+	return new Date(d.getTime() - CHECKPOINT_OVERLAP_DAYS * MS_PER_DAY)
+		.toISOString()
+		.slice(0, 10);
 }
 
 /**
@@ -1259,173 +1457,207 @@ export function resumeBoundary(priorCheckpoint: string | undefined): string | nu
  * order on a page is older than the resume boundary (a full page past the
  * boundary means the rest of history is already covered).
  */
-export function shouldStopPaginating(pageOrderDates: readonly (string | null)[], boundary: string | null): boolean {
-  if (!boundary || pageOrderDates.length === 0) {
-    return false;
-  }
-  return pageOrderDates.every((d) => d !== null && d < boundary);
+export function shouldStopPaginating(
+	pageOrderDates: readonly (string | null)[],
+	boundary: string | null,
+): boolean {
+	if (!boundary || pageOrderDates.length === 0) {
+		return false;
+	}
+	return pageOrderDates.every((d) => d !== null && d < boundary);
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "heb",
-    validateRecord,
-    // See the chase declaration: without this the runtime resolves `{}`, never
-    // raises the `credentials` INTERACTION, and H-E-B's hand-off blames the
-    // page for what is really an absent stored credential.
-    auth: { kind: "env", required: ["HEB_USERNAME", "HEB_PASSWORD"] },
-    // H-E-B is fronted by Incapsula, which fingerprints headless Chromium.
-    // Persistent profile keeps cookies + TLS fingerprint warm across runs.
-    browser: { profileName: "heb" },
-    async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-      const cookies = await context.cookies("https://www.heb.com/");
-      const hasSessionCookie = cookies.some((c) => SESSION_COOKIE_RE.test(c.name) && Boolean(c.value));
-      if (!hasSessionCookie) {
-        return false;
-      }
-      return true;
-    },
-    async ensureSession({
-      page,
-      sendInteraction,
-      capture,
-      checkpoint,
-      credentials,
-      onCredentialSubmit,
-    }): Promise<void> {
-      const ok = await ensureHebSession({
-        capture,
-        checkpoint,
-        credentials,
-        onCredentialSubmit,
-        page,
-        sendInteraction,
-      });
-      if (!ok) {
-        throw new Error("heb_session_required");
-      }
-    },
-    async collect(ctx: BrowserCollectContext): Promise<void> {
-      const { scope, state, emitRecord, emit, progress, emittedAt, page, capture, sendInteraction } = ctx;
-      const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
-      const wantsOrders = requested.has("orders");
-      const wantsItems = requested.has("order_items");
+	runConnector({
+		name: "heb",
+		validateRecord,
+		// See the chase declaration: without this the runtime resolves `{}`, never
+		// raises the `credentials` INTERACTION, and H-E-B's hand-off blames the
+		// page for what is really an absent stored credential.
+		auth: { kind: "env", required: ["HEB_USERNAME", "HEB_PASSWORD"] },
+		// H-E-B is fronted by Incapsula, which fingerprints headless Chromium.
+		// Persistent profile keeps cookies + TLS fingerprint warm across runs.
+		browser: { profileName: "heb" },
+		async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
+			const cookies = await context.cookies("https://www.heb.com/");
+			const hasSessionCookie = cookies.some(
+				(c) => SESSION_COOKIE_RE.test(c.name) && Boolean(c.value),
+			);
+			if (!hasSessionCookie) {
+				return false;
+			}
+			return true;
+		},
+		async ensureSession({
+			page,
+			sendInteraction,
+			capture,
+			checkpoint,
+			credentials,
+			onCredentialSubmit,
+		}): Promise<void> {
+			const ok = await ensureHebSession({
+				capture,
+				checkpoint,
+				credentials,
+				onCredentialSubmit,
+				page,
+				sendInteraction,
+			});
+			if (!ok) {
+				throw new Error("heb_session_required");
+			}
+		},
+		async collect(ctx: BrowserCollectContext): Promise<void> {
+			const {
+				scope,
+				state,
+				emitRecord,
+				emit,
+				progress,
+				emittedAt,
+				page,
+				capture,
+				sendInteraction,
+			} = ctx;
+			const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
+			const wantsOrders = requested.has("orders");
+			const wantsItems = requested.has("order_items");
 
-      if (!(wantsOrders || wantsItems)) {
-        return;
-      }
+			if (!(wantsOrders || wantsItems)) {
+				return;
+			}
 
-      const ordersState = (state.orders ?? {}) as OrdersStateShape;
-      const boundary = resumeBoundary(ordersState.checkpoint);
-      // A committed `orders` checkpoint is this connection's own record that
-      // H-E-B has listed orders for this account before. It is what makes a
-      // later "no order history" page a contradiction to escalate rather than
-      // a result to trust. Read here, next to the checkpoint it derives from,
-      // and passed down explicitly.
-      const priorOrdersEvidence = priorOrdersEvidenceFromState(ordersState);
+			const ordersState = (state.orders ?? {}) as OrdersStateShape;
+			const boundary = resumeBoundary(ordersState.checkpoint);
+			// A committed `orders` checkpoint is this connection's own record that
+			// H-E-B has listed orders for this account before. It is what makes a
+			// later "no order history" page a contradiction to escalate rather than
+			// a result to trust. Read here, next to the checkpoint it derives from,
+			// and passed down explicitly.
+			const priorOrdersEvidence = priorOrdersEvidenceFromState(ordersState);
 
-      const ordersFingerprintCursor = wantsOrders
-        ? openFingerprintCursor(state.orders, { excludeFromFingerprint: ["fetched_at"] })
-        : undefined;
-      const orderItemsCoverage = wantsItems ? newOrderItemsCoverage() : undefined;
-      // `orders` list-stream coverage is only meaningful when `orders` itself
-      // is in scope — mirrors the `wantsItems`-gated accumulator above.
-      const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
-      // Declared-vs-collected item tallies for the `order_items` anchor.
-      // Only meaningful when items are in scope.
-      const itemCountTallies: OrderItemTally[] | undefined = wantsItems ? [] : undefined;
+			const ordersFingerprintCursor = wantsOrders
+				? openFingerprintCursor(state.orders, {
+						excludeFromFingerprint: ["fetched_at"],
+					})
+				: undefined;
+			const orderItemsCoverage = wantsItems
+				? newOrderItemsCoverage()
+				: undefined;
+			// `orders` list-stream coverage is only meaningful when `orders` itself
+			// is in scope — mirrors the `wantsItems`-gated accumulator above.
+			const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
+			// Declared-vs-collected item tallies for the `order_items` anchor.
+			// Only meaningful when items are in scope.
+			const itemCountTallies: OrderItemTally[] | undefined = wantsItems
+				? []
+				: undefined;
 
-      const flags: RunFlags = {
-        detailAttempts: 0,
-        isManualRun: hebAllowsInteractiveAuthRepair(),
-        manualRepairAttempted: false,
-        sessionRepairRequired: false,
-      };
-      const deps: EmitDeps = {
-        ...(capture ? { capture } : {}),
-        emit,
-        emitRecord,
-        emittedAt,
-        itemCountTallies,
-        orderItemsCoverage,
-        ordersCoverage,
-        ordersFingerprintCursor,
-        progress,
-        sendInteraction,
-        wantsItems,
-        wantsOrders,
-      };
+			const flags: RunFlags = {
+				detailAttempts: 0,
+				isManualRun: hebAllowsInteractiveAuthRepair(),
+				manualRepairAttempted: false,
+				sessionRepairRequired: false,
+			};
+			const deps: EmitDeps = {
+				...(capture ? { capture } : {}),
+				emit,
+				emitRecord,
+				emittedAt,
+				itemCountTallies,
+				orderItemsCoverage,
+				ordersCoverage,
+				ordersFingerprintCursor,
+				progress,
+				sendInteraction,
+				wantsItems,
+				wantsOrders,
+			};
 
-      const gapRecovery = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
-        page,
-        {
-          ...(capture ? { capture } : {}),
-          detailGaps: ctx.detailGaps,
-          emit,
-          emitRecord,
-          emittedAt,
-          requestDetailGapPage: ctx.requestDetailGapPage,
-          sendInteraction,
-        },
-        flags,
-        { recoveryOnly: ctx.recoveryOnly === true, wantsItems }
-      );
-      if (gapRecovery.stoppedWithPending) {
-        await progress(
-          "H-E-B order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery"
-        );
-      }
-      if (gapRecovery.suppressForward) {
-        return;
-      }
+			const gapRecovery =
+				await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+					page,
+					{
+						...(capture ? { capture } : {}),
+						detailGaps: ctx.detailGaps,
+						emit,
+						emitRecord,
+						emittedAt,
+						requestDetailGapPage: ctx.requestDetailGapPage,
+						sendInteraction,
+					},
+					flags,
+					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
+				);
+			if (gapRecovery.stoppedWithPending) {
+				await progress(
+					"H-E-B order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery",
+				);
+			}
+			if (gapRecovery.suppressForward) {
+				return;
+			}
 
-      await progress("H-E-B session verified; scanning order history");
+			await progress("H-E-B session verified; scanning order history");
 
-      const { newestOrderDate, truncated } = await runForwardScan(page, deps, flags, boundary, priorOrdersEvidence);
+			const { newestOrderDate, truncated } = await runForwardScan(
+				page,
+				deps,
+				flags,
+				boundary,
+				priorOrdersEvidence,
+			);
 
-      if (wantsOrders) {
-        // A truncated scan holds the checkpoint at its prior value: advancing
-        // it would strand every order on the pages this run never read.
-        const cursor = buildOrdersStateCursor(newestOrderDate, ordersState, ordersFingerprintCursor, truncated);
-        await emit({ type: "STATE", stream: "orders", cursor });
-      }
+			if (wantsOrders) {
+				// A truncated scan holds the checkpoint at its prior value: advancing
+				// it would strand every order on the pages this run never read.
+				const cursor = buildOrdersStateCursor(
+					newestOrderDate,
+					ordersState,
+					ordersFingerprintCursor,
+					truncated,
+				);
+				await emit({ type: "STATE", stream: "orders", cursor });
+			}
 
-      if (orderItemsCoverage) {
-        await emitOrderItemsCoverage(deps, orderItemsCoverage);
-      }
-      // The `order_items` completeness anchor: every hydrated order's item
-      // count as H-E-B declared it on the list card, against what the detail
-      // page actually yielded. Reported only when the provider's own numbers
-      // say something is missing — a run where every order reconciles needs
-      // no notice, and an order with no declared count is silently
-      // unanchored rather than falsely clean.
-      if (itemCountTallies && itemCountTallies.length > 0) {
-        const summary = summarizeItemCounts(itemCountTallies);
-        if (summary.short > 0) {
-          await emit({
-            type: "SKIP_RESULT",
-            stream: "order_items",
-            reason: "item_count_short",
-            message: "Some orders hold fewer items than H-E-B says they contain",
-            diagnostics: {
-              short_orders: summary.short,
-              complete_orders: summary.complete,
-              unanchored_orders: summary.unavailable,
-              declared_items: summary.declaredItems,
-              collected_items: summary.collectedItems,
-              short_order_ids: summary.shortOrderIds,
-            },
-          });
-        }
-      }
-      // Same honesty posture as order_items: emit once the forward scan
-      // completes, including the zero-considered steady-state case, so the
-      // `orders` list stream is never left permanently unmeasured.
-      if (ordersCoverage) {
-        await emitOrdersCoverage(deps, ordersCoverage);
-      }
-    },
-  });
+			if (orderItemsCoverage) {
+				await emitOrderItemsCoverage(deps, orderItemsCoverage);
+			}
+			// The `order_items` completeness anchor: every hydrated order's item
+			// count as H-E-B declared it on the list card, against what the detail
+			// page actually yielded. Reported only when the provider's own numbers
+			// say something is missing — a run where every order reconciles needs
+			// no notice, and an order with no declared count is silently
+			// unanchored rather than falsely clean.
+			if (itemCountTallies && itemCountTallies.length > 0) {
+				const summary = summarizeItemCounts(itemCountTallies);
+				if (summary.short > 0) {
+					await emit({
+						type: "SKIP_RESULT",
+						stream: "order_items",
+						reason: "item_count_short",
+						message:
+							"Some orders hold fewer items than H-E-B says they contain",
+						diagnostics: {
+							short_orders: summary.short,
+							complete_orders: summary.complete,
+							unanchored_orders: summary.unavailable,
+							declared_items: summary.declaredItems,
+							collected_items: summary.collectedItems,
+							short_order_ids: summary.shortOrderIds,
+						},
+					});
+				}
+			}
+			// Same honesty posture as order_items: emit once the forward scan
+			// completes, including the zero-considered steady-state case, so the
+			// `orders` list stream is never left permanently unmeasured.
+			if (ordersCoverage) {
+				await emitOrdersCoverage(deps, ordersCoverage);
+			}
+		},
+	});
 }

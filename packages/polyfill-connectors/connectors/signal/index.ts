@@ -114,14 +114,14 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  mkdtempSync,
-  openSync,
-  readSync,
-  realpathSync,
-  rmSync,
+	closeSync,
+	constants as fsConstants,
+	fstatSync,
+	mkdtempSync,
+	openSync,
+	readSync,
+	realpathSync,
+	rmSync,
 } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -129,24 +129,24 @@ import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
 import {
-  buildDetailCoverageMessage,
-  type CollectContext,
-  type RecordData,
-  runConnector,
+	buildDetailCoverageMessage,
+	type CollectContext,
+	type RecordData,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import {
-  makeReferenceBlobUploader,
-  type ReferenceBlobRef,
-  runtimeBlobUploadAvailable,
+	makeReferenceBlobUploader,
+	type ReferenceBlobRef,
+	runtimeBlobUploadAvailable,
 } from "../../src/reference-blob-uploader.ts";
 import {
-  buildConversationRecord,
-  buildMessageRecord,
-  buildReactionRecord,
-  extractReactionsFromMessageJson,
-  parseMessageJson,
-  type SignalConversationRow,
-  type SignalMessageRow,
+	buildConversationRecord,
+	buildMessageRecord,
+	buildReactionRecord,
+	extractReactionsFromMessageJson,
+	parseMessageJson,
+	type SignalConversationRow,
+	type SignalMessageRow,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -176,34 +176,36 @@ export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES_ENV = "PDPP_SIGNAL_MAX_ATTACHMENT_BYTES";
 const POSITIVE_INTEGER_PATTERN = /^\d+$/;
 
-export function resolveMaxAttachmentBytes(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env[MAX_ATTACHMENT_BYTES_ENV];
-  if (!(raw && POSITIVE_INTEGER_PATTERN.test(raw))) {
-    return DEFAULT_MAX_ATTACHMENT_BYTES;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_MAX_ATTACHMENT_BYTES;
-  }
-  return parsed;
+export function resolveMaxAttachmentBytes(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	const raw = env[MAX_ATTACHMENT_BYTES_ENV];
+	if (!(raw && POSITIVE_INTEGER_PATTERN.test(raw))) {
+		return DEFAULT_MAX_ATTACHMENT_BYTES;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_MAX_ATTACHMENT_BYTES;
+	}
+	return parsed;
 }
 
 export function resolveSigtopBin(env: NodeJS.ProcessEnv = process.env): string {
-  return env.SIGTOP_BIN || "sigtop";
+	return env.SIGTOP_BIN || "sigtop";
 }
 
 export function formatSigtopMissingError(bin: string): string {
-  return [
-    `sigtop binary not found: ${bin}`,
-    "Install sigtop (github.com/tbvdm/sigtop) and either put it on PATH or set SIGTOP_BIN to its absolute path.",
-    "Linux builds additionally require libsecret-1-dev and pkg-config at build time (apt install libsecret-1-dev pkg-config) — see sigtop's README.",
-  ].join(" ");
+	return [
+		`sigtop binary not found: ${bin}`,
+		"Install sigtop (github.com/tbvdm/sigtop) and either put it on PATH or set SIGTOP_BIN to its absolute path.",
+		"Linux builds additionally require libsecret-1-dev and pkg-config at build time (apt install libsecret-1-dev pkg-config) — see sigtop's README.",
+	].join(" ");
 }
 
 interface SigtopRunResult {
-  code: number | null;
-  stderr: string;
-  stdout: string;
+	code: number | null;
+	stderr: string;
+	stdout: string;
 }
 
 const DEFAULT_SIGTOP_TIMEOUT_MS = 5 * 60 * 1000;
@@ -217,58 +219,66 @@ const DEFAULT_SIGTOP_TIMEOUT_MS = 5 * 60 * 1000;
  * operations against a local file, not a multi-hour network archive dump.
  */
 export function runSigtop(
-  args: string[],
-  { timeoutMs = DEFAULT_SIGTOP_TIMEOUT_MS }: { timeoutMs?: number } = {}
+	args: string[],
+	{ timeoutMs = DEFAULT_SIGTOP_TIMEOUT_MS }: { timeoutMs?: number } = {},
 ): Promise<SigtopRunResult> {
-  const bin = resolveSigtopBin();
-  return new Promise((resolve, reject) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
-    } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
-      return;
-    }
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      child.kill("SIGKILL");
-      reject(new Error(`sigtop_timeout: '${args[0] ?? ""}' did not complete within ${timeoutMs}ms`));
-    }, timeoutMs);
-    timer.unref?.();
+	const bin = resolveSigtopBin();
+	return new Promise((resolve, reject) => {
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+		} catch (err) {
+			reject(err instanceof Error ? err : new Error(String(err)));
+			return;
+		}
+		let stdout = "";
+		let stderr = "";
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			child.kill("SIGKILL");
+			reject(
+				new Error(
+					`sigtop_timeout: '${args[0] ?? ""}' did not complete within ${timeoutMs}ms`,
+				),
+			);
+		}, timeoutMs);
+		timer.unref?.();
 
-    child.stdout?.on("data", (d: Buffer) => {
-      stdout += d.toString();
-    });
-    child.stderr?.on("data", (d: Buffer) => {
-      stderr += d.toString();
-    });
-    child.on("error", (err: NodeJS.ErrnoException) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      if (err.code === "ENOENT") {
-        reject(new Error(`sigtop_not_found: ${formatSigtopMissingError(bin)}`, { cause: err }));
-        return;
-      }
-      reject(err);
-    });
-    child.on("close", (code) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, stderr, stdout });
-    });
-  });
+		child.stdout?.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		child.stderr?.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		child.on("error", (err: NodeJS.ErrnoException) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			if (err.code === "ENOENT") {
+				reject(
+					new Error(`sigtop_not_found: ${formatSigtopMissingError(bin)}`, {
+						cause: err,
+					}),
+				);
+				return;
+			}
+			reject(err);
+		});
+		child.on("close", (code) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			resolve({ code, stderr, stdout });
+		});
+	});
 }
 
 /**
@@ -282,11 +292,11 @@ export function runSigtop(
  * malformed cursor.
  */
 export function parseCursorMs(value: unknown): number {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) {
-    return 0;
-  }
-  return Math.floor(n);
+	const n = Number(value);
+	if (!Number.isFinite(n) || n < 0) {
+		return 0;
+	}
+	return Math.floor(n);
 }
 
 // Returns true when `table` exists in the opened database. Signal
@@ -296,18 +306,26 @@ export function parseCursorMs(value: unknown): number {
 // degrades to a best-effort/SKIP_RESULT outcome rather than crashing the
 // whole run, mirroring imessage's identical `tableExists` gate.
 function tableExists(db: DatabaseSync, table: string): boolean {
-  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
-  return row !== undefined;
+	const row = db
+		.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+		.get(table);
+	return row !== undefined;
 }
 
-function columnExists(db: DatabaseSync, table: string, column: string): boolean {
-  const rows = db.prepare(`PRAGMA table_info(${table})`).iterate() as IterableIterator<{ name: string }>;
-  for (const r of rows) {
-    if (r.name === column) {
-      return true;
-    }
-  }
-  return false;
+function columnExists(
+	db: DatabaseSync,
+	table: string,
+	column: string,
+): boolean {
+	const rows = db
+		.prepare(`PRAGMA table_info(${table})`)
+		.iterate() as IterableIterator<{ name: string }>;
+	for (const r of rows) {
+		if (r.name === column) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -317,30 +335,37 @@ function columnExists(db: DatabaseSync, table: string, column: string): boolean 
  * `withExportedDatabase`) — kept separate so tests can drive the open step
  * without spawning a real sigtop process.
  */
-async function exportAndOpenDatabase(): Promise<{ db: DatabaseSync; tmpDir: string }> {
-  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-signal-"));
-  // sigtop's export-database opens its target with O_EXCL and fails if it
-  // already exists — this path must be reserved (a fresh dir) but never
-  // pre-created as a file.
-  const dbFile = join(tmpDir, "export.sqlite");
-  const result = await runSigtop(["export-database", dbFile]);
-  if (result.code !== 0) {
-    rmSync(tmpDir, { force: true, recursive: true });
-    throw new Error(`sigtop_export_database_failed: exit code ${String(result.code)}: ${result.stderr.trim()}`);
-  }
-  const db = new DatabaseSync(dbFile, { readOnly: true });
-  return { db, tmpDir };
+async function exportAndOpenDatabase(): Promise<{
+	db: DatabaseSync;
+	tmpDir: string;
+}> {
+	const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-signal-"));
+	// sigtop's export-database opens its target with O_EXCL and fails if it
+	// already exists — this path must be reserved (a fresh dir) but never
+	// pre-created as a file.
+	const dbFile = join(tmpDir, "export.sqlite");
+	const result = await runSigtop(["export-database", dbFile]);
+	if (result.code !== 0) {
+		rmSync(tmpDir, { force: true, recursive: true });
+		throw new Error(
+			`sigtop_export_database_failed: exit code ${String(result.code)}: ${result.stderr.trim()}`,
+		);
+	}
+	const db = new DatabaseSync(dbFile, { readOnly: true });
+	return { db, tmpDir };
 }
 
 /** Runs `fn` against a freshly exported+opened database, always cleaning up. */
-async function withExportedDatabase<T>(fn: (db: DatabaseSync) => Promise<T>): Promise<T> {
-  const { db, tmpDir } = await exportAndOpenDatabase();
-  try {
-    return await fn(db);
-  } finally {
-    db.close();
-    rmSync(tmpDir, { force: true, recursive: true });
-  }
+async function withExportedDatabase<T>(
+	fn: (db: DatabaseSync) => Promise<T>,
+): Promise<T> {
+	const { db, tmpDir } = await exportAndOpenDatabase();
+	try {
+		return await fn(db);
+	} finally {
+		db.close();
+		rmSync(tmpDir, { force: true, recursive: true });
+	}
 }
 
 /**
@@ -372,22 +397,26 @@ async function withExportedDatabase<T>(fn: (db: DatabaseSync) => Promise<T>): Pr
  * a missing `messages.sourceServiceId` already does.
  */
 function messagesSelect(db: DatabaseSync): string {
-  const hasSourceServiceId = columnExists(db, "messages", "sourceServiceId");
-  const hasReceivedAtMs = columnExists(db, "messages", "received_at_ms");
-  const hasConversationServiceId = columnExists(db, "conversations", "serviceId");
-  let senderExpr = "NULL";
-  if (hasSourceServiceId) {
-    // With both columns present the join resolves the sender to a conversation
-    // id; without `conversations.serviceId` the raw service id is the best the
-    // schema can offer. Neither column means no sender at all.
-    senderExpr = hasConversationServiceId ? "c.id" : "m.sourceServiceId";
-  }
-  const receivedExpr = hasReceivedAtMs ? "m.received_at_ms" : "NULL";
-  const joinClause =
-    hasSourceServiceId && hasConversationServiceId
-      ? "LEFT JOIN conversations AS c ON m.sourceServiceId = c.serviceId"
-      : "";
-  return `
+	const hasSourceServiceId = columnExists(db, "messages", "sourceServiceId");
+	const hasReceivedAtMs = columnExists(db, "messages", "received_at_ms");
+	const hasConversationServiceId = columnExists(
+		db,
+		"conversations",
+		"serviceId",
+	);
+	let senderExpr = "NULL";
+	if (hasSourceServiceId) {
+		// With both columns present the join resolves the sender to a conversation
+		// id; without `conversations.serviceId` the raw service id is the best the
+		// schema can offer. Neither column means no sender at all.
+		senderExpr = hasConversationServiceId ? "c.id" : "m.sourceServiceId";
+	}
+	const receivedExpr = hasReceivedAtMs ? "m.received_at_ms" : "NULL";
+	const joinClause =
+		hasSourceServiceId && hasConversationServiceId
+			? "LEFT JOIN conversations AS c ON m.sourceServiceId = c.serviceId"
+			: "";
+	return `
     SELECT m.id AS id, m.conversationId AS conversationId, ${senderExpr} AS sourceServiceId,
            m.sent_at AS sentAt, ${receivedExpr} AS receivedAtMs, m.body AS body, m.type AS type,
            m.json AS json
@@ -399,7 +428,7 @@ function messagesSelect(db: DatabaseSync): string {
 }
 
 function conversationsSelect(): string {
-  return `
+	return `
     SELECT id, type, name, e164, serviceId, groupId
     FROM conversations
     ORDER BY id ASC
@@ -416,19 +445,19 @@ function conversationsSelect(): string {
  * behavior rather than the provider-side anomaly it is for Jellyfin.
  */
 export function validateSourceTotal(value: unknown, label: string): number {
-  if (typeof value !== "number") {
-    throw new Error(`signal_source_total_not_number: ${label}`);
-  }
-  if (!Number.isFinite(value)) {
-    throw new Error(`signal_source_total_not_finite: ${label}`);
-  }
-  if (!Number.isInteger(value)) {
-    throw new Error(`signal_source_total_not_integer: ${label}`);
-  }
-  if (value < 0) {
-    throw new Error(`signal_source_total_negative: ${label}`);
-  }
-  return value;
+	if (typeof value !== "number") {
+		throw new Error(`signal_source_total_not_number: ${label}`);
+	}
+	if (!Number.isFinite(value)) {
+		throw new Error(`signal_source_total_not_finite: ${label}`);
+	}
+	if (!Number.isInteger(value)) {
+		throw new Error(`signal_source_total_not_integer: ${label}`);
+	}
+	if (value < 0) {
+		throw new Error(`signal_source_total_negative: ${label}`);
+	}
+	return value;
 }
 
 /**
@@ -454,15 +483,20 @@ export function validateSourceTotal(value: unknown, label: string): number {
  * defaulting to zero, because an unmeasurable boundary is not an empty one.
  */
 function countSourceMessages(db: DatabaseSync): number {
-  let row: unknown;
-  try {
-    row = db.prepare("SELECT COUNT(*) AS total FROM messages").get();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`signal_source_total_query_failed: messages: ${msg}`, { cause: err });
-  }
-  const total = (row as { total?: unknown } | undefined)?.total;
-  return validateSourceTotal(typeof total === "bigint" ? Number(total) : total, "messages");
+	let row: unknown;
+	try {
+		row = db.prepare("SELECT COUNT(*) AS total FROM messages").get();
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new Error(`signal_source_total_query_failed: messages: ${msg}`, {
+			cause: err,
+		});
+	}
+	const total = (row as { total?: unknown } | undefined)?.total;
+	return validateSourceTotal(
+		typeof total === "bigint" ? Number(total) : total,
+		"messages",
+	);
 }
 
 /**
@@ -476,16 +510,16 @@ function countSourceMessages(db: DatabaseSync): number {
  * the finding in exactly that case.
  */
 export function parseEmittedIds(value: unknown): Set<string> {
-  if (!Array.isArray(value)) {
-    return new Set();
-  }
-  const out = new Set<string>();
-  for (const entry of value) {
-    if (typeof entry === "string" && entry !== "") {
-      out.add(entry);
-    }
-  }
-  return out;
+	if (!Array.isArray(value)) {
+		return new Set();
+	}
+	const out = new Set<string>();
+	for (const entry of value) {
+		if (typeof entry === "string" && entry !== "") {
+			out.add(entry);
+		}
+	}
+	return out;
 }
 
 /**
@@ -499,21 +533,26 @@ export function parseEmittedIds(value: unknown): Set<string> {
  * force the check degrades to "cannot prove", never to a false clean bill:
  * `reconcileMessageAnchor`'s caller reports the truncation explicitly.
  */
-export function mergeEmittedIds(prior: ReadonlySet<string>, current: readonly string[]): string[] {
-  const merged = [...prior, ...current];
-  return merged.length > MAX_EMITTED_ID_CURSOR ? merged.slice(merged.length - MAX_EMITTED_ID_CURSOR) : merged;
+export function mergeEmittedIds(
+	prior: ReadonlySet<string>,
+	current: readonly string[],
+): string[] {
+	const merged = [...prior, ...current];
+	return merged.length > MAX_EMITTED_ID_CURSOR
+		? merged.slice(merged.length - MAX_EMITTED_ID_CURSOR)
+		: merged;
 }
 
 interface QueriedMessageRows {
-  /** Ids this run actually emitted, for the durable emitted-id cursor. */
-  emittedIds: string[];
-  latestMs: number;
-  reactionSourceRows: Array<{ id: string; json: string | null }>;
-  skippedNullDate: number;
-  /** Rows this run's cursor window enumerated (the in-window denominator). */
-  windowConsidered: number;
-  /** Rows this run's cursor window accounted for (emitted or deliberately skipped). */
-  windowCovered: number;
+	/** Ids this run actually emitted, for the durable emitted-id cursor. */
+	emittedIds: string[];
+	latestMs: number;
+	reactionSourceRows: Array<{ id: string; json: string | null }>;
+	skippedNullDate: number;
+	/** Rows this run's cursor window enumerated (the in-window denominator). */
+	windowConsidered: number;
+	/** Rows this run's cursor window accounted for (emitted or deliberately skipped). */
+	windowCovered: number;
 }
 
 /**
@@ -550,20 +589,20 @@ interface QueriedMessageRows {
  * working and is deliberately not reported here.
  */
 interface MessageAnchorReconciliation {
-  belowWatermark: number;
-  sourceTotal: number;
-  /**
-   * How many below-watermark source ids were never emitted. This is the full
-   * count, independent of how many ids `unreachableIdSample` retained.
-   */
-  unreachableCount: number;
-  /**
-   * At most `MAX_UNREACHABLE_IDS_IN_DIAGNOSTIC` ids, kept for the diagnostic.
-   * The full id list is deliberately NOT materialized: the below-watermark
-   * row set is unbounded (it grows with the whole Signal history), while the
-   * only consumers are a count and a capped sample.
-   */
-  unreachableIdSample: string[];
+	belowWatermark: number;
+	sourceTotal: number;
+	/**
+	 * How many below-watermark source ids were never emitted. This is the full
+	 * count, independent of how many ids `unreachableIdSample` retained.
+	 */
+	unreachableCount: number;
+	/**
+	 * At most `MAX_UNREACHABLE_IDS_IN_DIAGNOSTIC` ids, kept for the diagnostic.
+	 * The full id list is deliberately NOT materialized: the below-watermark
+	 * row set is unbounded (it grows with the whole Signal history), while the
+	 * only consumers are a count and a capped sample.
+	 */
+	unreachableIdSample: string[];
 }
 
 /**
@@ -581,49 +620,57 @@ interface MessageAnchorReconciliation {
  * produces no finding.
  */
 function reconcileMessageAnchor(
-  db: DatabaseSync,
-  since: number,
-  priorEmittedIds: ReadonlySet<string>
+	db: DatabaseSync,
+	since: number,
+	priorEmittedIds: ReadonlySet<string>,
 ): MessageAnchorReconciliation {
-  const sourceTotal = countSourceMessages(db);
-  // Streamed with `iterate()`, not `.all()`: the below-watermark set is
-  // bounded only by the size of the owner's whole Signal history, and the
-  // two facts derived from it (a count, and a capped id sample) both fold
-  // row-by-row. Materializing the full list would put the entire message
-  // history in memory to compute a number.
-  //
-  // A cold start (no prior cursor) has emitted nothing yet, so every
-  // below-watermark id would look "unreachable". But a cold start has
-  // `since === 0`, which puts nothing below the watermark — the set is
-  // empty and no false finding is possible.
-  let belowWatermarkRows = 0;
-  let unreachableCount = 0;
-  const unreachableIdSample: string[] = [];
-  try {
-    const iter = db
-      .prepare("SELECT id AS id FROM messages WHERE sent_at IS NOT NULL AND sent_at <= ?")
-      .iterate(since) as IterableIterator<{ id?: unknown }>;
-    for (const row of iter) {
-      belowWatermarkRows += 1;
-      const { id } = row;
-      if (typeof id === "string" && !priorEmittedIds.has(id)) {
-        unreachableCount += 1;
-        if (unreachableIdSample.length < MAX_UNREACHABLE_IDS_IN_DIAGNOSTIC) {
-          unreachableIdSample.push(id);
-        }
-      }
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`signal_source_total_query_failed: messages_below_watermark: ${msg}`, { cause: err });
-  }
-  const belowWatermark = validateSourceTotal(belowWatermarkRows, "messages_below_watermark");
-  if (belowWatermark > sourceTotal) {
-    throw new Error(
-      `signal_source_total_inconsistent: below-watermark ${String(belowWatermark)} exceeds source total ${String(sourceTotal)}`
-    );
-  }
-  return { belowWatermark, sourceTotal, unreachableCount, unreachableIdSample };
+	const sourceTotal = countSourceMessages(db);
+	// Streamed with `iterate()`, not `.all()`: the below-watermark set is
+	// bounded only by the size of the owner's whole Signal history, and the
+	// two facts derived from it (a count, and a capped id sample) both fold
+	// row-by-row. Materializing the full list would put the entire message
+	// history in memory to compute a number.
+	//
+	// A cold start (no prior cursor) has emitted nothing yet, so every
+	// below-watermark id would look "unreachable". But a cold start has
+	// `since === 0`, which puts nothing below the watermark — the set is
+	// empty and no false finding is possible.
+	let belowWatermarkRows = 0;
+	let unreachableCount = 0;
+	const unreachableIdSample: string[] = [];
+	try {
+		const iter = db
+			.prepare(
+				"SELECT id AS id FROM messages WHERE sent_at IS NOT NULL AND sent_at <= ?",
+			)
+			.iterate(since) as IterableIterator<{ id?: unknown }>;
+		for (const row of iter) {
+			belowWatermarkRows += 1;
+			const { id } = row;
+			if (typeof id === "string" && !priorEmittedIds.has(id)) {
+				unreachableCount += 1;
+				if (unreachableIdSample.length < MAX_UNREACHABLE_IDS_IN_DIAGNOSTIC) {
+					unreachableIdSample.push(id);
+				}
+			}
+		}
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new Error(
+			`signal_source_total_query_failed: messages_below_watermark: ${msg}`,
+			{ cause: err },
+		);
+	}
+	const belowWatermark = validateSourceTotal(
+		belowWatermarkRows,
+		"messages_below_watermark",
+	);
+	if (belowWatermark > sourceTotal) {
+		throw new Error(
+			`signal_source_total_inconsistent: below-watermark ${String(belowWatermark)} exceeds source total ${String(sourceTotal)}`,
+		);
+	}
+	return { belowWatermark, sourceTotal, unreachableCount, unreachableIdSample };
 }
 
 /**
@@ -635,102 +682,125 @@ function reconcileMessageAnchor(
  * SKIP_RESULT traffic for a stream nobody asked for.
  */
 function queryMessageRows(
-  db: DatabaseSync,
-  since: number
-): { latestMs: number; rows: Array<{ built: ReturnType<typeof buildMessageRecord>; raw: SignalMessageRow }> } {
-  const iter = db.prepare(messagesSelect(db)).iterate(since) as IterableIterator<SignalMessageRow>;
-  let latestMs = since;
-  const rows: Array<{ built: ReturnType<typeof buildMessageRecord>; raw: SignalMessageRow }> = [];
-  for (const r of iter) {
-    const built = buildMessageRecord(r);
-    if (built.sentAtMs !== null && built.sentAtMs > latestMs) {
-      latestMs = built.sentAtMs;
-    }
-    rows.push({ built, raw: r });
-  }
-  return { latestMs, rows };
+	db: DatabaseSync,
+	since: number,
+): {
+	latestMs: number;
+	rows: Array<{
+		built: ReturnType<typeof buildMessageRecord>;
+		raw: SignalMessageRow;
+	}>;
+} {
+	const iter = db
+		.prepare(messagesSelect(db))
+		.iterate(since) as IterableIterator<SignalMessageRow>;
+	let latestMs = since;
+	const rows: Array<{
+		built: ReturnType<typeof buildMessageRecord>;
+		raw: SignalMessageRow;
+	}> = [];
+	for (const r of iter) {
+		const built = buildMessageRecord(r);
+		if (built.sentAtMs !== null && built.sentAtMs > latestMs) {
+			latestMs = built.sentAtMs;
+		}
+		rows.push({ built, raw: r });
+	}
+	return { latestMs, rows };
 }
 
 async function emitMessageRowsAndReactions({
-  db,
-  emitRecord,
-  emitReactions,
-  progress,
-  since,
+	db,
+	emitRecord,
+	emitReactions,
+	progress,
+	since,
 }: {
-  db: DatabaseSync;
-  emitRecord: (stream: string, data: RecordData) => Promise<void>;
-  emitReactions: boolean;
-  progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
-  since: number;
+	db: DatabaseSync;
+	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emitReactions: boolean;
+	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
+	since: number;
 }): Promise<QueriedMessageRows> {
-  const { latestMs, rows } = queryMessageRows(db, since);
-  let itemOrdinal = 0;
-  let skippedNullDate = 0;
-  // Measured at the enumeration site from the rows the source handed back —
-  // never aliased to the emitted count. A row skipped for an unusable date
-  // raises `windowConsidered` without raising `windowCovered`, so it reads
-  // `partial` exactly as it should.
-  const windowConsidered = rows.length;
-  let windowCovered = 0;
-  const emittedIds: string[] = [];
-  const reactionSourceRows: Array<{ id: string; json: string | null }> = [];
-  for (const { built, raw } of rows) {
-    itemOrdinal += 1;
-    if (built.sentAtMs === null) {
-      // No usable timestamp on this row (neither sent_at nor
-      // received_at_ms) — no honest cursor position. Skip with a
-      // diagnostic rather than fabricating the run's wall clock (see
-      // imessage's identical null-date-skip-not-fabricate rule).
-      skippedNullDate += 1;
-      continue;
-    }
-    await emitRecord("messages", built.record);
-    windowCovered += 1;
-    emittedIds.push(raw.id);
-    if (emitReactions) {
-      reactionSourceRows.push({ id: raw.id, json: raw.json });
-    }
-    if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
-      await progress(`Signal phase=emit pass=emit stream=messages item=${itemOrdinal}`, { stream: "messages" });
-    }
-  }
-  return { emittedIds, latestMs, reactionSourceRows, skippedNullDate, windowConsidered, windowCovered };
+	const { latestMs, rows } = queryMessageRows(db, since);
+	let itemOrdinal = 0;
+	let skippedNullDate = 0;
+	// Measured at the enumeration site from the rows the source handed back —
+	// never aliased to the emitted count. A row skipped for an unusable date
+	// raises `windowConsidered` without raising `windowCovered`, so it reads
+	// `partial` exactly as it should.
+	const windowConsidered = rows.length;
+	let windowCovered = 0;
+	const emittedIds: string[] = [];
+	const reactionSourceRows: Array<{ id: string; json: string | null }> = [];
+	for (const { built, raw } of rows) {
+		itemOrdinal += 1;
+		if (built.sentAtMs === null) {
+			// No usable timestamp on this row (neither sent_at nor
+			// received_at_ms) — no honest cursor position. Skip with a
+			// diagnostic rather than fabricating the run's wall clock (see
+			// imessage's identical null-date-skip-not-fabricate rule).
+			skippedNullDate += 1;
+			continue;
+		}
+		await emitRecord("messages", built.record);
+		windowCovered += 1;
+		emittedIds.push(raw.id);
+		if (emitReactions) {
+			reactionSourceRows.push({ id: raw.id, json: raw.json });
+		}
+		if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
+			await progress(
+				`Signal phase=emit pass=emit stream=messages item=${itemOrdinal}`,
+				{ stream: "messages" },
+			);
+		}
+	}
+	return {
+		emittedIds,
+		latestMs,
+		reactionSourceRows,
+		skippedNullDate,
+		windowConsidered,
+		windowCovered,
+	};
 }
 
 async function emitReactionRowsFromMessages(
-  reactionSourceRows: ReadonlyArray<{ id: string; json: string | null }>,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>
+	reactionSourceRows: ReadonlyArray<{ id: string; json: string | null }>,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
 ): Promise<number> {
-  let emitted = 0;
-  for (const row of reactionSourceRows) {
-    const json = parseMessageJson(row.json);
-    for (const reaction of extractReactionsFromMessageJson(row.id, json)) {
-      await emitRecord("reactions", buildReactionRecord(reaction));
-      emitted += 1;
-    }
-  }
-  return emitted;
+	let emitted = 0;
+	for (const row of reactionSourceRows) {
+		const json = parseMessageJson(row.json);
+		for (const reaction of extractReactionsFromMessageJson(row.id, json)) {
+			await emitRecord("reactions", buildReactionRecord(reaction));
+			emitted += 1;
+		}
+	}
+	return emitted;
 }
 
 async function emitConversationRows(
-  db: DatabaseSync,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>
+	db: DatabaseSync,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
 ): Promise<number> {
-  const rows = db.prepare(conversationsSelect()).iterate() as IterableIterator<SignalConversationRow>;
-  let emitted = 0;
-  for (const r of rows) {
-    await emitRecord("conversations", buildConversationRecord(r));
-    emitted += 1;
-  }
-  return emitted;
+	const rows = db
+		.prepare(conversationsSelect())
+		.iterate() as IterableIterator<SignalConversationRow>;
+	let emitted = 0;
+	for (const r of rows) {
+		await emitRecord("conversations", buildConversationRecord(r));
+		emitted += 1;
+	}
+	return emitted;
 }
 
 // ─── Attachment hydration (reused pattern from imessage/index.ts) ───────
 
 interface SafeAttachmentPathResult {
-  ok: boolean;
-  path: string | null;
+	ok: boolean;
+	path: string | null;
 }
 
 /**
@@ -743,44 +813,49 @@ interface SafeAttachmentPathResult {
  * directory is connector-controlled and arguably a stronger boundary than
  * imessage's user-owned Attachments tree.
  */
-function resolveSafeAttachmentPath(rawPath: string, root: string): SafeAttachmentPathResult {
-  let realRoot: string;
-  try {
-    realRoot = realpathSync(root);
-  } catch {
-    return { ok: false, path: null };
-  }
-  let realCandidate: string;
-  try {
-    realCandidate = realpathSync(rawPath);
-  } catch {
-    return { ok: false, path: null };
-  }
-  const withinRoot = realCandidate === realRoot || realCandidate.startsWith(realRoot + sep);
-  if (!withinRoot) {
-    return { ok: false, path: null };
-  }
-  return { ok: true, path: realCandidate };
+function resolveSafeAttachmentPath(
+	rawPath: string,
+	root: string,
+): SafeAttachmentPathResult {
+	let realRoot: string;
+	try {
+		realRoot = realpathSync(root);
+	} catch {
+		return { ok: false, path: null };
+	}
+	let realCandidate: string;
+	try {
+		realCandidate = realpathSync(rawPath);
+	} catch {
+		return { ok: false, path: null };
+	}
+	const withinRoot =
+		realCandidate === realRoot || realCandidate.startsWith(realRoot + sep);
+	if (!withinRoot) {
+		return { ok: false, path: null };
+	}
+	return { ok: true, path: realCandidate };
 }
 
 export interface AttachmentHydrationResult {
-  blobRef: ReferenceBlobRef | null;
-  bytes: Buffer | null;
-  contentSha256: string | null;
-  hydrationError: string | null;
-  hydrationStatus: "deferred" | "hydrated" | "failed" | "too_large" | "missing";
-  sizeBytes: number | null;
+	blobRef: ReferenceBlobRef | null;
+	bytes: Buffer | null;
+	contentSha256: string | null;
+	hydrationError: string | null;
+	hydrationStatus: "deferred" | "hydrated" | "failed" | "too_large" | "missing";
+	sizeBytes: number | null;
 }
 
 function missingAttachmentResult(): AttachmentHydrationResult {
-  return {
-    blobRef: null,
-    bytes: null,
-    contentSha256: null,
-    hydrationError: "attachment file is missing, unreadable, or was replaced with a symlink.",
-    hydrationStatus: "missing",
-    sizeBytes: null,
-  };
+	return {
+		blobRef: null,
+		bytes: null,
+		contentSha256: null,
+		hydrationError:
+			"attachment file is missing, unreadable, or was replaced with a symlink.",
+		hydrationStatus: "missing",
+		sizeBytes: null,
+	};
 }
 
 /**
@@ -793,109 +868,118 @@ function missingAttachmentResult(): AttachmentHydrationResult {
  * unconditionally, and so do macOS/Windows (sigtop's other supported
  * platforms per Node's fs module) — untested here, see module doc.
  */
-export function readAttachmentFileSync(localPath: string, maxBytes: number): AttachmentHydrationResult {
-  let fd: number;
-  try {
-    // biome-ignore lint/suspicious/noBitwiseOperators: composing POSIX open() flags requires a bitmask OR, not logical OR.
-    fd = openSync(localPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch {
-    return missingAttachmentResult();
-  }
-  try {
-    let size: number;
-    try {
-      ({ size } = fstatSync(fd));
-    } catch (err) {
-      return {
-        blobRef: null,
-        bytes: null,
-        contentSha256: null,
-        hydrationError: err instanceof Error ? err.message : "Failed to stat attachment file.",
-        hydrationStatus: "failed",
-        sizeBytes: null,
-      };
-    }
-    if (size > maxBytes) {
-      return {
-        blobRef: null,
-        bytes: null,
-        contentSha256: null,
-        hydrationError: `attachment exceeds max size: ${size} > ${maxBytes} bytes`,
-        hydrationStatus: "too_large",
-        sizeBytes: size,
-      };
-    }
-    const buffer = Buffer.alloc(size);
-    let offset = 0;
-    try {
-      while (offset < size) {
-        const bytesRead = readSync(fd, buffer, offset, size - offset, offset);
-        if (bytesRead === 0) {
-          break;
-        }
-        offset += bytesRead;
-      }
-    } catch (err) {
-      return {
-        blobRef: null,
-        bytes: null,
-        contentSha256: null,
-        hydrationError: err instanceof Error ? err.message : "Failed to read attachment file.",
-        hydrationStatus: "failed",
-        sizeBytes: size,
-      };
-    }
-    const bytes = offset === size ? buffer : buffer.subarray(0, offset);
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    return {
-      blobRef: null,
-      bytes,
-      contentSha256,
-      hydrationError: null,
-      hydrationStatus: "deferred",
-      sizeBytes: bytes.byteLength,
-    };
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      // Nothing actionable: the read outcome above is already decided.
-    }
-  }
+export function readAttachmentFileSync(
+	localPath: string,
+	maxBytes: number,
+): AttachmentHydrationResult {
+	let fd: number;
+	try {
+		// biome-ignore lint/suspicious/noBitwiseOperators: composing POSIX open() flags requires a bitmask OR, not logical OR.
+		fd = openSync(localPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+	} catch {
+		return missingAttachmentResult();
+	}
+	try {
+		let size: number;
+		try {
+			({ size } = fstatSync(fd));
+		} catch (err) {
+			return {
+				blobRef: null,
+				bytes: null,
+				contentSha256: null,
+				hydrationError:
+					err instanceof Error
+						? err.message
+						: "Failed to stat attachment file.",
+				hydrationStatus: "failed",
+				sizeBytes: null,
+			};
+		}
+		if (size > maxBytes) {
+			return {
+				blobRef: null,
+				bytes: null,
+				contentSha256: null,
+				hydrationError: `attachment exceeds max size: ${size} > ${maxBytes} bytes`,
+				hydrationStatus: "too_large",
+				sizeBytes: size,
+			};
+		}
+		const buffer = Buffer.alloc(size);
+		let offset = 0;
+		try {
+			while (offset < size) {
+				const bytesRead = readSync(fd, buffer, offset, size - offset, offset);
+				if (bytesRead === 0) {
+					break;
+				}
+				offset += bytesRead;
+			}
+		} catch (err) {
+			return {
+				blobRef: null,
+				bytes: null,
+				contentSha256: null,
+				hydrationError:
+					err instanceof Error
+						? err.message
+						: "Failed to read attachment file.",
+				hydrationStatus: "failed",
+				sizeBytes: size,
+			};
+		}
+		const bytes = offset === size ? buffer : buffer.subarray(0, offset);
+		const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+		return {
+			blobRef: null,
+			bytes,
+			contentSha256,
+			hydrationError: null,
+			hydrationStatus: "deferred",
+			sizeBytes: bytes.byteLength,
+		};
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			// Nothing actionable: the read outcome above is already decided.
+		}
+	}
 }
 
 function uploadAttachmentBlob(args: {
-  bytes: Buffer;
-  mimeType: string;
-  recordKey: string;
+	bytes: Buffer;
+	mimeType: string;
+	recordKey: string;
 }): Promise<ReferenceBlobRef | null> {
-  const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-  const ownerToken = process.env.PDPP_OWNER_TOKEN;
-  if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
-    return Promise.resolve(null);
-  }
-  const uploader = makeReferenceBlobUploader({
-    connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-    ownerToken,
-    rsUrl,
-  });
-  return uploader({
-    connectorId: "https://registry.pdpp.org/connectors/signal",
-    content: [args.bytes],
-    mimeType: args.mimeType,
-    recordKey: args.recordKey,
-    stream: "attachments",
-  });
+	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
+	const ownerToken = process.env.PDPP_OWNER_TOKEN;
+	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+		return Promise.resolve(null);
+	}
+	const uploader = makeReferenceBlobUploader({
+		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
+		ownerToken,
+		rsUrl,
+	});
+	return uploader({
+		connectorId: "https://registry.pdpp.org/connectors/signal",
+		content: [args.bytes],
+		mimeType: args.mimeType,
+		recordKey: args.recordKey,
+		stream: "attachments",
+	});
 }
 
 function attachmentRecordId(localPath: string): string {
-  return createHash("sha256").update(localPath).digest("hex");
+	return createHash("sha256").update(localPath).digest("hex");
 }
 
 interface AttachmentMetadata {
-  contentType: string | null;
-  messageId: string | null;
-  size: number | null;
+	contentType: string | null;
+	messageId: string | null;
+	size: number | null;
 }
 
 /**
@@ -910,25 +994,33 @@ interface AttachmentMetadata {
  * corrupting the attachment's actual bytes/hash, which are read directly
  * from the exported file regardless of whether the join succeeded.
  */
-function buildAttachmentMetadataIndex(db: DatabaseSync): Map<string, AttachmentMetadata> {
-  const index = new Map<string, AttachmentMetadata>();
-  if (!tableExists(db, "message_attachments")) {
-    return index;
-  }
-  const rows = db
-    .prepare("SELECT messageId, contentType, fileName, size FROM message_attachments")
-    .iterate() as IterableIterator<{
-    contentType: string | null;
-    fileName: string | null;
-    messageId: string | null;
-    size: number | null;
-  }>;
-  for (const r of rows) {
-    if (r.fileName) {
-      index.set(r.fileName, { contentType: r.contentType, messageId: r.messageId, size: r.size });
-    }
-  }
-  return index;
+function buildAttachmentMetadataIndex(
+	db: DatabaseSync,
+): Map<string, AttachmentMetadata> {
+	const index = new Map<string, AttachmentMetadata>();
+	if (!tableExists(db, "message_attachments")) {
+		return index;
+	}
+	const rows = db
+		.prepare(
+			"SELECT messageId, contentType, fileName, size FROM message_attachments",
+		)
+		.iterate() as IterableIterator<{
+		contentType: string | null;
+		fileName: string | null;
+		messageId: string | null;
+		size: number | null;
+	}>;
+	for (const r of rows) {
+		if (r.fileName) {
+			index.set(r.fileName, {
+				contentType: r.contentType,
+				messageId: r.messageId,
+				size: r.size,
+			});
+		}
+	}
+	return index;
 }
 
 /**
@@ -943,140 +1035,177 @@ function buildAttachmentMetadataIndex(db: DatabaseSync): Map<string, AttachmentM
  * attacker-controlled subtree during enumeration itself.
  */
 async function listExportedAttachmentFiles(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(current: string): Promise<void> {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full);
-      } else if (entry.isFile()) {
-        out.push(full);
-      }
-    }
-  }
-  await walk(dir);
-  return out;
+	const out: string[] = [];
+	async function walk(current: string): Promise<void> {
+		let entries: Dirent[];
+		try {
+			entries = await readdir(current, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			const full = join(current, entry.name);
+			if (entry.isDirectory()) {
+				await walk(full);
+			} else if (entry.isFile()) {
+				out.push(full);
+			}
+		}
+	}
+	await walk(dir);
+	return out;
 }
 
 async function resolveAttachmentHydration(
-  localPath: string,
-  contentType: string,
-  id: string,
-  maxBytes: number,
-  exportRoot: string
+	localPath: string,
+	contentType: string,
+	id: string,
+	maxBytes: number,
+	exportRoot: string,
 ): Promise<AttachmentHydrationResult> {
-  const safe = resolveSafeAttachmentPath(localPath, exportRoot);
-  if (!(safe.ok && safe.path)) {
-    return {
-      blobRef: null,
-      bytes: null,
-      contentSha256: null,
-      hydrationError: "attachment file is missing, unreadable, or outside the trusted export root.",
-      hydrationStatus: "missing",
-      sizeBytes: null,
-    };
-  }
-  const local = readAttachmentFileSync(safe.path, maxBytes);
-  if (!(local.hydrationStatus === "deferred" && local.bytes)) {
-    return local;
-  }
-  try {
-    const blobRef = await uploadAttachmentBlob({ bytes: local.bytes, mimeType: contentType, recordKey: id });
-    return {
-      ...local,
-      blobRef,
-      contentSha256: blobRef?.sha256 ?? local.contentSha256,
-      hydrationStatus: blobRef ? "hydrated" : "deferred",
-      sizeBytes: blobRef?.size_bytes ?? local.sizeBytes,
-    };
-  } catch (err) {
-    return {
-      ...local,
-      blobRef: null,
-      hydrationError: err instanceof Error ? err.message : "Attachment blob upload failed.",
-      hydrationStatus: "failed",
-    };
-  }
+	const safe = resolveSafeAttachmentPath(localPath, exportRoot);
+	if (!(safe.ok && safe.path)) {
+		return {
+			blobRef: null,
+			bytes: null,
+			contentSha256: null,
+			hydrationError:
+				"attachment file is missing, unreadable, or outside the trusted export root.",
+			hydrationStatus: "missing",
+			sizeBytes: null,
+		};
+	}
+	const local = readAttachmentFileSync(safe.path, maxBytes);
+	if (!(local.hydrationStatus === "deferred" && local.bytes)) {
+		return local;
+	}
+	try {
+		const blobRef = await uploadAttachmentBlob({
+			bytes: local.bytes,
+			mimeType: contentType,
+			recordKey: id,
+		});
+		return {
+			...local,
+			blobRef,
+			contentSha256: blobRef?.sha256 ?? local.contentSha256,
+			hydrationStatus: blobRef ? "hydrated" : "deferred",
+			sizeBytes: blobRef?.size_bytes ?? local.sizeBytes,
+		};
+	} catch (err) {
+		return {
+			...local,
+			blobRef: null,
+			hydrationError:
+				err instanceof Error ? err.message : "Attachment blob upload failed.",
+			hydrationStatus: "failed",
+		};
+	}
 }
 
 async function emitAttachmentRows({
-  emitRecord,
-  exportRoot,
-  files,
-  maxBytes,
-  metadataIndex,
-  progress,
+	emitRecord,
+	exportRoot,
+	files,
+	maxBytes,
+	metadataIndex,
+	progress,
 }: {
-  emitRecord: (stream: string, data: RecordData) => Promise<void>;
-  exportRoot: string;
-  files: readonly string[];
-  maxBytes: number;
-  metadataIndex: Map<string, AttachmentMetadata>;
-  progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
+	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	exportRoot: string;
+	files: readonly string[];
+	maxBytes: number;
+	metadataIndex: Map<string, AttachmentMetadata>;
+	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 }): Promise<number> {
-  let emitted = 0;
-  for (const localPath of files) {
-    const filename = localPath.split(sep).at(-1) || `attachment-${emitted}`;
-    const meta = metadataIndex.get(filename) ?? null;
-    const contentType = meta?.contentType || "application/octet-stream";
-    const id = attachmentRecordId(localPath);
-    const result = await resolveAttachmentHydration(localPath, contentType, id, maxBytes, exportRoot);
+	let emitted = 0;
+	for (const localPath of files) {
+		const filename = localPath.split(sep).at(-1) || `attachment-${emitted}`;
+		const meta = metadataIndex.get(filename) ?? null;
+		const contentType = meta?.contentType || "application/octet-stream";
+		const id = attachmentRecordId(localPath);
+		const result = await resolveAttachmentHydration(
+			localPath,
+			contentType,
+			id,
+			maxBytes,
+			exportRoot,
+		);
 
-    await emitRecord("attachments", {
-      id,
-      message_id: meta?.messageId ?? null,
-      conversation_id: null,
-      filename,
-      content_type: contentType,
-      size_bytes: result.sizeBytes ?? meta?.size ?? null,
-      content_sha256: result.contentSha256,
-      hydration_status: result.hydrationStatus,
-      hydration_error: result.hydrationError,
-      blob_ref: result.blobRef,
-    });
-    emitted += 1;
+		await emitRecord("attachments", {
+			id,
+			message_id: meta?.messageId ?? null,
+			conversation_id: null,
+			filename,
+			content_type: contentType,
+			size_bytes: result.sizeBytes ?? meta?.size ?? null,
+			content_sha256: result.contentSha256,
+			hydration_status: result.hydrationStatus,
+			hydration_error: result.hydrationError,
+			blob_ref: result.blobRef,
+		});
+		emitted += 1;
 
-    if (emitted % ATTACHMENT_PROGRESS_INTERVAL === 0) {
-      await progress(`Signal phase=emit pass=emit stream=attachments item=${emitted}`, { stream: "attachments" });
-    }
-  }
-  return emitted;
+		if (emitted % ATTACHMENT_PROGRESS_INTERVAL === 0) {
+			await progress(
+				`Signal phase=emit pass=emit stream=attachments item=${emitted}`,
+				{ stream: "attachments" },
+			);
+		}
+	}
+	return emitted;
 }
 
 async function collectAttachments(ctx: CollectContext): Promise<void> {
-  const { emit, emitRecord, progress } = ctx;
-  const maxBytes = resolveMaxAttachmentBytes(process.env);
-  const exportRoot =
-    process.env.SIGNAL_ATTACHMENTS_EXPORT_DIR || join(tmpdir(), `pdpp-signal-attachments-${randomUUID()}`);
-  await mkdir(exportRoot, { recursive: true });
+	const { emit, emitRecord, progress } = ctx;
+	const maxBytes = resolveMaxAttachmentBytes(process.env);
+	const exportRoot =
+		process.env.SIGNAL_ATTACHMENTS_EXPORT_DIR ||
+		join(tmpdir(), `pdpp-signal-attachments-${randomUUID()}`);
+	await mkdir(exportRoot, { recursive: true });
 
-  await progress("Signal phase=index pass=index stream=attachments exporting via sigtop", { stream: "attachments" });
-  const result = await runSigtop(["export-attachments", "-i", exportRoot]);
-  if (result.code !== 0) {
-    throw new Error(`sigtop_export_attachments_failed: exit code ${String(result.code)}: ${result.stderr.trim()}`);
-  }
+	await progress(
+		"Signal phase=index pass=index stream=attachments exporting via sigtop",
+		{ stream: "attachments" },
+	);
+	const result = await runSigtop(["export-attachments", "-i", exportRoot]);
+	if (result.code !== 0) {
+		throw new Error(
+			`sigtop_export_attachments_failed: exit code ${String(result.code)}: ${result.stderr.trim()}`,
+		);
+	}
 
-  const files = await listExportedAttachmentFiles(exportRoot);
-  const metadataIndex = await withExportedDatabase((db) => Promise.resolve(buildAttachmentMetadataIndex(db)));
+	const files = await listExportedAttachmentFiles(exportRoot);
+	const metadataIndex = await withExportedDatabase((db) =>
+		Promise.resolve(buildAttachmentMetadataIndex(db)),
+	);
 
-  await progress("Signal phase=emit pass=emit stream=attachments hydrating rows", { stream: "attachments" });
-  const emitted = await emitAttachmentRows({ emitRecord, exportRoot, files, maxBytes, metadataIndex, progress });
-  if (emitted === 0) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "attachments",
-      reason: "no_attachments_exported",
-      message:
-        "sigtop export-attachments produced no files for this account (or all attachments were already exported by a prior incremental run).",
-    });
-  }
-  await emit({ type: "STATE", stream: "attachments", cursor: { synced_at: new Date().toISOString() } });
+	await progress(
+		"Signal phase=emit pass=emit stream=attachments hydrating rows",
+		{ stream: "attachments" },
+	);
+	const emitted = await emitAttachmentRows({
+		emitRecord,
+		exportRoot,
+		files,
+		maxBytes,
+		metadataIndex,
+		progress,
+	});
+	if (emitted === 0) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "attachments",
+			reason: "no_attachments_exported",
+			message:
+				"sigtop export-attachments produced no files for this account (or all attachments were already exported by a prior incremental run).",
+		});
+	}
+	await emit({
+		type: "STATE",
+		stream: "attachments",
+		cursor: { synced_at: new Date().toISOString() },
+	});
 }
 
 /**
@@ -1106,57 +1235,60 @@ async function collectAttachments(ctx: CollectContext): Promise<void> {
  *     intended, not a gap. Only upstream-present-and-never-emitted counts.
  */
 async function emitMessageAnchorEvidence(
-  emit: CollectContext["emit"],
-  anchor: MessageAnchorReconciliation,
-  result: QueriedMessageRows,
-  since: number,
-  proveBackfill: boolean
+	emit: CollectContext["emit"],
+	anchor: MessageAnchorReconciliation,
+	result: QueriedMessageRows,
+	since: number,
+	proveBackfill: boolean,
 ): Promise<void> {
-  if (!proveBackfill) {
-    // A legacy cursor (watermark, no emitted-id set) cannot distinguish
-    // "already emitted" from "newly backfilled". Say so plainly rather than
-    // reporting either a false gap or an unearned clean bill.
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "messages",
-      reason: "backfill_check_unproven_legacy_cursor",
-      message:
-        "Below-watermark backfill could not be checked this run: the messages cursor predates the emitted-id set. " +
-        "This run seeds that set; the next run checks properly.",
-      diagnostics: { source_total: anchor.sourceTotal, below_watermark: anchor.belowWatermark },
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-  } else if (anchor.unreachableCount > 0) {
-    const sample = anchor.unreachableIdSample;
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "messages",
-      reason: "source_rows_below_watermark_unreachable",
-      message:
-        `Signal Desktop holds ${String(anchor.unreachableCount)} message(s) at or below the cursor watermark that this ` +
-        "connector has never emitted — a backfill carrying older sent_at values. The forward-only sent_at cursor cannot " +
-        "revisit them; re-run with collection_mode=full_refresh to recover them.",
-      diagnostics: {
-        source_total: anchor.sourceTotal,
-        below_watermark: anchor.belowWatermark,
-        unreachable_count: anchor.unreachableCount,
-        unreachable_ids: sample,
-        truncated: sample.length < anchor.unreachableCount,
-        watermark_sent_at_ms: since,
-      },
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-  }
-  await emit(
-    buildDetailCoverageMessage({
-      stream: "messages",
-      stateStream: "messages",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: result.windowConsidered,
-      covered: result.windowCovered,
-    })
-  );
+	if (!proveBackfill) {
+		// A legacy cursor (watermark, no emitted-id set) cannot distinguish
+		// "already emitted" from "newly backfilled". Say so plainly rather than
+		// reporting either a false gap or an unearned clean bill.
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: "backfill_check_unproven_legacy_cursor",
+			message:
+				"Below-watermark backfill could not be checked this run: the messages cursor predates the emitted-id set. " +
+				"This run seeds that set; the next run checks properly.",
+			diagnostics: {
+				source_total: anchor.sourceTotal,
+				below_watermark: anchor.belowWatermark,
+			},
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	} else if (anchor.unreachableCount > 0) {
+		const sample = anchor.unreachableIdSample;
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: "source_rows_below_watermark_unreachable",
+			message:
+				`Signal Desktop holds ${String(anchor.unreachableCount)} message(s) at or below the cursor watermark that this ` +
+				"connector has never emitted — a backfill carrying older sent_at values. The forward-only sent_at cursor cannot " +
+				"revisit them; re-run with collection_mode=full_refresh to recover them.",
+			diagnostics: {
+				source_total: anchor.sourceTotal,
+				below_watermark: anchor.belowWatermark,
+				unreachable_count: anchor.unreachableCount,
+				unreachable_ids: sample,
+				truncated: sample.length < anchor.unreachableCount,
+				watermark_sent_at_ms: since,
+			},
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
+	await emit(
+		buildDetailCoverageMessage({
+			stream: "messages",
+			stateStream: "messages",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: result.windowConsidered,
+			covered: result.windowCovered,
+		}),
+	);
 }
 
 /**
@@ -1169,150 +1301,175 @@ async function emitMessageAnchorEvidence(
  * incidental nesting.
  */
 async function collectMessagesAndReactions({
-  db,
-  ctx,
-  emitMessages,
-  emitReactions,
-  priorEmittedIds,
-  proveBackfill,
-  since,
+	db,
+	ctx,
+	emitMessages,
+	emitReactions,
+	priorEmittedIds,
+	proveBackfill,
+	since,
 }: {
-  ctx: CollectContext;
-  db: DatabaseSync;
-  emitMessages: boolean;
-  emitReactions: boolean;
-  priorEmittedIds: ReadonlySet<string>;
-  /** False on a legacy cursor with no emitted-id set — see the caller. */
-  proveBackfill: boolean;
-  since: number;
+	ctx: CollectContext;
+	db: DatabaseSync;
+	emitMessages: boolean;
+	emitReactions: boolean;
+	priorEmittedIds: ReadonlySet<string>;
+	/** False on a legacy cursor with no emitted-id set — see the caller. */
+	proveBackfill: boolean;
+	since: number;
 }): Promise<void> {
-  const { emit, emitRecord, progress } = ctx;
-  await progress("Signal phase=index pass=index stream=messages querying rows", { stream: "messages" });
+	const { emit, emitRecord, progress } = ctx;
+	await progress(
+		"Signal phase=index pass=index stream=messages querying rows",
+		{ stream: "messages" },
+	);
 
-  // Measured BEFORE the emit pass, at the source boundary, so the anchor
-  // cannot be contaminated by anything this run emitted. Throws on a
-  // malformed or unreadable count — an unmeasurable boundary is not an
-  // empty one.
-  const anchor = reconcileMessageAnchor(db, since, priorEmittedIds);
+	// Measured BEFORE the emit pass, at the source boundary, so the anchor
+	// cannot be contaminated by anything this run emitted. Throws on a
+	// malformed or unreadable count — an unmeasurable boundary is not an
+	// empty one.
+	const anchor = reconcileMessageAnchor(db, since, priorEmittedIds);
 
-  let result: QueriedMessageRows;
-  try {
-    result = await emitMessageRowsAndReactions({
-      db,
-      // A reactions-only request (messages not in scope) must not emit
-      // `messages` RECORD/SKIP_RESULT traffic for a stream nobody asked
-      // for — route through a no-op in that case.
-      emitRecord: emitMessages ? emitRecord : () => Promise.resolve(),
-      emitReactions,
-      progress,
-      since,
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`signal_db_query_failed: ${msg}`, { cause: err });
-  }
+	let result: QueriedMessageRows;
+	try {
+		result = await emitMessageRowsAndReactions({
+			db,
+			// A reactions-only request (messages not in scope) must not emit
+			// `messages` RECORD/SKIP_RESULT traffic for a stream nobody asked
+			// for — route through a no-op in that case.
+			emitRecord: emitMessages ? emitRecord : () => Promise.resolve(),
+			emitReactions,
+			progress,
+			since,
+		});
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new Error(`signal_db_query_failed: ${msg}`, { cause: err });
+	}
 
-  if (emitMessages) {
-    if (result.skippedNullDate > 0) {
-      await emit({
-        type: "SKIP_RESULT",
-        stream: "messages",
-        reason: "message_date_unusable",
-        message: `Skipped ${result.skippedNullDate} message(s) with a missing or unusable sent_at/received_at_ms; they cannot be placed on the sent_at cursor without fabricating a timestamp.`,
-      });
-    }
-    await emitMessageAnchorEvidence(emit, anchor, result, since, proveBackfill);
-    await emit({
-      type: "STATE",
-      stream: "messages",
-      cursor: {
-        last_sent_at_ms: result.latestMs,
-        // Union of what prior runs emitted and what this run emitted. This
-        // is what makes the backfill check a SET comparison rather than a
-        // count: without it there is no way to tell a below-watermark row
-        // we already have from one a re-link just introduced.
-        emitted_ids: mergeEmittedIds(priorEmittedIds, result.emittedIds),
-      },
-    });
-  }
+	if (emitMessages) {
+		if (result.skippedNullDate > 0) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "messages",
+				reason: "message_date_unusable",
+				message: `Skipped ${result.skippedNullDate} message(s) with a missing or unusable sent_at/received_at_ms; they cannot be placed on the sent_at cursor without fabricating a timestamp.`,
+			});
+		}
+		await emitMessageAnchorEvidence(emit, anchor, result, since, proveBackfill);
+		await emit({
+			type: "STATE",
+			stream: "messages",
+			cursor: {
+				last_sent_at_ms: result.latestMs,
+				// Union of what prior runs emitted and what this run emitted. This
+				// is what makes the backfill check a SET comparison rather than a
+				// count: without it there is no way to tell a below-watermark row
+				// we already have from one a re-link just introduced.
+				emitted_ids: mergeEmittedIds(priorEmittedIds, result.emittedIds),
+			},
+		});
+	}
 
-  if (emitReactions) {
-    await progress("Signal phase=emit pass=emit stream=reactions deriving from message json", { stream: "reactions" });
-    await emitReactionRowsFromMessages(result.reactionSourceRows, emitRecord);
-    await emit({ type: "STATE", stream: "reactions", cursor: { synced_at: new Date().toISOString() } });
-  }
+	if (emitReactions) {
+		await progress(
+			"Signal phase=emit pass=emit stream=reactions deriving from message json",
+			{ stream: "reactions" },
+		);
+		await emitReactionRowsFromMessages(result.reactionSourceRows, emitRecord);
+		await emit({
+			type: "STATE",
+			stream: "reactions",
+			cursor: { synced_at: new Date().toISOString() },
+		});
+	}
 }
 
-async function collectConversations(db: DatabaseSync, ctx: CollectContext): Promise<void> {
-  const { emit, emitRecord, progress } = ctx;
-  await progress("Signal phase=index pass=index stream=conversations querying rows", { stream: "conversations" });
-  try {
-    await emitConversationRows(db, emitRecord);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`signal_db_query_failed: ${msg}`, { cause: err });
-  }
-  await emit({ type: "STATE", stream: "conversations", cursor: { synced_at: new Date().toISOString() } });
+async function collectConversations(
+	db: DatabaseSync,
+	ctx: CollectContext,
+): Promise<void> {
+	const { emit, emitRecord, progress } = ctx;
+	await progress(
+		"Signal phase=index pass=index stream=conversations querying rows",
+		{ stream: "conversations" },
+	);
+	try {
+		await emitConversationRows(db, emitRecord);
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new Error(`signal_db_query_failed: ${msg}`, { cause: err });
+	}
+	await emit({
+		type: "STATE",
+		stream: "conversations",
+		cursor: { synced_at: new Date().toISOString() },
+	});
 }
 
-async function collectMessagesConversationsReactions(ctx: CollectContext): Promise<void> {
-  const { state, requested } = ctx;
-  const emitMessages = requested.has("messages");
-  const emitReactions = requested.has("reactions");
-  const emitConversationsStream = requested.has("conversations");
-  if (!(emitMessages || emitReactions || emitConversationsStream)) {
-    return;
-  }
-  await withExportedDatabase(async (db) => {
-    if (emitMessages || emitReactions) {
-      const messagesState = (state.messages ?? {}) as { emitted_ids?: unknown; last_sent_at_ms?: number };
-      const since = parseCursorMs(messagesState.last_sent_at_ms ?? 0);
-      const priorEmittedIds = parseEmittedIds(messagesState.emitted_ids);
-      // A legacy cursor carries a watermark but no emitted-id set. Every
-      // below-watermark id would then look "never emitted" — a false gap
-      // for rows prior runs genuinely did emit. Treat that first
-      // post-deploy run as unproven (skip the check, seed the set) rather
-      // than alarming. The run after it has a real set and checks properly.
-      const hasEmittedIdCursor = Array.isArray(messagesState.emitted_ids);
-      await collectMessagesAndReactions({
-        ctx,
-        db,
-        emitMessages,
-        emitReactions,
-        priorEmittedIds,
-        proveBackfill: since === 0 || hasEmittedIdCursor,
-        since,
-      });
-    }
-    if (emitConversationsStream) {
-      await collectConversations(db, ctx);
-    }
-  });
+async function collectMessagesConversationsReactions(
+	ctx: CollectContext,
+): Promise<void> {
+	const { state, requested } = ctx;
+	const emitMessages = requested.has("messages");
+	const emitReactions = requested.has("reactions");
+	const emitConversationsStream = requested.has("conversations");
+	if (!(emitMessages || emitReactions || emitConversationsStream)) {
+		return;
+	}
+	await withExportedDatabase(async (db) => {
+		if (emitMessages || emitReactions) {
+			const messagesState = (state.messages ?? {}) as {
+				emitted_ids?: unknown;
+				last_sent_at_ms?: number;
+			};
+			const since = parseCursorMs(messagesState.last_sent_at_ms ?? 0);
+			const priorEmittedIds = parseEmittedIds(messagesState.emitted_ids);
+			// A legacy cursor carries a watermark but no emitted-id set. Every
+			// below-watermark id would then look "never emitted" — a false gap
+			// for rows prior runs genuinely did emit. Treat that first
+			// post-deploy run as unproven (skip the check, seed the set) rather
+			// than alarming. The run after it has a real set and checks properly.
+			const hasEmittedIdCursor = Array.isArray(messagesState.emitted_ids);
+			await collectMessagesAndReactions({
+				ctx,
+				db,
+				emitMessages,
+				emitReactions,
+				priorEmittedIds,
+				proveBackfill: since === 0 || hasEmittedIdCursor,
+				since,
+			});
+		}
+		if (emitConversationsStream) {
+			await collectConversations(db, ctx);
+		}
+	});
 }
 
 async function runHealthCheck(ctx: CollectContext): Promise<void> {
-  await ctx.progress("Signal phase=index pass=index sigtop check-database", {});
-  const health = await runSigtop(["check-database"]);
-  if (health.code !== 0) {
-    throw new Error(
-      `signal_db_check_failed: sigtop check-database reported a problem: ${health.stderr.trim() || health.stdout.trim()}`
-    );
-  }
+	await ctx.progress("Signal phase=index pass=index sigtop check-database", {});
+	const health = await runSigtop(["check-database"]);
+	if (health.code !== 0) {
+		throw new Error(
+			`signal_db_check_failed: sigtop check-database reported a problem: ${health.stderr.trim() || health.stdout.trim()}`,
+		);
+	}
 }
 
 // Guarded so importing this module (e.g. from a unit test) never starts the
 // stdin-driven Collection Profile protocol loop — that only happens when
 // this file is the actual process entry point. See is-main-module.ts.
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "signal",
-    validateRecord,
-    async collect(ctx) {
-      await runHealthCheck(ctx);
-      await collectMessagesConversationsReactions(ctx);
-      if (ctx.requested.has("attachments")) {
-        await collectAttachments(ctx);
-      }
-    },
-  });
+	runConnector({
+		name: "signal",
+		validateRecord,
+		async collect(ctx) {
+			await runHealthCheck(ctx);
+			await collectMessagesConversationsReactions(ctx);
+			if (ctx.requested.has("attachments")) {
+				await collectAttachments(ctx);
+			}
+		},
+	});
 }

@@ -14,14 +14,23 @@
  */
 
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Download } from "playwright";
 
 export type PlaywrightDownloadLike = Pick<Download, "saveAs"> &
-  Partial<Pick<Download, "createReadStream" | "failure" | "suggestedFilename" | "url">>;
+	Partial<
+		Pick<Download, "createReadStream" | "failure" | "suggestedFilename" | "url">
+	>;
 
 /**
  * Diagnostic info captured while persisting a Playwright Download. Surfaced
@@ -31,22 +40,27 @@ export type PlaywrightDownloadLike = Pick<Download, "saveAs"> &
  * blind dead-end.
  */
 export interface PlaywrightDownloadOutcome {
-  bytes: number;
-  downloadFailure?: string | null;
-  saveAsError?: string;
-  source: "dataUrl" | "saveAs" | "createReadStream";
-  streamError?: string;
+	bytes: number;
+	downloadFailure?: string | null;
+	saveAsError?: string;
+	source: "dataUrl" | "saveAs" | "createReadStream";
+	streamError?: string;
 }
 
-export async function readPlaywrightDownloadBuffer(download: PlaywrightDownloadLike): Promise<Buffer> {
-  const tempDir = await mkdtemp(join(tmpdir(), "pdpp-playwright-download-"));
-  try {
-    const target = join(tempDir, download.suggestedFilename?.() || "download.bin");
-    await savePlaywrightDownload(download, target);
-    return await readFile(target);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
+export async function readPlaywrightDownloadBuffer(
+	download: PlaywrightDownloadLike,
+): Promise<Buffer> {
+	const tempDir = await mkdtemp(join(tmpdir(), "pdpp-playwright-download-"));
+	try {
+		const target = join(
+			tempDir,
+			download.suggestedFilename?.() || "download.bin",
+		);
+		await savePlaywrightDownload(download, target);
+		return await readFile(target);
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
 }
 
 /**
@@ -56,21 +70,27 @@ export async function readPlaywrightDownloadBuffer(download: PlaywrightDownloadL
  * export driver to surface `download_empty` evidence in the timeline.
  */
 export async function readPlaywrightDownloadBufferDetailed(
-  download: PlaywrightDownloadLike
+	download: PlaywrightDownloadLike,
 ): Promise<{ buffer: Buffer; outcome: PlaywrightDownloadOutcome }> {
-  const tempDir = await mkdtemp(join(tmpdir(), "pdpp-playwright-download-"));
-  try {
-    const target = join(tempDir, download.suggestedFilename?.() || "download.bin");
-    const outcome = await savePlaywrightDownloadDetailed(download, target);
-    const buffer = await readFile(target);
-    return { buffer, outcome: { ...outcome, bytes: buffer.length } };
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
+	const tempDir = await mkdtemp(join(tmpdir(), "pdpp-playwright-download-"));
+	try {
+		const target = join(
+			tempDir,
+			download.suggestedFilename?.() || "download.bin",
+		);
+		const outcome = await savePlaywrightDownloadDetailed(download, target);
+		const buffer = await readFile(target);
+		return { buffer, outcome: { ...outcome, bytes: buffer.length } };
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
 }
 
-export async function savePlaywrightDownload(download: PlaywrightDownloadLike, targetPath: string): Promise<void> {
-  await savePlaywrightDownloadDetailed(download, targetPath);
+export async function savePlaywrightDownload(
+	download: PlaywrightDownloadLike,
+	targetPath: string,
+): Promise<void> {
+	await savePlaywrightDownloadDetailed(download, targetPath);
 }
 
 /**
@@ -82,84 +102,90 @@ export async function savePlaywrightDownload(download: PlaywrightDownloadLike, t
  * driver was hitting under `download_empty`.
  */
 export async function savePlaywrightDownloadDetailed(
-  download: PlaywrightDownloadLike,
-  targetPath: string
+	download: PlaywrightDownloadLike,
+	targetPath: string,
 ): Promise<PlaywrightDownloadOutcome> {
-  await mkdir(dirname(targetPath), { recursive: true });
-  const dataUrlBuffer = readDownloadDataUrl(download);
-  if (dataUrlBuffer) {
-    await writeFile(targetPath, dataUrlBuffer);
-    return { bytes: dataUrlBuffer.length, source: "dataUrl" };
-  }
-  let saveAsError: string | undefined;
-  try {
-    await download.saveAs(targetPath);
-    const size = await statSize(targetPath);
-    if (size > 0) {
-      return { bytes: size, source: "saveAs" };
-    }
-    saveAsError = "saveAs_returned_zero_bytes";
-  } catch (saveErr) {
-    saveAsError = downloadErrorMessage(saveErr);
-  }
-  if (!download.createReadStream) {
-    const failure = download.failure ? await download.failure().catch((): null => null) : null;
-    throw new Error(`download.saveAs failed (${saveAsError})${failure ? `; download.failure=${failure}` : ""}`);
-  }
-  try {
-    const stream = await download.createReadStream();
-    await pipeline(stream, createWriteStream(targetPath));
-    const size = await statSize(targetPath);
-    return { bytes: size, source: "createReadStream", saveAsError };
-  } catch (streamErr) {
-    const failure = download.failure ? await download.failure().catch((): null => null) : null;
-    throw new Error(
-      `download.saveAs failed (${saveAsError}); createReadStream failed (${downloadErrorMessage(
-        streamErr
-      )})${failure ? `; download.failure=${failure}` : ""}`,
-      { cause: streamErr }
-    );
-  }
+	await mkdir(dirname(targetPath), { recursive: true });
+	const dataUrlBuffer = readDownloadDataUrl(download);
+	if (dataUrlBuffer) {
+		await writeFile(targetPath, dataUrlBuffer);
+		return { bytes: dataUrlBuffer.length, source: "dataUrl" };
+	}
+	let saveAsError: string | undefined;
+	try {
+		await download.saveAs(targetPath);
+		const size = await statSize(targetPath);
+		if (size > 0) {
+			return { bytes: size, source: "saveAs" };
+		}
+		saveAsError = "saveAs_returned_zero_bytes";
+	} catch (saveErr) {
+		saveAsError = downloadErrorMessage(saveErr);
+	}
+	if (!download.createReadStream) {
+		const failure = download.failure
+			? await download.failure().catch((): null => null)
+			: null;
+		throw new Error(
+			`download.saveAs failed (${saveAsError})${failure ? `; download.failure=${failure}` : ""}`,
+		);
+	}
+	try {
+		const stream = await download.createReadStream();
+		await pipeline(stream, createWriteStream(targetPath));
+		const size = await statSize(targetPath);
+		return { bytes: size, source: "createReadStream", saveAsError };
+	} catch (streamErr) {
+		const failure = download.failure
+			? await download.failure().catch((): null => null)
+			: null;
+		throw new Error(
+			`download.saveAs failed (${saveAsError}); createReadStream failed (${downloadErrorMessage(
+				streamErr,
+			)})${failure ? `; download.failure=${failure}` : ""}`,
+			{ cause: streamErr },
+		);
+	}
 }
 
 async function statSize(path: string): Promise<number> {
-  try {
-    const info = await stat(path);
-    return info.size;
-  } catch {
-    return 0;
-  }
+	try {
+		const info = await stat(path);
+		return info.size;
+	} catch {
+		return 0;
+	}
 }
 
 function downloadErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+	return err instanceof Error ? err.message : String(err);
 }
 
 function readDownloadDataUrl(download: PlaywrightDownloadLike): Buffer | null {
-  if (!download.url) {
-    return null;
-  }
-  let url: string;
-  try {
-    url = download.url();
-  } catch {
-    return null;
-  }
-  if (!url.startsWith("data:")) {
-    return null;
-  }
-  const commaIndex = url.indexOf(",");
-  if (commaIndex < 0) {
-    return null;
-  }
-  const metadata = url.slice("data:".length, commaIndex).toLowerCase();
-  const payload = url.slice(commaIndex + 1);
-  try {
-    if (metadata.split(";").includes("base64")) {
-      return Buffer.from(payload, "base64");
-    }
-    return Buffer.from(decodeURIComponent(payload), "utf8");
-  } catch {
-    return null;
-  }
+	if (!download.url) {
+		return null;
+	}
+	let url: string;
+	try {
+		url = download.url();
+	} catch {
+		return null;
+	}
+	if (!url.startsWith("data:")) {
+		return null;
+	}
+	const commaIndex = url.indexOf(",");
+	if (commaIndex < 0) {
+		return null;
+	}
+	const metadata = url.slice("data:".length, commaIndex).toLowerCase();
+	const payload = url.slice(commaIndex + 1);
+	try {
+		if (metadata.split(";").includes("base64")) {
+			return Buffer.from(payload, "base64");
+		}
+		return Buffer.from(decodeURIComponent(payload), "utf8");
+	} catch {
+		return null;
+	}
 }

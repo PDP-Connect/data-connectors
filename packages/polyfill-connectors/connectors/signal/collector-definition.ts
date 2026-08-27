@@ -33,7 +33,12 @@
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
 
-export const SIGNAL_DEFAULT_STREAMS = ["messages", "conversations", "reactions", "attachments"] as const;
+export const SIGNAL_DEFAULT_STREAMS = [
+	"messages",
+	"conversations",
+	"reactions",
+	"attachments",
+] as const;
 
 /**
  * Only `messages` declares a `consent_time_field` (`sent_at`). Conversations
@@ -44,9 +49,9 @@ export const SIGNAL_DEFAULT_STREAMS = ["messages", "conversations", "reactions",
 export const SIGNAL_TIME_SCOPABLE_STREAMS = ["messages"] as const;
 
 export const signalCollectorDefinition: LocalCollectorDefinition = {
-  connector_id: "signal",
-  entry: "signal",
-  bindings: { filesystem: { required: true } },
-  streams: SIGNAL_DEFAULT_STREAMS,
-  time_scopable_streams: SIGNAL_TIME_SCOPABLE_STREAMS,
+	connector_id: "signal",
+	entry: "signal",
+	bindings: { filesystem: { required: true } },
+	streams: SIGNAL_DEFAULT_STREAMS,
+	time_scopable_streams: SIGNAL_TIME_SCOPABLE_STREAMS,
 };

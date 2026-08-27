@@ -57,21 +57,23 @@ const TWO_DIGIT_SEGMENT = /^\d{2}$/;
 
 /** The owner-declared boundary, as connectors consume it. */
 export interface EnumerationScope {
-  readonly since?: string | null;
-  readonly source_roots?: readonly string[] | null;
+	readonly since?: string | null;
+	readonly source_roots?: readonly string[] | null;
 }
 
-function normalizeRoots(roots: readonly string[] | null | undefined): readonly string[] {
-  if (!Array.isArray(roots)) {
-    return [];
-  }
-  const out = new Set<string>();
-  for (const root of roots) {
-    if (typeof root === "string" && root.trim()) {
-      out.add(root.trim());
-    }
-  }
-  return [...out];
+function normalizeRoots(
+	roots: readonly string[] | null | undefined,
+): readonly string[] {
+	if (!Array.isArray(roots)) {
+		return [];
+	}
+	const out = new Set<string>();
+	for (const root of roots) {
+		if (typeof root === "string" && root.trim()) {
+			out.add(root.trim());
+		}
+	}
+	return [...out];
 }
 
 /**
@@ -90,19 +92,19 @@ function normalizeRoots(roots: readonly string[] | null | undefined): readonly s
  * can never climb above its own first segment and widen itself.
  */
 function segments(value: string): string[] {
-  const parts = value
-    .split(PATH_SEPARATORS)
-    .flatMap((part) => part.split(sep))
-    .filter((part) => part.length > 0 && part !== ".");
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (part === "..") {
-      resolved.pop();
-      continue;
-    }
-    resolved.push(part);
-  }
-  return resolved;
+	const parts = value
+		.split(PATH_SEPARATORS)
+		.flatMap((part) => part.split(sep))
+		.filter((part) => part.length > 0 && part !== ".");
+	const resolved: string[] = [];
+	for (const part of parts) {
+		if (part === "..") {
+			resolved.pop();
+			continue;
+		}
+		resolved.push(part);
+	}
+	return resolved;
 }
 
 /**
@@ -113,19 +115,22 @@ function segments(value: string): string[] {
  * "is this leaf selected" should use {@link isPathWithinSourceRoots}, which does
  * not admit parents.
  */
-export function pathContainsOrIsWithin(root: string, candidate: string): boolean {
-  const rootParts = segments(root);
-  const candidateParts = segments(candidate);
-  if (rootParts.length === 0) {
-    return true;
-  }
-  const shared = Math.min(rootParts.length, candidateParts.length);
-  for (let i = 0; i < shared; i += 1) {
-    if (rootParts[i] !== candidateParts[i]) {
-      return false;
-    }
-  }
-  return true;
+export function pathContainsOrIsWithin(
+	root: string,
+	candidate: string,
+): boolean {
+	const rootParts = segments(root);
+	const candidateParts = segments(candidate);
+	if (rootParts.length === 0) {
+		return true;
+	}
+	const shared = Math.min(rootParts.length, candidateParts.length);
+	for (let i = 0; i < shared; i += 1) {
+		if (rootParts[i] !== candidateParts[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /**
@@ -135,19 +140,22 @@ export function pathContainsOrIsWithin(root: string, candidate: string): boolean
  * boundary. A path that merely CONTAINS a root (i.e. is an ancestor of it) is
  * not itself selected; use {@link shouldDescendIntoDirectory} while walking.
  */
-export function isPathWithinSourceRoots(candidate: string, scope: EnumerationScope | null | undefined): boolean {
-  const roots = normalizeRoots(scope?.source_roots);
-  if (roots.length === 0) {
-    return true;
-  }
-  const candidateParts = segments(candidate);
-  return roots.some((root) => {
-    const rootParts = segments(root);
-    if (rootParts.length > candidateParts.length) {
-      return false;
-    }
-    return rootParts.every((part, i) => part === candidateParts[i]);
-  });
+export function isPathWithinSourceRoots(
+	candidate: string,
+	scope: EnumerationScope | null | undefined,
+): boolean {
+	const roots = normalizeRoots(scope?.source_roots);
+	if (roots.length === 0) {
+		return true;
+	}
+	const candidateParts = segments(candidate);
+	return roots.some((root) => {
+		const rootParts = segments(root);
+		if (rootParts.length > candidateParts.length) {
+			return false;
+		}
+		return rootParts.every((part, i) => part === candidateParts[i]);
+	});
 }
 
 /**
@@ -157,12 +165,19 @@ export function isPathWithinSourceRoots(candidate: string, scope: EnumerationSco
  * to one. Everything else is pruned before its contents are ever listed, which
  * is where the I/O saving actually comes from.
  */
-export function shouldDescendIntoDirectory(directory: string, scope: EnumerationScope | null | undefined): boolean {
-  const roots = normalizeRoots(scope?.source_roots);
-  if (roots.length === 0) {
-    return true;
-  }
-  return roots.some((root) => pathContainsOrIsWithin(root, directory) || pathContainsOrIsWithin(directory, root));
+export function shouldDescendIntoDirectory(
+	directory: string,
+	scope: EnumerationScope | null | undefined,
+): boolean {
+	const roots = normalizeRoots(scope?.source_roots);
+	if (roots.length === 0) {
+		return true;
+	}
+	return roots.some(
+		(root) =>
+			pathContainsOrIsWithin(root, directory) ||
+			pathContainsOrIsWithin(directory, root),
+	);
 }
 
 /**
@@ -201,56 +216,60 @@ export function shouldDescendIntoDirectory(directory: string, scope: Enumeration
  * fail-open contract (never silently exclude data).
  */
 function previousCalendarDay(day: string): string {
-  const ms = Date.parse(`${day}T00:00:00.000Z`);
-  if (Number.isNaN(ms)) {
-    return day;
-  }
-  return new Date(ms - 86_400_000).toISOString().slice(0, 10);
+	const ms = Date.parse(`${day}T00:00:00.000Z`);
+	if (Number.isNaN(ms)) {
+		return day;
+	}
+	return new Date(ms - 86_400_000).toISOString().slice(0, 10);
 }
 
 export function dateDirectoryInRange(
-  parts: { readonly day?: string | null; readonly month?: string | null; readonly year: string },
-  scope: EnumerationScope | null | undefined
+	parts: {
+		readonly day?: string | null;
+		readonly month?: string | null;
+		readonly year: string;
+	},
+	scope: EnumerationScope | null | undefined,
 ): boolean {
-  const since = typeof scope?.since === "string" ? scope.since.trim() : "";
-  if (!since) {
-    return true;
-  }
-  const declaredDay = since.slice(0, 10);
-  if (!ISO_DATE.test(declaredDay)) {
-    return true;
-  }
-  // Widen by one calendar day (see the timezone note above): the directory day
-  // is local, the records are UTC, so a directory named D-1 can still hold a
-  // record at or after a boundary falling on D.
-  const boundary = previousCalendarDay(declaredDay);
-  const year = parts.year.trim();
-  if (!YEAR_SEGMENT.test(year)) {
-    return true;
-  }
-  if (year !== boundary.slice(0, 4)) {
-    return year > boundary.slice(0, 4);
-  }
-  const month = parts.month?.trim();
-  if (!month) {
-    return true;
-  }
-  if (!TWO_DIGIT_SEGMENT.test(month)) {
-    return true;
-  }
-  if (month !== boundary.slice(5, 7)) {
-    return month > boundary.slice(5, 7);
-  }
-  const day = parts.day?.trim();
-  if (!day) {
-    return true;
-  }
-  if (!TWO_DIGIT_SEGMENT.test(day)) {
-    return true;
-  }
-  // The boundary day itself straddles the instant, so it is never pruned;
-  // `boundary` is already one day earlier than declared, per the timezone note.
-  return day >= boundary.slice(8, 10);
+	const since = typeof scope?.since === "string" ? scope.since.trim() : "";
+	if (!since) {
+		return true;
+	}
+	const declaredDay = since.slice(0, 10);
+	if (!ISO_DATE.test(declaredDay)) {
+		return true;
+	}
+	// Widen by one calendar day (see the timezone note above): the directory day
+	// is local, the records are UTC, so a directory named D-1 can still hold a
+	// record at or after a boundary falling on D.
+	const boundary = previousCalendarDay(declaredDay);
+	const year = parts.year.trim();
+	if (!YEAR_SEGMENT.test(year)) {
+		return true;
+	}
+	if (year !== boundary.slice(0, 4)) {
+		return year > boundary.slice(0, 4);
+	}
+	const month = parts.month?.trim();
+	if (!month) {
+		return true;
+	}
+	if (!TWO_DIGIT_SEGMENT.test(month)) {
+		return true;
+	}
+	if (month !== boundary.slice(5, 7)) {
+		return month > boundary.slice(5, 7);
+	}
+	const day = parts.day?.trim();
+	if (!day) {
+		return true;
+	}
+	if (!TWO_DIGIT_SEGMENT.test(day)) {
+		return true;
+	}
+	// The boundary day itself straddles the instant, so it is never pruned;
+	// `boundary` is already one day earlier than declared, per the timezone note.
+	return day >= boundary.slice(8, 10);
 }
 
 /**
@@ -281,40 +300,46 @@ export function dateDirectoryInRange(
  * The match is still segment-anchored — `pdpp` does not select `pdpp-secrets` —
  * because the encoded form is compared on `-` boundaries, not by substring.
  */
-export function projectDirMatchesSourceRoots(projectDir: string, scope: EnumerationScope | null | undefined): boolean {
-  const roots = normalizeRoots(scope?.source_roots);
-  if (roots.length === 0) {
-    return true;
-  }
-  return roots.some((root) => {
-    const parts = segments(root);
-    if (parts.length === 0) {
-      return true;
-    }
-    // Absolute/multi-segment roots: compare against both flattened encodings,
-    // anchored at a `-` boundary so a sibling with a longer name cannot match.
-    const dotFolded = `-${parts.join("-").replace(/\./g, "-")}`;
-    const dotKept = `-${parts.join("-")}`;
-    for (const encoded of new Set([dotFolded, dotKept])) {
-      if (projectDir === encoded || projectDir.startsWith(`${encoded}-`)) {
-        return true;
-      }
-    }
-    // Bare single-segment root: accept it only as the FINAL segment of the
-    // flattened name.
-    //
-    // It cannot also match mid-name. `-` is ambiguous — it encodes a path
-    // separator AND occurs inside real directory names — so `-proj-secrets` is
-    // indistinguishable from the project `/…/proj/secrets` and the project
-    // `/…/proj-secrets`. Treating a mid-name `-proj-` as a match would select
-    // `proj-secrets` whenever the owner asked for `proj`, silently widening
-    // their boundary. Requiring the final segment is the reading that can never
-    // over-select; an owner who means a nested project can name its full path.
-    if (parts.length === 1 && !(root.includes("/") || root.includes("\\") || root.includes(sep))) {
-      return projectDir.endsWith(`-${parts[0]}`);
-    }
-    return false;
-  });
+export function projectDirMatchesSourceRoots(
+	projectDir: string,
+	scope: EnumerationScope | null | undefined,
+): boolean {
+	const roots = normalizeRoots(scope?.source_roots);
+	if (roots.length === 0) {
+		return true;
+	}
+	return roots.some((root) => {
+		const parts = segments(root);
+		if (parts.length === 0) {
+			return true;
+		}
+		// Absolute/multi-segment roots: compare against both flattened encodings,
+		// anchored at a `-` boundary so a sibling with a longer name cannot match.
+		const dotFolded = `-${parts.join("-").replace(/\./g, "-")}`;
+		const dotKept = `-${parts.join("-")}`;
+		for (const encoded of new Set([dotFolded, dotKept])) {
+			if (projectDir === encoded || projectDir.startsWith(`${encoded}-`)) {
+				return true;
+			}
+		}
+		// Bare single-segment root: accept it only as the FINAL segment of the
+		// flattened name.
+		//
+		// It cannot also match mid-name. `-` is ambiguous — it encodes a path
+		// separator AND occurs inside real directory names — so `-proj-secrets` is
+		// indistinguishable from the project `/…/proj/secrets` and the project
+		// `/…/proj-secrets`. Treating a mid-name `-proj-` as a match would select
+		// `proj-secrets` whenever the owner asked for `proj`, silently widening
+		// their boundary. Requiring the final segment is the reading that can never
+		// over-select; an owner who means a nested project can name its full path.
+		if (
+			parts.length === 1 &&
+			!(root.includes("/") || root.includes("\\") || root.includes(sep))
+		) {
+			return projectDir.endsWith(`-${parts[0]}`);
+		}
+		return false;
+	});
 }
 
 /**
@@ -327,18 +352,20 @@ export function projectDirMatchesSourceRoots(projectDir: string, scope: Enumerat
  * silently invalidate valid proof or validate stale proof. `unscoped` is a real
  * value: a full pass is a declared boundary too.
  */
-export function enumerationScopeFingerprint(scope: EnumerationScope | null | undefined): string {
-  const since = typeof scope?.since === "string" ? scope.since.trim() : "";
-  const validSince = since && !Number.isNaN(Date.parse(since)) ? since : "";
-  const roots = normalizeRoots(scope?.source_roots).slice().sort();
-  const parts: string[] = [];
-  if (validSince) {
-    parts.push(`since=${validSince}`);
-  }
-  if (roots.length > 0) {
-    parts.push(`roots=${roots.join(",")}`);
-  }
-  return parts.length > 0 ? parts.join(";") : "unscoped";
+export function enumerationScopeFingerprint(
+	scope: EnumerationScope | null | undefined,
+): string {
+	const since = typeof scope?.since === "string" ? scope.since.trim() : "";
+	const validSince = since && !Number.isNaN(Date.parse(since)) ? since : "";
+	const roots = normalizeRoots(scope?.source_roots).slice().sort();
+	const parts: string[] = [];
+	if (validSince) {
+		parts.push(`since=${validSince}`);
+	}
+	if (roots.length > 0) {
+		parts.push(`roots=${roots.join(",")}`);
+	}
+	return parts.length > 0 ? parts.join(";") : "unscoped";
 }
 
 /**
@@ -347,12 +374,14 @@ export function enumerationScopeFingerprint(scope: EnumerationScope | null | und
  * Lets a connector report honestly that a run was enumeration-bounded rather
  * than merely emission-filtered — the distinction this whole module exists for.
  */
-export function scopeBoundsEnumeration(scope: EnumerationScope | null | undefined): boolean {
-  if (!scope) {
-    return false;
-  }
-  const since = typeof scope.since === "string" ? scope.since.trim() : "";
-  return normalizeRoots(scope.source_roots).length > 0 || since.length > 0;
+export function scopeBoundsEnumeration(
+	scope: EnumerationScope | null | undefined,
+): boolean {
+	if (!scope) {
+		return false;
+	}
+	const since = typeof scope.since === "string" ? scope.since.trim() : "";
+	return normalizeRoots(scope.source_roots).length > 0 || since.length > 0;
 }
 
 /**
@@ -365,24 +394,30 @@ export function scopeBoundsEnumeration(scope: EnumerationScope | null | undefine
  * `time_range` on the same scope entry.
  */
 export function readEnumerationScope(
-  requested: ReadonlyMap<string, { readonly source_roots?: unknown; readonly time_range?: { since?: string } }>,
-  streams: readonly string[]
+	requested: ReadonlyMap<
+		string,
+		{
+			readonly source_roots?: unknown;
+			readonly time_range?: { since?: string };
+		}
+	>,
+	streams: readonly string[],
 ): EnumerationScope | null {
-  for (const stream of streams) {
-    const scope = requested.get(stream);
-    if (!scope) {
-      continue;
-    }
-    const since = scope.time_range?.since;
-    const roots = Array.isArray(scope.source_roots)
-      ? scope.source_roots.filter((r): r is string => typeof r === "string")
-      : [];
-    if ((typeof since === "string" && since) || roots.length > 0) {
-      return {
-        ...(typeof since === "string" && since ? { since } : {}),
-        ...(roots.length > 0 ? { source_roots: roots } : {}),
-      };
-    }
-  }
-  return null;
+	for (const stream of streams) {
+		const scope = requested.get(stream);
+		if (!scope) {
+			continue;
+		}
+		const since = scope.time_range?.since;
+		const roots = Array.isArray(scope.source_roots)
+			? scope.source_roots.filter((r): r is string => typeof r === "string")
+			: [];
+		if ((typeof since === "string" && since) || roots.length > 0) {
+			return {
+				...(typeof since === "string" && since ? { since } : {}),
+				...(roots.length > 0 ? { source_roots: roots } : {}),
+			};
+		}
+	}
+	return null;
 }

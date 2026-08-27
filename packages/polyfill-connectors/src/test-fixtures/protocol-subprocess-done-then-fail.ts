@@ -3,5 +3,7 @@
 
 import { stringifyForJsonl } from "@pdpp/connector-protocol";
 
-process.stdout.write(stringifyForJsonl({ type: "DONE", status: "succeeded", records_emitted: 0 }));
+process.stdout.write(
+	stringifyForJsonl({ type: "DONE", status: "succeeded", records_emitted: 0 }),
+);
 process.exit(1);

@@ -31,14 +31,18 @@
  */
 
 export type BoundedReadOutcome =
-  | { kind: "ok"; text: string }
-  | { kind: "content_length_exceeded"; declaredBytes: number; maxBytes: number }
-  | { kind: "content_length_missing_stream_exceeded"; maxBytes: number }
-  | { kind: "content_length_understated_stream_exceeded"; declaredBytes: number; maxBytes: number };
+	| { kind: "ok"; text: string }
+	| { kind: "content_length_exceeded"; declaredBytes: number; maxBytes: number }
+	| { kind: "content_length_missing_stream_exceeded"; maxBytes: number }
+	| {
+			kind: "content_length_understated_stream_exceeded";
+			declaredBytes: number;
+			maxBytes: number;
+	  };
 
 export interface BoundedReadableResponse {
-  body: ReadableStream<Uint8Array> | null;
-  headers: { get: (name: string) => string | null };
+	body: ReadableStream<Uint8Array> | null;
+	headers: { get: (name: string) => string | null };
 }
 
 const CONTENT_LENGTH_DIGITS_RE = /^\d+$/;
@@ -49,15 +53,15 @@ const CONTENT_LENGTH_DIGITS_RE = /^\d+$/;
  *  the caller, which is the safe direction (falls through to the streaming
  *  guard rather than trusting a malformed declaration). */
 function parseContentLength(raw: string | null): number | null {
-  if (raw === null) {
-    return null;
-  }
-  const trimmed = raw.trim();
-  if (!CONTENT_LENGTH_DIGITS_RE.test(trimmed)) {
-    return null;
-  }
-  const value = Number(trimmed);
-  return Number.isSafeInteger(value) ? value : null;
+	if (raw === null) {
+		return null;
+	}
+	const trimmed = raw.trim();
+	if (!CONTENT_LENGTH_DIGITS_RE.test(trimmed)) {
+		return null;
+	}
+	const value = Number(trimmed);
+	return Number.isSafeInteger(value) ? value : null;
 }
 
 /**
@@ -68,55 +72,66 @@ function parseContentLength(raw: string | null): number | null {
  * of overrun before the cap trips, since chunk boundaries aren't caller
  * controlled) before returning a rejection.
  */
-export async function readBoundedText(res: BoundedReadableResponse, maxBytes: number): Promise<BoundedReadOutcome> {
-  const declaredBytes = parseContentLength(res.headers.get("content-length"));
-  if (declaredBytes !== null && declaredBytes > maxBytes) {
-    return { kind: "content_length_exceeded", declaredBytes, maxBytes };
-  }
+export async function readBoundedText(
+	res: BoundedReadableResponse,
+	maxBytes: number,
+): Promise<BoundedReadOutcome> {
+	const declaredBytes = parseContentLength(res.headers.get("content-length"));
+	if (declaredBytes !== null && declaredBytes > maxBytes) {
+		return { kind: "content_length_exceeded", declaredBytes, maxBytes };
+	}
 
-  if (!res.body) {
-    return { kind: "ok", text: "" };
-  }
+	if (!res.body) {
+		return { kind: "ok", text: "" };
+	}
 
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      total += value.length;
-      if (total > maxBytes) {
-        return declaredBytes === null
-          ? { kind: "content_length_missing_stream_exceeded", maxBytes }
-          : { kind: "content_length_understated_stream_exceeded", declaredBytes, maxBytes };
-      }
-      chunks.push(value);
-    }
-  } finally {
-    // Release the reader lock and cancel any remaining backpressure so a
-    // rejected (oversized) body doesn't keep pulling bytes off the wire.
-    reader.releaseLock();
-    await res.body.cancel().catch((): undefined => undefined);
-  }
+	const reader = res.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			total += value.length;
+			if (total > maxBytes) {
+				return declaredBytes === null
+					? { kind: "content_length_missing_stream_exceeded", maxBytes }
+					: {
+							kind: "content_length_understated_stream_exceeded",
+							declaredBytes,
+							maxBytes,
+						};
+			}
+			chunks.push(value);
+		}
+	} finally {
+		// Release the reader lock and cancel any remaining backpressure so a
+		// rejected (oversized) body doesn't keep pulling bytes off the wire.
+		reader.releaseLock();
+		await res.body.cancel().catch((): undefined => undefined);
+	}
 
-  const buffer = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)));
-  return { kind: "ok", text: buffer.toString("utf8") };
+	const buffer = Buffer.concat(
+		chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)),
+	);
+	return { kind: "ok", text: buffer.toString("utf8") };
 }
 
 /** Human-readable summary for a rejected outcome, safe to include in a
  *  thrown error message — carries no response body content, only sizes. */
-export function describeBoundedReadRejection(outcome: Exclude<BoundedReadOutcome, { kind: "ok" }>): string {
-  switch (outcome.kind) {
-    case "content_length_exceeded":
-      return `declared Content-Length ${String(outcome.declaredBytes)} exceeds cap ${String(outcome.maxBytes)}`;
-    case "content_length_missing_stream_exceeded":
-      return `response body exceeded cap ${String(outcome.maxBytes)} with no Content-Length header`;
-    case "content_length_understated_stream_exceeded":
-      return `response body exceeded cap ${String(outcome.maxBytes)} (declared Content-Length ${String(outcome.declaredBytes)} understated the real size)`;
-    default:
-      return "response body exceeded the size cap";
-  }
+export function describeBoundedReadRejection(
+	outcome: Exclude<BoundedReadOutcome, { kind: "ok" }>,
+): string {
+	switch (outcome.kind) {
+		case "content_length_exceeded":
+			return `declared Content-Length ${String(outcome.declaredBytes)} exceeds cap ${String(outcome.maxBytes)}`;
+		case "content_length_missing_stream_exceeded":
+			return `response body exceeded cap ${String(outcome.maxBytes)} with no Content-Length header`;
+		case "content_length_understated_stream_exceeded":
+			return `response body exceeded cap ${String(outcome.maxBytes)} (declared Content-Length ${String(outcome.declaredBytes)} understated the real size)`;
+		default:
+			return "response body exceeded the size cap";
+	}
 }

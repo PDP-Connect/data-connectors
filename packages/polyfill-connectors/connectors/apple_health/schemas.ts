@@ -45,25 +45,29 @@ const APPLE_HEALTH_ID_RE = /^[0-9a-f]{24}$/; // hashId: 24-char sha256 hex slice
 // isoDate => new Date(v).toISOString() => always ...T..:..:...sssZ.
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-const appleHealthIdSchema = z.string().regex(APPLE_HEALTH_ID_RE, "must be a 24-char hex Apple Health record id");
-const isoDateTimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const appleHealthIdSchema = z
+	.string()
+	.regex(APPLE_HEALTH_ID_RE, "must be a 24-char hex Apple Health record id");
+const isoDateTimeSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 
 /**
  * records stream: one record per HKRecord element with a parseable startDate.
  * Cursor: start_date (last_start_date).
  */
 export const recordsSchema = z.object({
-  id: appleHealthIdSchema,
-  type: z.string().min(1).max(200),
-  source_name: z.string().min(1).max(500).nullable(),
-  source_version: z.string().min(1).max(200).nullable(),
-  unit: z.string().min(1).max(100).nullable(),
-  // float-capable (heart rate, body mass, etc.) — not .int(). zod's z.number()
-  // already rejects NaN/Infinity, matching the builder's `Number.isFinite` gate.
-  value: z.number().nullable(),
-  value_raw: z.string().min(1).max(500).nullable(),
-  start_date: isoDateTimeSchema,
-  end_date: isoDateTimeSchema.nullable(),
+	id: appleHealthIdSchema,
+	type: z.string().min(1).max(200),
+	source_name: z.string().min(1).max(500).nullable(),
+	source_version: z.string().min(1).max(200).nullable(),
+	unit: z.string().min(1).max(100).nullable(),
+	// float-capable (heart rate, body mass, etc.) — not .int(). zod's z.number()
+	// already rejects NaN/Infinity, matching the builder's `Number.isFinite` gate.
+	value: z.number().nullable(),
+	value_raw: z.string().min(1).max(500).nullable(),
+	start_date: isoDateTimeSchema,
+	end_date: isoDateTimeSchema.nullable(),
 });
 
 /**
@@ -71,22 +75,22 @@ export const recordsSchema = z.object({
  * Cursor: start_date (last_start_date).
  */
 export const workoutsSchema = z.object({
-  id: appleHealthIdSchema,
-  workout_activity_type: z.string().min(1).max(200).nullable(),
-  duration_minutes: z.number().min(0).nullable(),
-  total_energy_burned_kcal: z.number().min(0).nullable(),
-  total_distance_km: z.number().min(0).nullable(),
-  source_name: z.string().min(1).max(500).nullable(),
-  start_date: isoDateTimeSchema,
-  end_date: isoDateTimeSchema.nullable(),
+	id: appleHealthIdSchema,
+	workout_activity_type: z.string().min(1).max(200).nullable(),
+	duration_minutes: z.number().min(0).nullable(),
+	total_energy_burned_kcal: z.number().min(0).nullable(),
+	total_distance_km: z.number().min(0).nullable(),
+	source_name: z.string().min(1).max(500).nullable(),
+	start_date: isoDateTimeSchema,
+	end_date: isoDateTimeSchema.nullable(),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  records: recordsSchema,
-  workouts: workoutsSchema,
+	records: recordsSchema,
+	workouts: workoutsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

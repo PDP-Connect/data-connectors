@@ -40,14 +40,17 @@ const nonNegativeIntSchema = z.number().int().min(0).nullable();
  * manifest); tighten to its real shape when extraction lands.
  */
 export const videosSchema = z.object({
-  id: z.string().min(1).max(128),
-  title: pdppSafeText.max(1000).nullable(),
-  description: pdppSafeText.max(65_000).nullable(),
-  duration_seconds: nonNegativeIntSchema,
-  view_count: nonNegativeIntSchema,
-  created_at: z.string().regex(ISO_DT_RE, "created_at must be an ISO-8601 datetime").nullable(),
-  share_url: z.url().max(4096).nullable(),
-  has_transcript: z.boolean().nullable(),
+	id: z.string().min(1).max(128),
+	title: pdppSafeText.max(1000).nullable(),
+	description: pdppSafeText.max(65_000).nullable(),
+	duration_seconds: nonNegativeIntSchema,
+	view_count: nonNegativeIntSchema,
+	created_at: z
+		.string()
+		.regex(ISO_DT_RE, "created_at must be an ISO-8601 datetime")
+		.nullable(),
+	share_url: z.url().max(4096).nullable(),
+	has_transcript: z.boolean().nullable(),
 });
 
 /**
@@ -55,9 +58,9 @@ export const videosSchema = z.object({
  * `text` is the full transcript body → pdppSafeText (large allowed).
  */
 export const transcriptsSchema = z.object({
-  id: z.string().min(1).max(160),
-  video_id: z.string().min(1).max(128),
-  text: pdppSafeText.max(10_000_000).nullable(),
+	id: z.string().min(1).max(160),
+	video_id: z.string().min(1).max(128),
+	text: pdppSafeText.max(10_000_000).nullable(),
 });
 
 /**
@@ -65,8 +68,8 @@ export const transcriptsSchema = z.object({
  * connector declares (and will emit once extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  videos: videosSchema,
-  transcripts: transcriptsSchema,
+	videos: videosSchema,
+	transcripts: transcriptsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

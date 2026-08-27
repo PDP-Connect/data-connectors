@@ -19,7 +19,10 @@
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ReconcileReport, reconcileFromDisk } from "../src/manifest-reconcile.ts";
+import {
+	type ReconcileReport,
+	reconcileFromDisk,
+} from "../src/manifest-reconcile.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, "..");
@@ -31,63 +34,65 @@ const JSON_EXT_RE = /\.json$/;
  *  match in every case so far; this exists so future divergence has a
  *  single place to encode. */
 function connectorDirFor(manifestName: string): string {
-  return manifestName;
+	return manifestName;
 }
 
 /** Return paths the emit-scanner should read for a connector. We include
  *  index.ts and parsers.ts when they exist; everything else under the
  *  connector dir is left out to keep the scan fast and predictable. */
 function emitSourcePathsFor(connectorDir: string): string[] {
-  const candidates = ["index.ts", "parsers.ts"];
-  return candidates.map((f) => join(connectorDir, f)).filter(existsSync);
+	const candidates = ["index.ts", "parsers.ts"];
+	return candidates.map((f) => join(connectorDir, f)).filter(existsSync);
 }
 
 function listManifestNames(): string[] {
-  return readdirSync(MANIFEST_DIR)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => f.replace(JSON_EXT_RE, ""))
-    .sort();
+	return readdirSync(MANIFEST_DIR)
+		.filter((f) => f.endsWith(".json"))
+		.map((f) => f.replace(JSON_EXT_RE, ""))
+		.sort();
 }
 
 function listSchemaConnectorNames(): string[] {
-  return readdirSync(CONNECTORS_DIR)
-    .filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
-    .sort();
+	return readdirSync(CONNECTORS_DIR)
+		.filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
+		.sort();
 }
 
 function buildReport(name: string): ReconcileReport | null {
-  const dir = join(CONNECTORS_DIR, connectorDirFor(name));
-  if (!existsSync(dir)) {
-    return null;
-  }
-  const schemaPath = join(dir, "schemas.ts");
-  return reconcileFromDisk({
-    connector: name,
-    manifestPath: join(MANIFEST_DIR, `${name}.json`),
-    schemaPath: existsSync(schemaPath) ? schemaPath : null,
-    emitSourcePaths: emitSourcePathsFor(dir),
-  });
+	const dir = join(CONNECTORS_DIR, connectorDirFor(name));
+	if (!existsSync(dir)) {
+		return null;
+	}
+	const schemaPath = join(dir, "schemas.ts");
+	return reconcileFromDisk({
+		connector: name,
+		manifestPath: join(MANIFEST_DIR, `${name}.json`),
+		schemaPath: existsSync(schemaPath) ? schemaPath : null,
+		emitSourcePaths: emitSourcePathsFor(dir),
+	});
 }
 
 function printReport(r: ReconcileReport): void {
-  const flag = r.ok ? "✓" : "✖";
-  console.log(`${flag} ${r.connector}`);
-  console.log(`    manifest:   [${r.declared.join(", ")}]`);
-  console.log(`    schema:     [${r.registered.join(", ")}]`);
-  console.log(`    emitted:    [${r.emitted.join(", ")}]`);
-  if (r.missing_manifest.length > 0) {
-    console.log(`    ✖ emitted but undeclared: ${r.missing_manifest.join(", ")}`);
-  }
-  if (r.missing_schema.length > 0) {
-    console.log(`    ✖ emitted without schema: ${r.missing_schema.join(", ")}`);
-  }
-  if (r.missing_emit.length > 0) {
-    console.log(`    ✖ declared but unfilled:  ${r.missing_emit.join(", ")}`);
-  }
+	const flag = r.ok ? "✓" : "✖";
+	console.log(`${flag} ${r.connector}`);
+	console.log(`    manifest:   [${r.declared.join(", ")}]`);
+	console.log(`    schema:     [${r.registered.join(", ")}]`);
+	console.log(`    emitted:    [${r.emitted.join(", ")}]`);
+	if (r.missing_manifest.length > 0) {
+		console.log(
+			`    ✖ emitted but undeclared: ${r.missing_manifest.join(", ")}`,
+		);
+	}
+	if (r.missing_schema.length > 0) {
+		console.log(`    ✖ emitted without schema: ${r.missing_schema.join(", ")}`);
+	}
+	if (r.missing_emit.length > 0) {
+		console.log(`    ✖ declared but unfilled:  ${r.missing_emit.join(", ")}`);
+	}
 }
 
 function printUsage(): void {
-  console.log(`Usage:
+	console.log(`Usage:
   pnpm exec tsx bin/reconcile-manifests.ts [--all] [connector ...]
 
 Default:
@@ -100,39 +105,43 @@ Options:
 }
 
 function parseTargets(argv: string[]): string[] | null {
-  if (argv.includes("--help") || argv.includes("-h")) {
-    printUsage();
-    return null;
-  }
-  const includeAll = argv.includes("--all");
-  const targets = argv.filter((arg) => arg !== "--all");
-  if (targets.length > 0) {
-    return targets;
-  }
-  return includeAll ? listManifestNames() : listSchemaConnectorNames();
+	if (argv.includes("--help") || argv.includes("-h")) {
+		printUsage();
+		return null;
+	}
+	const includeAll = argv.includes("--all");
+	const targets = argv.filter((arg) => arg !== "--all");
+	if (targets.length > 0) {
+		return targets;
+	}
+	return includeAll ? listManifestNames() : listSchemaConnectorNames();
 }
 
 function main(): void {
-  const targets = parseTargets(process.argv.slice(2));
-  if (targets === null) {
-    return;
-  }
-  let totalDrift = 0;
-  for (const name of targets) {
-    const r = buildReport(name);
-    if (r === null) {
-      console.log(`# ${name} — manifest exists but no connectors/${name}/ dir; skipping`);
-      continue;
-    }
-    printReport(r);
-    if (!r.ok) {
-      totalDrift += 1;
-    }
-  }
-  console.log(`\n${targets.length} connectors checked, ${totalDrift} with drift`);
-  if (totalDrift > 0) {
-    process.exit(1);
-  }
+	const targets = parseTargets(process.argv.slice(2));
+	if (targets === null) {
+		return;
+	}
+	let totalDrift = 0;
+	for (const name of targets) {
+		const r = buildReport(name);
+		if (r === null) {
+			console.log(
+				`# ${name} — manifest exists but no connectors/${name}/ dir; skipping`,
+			);
+			continue;
+		}
+		printReport(r);
+		if (!r.ok) {
+			totalDrift += 1;
+		}
+	}
+	console.log(
+		`\n${targets.length} connectors checked, ${totalDrift} with drift`,
+	);
+	if (totalDrift > 0) {
+		process.exit(1);
+	}
 }
 
 main();

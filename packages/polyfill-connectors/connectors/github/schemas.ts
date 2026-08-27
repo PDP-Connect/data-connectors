@@ -39,18 +39,18 @@ const ISO_DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
  * Sampled metrics (followers, following, public_repos, public_gists) moved to user_stats.
  */
 export const userSchema = z.object({
-  id: idSchema,
-  login: pdppSafeText.max(80),
-  name: pdppSafeText.max(255).nullable(),
-  email: pdppSafeText.max(255).nullable(),
-  bio: pdppSafeText.max(160).nullable(),
-  company: pdppSafeText.max(255).nullable(),
-  location: pdppSafeText.max(255).nullable(),
-  blog: pdppSafeText.max(1000).nullable(),
-  twitter_username: pdppSafeText.max(80).nullable(),
-  created_at: isoDateSchema,
-  updated_at: isoDateSchema,
-  avatar_url: urlSchema,
+	id: idSchema,
+	login: pdppSafeText.max(80),
+	name: pdppSafeText.max(255).nullable(),
+	email: pdppSafeText.max(255).nullable(),
+	bio: pdppSafeText.max(160).nullable(),
+	company: pdppSafeText.max(255).nullable(),
+	location: pdppSafeText.max(255).nullable(),
+	blog: pdppSafeText.max(1000).nullable(),
+	twitter_username: pdppSafeText.max(80).nullable(),
+	created_at: isoDateSchema,
+	updated_at: isoDateSchema,
+	avatar_url: urlSchema,
 });
 
 /**
@@ -58,13 +58,13 @@ export const userSchema = z.object({
  * One record per user per calendar day (UTC). Cursor: observed_on.
  */
 export const userStatsSchema = z.object({
-  id: pdppSafeText.max(100), // "{user_id}:{YYYY-MM-DD}"
-  user_id: idSchema,
-  observed_on: z.string().regex(ISO_DATE_ONLY_RE),
-  public_repos: numericSchema,
-  public_gists: numericSchema,
-  followers: numericSchema,
-  following: numericSchema,
+	id: pdppSafeText.max(100), // "{user_id}:{YYYY-MM-DD}"
+	user_id: idSchema,
+	observed_on: z.string().regex(ISO_DATE_ONLY_RE),
+	public_repos: numericSchema,
+	public_gists: numericSchema,
+	followers: numericSchema,
+	following: numericSchema,
 });
 
 /**
@@ -73,42 +73,42 @@ export const userStatsSchema = z.object({
  * to accept undefined in addition to null and valid values.
  */
 export const repositoriesSchema = z.object({
-  id: idSchema,
-  name: pdppSafeText.max(255).optional(),
-  full_name: pdppSafeText.max(255).optional(),
-  owner_login: loginSchema.optional(),
-  description: descriptionSchema.optional(),
-  private: booleanNullableSchema.optional(),
-  fork: booleanNullableSchema.optional(),
-  archived: booleanNullableSchema.optional(),
-  disabled: booleanNullableSchema.optional(),
-  default_branch: pdppSafeText.max(255).nullable().optional(),
-  language: pdppSafeText.max(80).nullable().optional(),
-  topics: z.array(pdppSafeText.max(255)).nullable().optional(),
-  stargazers_count: numericSchema.optional(),
-  forks_count: numericSchema.optional(),
-  open_issues_count: numericSchema.optional(),
-  watchers_count: numericSchema.optional(),
-  size_kb: numericSchema.optional(),
-  license_key: pdppSafeText.max(50).nullable().optional(),
-  html_url: urlSchema.optional(),
-  homepage: urlSchema.optional(),
-  created_at: isoDateSchema.optional(),
-  updated_at: isoDateSchema.optional(),
-  pushed_at: isoDateSchema.optional(),
+	id: idSchema,
+	name: pdppSafeText.max(255).optional(),
+	full_name: pdppSafeText.max(255).optional(),
+	owner_login: loginSchema.optional(),
+	description: descriptionSchema.optional(),
+	private: booleanNullableSchema.optional(),
+	fork: booleanNullableSchema.optional(),
+	archived: booleanNullableSchema.optional(),
+	disabled: booleanNullableSchema.optional(),
+	default_branch: pdppSafeText.max(255).nullable().optional(),
+	language: pdppSafeText.max(80).nullable().optional(),
+	topics: z.array(pdppSafeText.max(255)).nullable().optional(),
+	stargazers_count: numericSchema.optional(),
+	forks_count: numericSchema.optional(),
+	open_issues_count: numericSchema.optional(),
+	watchers_count: numericSchema.optional(),
+	size_kb: numericSchema.optional(),
+	license_key: pdppSafeText.max(50).nullable().optional(),
+	html_url: urlSchema.optional(),
+	homepage: urlSchema.optional(),
+	created_at: isoDateSchema.optional(),
+	updated_at: isoDateSchema.optional(),
+	pushed_at: isoDateSchema.optional(),
 });
 
 /**
  * starred stream: simple star records with starred_at timestamp.
  */
 export const starredSchema = z.object({
-  id: idSchema,
-  full_name: pdppSafeText.max(255),
-  description: descriptionSchema,
-  language: pdppSafeText.max(80).nullable(),
-  stargazers_count: numericSchema,
-  html_url: urlSchema,
-  starred_at: isoDateSchema,
+	id: idSchema,
+	full_name: pdppSafeText.max(255),
+	description: descriptionSchema,
+	language: pdppSafeText.max(80).nullable(),
+	stargazers_count: numericSchema,
+	html_url: urlSchema,
+	starred_at: isoDateSchema,
 });
 
 /**
@@ -116,28 +116,28 @@ export const starredSchema = z.object({
  * Cursor: updated_at.
  */
 export const issuesSchema = z.object({
-  id: idSchema,
-  number: numericSchema,
-  title: titleSchema,
-  body: bodySchema,
-  state: pdppSafeText.max(20).nullable(),
-  state_reason: pdppSafeText.max(50).nullable(),
-  user_login: loginSchema,
-  user_id: idSchema.nullable(),
-  assignees: z.array(pdppSafeText.max(80)).nullable(),
-  labels: z.array(pdppSafeText.max(255)).nullable(),
-  milestone_title: pdppSafeText.max(255).nullable(),
-  repository_full_name: pdppSafeText.max(255).nullable(),
-  repository_id: idSchema.nullable(),
-  html_url: urlSchema,
-  comments: numericSchema,
-  reactions_total_count: numericSchema,
-  created_at: isoDateSchema,
-  updated_at: isoDateSchema,
-  closed_at: isoDateSchema,
-  is_pull_request: booleanSchema,
-  pull_request_url: urlSchema,
-  draft: booleanNullableSchema,
+	id: idSchema,
+	number: numericSchema,
+	title: titleSchema,
+	body: bodySchema,
+	state: pdppSafeText.max(20).nullable(),
+	state_reason: pdppSafeText.max(50).nullable(),
+	user_login: loginSchema,
+	user_id: idSchema.nullable(),
+	assignees: z.array(pdppSafeText.max(80)).nullable(),
+	labels: z.array(pdppSafeText.max(255)).nullable(),
+	milestone_title: pdppSafeText.max(255).nullable(),
+	repository_full_name: pdppSafeText.max(255).nullable(),
+	repository_id: idSchema.nullable(),
+	html_url: urlSchema,
+	comments: numericSchema,
+	reactions_total_count: numericSchema,
+	created_at: isoDateSchema,
+	updated_at: isoDateSchema,
+	closed_at: isoDateSchema,
+	is_pull_request: booleanSchema,
+	pull_request_url: urlSchema,
+	draft: booleanNullableSchema,
 });
 
 /**
@@ -145,36 +145,36 @@ export const issuesSchema = z.object({
  * Cursor: updated_at.
  */
 export const pullRequestsSchema = z.object({
-  id: idSchema,
-  number: numericSchema,
-  title: titleSchema,
-  body: bodySchema,
-  state: pdppSafeText.max(20).nullable(),
-  state_reason: pdppSafeText.max(50).nullable(),
-  user_login: loginSchema,
-  user_id: idSchema.nullable(),
-  assignees: z.array(pdppSafeText.max(80)).nullable(),
-  labels: z.array(pdppSafeText.max(255)).nullable(),
-  milestone_title: pdppSafeText.max(255).nullable(),
-  repository_full_name: pdppSafeText.max(255).nullable(),
-  repository_id: idSchema.nullable(),
-  html_url: urlSchema,
-  comments: numericSchema,
-  reactions_total_count: numericSchema,
-  created_at: isoDateSchema,
-  updated_at: isoDateSchema,
-  closed_at: isoDateSchema,
-  draft: booleanSchema,
-  merged_at: isoDateSchema,
-  merged_by_login: loginSchema,
-  commits_count: numericSchema,
-  additions: numericSchema,
-  deletions: numericSchema,
-  changed_files: numericSchema,
-  base_ref: pdppSafeText.max(255).nullable(),
-  head_ref: pdppSafeText.max(255).nullable(),
-  requested_reviewers: z.array(pdppSafeText.max(80)).nullable(),
-  review_comments_count: numericSchema,
+	id: idSchema,
+	number: numericSchema,
+	title: titleSchema,
+	body: bodySchema,
+	state: pdppSafeText.max(20).nullable(),
+	state_reason: pdppSafeText.max(50).nullable(),
+	user_login: loginSchema,
+	user_id: idSchema.nullable(),
+	assignees: z.array(pdppSafeText.max(80)).nullable(),
+	labels: z.array(pdppSafeText.max(255)).nullable(),
+	milestone_title: pdppSafeText.max(255).nullable(),
+	repository_full_name: pdppSafeText.max(255).nullable(),
+	repository_id: idSchema.nullable(),
+	html_url: urlSchema,
+	comments: numericSchema,
+	reactions_total_count: numericSchema,
+	created_at: isoDateSchema,
+	updated_at: isoDateSchema,
+	closed_at: isoDateSchema,
+	draft: booleanSchema,
+	merged_at: isoDateSchema,
+	merged_by_login: loginSchema,
+	commits_count: numericSchema,
+	additions: numericSchema,
+	deletions: numericSchema,
+	changed_files: numericSchema,
+	base_ref: pdppSafeText.max(255).nullable(),
+	head_ref: pdppSafeText.max(255).nullable(),
+	requested_reviewers: z.array(pdppSafeText.max(80)).nullable(),
+	review_comments_count: numericSchema,
 });
 
 /**
@@ -182,38 +182,38 @@ export const pullRequestsSchema = z.object({
  * Cursor: updated_at.
  */
 export const gistsSchema = z.object({
-  id: idSchema,
-  description: descriptionSchema,
-  public: booleanSchema,
-  html_url: urlSchema,
-  files: z
-    .array(
-      z.object({
-        filename: pdppSafeText.max(255).nullable(),
-        language: pdppSafeText.max(80).nullable(),
-        size: numericSchema,
-        raw_url: urlSchema,
-      })
-    )
-    .nullable(),
-  files_truncated: booleanSchema,
-  files_total_count: numericSchema,
-  comments_count: numericSchema,
-  created_at: isoDateSchema,
-  updated_at: isoDateSchema,
+	id: idSchema,
+	description: descriptionSchema,
+	public: booleanSchema,
+	html_url: urlSchema,
+	files: z
+		.array(
+			z.object({
+				filename: pdppSafeText.max(255).nullable(),
+				language: pdppSafeText.max(80).nullable(),
+				size: numericSchema,
+				raw_url: urlSchema,
+			}),
+		)
+		.nullable(),
+	files_truncated: booleanSchema,
+	files_total_count: numericSchema,
+	comments_count: numericSchema,
+	created_at: isoDateSchema,
+	updated_at: isoDateSchema,
 });
 
 /**
  * Schema registry: stream name → zod schema.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  user: userSchema,
-  user_stats: userStatsSchema,
-  repositories: repositoriesSchema,
-  starred: starredSchema,
-  issues: issuesSchema,
-  pull_requests: pullRequestsSchema,
-  gists: gistsSchema,
+	user: userSchema,
+	user_stats: userStatsSchema,
+	repositories: repositoriesSchema,
+	starred: starredSchema,
+	issues: issuesSchema,
+	pull_requests: pullRequestsSchema,
+	gists: gistsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

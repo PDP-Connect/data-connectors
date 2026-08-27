@@ -30,7 +30,10 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const CURRENCY_CODE_RE = /^[A-Z]{3}$/; // ISO 4217
 
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 const coordSchema = z.number().nullable(); // lat/lng; manifest type "number"
 const centsSchema = z.number().int().min(0).nullable();
 
@@ -44,28 +47,31 @@ const centsSchema = z.number().int().min(0).nullable();
  * strings. `receipt_url` is a URL.
  */
 export const tripsSchema = z.object({
-  id: z.string().min(1).max(200),
-  status: z.string().min(1).max(64).nullable(),
-  product_type: z.string().min(1).max(128).nullable(),
-  requested_at: isoDateTimeNullable,
-  started_at: isoDateTimeNullable,
-  completed_at: isoDateTimeNullable,
-  pickup_address: pdppSafeText.max(1000).nullable(),
-  pickup_lat: coordSchema,
-  pickup_lng: coordSchema,
-  dropoff_address: pdppSafeText.max(1000).nullable(),
-  dropoff_lat: coordSchema,
-  dropoff_lng: coordSchema,
-  distance_meters: z.number().min(0).nullable(),
-  duration_seconds: z.number().int().min(0).nullable(),
-  fare_total: pdppSafeText.max(64).nullable(),
-  fare_total_cents: centsSchema,
-  currency: z.string().regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code").nullable(),
-  tip_cents: centsSchema,
-  surge_multiplier: z.number().min(0).nullable(),
-  driver_name: pdppSafeText.max(300).nullable(),
-  vehicle_description: pdppSafeText.max(500).nullable(),
-  receipt_url: z.url().max(4096).nullable(),
+	id: z.string().min(1).max(200),
+	status: z.string().min(1).max(64).nullable(),
+	product_type: z.string().min(1).max(128).nullable(),
+	requested_at: isoDateTimeNullable,
+	started_at: isoDateTimeNullable,
+	completed_at: isoDateTimeNullable,
+	pickup_address: pdppSafeText.max(1000).nullable(),
+	pickup_lat: coordSchema,
+	pickup_lng: coordSchema,
+	dropoff_address: pdppSafeText.max(1000).nullable(),
+	dropoff_lat: coordSchema,
+	dropoff_lng: coordSchema,
+	distance_meters: z.number().min(0).nullable(),
+	duration_seconds: z.number().int().min(0).nullable(),
+	fare_total: pdppSafeText.max(64).nullable(),
+	fare_total_cents: centsSchema,
+	currency: z
+		.string()
+		.regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code")
+		.nullable(),
+	tip_cents: centsSchema,
+	surge_multiplier: z.number().min(0).nullable(),
+	driver_name: pdppSafeText.max(300).nullable(),
+	vehicle_description: pdppSafeText.max(500).nullable(),
+	receipt_url: z.url().max(4096).nullable(),
 });
 
 /**
@@ -73,7 +79,7 @@ export const tripsSchema = z.object({
  * connector declares (and will emit once GraphQL extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  trips: tripsSchema,
+	trips: tripsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

@@ -40,7 +40,10 @@
 // permitted; fabricating a pointer to bytes no run stored is not — a
 // never-hydrated statement stays all-null.
 
-import { type CarryForwardCursor, openCarryForwardCursor } from "./fingerprint-cursor.ts";
+import {
+	type CarryForwardCursor,
+	openCarryForwardCursor,
+} from "./fingerprint-cursor.ts";
 
 /** The content-addressed PDF pointer fields plus the positive content
  *  fingerprint, carried across runs. The blob pointers
@@ -53,95 +56,107 @@ import { type CarryForwardCursor, openCarryForwardCursor } from "./fingerprint-c
  *  statement. Content fields are optional so legacy persisted entries (written
  *  before this field existed) decode cleanly. */
 export interface StatementHydration {
-  document_url: string | null;
-  pdf_page_count?: number | null;
-  pdf_path: string | null;
-  pdf_sha256: string | null;
-  pdf_text_sha256?: string | null;
+	document_url: string | null;
+	pdf_page_count?: number | null;
+	pdf_path: string | null;
+	pdf_sha256: string | null;
+	pdf_text_sha256?: string | null;
 }
 
 /** The all-null index-only triple a never-hydrated statement emits. */
 export const NEVER_HYDRATED: StatementHydration = {
-  document_url: null,
-  pdf_path: null,
-  pdf_sha256: null,
-  pdf_text_sha256: null,
-  pdf_page_count: null,
+	document_url: null,
+	pdf_path: null,
+	pdf_sha256: null,
+	pdf_text_sha256: null,
+	pdf_page_count: null,
 };
 
 /** True iff this hydration entry carries a real (non-null) pointer. A prior
  *  entry whose `pdf_path` is null was itself an index-only emit — there is
  *  nothing to carry forward, so the statement stays index-only. */
-export function isHydrated(h: StatementHydration | undefined): h is StatementHydration {
-  return Boolean(h && h.pdf_path !== null && h.pdf_sha256 !== null && h.document_url !== null);
+export function isHydrated(
+	h: StatementHydration | undefined,
+): h is StatementHydration {
+	return Boolean(
+		h &&
+			h.pdf_path !== null &&
+			h.pdf_sha256 !== null &&
+			h.document_url !== null,
+	);
 }
 
 export interface StatementHydrationCursor {
-  /** Drop ids not `note`d this run. Idempotent. Only valid on full-scan
-   *  streams (both statement streams are full scans of the documents index),
-   *  so a statement no longer listed stops being carried forever. Call in
-   *  lockstep with the fingerprint cursor's `dropUnseenIds()`. */
-  dropUnseenIds: () => void;
-  /** Record this statement id's hydration pointers into the next-run map and
-   *  the seen-set. MUST be called for every observed statement id this run —
-   *  with the freshly hydrated pointers on success, and (after carry-forward)
-   *  with the resolved pointers on failure — so the next run's prior map is
-   *  complete and the prune step has the right inputs. */
-  note: (id: string, value: StatementHydration) => void;
-  /** The pointers to emit for a statement that failed hydration this run:
-   *  the prior hydrated pointers if the statement was previously hydrated,
-   *  otherwise the all-null index-only triple. Pure: does not mutate the
-   *  cursor (call `note` separately with the resolved value). */
-  resolveOnFailure: (id: string) => StatementHydration;
-  /** Number of ids in the next map. */
-  size: () => number;
-  /** Serializable next-run map for the `hydration` key of the statements
-   *  STATE cursor. */
-  toState: () => Record<string, StatementHydration>;
+	/** Drop ids not `note`d this run. Idempotent. Only valid on full-scan
+	 *  streams (both statement streams are full scans of the documents index),
+	 *  so a statement no longer listed stops being carried forever. Call in
+	 *  lockstep with the fingerprint cursor's `dropUnseenIds()`. */
+	dropUnseenIds: () => void;
+	/** Record this statement id's hydration pointers into the next-run map and
+	 *  the seen-set. MUST be called for every observed statement id this run —
+	 *  with the freshly hydrated pointers on success, and (after carry-forward)
+	 *  with the resolved pointers on failure — so the next run's prior map is
+	 *  complete and the prune step has the right inputs. */
+	note: (id: string, value: StatementHydration) => void;
+	/** The pointers to emit for a statement that failed hydration this run:
+	 *  the prior hydrated pointers if the statement was previously hydrated,
+	 *  otherwise the all-null index-only triple. Pure: does not mutate the
+	 *  cursor (call `note` separately with the resolved value). */
+	resolveOnFailure: (id: string) => StatementHydration;
+	/** Number of ids in the next map. */
+	size: () => number;
+	/** Serializable next-run map for the `hydration` key of the statements
+	 *  STATE cursor. */
+	toState: () => Record<string, StatementHydration>;
 }
 
 /** Open a statement hydration carry-forward cursor seeded from the prior
  *  STATE cursor's decoded `hydration` map. Reuses the shared
  *  `openCarryForwardCursor` seed/seen/prune/serialize lifecycle. */
-export function openStatementHydrationCursor(prior: ReadonlyMap<string, StatementHydration>): StatementHydrationCursor {
-  const cursor: CarryForwardCursor<StatementHydration> = openCarryForwardCursor(prior);
-  return {
-    note(id: string, value: StatementHydration): void {
-      cursor.note(id, value);
-    },
-    resolveOnFailure(id: string): StatementHydration {
-      const prev = cursor.prior(id);
-      return isHydrated(prev) ? { ...prev } : { ...NEVER_HYDRATED };
-    },
-    dropUnseenIds(): void {
-      cursor.dropUnseenIds();
-    },
-    size(): number {
-      return cursor.size();
-    },
-    toState(): Record<string, StatementHydration> {
-      return cursor.toState();
-    },
-  };
+export function openStatementHydrationCursor(
+	prior: ReadonlyMap<string, StatementHydration>,
+): StatementHydrationCursor {
+	const cursor: CarryForwardCursor<StatementHydration> =
+		openCarryForwardCursor(prior);
+	return {
+		note(id: string, value: StatementHydration): void {
+			cursor.note(id, value);
+		},
+		resolveOnFailure(id: string): StatementHydration {
+			const prev = cursor.prior(id);
+			return isHydrated(prev) ? { ...prev } : { ...NEVER_HYDRATED };
+		},
+		dropUnseenIds(): void {
+			cursor.dropUnseenIds();
+		},
+		size(): number {
+			return cursor.size();
+		},
+		toState(): Record<string, StatementHydration> {
+			return cursor.toState();
+		},
+	};
 }
 
 /** Coerce one persisted hydration entry, tolerating legacy / corrupt shapes.
  *  Only the three known pointer fields are kept; a missing or wrong-typed
  *  field decodes to null (which `isHydrated` then treats as not-carriable). */
 function coerceHydrationEntry(value: unknown): StatementHydration | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const v = value as Record<string, unknown>;
-  const str = (x: unknown): string | null => (typeof x === "string" && x.length > 0 ? x : null);
-  const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : null);
-  return {
-    document_url: str(v.document_url),
-    pdf_path: str(v.pdf_path),
-    pdf_sha256: str(v.pdf_sha256),
-    pdf_text_sha256: str(v.pdf_text_sha256),
-    pdf_page_count: num(v.pdf_page_count),
-  };
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	const v = value as Record<string, unknown>;
+	const str = (x: unknown): string | null =>
+		typeof x === "string" && x.length > 0 ? x : null;
+	const num = (x: unknown): number | null =>
+		typeof x === "number" && Number.isFinite(x) && x > 0 ? x : null;
+	return {
+		document_url: str(v.document_url),
+		pdf_path: str(v.pdf_path),
+		pdf_sha256: str(v.pdf_sha256),
+		pdf_text_sha256: str(v.pdf_text_sha256),
+		pdf_page_count: num(v.pdf_page_count),
+	};
 }
 
 /** Decode the prior `statements` STATE cursor's `hydration` map. Keyed by
@@ -151,22 +166,28 @@ function coerceHydrationEntry(value: unknown): StatementHydration | null {
  *  cursor decodes to an empty map, so the first post-deploy run rebuilds it
  *  and any statement that fails hydration before it has ever been seen
  *  hydrated stays honestly index-only. */
-export function readPriorStatementHydration(streamState: unknown): Map<string, StatementHydration> {
-  const out = new Map<string, StatementHydration>();
-  if (!streamState || typeof streamState !== "object" || Array.isArray(streamState)) {
-    return out;
-  }
-  const raw = (streamState as Record<string, unknown>).hydration;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    const entry = coerceHydrationEntry(value);
-    // Only retain entries that actually carry pointers; an all-null prior
-    // entry has nothing to carry forward, so it need not be persisted.
-    if (entry && isHydrated(entry)) {
-      out.set(id, entry);
-    }
-  }
-  return out;
+export function readPriorStatementHydration(
+	streamState: unknown,
+): Map<string, StatementHydration> {
+	const out = new Map<string, StatementHydration>();
+	if (
+		!streamState ||
+		typeof streamState !== "object" ||
+		Array.isArray(streamState)
+	) {
+		return out;
+	}
+	const raw = (streamState as Record<string, unknown>).hydration;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		const entry = coerceHydrationEntry(value);
+		// Only retain entries that actually carry pointers; an all-null prior
+		// entry has nothing to carry forward, so it need not be persisted.
+		if (entry && isHydrated(entry)) {
+			out.set(id, entry);
+		}
+	}
+	return out;
 }

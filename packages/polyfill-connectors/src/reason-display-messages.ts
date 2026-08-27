@@ -41,23 +41,29 @@
 import { readPolyfillManifests } from "./manifest-registry.ts";
 
 interface ManifestLike {
-  connector_id?: unknown;
-  connector_key?: unknown;
-  reason_display_messages?: unknown;
+	connector_id?: unknown;
+	connector_key?: unknown;
+	reason_display_messages?: unknown;
 }
 
 const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
 
 function manifestKey(manifest: ManifestLike, fallbackFile: string): string {
-  if (typeof manifest.connector_key === "string" && manifest.connector_key.trim()) {
-    return manifest.connector_key.trim();
-  }
-  if (typeof manifest.connector_id === "string" && manifest.connector_id.trim()) {
-    return manifest.connector_id.startsWith(REGISTRY_URL_PREFIX)
-      ? manifest.connector_id.slice(REGISTRY_URL_PREFIX.length)
-      : manifest.connector_id;
-  }
-  return fallbackFile;
+	if (
+		typeof manifest.connector_key === "string" &&
+		manifest.connector_key.trim()
+	) {
+		return manifest.connector_key.trim();
+	}
+	if (
+		typeof manifest.connector_id === "string" &&
+		manifest.connector_id.trim()
+	) {
+		return manifest.connector_id.startsWith(REGISTRY_URL_PREFIX)
+			? manifest.connector_id.slice(REGISTRY_URL_PREFIX.length)
+			: manifest.connector_id;
+	}
+	return fallbackFile;
 }
 
 export class ReasonDisplayMessageError extends Error {}
@@ -69,44 +75,54 @@ export class ReasonDisplayMessageError extends Error {}
  * `PDPP_POLYFILL_MANIFESTS_DIR` at a scratch directory and see it reflected
  * immediately (matches `readPolyfillManifests`'s own behavior).
  */
-export function connectorReasonDisplayMessages(): Readonly<Record<string, Readonly<Record<string, string>>>> {
-  const byConnector: Record<string, Record<string, string>> = {};
+export function connectorReasonDisplayMessages(): Readonly<
+	Record<string, Readonly<Record<string, string>>>
+> {
+	const byConnector: Record<string, Record<string, string>> = {};
 
-  for (const { file, manifest } of readPolyfillManifests()) {
-    const raw = (manifest as ManifestLike).reason_display_messages;
-    if (raw === undefined) {
-      continue;
-    }
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      throw new ReasonDisplayMessageError(
-        `${file}: reason_display_messages must be an object of reason_code -> display_message strings`
-      );
-    }
-    const key = manifestKey(manifest as ManifestLike, file);
-    const messages: Record<string, string> = {};
-    for (const [reasonCode, displayMessage] of Object.entries(raw as Record<string, unknown>)) {
-      if (typeof displayMessage !== "string" || displayMessage.trim().length === 0) {
-        throw new ReasonDisplayMessageError(
-          `${file}: reason_display_messages["${reasonCode}"] must be a non-empty string`
-        );
-      }
-      if (displayMessage === reasonCode) {
-        throw new ReasonDisplayMessageError(
-          `${file}: reason_display_messages["${reasonCode}"] repeats its own key — write vetted end-user copy, not the raw code`
-        );
-      }
-      messages[reasonCode] = displayMessage;
-    }
-    byConnector[key] = messages;
-  }
+	for (const { file, manifest } of readPolyfillManifests()) {
+		const raw = (manifest as ManifestLike).reason_display_messages;
+		if (raw === undefined) {
+			continue;
+		}
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			throw new ReasonDisplayMessageError(
+				`${file}: reason_display_messages must be an object of reason_code -> display_message strings`,
+			);
+		}
+		const key = manifestKey(manifest as ManifestLike, file);
+		const messages: Record<string, string> = {};
+		for (const [reasonCode, displayMessage] of Object.entries(
+			raw as Record<string, unknown>,
+		)) {
+			if (
+				typeof displayMessage !== "string" ||
+				displayMessage.trim().length === 0
+			) {
+				throw new ReasonDisplayMessageError(
+					`${file}: reason_display_messages["${reasonCode}"] must be a non-empty string`,
+				);
+			}
+			if (displayMessage === reasonCode) {
+				throw new ReasonDisplayMessageError(
+					`${file}: reason_display_messages["${reasonCode}"] repeats its own key — write vetted end-user copy, not the raw code`,
+				);
+			}
+			messages[reasonCode] = displayMessage;
+		}
+		byConnector[key] = messages;
+	}
 
-  return Object.freeze(byConnector);
+	return Object.freeze(byConnector);
 }
 
 /** Looks up one connector's declared copy for one reason code, or `null` if none is declared. */
-export function connectorReasonDisplayMessage(connectorKey: string | null, reasonCode: string | null): string | null {
-  if (!(connectorKey && reasonCode)) {
-    return null;
-  }
-  return connectorReasonDisplayMessages()[connectorKey]?.[reasonCode] ?? null;
+export function connectorReasonDisplayMessage(
+	connectorKey: string | null,
+	reasonCode: string | null,
+): string | null {
+	if (!(connectorKey && reasonCode)) {
+		return null;
+	}
+	return connectorReasonDisplayMessages()[connectorKey]?.[reasonCode] ?? null;
 }

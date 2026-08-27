@@ -16,14 +16,14 @@
 import "@pdpp/connector-protocol/connector-runtime-protocol";
 
 declare module "@pdpp/connector-protocol/connector-runtime-protocol" {
-  interface ProgressExtra {
-    /**
-     * Declares a connector-defined phase transition with no external-provider
-     * dependency (no rate limit, no network I/O to a third party) starting
-     * now. `run-executor.ts`'s attempt watchdog uses this to stop applying
-     * `maxRunWallClockMs` — a budget sized for provider-rate-limited walks —
-     * once the run has moved into locally-bound work like a database read.
-     */
-    phase_boundary?: "local_only_phase_started";
-  }
+	interface ProgressExtra {
+		/**
+		 * Declares a connector-defined phase transition with no external-provider
+		 * dependency (no rate limit, no network I/O to a third party) starting
+		 * now. `run-executor.ts`'s attempt watchdog uses this to stop applying
+		 * `maxRunWallClockMs` — a budget sized for provider-rate-limited walks —
+		 * once the run has moved into locally-bound work like a database read.
+		 */
+		phase_boundary?: "local_only_phase_started";
+	}
 }

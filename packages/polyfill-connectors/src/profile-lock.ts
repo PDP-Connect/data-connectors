@@ -67,7 +67,11 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
 /** The three Chromium singleton files inside a user-data-dir. */
-const SINGLETON_FILE_NAMES = ["SingletonLock", "SingletonCookie", "SingletonSocket"] as const;
+const SINGLETON_FILE_NAMES = [
+	"SingletonLock",
+	"SingletonCookie",
+	"SingletonSocket",
+] as const;
 
 /**
  * Per-userDataDir mutex. Serializes the cleanup-then-launch sequence so
@@ -88,26 +92,29 @@ const profileMutex = new Map<string, Promise<unknown>>();
  */
 type MaybePromise<T> = T | Promise<T>;
 
-export async function withProfileLockMutex<T>(profileDir: string, criticalSection: () => MaybePromise<T>): Promise<T> {
-  const prior = profileMutex.get(profileDir) ?? Promise.resolve();
-  let releaseAfter: () => void = () => undefined;
-  const ours = new Promise<void>((resolve) => {
-    releaseAfter = resolve;
-  });
-  // Chain: this call's slot in the mutex is `prior.then(() => ours)`. The
-  // next caller will await `ours` (which resolves when WE release), so
-  // they run strictly after us. Always-resolved chain so a thrown error
-  // doesn't poison the queue for subsequent callers.
-  profileMutex.set(
-    profileDir,
-    prior.then(() => ours)
-  );
-  await prior.catch(() => undefined);
-  try {
-    return await criticalSection();
-  } finally {
-    releaseAfter();
-  }
+export async function withProfileLockMutex<T>(
+	profileDir: string,
+	criticalSection: () => MaybePromise<T>,
+): Promise<T> {
+	const prior = profileMutex.get(profileDir) ?? Promise.resolve();
+	let releaseAfter: () => void = () => undefined;
+	const ours = new Promise<void>((resolve) => {
+		releaseAfter = resolve;
+	});
+	// Chain: this call's slot in the mutex is `prior.then(() => ours)`. The
+	// next caller will await `ours` (which resolves when WE release), so
+	// they run strictly after us. Always-resolved chain so a thrown error
+	// doesn't poison the queue for subsequent callers.
+	profileMutex.set(
+		profileDir,
+		prior.then(() => ours),
+	);
+	await prior.catch(() => undefined);
+	try {
+		return await criticalSection();
+	} finally {
+		releaseAfter();
+	}
 }
 
 /**
@@ -120,27 +127,29 @@ export async function withProfileLockMutex<T>(profileDir: string, criticalSectio
  * Returns the names of files that were actually removed (for logging /
  * test introspection).
  */
-export async function removeChromiumSingletonResidue(profileDir: string): Promise<string[]> {
-  const removed: string[] = [];
-  for (const name of SINGLETON_FILE_NAMES) {
-    const path = join(profileDir, name);
-    try {
-      // `unlink` removes a symlink itself (not its target), which is what
-      // we want — the target either doesn't exist (SingletonLock's
-      // hostname-pid string) or is owned by Chromium's IPC layer
-      // (SingletonSocket's /tmp socket). We never follow.
-      await fs.unlink(path);
-      removed.push(name);
-    } catch (err) {
-      // ENOENT is the common case (file wasn't there). Anything else
-      // (e.g. EACCES from a misconfigured permissions setup) should
-      // surface — we'd rather fail loudly than silently leave a lock
-      // file behind.
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (code !== "ENOENT") {
-        throw err;
-      }
-    }
-  }
-  return removed;
+export async function removeChromiumSingletonResidue(
+	profileDir: string,
+): Promise<string[]> {
+	const removed: string[] = [];
+	for (const name of SINGLETON_FILE_NAMES) {
+		const path = join(profileDir, name);
+		try {
+			// `unlink` removes a symlink itself (not its target), which is what
+			// we want — the target either doesn't exist (SingletonLock's
+			// hostname-pid string) or is owned by Chromium's IPC layer
+			// (SingletonSocket's /tmp socket). We never follow.
+			await fs.unlink(path);
+			removed.push(name);
+		} catch (err) {
+			// ENOENT is the common case (file wasn't there). Anything else
+			// (e.g. EACCES from a misconfigured permissions setup) should
+			// surface — we'd rather fail loudly than silently leave a lock
+			// file behind.
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code !== "ENOENT") {
+				throw err;
+			}
+		}
+	}
+	return removed;
 }

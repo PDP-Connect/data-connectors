@@ -13,14 +13,14 @@
 
 import { parseHTML } from "linkedom";
 import type {
-  DetailItem,
-  FulfillmentMethod,
-  ListPageDiagnostics,
-  ListPageOrder,
-  MaxPageResolution,
-  OrderDetail,
-  OrderItemRecord,
-  OrdersRecord,
+	DetailItem,
+	FulfillmentMethod,
+	ListPageDiagnostics,
+	ListPageOrder,
+	MaxPageResolution,
+	OrderDetail,
+	OrderItemRecord,
+	OrdersRecord,
 } from "./types.ts";
 
 const CURRENCY_CENTS_MULTIPLIER = 100;
@@ -45,15 +45,15 @@ const PAGINATION_PAGE_RE = /page=(\d+)/;
 const CURBSIDE_PREFIX_RE = /curbside/i;
 
 function textOf(el: Element | null | undefined): string {
-  if (!el) {
-    return "";
-  }
-  const maybe = (el as { innerText?: string }).innerText;
-  return typeof maybe === "string" ? maybe : (el.textContent ?? "");
+	if (!el) {
+		return "";
+	}
+	const maybe = (el as { innerText?: string }).innerText;
+	return typeof maybe === "string" ? maybe : (el.textContent ?? "");
 }
 
 function normText(el: Element | null | undefined): string {
-  return textOf(el).replace(WHITESPACE_RE, " ").trim();
+	return textOf(el).replace(WHITESPACE_RE, " ").trim();
 }
 
 /**
@@ -65,18 +65,20 @@ function normText(el: Element | null | undefined): string {
  * capture groups are still trimmed before use.
  */
 function rawLines(el: Element | null | undefined): string {
-  return textOf(el)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join("\n");
+	return textOf(el)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.join("\n");
 }
 
-function fulfillmentMethodFromPrefix(prefix: string | undefined): FulfillmentMethod {
-  if (!prefix) {
-    return "unknown";
-  }
-  return CURBSIDE_PREFIX_RE.test(prefix) ? "curbside" : "delivery";
+function fulfillmentMethodFromPrefix(
+	prefix: string | undefined,
+): FulfillmentMethod {
+	if (!prefix) {
+		return "unknown";
+	}
+	return CURBSIDE_PREFIX_RE.test(prefix) ? "curbside" : "delivery";
 }
 
 /**
@@ -86,26 +88,28 @@ function fulfillmentMethodFromPrefix(prefix: string | undefined): FulfillmentMet
  * gives us no `data-testid`-style hooks on the list page, unlike Amazon).
  */
 function parseOrderCardText(orderId: string, cardText: string): ListPageOrder {
-  const dateMatch = LIST_DATE_RE.exec(cardText);
-  const totalCountMatch = LIST_TOTAL_COUNT_RE.exec(cardText);
-  const statusMatch = LIST_STATUS_RE.exec(cardText);
-  const fulfillmentMatch = LIST_FULFILLMENT_RE.exec(cardText);
+	const dateMatch = LIST_DATE_RE.exec(cardText);
+	const totalCountMatch = LIST_TOTAL_COUNT_RE.exec(cardText);
+	const statusMatch = LIST_STATUS_RE.exec(cardText);
+	const fulfillmentMatch = LIST_FULFILLMENT_RE.exec(cardText);
 
-  return {
-    orderId,
-    orderDateRaw: dateMatch?.[1] ?? null,
-    total: totalCountMatch?.[1] ? `$${totalCountMatch[1]}` : null,
-    itemCount: totalCountMatch?.[2] ? Number(totalCountMatch[2]) : null,
-    status: statusMatch?.[1] ? statusMatch[1].trim() : null,
-    statusCode: null,
-    fulfillmentMethod: fulfillmentMethodFromPrefix(fulfillmentMatch?.[1]),
-    fulfillmentLocation: fulfillmentMatch?.[2] ? fulfillmentMatch[2].trim() : null,
-    source: "dom",
-    storeName: null,
-    timeslotStart: null,
-    timeslotEnd: null,
-    unfulfilledCount: null,
-  };
+	return {
+		orderId,
+		orderDateRaw: dateMatch?.[1] ?? null,
+		total: totalCountMatch?.[1] ? `$${totalCountMatch[1]}` : null,
+		itemCount: totalCountMatch?.[2] ? Number(totalCountMatch[2]) : null,
+		status: statusMatch?.[1] ? statusMatch[1].trim() : null,
+		statusCode: null,
+		fulfillmentMethod: fulfillmentMethodFromPrefix(fulfillmentMatch?.[1]),
+		fulfillmentLocation: fulfillmentMatch?.[2]
+			? fulfillmentMatch[2].trim()
+			: null,
+		source: "dom",
+		storeName: null,
+		timeslotStart: null,
+		timeslotEnd: null,
+		unfulfilledCount: null,
+	};
 }
 
 /**
@@ -121,27 +125,31 @@ function parseOrderCardText(orderId: string, cardText: string): ListPageOrder {
  * real, stable card boundary is `[data-qe-id="orderDetailsCard"]`.
  */
 function cardContainerFor(link: Element): Element {
-  const card = link.closest('[data-qe-id="orderDetailsCard"]');
-  return card ?? link.closest("li") ?? link.parentElement ?? link;
+	const card = link.closest('[data-qe-id="orderDetailsCard"]');
+	return card ?? link.closest("li") ?? link.parentElement ?? link;
 }
 
 export function parseOrdersListDom(html: string): ListPageOrder[] {
-  const { document } = parseHTML(html);
-  const links = [...document.querySelectorAll<HTMLAnchorElement>('a[href*="/my-account/order-history/HEB"]')];
-  const seen = new Set<string>();
-  const results: ListPageOrder[] = [];
-  for (const link of links) {
-    const href = link.getAttribute("href") ?? "";
-    const idMatch = ORDER_LINK_HREF_RE.exec(href);
-    const orderId = idMatch?.[1];
-    if (!orderId || seen.has(orderId)) {
-      continue;
-    }
-    seen.add(orderId);
-    const card = cardContainerFor(link);
-    results.push(parseOrderCardText(orderId, rawLines(card)));
-  }
-  return results;
+	const { document } = parseHTML(html);
+	const links = [
+		...document.querySelectorAll<HTMLAnchorElement>(
+			'a[href*="/my-account/order-history/HEB"]',
+		),
+	];
+	const seen = new Set<string>();
+	const results: ListPageOrder[] = [];
+	for (const link of links) {
+		const href = link.getAttribute("href") ?? "";
+		const idMatch = ORDER_LINK_HREF_RE.exec(href);
+		const orderId = idMatch?.[1];
+		if (!orderId || seen.has(orderId)) {
+			continue;
+		}
+		seen.add(orderId);
+		const card = cardContainerFor(link);
+		results.push(parseOrderCardText(orderId, rawLines(card)));
+	}
+	return results;
 }
 
 // ─── Structured order-list source (__NEXT_DATA__) ────────────────────────
@@ -171,27 +179,27 @@ export function parseOrdersListDom(html: string): ListPageOrder[] {
 // "Curbside at <X>"/"Delivery to <X>" text was established (see above).
 
 interface StructuredOrderRow {
-  fulfillmentType?: unknown;
-  orderChangesOverview?: { unfulfilledCount?: unknown } | null;
-  orderId?: unknown;
-  orderStatusMessageShort?: unknown;
-  orderTimeslot?: { endDateTime?: unknown; startDateTime?: unknown } | null;
-  status?: unknown;
-  store?: { name?: unknown } | null;
+	fulfillmentType?: unknown;
+	orderChangesOverview?: { unfulfilledCount?: unknown } | null;
+	orderId?: unknown;
+	orderStatusMessageShort?: unknown;
+	orderTimeslot?: { endDateTime?: unknown; startDateTime?: unknown } | null;
+	status?: unknown;
+	store?: { name?: unknown } | null;
 }
 
 interface StructuredPageProps {
-  orders?: unknown;
-  page?: unknown;
-  pages?: unknown;
+	orders?: unknown;
+	page?: unknown;
+	pages?: unknown;
 }
 
 function asString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
+	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function asInt(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
+	return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
 /** Extract and JSON.parse the `__NEXT_DATA__` script payload's
@@ -199,30 +207,30 @@ function asInt(value: unknown): number | null {
  *  does not parse as JSON — the caller falls back to DOM extraction, per
  *  Decision 1's "absent or malformed" fallback trigger. */
 function readNextDataPageProps(html: string): StructuredPageProps | null {
-  const { document } = parseHTML(html);
-  const script = document.querySelector("script#__NEXT_DATA__");
-  const raw = script?.textContent;
-  if (!raw) {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    return null;
-  }
-  const { props } = parsed as { props?: unknown };
-  if (typeof props !== "object" || props === null) {
-    return null;
-  }
-  const { pageProps } = props as { pageProps?: unknown };
-  if (typeof pageProps !== "object" || pageProps === null) {
-    return null;
-  }
-  return pageProps as StructuredPageProps;
+	const { document } = parseHTML(html);
+	const script = document.querySelector("script#__NEXT_DATA__");
+	const raw = script?.textContent;
+	if (!raw) {
+		return null;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== "object" || parsed === null) {
+		return null;
+	}
+	const { props } = parsed as { props?: unknown };
+	if (typeof props !== "object" || props === null) {
+		return null;
+	}
+	const { pageProps } = props as { pageProps?: unknown };
+	if (typeof pageProps !== "object" || pageProps === null) {
+		return null;
+	}
+	return pageProps as StructuredPageProps;
 }
 
 /**
@@ -232,32 +240,38 @@ function readNextDataPageProps(html: string): StructuredPageProps | null {
  * parser's trustworthy shape" falls back to DOM extraction for that row.
  */
 function parseStructuredOrderRow(row: unknown): ListPageOrder | null {
-  if (typeof row !== "object" || row === null) {
-    return null;
-  }
-  const r = row as StructuredOrderRow;
-  const orderId = asString(r.orderId);
-  if (!orderId) {
-    return null;
-  }
-  const timeslot = r.orderTimeslot && typeof r.orderTimeslot === "object" ? r.orderTimeslot : null;
-  const store = r.store && typeof r.store === "object" ? r.store : null;
-  const changes = r.orderChangesOverview && typeof r.orderChangesOverview === "object" ? r.orderChangesOverview : null;
-  return {
-    orderId,
-    orderDateRaw: asString(timeslot?.startDateTime),
-    total: null,
-    itemCount: null,
-    status: asString(r.orderStatusMessageShort),
-    statusCode: asString(r.status),
-    fulfillmentMethod: "unknown",
-    fulfillmentLocation: null,
-    source: "structured",
-    storeName: asString(store?.name),
-    timeslotStart: asString(timeslot?.startDateTime),
-    timeslotEnd: asString(timeslot?.endDateTime),
-    unfulfilledCount: asInt(changes?.unfulfilledCount),
-  };
+	if (typeof row !== "object" || row === null) {
+		return null;
+	}
+	const r = row as StructuredOrderRow;
+	const orderId = asString(r.orderId);
+	if (!orderId) {
+		return null;
+	}
+	const timeslot =
+		r.orderTimeslot && typeof r.orderTimeslot === "object"
+			? r.orderTimeslot
+			: null;
+	const store = r.store && typeof r.store === "object" ? r.store : null;
+	const changes =
+		r.orderChangesOverview && typeof r.orderChangesOverview === "object"
+			? r.orderChangesOverview
+			: null;
+	return {
+		orderId,
+		orderDateRaw: asString(timeslot?.startDateTime),
+		total: null,
+		itemCount: null,
+		status: asString(r.orderStatusMessageShort),
+		statusCode: asString(r.status),
+		fulfillmentMethod: "unknown",
+		fulfillmentLocation: null,
+		source: "structured",
+		storeName: asString(store?.name),
+		timeslotStart: asString(timeslot?.startDateTime),
+		timeslotEnd: asString(timeslot?.endDateTime),
+		unfulfilledCount: asInt(changes?.unfulfilledCount),
+	};
 }
 
 /**
@@ -269,19 +283,21 @@ function parseStructuredOrderRow(row: unknown): ListPageOrder | null {
  * the array itself is usable — those untrustworthy rows are the caller's
  * per-row DOM-fallback responsibility, not a page-level failure.
  */
-export function parseOrdersListStructured(html: string): ListPageOrder[] | null {
-  const pageProps = readNextDataPageProps(html);
-  if (!(pageProps && Array.isArray(pageProps.orders))) {
-    return null;
-  }
-  const results: ListPageOrder[] = [];
-  for (const row of pageProps.orders) {
-    const parsed = parseStructuredOrderRow(row);
-    if (parsed) {
-      results.push(parsed);
-    }
-  }
-  return results;
+export function parseOrdersListStructured(
+	html: string,
+): ListPageOrder[] | null {
+	const pageProps = readNextDataPageProps(html);
+	if (!(pageProps && Array.isArray(pageProps.orders))) {
+		return null;
+	}
+	const results: ListPageOrder[] = [];
+	for (const row of pageProps.orders) {
+		const parsed = parseStructuredOrderRow(row);
+		if (parsed) {
+			results.push(parsed);
+		}
+	}
+	return results;
 }
 
 /**
@@ -296,41 +312,49 @@ export function parseOrdersListStructured(html: string): ListPageOrder[] | null 
  * with no DOM counterpart (should not normally occur — the DOM link list and
  * structured array describe the same page) is appended after.
  */
-export function mergeOrdersListPage(structured: ListPageOrder[] | null, dom: ListPageOrder[]): ListPageOrder[] {
-  if (!structured) {
-    return dom;
-  }
-  const structuredById = new Map(structured.map((o) => [o.orderId, o]));
-  const domById = new Map(dom.map((o) => [o.orderId, o]));
-  const merged: ListPageOrder[] = [];
-  const usedStructuredIds = new Set<string>();
-  for (const domOrder of dom) {
-    const structuredOrder = structuredById.get(domOrder.orderId);
-    if (!structuredOrder) {
-      merged.push(domOrder);
-      continue;
-    }
-    usedStructuredIds.add(domOrder.orderId);
-    merged.push({
-      ...structuredOrder,
-      // Carry over DOM-only-evidenced fields onto the preferred structured row.
-      // orderDateRaw stays DOM-authoritative (see parseOrderDate doc):
-      // truncation-equivalence between the structured UTC timeslot and the
-      // DOM-rendered local date is unproven, so a merged row must not silently
-      // adopt the structured timestamp for order_date.
-      orderDateRaw: domOrder.orderDateRaw,
-      total: domOrder.total,
-      itemCount: domOrder.itemCount,
-      fulfillmentMethod: domOrder.fulfillmentMethod,
-      fulfillmentLocation: domOrder.fulfillmentLocation,
-    });
-  }
-  for (const structuredOrder of structured) {
-    if (!(usedStructuredIds.has(structuredOrder.orderId) || domById.has(structuredOrder.orderId))) {
-      merged.push(structuredOrder);
-    }
-  }
-  return merged;
+export function mergeOrdersListPage(
+	structured: ListPageOrder[] | null,
+	dom: ListPageOrder[],
+): ListPageOrder[] {
+	if (!structured) {
+		return dom;
+	}
+	const structuredById = new Map(structured.map((o) => [o.orderId, o]));
+	const domById = new Map(dom.map((o) => [o.orderId, o]));
+	const merged: ListPageOrder[] = [];
+	const usedStructuredIds = new Set<string>();
+	for (const domOrder of dom) {
+		const structuredOrder = structuredById.get(domOrder.orderId);
+		if (!structuredOrder) {
+			merged.push(domOrder);
+			continue;
+		}
+		usedStructuredIds.add(domOrder.orderId);
+		merged.push({
+			...structuredOrder,
+			// Carry over DOM-only-evidenced fields onto the preferred structured row.
+			// orderDateRaw stays DOM-authoritative (see parseOrderDate doc):
+			// truncation-equivalence between the structured UTC timeslot and the
+			// DOM-rendered local date is unproven, so a merged row must not silently
+			// adopt the structured timestamp for order_date.
+			orderDateRaw: domOrder.orderDateRaw,
+			total: domOrder.total,
+			itemCount: domOrder.itemCount,
+			fulfillmentMethod: domOrder.fulfillmentMethod,
+			fulfillmentLocation: domOrder.fulfillmentLocation,
+		});
+	}
+	for (const structuredOrder of structured) {
+		if (
+			!(
+				usedStructuredIds.has(structuredOrder.orderId) ||
+				domById.has(structuredOrder.orderId)
+			)
+		) {
+			merged.push(structuredOrder);
+		}
+	}
+	return merged;
 }
 
 /** Parse "July 14, 2026" or an ISO-8601 timestamp → "2026-07-14". Returns
@@ -339,27 +363,29 @@ export function mergeOrdersListPage(structured: ListPageOrder[] | null, dom: Lis
  *  (see mergeOrdersListPage doc: order_date itself stays DOM-authoritative
  *  when a DOM row exists; this only feeds a structured-only row's date). */
 export function parseOrderDate(raw: string | null | undefined): string | null {
-  if (!raw) {
-    return null;
-  }
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) {
-    return null;
-  }
-  return d.toISOString().slice(0, 10);
+	if (!raw) {
+		return null;
+	}
+	const d = new Date(raw);
+	if (Number.isNaN(d.getTime())) {
+		return null;
+	}
+	return d.toISOString().slice(0, 10);
 }
 
-export function parseCurrencyCents(raw: string | null | undefined): number | null {
-  if (!raw) {
-    return null;
-  }
-  const s = String(raw);
-  const stripped = s.replace(CURRENCY_THOUSANDS_RE, "");
-  const m = stripped.match(CURRENCY_NUMBER_RE);
-  if (!m?.[1]) {
-    return null;
-  }
-  return Math.round(Number(m[1]) * CURRENCY_CENTS_MULTIPLIER);
+export function parseCurrencyCents(
+	raw: string | null | undefined,
+): number | null {
+	if (!raw) {
+		return null;
+	}
+	const s = String(raw);
+	const stripped = s.replace(CURRENCY_THOUSANDS_RE, "");
+	const m = stripped.match(CURRENCY_NUMBER_RE);
+	if (!m?.[1]) {
+		return null;
+	}
+	return Math.round(Number(m[1]) * CURRENCY_CENTS_MULTIPLIER);
 }
 
 // ─── maxPage resolution (structured-primary, DOM-fallback) ───────────────
@@ -379,37 +405,40 @@ const PAGES_TO_PAGE_RE = /^\?page=(\d+)$/;
  *  ignored for the max computation but marks the array as seen (so an empty
  *  usable result is still "resolved" only if at least one entry parsed). */
 export function resolveStructuredMaxPage(
-  pageProps: {
-    page?: unknown;
-    pages?: unknown;
-  } | null
+	pageProps: {
+		page?: unknown;
+		pages?: unknown;
+	} | null,
 ): MaxPageResolution {
-  if (!(pageProps && Array.isArray(pageProps.pages))) {
-    return { kind: "absent" };
-  }
-  const parsedPages: number[] = [];
-  for (const entry of pageProps.pages) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const { to } = entry as { to?: unknown };
-    if (typeof to !== "string") {
-      continue;
-    }
-    const m = PAGES_TO_PAGE_RE.exec(to);
-    if (m?.[1]) {
-      parsedPages.push(Number(m[1]));
-    }
-  }
-  if (parsedPages.length === 0) {
-    return { kind: "absent" };
-  }
-  const maxPage = Math.max(...parsedPages);
-  const currentPage = asInt(pageProps.page);
-  if (currentPage !== null && currentPage > maxPage) {
-    return { kind: "contradictory", reason: "structured current page exceeds structured pages[] max" };
-  }
-  return { kind: "resolved", source: "structured", value: maxPage };
+	if (!(pageProps && Array.isArray(pageProps.pages))) {
+		return { kind: "absent" };
+	}
+	const parsedPages: number[] = [];
+	for (const entry of pageProps.pages) {
+		if (typeof entry !== "object" || entry === null) {
+			continue;
+		}
+		const { to } = entry as { to?: unknown };
+		if (typeof to !== "string") {
+			continue;
+		}
+		const m = PAGES_TO_PAGE_RE.exec(to);
+		if (m?.[1]) {
+			parsedPages.push(Number(m[1]));
+		}
+	}
+	if (parsedPages.length === 0) {
+		return { kind: "absent" };
+	}
+	const maxPage = Math.max(...parsedPages);
+	const currentPage = asInt(pageProps.page);
+	if (currentPage !== null && currentPage > maxPage) {
+		return {
+			kind: "contradictory",
+			reason: "structured current page exceeds structured pages[] max",
+		};
+	}
+	return { kind: "resolved", source: "structured", value: maxPage };
 }
 
 /**
@@ -420,27 +449,32 @@ export function resolveStructuredMaxPage(
  * prior `parseMaxPage` conflated the first two cases by always returning 1.
  */
 export function resolveDomMaxPage(html: string): MaxPageResolution {
-  const { document } = parseHTML(html);
-  const nav = document.querySelector('nav[aria-label*="Pagination" i]');
-  if (!nav) {
-    return { kind: "absent" };
-  }
-  const links = [...nav.querySelectorAll<HTMLAnchorElement>('a[href*="page="]')];
-  if (links.length === 0) {
-    return { kind: "absent" };
-  }
-  const pageNumbers: number[] = [];
-  for (const link of links) {
-    const href = link.getAttribute("href") ?? "";
-    const m = PAGINATION_PAGE_RE.exec(href);
-    if (m?.[1]) {
-      pageNumbers.push(Number(m[1]));
-    }
-  }
-  if (pageNumbers.length === 0) {
-    return { kind: "contradictory", reason: "pagination nav present but no page= link parsed" };
-  }
-  return { kind: "resolved", source: "dom", value: Math.max(...pageNumbers) };
+	const { document } = parseHTML(html);
+	const nav = document.querySelector('nav[aria-label*="Pagination" i]');
+	if (!nav) {
+		return { kind: "absent" };
+	}
+	const links = [
+		...nav.querySelectorAll<HTMLAnchorElement>('a[href*="page="]'),
+	];
+	if (links.length === 0) {
+		return { kind: "absent" };
+	}
+	const pageNumbers: number[] = [];
+	for (const link of links) {
+		const href = link.getAttribute("href") ?? "";
+		const m = PAGINATION_PAGE_RE.exec(href);
+		if (m?.[1]) {
+			pageNumbers.push(Number(m[1]));
+		}
+	}
+	if (pageNumbers.length === 0) {
+		return {
+			kind: "contradictory",
+			reason: "pagination nav present but no page= link parsed",
+		};
+	}
+	return { kind: "resolved", source: "dom", value: Math.max(...pageNumbers) };
 }
 
 /**
@@ -452,12 +486,12 @@ export function resolveDomMaxPage(html: string): MaxPageResolution {
  * asserting two different things about its own pagination state).
  */
 export function resolveMaxPage(html: string): MaxPageResolution {
-  const pageProps = readNextDataPageProps(html);
-  const structuredResult = resolveStructuredMaxPage(pageProps);
-  if (structuredResult.kind !== "absent") {
-    return structuredResult;
-  }
-  return resolveDomMaxPage(html);
+	const pageProps = readNextDataPageProps(html);
+	const structuredResult = resolveStructuredMaxPage(pageProps);
+	if (structuredResult.kind !== "absent") {
+		return structuredResult;
+	}
+	return resolveDomMaxPage(html);
 }
 
 // ─── Order-detail page ────────────────────────────────────────────────────
@@ -526,11 +560,11 @@ const IMAGE_PRODUCT_ID_PAD_LENGTH = 9;
  * decimal-like id such as "123.45" is not a valid H-E-B product id).
  */
 export function productImageUrl(productId: string | null): string | null {
-  if (!(productId && PRODUCT_ID_RE.test(productId))) {
-    return null;
-  }
-  const padded = productId.padStart(IMAGE_PRODUCT_ID_PAD_LENGTH, "0");
-  return `https://images.heb.com/is/image/HEBGrocery/prd-small/${padded}.jpg`;
+	if (!(productId && PRODUCT_ID_RE.test(productId))) {
+		return null;
+	}
+	const padded = productId.padStart(IMAGE_PRODUCT_ID_PAD_LENGTH, "0");
+	return `https://images.heb.com/is/image/HEBGrocery/prd-small/${padded}.jpg`;
 }
 
 /**
@@ -539,8 +573,8 @@ export function productImageUrl(productId: string | null): string | null {
  * `<li data-qe-id="itemRow">` — `.closest("li")` is correct here as-is.
  */
 function itemRowFor(link: Element): Element {
-  const li = link.closest("li");
-  return li ?? link.parentElement ?? link;
+	const li = link.closest("li");
+	return li ?? link.parentElement ?? link;
 }
 
 /**
@@ -550,17 +584,17 @@ function itemRowFor(link: Element): Element {
  * Returns null if the row isn't inside a recognized category section.
  */
 function departmentFor(row: Element): string | null {
-  const section = row.closest("section");
-  const title = section?.querySelector('[data-qe-id="orderDetailsGroupTitle"]');
-  const text = normText(title);
-  return text || null;
+	const section = row.closest("section");
+	const title = section?.querySelector('[data-qe-id="orderDetailsGroupTitle"]');
+	const text = normText(title);
+	return text || null;
 }
 
 function absoluteProductUrl(href: string): string | null {
-  if (!href) {
-    return null;
-  }
-  return href.startsWith("http") ? href : `https://www.heb.com${href}`;
+	if (!href) {
+		return null;
+	}
+	return href.startsWith("http") ? href : `https://www.heb.com${href}`;
 }
 
 /**
@@ -575,13 +609,14 @@ function absoluteProductUrl(href: string): string | null {
  * extraction.
  */
 export function parseDetailQuantity(rowText: string): number | null {
-  const structuredMatch = STRUCTURED_QTY_RE.exec(rowText);
-  if (structuredMatch?.[1]) {
-    return Number(structuredMatch[1]);
-  }
-  const quantityMatch = DETAIL_QUANTITY_RE.exec(rowText);
-  const raw = quantityMatch?.[1]?.trim().replace(TRAILING_PERIOD_RE, "").trim() ?? null;
-  return raw && NUMERIC_RE.test(raw) ? Number(raw) : null;
+	const structuredMatch = STRUCTURED_QTY_RE.exec(rowText);
+	if (structuredMatch?.[1]) {
+		return Number(structuredMatch[1]);
+	}
+	const quantityMatch = DETAIL_QUANTITY_RE.exec(rowText);
+	const raw =
+		quantityMatch?.[1]?.trim().replace(TRAILING_PERIOD_RE, "").trim() ?? null;
+	return raw && NUMERIC_RE.test(raw) ? Number(raw) : null;
 }
 
 // LIVE-VERIFIED (2026-07-14): checkoutItemPrice (line total), a strikethrough
@@ -593,31 +628,33 @@ export function parseDetailQuantity(rowText: string): number | null {
 // accessible line (which IS separated by its own sentence) if the structured
 // span is absent.
 function parseLineTotal(row: Element, rowText: string): string | null {
-  const structured = normText(row.querySelector('[data-qe-id="checkoutItemPrice"]'));
-  const priceMatch = structured ? null : DETAIL_PRICE_RE.exec(rowText);
-  const raw = structured || (priceMatch?.[1] ? `$${priceMatch[1]}` : null);
-  return raw || null;
+	const structured = normText(
+		row.querySelector('[data-qe-id="checkoutItemPrice"]'),
+	);
+	const priceMatch = structured ? null : DETAIL_PRICE_RE.exec(rowText);
+	const raw = structured || (priceMatch?.[1] ? `$${priceMatch[1]}` : null);
+	return raw || null;
 }
 
 function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
-  const href = link.getAttribute("href") ?? "";
-  const productId = href.split("/").filter(Boolean).pop() ?? null;
-  const name = normText(link);
-  if (!(name && productId)) {
-    return null;
-  }
-  const row = itemRowFor(link);
-  const rowText = rawLines(row);
+	const href = link.getAttribute("href") ?? "";
+	const productId = href.split("/").filter(Boolean).pop() ?? null;
+	const name = normText(link);
+	if (!(name && productId)) {
+		return null;
+	}
+	const row = itemRowFor(link);
+	const rowText = rawLines(row);
 
-  return {
-    department: departmentFor(row),
-    name,
-    productId,
-    productUrl: absoluteProductUrl(href),
-    imageUrl: productImageUrl(productId),
-    quantity: parseDetailQuantity(rowText),
-    lineTotal: parseLineTotal(row, rowText),
-  };
+	return {
+		department: departmentFor(row),
+		name,
+		productId,
+		productUrl: absoluteProductUrl(href),
+		imageUrl: productImageUrl(productId),
+		quantity: parseDetailQuantity(rowText),
+		lineTotal: parseLineTotal(row, rowText),
+	};
 }
 
 // LIVE-VERIFIED (2026-07-14): every real item row emits TWO anchors to the
@@ -632,28 +669,32 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 // rail was found on the real captured page (verified: only a "Quick actions"
 // banner with report/reorder buttons, no product-detail links).
 export function parseOrderDetailDom(html: string): OrderDetail | null {
-  const { document } = parseHTML(html);
-  const links = [...document.querySelectorAll<HTMLAnchorElement>('a[data-qe-id="itemRowDetailsName"]')];
-  if (links.length === 0) {
-    return null;
-  }
-  const seenHrefs = new Set<string>();
-  const items: DetailItem[] = [];
-  for (const link of links) {
-    const href = link.getAttribute("href") ?? "";
-    if (!href || seenHrefs.has(href)) {
-      continue;
-    }
-    seenHrefs.add(href);
-    const item = parseDetailItem(link);
-    if (item) {
-      items.push(item);
-    }
-  }
-  if (items.length === 0) {
-    return null;
-  }
-  return { items };
+	const { document } = parseHTML(html);
+	const links = [
+		...document.querySelectorAll<HTMLAnchorElement>(
+			'a[data-qe-id="itemRowDetailsName"]',
+		),
+	];
+	if (links.length === 0) {
+		return null;
+	}
+	const seenHrefs = new Set<string>();
+	const items: DetailItem[] = [];
+	for (const link of links) {
+		const href = link.getAttribute("href") ?? "";
+		if (!href || seenHrefs.has(href)) {
+			continue;
+		}
+		seenHrefs.add(href);
+		const item = parseDetailItem(link);
+		if (item) {
+			items.push(item);
+		}
+	}
+	if (items.length === 0) {
+		return null;
+	}
+	return { items };
 }
 
 // ─── Incapsula block detection ────────────────────────────────────────────
@@ -684,27 +725,31 @@ const IMPERVA_HOST_NAME_RE = /"hostName"\s*:/;
 const IMPERVA_INCIDENT_MAX_BYTES = 4000;
 
 function isImpervaIncidentReport(html: string): boolean {
-  if (html.length > IMPERVA_INCIDENT_MAX_BYTES) {
-    return false;
-  }
-  return IMPERVA_INCIDENT_ID_RE.test(html) && IMPERVA_HOST_NAME_RE.test(html);
+	if (html.length > IMPERVA_INCIDENT_MAX_BYTES) {
+		return false;
+	}
+	return IMPERVA_INCIDENT_ID_RE.test(html) && IMPERVA_HOST_NAME_RE.test(html);
 }
 
 export function isIncapsulaBlocked(html: string): boolean {
-  if (isImpervaIncidentReport(html)) {
-    return true;
-  }
-  const { document } = parseHTML(html);
-  const { body } = document;
-  if (!body) {
-    return false;
-  }
-  const hasH3 = Boolean(document.querySelector("h3"));
-  const hasBreadcrumb = Boolean(document.querySelector('nav[aria-label*="breadcrumb" i], [class*="breadcrumb" i]'));
-  const hasTestId = Boolean(document.querySelector("[data-testid]"));
-  const hasIframe = Boolean(document.querySelector("iframe"));
-  const shallowBody = body.children.length <= 2;
-  return !(hasH3 || hasBreadcrumb || hasTestId) && shallowBody && hasIframe;
+	if (isImpervaIncidentReport(html)) {
+		return true;
+	}
+	const { document } = parseHTML(html);
+	const { body } = document;
+	if (!body) {
+		return false;
+	}
+	const hasH3 = Boolean(document.querySelector("h3"));
+	const hasBreadcrumb = Boolean(
+		document.querySelector(
+			'nav[aria-label*="breadcrumb" i], [class*="breadcrumb" i]',
+		),
+	);
+	const hasTestId = Boolean(document.querySelector("[data-testid]"));
+	const hasIframe = Boolean(document.querySelector("iframe"));
+	const shallowBody = body.children.length <= 2;
+	return !(hasH3 || hasBreadcrumb || hasTestId) && shallowBody && hasIframe;
 }
 
 // ─── Session probe (deep check) ───────────────────────────────────────────
@@ -714,11 +759,11 @@ export function isIncapsulaBlocked(html: string): boolean {
 const LOGGED_OUT_URL_RE = /\/(sign-in|login|challenge|checkpoint)/i;
 
 export function looksLoggedOut(landedUrl: string, html: string): boolean {
-  if (LOGGED_OUT_URL_RE.test(landedUrl)) {
-    return true;
-  }
-  const { document } = parseHTML(html);
-  return Boolean(document.querySelector('input[type="password"]'));
+	if (LOGGED_OUT_URL_RE.test(landedUrl)) {
+		return true;
+	}
+	const { document } = parseHTML(html);
+	return Boolean(document.querySelector('input[type="password"]'));
 }
 
 // ─── Empty-list-page diagnostics ──────────────────────────────────────────
@@ -752,62 +797,73 @@ const ORDER_RESULTS_SELECTOR = '[data-qe-id="orderResults"]';
 const EMPTY_STATE_SELECTOR = '[class*="OrderEmpty_"], [class*="Empty_box"]';
 
 export function hasOrdersEmptyState(html: string): boolean {
-  const { document } = parseHTML(html);
-  const results = document.querySelector(ORDER_RESULTS_SELECTOR);
-  if (!results) {
-    return false;
-  }
-  return Boolean(results.querySelector(EMPTY_STATE_SELECTOR));
+	const { document } = parseHTML(html);
+	const results = document.querySelector(ORDER_RESULTS_SELECTOR);
+	if (!results) {
+		return false;
+	}
+	return Boolean(results.querySelector(EMPTY_STATE_SELECTOR));
 }
 
-export function diagnoseEmptyListPage(html: string, url: string): ListPageDiagnostics {
-  const { document } = parseHTML(html);
-  return {
-    url,
-    title: document.title ?? "",
-    order_cards: document.querySelectorAll('a[href*="/my-account/order-history/HEB"]').length,
-    any_card: document.querySelectorAll('[class*="order" i]').length,
-    password_form: Boolean(document.querySelector('input[type="password"]')),
-    incapsula_block: isIncapsulaBlocked(html),
-    empty_state: hasOrdersEmptyState(html),
-    body_preview: normText(document.body).slice(0, 240),
-  };
+export function diagnoseEmptyListPage(
+	html: string,
+	url: string,
+): ListPageDiagnostics {
+	const { document } = parseHTML(html);
+	return {
+		url,
+		title: document.title ?? "",
+		order_cards: document.querySelectorAll(
+			'a[href*="/my-account/order-history/HEB"]',
+		).length,
+		any_card: document.querySelectorAll('[class*="order" i]').length,
+		password_form: Boolean(document.querySelector('input[type="password"]')),
+		incapsula_block: isIncapsulaBlocked(html),
+		empty_state: hasOrdersEmptyState(html),
+		body_preview: normText(document.body).slice(0, 240),
+	};
 }
 
 /** Keep browser text local to classification. Durable SKIP_RESULT diagnostics
  * retain structural facts but never page content, title, or URL. */
-export function redactHebListPageDiagnostics(diag: ListPageDiagnostics): ListPageDiagnostics {
-  return {
-    any_card: diag.any_card,
-    body_preview: "",
-    empty_state: diag.empty_state,
-    incapsula_block: diag.incapsula_block,
-    order_cards: diag.order_cards,
-    password_form: diag.password_form,
-    title: "",
-    url: "",
-  };
+export function redactHebListPageDiagnostics(
+	diag: ListPageDiagnostics,
+): ListPageDiagnostics {
+	return {
+		any_card: diag.any_card,
+		body_preview: "",
+		empty_state: diag.empty_state,
+		incapsula_block: diag.incapsula_block,
+		order_cards: diag.order_cards,
+		password_form: diag.password_form,
+		title: "",
+		url: "",
+	};
 }
 
 // ─── Record builders ──────────────────────────────────────────────────────
 
-export function buildOrderRecord(listOrder: ListPageOrder, orderDate: string, emittedAt: string): OrdersRecord {
-  return {
-    id: listOrder.orderId,
-    order_date: orderDate,
-    fulfillment_method: listOrder.fulfillmentMethod,
-    fulfillment_location: listOrder.fulfillmentLocation,
-    status: listOrder.status,
-    status_code: listOrder.statusCode,
-    store_name: listOrder.storeName,
-    timeslot_start: listOrder.timeslotStart,
-    timeslot_end: listOrder.timeslotEnd,
-    unfulfilled_count: listOrder.unfulfilledCount,
-    total: listOrder.total,
-    total_cents: parseCurrencyCents(listOrder.total),
-    item_count: listOrder.itemCount,
-    fetched_at: emittedAt,
-  };
+export function buildOrderRecord(
+	listOrder: ListPageOrder,
+	orderDate: string,
+	emittedAt: string,
+): OrdersRecord {
+	return {
+		id: listOrder.orderId,
+		order_date: orderDate,
+		fulfillment_method: listOrder.fulfillmentMethod,
+		fulfillment_location: listOrder.fulfillmentLocation,
+		status: listOrder.status,
+		status_code: listOrder.statusCode,
+		store_name: listOrder.storeName,
+		timeslot_start: listOrder.timeslotStart,
+		timeslot_end: listOrder.timeslotEnd,
+		unfulfilled_count: listOrder.unfulfilledCount,
+		total: listOrder.total,
+		total_cents: parseCurrencyCents(listOrder.total),
+		item_count: listOrder.itemCount,
+		fetched_at: emittedAt,
+	};
 }
 
 /** Composite item id, Amazon's `${orderId}|${key}` pattern (design doc: "H-E-B
@@ -818,33 +874,38 @@ export function buildOrderRecord(listOrder: ListPageOrder, orderDate: string, em
  *  item list) so two same-name, product-id-null items in one order — e.g. two
  *  malformed/variant hrefs that both fail to yield a product id — get
  *  distinct ids instead of colliding on the same normalized name. */
-export function orderItemId(orderId: string, item: Pick<DetailItem, "productId" | "name">, itemIndex: number): string {
-  if (item.productId) {
-    return `${orderId}|${item.productId}`;
-  }
-  const normalizedName = item.name.replace(WHITESPACE_RE, " ").trim().toLowerCase() || "unknown";
-  return `${orderId}|${normalizedName}|${itemIndex}`;
+export function orderItemId(
+	orderId: string,
+	item: Pick<DetailItem, "productId" | "name">,
+	itemIndex: number,
+): string {
+	if (item.productId) {
+		return `${orderId}|${item.productId}`;
+	}
+	const normalizedName =
+		item.name.replace(WHITESPACE_RE, " ").trim().toLowerCase() || "unknown";
+	return `${orderId}|${normalizedName}|${itemIndex}`;
 }
 
 export function buildOrderItemRecord(
-  orderId: string,
-  orderDate: string,
-  item: DetailItem,
-  itemIndex: number,
-  emittedAt: string
+	orderId: string,
+	orderDate: string,
+	item: DetailItem,
+	itemIndex: number,
+	emittedAt: string,
 ): OrderItemRecord {
-  return {
-    id: orderItemId(orderId, item, itemIndex),
-    order_id: orderId,
-    name: item.name,
-    department: item.department,
-    product_id: item.productId,
-    product_url: item.productUrl,
-    image_url: item.imageUrl,
-    quantity: item.quantity,
-    line_total: item.lineTotal,
-    line_total_cents: parseCurrencyCents(item.lineTotal),
-    order_date: orderDate,
-    fetched_at: emittedAt,
-  };
+	return {
+		id: orderItemId(orderId, item, itemIndex),
+		order_id: orderId,
+		name: item.name,
+		department: item.department,
+		product_id: item.productId,
+		product_url: item.productUrl,
+		image_url: item.imageUrl,
+		quantity: item.quantity,
+		line_total: item.lineTotal,
+		line_total_cents: parseCurrencyCents(item.lineTotal),
+		order_date: orderDate,
+		fetched_at: emittedAt,
+	};
 }

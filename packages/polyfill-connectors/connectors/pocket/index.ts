@@ -22,44 +22,44 @@ import { type RecordData, runConnector } from "../../src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 interface PocketAuthor {
-  name?: string;
+	name?: string;
 }
 
 interface PocketTags {
-  [name: string]: unknown;
+	[name: string]: unknown;
 }
 
 interface PocketItem {
-  authors?: Record<string, PocketAuthor>;
-  favorite?: string;
-  given_title?: string | null;
-  given_url?: string;
-  item_id: string;
-  resolved_title?: string | null;
-  resolved_url?: string;
-  status?: string;
-  tags?: PocketTags;
-  time_added?: string | number;
-  time_favorited?: string | number;
-  time_read?: string | number;
-  time_to_read?: string;
-  time_updated?: string | number;
-  word_count?: string;
+	authors?: Record<string, PocketAuthor>;
+	favorite?: string;
+	given_title?: string | null;
+	given_url?: string;
+	item_id: string;
+	resolved_title?: string | null;
+	resolved_url?: string;
+	status?: string;
+	tags?: PocketTags;
+	time_added?: string | number;
+	time_favorited?: string | number;
+	time_read?: string | number;
+	time_to_read?: string;
+	time_updated?: string | number;
+	word_count?: string;
 }
 
 interface PocketGetResponse {
-  list?: Record<string, PocketItem> | unknown[];
+	list?: Record<string, PocketItem> | unknown[];
 }
 
 interface PocketRequestBody {
-  access_token: string;
-  consumer_key: string;
-  count: number;
-  detailType: string;
-  offset?: number;
-  since?: number;
-  sort: string;
-  state: string;
+	access_token: string;
+	consumer_key: string;
+	count: number;
+	detailType: string;
+	offset?: number;
+	since?: number;
+	sort: string;
+	state: string;
 }
 
 const POCKET_PAGE_SIZE = 500;
@@ -71,122 +71,137 @@ const POCKET_URL = "https://getpocket.com/v3/get";
 // stamp 1970-01-01 on `time_added`, the manifest's semantic-time source, or
 // throw on the Invalid Date.
 const isoFromUnix = (u: string | number | undefined | null): string | null => {
-  if (u === undefined || u === null || u === "") {
-    return null;
-  }
-  const sec = Number(u);
-  return Number.isFinite(sec) && sec > 0 ? new Date(sec * 1000).toISOString() : null;
+	if (u === undefined || u === null || u === "") {
+		return null;
+	}
+	const sec = Number(u);
+	return Number.isFinite(sec) && sec > 0
+		? new Date(sec * 1000).toISOString()
+		: null;
 };
 
 function itemRecord(it: PocketItem): RecordData {
-  // Pocket status: '0' = unread, '1' = archived, '2' = deleted (tombstone).
-  const itemId = String(it.item_id);
-  return {
-    id: itemId,
-    status: it.status,
-    url: it.resolved_url || it.given_url,
-    title: it.resolved_title || it.given_title || null,
-    author: it.authors
-      ? Object.values(it.authors)
-          .map((a) => a.name)
-          .filter(Boolean)
-          .join(", ")
-      : null,
-    time_added: isoFromUnix(it.time_added),
-    time_updated: isoFromUnix(it.time_updated),
-    time_read: isoFromUnix(it.time_read),
-    time_favorited: isoFromUnix(it.time_favorited),
-    tags: it.tags ? Object.keys(it.tags) : [],
-    archived: it.status === "1",
-    favorite: it.favorite === "1",
-    word_count: it.word_count ? Number.parseInt(it.word_count, 10) : null,
-    reading_time_minutes: it.time_to_read ? Number.parseInt(it.time_to_read, 10) : null,
-  };
+	// Pocket status: '0' = unread, '1' = archived, '2' = deleted (tombstone).
+	const itemId = String(it.item_id);
+	return {
+		id: itemId,
+		status: it.status,
+		url: it.resolved_url || it.given_url,
+		title: it.resolved_title || it.given_title || null,
+		author: it.authors
+			? Object.values(it.authors)
+					.map((a) => a.name)
+					.filter(Boolean)
+					.join(", ")
+			: null,
+		time_added: isoFromUnix(it.time_added),
+		time_updated: isoFromUnix(it.time_updated),
+		time_read: isoFromUnix(it.time_read),
+		time_favorited: isoFromUnix(it.time_favorited),
+		tags: it.tags ? Object.keys(it.tags) : [],
+		archived: it.status === "1",
+		favorite: it.favorite === "1",
+		word_count: it.word_count ? Number.parseInt(it.word_count, 10) : null,
+		reading_time_minutes: it.time_to_read
+			? Number.parseInt(it.time_to_read, 10)
+			: null,
+	};
 }
 
-async function fetchPocketPage(body: PocketRequestBody, offset: number): Promise<PocketItem[]> {
-  const res = await fetch(POCKET_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Accept": "application/json",
-    },
-    body: JSON.stringify({ ...body, offset }),
-  });
-  if (res.status === 401) {
-    throw new Error("pocket_auth_failed");
-  }
-  if (!res.ok) {
-    const text = (await res.text()).slice(0, 200);
-    const msg = `pocket_http_${String(res.status)}: ${text}`;
-    if (SERVER_ERROR_PATTERN.test(String(res.status))) {
-      throw new Error(`${msg} (retryable)`);
-    }
-    throw new Error(msg);
-  }
-  const data = (await res.json()) as PocketGetResponse;
-  if (!(data.list && typeof data.list === "object") || Array.isArray(data.list)) {
-    return [];
-  }
-  return Object.values(data.list) as PocketItem[];
+async function fetchPocketPage(
+	body: PocketRequestBody,
+	offset: number,
+): Promise<PocketItem[]> {
+	const res = await fetch(POCKET_URL, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Accept": "application/json",
+		},
+		body: JSON.stringify({ ...body, offset }),
+	});
+	if (res.status === 401) {
+		throw new Error("pocket_auth_failed");
+	}
+	if (!res.ok) {
+		const text = (await res.text()).slice(0, 200);
+		const msg = `pocket_http_${String(res.status)}: ${text}`;
+		if (SERVER_ERROR_PATTERN.test(String(res.status))) {
+			throw new Error(`${msg} (retryable)`);
+		}
+		throw new Error(msg);
+	}
+	const data = (await res.json()) as PocketGetResponse;
+	if (
+		!(data.list && typeof data.list === "object") ||
+		Array.isArray(data.list)
+	) {
+		return [];
+	}
+	return Object.values(data.list) as PocketItem[];
 }
 
 runConnector({
-  name: "pocket",
-  validateRecord,
-  retryablePattern: /ECONN|fetch failed/i,
-  auth: {
-    kind: "env",
-    required: ["POCKET_CONSUMER_KEY", "POCKET_ACCESS_TOKEN"],
-  },
-  // Pocket status '2' = deleted (tombstone).
-  isTombstone: (_stream, d) => d.status === "2",
-  async collect({ state, requested, credentials, emit, emitRecord, progress }) {
-    const consumerKey = credentials.POCKET_CONSUMER_KEY;
-    const accessToken = credentials.POCKET_ACCESS_TOKEN;
-    if (!(consumerKey && accessToken)) {
-      throw new Error("pocket_auth_failed");
-    }
+	name: "pocket",
+	validateRecord,
+	retryablePattern: /ECONN|fetch failed/i,
+	auth: {
+		kind: "env",
+		required: ["POCKET_CONSUMER_KEY", "POCKET_ACCESS_TOKEN"],
+	},
+	// Pocket status '2' = deleted (tombstone).
+	isTombstone: (_stream, d) => d.status === "2",
+	async collect({ state, requested, credentials, emit, emitRecord, progress }) {
+		const consumerKey = credentials.POCKET_CONSUMER_KEY;
+		const accessToken = credentials.POCKET_ACCESS_TOKEN;
+		if (!(consumerKey && accessToken)) {
+			throw new Error("pocket_auth_failed");
+		}
 
-    if (!requested.has("items")) {
-      return;
-    }
+		if (!requested.has("items")) {
+			return;
+		}
 
-    await progress("Fetching Pocket items", { stream: "items" });
-    const itemsState = state.items as { last_time_updated_unix?: number } | undefined;
-    const since = itemsState?.last_time_updated_unix;
-    const body: PocketRequestBody = {
-      consumer_key: consumerKey,
-      access_token: accessToken,
-      detailType: "complete",
-      state: "all",
-      sort: "oldest",
-      count: POCKET_PAGE_SIZE,
-      ...(since === undefined ? {} : { since }),
-    };
-    let offset = 0;
-    let latest = since || 0;
-    for (;;) {
-      const items = await fetchPocketPage(body, offset);
-      if (!items.length) {
-        break;
-      }
-      for (const it of items) {
-        const updated = Number.parseInt(String(it.time_updated || it.time_added || "0"), 10);
-        await emitRecord("items", itemRecord(it));
-        if (updated > latest) {
-          latest = updated;
-        }
-      }
-      offset += items.length;
-      if (items.length < POCKET_PAGE_SIZE) {
-        break;
-      }
-    }
-    await emit({
-      type: "STATE",
-      stream: "items",
-      cursor: { last_time_updated_unix: latest || null },
-    });
-  },
+		await progress("Fetching Pocket items", { stream: "items" });
+		const itemsState = state.items as
+			| { last_time_updated_unix?: number }
+			| undefined;
+		const since = itemsState?.last_time_updated_unix;
+		const body: PocketRequestBody = {
+			consumer_key: consumerKey,
+			access_token: accessToken,
+			detailType: "complete",
+			state: "all",
+			sort: "oldest",
+			count: POCKET_PAGE_SIZE,
+			...(since === undefined ? {} : { since }),
+		};
+		let offset = 0;
+		let latest = since || 0;
+		for (;;) {
+			const items = await fetchPocketPage(body, offset);
+			if (!items.length) {
+				break;
+			}
+			for (const it of items) {
+				const updated = Number.parseInt(
+					String(it.time_updated || it.time_added || "0"),
+					10,
+				);
+				await emitRecord("items", itemRecord(it));
+				if (updated > latest) {
+					latest = updated;
+				}
+			}
+			offset += items.length;
+			if (items.length < POCKET_PAGE_SIZE) {
+				break;
+			}
+		}
+		await emit({
+			type: "STATE",
+			stream: "items",
+			cursor: { last_time_updated_unix: latest || null },
+		});
+	},
 });

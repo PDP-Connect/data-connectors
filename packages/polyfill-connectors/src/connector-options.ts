@@ -26,17 +26,17 @@ const BOOL_TRUE = /^(1|true|yes|on)$/i;
 export type OptionParseKind = "int" | "bool" | "csv" | "string";
 
 export interface OptionFieldSpec {
-  default: unknown;
-  parse: OptionParseKind;
+	default: unknown;
+	parse: OptionParseKind;
 }
 
 export interface OptionsSpec {
-  envPrefix: string;
-  fields: Record<string, OptionFieldSpec>;
+	envPrefix: string;
+	fields: Record<string, OptionFieldSpec>;
 }
 
 export interface StartMessageWithOptions {
-  connector_options?: Record<string, unknown>;
+	connector_options?: Record<string, unknown>;
 }
 
 /**
@@ -53,52 +53,56 @@ export interface StartMessageWithOptions {
  *   }
  */
 export function readOptions(
-  startMsg: StartMessageWithOptions | null | undefined,
-  spec: OptionsSpec
+	startMsg: StartMessageWithOptions | null | undefined,
+	spec: OptionsSpec,
 ): Record<string, unknown> {
-  const fromStart: Record<string, unknown> = startMsg?.connector_options ?? {};
-  const out: Record<string, unknown> = {};
-  for (const [name, def] of Object.entries(spec.fields)) {
-    const envKey = `${spec.envPrefix}${name}`;
-    let raw: unknown;
-    if (Object.hasOwn(fromStart, name)) {
-      raw = fromStart[name];
-    } else if (process.env[envKey] === undefined) {
-      out[name] = def.default;
-      continue;
-    } else {
-      raw = process.env[envKey];
-    }
-    out[name] = coerce(raw, def.parse, def.default);
-  }
-  return out;
+	const fromStart: Record<string, unknown> = startMsg?.connector_options ?? {};
+	const out: Record<string, unknown> = {};
+	for (const [name, def] of Object.entries(spec.fields)) {
+		const envKey = `${spec.envPrefix}${name}`;
+		let raw: unknown;
+		if (Object.hasOwn(fromStart, name)) {
+			raw = fromStart[name];
+		} else if (process.env[envKey] === undefined) {
+			out[name] = def.default;
+			continue;
+		} else {
+			raw = process.env[envKey];
+		}
+		out[name] = coerce(raw, def.parse, def.default);
+	}
+	return out;
 }
 
-function coerce(raw: unknown, parse: OptionParseKind, fallback: unknown): unknown {
-  if (raw === null || raw === undefined) {
-    return fallback;
-  }
-  switch (parse) {
-    case "int": {
-      const n = Number.parseInt(String(raw), 10);
-      return Number.isFinite(n) ? n : fallback;
-    }
-    case "bool": {
-      if (typeof raw === "boolean") {
-        return raw;
-      }
-      return BOOL_TRUE.test(String(raw).trim());
-    }
-    case "csv": {
-      if (Array.isArray(raw)) {
-        return raw;
-      }
-      return String(raw)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
-    default:
-      return String(raw);
-  }
+function coerce(
+	raw: unknown,
+	parse: OptionParseKind,
+	fallback: unknown,
+): unknown {
+	if (raw === null || raw === undefined) {
+		return fallback;
+	}
+	switch (parse) {
+		case "int": {
+			const n = Number.parseInt(String(raw), 10);
+			return Number.isFinite(n) ? n : fallback;
+		}
+		case "bool": {
+			if (typeof raw === "boolean") {
+				return raw;
+			}
+			return BOOL_TRUE.test(String(raw).trim());
+		}
+		case "csv": {
+			if (Array.isArray(raw)) {
+				return raw;
+			}
+			return String(raw)
+				.split(",")
+				.map((s) => s.trim())
+				.filter(Boolean);
+		}
+		default:
+			return String(raw);
+	}
 }

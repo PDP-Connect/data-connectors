@@ -29,29 +29,31 @@
 
 export type SchemalessJustification = string;
 
-export const SCHEMALESS_CONNECTOR_ALLOWLIST: Readonly<Record<string, SchemalessJustification>> = Object.freeze({
-  // Lane A — COMPLETE (2026-05-28): google_takeout, twitter_archive, whatsapp,
-  // imessage, and loom now wire emit-time validateRecord (connectors/<name>/
-  // schemas.ts). Their entries were removed per the shrink-only invariant.
-  // Lane B — COMPLETE (2026-05-28): anthropic, notion, oura, spotify, strava,
-  // pocket, linkedin, shopify, and uber now wire emit-time validateRecord
-  // (connectors/<name>/schemas.ts). Their entries were removed per the
-  // shrink-only invariant. notion/oura/spotify/strava/pocket are
-  // emit-shape-derived; anthropic/linkedin/shopify/uber are scaffolds that do
-  // not yet emit a RECORD, so their schemas follow the manifest stream contract
-  // (loom precedent) and the first real emit is shape-checked.
-  // Lane C — COMPLETE (2026-05-28): heb, ical, meta, apple_health, doordash, and
-  // wholefoods now wire emit-time validateRecord (connectors/<name>/schemas.ts).
-  // Their entries were removed per the shrink-only invariant. ical and
-  // apple_health are emit-shape-derived from their parser record builders
-  // (buildEventRecord / buildHealthRecord / buildWorkoutRecord); heb, meta,
-  // doordash, and wholefoods are browser scaffolds that do not yet emit a RECORD,
-  // so their schemas follow the manifest stream contract (loom precedent) and
-  // the first real emit is shape-checked rather than silently trusted.
-  // The allowlist is now EMPTY: every stream-declaring connector validates its
-  // emitted records. It is kept (rather than deleted) so the honesty gate keeps
-  // running in BOTH directions — a connector that loses its validateRecord wiring
-  // and is not re-added here fails the build, and a future schemaless connector
-  // must make a deliberate, reviewed addition here. The map can only grow by an
-  // explicit, justified escape-hatch entry; a new connector validates by default.
+export const SCHEMALESS_CONNECTOR_ALLOWLIST: Readonly<
+	Record<string, SchemalessJustification>
+> = Object.freeze({
+	// Lane A — COMPLETE (2026-05-28): google_takeout, twitter_archive, whatsapp,
+	// imessage, and loom now wire emit-time validateRecord (connectors/<name>/
+	// schemas.ts). Their entries were removed per the shrink-only invariant.
+	// Lane B — COMPLETE (2026-05-28): anthropic, notion, oura, spotify, strava,
+	// pocket, linkedin, shopify, and uber now wire emit-time validateRecord
+	// (connectors/<name>/schemas.ts). Their entries were removed per the
+	// shrink-only invariant. notion/oura/spotify/strava/pocket are
+	// emit-shape-derived; anthropic/linkedin/shopify/uber are scaffolds that do
+	// not yet emit a RECORD, so their schemas follow the manifest stream contract
+	// (loom precedent) and the first real emit is shape-checked.
+	// Lane C — COMPLETE (2026-05-28): heb, ical, meta, apple_health, doordash, and
+	// wholefoods now wire emit-time validateRecord (connectors/<name>/schemas.ts).
+	// Their entries were removed per the shrink-only invariant. ical and
+	// apple_health are emit-shape-derived from their parser record builders
+	// (buildEventRecord / buildHealthRecord / buildWorkoutRecord); heb, meta,
+	// doordash, and wholefoods are browser scaffolds that do not yet emit a RECORD,
+	// so their schemas follow the manifest stream contract (loom precedent) and
+	// the first real emit is shape-checked rather than silently trusted.
+	// The allowlist is now EMPTY: every stream-declaring connector validates its
+	// emitted records. It is kept (rather than deleted) so the honesty gate keeps
+	// running in BOTH directions — a connector that loses its validateRecord wiring
+	// and is not re-added here fails the build, and a future schemaless connector
+	// must make a deliberate, reviewed addition here. The map can only grow by an
+	// explicit, justified escape-hatch entry; a new connector validates by default.
 });

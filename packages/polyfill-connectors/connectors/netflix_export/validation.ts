@@ -3,62 +3,74 @@
 
 import { createHash } from "node:crypto";
 import {
-  buildViewingActivityRecord,
-  detectViewingActivitySchema,
-  extractViewingActivityArtifact,
-  extractViewingActivityArtifactFromFile,
-  inferDirectHistoryDateOrderFromRows,
-  type NetflixExportExtractionResult,
-  parseCSVContentForValidation,
+	buildViewingActivityRecord,
+	detectViewingActivitySchema,
+	extractViewingActivityArtifact,
+	extractViewingActivityArtifactFromFile,
+	inferDirectHistoryDateOrderFromRows,
+	type NetflixExportExtractionResult,
+	parseCSVContentForValidation,
 } from "./parsers.ts";
-import type { ViewingActivityRecord, ViewingActivitySourceSchema } from "./types.ts";
+import type {
+	ViewingActivityRecord,
+	ViewingActivitySourceSchema,
+} from "./types.ts";
 
 export type NetflixExportValidationStatus =
-  | "valid"
-  | "duplicate"
-  | "empty"
-  | "unsupported"
-  | "too_large"
-  | "ambiguous_date_order";
+	| "valid"
+	| "duplicate"
+	| "empty"
+	| "unsupported"
+	| "too_large"
+	| "ambiguous_date_order";
 
 export interface NetflixExportValidationOptions {
-  readonly existingFileHashes?: readonly string[];
-  readonly fileName?: string | null;
-  readonly maxFileBytes?: number | null;
+	readonly existingFileHashes?: readonly string[];
+	readonly fileName?: string | null;
+	readonly maxFileBytes?: number | null;
 }
 
 export interface NetflixExportValidation {
-  readonly date_range: { readonly end: string | null; readonly start: string | null };
-  readonly detected_format: "viewing_activity_csv" | "viewing_activity_zip" | "unsupported";
-  readonly detected_schema: ViewingActivitySourceSchema | null;
-  readonly estimated_records: number;
-  readonly file_sha256: string;
-  readonly remediation: string | null;
-  readonly status: NetflixExportValidationStatus;
+	readonly date_range: {
+		readonly end: string | null;
+		readonly start: string | null;
+	};
+	readonly detected_format:
+		| "viewing_activity_csv"
+		| "viewing_activity_zip"
+		| "unsupported";
+	readonly detected_schema: ViewingActivitySourceSchema | null;
+	readonly estimated_records: number;
+	readonly file_sha256: string;
+	readonly remediation: string | null;
+	readonly status: NetflixExportValidationStatus;
 }
 
-function minMax(values: readonly string[]): { end: string | null; start: string | null } {
-  const sorted = values.filter(Boolean).sort();
-  return { end: sorted.at(-1) ?? null, start: sorted[0] ?? null };
+function minMax(values: readonly string[]): {
+	end: string | null;
+	start: string | null;
+} {
+	const sorted = values.filter(Boolean).sort();
+	return { end: sorted.at(-1) ?? null, start: sorted[0] ?? null };
 }
 
 function remediationFor(status: NetflixExportValidationStatus): string | null {
-  switch (status) {
-    case "duplicate":
-      return "This export was already imported. Request a newer export from netflix.com/account/getmyinfo if you need more recent activity.";
-    case "empty":
-      return "This looks like a Netflix viewing activity export, but it does not contain importable rows.";
-    case "too_large":
-      return "This is a real Netflix export, but it (or the ViewingActivity.csv inside it) is larger than PDPP can safely process from a browser upload. Extract the archive yourself and upload just CONTENT_INTERACTION/ViewingActivity.csv instead of the whole archive.";
-    case "unsupported":
-      return "Choose the CSV from Download all on netflix.com/viewingactivity, ViewingActivity.csv, or the .zip archive from netflix.com/account/getmyinfo. Other files are not supported.";
-    case "ambiguous_date_order":
-      return "Every date in this file is ambiguous between DD/MM and MM/DD order (no row's day exceeds 12), so PDPP can't tell which order Netflix used for your account's locale. Re-export a file that includes at least one date with a day above 12, or wait until your history includes one.";
-    case "valid":
-      return null;
-    default:
-      return null;
-  }
+	switch (status) {
+		case "duplicate":
+			return "This export was already imported. Request a newer export from netflix.com/account/getmyinfo if you need more recent activity.";
+		case "empty":
+			return "This looks like a Netflix viewing activity export, but it does not contain importable rows.";
+		case "too_large":
+			return "This is a real Netflix export, but it (or the ViewingActivity.csv inside it) is larger than PDPP can safely process from a browser upload. Extract the archive yourself and upload just CONTENT_INTERACTION/ViewingActivity.csv instead of the whole archive.";
+		case "unsupported":
+			return "Choose the CSV from Download all on netflix.com/viewingactivity, ViewingActivity.csv, or the .zip archive from netflix.com/account/getmyinfo. Other files are not supported.";
+		case "ambiguous_date_order":
+			return "Every date in this file is ambiguous between DD/MM and MM/DD order (no row's day exceeds 12), so PDPP can't tell which order Netflix used for your account's locale. Re-export a file that includes at least one date with a day above 12, or wait until your history includes one.";
+		case "valid":
+			return null;
+		default:
+			return null;
+	}
 }
 
 /**
@@ -71,110 +83,136 @@ function remediationFor(status: NetflixExportValidationStatus): string | null {
  * the ONLY difference between them is how `artifact` is obtained.
  */
 function buildValidationFromArtifact(
-  artifact: NetflixExportExtractionResult,
-  fileSha256: string,
-  existingFileHashes: readonly string[] | undefined
+	artifact: NetflixExportExtractionResult,
+	fileSha256: string,
+	existingFileHashes: readonly string[] | undefined,
 ): NetflixExportValidation {
-  const base = {
-    date_range: { end: null, start: null },
-    detected_format: "unsupported" as const,
-    detected_schema: null,
-    estimated_records: 0,
-    file_sha256: fileSha256,
-  };
+	const base = {
+		date_range: { end: null, start: null },
+		detected_format: "unsupported" as const,
+		detected_schema: null,
+		estimated_records: 0,
+		file_sha256: fileSha256,
+	};
 
-  if (!artifact.ok) {
-    // entry_too_large / total_too_large / too_many_entries mean this IS a
-    // real (or plausibly real) export that tripped the decompression-bomb
-    // policy — report too_large, not unsupported, so the owner gets
-    // actionable guidance instead of being told their real export is
-    // unrecognized. no_viewing_activity_entry / unsupported_shape mean the
-    // artifact genuinely isn't (or doesn't contain) a Netflix export.
-    const isSizePolicyRejection =
-      artifact.code === "entry_too_large" ||
-      artifact.code === "total_too_large" ||
-      artifact.code === "too_many_entries";
-    const status: NetflixExportValidationStatus = isSizePolicyRejection ? "too_large" : "unsupported";
-    return { ...base, remediation: remediationFor(status), status };
-  }
+	if (!artifact.ok) {
+		// entry_too_large / total_too_large / too_many_entries mean this IS a
+		// real (or plausibly real) export that tripped the decompression-bomb
+		// policy — report too_large, not unsupported, so the owner gets
+		// actionable guidance instead of being told their real export is
+		// unrecognized. no_viewing_activity_entry / unsupported_shape mean the
+		// artifact genuinely isn't (or doesn't contain) a Netflix export.
+		const isSizePolicyRejection =
+			artifact.code === "entry_too_large" ||
+			artifact.code === "total_too_large" ||
+			artifact.code === "too_many_entries";
+		const status: NetflixExportValidationStatus = isSizePolicyRejection
+			? "too_large"
+			: "unsupported";
+		return { ...base, remediation: remediationFor(status), status };
+	}
 
-  const { headers, rows } = parseCSVContentForValidation(artifact.csvText);
-  const schema = detectViewingActivitySchema(headers);
-  if (!schema) {
-    // Neither direct_history nor full_export header set matched — including
-    // a mixed/partial header row. Never guessed at; reported as unsupported.
-    return { ...base, remediation: remediationFor("unsupported"), status: "unsupported" };
-  }
+	const { headers, rows } = parseCSVContentForValidation(artifact.csvText);
+	const schema = detectViewingActivitySchema(headers);
+	if (!schema) {
+		// Neither direct_history nor full_export header set matched — including
+		// a mixed/partial header row. Never guessed at; reported as unsupported.
+		return {
+			...base,
+			remediation: remediationFor("unsupported"),
+			status: "unsupported",
+		};
+	}
 
-  const dateOrder = schema === "direct_history" ? inferDirectHistoryDateOrderFromRows(rows) : null;
-  const records = rows
-    .map((row) => buildViewingActivityRecord(row, schema, dateOrder))
-    .filter((rec): rec is ViewingActivityRecord => rec !== null);
+	const dateOrder =
+		schema === "direct_history"
+			? inferDirectHistoryDateOrderFromRows(rows)
+			: null;
+	const records = rows
+		.map((row) => buildViewingActivityRecord(row, schema, dateOrder))
+		.filter((rec): rec is ViewingActivityRecord => rec !== null);
 
-  if (schema === "direct_history" && !dateOrder && records.length === 0 && rows.some((row) => row.date)) {
-    // Every non-ISO date in the dataset is itself ambiguous (no row
-    // disambiguates DD/MM vs MM/DD) — the whole file failed to parse as a
-    // direct result, not because it's empty. Distinct, actionable status;
-    // never silently reported as "empty" or guessed at.
-    return {
-      ...base,
-      detected_schema: schema,
-      remediation: remediationFor("ambiguous_date_order"),
-      status: "ambiguous_date_order",
-    };
-  }
+	if (
+		schema === "direct_history" &&
+		!dateOrder &&
+		records.length === 0 &&
+		rows.some((row) => row.date)
+	) {
+		// Every non-ISO date in the dataset is itself ambiguous (no row
+		// disambiguates DD/MM vs MM/DD) — the whole file failed to parse as a
+		// direct result, not because it's empty. Distinct, actionable status;
+		// never silently reported as "empty" or guessed at.
+		return {
+			...base,
+			detected_schema: schema,
+			remediation: remediationFor("ambiguous_date_order"),
+			status: "ambiguous_date_order",
+		};
+	}
 
-  const dateRange = minMax(records.map((rec) => rec.watched_at));
+	const dateRange = minMax(records.map((rec) => rec.watched_at));
 
-  let status: NetflixExportValidationStatus = "valid";
-  if (new Set(existingFileHashes ?? []).has(fileSha256)) {
-    status = "duplicate";
-  } else if (records.length === 0) {
-    status = "empty";
-  }
+	let status: NetflixExportValidationStatus = "valid";
+	if (new Set(existingFileHashes ?? []).has(fileSha256)) {
+		status = "duplicate";
+	} else if (records.length === 0) {
+		status = "empty";
+	}
 
-  return {
-    date_range: dateRange,
-    detected_format: artifact.format,
-    detected_schema: schema,
-    estimated_records: records.length,
-    file_sha256: fileSha256,
-    remediation: remediationFor(status),
-    status,
-  };
+	return {
+		date_range: dateRange,
+		detected_format: artifact.format,
+		detected_schema: schema,
+		estimated_records: records.length,
+		file_sha256: fileSha256,
+		remediation: remediationFor(status),
+		status,
+	};
 }
 
 export function validateNetflixExportArtifact(
-  input: Buffer | Uint8Array | string,
-  options: NetflixExportValidationOptions = {}
+	input: Buffer | Uint8Array | string,
+	options: NetflixExportValidationOptions = {},
 ): NetflixExportValidation {
-  const bytes = typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
-  const fileSha256 = createHash("sha256").update(bytes).digest("hex");
+	const bytes =
+		typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
+	const fileSha256 = createHash("sha256").update(bytes).digest("hex");
 
-  if (options.maxFileBytes !== null && options.maxFileBytes !== undefined && bytes.byteLength > options.maxFileBytes) {
-    return {
-      date_range: { end: null, start: null },
-      detected_format: "unsupported",
-      detected_schema: null,
-      estimated_records: 0,
-      file_sha256: fileSha256,
-      remediation: remediationFor("too_large"),
-      status: "too_large",
-    };
-  }
+	if (
+		options.maxFileBytes !== null &&
+		options.maxFileBytes !== undefined &&
+		bytes.byteLength > options.maxFileBytes
+	) {
+		return {
+			date_range: { end: null, start: null },
+			detected_format: "unsupported",
+			detected_schema: null,
+			estimated_records: 0,
+			file_sha256: fileSha256,
+			remediation: remediationFor("too_large"),
+			status: "too_large",
+		};
+	}
 
-  const artifact = extractViewingActivityArtifact(options.fileName ?? "ViewingActivity.csv", bytes);
-  return buildValidationFromArtifact(artifact, fileSha256, options.existingFileHashes);
+	const artifact = extractViewingActivityArtifact(
+		options.fileName ?? "ViewingActivity.csv",
+		bytes,
+	);
+	return buildValidationFromArtifact(
+		artifact,
+		fileSha256,
+		options.existingFileHashes,
+	);
 }
 
 export interface NetflixExportFileValidationOptions {
-  readonly existingFileHashes?: readonly string[];
-  readonly fileName?: string | null;
-  /** Already-known SHA-256 of the file (e.g. computed once during the
-   *  streaming upload write) — passed in rather than recomputed, so this
-   *  validator never needs a second whole-file read just to hash it again. */
-  readonly fileSha256: string;
-  readonly maxFileBytes?: number | null;
+	readonly existingFileHashes?: readonly string[];
+	readonly fileName?: string | null;
+	/** Already-known SHA-256 of the file (e.g. computed once during the
+	 *  streaming upload write) — passed in rather than recomputed, so this
+	 *  validator never needs a second whole-file read just to hash it again. */
+	readonly fileSha256: string;
+	readonly maxFileBytes?: number | null;
 }
 
 /**
@@ -188,23 +226,35 @@ export interface NetflixExportFileValidationOptions {
  * closes `fd`.
  */
 export function validateNetflixExportArtifactFromFile(
-  fd: number,
-  fileName: string,
-  fileSize: number,
-  options: NetflixExportFileValidationOptions
+	fd: number,
+	fileName: string,
+	fileSize: number,
+	options: NetflixExportFileValidationOptions,
 ): NetflixExportValidation {
-  if (options.maxFileBytes !== null && options.maxFileBytes !== undefined && fileSize > options.maxFileBytes) {
-    return {
-      date_range: { end: null, start: null },
-      detected_format: "unsupported",
-      detected_schema: null,
-      estimated_records: 0,
-      file_sha256: options.fileSha256,
-      remediation: remediationFor("too_large"),
-      status: "too_large",
-    };
-  }
+	if (
+		options.maxFileBytes !== null &&
+		options.maxFileBytes !== undefined &&
+		fileSize > options.maxFileBytes
+	) {
+		return {
+			date_range: { end: null, start: null },
+			detected_format: "unsupported",
+			detected_schema: null,
+			estimated_records: 0,
+			file_sha256: options.fileSha256,
+			remediation: remediationFor("too_large"),
+			status: "too_large",
+		};
+	}
 
-  const artifact = extractViewingActivityArtifactFromFile(fd, fileSize, options.fileName ?? fileName);
-  return buildValidationFromArtifact(artifact, options.fileSha256, options.existingFileHashes);
+	const artifact = extractViewingActivityArtifactFromFile(
+		fd,
+		fileSize,
+		options.fileName ?? fileName,
+	);
+	return buildValidationFromArtifact(
+		artifact,
+		options.fileSha256,
+		options.existingFileHashes,
+	);
 }

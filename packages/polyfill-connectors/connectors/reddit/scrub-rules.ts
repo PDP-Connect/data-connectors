@@ -27,15 +27,16 @@
 import type { ScrubRule } from "../../src/scrubber.ts";
 
 // Module-scoped regex (biome useTopLevelRegex).
-const USER_MENTION_RE = /\b(?:\/?u\/|\/user\/)([A-Za-z0-9][A-Za-z0-9_-]{1,19})\b/g;
+const USER_MENTION_RE =
+	/\b(?:\/?u\/|\/user\/)([A-Za-z0-9][A-Za-z0-9_-]{1,19})\b/g;
 
 export const scrubRules: readonly ScrubRule[] = [
-  // /u/name, u/name, /user/name → /u/[REDACTED_USER]. Matches Reddit's
-  // 3-20 character username rule (starts alphanumeric, then
-  // alphanumeric/underscore/hyphen).
-  {
-    pattern: USER_MENTION_RE,
-    replacement: "/u/[REDACTED_USER]",
-    scope: "all",
-  },
+	// /u/name, u/name, /user/name → /u/[REDACTED_USER]. Matches Reddit's
+	// 3-20 character username rule (starts alphanumeric, then
+	// alphanumeric/underscore/hyphen).
+	{
+		pattern: USER_MENTION_RE,
+		replacement: "/u/[REDACTED_USER]",
+		scope: "all",
+	},
 ];

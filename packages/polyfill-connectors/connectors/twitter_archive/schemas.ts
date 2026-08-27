@@ -33,8 +33,13 @@ const SCREEN_NAME_RE = /^[A-Za-z0-9_]{1,40}$/;
 
 // Twitter snowflake ids are numeric strings; nullable because the archive
 // can omit id_str/id on malformed rows.
-const tweetIdSchema = z.string().regex(SNOWFLAKE_ID_RE, "id must be a numeric string").nullable();
-const isoZSchema = z.string().regex(ISO_Z_RE, "created_at must be an ISO-8601 Z timestamp");
+const tweetIdSchema = z
+	.string()
+	.regex(SNOWFLAKE_ID_RE, "id must be a numeric string")
+	.nullable();
+const isoZSchema = z
+	.string()
+	.regex(ISO_Z_RE, "created_at must be an ISO-8601 Z timestamp");
 const nullableIntSchema = z.number().int().nullable();
 const nonNegativeIntSchema = z.number().int().min(0);
 
@@ -43,16 +48,16 @@ const nonNegativeIntSchema = z.number().int().min(0);
  * Cursor: created_at.
  */
 export const tweetsSchema = z.object({
-  id: tweetIdSchema,
-  text: pdppSafeText.max(10_000).nullable(),
-  created_at: isoZSchema,
-  favorite_count: nullableIntSchema,
-  retweet_count: nullableIntSchema,
-  in_reply_to_status_id: z.string().regex(SNOWFLAKE_ID_RE).nullable(),
-  in_reply_to_screen_name: z.string().regex(SCREEN_NAME_RE).nullable(),
-  lang: pdppSafeText.max(40).nullable(),
-  media_count: nonNegativeIntSchema,
-  url_count: nonNegativeIntSchema,
+	id: tweetIdSchema,
+	text: pdppSafeText.max(10_000).nullable(),
+	created_at: isoZSchema,
+	favorite_count: nullableIntSchema,
+	retweet_count: nullableIntSchema,
+	in_reply_to_status_id: z.string().regex(SNOWFLAKE_ID_RE).nullable(),
+	in_reply_to_screen_name: z.string().regex(SCREEN_NAME_RE).nullable(),
+	lang: pdppSafeText.max(40).nullable(),
+	media_count: nonNegativeIntSchema,
+	url_count: nonNegativeIntSchema,
 });
 
 /**
@@ -67,20 +72,20 @@ export const tweetsSchema = z.object({
  * Cursor: created_at.
  */
 export const directMessagesSchema = z.object({
-  id: z.string().min(1).max(40).nullable(),
-  conversation_id: z.string().max(120).nullable(),
-  sender_id: z.string().min(1).max(40).nullable(),
-  recipient_id: z.string().min(1).max(40).nullable(),
-  created_at: isoZSchema,
-  text: pdppSafeText.max(10_000).nullable(),
+	id: z.string().min(1).max(40).nullable(),
+	conversation_id: z.string().max(120).nullable(),
+	sender_id: z.string().min(1).max(40).nullable(),
+	recipient_id: z.string().min(1).max(40).nullable(),
+	created_at: isoZSchema,
+	text: pdppSafeText.max(10_000).nullable(),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  tweets: tweetsSchema,
-  direct_messages: directMessagesSchema,
+	tweets: tweetsSchema,
+	direct_messages: directMessagesSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

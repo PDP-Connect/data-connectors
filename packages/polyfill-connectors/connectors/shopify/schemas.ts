@@ -37,15 +37,21 @@ const CURRENCY_CODE_RE = /^[A-Z]{3}$/; // ISO 4217
  * `tracking_url` is a URL; `tracking_number` is an opaque carrier string.
  */
 export const ordersSchema = z.object({
-  id: z.string().min(1).max(200),
-  order_date: z.string().regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime").nullable(),
-  merchant_name: pdppSafeText.max(500).nullable(),
-  status: z.string().min(1).max(64).nullable(),
-  total_cents: z.number().int().min(0).nullable(),
-  currency: z.string().regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code").nullable(),
-  tracking_number: z.string().min(1).max(128).nullable(),
-  tracking_url: z.url().max(4096).nullable(),
-  item_count: z.number().int().min(0).nullable(),
+	id: z.string().min(1).max(200),
+	order_date: z
+		.string()
+		.regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime")
+		.nullable(),
+	merchant_name: pdppSafeText.max(500).nullable(),
+	status: z.string().min(1).max(64).nullable(),
+	total_cents: z.number().int().min(0).nullable(),
+	currency: z
+		.string()
+		.regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code")
+		.nullable(),
+	tracking_number: z.string().min(1).max(128).nullable(),
+	tracking_url: z.url().max(4096).nullable(),
+	item_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -53,7 +59,7 @@ export const ordersSchema = z.object({
  * connector declares (and will emit once Apollo extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  orders: ordersSchema,
+	orders: ordersSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

@@ -11,19 +11,19 @@
  * must be marked truncated rather than complete.
  */
 export async function walkPagesWithCeiling(args: {
-  readonly maxPages: number;
-  readonly fetchPage: (pageNumber: number) => boolean | Promise<boolean>;
+	readonly maxPages: number;
+	readonly fetchPage: (pageNumber: number) => boolean | Promise<boolean>;
 }): Promise<{ pagesFetched: number; truncated: boolean }> {
-  if (!Number.isInteger(args.maxPages) || args.maxPages < 1) {
-    throw new RangeError("maxPages must be a positive integer");
-  }
+	if (!Number.isInteger(args.maxPages) || args.maxPages < 1) {
+		throw new RangeError("maxPages must be a positive integer");
+	}
 
-  for (let pageNumber = 1; pageNumber <= args.maxPages; pageNumber += 1) {
-    const hasMorePages = await args.fetchPage(pageNumber);
-    if (!hasMorePages) {
-      return { pagesFetched: pageNumber, truncated: false };
-    }
-  }
+	for (let pageNumber = 1; pageNumber <= args.maxPages; pageNumber += 1) {
+		const hasMorePages = await args.fetchPage(pageNumber);
+		if (!hasMorePages) {
+			return { pagesFetched: pageNumber, truncated: false };
+		}
+	}
 
-  return { pagesFetched: args.maxPages, truncated: true };
+	return { pagesFetched: args.maxPages, truncated: true };
 }

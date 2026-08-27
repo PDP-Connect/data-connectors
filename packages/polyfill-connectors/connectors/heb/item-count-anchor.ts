@@ -36,20 +36,26 @@
 
 /** One order's declared count against what was actually collected. */
 export interface OrderItemTally {
-  /** `order_items` records collected for this order this run. */
-  collectedItemCount: number;
-  /** The count H-E-B printed on the list card, or null when it did not. */
-  declaredItemCount: number | null;
-  orderId: string;
+	/** `order_items` records collected for this order this run. */
+	collectedItemCount: number;
+	/** The count H-E-B printed on the list card, or null when it did not. */
+	declaredItemCount: number | null;
+	orderId: string;
 }
 
 export type OrderItemVerdict =
-  /** No sound anchor: the provider stated no usable count. */
-  | { status: "unavailable"; orderId: string; reason: "no_declared_count" }
-  /** Everything the provider declared is accounted for. */
-  | { status: "complete"; orderId: string; considered: number; covered: number }
-  /** The provider declared more items than were collected. */
-  | { status: "short"; orderId: string; considered: number; covered: number; missing: number };
+	/** No sound anchor: the provider stated no usable count. */
+	| { status: "unavailable"; orderId: string; reason: "no_declared_count" }
+	/** Everything the provider declared is accounted for. */
+	| { status: "complete"; orderId: string; considered: number; covered: number }
+	/** The provider declared more items than were collected. */
+	| {
+			status: "short";
+			orderId: string;
+			considered: number;
+			covered: number;
+			missing: number;
+	  };
 
 /**
  * Validate a provider-declared item count.
@@ -61,19 +67,19 @@ export type OrderItemVerdict =
  * than the anomaly it is for a Jellyfin library.
  */
 export function validateDeclaredItemCount(value: unknown): number | null {
-  if (typeof value !== "number") {
-    return null;
-  }
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-  if (!Number.isInteger(value)) {
-    return null;
-  }
-  if (value < 0) {
-    return null;
-  }
-  return value;
+	if (typeof value !== "number") {
+		return null;
+	}
+	if (!Number.isFinite(value)) {
+		return null;
+	}
+	if (!Number.isInteger(value)) {
+		return null;
+	}
+	if (value < 0) {
+		return null;
+	}
+	return value;
 }
 
 /**
@@ -85,37 +91,46 @@ export function validateDeclaredItemCount(value: unknown): number | null {
  * the provider saying nothing.
  */
 export function tallyOrderItems(tally: OrderItemTally): OrderItemVerdict {
-  const declared = validateDeclaredItemCount(tally.declaredItemCount);
-  if (declared === null) {
-    return { status: "unavailable", orderId: tally.orderId, reason: "no_declared_count" };
-  }
-  const covered = Math.min(tally.collectedItemCount, declared);
-  if (covered < declared) {
-    return {
-      status: "short",
-      orderId: tally.orderId,
-      considered: declared,
-      covered,
-      missing: declared - covered,
-    };
-  }
-  return { status: "complete", orderId: tally.orderId, considered: declared, covered };
+	const declared = validateDeclaredItemCount(tally.declaredItemCount);
+	if (declared === null) {
+		return {
+			status: "unavailable",
+			orderId: tally.orderId,
+			reason: "no_declared_count",
+		};
+	}
+	const covered = Math.min(tally.collectedItemCount, declared);
+	if (covered < declared) {
+		return {
+			status: "short",
+			orderId: tally.orderId,
+			considered: declared,
+			covered,
+			missing: declared - covered,
+		};
+	}
+	return {
+		status: "complete",
+		orderId: tally.orderId,
+		considered: declared,
+		covered,
+	};
 }
 
 /** The run-level roll-up of every per-order verdict. */
 export interface ItemCountAnchorSummary {
-  /** Total items collected across those same orders. */
-  collectedItems: number;
-  /** Orders whose declared count was fully accounted for. */
-  complete: number;
-  /** Total items the provider declared across anchorable orders. */
-  declaredItems: number;
-  /** Orders holding fewer items than the provider declared. */
-  short: number;
-  /** Order ids that came up short, for a bounded diagnostic. */
-  shortOrderIds: string[];
-  /** Orders offering no sound anchor. */
-  unavailable: number;
+	/** Total items collected across those same orders. */
+	collectedItems: number;
+	/** Orders whose declared count was fully accounted for. */
+	complete: number;
+	/** Total items the provider declared across anchorable orders. */
+	declaredItems: number;
+	/** Orders holding fewer items than the provider declared. */
+	short: number;
+	/** Order ids that came up short, for a bounded diagnostic. */
+	shortOrderIds: string[];
+	/** Orders offering no sound anchor. */
+	unavailable: number;
 }
 
 /** Cap on ids listed in the diagnostic. The COUNT is always exact; only the
@@ -130,31 +145,33 @@ export const MAX_SHORT_ORDER_IDS_IN_DIAGNOSTIC = 50;
  * no declared count would silently treat its collected items as if they had
  * been verified against something.
  */
-export function summarizeItemCounts(tallies: readonly OrderItemTally[]): ItemCountAnchorSummary {
-  const summary: ItemCountAnchorSummary = {
-    complete: 0,
-    short: 0,
-    unavailable: 0,
-    declaredItems: 0,
-    collectedItems: 0,
-    shortOrderIds: [],
-  };
-  for (const tally of tallies) {
-    const verdict = tallyOrderItems(tally);
-    if (verdict.status === "unavailable") {
-      summary.unavailable += 1;
-      continue;
-    }
-    summary.declaredItems += verdict.considered;
-    summary.collectedItems += verdict.covered;
-    if (verdict.status === "short") {
-      summary.short += 1;
-      if (summary.shortOrderIds.length < MAX_SHORT_ORDER_IDS_IN_DIAGNOSTIC) {
-        summary.shortOrderIds.push(verdict.orderId);
-      }
-    } else {
-      summary.complete += 1;
-    }
-  }
-  return summary;
+export function summarizeItemCounts(
+	tallies: readonly OrderItemTally[],
+): ItemCountAnchorSummary {
+	const summary: ItemCountAnchorSummary = {
+		complete: 0,
+		short: 0,
+		unavailable: 0,
+		declaredItems: 0,
+		collectedItems: 0,
+		shortOrderIds: [],
+	};
+	for (const tally of tallies) {
+		const verdict = tallyOrderItems(tally);
+		if (verdict.status === "unavailable") {
+			summary.unavailable += 1;
+			continue;
+		}
+		summary.declaredItems += verdict.considered;
+		summary.collectedItems += verdict.covered;
+		if (verdict.status === "short") {
+			summary.short += 1;
+			if (summary.shortOrderIds.length < MAX_SHORT_ORDER_IDS_IN_DIAGNOSTIC) {
+				summary.shortOrderIds.push(verdict.orderId);
+			}
+		} else {
+			summary.complete += 1;
+		}
+	}
+	return summary;
 }

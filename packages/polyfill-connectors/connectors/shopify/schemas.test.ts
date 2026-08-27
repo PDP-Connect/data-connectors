@@ -18,49 +18,59 @@ import { test } from "node:test";
 import { ordersSchema, validateRecord } from "./schemas.ts";
 
 const ORDER_RECORD = {
-  id: "gid://shopify/Order/12345",
-  order_date: "2024-05-01T18:22:05.000Z",
-  merchant_name: "Acme Goods",
-  status: "fulfilled",
-  total_cents: 4999,
-  currency: "USD",
-  tracking_number: "1Z999AA10123456784",
-  tracking_url: "https://www.ups.com/track?tracknum=1Z999AA10123456784",
-  item_count: 3,
+	id: "gid://shopify/Order/12345",
+	order_date: "2024-05-01T18:22:05.000Z",
+	merchant_name: "Acme Goods",
+	status: "fulfilled",
+	total_cents: 4999,
+	currency: "USD",
+	tracking_number: "1Z999AA10123456784",
+	tracking_url: "https://www.ups.com/track?tracknum=1Z999AA10123456784",
+	item_count: 3,
 };
 
 test("orders schema accepts a contract-shaped record", () => {
-  const result = ordersSchema.safeParse(ORDER_RECORD);
-  assert.ok(result.success, JSON.stringify(result.error?.issues));
+	const result = ordersSchema.safeParse(ORDER_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
 test("orders schema accepts a pending order (nulls for not-yet-known fields)", () => {
-  const result = ordersSchema.safeParse({
-    ...ORDER_RECORD,
-    order_date: null,
-    status: "pending",
-    total_cents: null,
-    currency: null,
-    tracking_number: null,
-    tracking_url: null,
-    item_count: null,
-  });
-  assert.ok(result.success, JSON.stringify(result.error?.issues));
+	const result = ordersSchema.safeParse({
+		...ORDER_RECORD,
+		order_date: null,
+		status: "pending",
+		total_cents: null,
+		currency: null,
+		tracking_number: null,
+		tracking_url: null,
+		item_count: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
 test("orders schema rejects a non-ISO currency (raw symbol leaked in)", () => {
-  assert.equal(ordersSchema.safeParse({ ...ORDER_RECORD, currency: "$" }).success, false);
+	assert.equal(
+		ordersSchema.safeParse({ ...ORDER_RECORD, currency: "$" }).success,
+		false,
+	);
 });
 
 test("orders schema rejects a negative total_cents", () => {
-  assert.equal(ordersSchema.safeParse({ ...ORDER_RECORD, total_cents: -100 }).success, false);
+	assert.equal(
+		ordersSchema.safeParse({ ...ORDER_RECORD, total_cents: -100 }).success,
+		false,
+	);
 });
 
 test("orders schema rejects a non-URL tracking_url", () => {
-  assert.equal(ordersSchema.safeParse({ ...ORDER_RECORD, tracking_url: "see email" }).success, false);
+	assert.equal(
+		ordersSchema.safeParse({ ...ORDER_RECORD, tracking_url: "see email" })
+			.success,
+		false,
+	);
 });
 
 test("validateRecord routes orders and passes unknown streams through", () => {
-  assert.equal(validateRecord("orders", ORDER_RECORD).ok, true);
-  assert.equal(validateRecord("line_items", { id: "x" }).ok, true);
+	assert.equal(validateRecord("orders", ORDER_RECORD).ok, true);
+	assert.equal(validateRecord("line_items", { id: "x" }).ok, true);
 });
