@@ -25,7 +25,7 @@
 export type ConfigOptionKind = "collection_scope" | "transport";
 
 interface ConnectorOptionKinds {
-  readonly [optionKey: string]: ConfigOptionKind;
+	readonly [optionKey: string]: ConfigOptionKind;
 }
 
 /**
@@ -41,33 +41,34 @@ interface ConnectorOptionKinds {
  * silently fell through to the default: safe, but it made the registry's
  * decisions dead letters and left the honesty test with nothing to compare.
  */
-const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> = Object.freeze({
-  claude_code: Object.freeze({
-    // Both are substring filters over the project folders that get scanned
-    // (connectors/claude_code/parsers.ts applyProjectDirScope), so each one
-    // decides which sources are collected at all.
-    CLAUDE_CODE_PROJECT_EXCLUDE: "collection_scope",
-    CLAUDE_CODE_PROJECT_INCLUDE: "collection_scope",
-  }),
-  google_messages: Object.freeze({
-    // Caps how many conversations are scanned after a recency sort, so it
-    // decides WHICH chats are collected (connectors/google_messages/index.ts
-    // resolveMaxChats).
-    GMCLI_MAX_CHATS: "collection_scope",
-    // Caps messages fetched per chat, bounding how much history is collected.
-    GMCLI_MESSAGES_PER_CHAT_LIMIT: "collection_scope",
-    // Subprocess timeout for one helper invocation; changes no selection.
-    GMCLI_TIMEOUT_MS: "transport",
-  }),
-  slack: Object.freeze({
-    CHANNEL_ALLOWLIST: "collection_scope",
-    CHANNEL_TYPES: "collection_scope",
-    MEMBER_ONLY: "collection_scope",
-    LOOKBACK_DAYS: "collection_scope",
-    SKIP_FILES: "transport",
-    RECLAIM_UPLOADS: "transport",
-  }),
-});
+const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> =
+	Object.freeze({
+		claude_code: Object.freeze({
+			// Both are substring filters over the project folders that get scanned
+			// (connectors/claude_code/parsers.ts applyProjectDirScope), so each one
+			// decides which sources are collected at all.
+			CLAUDE_CODE_PROJECT_EXCLUDE: "collection_scope",
+			CLAUDE_CODE_PROJECT_INCLUDE: "collection_scope",
+		}),
+		google_messages: Object.freeze({
+			// Caps how many conversations are scanned after a recency sort, so it
+			// decides WHICH chats are collected (connectors/google_messages/index.ts
+			// resolveMaxChats).
+			GMCLI_MAX_CHATS: "collection_scope",
+			// Caps messages fetched per chat, bounding how much history is collected.
+			GMCLI_MESSAGES_PER_CHAT_LIMIT: "collection_scope",
+			// Subprocess timeout for one helper invocation; changes no selection.
+			GMCLI_TIMEOUT_MS: "transport",
+		}),
+		slack: Object.freeze({
+			CHANNEL_ALLOWLIST: "collection_scope",
+			CHANNEL_TYPES: "collection_scope",
+			MEMBER_ONLY: "collection_scope",
+			LOOKBACK_DAYS: "collection_scope",
+			SKIP_FILES: "transport",
+			RECLAIM_UPLOADS: "transport",
+		}),
+	});
 
 /**
  * The platform's decision for a given connector+option key. Absence (an
@@ -83,11 +84,17 @@ const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> = Ob
  * caller happens to hold.
  */
 function normalizeConnectorKey(connectorKey: string): string {
-  return connectorKey.replaceAll("-", "_");
+	return connectorKey.replaceAll("-", "_");
 }
 
-export function platformOptionKind(connectorKey: string, optionKey: string): ConfigOptionKind | null {
-  return PLATFORM_OPTION_KINDS[normalizeConnectorKey(connectorKey)]?.[optionKey] ?? null;
+export function platformOptionKind(
+	connectorKey: string,
+	optionKey: string,
+): ConfigOptionKind | null {
+	return (
+		PLATFORM_OPTION_KINDS[normalizeConnectorKey(connectorKey)]?.[optionKey] ??
+		null
+	);
 }
 
 /**
@@ -95,6 +102,9 @@ export function platformOptionKind(connectorKey: string, optionKey: string): Con
  * option: the platform's classification when registered, otherwise the
  * conservative collection_scope default -- never the manifest's own claim.
  */
-export function resolveEnforcedOptionKind(connectorKey: string, optionKey: string): ConfigOptionKind {
-  return platformOptionKind(connectorKey, optionKey) ?? "collection_scope";
+export function resolveEnforcedOptionKind(
+	connectorKey: string,
+	optionKey: string,
+): ConfigOptionKind {
+	return platformOptionKind(connectorKey, optionKey) ?? "collection_scope";
 }

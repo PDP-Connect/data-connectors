@@ -30,16 +30,17 @@ import type { BrowserContext, Page } from "playwright";
 import type { BrowserCollectContext } from "../../src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../src/test-harness.ts";
 import {
-  type AmazonReauthFn,
-  type EmitDeps,
-  processListOrder,
-  type RunFlags,
-  recoverPendingOrderItemDetailGaps,
+	type AmazonReauthFn,
+	type EmitDeps,
+	processListOrder,
+	type RunFlags,
+	recoverPendingOrderItemDetailGaps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageOrder } from "./types.ts";
 
-const SIGNIN_URL = "https://www.amazon.com/ap/signin?openid.return_to=order-details";
+const SIGNIN_URL =
+	"https://www.amazon.com/ap/signin?openid.return_to=order-details";
 const DEFAULT_ORDER_ID = "111-1234567-8901234";
 const DETAIL_URL = `https://www.amazon.com/gp/your-account/order-details?orderID=${DEFAULT_ORDER_ID}`;
 const FAKE_CONTEXT = {} as BrowserContext;
@@ -49,92 +50,104 @@ const FAKE_CONTEXT = {} as BrowserContext;
  *  reads credentials ONLY from this explicit parameter (`resolveLoginCredentials`),
  *  never from `process.env`. See `login-credentials.ts`. */
 const FAKE_CREDENTIALS: Readonly<Record<string, string | undefined>> = {
-  AMAZON_USERNAME: "owner@example.com",
-  AMAZON_PASSWORD: "hunter2",
+	AMAZON_USERNAME: "owner@example.com",
+	AMAZON_PASSWORD: "hunter2",
 };
 
 // biome-ignore lint/suspicious/useAwait: mock throws to prove a repaired/injected session never reaches sendInteraction
-const NEVER_CALLED_SEND_INTERACTION: BrowserCollectContext["sendInteraction"] = async () => {
-  throw new Error("sendInteraction must not be called — repair is injected via deps.reauthenticate");
-};
+const NEVER_CALLED_SEND_INTERACTION: BrowserCollectContext["sendInteraction"] =
+	async () => {
+		throw new Error(
+			"sendInteraction must not be called — repair is injected via deps.reauthenticate",
+		);
+	};
 
 /** A page whose `.url()` reports whichever URL was scripted for the Nth
  *  `.goto()` call — models Amazon's real behavior where a repaired session
  *  navigates the SAME URL to a different (real detail) destination. */
 function makeSequencedDetailPage(
-  landedUrls: string[],
-  html = "<html><body>no order details</body></html>"
+	landedUrls: string[],
+	html = "<html><body>no order details</body></html>",
 ): {
-  gotoCalls: string[];
-  page: Page;
+	gotoCalls: string[];
+	page: Page;
 } {
-  const gotoCalls: string[] = [];
-  let current = landedUrls[0] ?? DETAIL_URL;
-  const page = new Proxy(
-    {},
-    {
-      get(_target, prop): unknown {
-        if (prop === "goto") {
-          return (url: string) => {
-            gotoCalls.push(url);
-            current = landedUrls[gotoCalls.length - 1] ?? landedUrls.at(-1) ?? url;
-            return Promise.resolve(null);
-          };
-        }
-        if (prop === "waitForSelector") {
-          return (): Promise<null> => Promise.resolve(null);
-        }
-        if (prop === "content") {
-          return (): Promise<string> => Promise.resolve(html);
-        }
-        if (prop === "url") {
-          return (): string => current;
-        }
-        throw new Error(`unexpected page.${String(prop)} in sequenced detail stub`);
-      },
-    }
-  ) as Page;
-  return { gotoCalls, page };
+	const gotoCalls: string[] = [];
+	let current = landedUrls[0] ?? DETAIL_URL;
+	const page = new Proxy(
+		{},
+		{
+			get(_target, prop): unknown {
+				if (prop === "goto") {
+					return (url: string) => {
+						gotoCalls.push(url);
+						current =
+							landedUrls[gotoCalls.length - 1] ?? landedUrls.at(-1) ?? url;
+						return Promise.resolve(null);
+					};
+				}
+				if (prop === "waitForSelector") {
+					return (): Promise<null> => Promise.resolve(null);
+				}
+				if (prop === "content") {
+					return (): Promise<string> => Promise.resolve(html);
+				}
+				if (prop === "url") {
+					return (): string => current;
+				}
+				throw new Error(
+					`unexpected page.${String(prop)} in sequenced detail stub`,
+				);
+			},
+		},
+	) as Page;
+	return { gotoCalls, page };
 }
 
 function makeRunFlags(): RunFlags {
-  return {
-    detailAttempts: 0,
-    detailCaptured: false,
-    failedDetailCaptured: false,
-    repairAttempted: false,
-    sessionRepairRequired: false,
-    temporaryDetailFailures: 0,
-  };
+	return {
+		detailAttempts: 0,
+		detailCaptured: false,
+		failedDetailCaptured: false,
+		repairAttempted: false,
+		sessionRepairRequired: false,
+		temporaryDetailFailures: 0,
+	};
 }
 
 function makeListOrder(overrides: Partial<ListPageOrder> = {}): ListPageOrder {
-  return {
-    orderId: DEFAULT_ORDER_ID,
-    orderDateRaw: "January 5, 2026",
-    orderTotal: "$42.99",
-    deliveryStatus: "Delivered",
-    items: [{ asin: "B01ABCDEFG", name: "Widget", url: "https://amazon.com/dp/B01ABCDEFG" }],
-    ...overrides,
-  };
+	return {
+		orderId: DEFAULT_ORDER_ID,
+		orderDateRaw: "January 5, 2026",
+		orderTotal: "$42.99",
+		deliveryStatus: "Delivered",
+		items: [
+			{
+				asin: "B01ABCDEFG",
+				name: "Widget",
+				url: "https://amazon.com/dp/B01ABCDEFG",
+			},
+		],
+		...overrides,
+	};
 }
 
 function makeDeps(overrides: Partial<EmitDeps> = {}): { deps: EmitDeps } {
-  const harness = makeRecordingEmit(validateRecord);
-  const deps: EmitDeps = {
-    capture: null,
-    context: FAKE_CONTEXT,
-    emit: harness.emit,
-    emitRecord: harness.emitRecord,
-    emittedAt: "2026-04-22T12:00:00.000Z",
-    progress: (): Promise<void> => Promise.resolve(),
-    sendInteraction: NEVER_CALLED_SEND_INTERACTION,
-    skipDetail: false,
-    wantsItems: true,
-    wantsOrders: true,
-    ...overrides,
-  };
-  return { deps };
+	const harness = makeRecordingEmit(validateRecord);
+	const deps: EmitDeps = {
+		capture: null,
+		context: FAKE_CONTEXT,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: "2026-04-22T12:00:00.000Z",
+		progress: (): Promise<void> => Promise.resolve(),
+		sendInteraction: NEVER_CALLED_SEND_INTERACTION,
+		skipDetail: false,
+		wantsItems: true,
+		wantsOrders: true,
+		...overrides,
+	};
+	return { deps };
 }
 
 const DETAIL_HTML_WITH_ORDER = `<!doctype html><html><body><div id="orderDetails">
@@ -148,157 +161,220 @@ const DETAIL_HTML_WITH_ORDER = `<!doctype html><html><body><div id="orderDetails
 // ─── processListOrder: forward-walk detail fetch self-heal ─────────────
 
 test("processListOrder: sign-in bounce, repair succeeds, retried detail fetch hydrates — session NOT latched dead", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return true;
-  };
-  const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
-  const flags = makeRunFlags();
-  const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL, DETAIL_URL], DETAIL_HTML_WITH_ORDER);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return true;
+	};
+	const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
+	const flags = makeRunFlags();
+	const { gotoCalls, page } = makeSequencedDetailPage(
+		[SIGNIN_URL, DETAIL_URL],
+		DETAIL_HTML_WITH_ORDER,
+	);
 
-  await processListOrder(page, deps, flags, makeListOrder());
+	await processListOrder(page, deps, flags, makeListOrder());
 
-  assert.equal(reauthCalls, 1, "repair attempted exactly once");
-  assert.deepEqual(gotoCalls, [DETAIL_URL, DETAIL_URL], "the retry navigates to the EXACT SAME detail url");
-  assert.equal(flags.sessionRepairRequired, false, "a successful repair must not latch the session as dead");
-  assert.equal(flags.repairAttempted, true);
+	assert.equal(reauthCalls, 1, "repair attempted exactly once");
+	assert.deepEqual(
+		gotoCalls,
+		[DETAIL_URL, DETAIL_URL],
+		"the retry navigates to the EXACT SAME detail url",
+	);
+	assert.equal(
+		flags.sessionRepairRequired,
+		false,
+		"a successful repair must not latch the session as dead",
+	);
+	assert.equal(flags.repairAttempted, true);
 });
 
 test("processListOrder: sign-in bounce persists after repair → terminal owner-repair, exactly one retry", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return true;
-  };
-  const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
-  const flags = makeRunFlags();
-  // Both the original attempt and the post-repair retry land on sign-in.
-  const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL, SIGNIN_URL]);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return true;
+	};
+	const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
+	const flags = makeRunFlags();
+	// Both the original attempt and the post-repair retry land on sign-in.
+	const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL, SIGNIN_URL]);
 
-  await processListOrder(page, deps, flags, makeListOrder());
+	await processListOrder(page, deps, flags, makeListOrder());
 
-  assert.equal(reauthCalls, 1, "repair is not retried in a loop after a second sign-in bounce");
-  assert.equal(gotoCalls.length, 2, "exactly one retry navigation, then give up");
-  assert.equal(flags.sessionRepairRequired, true, "a persistent bounce still latches the terminal owner-repair state");
+	assert.equal(
+		reauthCalls,
+		1,
+		"repair is not retried in a loop after a second sign-in bounce",
+	);
+	assert.equal(
+		gotoCalls.length,
+		2,
+		"exactly one retry navigation, then give up",
+	);
+	assert.equal(
+		flags.sessionRepairRequired,
+		true,
+		"a persistent bounce still latches the terminal owner-repair state",
+	);
 });
 
 test("processListOrder: reauthenticate returns false (repair itself failed) → terminal owner-repair, no retry navigation", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return false;
-  };
-  const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
-  const flags = makeRunFlags();
-  const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL]);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return false;
+	};
+	const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
+	const flags = makeRunFlags();
+	const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL]);
 
-  await processListOrder(page, deps, flags, makeListOrder());
+	await processListOrder(page, deps, flags, makeListOrder());
 
-  assert.equal(reauthCalls, 1, "repair is attempted once even though it fails");
-  assert.equal(gotoCalls.length, 1, "a failed repair must not spend a retry navigation");
-  assert.equal(flags.sessionRepairRequired, true);
+	assert.equal(reauthCalls, 1, "repair is attempted once even though it fails");
+	assert.equal(
+		gotoCalls.length,
+		1,
+		"a failed repair must not spend a retry navigation",
+	);
+	assert.equal(flags.sessionRepairRequired, true);
 });
 
 test("processListOrder: no credentials configured → repair never attempted, pre-fix terminal behavior unchanged", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return true;
-  };
-  const { deps } = makeDeps({ reauthenticate });
-  const flags = makeRunFlags();
-  const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL]);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return true;
+	};
+	const { deps } = makeDeps({ reauthenticate });
+	const flags = makeRunFlags();
+	const { gotoCalls, page } = makeSequencedDetailPage([SIGNIN_URL]);
 
-  await processListOrder(page, deps, flags, makeListOrder());
+	await processListOrder(page, deps, flags, makeListOrder());
 
-  assert.equal(reauthCalls, 0, "no credentials means no automated repair path is eligible");
-  assert.equal(gotoCalls.length, 1, "no retry navigation without credentials");
-  assert.equal(flags.sessionRepairRequired, true, "falls through to the pre-existing terminal behavior");
+	assert.equal(
+		reauthCalls,
+		0,
+		"no credentials means no automated repair path is eligible",
+	);
+	assert.equal(gotoCalls.length, 1, "no retry navigation without credentials");
+	assert.equal(
+		flags.sessionRepairRequired,
+		true,
+		"falls through to the pre-existing terminal behavior",
+	);
 });
 
 test("processListOrder: the one-shot repair budget is spent across the WHOLE run, not once per order", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return true;
-  };
-  const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
-  const flags = makeRunFlags();
-  // First order: bounce, repair succeeds, retry succeeds (session alive).
-  const { page: page1 } = makeSequencedDetailPage([SIGNIN_URL, DETAIL_URL], DETAIL_HTML_WITH_ORDER);
-  await processListOrder(page1, deps, flags, makeListOrder({ orderId: "order-1" }));
-  assert.equal(reauthCalls, 1);
-  assert.equal(flags.sessionRepairRequired, false);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return true;
+	};
+	const { deps } = makeDeps({ credentials: FAKE_CREDENTIALS, reauthenticate });
+	const flags = makeRunFlags();
+	// First order: bounce, repair succeeds, retry succeeds (session alive).
+	const { page: page1 } = makeSequencedDetailPage(
+		[SIGNIN_URL, DETAIL_URL],
+		DETAIL_HTML_WITH_ORDER,
+	);
+	await processListOrder(
+		page1,
+		deps,
+		flags,
+		makeListOrder({ orderId: "order-1" }),
+	);
+	assert.equal(reauthCalls, 1);
+	assert.equal(flags.sessionRepairRequired, false);
 
-  // Second order in the SAME run bounces again — the one-shot budget is
-  // already spent, so this must NOT attempt a second repair even though
-  // sessionRepairRequired is still false (repair succeeded for order 1).
-  const { page: page2 } = makeSequencedDetailPage([SIGNIN_URL]);
-  await processListOrder(page2, deps, flags, makeListOrder({ orderId: "order-2" }));
+	// Second order in the SAME run bounces again — the one-shot budget is
+	// already spent, so this must NOT attempt a second repair even though
+	// sessionRepairRequired is still false (repair succeeded for order 1).
+	const { page: page2 } = makeSequencedDetailPage([SIGNIN_URL]);
+	await processListOrder(
+		page2,
+		deps,
+		flags,
+		makeListOrder({ orderId: "order-2" }),
+	);
 
-  assert.equal(reauthCalls, 1, "the repair budget does not replenish mid-run");
-  assert.equal(flags.sessionRepairRequired, true, "second bounce with no budget left latches terminal owner-repair");
+	assert.equal(reauthCalls, 1, "the repair budget does not replenish mid-run");
+	assert.equal(
+		flags.sessionRepairRequired,
+		true,
+		"second bounce with no budget left latches terminal owner-repair",
+	);
 });
 
 test("processListOrder: no reauthenticate injected and no credentials → falls straight to terminal owner-repair (integration default)", async () => {
-  const { deps } = makeDeps();
-  const flags = makeRunFlags();
-  const { page } = makeSequencedDetailPage([SIGNIN_URL]);
+	const { deps } = makeDeps();
+	const flags = makeRunFlags();
+	const { page } = makeSequencedDetailPage([SIGNIN_URL]);
 
-  await processListOrder(page, deps, flags, makeListOrder());
+	await processListOrder(page, deps, flags, makeListOrder());
 
-  assert.equal(flags.sessionRepairRequired, true);
-  assert.equal(
-    flags.repairAttempted,
-    true,
-    "the one-shot budget is still marked spent even though repair was ineligible"
-  );
+	assert.equal(flags.sessionRepairRequired, true);
+	assert.equal(
+		flags.repairAttempted,
+		true,
+		"the one-shot budget is still marked spent even though repair was ineligible",
+	);
 });
 
 // ─── recoverPendingOrderItemDetailGaps: recovery-loop self-heal ────────
 
 test("recoverPendingOrderItemDetailGaps: sign-in bounce during recovery, repair succeeds, recovery continues past it", async () => {
-  let reauthCalls = 0;
-  // biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
-  const reauthenticate: AmazonReauthFn = async () => {
-    reauthCalls += 1;
-    return true;
-  };
-  const harness = makeRecordingEmit(validateRecord);
-  const flags = makeRunFlags();
-  const { page } = makeSequencedDetailPage([SIGNIN_URL, DETAIL_URL], DETAIL_HTML_WITH_ORDER);
+	let reauthCalls = 0;
+	// biome-ignore lint/suspicious/useAwait: mock matches AmazonReauthFn's Promise-returning signature
+	const reauthenticate: AmazonReauthFn = async () => {
+		reauthCalls += 1;
+		return true;
+	};
+	const harness = makeRecordingEmit(validateRecord);
+	const flags = makeRunFlags();
+	const { page } = makeSequencedDetailPage(
+		[SIGNIN_URL, DETAIL_URL],
+		DETAIL_HTML_WITH_ORDER,
+	);
 
-  const result = await recoverPendingOrderItemDetailGaps(
-    page,
-    {
-      capture: null,
-      context: FAKE_CONTEXT,
-      credentials: FAKE_CREDENTIALS,
-      detailGaps: [
-        {
-          detail_locator: { kind: "amazon.order_detail", order_date: "2026-01-05", order_id: "111-1234567-8901234" },
-          gap_id: "gap_1",
-          record_key: "111-1234567-8901234",
-          reference_only: true,
-          status: "pending",
-          stream: "order_items",
-        },
-      ],
-      emit: harness.emit,
-      emitRecord: harness.emitRecord,
-      reauthenticate,
-      sendInteraction: NEVER_CALLED_SEND_INTERACTION,
-    },
-    flags
-  );
+	const result = await recoverPendingOrderItemDetailGaps(
+		page,
+		{
+			capture: null,
+			context: FAKE_CONTEXT,
+			credentials: FAKE_CREDENTIALS,
+			detailGaps: [
+				{
+					detail_locator: {
+						kind: "amazon.order_detail",
+						order_date: "2026-01-05",
+						order_id: "111-1234567-8901234",
+					},
+					gap_id: "gap_1",
+					record_key: "111-1234567-8901234",
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+				},
+			],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			reauthenticate,
+			sendInteraction: NEVER_CALLED_SEND_INTERACTION,
+		},
+		flags,
+	);
 
-  assert.equal(reauthCalls, 1, "repair attempted exactly once during recovery");
-  assert.equal(result.recovered, 1, "the repaired retry recovers the gap instead of re-deferring it");
-  assert.equal(flags.sessionRepairRequired, false);
+	assert.equal(reauthCalls, 1, "repair attempted exactly once during recovery");
+	assert.equal(
+		result.recovered,
+		1,
+		"the repaired retry recovers the gap instead of re-deferring it",
+	);
+	assert.equal(flags.sessionRepairRequired, false);
 });

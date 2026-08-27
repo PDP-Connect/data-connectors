@@ -48,34 +48,37 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 
 // Module-scoped regexes (Biome useTopLevelRegex).
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const UUID_RE =
+	/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/; // sha256 hex of local path
 
-const isoDatetimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const isoDatetimeSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 const uuidSchema = z.string().regex(UUID_RE, "must be a UUID");
 
 const blobRefSchema = z
-  .object({
-    blob_id: pdppSafeText.min(1),
-    mime_type: pdppSafeText.min(1),
-    sha256: pdppSafeText.min(1),
-    size_bytes: z.number().int().min(0),
-  })
-  .nullable();
+	.object({
+		blob_id: pdppSafeText.min(1),
+		mime_type: pdppSafeText.min(1),
+		sha256: pdppSafeText.min(1),
+		size_bytes: z.number().int().min(0),
+	})
+	.nullable();
 
 /**
  * messages stream: one record per Signal message row.
  * Cursor: sent_at (epoch-ms high-water mark tracked in STATE).
  */
 export const messagesSchema = z.object({
-  id: uuidSchema,
-  conversation_id: uuidSchema,
-  sender: pdppSafeText.max(320).nullable(),
-  sent_at: isoDatetimeSchema,
-  body: pdppSafeText.max(10_000_000).nullable(),
-  type: pdppSafeText.max(80).nullable(),
-  has_attachments: z.boolean(),
-  is_edited: z.boolean(),
+	id: uuidSchema,
+	conversation_id: uuidSchema,
+	sender: pdppSafeText.max(320).nullable(),
+	sent_at: isoDatetimeSchema,
+	body: pdppSafeText.max(10_000_000).nullable(),
+	type: pdppSafeText.max(80).nullable(),
+	has_attachments: z.boolean(),
+	is_edited: z.boolean(),
 });
 
 /**
@@ -84,10 +87,10 @@ export const messagesSchema = z.object({
  * incremental cursor (standing entity, no natural per-row date bound).
  */
 export const conversationsSchema = z.object({
-  id: uuidSchema,
-  type: z.enum(["private", "group"]).nullable(),
-  title: pdppSafeText.max(500).nullable(),
-  member_count: z.number().int().min(0).nullable(),
+	id: uuidSchema,
+	type: z.enum(["private", "group"]).nullable(),
+	title: pdppSafeText.max(500).nullable(),
+	member_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -95,10 +98,10 @@ export const conversationsSchema = z.object({
  * Semantics: append_only. Composite id, matching slack.reactions' shape.
  */
 export const reactionsSchema = z.object({
-  id: z.string().min(1).max(600),
-  message_id: uuidSchema,
-  emoji: pdppSafeText.min(1).max(40),
-  sender: pdppSafeText.min(1).max(320),
+	id: z.string().min(1).max(600),
+	message_id: uuidSchema,
+	emoji: pdppSafeText.min(1).max(40),
+	sender: pdppSafeText.min(1).max(320),
 });
 
 /**
@@ -110,26 +113,34 @@ export const reactionsSchema = z.object({
  * outcome without leaking the local filesystem path.
  */
 export const attachmentsSchema = z.object({
-  id: z.string().regex(ATTACHMENT_ID_RE, "attachment id must be a sha256 hex digest"),
-  message_id: uuidSchema.nullable(),
-  conversation_id: uuidSchema.nullable(),
-  filename: pdppSafeText.min(1).max(500),
-  content_type: pdppSafeText.min(1).max(200),
-  size_bytes: z.number().int().min(0).nullable(),
-  content_sha256: pdppSafeText.nullable(),
-  hydration_status: z.enum(["deferred", "hydrated", "failed", "too_large", "missing"]),
-  hydration_error: pdppSafeText.nullable(),
-  blob_ref: blobRefSchema,
+	id: z
+		.string()
+		.regex(ATTACHMENT_ID_RE, "attachment id must be a sha256 hex digest"),
+	message_id: uuidSchema.nullable(),
+	conversation_id: uuidSchema.nullable(),
+	filename: pdppSafeText.min(1).max(500),
+	content_type: pdppSafeText.min(1).max(200),
+	size_bytes: z.number().int().min(0).nullable(),
+	content_sha256: pdppSafeText.nullable(),
+	hydration_status: z.enum([
+		"deferred",
+		"hydrated",
+		"failed",
+		"too_large",
+		"missing",
+	]),
+	hydration_error: pdppSafeText.nullable(),
+	blob_ref: blobRefSchema,
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  messages: messagesSchema,
-  conversations: conversationsSchema,
-  reactions: reactionsSchema,
-  attachments: attachmentsSchema,
+	messages: messagesSchema,
+	conversations: conversationsSchema,
+	reactions: reactionsSchema,
+	attachments: attachmentsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

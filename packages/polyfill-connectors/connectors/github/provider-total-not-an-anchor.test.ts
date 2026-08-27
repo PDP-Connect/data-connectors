@@ -29,52 +29,67 @@ import { test } from "node:test";
 import { repoRecord, userStatsRecord } from "./parsers.ts";
 
 test("a private or org repository is collected but is not counted by public_repos", () => {
-  // One public user-owned repo — the only kind `public_repos` counts.
-  const publicOwn = repoRecord({
-    id: 1,
-    name: "public-own",
-    full_name: "octocat/public-own",
-    private: false,
-    owner: { login: "octocat", id: 99 },
-    pushed_at: "2026-01-01T00:00:00Z",
-  } as never);
-  // A private repo and an org repo — both returned by `/user/repos`, and both
-  // invisible to `public_repos`.
-  const privateOwn = repoRecord({
-    id: 2,
-    name: "private-own",
-    full_name: "octocat/private-own",
-    private: true,
-    owner: { login: "octocat", id: 99 },
-    pushed_at: "2026-01-02T00:00:00Z",
-  } as never);
-  const orgRepo = repoRecord({
-    id: 3,
-    name: "org-repo",
-    full_name: "acme/org-repo",
-    private: false,
-    owner: { login: "acme", id: 1234 },
-    pushed_at: "2026-01-03T00:00:00Z",
-  } as never);
+	// One public user-owned repo — the only kind `public_repos` counts.
+	const publicOwn = repoRecord({
+		id: 1,
+		name: "public-own",
+		full_name: "octocat/public-own",
+		private: false,
+		owner: { login: "octocat", id: 99 },
+		pushed_at: "2026-01-01T00:00:00Z",
+	} as never);
+	// A private repo and an org repo — both returned by `/user/repos`, and both
+	// invisible to `public_repos`.
+	const privateOwn = repoRecord({
+		id: 2,
+		name: "private-own",
+		full_name: "octocat/private-own",
+		private: true,
+		owner: { login: "octocat", id: 99 },
+		pushed_at: "2026-01-02T00:00:00Z",
+	} as never);
+	const orgRepo = repoRecord({
+		id: 3,
+		name: "org-repo",
+		full_name: "acme/org-repo",
+		private: false,
+		owner: { login: "acme", id: 1234 },
+		pushed_at: "2026-01-03T00:00:00Z",
+	} as never);
 
-  const collected = [publicOwn, privateOwn, orgRepo];
+	const collected = [publicOwn, privateOwn, orgRepo];
 
-  // The provider scalar, reported by `/user`, sees only the single public
-  // user-owned repository.
-  const stats = userStatsRecord(
-    { id: 99, login: "octocat", public_repos: 1, public_gists: 0, followers: 0, following: 0 } as never,
-    "2026-01-04"
-  );
+	// The provider scalar, reported by `/user`, sees only the single public
+	// user-owned repository.
+	const stats = userStatsRecord(
+		{
+			id: 99,
+			login: "octocat",
+			public_repos: 1,
+			public_gists: 0,
+			followers: 0,
+			following: 0,
+		} as never,
+		"2026-01-04",
+	);
 
-  assert.equal(stats.public_repos, 1, "the provider scalar counts only public user-owned repositories");
-  assert.equal(collected.length, 3, "the stream collects private and org repositories too");
+	assert.equal(
+		stats.public_repos,
+		1,
+		"the provider scalar counts only public user-owned repositories",
+	);
+	assert.equal(
+		collected.length,
+		3,
+		"the stream collects private and org repositories too",
+	);
 
-  // The load-bearing assertion: using the scalar as this stream's denominator
-  // would claim 2 of 3 collected repositories are missing, on a fully correct
-  // run. It is a different set, not a smaller measurement of the same set.
-  assert.notEqual(
-    stats.public_repos,
-    collected.length,
-    "public_repos must never be used as the repositories denominator — it measures a different set"
-  );
+	// The load-bearing assertion: using the scalar as this stream's denominator
+	// would claim 2 of 3 collected repositories are missing, on a fully correct
+	// run. It is a different set, not a smaller measurement of the same set.
+	assert.notEqual(
+		stats.public_repos,
+		collected.length,
+		"public_repos must never be used as the repositories denominator — it measures a different set",
+	);
 });

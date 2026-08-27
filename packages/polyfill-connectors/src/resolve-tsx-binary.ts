@@ -21,22 +21,24 @@ import { fileURLToPath } from "node:url";
  * Returns `null` when no `tsx` is reachable; callers surface
  * `TSX_MISSING_MESSAGE` rather than attempting a spawn that can only fail.
  */
-export function resolveTsxBinary(startDir: string = dirname(fileURLToPath(import.meta.url))): string | null {
-  let cursor = resolve(startDir);
-  const seen = new Set<string>();
-  while (!seen.has(cursor)) {
-    seen.add(cursor);
-    const candidate = join(cursor, "node_modules", ".bin", "tsx");
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = dirname(cursor);
-    if (parent === cursor) {
-      break;
-    }
-    cursor = parent;
-  }
-  return null;
+export function resolveTsxBinary(
+	startDir: string = dirname(fileURLToPath(import.meta.url)),
+): string | null {
+	let cursor = resolve(startDir);
+	const seen = new Set<string>();
+	while (!seen.has(cursor)) {
+		seen.add(cursor);
+		const candidate = join(cursor, "node_modules", ".bin", "tsx");
+		if (existsSync(candidate)) {
+			return candidate;
+		}
+		const parent = dirname(cursor);
+		if (parent === cursor) {
+			break;
+		}
+		cursor = parent;
+	}
+	return null;
 }
 
 /**
@@ -45,9 +47,9 @@ export function resolveTsxBinary(startDir: string = dirname(fileURLToPath(import
  * module (see that file's note on the slim-CLI invariant).
  */
 export const TSX_MISSING_MESSAGE =
-  "Could not locate tsx alongside the collector runner. Install " +
-  '@pdpp/local-collector with "npm i -g @pdpp/local-collector" or run ' +
-  '"pnpm install" at the monorepo root.';
+	"Could not locate tsx alongside the collector runner. Install " +
+	'@pdpp/local-collector with "npm i -g @pdpp/local-collector" or run ' +
+	'"pnpm install" at the monorepo root.';
 
 /**
  * Resolve the command used to spawn a connector child.
@@ -59,15 +61,15 @@ export const TSX_MISSING_MESSAGE =
  * missing dependency instead of surfacing an ENOENT from deep inside spawn.
  */
 export function resolveConnectorCommand(
-  command: string,
-  resolveBinary: (startDir?: string) => string | null = resolveTsxBinary
+	command: string,
+	resolveBinary: (startDir?: string) => string | null = resolveTsxBinary,
 ): string {
-  if (command !== "tsx") {
-    return command;
-  }
-  const binary = resolveBinary();
-  if (!binary) {
-    throw new Error(TSX_MISSING_MESSAGE);
-  }
-  return binary;
+	if (command !== "tsx") {
+		return command;
+	}
+	const binary = resolveBinary();
+	if (!binary) {
+		throw new Error(TSX_MISSING_MESSAGE);
+	}
+	return binary;
 }

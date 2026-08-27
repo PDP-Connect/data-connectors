@@ -34,8 +34,12 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 const RECORD_ID_RE = /^[0-9a-f]{24}$/; // hashId(): 24-hex sha256 slice
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-const recordIdSchema = z.string().regex(RECORD_ID_RE, "id must be a 24-hex sha256 slice");
-const isoTimestampSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const recordIdSchema = z
+	.string()
+	.regex(RECORD_ID_RE, "id must be a 24-hex sha256 slice");
+const isoTimestampSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 const durationSecondsSchema = z.number().int().min(0).nullable();
 
 /**
@@ -43,16 +47,16 @@ const durationSecondsSchema = z.number().int().min(0).nullable();
  * Cursor: watched_at (ISO).
  */
 export const viewingActivitySchema = z.object({
-  id: recordIdSchema,
-  title: pdppSafeText.max(500).nullable(),
-  watched_at: isoTimestampSchema,
-  watched_at_precision: z.enum(["day", "instant"]),
-  watched_at_raw: pdppSafeText.max(100),
-  device_type: pdppSafeText.max(100).nullable(),
-  duration_seconds: durationSecondsSchema,
-  profile_name: pdppSafeText.max(200).nullable(),
-  country: pdppSafeText.max(100).nullable(),
-  source_schema: z.enum(["direct_history", "full_export"]),
+	id: recordIdSchema,
+	title: pdppSafeText.max(500).nullable(),
+	watched_at: isoTimestampSchema,
+	watched_at_precision: z.enum(["day", "instant"]),
+	watched_at_raw: pdppSafeText.max(100),
+	device_type: pdppSafeText.max(100).nullable(),
+	duration_seconds: durationSecondsSchema,
+	profile_name: pdppSafeText.max(200).nullable(),
+	country: pdppSafeText.max(100).nullable(),
+	source_schema: z.enum(["direct_history", "full_export"]),
 });
 
 /**
@@ -60,7 +64,7 @@ export const viewingActivitySchema = z.object({
  * connector emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  viewing_activity: viewingActivitySchema,
+	viewing_activity: viewingActivitySchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

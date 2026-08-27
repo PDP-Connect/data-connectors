@@ -38,19 +38,22 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
  * `delivery_address` is free-form human text; `order_date` is an ISO datetime.
  */
 export const ordersSchema = z.object({
-  id: z.string().min(1).max(200),
-  order_date: z.string().regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime").nullable(),
-  restaurant_name: pdppSafeText.max(500).nullable(),
-  status: z.string().min(1).max(64).nullable(),
-  subtotal_cents: z.number().int().min(0).nullable(),
-  tax_cents: z.number().int().min(0).nullable(),
-  tip_cents: z.number().int().min(0).nullable(),
-  delivery_fee_cents: z.number().int().min(0).nullable(),
-  service_fee_cents: z.number().int().min(0).nullable(),
-  total_cents: z.number().int().min(0).nullable(),
-  delivery_address: pdppSafeText.max(1000).nullable(),
-  payment_method_summary: z.string().min(1).max(200).nullable(),
-  item_count: z.number().int().min(0).nullable(),
+	id: z.string().min(1).max(200),
+	order_date: z
+		.string()
+		.regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime")
+		.nullable(),
+	restaurant_name: pdppSafeText.max(500).nullable(),
+	status: z.string().min(1).max(64).nullable(),
+	subtotal_cents: z.number().int().min(0).nullable(),
+	tax_cents: z.number().int().min(0).nullable(),
+	tip_cents: z.number().int().min(0).nullable(),
+	delivery_fee_cents: z.number().int().min(0).nullable(),
+	service_fee_cents: z.number().int().min(0).nullable(),
+	total_cents: z.number().int().min(0).nullable(),
+	delivery_address: pdppSafeText.max(1000).nullable(),
+	payment_method_summary: z.string().min(1).max(200).nullable(),
+	item_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -62,12 +65,12 @@ export const ordersSchema = z.object({
  * so each element is bounded free text rather than `z.any()`).
  */
 export const orderItemsSchema = z.object({
-  id: z.string().min(1).max(200),
-  order_id: z.string().min(1).max(200),
-  name: pdppSafeText.max(1000),
-  quantity: z.number().int().min(0),
-  unit_price_cents: z.number().int().min(0).nullable(),
-  customizations: z.array(pdppSafeText.max(1000)),
+	id: z.string().min(1).max(200),
+	order_id: z.string().min(1).max(200),
+	name: pdppSafeText.max(1000),
+	quantity: z.number().int().min(0),
+	unit_price_cents: z.number().int().min(0).nullable(),
+	customizations: z.array(pdppSafeText.max(1000)),
 });
 
 /**
@@ -75,8 +78,8 @@ export const orderItemsSchema = z.object({
  * connector declares (and will emit once extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  orders: ordersSchema,
-  order_items: orderItemsSchema,
+	orders: ordersSchema,
+	order_items: orderItemsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

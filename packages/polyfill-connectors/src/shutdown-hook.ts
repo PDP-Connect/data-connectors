@@ -39,9 +39,9 @@ const SIGNALS_TO_HOOK = ["SIGTERM", "SIGINT"] as const;
 type HookableSignal = (typeof SIGNALS_TO_HOOK)[number];
 
 const SIGNAL_EXIT_CODES: Record<HookableSignal, number> = {
-  // Conventional UNIX: shell exit code = 128 + signum.
-  SIGTERM: 128 + 15,
-  SIGINT: 128 + 2,
+	// Conventional UNIX: shell exit code = 128 + signum.
+	SIGTERM: 128 + 15,
+	SIGINT: 128 + 2,
 };
 
 /**
@@ -59,63 +59,63 @@ const SIGNAL_EXIT_CODES: Record<HookableSignal, number> = {
  * logged and swallowed — it must not block shutdown.
  */
 function writeShutdownStderr(message: string): void {
-  try {
-    process.stderr.write(message);
-  } catch {
-    // stderr may be closed; nothing to do.
-  }
+	try {
+		process.stderr.write(message);
+	} catch {
+		// stderr may be closed; nothing to do.
+	}
 }
 
 async function runStepSwallowing(
-  fn: (() => Promise<unknown>) | undefined,
-  label: string,
-  signal: HookableSignal
+	fn: (() => Promise<unknown>) | undefined,
+	label: string,
+	signal: HookableSignal,
 ): Promise<void> {
-  if (!fn) {
-    return;
-  }
-  try {
-    await fn();
-  } catch (err) {
-    writeShutdownStderr(
-      `[shutdown-hook] ${label}() rejected during ${signal}: ${err instanceof Error ? err.message : String(err)}\n`
-    );
-  }
+	if (!fn) {
+		return;
+	}
+	try {
+		await fn();
+	} catch (err) {
+		writeShutdownStderr(
+			`[shutdown-hook] ${label}() rejected during ${signal}: ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+	}
 }
 
 export function withShutdownRelease(
-  release: () => Promise<unknown>,
-  options: { finalize?: () => Promise<unknown> } = {}
+	release: () => Promise<unknown>,
+	options: { finalize?: () => Promise<unknown> } = {},
 ): () => void {
-  let firing = false;
-  const { finalize } = options;
+	let firing = false;
+	const { finalize } = options;
 
-  const handle = (signal: HookableSignal) => async () => {
-    if (firing) {
-      return; // first signal wins; ignore duplicates during cleanup.
-    }
-    firing = true;
-    try {
-      await runStepSwallowing(finalize, "finalize", signal);
-      await runStepSwallowing(release, "release", signal);
-    } finally {
-      process.exit(SIGNAL_EXIT_CODES[signal]);
-    }
-  };
+	const handle = (signal: HookableSignal) => async () => {
+		if (firing) {
+			return; // first signal wins; ignore duplicates during cleanup.
+		}
+		firing = true;
+		try {
+			await runStepSwallowing(finalize, "finalize", signal);
+			await runStepSwallowing(release, "release", signal);
+		} finally {
+			process.exit(SIGNAL_EXIT_CODES[signal]);
+		}
+	};
 
-  // We need a stable reference per signal so `dispose()` can remove the
-  // specific listener we added (not all listeners, which would clobber
-  // sibling hooks).
-  const listeners: { signal: HookableSignal; fn: () => void }[] = [];
-  for (const signal of SIGNALS_TO_HOOK) {
-    const fn = handle(signal);
-    process.on(signal, fn);
-    listeners.push({ signal, fn });
-  }
+	// We need a stable reference per signal so `dispose()` can remove the
+	// specific listener we added (not all listeners, which would clobber
+	// sibling hooks).
+	const listeners: { signal: HookableSignal; fn: () => void }[] = [];
+	for (const signal of SIGNALS_TO_HOOK) {
+		const fn = handle(signal);
+		process.on(signal, fn);
+		listeners.push({ signal, fn });
+	}
 
-  return function dispose(): void {
-    for (const { signal, fn } of listeners) {
-      process.removeListener(signal, fn);
-    }
-  };
+	return function dispose(): void {
+		for (const { signal, fn } of listeners) {
+			process.removeListener(signal, fn);
+		}
+	};
 }

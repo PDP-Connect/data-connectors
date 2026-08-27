@@ -33,20 +33,23 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 // Opaque bounded id — tighten to UUID when the real payload is observed.
 const idSchema = z.string().min(1).max(128);
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 
 /**
  * conversations stream (manifest required: id). mutable_state, cursor
  * update_time.
  */
 export const conversationsSchema = z.object({
-  id: idSchema,
-  title: pdppSafeText.max(4000).nullable(),
-  create_time: isoDateTimeNullable,
-  update_time: isoDateTimeNullable,
-  project_id: idSchema.nullable(),
-  model: z.string().min(1).max(128).nullable(),
-  message_count: z.number().int().min(0).nullable(),
+	id: idSchema,
+	title: pdppSafeText.max(4000).nullable(),
+	create_time: isoDateTimeNullable,
+	update_time: isoDateTimeNullable,
+	project_id: idSchema.nullable(),
+	model: z.string().min(1).max(128).nullable(),
+	message_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -54,12 +57,12 @@ export const conversationsSchema = z.object({
  * cursor create_time. `content` is the full message body → pdppSafeText.
  */
 export const messagesSchema = z.object({
-  id: idSchema,
-  conversation_id: idSchema,
-  role: z.string().min(1).max(64).nullable(),
-  content: pdppSafeText.max(10_000_000).nullable(),
-  model: z.string().min(1).max(128).nullable(),
-  create_time: isoDateTimeNullable,
+	id: idSchema,
+	conversation_id: idSchema,
+	role: z.string().min(1).max(64).nullable(),
+	content: pdppSafeText.max(10_000_000).nullable(),
+	model: z.string().min(1).max(128).nullable(),
+	create_time: isoDateTimeNullable,
 });
 
 /**
@@ -67,11 +70,11 @@ export const messagesSchema = z.object({
  * update_time.
  */
 export const projectsSchema = z.object({
-  id: idSchema,
-  name: pdppSafeText.max(2000),
-  description: pdppSafeText.max(65_000).nullable(),
-  create_time: isoDateTimeNullable,
-  update_time: isoDateTimeNullable,
+	id: idSchema,
+	name: pdppSafeText.max(2000),
+	description: pdppSafeText.max(65_000).nullable(),
+	create_time: isoDateTimeNullable,
+	update_time: isoDateTimeNullable,
 });
 
 /**
@@ -79,9 +82,9 @@ export const projectsSchema = z.object({
  * connector declares (and will emit once the Claude API extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  conversations: conversationsSchema,
-  messages: messagesSchema,
-  projects: projectsSchema,
+	conversations: conversationsSchema,
+	messages: messagesSchema,
+	projects: projectsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

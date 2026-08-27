@@ -60,9 +60,9 @@
 
 /** A resolved, complete credential pair for one connection's sign-in. */
 export interface ResolvedLoginCredentials {
-  readonly kind: "resolved";
-  readonly password: string;
-  readonly username: string;
+	readonly kind: "resolved";
+	readonly password: string;
+	readonly username: string;
 }
 
 /**
@@ -71,18 +71,20 @@ export interface ResolvedLoginCredentials {
  * instead of blaming the provider's page.
  */
 export interface AbsentLoginCredentials {
-  readonly kind: "absent";
-  /** The credential field names that were absent or blank. */
-  readonly missing: readonly string[];
-  /**
-   * Owner-facing reason. Names the CREDENTIAL, never the page — the whole
-   * point of the type. Safe to surface in an interaction message: it contains
-   * only field NAMES, never a value.
-   */
-  readonly reason: string;
+	readonly kind: "absent";
+	/** The credential field names that were absent or blank. */
+	readonly missing: readonly string[];
+	/**
+	 * Owner-facing reason. Names the CREDENTIAL, never the page — the whole
+	 * point of the type. Safe to surface in an interaction message: it contains
+	 * only field NAMES, never a value.
+	 */
+	readonly reason: string;
 }
 
-export type LoginCredentialsResolution = AbsentLoginCredentials | ResolvedLoginCredentials;
+export type LoginCredentialsResolution =
+	| AbsentLoginCredentials
+	| ResolvedLoginCredentials;
 
 /**
  * Field names, as they appear in the runtime-resolved `credentials` object,
@@ -91,10 +93,10 @@ export type LoginCredentialsResolution = AbsentLoginCredentials | ResolvedLoginC
  * static-secret registry injects — one vocabulary, not three.
  */
 export interface LoginCredentialFields {
-  /** Credential field name(s) holding the password. First non-empty wins. */
-  readonly password: readonly string[];
-  /** Credential field name(s) holding the username/email. First non-empty wins. */
-  readonly username: readonly string[];
+	/** Credential field name(s) holding the password. First non-empty wins. */
+	readonly password: readonly string[];
+	/** Credential field name(s) holding the username/email. First non-empty wins. */
+	readonly username: readonly string[];
 }
 
 /**
@@ -108,12 +110,15 @@ export interface LoginCredentialFields {
  * has anything to object to and neither needs suppressing.
  */
 function firstNonEmpty(
-  credentials: Readonly<Record<string, string | undefined>>,
-  names: readonly string[]
+	credentials: Readonly<Record<string, string | undefined>>,
+	names: readonly string[],
 ): string | undefined {
-  return names
-    .map((name) => credentials[name])
-    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+	return names
+		.map((name) => credentials[name])
+		.find(
+			(value): value is string =>
+				typeof value === "string" && value.trim().length > 0,
+		);
 }
 
 /**
@@ -129,28 +134,28 @@ function firstNonEmpty(
  * same fail-closed rule `injectSecretBundle` applies one layer down.
  */
 export function resolveLoginCredentials(
-  credentials: Readonly<Record<string, string | undefined>> | undefined,
-  fields: LoginCredentialFields,
-  connectorName: string
+	credentials: Readonly<Record<string, string | undefined>> | undefined,
+	fields: LoginCredentialFields,
+	connectorName: string,
 ): LoginCredentialsResolution {
-  const source = credentials ?? {};
-  const username = firstNonEmpty(source, fields.username);
-  const password = firstNonEmpty(source, fields.password);
-  if (username && password) {
-    return { kind: "resolved", password, username };
-  }
-  const missing: string[] = [];
-  if (!username) {
-    missing.push(fields.username[0] ?? "username");
-  }
-  if (!password) {
-    missing.push(fields.password[0] ?? "password");
-  }
-  return {
-    kind: "absent",
-    missing,
-    reason: noStoredCredentialReason(connectorName, missing),
-  };
+	const source = credentials ?? {};
+	const username = firstNonEmpty(source, fields.username);
+	const password = firstNonEmpty(source, fields.password);
+	if (username && password) {
+		return { kind: "resolved", password, username };
+	}
+	const missing: string[] = [];
+	if (!username) {
+		missing.push(fields.username[0] ?? "username");
+	}
+	if (!password) {
+		missing.push(fields.password[0] ?? "password");
+	}
+	return {
+		kind: "absent",
+		missing,
+		reason: noStoredCredentialReason(connectorName, missing),
+	};
 }
 
 /**
@@ -161,10 +166,14 @@ export function resolveLoginCredentials(
  * reported "sign-in form did not render" / "unexpected UI" — which reads as a
  * provider outage and sent owners to debug the wrong thing.
  */
-export function noStoredCredentialReason(connectorName: string, missing: readonly string[]): string {
-  const fieldList = missing.length > 0 ? missing.join(", ") : "username, password";
-  return (
-    `no stored credential for this ${connectorName} connection (missing: ${fieldList}). ` +
-    "Automated sign-in was not attempted. Save this connection's credentials to enable it."
-  );
+export function noStoredCredentialReason(
+	connectorName: string,
+	missing: readonly string[],
+): string {
+	const fieldList =
+		missing.length > 0 ? missing.join(", ") : "username, password";
+	return (
+		`no stored credential for this ${connectorName} connection (missing: ${fieldList}). ` +
+		"Automated sign-in was not attempted. Save this connection's credentials to enable it."
+	);
 }

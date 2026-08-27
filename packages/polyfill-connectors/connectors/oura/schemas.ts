@@ -33,13 +33,19 @@ import { z } from "zod";
 import { makeValidateRecord } from "../../src/schema-registry.ts";
 
 // Module-scoped regexes (Biome useTopLevelRegex).
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-const ouraIdSchema = z.string().regex(UUID_RE, "id must be an Oura document UUID");
+const ouraIdSchema = z
+	.string()
+	.regex(UUID_RE, "id must be an Oura document UUID");
 const daySchema = z.string().regex(DAY_RE, "day must be YYYY-MM-DD");
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 // Physiological metrics: nullable floats. Oura returns floats for HRV /
 // efficiency / temperature; do not force .int() (would reject real records).
 const metricSchema = z.number().nullable();
@@ -49,21 +55,21 @@ const metricSchema = z.number().nullable();
  * Cursor: day.
  */
 export const sleepSchema = z.object({
-  id: ouraIdSchema,
-  day: daySchema,
-  bedtime_start: isoDateTimeNullable,
-  bedtime_end: isoDateTimeNullable,
-  total_sleep_duration: metricSchema,
-  rem_sleep_duration: metricSchema,
-  deep_sleep_duration: metricSchema,
-  light_sleep_duration: metricSchema,
-  efficiency: metricSchema,
-  latency: metricSchema,
-  average_heart_rate: metricSchema,
-  lowest_heart_rate: metricSchema,
-  average_hrv: metricSchema,
-  temperature_delta: metricSchema,
-  sleep_score: metricSchema,
+	id: ouraIdSchema,
+	day: daySchema,
+	bedtime_start: isoDateTimeNullable,
+	bedtime_end: isoDateTimeNullable,
+	total_sleep_duration: metricSchema,
+	rem_sleep_duration: metricSchema,
+	deep_sleep_duration: metricSchema,
+	light_sleep_duration: metricSchema,
+	efficiency: metricSchema,
+	latency: metricSchema,
+	average_heart_rate: metricSchema,
+	lowest_heart_rate: metricSchema,
+	average_hrv: metricSchema,
+	temperature_delta: metricSchema,
+	sleep_score: metricSchema,
 });
 
 /**
@@ -74,12 +80,12 @@ export const sleepSchema = z.object({
  * contributors across firmware versions.
  */
 export const readinessSchema = z.object({
-  id: ouraIdSchema,
-  day: daySchema,
-  score: metricSchema,
-  temperature_deviation: metricSchema,
-  temperature_trend_deviation: metricSchema,
-  contributors: z.record(z.string(), z.number().nullable()),
+	id: ouraIdSchema,
+	day: daySchema,
+	score: metricSchema,
+	temperature_deviation: metricSchema,
+	temperature_trend_deviation: metricSchema,
+	contributors: z.record(z.string(), z.number().nullable()),
 });
 
 /**
@@ -87,23 +93,23 @@ export const readinessSchema = z.object({
  * Cursor: day.
  */
 export const activitySchema = z.object({
-  id: ouraIdSchema,
-  day: daySchema,
-  score: metricSchema,
-  active_calories: metricSchema,
-  total_calories: metricSchema,
-  steps: metricSchema,
-  target_calories: metricSchema,
-  equivalent_walking_distance: metricSchema,
+	id: ouraIdSchema,
+	day: daySchema,
+	score: metricSchema,
+	active_calories: metricSchema,
+	total_calories: metricSchema,
+	steps: metricSchema,
+	target_calories: metricSchema,
+	equivalent_walking_distance: metricSchema,
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  sleep: sleepSchema,
-  readiness: readinessSchema,
-  activity: activitySchema,
+	sleep: sleepSchema,
+	readiness: readinessSchema,
+	activity: activitySchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

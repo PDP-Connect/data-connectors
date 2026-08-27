@@ -57,39 +57,39 @@ export const REDACTED = "[REDACTED]";
  * writes a live credential to a shared directory.
  */
 const SECRET_NAME_FRAGMENTS: readonly string[] = [
-  "passwd",
-  "password",
-  "passphrase",
-  "secret",
-  "token",
-  "apikey",
-  "api_key",
-  "api-key",
-  "credential",
-  "otp",
-  "one-time",
-  "one time",
-  "one_time",
-  "onetime",
-  "2fa",
-  "mfa",
-  "totp",
-  "auth code",
-  "auth_code",
-  "authcode",
-  "security code",
-  "security_code",
-  "verification code",
-  "verification_code",
-  "pin",
-  "cvv",
-  "cvc",
-  "private key",
-  "private_key",
-  "privatekey",
-  "session key",
-  "session_key",
-  "bearer",
+	"passwd",
+	"password",
+	"passphrase",
+	"secret",
+	"token",
+	"apikey",
+	"api_key",
+	"api-key",
+	"credential",
+	"otp",
+	"one-time",
+	"one time",
+	"one_time",
+	"onetime",
+	"2fa",
+	"mfa",
+	"totp",
+	"auth code",
+	"auth_code",
+	"authcode",
+	"security code",
+	"security_code",
+	"verification code",
+	"verification_code",
+	"pin",
+	"cvv",
+	"cvc",
+	"private key",
+	"private_key",
+	"privatekey",
+	"session key",
+	"session_key",
+	"bearer",
 ];
 
 /**
@@ -103,12 +103,12 @@ const MIN_MATCHABLE_SECRET_LENGTH = 4;
 
 /** True when a field's accessible name / attribute names imply a secret value. */
 export function isSecretFieldName(name: string): boolean {
-  const haystack = name.toLowerCase();
-  return SECRET_NAME_FRAGMENTS.some((fragment) => haystack.includes(fragment));
+	const haystack = name.toLowerCase();
+	return SECRET_NAME_FRAGMENTS.some((fragment) => haystack.includes(fragment));
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -116,9 +116,9 @@ function escapeRegExp(value: string): string {
  * secret is redacted before any shorter secret contained inside it.
  */
 function matchableSecrets(secrets: readonly string[]): string[] {
-  return [...new Set(secrets)]
-    .filter((secret) => secret.trim().length >= MIN_MATCHABLE_SECRET_LENGTH)
-    .sort((a, b) => b.length - a.length);
+	return [...new Set(secrets)]
+		.filter((secret) => secret.trim().length >= MIN_MATCHABLE_SECRET_LENGTH)
+		.sort((a, b) => b.length - a.length);
 }
 
 /**
@@ -128,12 +128,15 @@ function matchableSecrets(secrets: readonly string[]): string[] {
  * a field nobody thought to label — including values echoed into page text,
  * inline scripts, JSON blobs or URLs, where no field-based rule could see it.
  */
-export function redactKnownSecrets(content: string, secrets: readonly string[]): string {
-  let out = content;
-  for (const secret of matchableSecrets(secrets)) {
-    out = out.split(secret).join(REDACTED);
-  }
-  return out;
+export function redactKnownSecrets(
+	content: string,
+	secrets: readonly string[],
+): string {
+	let out = content;
+	for (const secret of matchableSecrets(secrets)) {
+		out = out.split(secret).join(REDACTED);
+	}
+	return out;
 }
 
 /**
@@ -147,9 +150,12 @@ export function redactKnownSecrets(content: string, secrets: readonly string[]):
  * A field with no value keeps its empty rendering: an unfilled password box
  * still looks unfilled after redaction.
  */
-export function redactAriaSnapshot(snapshot: string, secrets: readonly string[] = []): string {
-  const lines = snapshot.split("\n").map((line) => redactAriaLine(line));
-  return redactKnownSecrets(lines.join("\n"), secrets);
+export function redactAriaSnapshot(
+	snapshot: string,
+	secrets: readonly string[] = [],
+): string {
+	const lines = snapshot.split("\n").map((line) => redactAriaLine(line));
+	return redactKnownSecrets(lines.join("\n"), secrets);
 }
 
 /**
@@ -163,27 +169,28 @@ export function redactAriaSnapshot(snapshot: string, secrets: readonly string[] 
  * name (e.g. `textbox "Time: HH:MM"`) cannot be mistaken for the value
  * separator.
  */
-const ARIA_VALUE_LINE_RE = /^(\s*-\s+[A-Za-z]+(?:\s+"(?:[^"\\]|\\.)*")?(?:\s+\[[^\]]*\])*\s*:\s*)(.+)$/;
+const ARIA_VALUE_LINE_RE =
+	/^(\s*-\s+[A-Za-z]+(?:\s+"(?:[^"\\]|\\.)*")?(?:\s+\[[^\]]*\])*\s*:\s*)(.+)$/;
 
 function redactAriaLine(line: string): string {
-  const match = ARIA_VALUE_LINE_RE.exec(line);
-  if (!match) {
-    return line;
-  }
-  const [, prefix, rawValue] = match;
-  if (prefix === undefined || rawValue === undefined) {
-    return line;
-  }
-  // A child-bearing node ends at the colon; anything after it on the same line
-  // is a real value. Structural lines (e.g. `- generic [ref=e2]:`) have no
-  // trailing text and never reach here.
-  if (!isSecretFieldName(prefix)) {
-    return line;
-  }
-  // Preserve the quoting style Playwright chose, so the file still parses as
-  // the same shape of YAML and a numeric-looking value stays a string.
-  const quoted = rawValue.startsWith('"') && rawValue.endsWith('"');
-  return `${prefix}${quoted ? `"${REDACTED}"` : REDACTED}`;
+	const match = ARIA_VALUE_LINE_RE.exec(line);
+	if (!match) {
+		return line;
+	}
+	const [, prefix, rawValue] = match;
+	if (prefix === undefined || rawValue === undefined) {
+		return line;
+	}
+	// A child-bearing node ends at the colon; anything after it on the same line
+	// is a real value. Structural lines (e.g. `- generic [ref=e2]:`) have no
+	// trailing text and never reach here.
+	if (!isSecretFieldName(prefix)) {
+		return line;
+	}
+	// Preserve the quoting style Playwright chose, so the file still parses as
+	// the same shape of YAML and a numeric-looking value stays a string.
+	const quoted = rawValue.startsWith('"') && rawValue.endsWith('"');
+	return `${prefix}${quoted ? `"${REDACTED}"` : REDACTED}`;
 }
 
 /**
@@ -193,7 +200,7 @@ function redactAriaLine(line: string): string {
  * stand in for the type rule and hide the loss of either one.
  */
 const HTML_NAMING_ATTR_RE =
-  /\b(?:name|id|placeholder|aria-label|autocomplete|data-testid)\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+)/gi;
+	/\b(?:name|id|placeholder|aria-label|autocomplete|data-testid)\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+)/gi;
 
 const HTML_INPUT_TAG_RE = /<input\b[^>]*>/gi;
 const HTML_VALUE_ATTR_RE = /(\bvalue\s*=\s*)("[^"]*"|'[^']*'|[^\s"'>]+)/i;
@@ -210,19 +217,28 @@ const HTML_PASSWORD_TYPE_RE = /\btype\s*=\s*["']?password["']?/i;
  * `type="password"` is always treated as secret regardless of its name, which
  * catches an unlabelled password box.
  */
-export function redactDomHtml(html: string, secrets: readonly string[] = []): string {
-  const withRedactedInputs = html.replace(HTML_INPUT_TAG_RE, (tag) => {
-    const namingAttrs = [...tag.matchAll(HTML_NAMING_ATTR_RE)].map((m) => m[1] ?? "").join(" ");
-    const isSecret = HTML_PASSWORD_TYPE_RE.test(tag) || isSecretFieldName(namingAttrs);
-    if (!isSecret) {
-      return tag;
-    }
-    return tag.replace(HTML_VALUE_ATTR_RE, (_full, prefix: string, value: string) => {
-      const quote = value.startsWith("'") ? "'" : '"';
-      return `${prefix}${quote}${REDACTED}${quote}`;
-    });
-  });
-  return redactKnownSecrets(withRedactedInputs, secrets);
+export function redactDomHtml(
+	html: string,
+	secrets: readonly string[] = [],
+): string {
+	const withRedactedInputs = html.replace(HTML_INPUT_TAG_RE, (tag) => {
+		const namingAttrs = [...tag.matchAll(HTML_NAMING_ATTR_RE)]
+			.map((m) => m[1] ?? "")
+			.join(" ");
+		const isSecret =
+			HTML_PASSWORD_TYPE_RE.test(tag) || isSecretFieldName(namingAttrs);
+		if (!isSecret) {
+			return tag;
+		}
+		return tag.replace(
+			HTML_VALUE_ATTR_RE,
+			(_full, prefix: string, value: string) => {
+				const quote = value.startsWith("'") ? "'" : '"';
+				return `${prefix}${quote}${REDACTED}${quote}`;
+			},
+		);
+	});
+	return redactKnownSecrets(withRedactedInputs, secrets);
 }
 
 /**
@@ -235,13 +251,13 @@ export function redactDomHtml(html: string, secrets: readonly string[] = []): st
  * flat regex-over-text model cannot express them safely.
  */
 export function credentialScrubRules(secrets: readonly string[]): {
-  pattern: RegExp;
-  replacement: string;
-  scope: "all";
+	pattern: RegExp;
+	replacement: string;
+	scope: "all";
 }[] {
-  return matchableSecrets(secrets).map((secret) => ({
-    pattern: new RegExp(escapeRegExp(secret), "g"),
-    replacement: REDACTED,
-    scope: "all" as const,
-  }));
+	return matchableSecrets(secrets).map((secret) => ({
+		pattern: new RegExp(escapeRegExp(secret), "g"),
+		replacement: REDACTED,
+		scope: "all" as const,
+	}));
 }

@@ -25,54 +25,56 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
 
 interface OptionsSchemaProperty {
-  declared_option_kind?: string;
-  type?: string;
+	declared_option_kind?: string;
+	type?: string;
 }
 
 interface ManifestWithOptionsSchema {
-  connector_key?: string;
-  options_schema?: { properties?: Record<string, OptionsSchemaProperty> };
+	connector_key?: string;
+	options_schema?: { properties?: Record<string, OptionsSchemaProperty> };
 }
 
 function listManifestNames(): string[] {
-  return readdirSync(MANIFESTS_DIR)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => name.replace(/\.json$/, ""))
-    .sort();
+	return readdirSync(MANIFESTS_DIR)
+		.filter((name) => name.endsWith(".json"))
+		.map((name) => name.replace(/\.json$/, ""))
+		.sort();
 }
 
 function readManifest(name: string): ManifestWithOptionsSchema {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8")) as ManifestWithOptionsSchema;
+	return JSON.parse(
+		readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8"),
+	) as ManifestWithOptionsSchema;
 }
 
 test("no manifest's declared_option_kind disagrees with the platform-owned registry", () => {
-  const offenders: string[] = [];
-  for (const name of listManifestNames()) {
-    const manifest = readManifest(name);
-    const connectorKey = manifest.connector_key ?? name;
-    const properties = manifest.options_schema?.properties;
-    if (!properties) {
-      continue;
-    }
-    for (const [optionKey, prop] of Object.entries(properties)) {
-      const declared = prop.declared_option_kind;
-      if (!declared) {
-        continue;
-      }
-      const platformKind = platformOptionKind(connectorKey, optionKey);
-      if (platformKind && platformKind !== declared) {
-        offenders.push(
-          `${name}.options_schema.${optionKey}: manifest declares "${declared}" but the platform registry ` +
-            `requires "${platformKind}"`
-        );
-      }
-    }
-  }
-  assert.deepEqual(
-    offenders,
-    [],
-    `a connector must not self-declare a more permissive option_kind than the platform registry allows: ${offenders.join("; ")}`
-  );
+	const offenders: string[] = [];
+	for (const name of listManifestNames()) {
+		const manifest = readManifest(name);
+		const connectorKey = manifest.connector_key ?? name;
+		const properties = manifest.options_schema?.properties;
+		if (!properties) {
+			continue;
+		}
+		for (const [optionKey, prop] of Object.entries(properties)) {
+			const declared = prop.declared_option_kind;
+			if (!declared) {
+				continue;
+			}
+			const platformKind = platformOptionKind(connectorKey, optionKey);
+			if (platformKind && platformKind !== declared) {
+				offenders.push(
+					`${name}.options_schema.${optionKey}: manifest declares "${declared}" but the platform registry ` +
+						`requires "${platformKind}"`,
+				);
+			}
+		}
+	}
+	assert.deepEqual(
+		offenders,
+		[],
+		`a connector must not self-declare a more permissive option_kind than the platform registry allows: ${offenders.join("; ")}`,
+	);
 });
 
 /**
@@ -88,48 +90,52 @@ test("no manifest's declared_option_kind disagrees with the platform-owned regis
  * the platform must actually HAVE an opinion to check it against.
  */
 test("every manifest-declared option_kind resolves to a real platform registry entry", () => {
-  const unmatched: string[] = [];
-  for (const name of listManifestNames()) {
-    const manifest = readManifest(name);
-    const connectorKey = manifest.connector_key ?? name;
-    const properties = manifest.options_schema?.properties;
-    if (!properties) {
-      continue;
-    }
-    for (const [optionKey, prop] of Object.entries(properties)) {
-      if (!prop.declared_option_kind) {
-        continue;
-      }
-      if (platformOptionKind(connectorKey, optionKey) === null) {
-        unmatched.push(`${name} (connector_key "${connectorKey}").options_schema.${optionKey}`);
-      }
-    }
-  }
-  assert.deepEqual(
-    unmatched,
-    [],
-    `a declared option_kind the registry cannot resolve is unenforceable and silently unverified: ${unmatched.join("; ")}`
-  );
+	const unmatched: string[] = [];
+	for (const name of listManifestNames()) {
+		const manifest = readManifest(name);
+		const connectorKey = manifest.connector_key ?? name;
+		const properties = manifest.options_schema?.properties;
+		if (!properties) {
+			continue;
+		}
+		for (const [optionKey, prop] of Object.entries(properties)) {
+			if (!prop.declared_option_kind) {
+				continue;
+			}
+			if (platformOptionKind(connectorKey, optionKey) === null) {
+				unmatched.push(
+					`${name} (connector_key "${connectorKey}").options_schema.${optionKey}`,
+				);
+			}
+		}
+	}
+	assert.deepEqual(
+		unmatched,
+		[],
+		`a declared option_kind the registry cannot resolve is unenforceable and silently unverified: ${unmatched.join("; ")}`,
+	);
 });
 
 test("sanity: the disagreement check actually fires when a manifest mislabels a known collection_scope key as transport", () => {
-  const hostileManifest: ManifestWithOptionsSchema = {
-    connector_key: "slack",
-    options_schema: {
-      properties: {
-        // The real slack.json declares CHANNEL_ALLOWLIST as
-        // collection_scope; a hostile manifest claiming "transport" here
-        // would let it self-activate without owner confirmation.
-        CHANNEL_ALLOWLIST: { type: "array", declared_option_kind: "transport" },
-      },
-    },
-  };
-  const platformKind = platformOptionKind("slack", "CHANNEL_ALLOWLIST");
-  assert.equal(platformKind, "collection_scope");
-  const declared = hostileManifest.options_schema?.properties?.CHANNEL_ALLOWLIST?.declared_option_kind;
-  assert.notEqual(
-    declared,
-    platformKind,
-    "the sanity fixture itself must disagree with the registry, or this test proves nothing"
-  );
+	const hostileManifest: ManifestWithOptionsSchema = {
+		connector_key: "slack",
+		options_schema: {
+			properties: {
+				// The real slack.json declares CHANNEL_ALLOWLIST as
+				// collection_scope; a hostile manifest claiming "transport" here
+				// would let it self-activate without owner confirmation.
+				CHANNEL_ALLOWLIST: { type: "array", declared_option_kind: "transport" },
+			},
+		},
+	};
+	const platformKind = platformOptionKind("slack", "CHANNEL_ALLOWLIST");
+	assert.equal(platformKind, "collection_scope");
+	const declared =
+		hostileManifest.options_schema?.properties?.CHANNEL_ALLOWLIST
+			?.declared_option_kind;
+	assert.notEqual(
+		declared,
+		platformKind,
+		"the sanity fixture itself must disagree with the registry, or this test proves nothing",
+	);
 });

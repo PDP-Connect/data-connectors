@@ -37,14 +37,14 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
  * `is_verified` is a tri-state boolean (nullable).
  */
 export const profileSchema = z.object({
-  id: z.string().min(1).max(200),
-  username: z.string().min(1).max(200),
-  full_name: pdppSafeText.max(500).nullable(),
-  bio: pdppSafeText.max(4000).nullable(),
-  follower_count: z.number().int().min(0).nullable(),
-  following_count: z.number().int().min(0).nullable(),
-  post_count: z.number().int().min(0).nullable(),
-  is_verified: z.boolean().nullable(),
+	id: z.string().min(1).max(200),
+	username: z.string().min(1).max(200),
+	full_name: pdppSafeText.max(500).nullable(),
+	bio: pdppSafeText.max(4000).nullable(),
+	follower_count: z.number().int().min(0).nullable(),
+	following_count: z.number().int().min(0).nullable(),
+	post_count: z.number().int().min(0).nullable(),
+	is_verified: z.boolean().nullable(),
 });
 
 /**
@@ -56,13 +56,16 @@ export const profileSchema = z.object({
  * `location_name` is free-form; `taken_at` is an ISO datetime.
  */
 export const postsSchema = z.object({
-  id: z.string().min(1).max(200),
-  caption: pdppSafeText.max(100_000).nullable(),
-  media_type: z.string().min(1).max(64).nullable(),
-  like_count: z.number().int().min(0).nullable(),
-  comment_count: z.number().int().min(0).nullable(),
-  location_name: pdppSafeText.max(500).nullable(),
-  taken_at: z.string().regex(ISO_DT_RE, "taken_at must be an ISO-8601 datetime").nullable(),
+	id: z.string().min(1).max(200),
+	caption: pdppSafeText.max(100_000).nullable(),
+	media_type: z.string().min(1).max(64).nullable(),
+	like_count: z.number().int().min(0).nullable(),
+	comment_count: z.number().int().min(0).nullable(),
+	location_name: pdppSafeText.max(500).nullable(),
+	taken_at: z
+		.string()
+		.regex(ISO_DT_RE, "taken_at must be an ISO-8601 datetime")
+		.nullable(),
 });
 
 /**
@@ -70,8 +73,8 @@ export const postsSchema = z.object({
  * connector declares (and will emit once extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  profile: profileSchema,
-  posts: postsSchema,
+	profile: profileSchema,
+	posts: postsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

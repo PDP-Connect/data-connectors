@@ -71,8 +71,10 @@ const MEMBER_PROPERTY_NAMES = ["X-ADDRESSBOOKSERVER-MEMBER", "MEMBER"];
 const URN_UUID_PREFIX_RE = /^urn:uuid:/i;
 
 function rawValues(card: ParsedVCard, names: readonly string[]): string[] {
-  const wanted = new Set(names.map((n) => n.toUpperCase()));
-  return card.rawProperties.filter((p) => wanted.has(p.name.toUpperCase())).map((p) => p.value.trim());
+	const wanted = new Set(names.map((n) => n.toUpperCase()));
+	return card.rawProperties
+		.filter((p) => wanted.has(p.name.toUpperCase()))
+		.map((p) => p.value.trim());
 }
 
 /**
@@ -84,7 +86,9 @@ function rawValues(card: ParsedVCard, names: readonly string[]): string[] {
  * never silently remove a real person from `contacts`.
  */
 export function isGroupVCard(card: ParsedVCard): boolean {
-  return rawValues(card, KIND_PROPERTY_NAMES).some((v) => v.toLowerCase() === "group");
+	return rawValues(card, KIND_PROPERTY_NAMES).some(
+		(v) => v.toLowerCase() === "group",
+	);
 }
 
 /**
@@ -93,22 +97,22 @@ export function isGroupVCard(card: ParsedVCard): boolean {
  * result is a stable set-like list suitable for a record body.
  */
 export function groupMemberUids(card: ParsedVCard): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const value of rawValues(card, MEMBER_PROPERTY_NAMES)) {
-    const uid = value.replace(URN_UUID_PREFIX_RE, "").trim();
-    if (uid && !seen.has(uid)) {
-      seen.add(uid);
-      out.push(uid);
-    }
-  }
-  return out;
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const value of rawValues(card, MEMBER_PROPERTY_NAMES)) {
+		const uid = value.replace(URN_UUID_PREFIX_RE, "").trim();
+		if (uid && !seen.has(uid)) {
+			seen.add(uid);
+			out.push(uid);
+		}
+	}
+	return out;
 }
 
 /** The enumerated collection, partitioned by what each resource actually is. */
 export interface VCardPartition<T> {
-  contacts: T[];
-  groups: T[];
+	contacts: T[];
+	groups: T[];
 }
 
 /**
@@ -118,17 +122,19 @@ export interface VCardPartition<T> {
  * emitter and the group anchor cannot disagree about it — the phantom-contact
  * defect was precisely such a disagreement, with no partition at all.
  */
-export function partitionVCards<T extends { card: ParsedVCard }>(resources: readonly T[]): VCardPartition<T> {
-  const contacts: T[] = [];
-  const groups: T[] = [];
-  for (const resource of resources) {
-    if (isGroupVCard(resource.card)) {
-      groups.push(resource);
-    } else {
-      contacts.push(resource);
-    }
-  }
-  return { contacts, groups };
+export function partitionVCards<T extends { card: ParsedVCard }>(
+	resources: readonly T[],
+): VCardPartition<T> {
+	const contacts: T[] = [];
+	const groups: T[] = [];
+	for (const resource of resources) {
+		if (isGroupVCard(resource.card)) {
+			groups.push(resource);
+		} else {
+			contacts.push(resource);
+		}
+	}
+	return { contacts, groups };
 }
 
 /**
@@ -141,26 +147,26 @@ export function partitionVCards<T extends { card: ParsedVCard }>(resources: read
  * denominator partly out of the data it is meant to verify.
  */
 export interface GroupAnchor {
-  /** True only when the enumeration reached a complete boundary. */
-  boundaryEstablished: boolean;
-  /** Distinct group names derived from contacts' CATEGORIES. Derived, not measured. */
-  derivedCategoryGroups: number;
-  /** Group records actually emitted this run. */
-  emitted: number;
-  /** Group vCards the server enumerated. Measured at the source boundary. */
-  serverGroupVCards: number;
+	/** True only when the enumeration reached a complete boundary. */
+	boundaryEstablished: boolean;
+	/** Distinct group names derived from contacts' CATEGORIES. Derived, not measured. */
+	derivedCategoryGroups: number;
+	/** Group records actually emitted this run. */
+	emitted: number;
+	/** Group vCards the server enumerated. Measured at the source boundary. */
+	serverGroupVCards: number;
 }
 
 export type GroupAnchorVerdict =
-  /** Enumeration was incomplete; no claim about completeness is possible. */
-  | { status: "unproven"; reason: "boundary_not_established" }
-  /** The server enumerated no groups and no CATEGORIES groups were derived.
-   *  This is a CHECKED zero — genuine evidence of an empty account. */
-  | { status: "empty_confirmed" }
-  /** Every group the server holds is accounted for in what was emitted. */
-  | { status: "complete"; considered: number; covered: number }
-  /** The server holds groups that were not emitted. */
-  | { status: "short"; considered: number; covered: number; missing: number };
+	/** Enumeration was incomplete; no claim about completeness is possible. */
+	| { status: "unproven"; reason: "boundary_not_established" }
+	/** The server enumerated no groups and no CATEGORIES groups were derived.
+	 *  This is a CHECKED zero — genuine evidence of an empty account. */
+	| { status: "empty_confirmed" }
+	/** Every group the server holds is accounted for in what was emitted. */
+	| { status: "complete"; considered: number; covered: number }
+	/** The server holds groups that were not emitted. */
+	| { status: "short"; considered: number; covered: number; missing: number };
 
 /**
  * Turn the measured anchor into a verdict.
@@ -175,16 +181,25 @@ export type GroupAnchorVerdict =
  * two-way equality would flag correct behaviour as failure.
  */
 export function groupAnchorVerdict(anchor: GroupAnchor): GroupAnchorVerdict {
-  if (!anchor.boundaryEstablished) {
-    return { status: "unproven", reason: "boundary_not_established" };
-  }
-  if (anchor.serverGroupVCards === 0 && anchor.derivedCategoryGroups === 0 && anchor.emitted === 0) {
-    return { status: "empty_confirmed" };
-  }
-  const considered = anchor.serverGroupVCards;
-  const covered = Math.min(anchor.emitted, considered);
-  if (covered < considered) {
-    return { status: "short", considered, covered, missing: considered - covered };
-  }
-  return { status: "complete", considered, covered };
+	if (!anchor.boundaryEstablished) {
+		return { status: "unproven", reason: "boundary_not_established" };
+	}
+	if (
+		anchor.serverGroupVCards === 0 &&
+		anchor.derivedCategoryGroups === 0 &&
+		anchor.emitted === 0
+	) {
+		return { status: "empty_confirmed" };
+	}
+	const considered = anchor.serverGroupVCards;
+	const covered = Math.min(anchor.emitted, considered);
+	if (covered < considered) {
+		return {
+			status: "short",
+			considered,
+			covered,
+			missing: considered - covered,
+		};
+	}
+	return { status: "complete", considered, covered };
 }

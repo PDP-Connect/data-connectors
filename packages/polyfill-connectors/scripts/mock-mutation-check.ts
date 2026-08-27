@@ -54,7 +54,13 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -68,28 +74,29 @@ const TEST_TIMEOUT_MS = 20_000;
 // `identifier.includes("/foo")`. Deliberately narrow — a general string
 // literal isn't a path matcher, and a false-positive match would waste a
 // mutation run on a literal that was never load-bearing to begin with.
-const PATH_MATCHER_RE = /(?:\.(?:startsWith|includes)\("(\/[^"]*)"\)|===\s*"(\/[^"]*)")/g;
+const PATH_MATCHER_RE =
+	/(?:\.(?:startsWith|includes)\("(\/[^"]*)"\)|===\s*"(\/[^"]*)")/g;
 
 export interface PathLiteralSite {
-  readonly file: string;
-  readonly line: number;
-  readonly literal: string;
+	readonly file: string;
+	readonly line: number;
+	readonly literal: string;
 }
 
 export interface ConnectorMutationResult {
-  readonly connector: string;
-  readonly decorative: readonly PathLiteralSite[];
-  readonly detail: string;
-  readonly loadBearing: number;
-  readonly sites: readonly PathLiteralSite[];
-  readonly verdict: "PASS" | "WEAK" | "UNKNOWN";
+	readonly connector: string;
+	readonly decorative: readonly PathLiteralSite[];
+	readonly detail: string;
+	readonly loadBearing: number;
+	readonly sites: readonly PathLiteralSite[];
+	readonly verdict: "PASS" | "WEAK" | "UNKNOWN";
 }
 
 function listConnectors(): string[] {
-  return readdirSync(CONNECTORS_DIR, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .sort();
+	return readdirSync(CONNECTORS_DIR, { withFileTypes: true })
+		.filter((e) => e.isDirectory())
+		.map((e) => e.name)
+		.sort();
 }
 
 const SCRATCH_PREFIX = "__mutation_scratch_";
@@ -106,64 +113,67 @@ const SCRATCH_PREFIX = "__mutation_scratch_";
  * one.
  */
 function sweepOrphanedScratchFiles(): number {
-  let removed = 0;
-  for (const connector of listConnectors()) {
-    const dir = join(CONNECTORS_DIR, connector);
-    for (const entry of readdirSync(dir)) {
-      if (entry.startsWith(SCRATCH_PREFIX)) {
-        rmSync(join(dir, entry), { force: true });
-        removed += 1;
-      }
-    }
-  }
-  return removed;
+	let removed = 0;
+	for (const connector of listConnectors()) {
+		const dir = join(CONNECTORS_DIR, connector);
+		for (const entry of readdirSync(dir)) {
+			if (entry.startsWith(SCRATCH_PREFIX)) {
+				rmSync(join(dir, entry), { force: true });
+				removed += 1;
+			}
+		}
+	}
+	return removed;
 }
 
 function listTestFiles(connector: string): string[] {
-  const dir = join(CONNECTORS_DIR, connector);
-  if (!existsSync(dir)) {
-    return [];
-  }
-  return (
-    readdirSync(dir)
-      .filter((f) => f.endsWith(".test.ts"))
-      // Scratch copies are written alongside the original (relative imports must
-      // resolve) and therefore also end in `.test.ts`. Without this filter a
-      // leftover scratch from an interrupted run is collected as a real test
-      // file, and the next trial reads a path that its own `finally` already
-      // deleted — the run dies with ENOENT on a filename it invented itself.
-      .filter((f) => !f.startsWith(SCRATCH_PREFIX))
-      .map((f) => join(dir, f))
-      .sort()
-  );
+	const dir = join(CONNECTORS_DIR, connector);
+	if (!existsSync(dir)) {
+		return [];
+	}
+	return (
+		readdirSync(dir)
+			.filter((f) => f.endsWith(".test.ts"))
+			// Scratch copies are written alongside the original (relative imports must
+			// resolve) and therefore also end in `.test.ts`. Without this filter a
+			// leftover scratch from an interrupted run is collected as a real test
+			// file, and the next trial reads a path that its own `finally` already
+			// deleted — the run dies with ENOENT on a filename it invented itself.
+			.filter((f) => !f.startsWith(SCRATCH_PREFIX))
+			.map((f) => join(dir, f))
+			.sort()
+	);
 }
 
 /** Find every path-literal matcher site in a test file's source text. */
-export function findPathLiteralSites(filePath: string, source: string): PathLiteralSite[] {
-  const sites: PathLiteralSite[] = [];
-  const lines = source.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? "";
-    // Skip comment lines: a regression-guard comment quoting a path (jellyfin's
-    // "Jellyfin serves its REST API at the root, NOT under /api/" style notes)
-    // is documentation, not a matcher — mutating it would corrupt the scratch
-    // file's prose without changing any executable behavior, producing a
-    // meaningless mutation run.
-    const trimmed = line.trim();
-    if (trimmed.startsWith("//") || trimmed.startsWith("*")) {
-      continue;
-    }
-    PATH_MATCHER_RE.lastIndex = 0;
-    let match = PATH_MATCHER_RE.exec(line);
-    while (match) {
-      const literal = match[1] ?? match[2];
-      if (literal) {
-        sites.push({ file: filePath, line: i + 1, literal });
-      }
-      match = PATH_MATCHER_RE.exec(line);
-    }
-  }
-  return sites;
+export function findPathLiteralSites(
+	filePath: string,
+	source: string,
+): PathLiteralSite[] {
+	const sites: PathLiteralSite[] = [];
+	const lines = source.split("\n");
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i] ?? "";
+		// Skip comment lines: a regression-guard comment quoting a path (jellyfin's
+		// "Jellyfin serves its REST API at the root, NOT under /api/" style notes)
+		// is documentation, not a matcher — mutating it would corrupt the scratch
+		// file's prose without changing any executable behavior, producing a
+		// meaningless mutation run.
+		const trimmed = line.trim();
+		if (trimmed.startsWith("//") || trimmed.startsWith("*")) {
+			continue;
+		}
+		PATH_MATCHER_RE.lastIndex = 0;
+		let match = PATH_MATCHER_RE.exec(line);
+		while (match) {
+			const literal = match[1] ?? match[2];
+			if (literal) {
+				sites.push({ file: filePath, line: i + 1, literal });
+			}
+			match = PATH_MATCHER_RE.exec(line);
+		}
+	}
+	return sites;
 }
 
 /**
@@ -181,26 +191,39 @@ export function findPathLiteralSites(filePath: string, source: string): PathLite
  * to answer.
  */
 function mutateSource(source: string, literal: string): string {
-  const quoted = `"${literal}"`;
-  const mutated = `"${literal}__MUTATED__"`;
-  if (!source.includes(quoted)) {
-    throw new Error(`literal ${quoted} not found for mutation (source may have changed since detection)`);
-  }
-  return source.split(quoted).join(mutated);
+	const quoted = `"${literal}"`;
+	const mutated = `"${literal}__MUTATED__"`;
+	if (!source.includes(quoted)) {
+		throw new Error(
+			`literal ${quoted} not found for mutation (source may have changed since detection)`,
+		);
+	}
+	return source.split(quoted).join(mutated);
 }
 
 function runTestFile(filePath: string): { passed: boolean; output: string } {
-  try {
-    const output = execFileSync(
-      process.execPath,
-      ["--test", "--import", "tsx", `--test-timeout=${TEST_TIMEOUT_MS}`, filePath],
-      { cwd: PACKAGE_ROOT, encoding: "utf8", stdio: "pipe", timeout: TEST_TIMEOUT_MS * 4 }
-    );
-    return { passed: true, output };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string };
-    return { passed: false, output: `${e.stdout ?? ""}\n${e.stderr ?? ""}` };
-  }
+	try {
+		const output = execFileSync(
+			process.execPath,
+			[
+				"--test",
+				"--import",
+				"tsx",
+				`--test-timeout=${TEST_TIMEOUT_MS}`,
+				filePath,
+			],
+			{
+				cwd: PACKAGE_ROOT,
+				encoding: "utf8",
+				stdio: "pipe",
+				timeout: TEST_TIMEOUT_MS * 4,
+			},
+		);
+		return { passed: true, output };
+	} catch (err) {
+		const e = err as { stdout?: string; stderr?: string };
+		return { passed: false, output: `${e.stdout ?? ""}\n${e.stderr ?? ""}` };
+	}
 }
 
 /**
@@ -210,114 +233,141 @@ function runTestFile(filePath: string): { passed: boolean; output: string } {
  * The scratch file is written ALONGSIDE the original (not in system tmp)
  * because the connector's relative imports (`../../src/...`) must resolve.
  */
-function runMutationTrial(site: PathLiteralSite): { loadBearing: boolean; output: string } {
-  const original = readFileSync(site.file, "utf8");
-  const mutated = mutateSource(original, site.literal);
-  const dir = dirname(site.file);
-  const scratchPath = join(dir, `${SCRATCH_PREFIX}${process.pid}_${Date.now()}.test.ts`);
-  writeFileSync(scratchPath, mutated);
-  try {
-    const result = runTestFile(scratchPath);
-    return { loadBearing: !result.passed, output: result.output };
-  } finally {
-    rmSync(scratchPath, { force: true });
-  }
+function runMutationTrial(site: PathLiteralSite): {
+	loadBearing: boolean;
+	output: string;
+} {
+	const original = readFileSync(site.file, "utf8");
+	const mutated = mutateSource(original, site.literal);
+	const dir = dirname(site.file);
+	const scratchPath = join(
+		dir,
+		`${SCRATCH_PREFIX}${process.pid}_${Date.now()}.test.ts`,
+	);
+	writeFileSync(scratchPath, mutated);
+	try {
+		const result = runTestFile(scratchPath);
+		return { loadBearing: !result.passed, output: result.output };
+	} finally {
+		rmSync(scratchPath, { force: true });
+	}
 }
 
 function checkConnector(connector: string): ConnectorMutationResult {
-  const testFiles = listTestFiles(connector);
-  const sites: PathLiteralSite[] = [];
-  for (const file of testFiles) {
-    const source = readFileSync(file, "utf8");
-    sites.push(...findPathLiteralSites(file, source));
-  }
+	const testFiles = listTestFiles(connector);
+	const sites: PathLiteralSite[] = [];
+	for (const file of testFiles) {
+		const source = readFileSync(file, "utf8");
+		sites.push(...findPathLiteralSites(file, source));
+	}
 
-  // Dedupe identical (file, literal) pairs — the same route matcher can
-  // legitimately appear more than once in one file (e.g. a shared fake
-  // server class instantiated by several tests); mutating it once proves
-  // the same fact every additional occurrence would.
-  const seen = new Set<string>();
-  const uniqueSites = sites.filter((s) => {
-    const key = `${s.file}::${s.literal}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
+	// Dedupe identical (file, literal) pairs — the same route matcher can
+	// legitimately appear more than once in one file (e.g. a shared fake
+	// server class instantiated by several tests); mutating it once proves
+	// the same fact every additional occurrence would.
+	const seen = new Set<string>();
+	const uniqueSites = sites.filter((s) => {
+		const key = `${s.file}::${s.literal}`;
+		if (seen.has(key)) {
+			return false;
+		}
+		seen.add(key);
+		return true;
+	});
 
-  if (uniqueSites.length === 0) {
-    return {
-      connector,
-      verdict: "UNKNOWN",
-      sites: [],
-      loadBearing: 0,
-      decorative: [],
-      detail:
-        testFiles.length === 0
-          ? "no test files found"
-          : "no request-path-matching literal detected in test source — this connector's HTTP surface (if any) is not covered by a path-asserting mock; cannot be checked, not the same as passing",
-    };
-  }
+	if (uniqueSites.length === 0) {
+		return {
+			connector,
+			verdict: "UNKNOWN",
+			sites: [],
+			loadBearing: 0,
+			decorative: [],
+			detail:
+				testFiles.length === 0
+					? "no test files found"
+					: "no request-path-matching literal detected in test source — this connector's HTTP surface (if any) is not covered by a path-asserting mock; cannot be checked, not the same as passing",
+		};
+	}
 
-  const decorative: PathLiteralSite[] = [];
-  let loadBearing = 0;
-  for (const site of uniqueSites) {
-    const { loadBearing: isLoadBearing } = runMutationTrial(site);
-    if (isLoadBearing) {
-      loadBearing += 1;
-    } else {
-      decorative.push(site);
-    }
-  }
+	const decorative: PathLiteralSite[] = [];
+	let loadBearing = 0;
+	for (const site of uniqueSites) {
+		const { loadBearing: isLoadBearing } = runMutationTrial(site);
+		if (isLoadBearing) {
+			loadBearing += 1;
+		} else {
+			decorative.push(site);
+		}
+	}
 
-  const verdict: ConnectorMutationResult["verdict"] = decorative.length === 0 ? "PASS" : "WEAK";
-  const detail =
-    verdict === "PASS"
-      ? `${loadBearing}/${uniqueSites.length} path literal(s) are load-bearing — mutating any of them breaks the suite`
-      : `${decorative.length}/${uniqueSites.length} path literal(s) are decorative — the suite still passes when they're corrupted, at ${decorative
-          .map((d) => `${d.file.replace(`${PACKAGE_ROOT}/`, "")}:${d.line} "${d.literal}"`)
-          .join("; ")}`;
+	const verdict: ConnectorMutationResult["verdict"] =
+		decorative.length === 0 ? "PASS" : "WEAK";
+	const detail =
+		verdict === "PASS"
+			? `${loadBearing}/${uniqueSites.length} path literal(s) are load-bearing — mutating any of them breaks the suite`
+			: `${decorative.length}/${uniqueSites.length} path literal(s) are decorative — the suite still passes when they're corrupted, at ${decorative
+					.map(
+						(d) =>
+							`${d.file.replace(`${PACKAGE_ROOT}/`, "")}:${d.line} "${d.literal}"`,
+					)
+					.join("; ")}`;
 
-  return { connector, verdict, sites: uniqueSites, loadBearing, decorative, detail };
+	return {
+		connector,
+		verdict,
+		sites: uniqueSites,
+		loadBearing,
+		decorative,
+		detail,
+	};
 }
 
 export function runAllConnectors(only?: string): ConnectorMutationResult[] {
-  const connectors = only ? [only] : listConnectors();
-  return connectors.map(checkConnector);
+	const connectors = only ? [only] : listConnectors();
+	return connectors.map(checkConnector);
 }
 
 function printTable(results: ConnectorMutationResult[]): void {
-  const width = Math.max(...results.map((r) => r.connector.length));
-  for (const r of results) {
-    console.log(`${r.verdict.padEnd(8)} ${r.connector.padEnd(width)} ${r.detail}`);
-  }
-  const pass = results.filter((r) => r.verdict === "PASS").length;
-  const weak = results.filter((r) => r.verdict === "WEAK").length;
-  const unknown = results.filter((r) => r.verdict === "UNKNOWN").length;
-  console.log(`\n${pass} PASS, ${weak} WEAK, ${unknown} UNKNOWN (of ${results.length} connectors)`);
-  console.log("REPORT-ONLY: this gate does not fail CI. See src/mock-mutation-check.test.ts for the ratchet.");
+	const width = Math.max(...results.map((r) => r.connector.length));
+	for (const r of results) {
+		console.log(
+			`${r.verdict.padEnd(8)} ${r.connector.padEnd(width)} ${r.detail}`,
+		);
+	}
+	const pass = results.filter((r) => r.verdict === "PASS").length;
+	const weak = results.filter((r) => r.verdict === "WEAK").length;
+	const unknown = results.filter((r) => r.verdict === "UNKNOWN").length;
+	console.log(
+		`\n${pass} PASS, ${weak} WEAK, ${unknown} UNKNOWN (of ${results.length} connectors)`,
+	);
+	console.log(
+		"REPORT-ONLY: this gate does not fail CI. See src/mock-mutation-check.test.ts for the ratchet.",
+	);
 }
 
 function main(): void {
-  const args = process.argv.slice(2);
-  const jsonOut = args.includes("--json");
-  const connectorArg = args.find((a) => a.startsWith("--connector="))?.split("=")[1];
+	const args = process.argv.slice(2);
+	const jsonOut = args.includes("--json");
+	const connectorArg = args
+		.find((a) => a.startsWith("--connector="))
+		?.split("=")[1];
 
-  const swept = sweepOrphanedScratchFiles();
-  if (swept > 0 && !jsonOut) {
-    console.log(`swept ${swept} orphaned scratch file(s) from an interrupted run\n`);
-  }
+	const swept = sweepOrphanedScratchFiles();
+	if (swept > 0 && !jsonOut) {
+		console.log(
+			`swept ${swept} orphaned scratch file(s) from an interrupted run\n`,
+		);
+	}
 
-  const results = runAllConnectors(connectorArg);
+	const results = runAllConnectors(connectorArg);
 
-  if (jsonOut) {
-    console.log(JSON.stringify(results, null, 2));
-  } else {
-    printTable(results);
-  }
+	if (jsonOut) {
+		console.log(JSON.stringify(results, null, 2));
+	} else {
+		printTable(results);
+	}
 }
 
 if (isMainModule(import.meta.url)) {
-  main();
+	main();
 }

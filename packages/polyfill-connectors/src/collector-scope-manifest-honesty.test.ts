@@ -27,49 +27,64 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildCollectorStartMessage, resolveScopedStreamTimeRanges } from "@pdpp/collector-runtime";
+import {
+	buildCollectorStartMessage,
+	resolveScopedStreamTimeRanges,
+} from "@pdpp/collector-runtime";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
 
 interface ManifestStream {
-  consent_time_field?: string;
-  name?: string;
+	consent_time_field?: string;
+	name?: string;
 }
 
 interface ConnectorManifest {
-  streams?: ManifestStream[];
+	streams?: ManifestStream[];
 }
 
 const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
 const MANIFESTS_DIR = join(PACKAGE_ROOT, "..", "manifests");
 
 function readManifest(connectorId: string): ConnectorManifest {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, `${connectorId}.json`), "utf8")) as ConnectorManifest;
+	return JSON.parse(
+		readFileSync(join(MANIFESTS_DIR, `${connectorId}.json`), "utf8"),
+	) as ConnectorManifest;
 }
 
 test("every local-collector definition mirrors its manifest's time-scopable streams exactly", () => {
-  assert.ok(LOCAL_COLLECTOR_DEFINITIONS.length > 0, "no local collector definitions were discovered");
+	assert.ok(
+		LOCAL_COLLECTOR_DEFINITIONS.length > 0,
+		"no local collector definitions were discovered",
+	);
 
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const manifest = readManifest(definition.connector_id);
-    const declared = [...(definition.time_scopable_streams ?? [])].sort();
+	for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+		const manifest = readManifest(definition.connector_id);
+		const declared = [...(definition.time_scopable_streams ?? [])].sort();
 
-    // The manifest authority: a stream is time-scopable exactly when it declares
-    // the field a `since` would be compared against. Restricted to the streams
-    // this collector actually requests — a bound on a stream the run never asks
-    // for is not a boundary anyone can observe.
-    const requested = new Set(definition.streams);
-    const scopableByManifest = (manifest.streams ?? [])
-      .filter((stream) => typeof stream.name === "string" && requested.has(stream.name))
-      .filter((stream) => typeof stream.consent_time_field === "string" && stream.consent_time_field.trim())
-      .map((stream) => stream.name as string)
-      .sort();
+		// The manifest authority: a stream is time-scopable exactly when it declares
+		// the field a `since` would be compared against. Restricted to the streams
+		// this collector actually requests — a bound on a stream the run never asks
+		// for is not a boundary anyone can observe.
+		const requested = new Set(definition.streams);
+		const scopableByManifest = (manifest.streams ?? [])
+			.filter(
+				(stream) =>
+					typeof stream.name === "string" && requested.has(stream.name),
+			)
+			.filter(
+				(stream) =>
+					typeof stream.consent_time_field === "string" &&
+					stream.consent_time_field.trim(),
+			)
+			.map((stream) => stream.name as string)
+			.sort();
 
-    assert.deepEqual(
-      declared,
-      scopableByManifest,
-      `${definition.connector_id}: time_scopable_streams must equal the requested streams whose manifest declares a consent_time_field`
-    );
-  }
+		assert.deepEqual(
+			declared,
+			scopableByManifest,
+			`${definition.connector_id}: time_scopable_streams must equal the requested streams whose manifest declares a consent_time_field`,
+		);
+	}
 });
 
 /**
@@ -80,63 +95,66 @@ test("every local-collector definition mirrors its manifest's time-scopable stre
 const ROOT_ENFORCING_CONNECTORS = new Set(["claude_code", "codex"]);
 
 test("enforces_source_roots is declared by exactly the connectors that implement root pruning", () => {
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    assert.equal(
-      definition.enforces_source_roots === true,
-      ROOT_ENFORCING_CONNECTORS.has(definition.connector_id),
-      `${definition.connector_id}: enforces_source_roots must reflect implemented behaviour, not intent — ` +
-        "claiming it without a root-pruning walk would report corpus-wide coverage as bounded"
-    );
-  }
+	for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+		assert.equal(
+			definition.enforces_source_roots === true,
+			ROOT_ENFORCING_CONNECTORS.has(definition.connector_id),
+			`${definition.connector_id}: enforces_source_roots must reflect implemented behaviour, not intent — ` +
+				"claiming it without a root-pruning walk would report corpus-wide coverage as bounded",
+		);
+	}
 });
 
 test("a root-enforcing connector's source actually consults the shared containment helper", () => {
-  // Pins the flag to the implementation rather than to a comment: a connector
-  // that drops the pruning call must fail this, not silently keep the claim.
-  for (const connectorId of ROOT_ENFORCING_CONNECTORS) {
-    const source = readFileSync(join(PACKAGE_ROOT, "..", "connectors", connectorId, "index.ts"), "utf8");
-    assert.match(
-      source,
-      /shouldDescendIntoDirectory|isPathWithinSourceRoots|projectDirMatchesSourceRoots/,
-      `${connectorId} declares enforces_source_roots but never calls a shared path-containment helper`
-    );
-  }
+	// Pins the flag to the implementation rather than to a comment: a connector
+	// that drops the pruning call must fail this, not silently keep the claim.
+	for (const connectorId of ROOT_ENFORCING_CONNECTORS) {
+		const source = readFileSync(
+			join(PACKAGE_ROOT, "..", "connectors", connectorId, "index.ts"),
+			"utf8",
+		);
+		assert.match(
+			source,
+			/shouldDescendIntoDirectory|isPathWithinSourceRoots|projectDirMatchesSourceRoots/,
+			`${connectorId} declares enforces_source_roots but never calls a shared path-containment helper`,
+		);
+	}
 });
 
 test("no definition claims a time-scopable stream it does not collect", () => {
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const requested = new Set(definition.streams);
-    for (const stream of definition.time_scopable_streams ?? []) {
-      assert.ok(
-        requested.has(stream),
-        `${definition.connector_id}: "${stream}" is declared time-scopable but is not in the collector's stream set`
-      );
-    }
-  }
+	for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+		const requested = new Set(definition.streams);
+		for (const stream of definition.time_scopable_streams ?? []) {
+			assert.ok(
+				requested.has(stream),
+				`${definition.connector_id}: "${stream}" is declared time-scopable but is not in the collector's stream set`,
+			);
+		}
+	}
 });
 
 test("every definition preserves all requested streams and applies since only to manifest time-scopable streams", () => {
-  const bounded = { since: "2026-08-01T00:00:00.000Z" };
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const start = buildCollectorStartMessage(
-      definition.streams,
-      [],
-      null,
-      {},
-      resolveScopedStreamTimeRanges(bounded, definition.time_scopable_streams)
-    );
-    const expected = new Set(definition.streams);
-    assert.deepEqual(
-      new Set(start.scope.streams.map((stream) => stream.name)),
-      expected,
-      `${definition.connector_id}: bounded scope must not silently remove declared streams`
-    );
-    for (const stream of start.scope.streams) {
-      assert.equal(
-        "time_range" in stream,
-        (definition.time_scopable_streams ?? []).includes(stream.name),
-        `${definition.connector_id}.${stream.name}: time scope must follow manifest applicability`
-      );
-    }
-  }
+	const bounded = { since: "2026-08-01T00:00:00.000Z" };
+	for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+		const start = buildCollectorStartMessage(
+			definition.streams,
+			[],
+			null,
+			{},
+			resolveScopedStreamTimeRanges(bounded, definition.time_scopable_streams),
+		);
+		const expected = new Set(definition.streams);
+		assert.deepEqual(
+			new Set(start.scope.streams.map((stream) => stream.name)),
+			expected,
+			`${definition.connector_id}: bounded scope must not silently remove declared streams`,
+		);
+		for (const stream of start.scope.streams) {
+			assert.equal(
+				"time_range" in stream,
+				(definition.time_scopable_streams ?? []).includes(stream.name),
+				`${definition.connector_id}.${stream.name}: time scope must follow manifest applicability`,
+			);
+		}
+	}
 });

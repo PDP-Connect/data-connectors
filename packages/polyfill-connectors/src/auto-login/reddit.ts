@@ -21,8 +21,16 @@
  */
 
 import type { BrowserContext, Page } from "playwright";
-import { DEADLINE_TIMEOUT, manualBrowserLogin, withDeadline } from "../browser-handoff.ts";
-import type { InteractionRequest, InteractionResponse, SessionCheckpointFn } from "../connector-runtime.ts";
+import {
+	DEADLINE_TIMEOUT,
+	manualBrowserLogin,
+	withDeadline,
+} from "../browser-handoff.ts";
+import type {
+	InteractionRequest,
+	InteractionResponse,
+	SessionCheckpointFn,
+} from "../connector-runtime.ts";
 import type { CaptureSession, LocatorProbe } from "../fixture-capture.ts";
 import { detectCloudflareChallenge } from "../platform-probes.ts";
 import { locatorIsVisible } from "./locator-helpers.ts";
@@ -32,104 +40,111 @@ const HOME_URL = "https://www.reddit.com/";
 const SESSION_COOKIE_NAME = "reddit_session";
 const USERNAME_SELECTOR = 'input[name="username"], input#loginUsername';
 const PASSWORD_SELECTOR = 'input[name="password"], input#loginPassword';
-const SUBMIT_SELECTOR = 'button[type="submit"]:has-text("Log In"), button[type="submit"]:has-text("Continue")';
-const OTP_SELECTOR = 'input[name="otp"], input[name="verification_code"], input[autocomplete="one-time-code"]';
+const SUBMIT_SELECTOR =
+	'button[type="submit"]:has-text("Log In"), button[type="submit"]:has-text("Continue")';
+const OTP_SELECTOR =
+	'input[name="otp"], input[name="verification_code"], input[autocomplete="one-time-code"]';
 const SUBMIT_BUTTON_NAME_RE = /^(log in|continue)$/i;
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-  "No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser, then respond success.";
+	"No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser, then respond success.";
 
 const LOGIN_LOCATOR_PROBES: LocatorProbe[] = [
-  {
-    id: "username",
-    kind: "css",
-    selector: USERNAME_SELECTOR,
-    description: "Reddit username field candidates used by the connector.",
-  },
-  {
-    id: "password",
-    kind: "css",
-    selector: PASSWORD_SELECTOR,
-    description: "Reddit password field candidates used by the connector.",
-  },
-  {
-    id: "submit-role",
-    kind: "role",
-    role: "button",
-    namePattern: "^(log in|continue)$",
-    nameFlags: "i",
-    description: "Semantic login/continue button candidate.",
-  },
-  {
-    id: "submit-css",
-    kind: "css",
-    selector: SUBMIT_SELECTOR,
-    description: "Fallback CSS submit candidate.",
-  },
-  {
-    id: "otp",
-    kind: "css",
-    selector: OTP_SELECTOR,
-    description: "OTP candidates; hidden fields must not trigger an OTP interaction.",
-  },
+	{
+		id: "username",
+		kind: "css",
+		selector: USERNAME_SELECTOR,
+		description: "Reddit username field candidates used by the connector.",
+	},
+	{
+		id: "password",
+		kind: "css",
+		selector: PASSWORD_SELECTOR,
+		description: "Reddit password field candidates used by the connector.",
+	},
+	{
+		id: "submit-role",
+		kind: "role",
+		role: "button",
+		namePattern: "^(log in|continue)$",
+		nameFlags: "i",
+		description: "Semantic login/continue button candidate.",
+	},
+	{
+		id: "submit-css",
+		kind: "css",
+		selector: SUBMIT_SELECTOR,
+		description: "Fallback CSS submit candidate.",
+	},
+	{
+		id: "otp",
+		kind: "css",
+		selector: OTP_SELECTOR,
+		description:
+			"OTP candidates; hidden fields must not trigger an OTP interaction.",
+	},
 ];
 
-type SendInteraction = (req: InteractionRequest) => Promise<InteractionResponse>;
+type SendInteraction = (
+	req: InteractionRequest,
+) => Promise<InteractionResponse>;
 
 interface ManualHandoffProbeRetryOptions {
-  pollIntervalMs?: number;
-  retryForMs?: number;
+	pollIntervalMs?: number;
+	retryForMs?: number;
 }
 
 interface EnsureRedditSessionArgs {
-  capture?: CaptureSession | null;
-  /**
-   * Mark a session-establishment phase so the runtime watchdog's no-progress
-   * message names WHERE establishment stalled. Optional (matching heb.ts's
-   * shape) so the many internal/test callers that don't checkpoint keep
-   * working; the production hook (`connectors/reddit/index.ts`'s
-   * `redditEnsureSession`) forwards the runtime's real one.
-   *
-   * Production `run_1787109028586` is why this exists: the run hung 120s
-   * inside the first liveness probe with `session-establish:begin` — the
-   * RUNTIME's own framing checkpoint — as the last marker, so the failure
-   * named the whole window rather than the probe that actually stalled.
-   */
-  checkpoint?: SessionCheckpointFn;
-  context: BrowserContext;
-  /**
-   * Test seam for the manual-handoff post-interaction re-probe window (see
-   * `isSessionLiveWithRetry`). Defaults to the production window
-   * (`MANUAL_HANDOFF_PROBE_RETRY_MS` / `MANUAL_HANDOFF_PROBE_POLL_INTERVAL_MS`);
-   * tests that deliberately exercise the "never becomes live" throw path
-   * override this so the assertion doesn't burn the real retry window.
-   */
-  manualHandoffProbeRetry?: ManualHandoffProbeRetryOptions;
-  /**
-   * Runtime marker for the post-submit credential-safety invariant: fired at
-   * the exact click that sends the saved password to Reddit's real sign-in
-   * form (see `EnsureSessionArgs.onCredentialSubmit`). Never fired on the
-   * session-reuse early return, the manual hand-off paths, or the OTP
-   * resubmit — those never send the saved password.
-   */
-  onCredentialSubmit?: () => void;
-  page: Page;
-  sendInteraction: SendInteraction;
-  /**
-   * Test seam for the per-probe bounds (see {@link SessionProbeOptions}).
-   * Production passes nothing and gets the real bounds; tests that prove the
-   * hang path shrink `evaluateTimeoutMs` so the assertion doesn't have to
-   * spend the production bound in real wall-clock.
-   */
-  sessionProbe?: SessionProbeOptions;
+	capture?: CaptureSession | null;
+	/**
+	 * Mark a session-establishment phase so the runtime watchdog's no-progress
+	 * message names WHERE establishment stalled. Optional (matching heb.ts's
+	 * shape) so the many internal/test callers that don't checkpoint keep
+	 * working; the production hook (`connectors/reddit/index.ts`'s
+	 * `redditEnsureSession`) forwards the runtime's real one.
+	 *
+	 * Production `run_1787109028586` is why this exists: the run hung 120s
+	 * inside the first liveness probe with `session-establish:begin` — the
+	 * RUNTIME's own framing checkpoint — as the last marker, so the failure
+	 * named the whole window rather than the probe that actually stalled.
+	 */
+	checkpoint?: SessionCheckpointFn;
+	context: BrowserContext;
+	/**
+	 * Test seam for the manual-handoff post-interaction re-probe window (see
+	 * `isSessionLiveWithRetry`). Defaults to the production window
+	 * (`MANUAL_HANDOFF_PROBE_RETRY_MS` / `MANUAL_HANDOFF_PROBE_POLL_INTERVAL_MS`);
+	 * tests that deliberately exercise the "never becomes live" throw path
+	 * override this so the assertion doesn't burn the real retry window.
+	 */
+	manualHandoffProbeRetry?: ManualHandoffProbeRetryOptions;
+	/**
+	 * Runtime marker for the post-submit credential-safety invariant: fired at
+	 * the exact click that sends the saved password to Reddit's real sign-in
+	 * form (see `EnsureSessionArgs.onCredentialSubmit`). Never fired on the
+	 * session-reuse early return, the manual hand-off paths, or the OTP
+	 * resubmit — those never send the saved password.
+	 */
+	onCredentialSubmit?: () => void;
+	page: Page;
+	sendInteraction: SendInteraction;
+	/**
+	 * Test seam for the per-probe bounds (see {@link SessionProbeOptions}).
+	 * Production passes nothing and gets the real bounds; tests that prove the
+	 * hang path shrink `evaluateTimeoutMs` so the assertion doesn't have to
+	 * spend the production bound in real wall-clock.
+	 */
+	sessionProbe?: SessionProbeOptions;
 }
 
 function otpCode(resp: InteractionResponse): string | null {
-  return resp.data?.code ?? resp.value ?? null;
+	return resp.data?.code ?? resp.value ?? null;
 }
 
 async function hasSessionCookie(context: BrowserContext): Promise<boolean> {
-  const cookies = await context.cookies(HOME_URL);
-  return cookies.some((c) => c.name === SESSION_COOKIE_NAME && Boolean(c.value));
+	const cookies = await context.cookies(HOME_URL);
+	return cookies.some(
+		(c) => c.name === SESSION_COOKIE_NAME && Boolean(c.value),
+	);
 }
 
 /**
@@ -210,27 +225,27 @@ export const REDDIT_JSON_ORIGIN = "https://old.reddit.com";
  * timeout, so this cannot reintroduce an unbounded await.
  */
 export async function ensureRedditJsonOrigin(page: Page): Promise<boolean> {
-  try {
-    if (new URL(page.url()).origin === REDDIT_JSON_ORIGIN) {
-      return true;
-    }
-  } catch {
-    // An unnavigated page (`about:blank`) has no parseable origin — fall
-    // through and navigate rather than treating it as a fault.
-  }
-  try {
-    await page.goto(`${REDDIT_JSON_ORIGIN}/`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-  } catch {
-    return false;
-  }
-  try {
-    return new URL(page.url()).origin === REDDIT_JSON_ORIGIN;
-  } catch {
-    return false;
-  }
+	try {
+		if (new URL(page.url()).origin === REDDIT_JSON_ORIGIN) {
+			return true;
+		}
+	} catch {
+		// An unnavigated page (`about:blank`) has no parseable origin — fall
+		// through and navigate rather than treating it as a fault.
+	}
+	try {
+		await page.goto(`${REDDIT_JSON_ORIGIN}/`, {
+			waitUntil: "domcontentloaded",
+			timeout: 30_000,
+		});
+	} catch {
+		return false;
+	}
+	try {
+		return new URL(page.url()).origin === REDDIT_JSON_ORIGIN;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -243,14 +258,14 @@ export async function ensureRedditJsonOrigin(page: Page): Promise<boolean> {
  * shrink it instead of sleeping; nothing in production passes it.
  */
 export interface SessionProbeOptions {
-  readonly evaluateTimeoutMs?: number;
-  /**
-   * Fired when a probe could not answer within its bound — never fired for a
-   * probe that ran and reported a dead session. Keeps "Reddit stopped
-   * answering" distinguishable from "you are logged out" in diagnostics, even
-   * though both produce the same `false` verdict and the same next action.
-   */
-  readonly onProbeTimeout?: (stage: string) => void;
+	readonly evaluateTimeoutMs?: number;
+	/**
+	 * Fired when a probe could not answer within its bound — never fired for a
+	 * probe that ran and reported a dead session. Keeps "Reddit stopped
+	 * answering" distinguishable from "you are logged out" in diagnostics, even
+	 * though both produce the same `false` verdict and the same next action.
+	 */
+	readonly onProbeTimeout?: (stage: string) => void;
 }
 
 /**
@@ -271,81 +286,87 @@ export interface SessionProbeOptions {
  * does not erase the distinction in DIAGNOSTICS — a tarpit and a genuinely
  * logged-out session must not look identical to whoever reads the run later.
  */
-export async function isSessionLive(page: Page, options: SessionProbeOptions = {}): Promise<boolean> {
-  const { evaluateTimeoutMs = SESSION_PROBE_EVALUATE_TIMEOUT_MS, onProbeTimeout } = options;
-  const username = process.env.REDDIT_USERNAME;
-  if (username) {
-    // The fetch below is same-origin ONLY because of this: Reddit grants no
-    // cross-origin access to its JSON, so a probe issued from the wrong origin
-    // is blocked by the browser and reads as a dead session no matter how live
-    // the session is. See REDDIT_JSON_ORIGIN.
-    if (!(await ensureRedditJsonOrigin(page))) {
-      // Could not even ask — nameable in diagnostics as its own stage rather
-      // than collapsing into the same silent `false` as a logged-out session.
-      onProbeTimeout?.("origin");
-      return false;
-    }
-    try {
-      const result = await withDeadline(
-        page.evaluate(
-          async ({ origin, path, fetchTimeoutMs }) => {
-            try {
-              const res = await fetch(`${origin}${path}`, {
-                credentials: "include",
-                headers: { accept: "application/json" },
-                signal: AbortSignal.timeout(fetchTimeoutMs),
-              });
-              return { status: res.status };
-            } catch {
-              // Includes the abort: an unanswered request is reported as
-              // status 0, i.e. "not live", never as a hang.
-              return { status: 0 };
-            }
-          },
-          {
-            fetchTimeoutMs: SESSION_PROBE_FETCH_TIMEOUT_MS,
-            origin: REDDIT_JSON_ORIGIN,
-            path: `/user/${encodeURIComponent(username)}/saved.json`,
-          }
-        ) as Promise<{ status: number }>,
-        evaluateTimeoutMs
-      );
-      if (result === DEADLINE_TIMEOUT) {
-        // The page context never returned — distinct from a probe that ran
-        // and reported a dead session. Same verdict, different diagnosis.
-        onProbeTimeout?.("evaluate");
-        return false;
-      }
-      return result.status === 200;
-    } catch {
-      return false;
-    }
-  }
+export async function isSessionLive(
+	page: Page,
+	options: SessionProbeOptions = {},
+): Promise<boolean> {
+	const {
+		evaluateTimeoutMs = SESSION_PROBE_EVALUATE_TIMEOUT_MS,
+		onProbeTimeout,
+	} = options;
+	const username = process.env.REDDIT_USERNAME;
+	if (username) {
+		// The fetch below is same-origin ONLY because of this: Reddit grants no
+		// cross-origin access to its JSON, so a probe issued from the wrong origin
+		// is blocked by the browser and reads as a dead session no matter how live
+		// the session is. See REDDIT_JSON_ORIGIN.
+		if (!(await ensureRedditJsonOrigin(page))) {
+			// Could not even ask — nameable in diagnostics as its own stage rather
+			// than collapsing into the same silent `false` as a logged-out session.
+			onProbeTimeout?.("origin");
+			return false;
+		}
+		try {
+			const result = await withDeadline(
+				page.evaluate(
+					async ({ origin, path, fetchTimeoutMs }) => {
+						try {
+							const res = await fetch(`${origin}${path}`, {
+								credentials: "include",
+								headers: { accept: "application/json" },
+								signal: AbortSignal.timeout(fetchTimeoutMs),
+							});
+							return { status: res.status };
+						} catch {
+							// Includes the abort: an unanswered request is reported as
+							// status 0, i.e. "not live", never as a hang.
+							return { status: 0 };
+						}
+					},
+					{
+						fetchTimeoutMs: SESSION_PROBE_FETCH_TIMEOUT_MS,
+						origin: REDDIT_JSON_ORIGIN,
+						path: `/user/${encodeURIComponent(username)}/saved.json`,
+					},
+				) as Promise<{ status: number }>,
+				evaluateTimeoutMs,
+			);
+			if (result === DEADLINE_TIMEOUT) {
+				// The page context never returned — distinct from a probe that ran
+				// and reported a dead session. Same verdict, different diagnosis.
+				onProbeTimeout?.("evaluate");
+				return false;
+			}
+			return result.status === 200;
+		} catch {
+			return false;
+		}
+	}
 
-  try {
-    // Same origin requirement as the JSON probe above, for a different reason:
-    // the logout link only exists in old.reddit.com's markup. Reuses the shared
-    // guard so both paths agree on what "on the right origin" means.
-    if (!(await ensureRedditJsonOrigin(page))) {
-      onProbeTimeout?.("origin");
-      return false;
-    }
-    // `count()` is a CDP round-trip with no default timeout of its own, so a
-    // wedged renderer hangs it the same way the JSON probe above hung. The
-    // `goto` timeout does not cover it — that bound is already spent by the
-    // time this runs.
-    const logout = await withDeadline(
-      page.locator('a[href*="/logout"], form[action*="logout"]').count(),
-      evaluateTimeoutMs
-    );
-    if (logout === DEADLINE_TIMEOUT) {
-      onProbeTimeout?.("logout-locator");
-      return false;
-    }
-    return logout > 0;
-  } catch {
-    return false;
-  }
+	try {
+		// Same origin requirement as the JSON probe above, for a different reason:
+		// the logout link only exists in old.reddit.com's markup. Reuses the shared
+		// guard so both paths agree on what "on the right origin" means.
+		if (!(await ensureRedditJsonOrigin(page))) {
+			onProbeTimeout?.("origin");
+			return false;
+		}
+		// `count()` is a CDP round-trip with no default timeout of its own, so a
+		// wedged renderer hangs it the same way the JSON probe above hung. The
+		// `goto` timeout does not cover it — that bound is already spent by the
+		// time this runs.
+		const logout = await withDeadline(
+			page.locator('a[href*="/logout"], form[action*="logout"]').count(),
+			evaluateTimeoutMs,
+		);
+		if (logout === DEADLINE_TIMEOUT) {
+			onProbeTimeout?.("logout-locator");
+			return false;
+		}
+		return logout > 0;
+	} catch {
+		return false;
+	}
 }
 
 const MANUAL_HANDOFF_PROBE_RETRY_MS = 15_000;
@@ -379,63 +400,77 @@ const MANUAL_HANDOFF_PROBE_POLL_INTERVAL_MS = 3000;
  * far under the runtime watchdog's no-progress window.
  */
 export async function isSessionLiveWithRetry(
-  page: Page,
-  {
-    evaluateTimeoutMs,
-    onProbeTimeout,
-    pollIntervalMs = MANUAL_HANDOFF_PROBE_POLL_INTERVAL_MS,
-    retryForMs = MANUAL_HANDOFF_PROBE_RETRY_MS,
-  }: SessionProbeOptions & { pollIntervalMs?: number; retryForMs?: number } = {}
+	page: Page,
+	{
+		evaluateTimeoutMs,
+		onProbeTimeout,
+		pollIntervalMs = MANUAL_HANDOFF_PROBE_POLL_INTERVAL_MS,
+		retryForMs = MANUAL_HANDOFF_PROBE_RETRY_MS,
+	}: SessionProbeOptions & {
+		pollIntervalMs?: number;
+		retryForMs?: number;
+	} = {},
 ): Promise<boolean> {
-  const probeOptions: SessionProbeOptions = {
-    ...(evaluateTimeoutMs === undefined ? {} : { evaluateTimeoutMs }),
-    ...(onProbeTimeout === undefined ? {} : { onProbeTimeout }),
-  };
-  const deadline = Date.now() + retryForMs;
-  for (;;) {
-    if (await isSessionLive(page, probeOptions)) {
-      return true;
-    }
-    if (Date.now() >= deadline) {
-      return false;
-    }
-    await page.waitForTimeout(pollIntervalMs);
-  }
+	const probeOptions: SessionProbeOptions = {
+		...(evaluateTimeoutMs === undefined ? {} : { evaluateTimeoutMs }),
+		...(onProbeTimeout === undefined ? {} : { onProbeTimeout }),
+	};
+	const deadline = Date.now() + retryForMs;
+	for (;;) {
+		if (await isSessionLive(page, probeOptions)) {
+			return true;
+		}
+		if (Date.now() >= deadline) {
+			return false;
+		}
+		await page.waitForTimeout(pollIntervalMs);
+	}
 }
 
-async function captureLoginState(capture: CaptureSession | null | undefined, page: Page, label: string): Promise<void> {
-  if (!capture) {
-    return;
-  }
-  await capture.captureDom(page, label).catch((): undefined => undefined);
-  await capture.captureLocatorProbe?.(page, label, LOGIN_LOCATOR_PROBES).catch((): undefined => undefined);
+async function captureLoginState(
+	capture: CaptureSession | null | undefined,
+	page: Page,
+	label: string,
+): Promise<void> {
+	if (!capture) {
+		return;
+	}
+	await capture.captureDom(page, label).catch((): undefined => undefined);
+	await capture
+		.captureLocatorProbe?.(page, label, LOGIN_LOCATOR_PROBES)
+		.catch((): undefined => undefined);
 }
 
-async function clickRedditLoginSubmit(page: Page, onCredentialSubmit?: () => void): Promise<boolean> {
-  const { getByRole } = page as Pick<Page, "getByRole">;
-  if (typeof getByRole === "function") {
-    const semantic = getByRole.call(page, "button", { name: SUBMIT_BUTTON_NAME_RE }).first();
-    if (await locatorIsVisible(semantic)) {
-      await semantic.click();
-      onCredentialSubmit?.();
-      return true;
-    }
-  }
+async function clickRedditLoginSubmit(
+	page: Page,
+	onCredentialSubmit?: () => void,
+): Promise<boolean> {
+	const { getByRole } = page as Pick<Page, "getByRole">;
+	if (typeof getByRole === "function") {
+		const semantic = getByRole
+			.call(page, "button", { name: SUBMIT_BUTTON_NAME_RE })
+			.first();
+		if (await locatorIsVisible(semantic)) {
+			await semantic.click();
+			onCredentialSubmit?.();
+			return true;
+		}
+	}
 
-  const fallback = page.locator(SUBMIT_SELECTOR).first();
-  if (await locatorIsVisible(fallback)) {
-    await fallback.click();
-    onCredentialSubmit?.();
-    return true;
-  }
-  return false;
+	const fallback = page.locator(SUBMIT_SELECTOR).first();
+	if (await locatorIsVisible(fallback)) {
+		await fallback.click();
+		onCredentialSubmit?.();
+		return true;
+	}
+	return false;
 }
 
 function loginBlockedMessage(cfSignals: string[]): string {
-  if (cfSignals.length > 0) {
-    return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the browser window and re-run.`;
-  }
-  return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the browser window and re-run.";
+	if (cfSignals.length > 0) {
+		return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the browser window and re-run.`;
+	}
+	return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the browser window and re-run.";
 }
 
 /**
@@ -446,249 +481,301 @@ function loginBlockedMessage(cfSignals: string[]): string {
  * session-establishment branching.
  */
 function manualHandoffArgs({
-  capture,
-  checkpoint,
-  manualHandoffProbeRetry,
-  page,
-  sendInteraction,
-  sessionProbe,
+	capture,
+	checkpoint,
+	manualHandoffProbeRetry,
+	page,
+	sendInteraction,
+	sessionProbe,
 }: {
-  capture: CaptureSession | null | undefined;
-  checkpoint: SessionCheckpointFn | undefined;
-  manualHandoffProbeRetry: ManualHandoffProbeRetryOptions | undefined;
-  page: Page;
-  sendInteraction: SendInteraction;
-  sessionProbe: SessionProbeOptions | undefined;
+	capture: CaptureSession | null | undefined;
+	checkpoint: SessionCheckpointFn | undefined;
+	manualHandoffProbeRetry: ManualHandoffProbeRetryOptions | undefined;
+	page: Page;
+	sendInteraction: SendInteraction;
+	sessionProbe: SessionProbeOptions | undefined;
 }): Pick<
-  EnsureRedditSessionArgs,
-  "capture" | "checkpoint" | "manualHandoffProbeRetry" | "page" | "sendInteraction" | "sessionProbe"
+	EnsureRedditSessionArgs,
+	| "capture"
+	| "checkpoint"
+	| "manualHandoffProbeRetry"
+	| "page"
+	| "sendInteraction"
+	| "sessionProbe"
 > {
-  return {
-    ...(capture === undefined ? {} : { capture }),
-    ...(checkpoint === undefined ? {} : { checkpoint }),
-    ...(manualHandoffProbeRetry === undefined ? {} : { manualHandoffProbeRetry }),
-    page,
-    sendInteraction,
-    ...(sessionProbe === undefined ? {} : { sessionProbe }),
-  };
+	return {
+		...(capture === undefined ? {} : { capture }),
+		...(checkpoint === undefined ? {} : { checkpoint }),
+		...(manualHandoffProbeRetry === undefined
+			? {}
+			: { manualHandoffProbeRetry }),
+		page,
+		sendInteraction,
+		...(sessionProbe === undefined ? {} : { sessionProbe }),
+	};
 }
 
 async function ensureRedditManualSession({
-  capture,
-  checkpoint,
-  manualHandoffProbeRetry,
-  page,
-  sendInteraction,
-  sessionProbe,
+	capture,
+	checkpoint,
+	manualHandoffProbeRetry,
+	page,
+	sendInteraction,
+	sessionProbe,
 }: Pick<
-  EnsureRedditSessionArgs,
-  "capture" | "checkpoint" | "manualHandoffProbeRetry" | "page" | "sendInteraction" | "sessionProbe"
+	EnsureRedditSessionArgs,
+	| "capture"
+	| "checkpoint"
+	| "manualHandoffProbeRetry"
+	| "page"
+	| "sendInteraction"
+	| "sessionProbe"
 >): Promise<void> {
-  await checkpoint?.("reddit-signin-manual-required");
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
-  if (
-    await manualBrowserLogin({
-      ...(capture ? { capture } : {}),
-      message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
-      page,
-      probe: () => isSessionLiveWithRetry(page, { ...sessionProbe, ...manualHandoffProbeRetry }),
-      sendInteraction,
-      timeoutSeconds: 1800,
-    })
-  ) {
-    return;
-  }
-  throw new Error("reddit_login_manual_incomplete");
+	await checkpoint?.("reddit-signin-manual-required");
+	await page
+		.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+		.catch((): undefined => undefined);
+	if (
+		await manualBrowserLogin({
+			...(capture ? { capture } : {}),
+			message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
+			page,
+			probe: () =>
+				isSessionLiveWithRetry(page, {
+					...sessionProbe,
+					...manualHandoffProbeRetry,
+				}),
+			sendInteraction,
+			timeoutSeconds: 1800,
+		})
+	) {
+		return;
+	}
+	throw new Error("reddit_login_manual_incomplete");
 }
 
 async function recoverRedditBlockedLogin({
-  capture,
-  checkpoint,
-  manualHandoffProbeRetry,
-  page,
-  sendInteraction,
-  sessionProbe,
+	capture,
+	checkpoint,
+	manualHandoffProbeRetry,
+	page,
+	sendInteraction,
+	sessionProbe,
 }: Pick<
-  EnsureRedditSessionArgs,
-  "capture" | "checkpoint" | "manualHandoffProbeRetry" | "page" | "sendInteraction" | "sessionProbe"
+	EnsureRedditSessionArgs,
+	| "capture"
+	| "checkpoint"
+	| "manualHandoffProbeRetry"
+	| "page"
+	| "sendInteraction"
+	| "sessionProbe"
 >): Promise<void> {
-  await checkpoint?.("reddit-login-blocked-handoff");
-  const cf = await detectCloudflareChallenge(page);
-  const message = loginBlockedMessage(cf.signals);
-  if (
-    await manualBrowserLogin({
-      ...(capture ? { capture } : {}),
-      message,
-      page,
-      probe: () => isSessionLiveWithRetry(page, { ...sessionProbe, ...manualHandoffProbeRetry }),
-      reason: "captcha",
-      sendInteraction,
-      timeoutSeconds: 1800,
-    })
-  ) {
-    return;
-  }
-  throw new Error("reddit_login_unexpected_ui");
+	await checkpoint?.("reddit-login-blocked-handoff");
+	const cf = await detectCloudflareChallenge(page);
+	const message = loginBlockedMessage(cf.signals);
+	if (
+		await manualBrowserLogin({
+			...(capture ? { capture } : {}),
+			message,
+			page,
+			probe: () =>
+				isSessionLiveWithRetry(page, {
+					...sessionProbe,
+					...manualHandoffProbeRetry,
+				}),
+			reason: "captcha",
+			sendInteraction,
+			timeoutSeconds: 1800,
+		})
+	) {
+		return;
+	}
+	throw new Error("reddit_login_unexpected_ui");
 }
 
 export async function ensureRedditSession({
-  capture,
-  checkpoint,
-  context,
-  manualHandoffProbeRetry,
-  onCredentialSubmit,
-  page,
-  sendInteraction,
-  sessionProbe,
+	capture,
+	checkpoint,
+	context,
+	manualHandoffProbeRetry,
+	onCredentialSubmit,
+	page,
+	sendInteraction,
+	sessionProbe,
 }: EnsureRedditSessionArgs): Promise<void> {
-  // BEFORE the probe, not after: this is the first thing this function does,
-  // and the probe below is where run_1787109028586 spent its 120 silent
-  // seconds. A checkpoint emitted after the probe would name a phase the run
-  // never reached.
-  await checkpoint?.("reddit-session-probe");
-  // Probe timeouts are recorded synchronously and drained after the probe
-  // returns: `onProbeTimeout` fires from inside `isSessionLive`, which is not
-  // an async-callback seam, so awaiting a checkpoint there is not possible and
-  // firing one unawaited would leave a floating promise racing the flow below.
-  const timedOutStages: string[] = [];
-  const probeOptions: SessionProbeOptions = {
-    ...sessionProbe,
-    onProbeTimeout: (stage: string): void => {
-      // Distinguishable in diagnostics from a probe that ran and said "dead":
-      // both proceed to login, but only one of them means Reddit stopped
-      // answering us.
-      timedOutStages.push(stage);
-      sessionProbe?.onProbeTimeout?.(stage);
-    },
-  };
-  const drainProbeTimeouts = async (): Promise<void> => {
-    while (timedOutStages.length > 0) {
-      const stage = timedOutStages.shift();
-      await checkpoint?.(`reddit-session-probe-timeout:${stage}`);
-    }
-  };
-  const sessionAlreadyLive = (await hasSessionCookie(context)) && (await isSessionLive(page, probeOptions));
-  await drainProbeTimeouts();
-  if (sessionAlreadyLive) {
-    await checkpoint?.("reddit-session-already-live");
-    return;
-  }
+	// BEFORE the probe, not after: this is the first thing this function does,
+	// and the probe below is where run_1787109028586 spent its 120 silent
+	// seconds. A checkpoint emitted after the probe would name a phase the run
+	// never reached.
+	await checkpoint?.("reddit-session-probe");
+	// Probe timeouts are recorded synchronously and drained after the probe
+	// returns: `onProbeTimeout` fires from inside `isSessionLive`, which is not
+	// an async-callback seam, so awaiting a checkpoint there is not possible and
+	// firing one unawaited would leave a floating promise racing the flow below.
+	const timedOutStages: string[] = [];
+	const probeOptions: SessionProbeOptions = {
+		...sessionProbe,
+		onProbeTimeout: (stage: string): void => {
+			// Distinguishable in diagnostics from a probe that ran and said "dead":
+			// both proceed to login, but only one of them means Reddit stopped
+			// answering us.
+			timedOutStages.push(stage);
+			sessionProbe?.onProbeTimeout?.(stage);
+		},
+	};
+	const drainProbeTimeouts = async (): Promise<void> => {
+		while (timedOutStages.length > 0) {
+			const stage = timedOutStages.shift();
+			await checkpoint?.(`reddit-session-probe-timeout:${stage}`);
+		}
+	};
+	const sessionAlreadyLive =
+		(await hasSessionCookie(context)) &&
+		(await isSessionLive(page, probeOptions));
+	await drainProbeTimeouts();
+	if (sessionAlreadyLive) {
+		await checkpoint?.("reddit-session-already-live");
+		return;
+	}
 
-  const username = process.env.REDDIT_USERNAME;
-  const password = process.env.REDDIT_PASSWORD;
-  if (!(username && password)) {
-    await ensureRedditManualSession(
-      manualHandoffArgs({ capture, checkpoint, manualHandoffProbeRetry, page, sendInteraction, sessionProbe })
-    );
-    return;
-  }
+	const username = process.env.REDDIT_USERNAME;
+	const password = process.env.REDDIT_PASSWORD;
+	if (!(username && password)) {
+		await ensureRedditManualSession(
+			manualHandoffArgs({
+				capture,
+				checkpoint,
+				manualHandoffProbeRetry,
+				page,
+				sendInteraction,
+				sessionProbe,
+			}),
+		);
+		return;
+	}
 
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
-  await captureLoginState(capture, page, "reddit-login-page");
-  await checkpoint?.("reddit-signin-loaded");
+	await page
+		.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+		.catch((): undefined => undefined);
+	await captureLoginState(capture, page, "reddit-login-page");
+	await checkpoint?.("reddit-signin-loaded");
 
-  const userIn = page.locator(USERNAME_SELECTOR).first();
-  // `count()` is a one-shot DOM snapshot with no wait; on Reddit's
-  // client-rendered login page it can read 0 before the field has painted.
-  // `waitFor` gives the render a real, bounded chance instead.
-  const usernameAppeared = await userIn
-    .waitFor({ state: "attached", timeout: 10_000 })
-    .then((): true => true)
-    .catch((): false => false);
-  if (!usernameAppeared) {
-    // Cloudflare challenge, shadow DOM change, or redirect loop — hand off.
-    // Earn the diagnosis via the shared detector instead of guessing "possible
-    // Cloudflare challenge" from absence of inputs alone.
-    await recoverRedditBlockedLogin(
-      manualHandoffArgs({ capture, checkpoint, manualHandoffProbeRetry, page, sendInteraction, sessionProbe })
-    );
-    return;
-  }
+	const userIn = page.locator(USERNAME_SELECTOR).first();
+	// `count()` is a one-shot DOM snapshot with no wait; on Reddit's
+	// client-rendered login page it can read 0 before the field has painted.
+	// `waitFor` gives the render a real, bounded chance instead.
+	const usernameAppeared = await userIn
+		.waitFor({ state: "attached", timeout: 10_000 })
+		.then((): true => true)
+		.catch((): false => false);
+	if (!usernameAppeared) {
+		// Cloudflare challenge, shadow DOM change, or redirect loop — hand off.
+		// Earn the diagnosis via the shared detector instead of guessing "possible
+		// Cloudflare challenge" from absence of inputs alone.
+		await recoverRedditBlockedLogin(
+			manualHandoffArgs({
+				capture,
+				checkpoint,
+				manualHandoffProbeRetry,
+				page,
+				sendInteraction,
+				sessionProbe,
+			}),
+		);
+		return;
+	}
 
-  await userIn.fill(username);
-  await page.locator(PASSWORD_SELECTOR).first().fill(password);
-  await captureLoginState(capture, page, "reddit-login-before-submit");
-  await checkpoint?.("reddit-password-submit");
-  if (!(await clickRedditLoginSubmit(page, onCredentialSubmit))) {
-    await captureLoginState(capture, page, "reddit-login-submit-missing");
-    throw new Error("reddit_login_submit_missing");
-  }
-  await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch((): null => null);
-  await captureLoginState(capture, page, "reddit-login-after-submit");
-  await checkpoint?.("reddit-2fa-decision");
+	await userIn.fill(username);
+	await page.locator(PASSWORD_SELECTOR).first().fill(password);
+	await captureLoginState(capture, page, "reddit-login-before-submit");
+	await checkpoint?.("reddit-password-submit");
+	if (!(await clickRedditLoginSubmit(page, onCredentialSubmit))) {
+		await captureLoginState(capture, page, "reddit-login-submit-missing");
+		throw new Error("reddit_login_submit_missing");
+	}
+	await page
+		.waitForLoadState("domcontentloaded", { timeout: 30_000 })
+		.catch((): null => null);
+	await captureLoginState(capture, page, "reddit-login-after-submit");
+	await checkpoint?.("reddit-2fa-decision");
 
-  // 2FA: Reddit shows a separate OTP step when 2FA is enabled on the account.
-  // Give it the same bounded render tolerance as the pre-submit username
-  // field (waitFor, not a flat 1s isVisible): the post-submit transition is a
-  // second client-side render pass, and a `locatorIsVisible`-only check
-  // (hardcoded 1s) can read "not present" before the field paints, silently
-  // skipping the owner's OTP interaction and falling through to the dead
-  // 90s cookie poll — the exact shape of `reddit_login_post_submit_failed`
-  // with zero interaction requests ever sent.
-  const otpIn = page.locator(OTP_SELECTOR).first();
-  const otpAppeared = await otpIn
-    .waitFor({ state: "visible", timeout: 5000 })
-    .then((): true => true)
-    .catch((): false => false);
-  if (otpAppeared) {
-    await captureLoginState(capture, page, "reddit-otp-detected");
-    const resp = await sendInteraction({
-      kind: "otp",
-      message: "Reddit requires a 2FA verification code. Enter the 6-digit code from your authenticator app or SMS:",
-      schema: {
-        type: "object",
-        properties: { code: { type: "string", pattern: "^\\d{6}$" } },
-        required: ["code"],
-      },
-      timeout_seconds: 300,
-    });
-    const code = otpCode(resp);
-    if (!code) {
-      if (await isSessionLive(page)) {
-        return;
-      }
-      throw new Error("reddit_2fa_cancelled");
-    }
-    await otpIn.fill(code);
-    await page
-      .locator('button[type="submit"]')
-      .first()
-      .click()
-      .catch((): undefined => undefined);
-    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch((): null => null);
-    await captureLoginState(capture, page, "reddit-otp-after-submit");
-  }
+	// 2FA: Reddit shows a separate OTP step when 2FA is enabled on the account.
+	// Give it the same bounded render tolerance as the pre-submit username
+	// field (waitFor, not a flat 1s isVisible): the post-submit transition is a
+	// second client-side render pass, and a `locatorIsVisible`-only check
+	// (hardcoded 1s) can read "not present" before the field paints, silently
+	// skipping the owner's OTP interaction and falling through to the dead
+	// 90s cookie poll — the exact shape of `reddit_login_post_submit_failed`
+	// with zero interaction requests ever sent.
+	const otpIn = page.locator(OTP_SELECTOR).first();
+	const otpAppeared = await otpIn
+		.waitFor({ state: "visible", timeout: 5000 })
+		.then((): true => true)
+		.catch((): false => false);
+	if (otpAppeared) {
+		await captureLoginState(capture, page, "reddit-otp-detected");
+		const resp = await sendInteraction({
+			kind: "otp",
+			message:
+				"Reddit requires a 2FA verification code. Enter the 6-digit code from your authenticator app or SMS:",
+			schema: {
+				type: "object",
+				properties: { code: { type: "string", pattern: "^\\d{6}$" } },
+				required: ["code"],
+			},
+			timeout_seconds: 300,
+		});
+		const code = otpCode(resp);
+		if (!code) {
+			if (await isSessionLive(page)) {
+				return;
+			}
+			throw new Error("reddit_2fa_cancelled");
+		}
+		await otpIn.fill(code);
+		await page
+			.locator('button[type="submit"]')
+			.first()
+			.click()
+			.catch((): undefined => undefined);
+		await page
+			.waitForLoadState("domcontentloaded", { timeout: 30_000 })
+			.catch((): null => null);
+		await captureLoginState(capture, page, "reddit-otp-after-submit");
+	}
 
-  // Poll up to 90s — Reddit may redirect through interstitials before the
-  // session cookie is written. Checkpointed per attempt so this window shows
-  // as live progress rather than another silent stretch: each iteration now
-  // has a bounded probe, so a checkpoint here is a real liveness signal about
-  // the run, not just a timer tick.
-  await checkpoint?.("reddit-final-verify");
-  for (let attempt = 0; attempt < 18; attempt += 1) {
-    const live = (await hasSessionCookie(context)) && (await isSessionLive(page, probeOptions));
-    await drainProbeTimeouts();
-    if (live) {
-      return;
-    }
-    await checkpoint?.(`reddit-final-verify:attempt-${attempt + 1}`);
-    await page.waitForTimeout(5000);
-  }
+	// Poll up to 90s — Reddit may redirect through interstitials before the
+	// session cookie is written. Checkpointed per attempt so this window shows
+	// as live progress rather than another silent stretch: each iteration now
+	// has a bounded probe, so a checkpoint here is a real liveness signal about
+	// the run, not just a timer tick.
+	await checkpoint?.("reddit-final-verify");
+	for (let attempt = 0; attempt < 18; attempt += 1) {
+		const live =
+			(await hasSessionCookie(context)) &&
+			(await isSessionLive(page, probeOptions));
+		await drainProbeTimeouts();
+		if (live) {
+			return;
+		}
+		await checkpoint?.(`reddit-final-verify:attempt-${attempt + 1}`);
+		await page.waitForTimeout(5000);
+	}
 
-  await captureLoginState(capture, page, "reddit-login-post-submit-failed");
-  // NOT IMPLEMENTED: unlike amazon.ts's final-verify (fillOrHandleChallenge /
-  // the amazon_login_incomplete_after_submit path), this gives the operator
-  // no manual-handoff second chance when the automated flow completes but
-  // the poll above never finds a live session (e.g. an approve-on-device
-  // prompt or challenge variant the steps above didn't recognize) — it fails
-  // straight to `reddit_login_post_submit_failed`. Adding one here is safe in
-  // principle (a manual handoff only waits on the operator and re-probes,
-  // it never resubmits the saved credential), but three existing tests
-  // (`reddit.test.ts`: "fires onCredentialSubmit exactly once" x2, and the
-  // post-submit-fault COUNTERWEIGHT pair around POST_SUBMIT_TRANSPORT_FAULT)
-  // deliberately assert `sendInteraction` is NEVER called on this path as
-  // defense-in-depth for the credential-safety invariant, so adding the
-  // handoff here requires rewriting those assertions rather than a small
-  // isolated change. Left as a follow-up rather than done under this fix.
-  throw new Error("reddit_login_post_submit_failed");
+	await captureLoginState(capture, page, "reddit-login-post-submit-failed");
+	// NOT IMPLEMENTED: unlike amazon.ts's final-verify (fillOrHandleChallenge /
+	// the amazon_login_incomplete_after_submit path), this gives the operator
+	// no manual-handoff second chance when the automated flow completes but
+	// the poll above never finds a live session (e.g. an approve-on-device
+	// prompt or challenge variant the steps above didn't recognize) — it fails
+	// straight to `reddit_login_post_submit_failed`. Adding one here is safe in
+	// principle (a manual handoff only waits on the operator and re-probes,
+	// it never resubmits the saved credential), but three existing tests
+	// (`reddit.test.ts`: "fires onCredentialSubmit exactly once" x2, and the
+	// post-submit-fault COUNTERWEIGHT pair around POST_SUBMIT_TRANSPORT_FAULT)
+	// deliberately assert `sendInteraction` is NEVER called on this path as
+	// defense-in-depth for the credential-safety invariant, so adding the
+	// handoff here requires rewriting those assertions rather than a small
+	// isolated change. Left as a follow-up rather than done under this fix.
+	throw new Error("reddit_login_post_submit_failed");
 }

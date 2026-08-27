@@ -35,9 +35,9 @@
 import type { Download, Page } from "playwright";
 
 export interface DownloadQueue {
-  detach: () => void;
-  pendingCount: () => number;
-  waitForNextDownload: (opts?: { timeoutMs?: number }) => Promise<Download>;
+	detach: () => void;
+	pendingCount: () => number;
+	waitForNextDownload: (opts?: { timeoutMs?: number }) => Promise<Download>;
 }
 
 /**
@@ -48,82 +48,82 @@ export interface DownloadQueue {
 type Waiter = (dl: Download | null) => void;
 
 export function attachDownloadQueue(target: Page): DownloadQueue {
-  const pending: Download[] = [];
-  const waiters: Waiter[] = [];
+	const pending: Download[] = [];
+	const waiters: Waiter[] = [];
 
-  const onDownload = (dl: Download): void => {
-    if (waiters.length > 0) {
-      const resolve = waiters.shift();
-      if (resolve) {
-        resolve(dl);
-      }
-    } else {
-      pending.push(dl);
-    }
-  };
+	const onDownload = (dl: Download): void => {
+		if (waiters.length > 0) {
+			const resolve = waiters.shift();
+			if (resolve) {
+				resolve(dl);
+			}
+		} else {
+			pending.push(dl);
+		}
+	};
 
-  target.on("download", onDownload);
+	target.on("download", onDownload);
 
-  return {
-    waitForNextDownload({ timeoutMs = 180_000 } = {}): Promise<Download> {
-      if (pending.length > 0) {
-        const first = pending.shift();
-        if (first) {
-          return Promise.resolve(first);
-        }
-      }
-      return new Promise<Download>((resolve, reject) => {
-        let resolved = false;
-        const timer = setTimeout(() => {
-          if (resolved) {
-            return;
-          }
-          resolved = true;
-          // Remove this waiter from the queue so a late download doesn't
-          // resolve a timed-out promise.
-          const idx = waiters.indexOf(wrap);
-          if (idx >= 0) {
-            waiters.splice(idx, 1);
-          }
-          reject(new Error(`download_timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-        const wrap: Waiter = (dl) => {
-          if (resolved) {
-            // Already timed out — push back so another waiter (if any) can
-            // claim it, rather than dropping.
-            if (dl) {
-              pending.unshift(dl);
-            }
-            return;
-          }
-          if (!dl) {
-            // Detached; let the timer fire the real rejection.
-            return;
-          }
-          resolved = true;
-          clearTimeout(timer);
-          resolve(dl);
-        };
-        waiters.push(wrap);
-      });
-    },
-    detach(): void {
-      target.off("download", onDownload);
-      // Anything still waiting gets rejected so callers don't hang forever.
-      while (waiters.length > 0) {
-        const w = waiters.shift();
-        // Passing a sentinel that won't look like a Download; the waiter
-        // pairs a timer that will fire the rejection on its own, but we
-        // flush here for immediate unblock.
-        try {
-          w?.(null);
-        } catch {
-          /* ignore */
-        }
-      }
-    },
-    pendingCount(): number {
-      return pending.length;
-    },
-  };
+	return {
+		waitForNextDownload({ timeoutMs = 180_000 } = {}): Promise<Download> {
+			if (pending.length > 0) {
+				const first = pending.shift();
+				if (first) {
+					return Promise.resolve(first);
+				}
+			}
+			return new Promise<Download>((resolve, reject) => {
+				let resolved = false;
+				const timer = setTimeout(() => {
+					if (resolved) {
+						return;
+					}
+					resolved = true;
+					// Remove this waiter from the queue so a late download doesn't
+					// resolve a timed-out promise.
+					const idx = waiters.indexOf(wrap);
+					if (idx >= 0) {
+						waiters.splice(idx, 1);
+					}
+					reject(new Error(`download_timeout after ${timeoutMs}ms`));
+				}, timeoutMs);
+				const wrap: Waiter = (dl) => {
+					if (resolved) {
+						// Already timed out — push back so another waiter (if any) can
+						// claim it, rather than dropping.
+						if (dl) {
+							pending.unshift(dl);
+						}
+						return;
+					}
+					if (!dl) {
+						// Detached; let the timer fire the real rejection.
+						return;
+					}
+					resolved = true;
+					clearTimeout(timer);
+					resolve(dl);
+				};
+				waiters.push(wrap);
+			});
+		},
+		detach(): void {
+			target.off("download", onDownload);
+			// Anything still waiting gets rejected so callers don't hang forever.
+			while (waiters.length > 0) {
+				const w = waiters.shift();
+				// Passing a sentinel that won't look like a Download; the waiter
+				// pairs a timer that will fire the rejection on its own, but we
+				// flush here for immediate unblock.
+				try {
+					w?.(null);
+				} catch {
+					/* ignore */
+				}
+			}
+		},
+		pendingCount(): number {
+			return pending.length;
+		},
+	};
 }

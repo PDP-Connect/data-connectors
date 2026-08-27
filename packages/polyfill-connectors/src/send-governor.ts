@@ -26,11 +26,11 @@
  * runtime performs exactly one pre-flight wait per admitted request.
  */
 export interface SendGovernor {
-  /**
-   * The single pre-flight wait. Resolves when the request may be transmitted.
-   * This is the ONLY sanctioned `await`-before-send in a request path.
-   */
-  acquire: () => Promise<void>;
+	/**
+	 * The single pre-flight wait. Resolves when the request may be transmitted.
+	 * This is the ONLY sanctioned `await`-before-send in a request path.
+	 */
+	acquire: () => Promise<void>;
 }
 
 /**
@@ -41,13 +41,13 @@ export interface SendGovernor {
  * second gate.
  */
 export interface SendDelayHint {
-  /**
-   * Compute the pre-flight delay (ms) this signal would impose and advance any
-   * internal state (e.g. a GCRA Theoretical Arrival Time) as if a request were
-   * admitted now. Pure of any sleep: the caller — the single governor — owns
-   * the wait. Returns 0 when no delay is owed.
-   */
-  nextDelayMs: () => number;
+	/**
+	 * Compute the pre-flight delay (ms) this signal would impose and advance any
+	 * internal state (e.g. a GCRA Theoretical Arrival Time) as if a request were
+	 * admitted now. Pure of any sleep: the caller — the single governor — owns
+	 * the wait. Returns 0 when no delay is owed.
+	 */
+	nextDelayMs: () => number;
 }
 
 /**
@@ -60,36 +60,38 @@ export interface SendDelayHint {
  * asserts `count === 1` over a single admitted request.
  */
 export class PreflightWaitProbe {
-  private _count = 0;
-  private _totalMs = 0;
+	private _count = 0;
+	private _totalMs = 0;
 
-  /** Number of pre-flight wait sources that fired since the last reset. */
-  get count(): number {
-    return this._count;
-  }
+	/** Number of pre-flight wait sources that fired since the last reset. */
+	get count(): number {
+		return this._count;
+	}
 
-  /** Total pre-flight wait time (ms) observed since the last reset. */
-  get totalMs(): number {
-    return this._totalMs;
-  }
+	/** Total pre-flight wait time (ms) observed since the last reset. */
+	get totalMs(): number {
+		return this._totalMs;
+	}
 
-  reset(): void {
-    this._count = 0;
-    this._totalMs = 0;
-  }
+	reset(): void {
+		this._count = 0;
+		this._totalMs = 0;
+	}
 
-  /**
-   * Wrap a sleep so a non-zero wait is counted as one pre-flight wait source.
-   * Zero-or-negative waits are no-ops and are not counted: a governor that
-   * computes a 0ms delay did not actually gate the request.
-   */
-  wrap(sleep: (ms: number) => void | Promise<void>): (ms: number) => Promise<void> {
-    return async (ms: number): Promise<void> => {
-      if (ms > 0) {
-        this._count += 1;
-        this._totalMs += ms;
-      }
-      await sleep(ms);
-    };
-  }
+	/**
+	 * Wrap a sleep so a non-zero wait is counted as one pre-flight wait source.
+	 * Zero-or-negative waits are no-ops and are not counted: a governor that
+	 * computes a 0ms delay did not actually gate the request.
+	 */
+	wrap(
+		sleep: (ms: number) => void | Promise<void>,
+	): (ms: number) => Promise<void> {
+		return async (ms: number): Promise<void> => {
+			if (ms > 0) {
+				this._count += 1;
+				this._totalMs += ms;
+			}
+			await sleep(ms);
+		};
+	}
 }

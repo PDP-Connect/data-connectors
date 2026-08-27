@@ -7,7 +7,10 @@
 
 import type { Locator } from "playwright";
 import type { BodyResponseDiagnostics } from "../../src/browser-artifact-response.ts";
-import type { BrowserSurfaceDiagnostic, BrowserSurfaceRoute } from "../../src/browser-surface-diagnostic.ts";
+import type {
+	BrowserSurfaceDiagnostic,
+	BrowserSurfaceRoute,
+} from "../../src/browser-surface-diagnostic.ts";
 import type { RecordData } from "../../src/connector-runtime.ts";
 import type { CaptureSession } from "../../src/fixture-capture.ts";
 import type { StatementContentFingerprint } from "../../src/statement-content-fingerprint.ts";
@@ -16,35 +19,35 @@ import type { StatementContentFingerprint } from "../../src/statement-content-fi
 
 /** Per-row input to hydrateStatementPdfs. */
 export interface StatementRow {
-  account_id: string | null;
-  account_reference?: string | null;
-  date_delivered: string | null;
-  id: string;
-  rowIndex: number;
-  title: string | null;
+	account_id: string | null;
+	account_reference?: string | null;
+	date_delivered: string | null;
+	id: string;
+	rowIndex: number;
+	title: string | null;
 }
 
 // ─── Dashboard / account extraction ──────────────────────────────────────
 
 export interface DashboardAccount {
-  account_id_raw: string | null;
-  account_type: string;
-  account_url: string;
-  balance_cents: number | null;
-  last_four: string | null;
-  name: string | null;
-  raw_text: string;
+	account_id_raw: string | null;
+	account_type: string;
+	account_url: string;
+	balance_cents: number | null;
+	last_four: string | null;
+	name: string | null;
+	raw_text: string;
 }
 
 // ─── Emitted records ─────────────────────────────────────────────────────
 
 export interface AccountRecord extends RecordData {
-  fetched_at: string;
-  id: string;
-  last_four: string | null;
-  name: string | null;
-  status: "open";
-  type: string;
+	fetched_at: string;
+	id: string;
+	last_four: string | null;
+	name: string | null;
+	status: "open";
+	type: string;
 }
 
 /**
@@ -55,61 +58,61 @@ export interface AccountRecord extends RecordData {
  * longer versions the entity record.
  */
 export interface AccountStatsRecord extends RecordData {
-  account_id: string;
-  available_balance_cents: number | null;
-  balance_cents: number | null;
-  id: string;
-  observed_on: string;
+	account_id: string;
+	available_balance_cents: number | null;
+	balance_cents: number | null;
+	id: string;
+	observed_on: string;
 }
 
 export interface TransactionRecord extends RecordData {
-  account_id: string;
-  account_name: string | null;
-  amount: number;
-  balance_after_cents: number | null;
-  category: string | null;
-  check_number: string | null;
-  currency: "USD";
-  date: string;
-  description: string;
-  fetched_at: string;
-  id: string;
-  original_description: string;
-  source: string;
+	account_id: string;
+	account_name: string | null;
+	amount: number;
+	balance_after_cents: number | null;
+	category: string | null;
+	check_number: string | null;
+	currency: "USD";
+	date: string;
+	description: string;
+	fetched_at: string;
+	id: string;
+	original_description: string;
+	source: string;
 }
 
 export interface InboxMessageRecord extends RecordData {
-  date_received: string | null;
-  fetched_at: string;
-  id: string;
-  preview: string;
-  status: "unread" | "read";
-  subject: string;
+	date_received: string | null;
+	fetched_at: string;
+	id: string;
+	preview: string;
+	status: "unread" | "read";
+	subject: string;
 }
 
 export interface StatementRecord extends RecordData {
-  account_id: string | null;
-  account_reference: string | null;
-  date_delivered: string | null;
-  document_url: string | null;
-  fetched_at: string;
-  id: string;
-  pdf_page_count: number | null;
-  pdf_path: string | null;
-  pdf_sha256: string | null;
-  pdf_text_sha256: string | null;
-  title: string | null;
+	account_id: string | null;
+	account_reference: string | null;
+	date_delivered: string | null;
+	document_url: string | null;
+	fetched_at: string;
+	id: string;
+	pdf_page_count: number | null;
+	pdf_path: string | null;
+	pdf_sha256: string | null;
+	pdf_text_sha256: string | null;
+	title: string | null;
 }
 
 export interface CreditCardBillingRecord extends RecordData {
-  account_id: string | null;
-  account_nickname: string | null;
-  annual_percent_rate: string | null;
-  card_holders: string | null;
-  cash_advance_apr: string | null;
-  credit_limit_cents: number | null;
-  fetched_at: string;
-  id: string;
+	account_id: string | null;
+	account_nickname: string | null;
+	annual_percent_rate: string | null;
+	card_holders: string | null;
+	cash_advance_apr: string | null;
+	credit_limit_cents: number | null;
+	fetched_at: string;
+	id: string;
 }
 
 /**
@@ -121,34 +124,34 @@ export interface CreditCardBillingRecord extends RecordData {
  * on the entity — see design.md for the classification rationale.
  */
 export interface CreditCardBillingStatsRecord extends RecordData {
-  account_id: string | null;
-  available_credit_cents: number | null;
-  billing_status: string | null;
-  card_id: string;
-  cash_rewards_cents: number | null;
-  current_balance_cents: number | null;
-  id: string;
-  minimum_payment_met: boolean;
-  observed_on: string;
+	account_id: string | null;
+	available_credit_cents: number | null;
+	billing_status: string | null;
+	card_id: string;
+	cash_rewards_cents: number | null;
+	current_balance_cents: number | null;
+	id: string;
+	minimum_payment_met: boolean;
+	observed_on: string;
 }
 
 // ─── Diagnostics (live-page drift detection) ─────────────────────────────
 
 export interface DiagnosticCandidate {
-  cls: string;
-  id: string | null;
-  tag: string;
-  text: string;
+	cls: string;
+	id: string | null;
+	tag: string;
+	text: string;
 }
 
 export interface PageDiagnostics {
-  dialog_html_preview?: string | null;
-  dialogs_open: number;
-  export_candidates: DiagnosticCandidate[];
-  has_utility_bar: boolean;
-  nav_candidates: DiagnosticCandidate[];
-  title: string;
-  url: string;
+	dialog_html_preview?: string | null;
+	dialogs_open: number;
+	export_candidates: DiagnosticCandidate[];
+	has_utility_bar: boolean;
+	nav_candidates: DiagnosticCandidate[];
+	title: string;
+	url: string;
 }
 
 /**
@@ -159,64 +162,64 @@ export interface PageDiagnostics {
  * the analytics-noise candidate list.
  */
 export interface DownloadDiagnostics {
-  bytes?: number | null;
-  downloadFailure?: string | null;
-  saveAsError?: string | null;
-  source?: "dataUrl" | "saveAs" | "createReadStream" | null;
-  streamError?: string | null;
-  suggestedFilename?: string | null;
-  url?: string | null;
+	bytes?: number | null;
+	downloadFailure?: string | null;
+	saveAsError?: string | null;
+	source?: "dataUrl" | "saveAs" | "createReadStream" | null;
+	streamError?: string | null;
+	suggestedFilename?: string | null;
+	url?: string | null;
 }
 
 export interface DiagnosticInfo {
-  artifact?: BodyResponseDiagnostics | null;
-  browser_surface?: BrowserSurfaceDiagnostic;
-  diag: PageDiagnostics | null;
-  download?: DownloadDiagnostics | null;
-  error?: string;
-  no_export_observation?: NoExportAffordanceObservation;
-  phase: string;
+	artifact?: BodyResponseDiagnostics | null;
+	browser_surface?: BrowserSurfaceDiagnostic;
+	diag: PageDiagnostics | null;
+	download?: DownloadDiagnostics | null;
+	error?: string;
+	no_export_observation?: NoExportAffordanceObservation;
+	phase: string;
 }
 
 /** Closed facts collected only for the no-export terminal diagnostic. */
 export interface NoExportAffordanceObservation {
-  account_detail_marker_count: number;
-  navigation_marker_count: number;
-  route: BrowserSurfaceRoute;
-  target_count: number;
-  transaction_marker_count: number;
+	account_detail_marker_count: number;
+	navigation_marker_count: number;
+	route: BrowserSurfaceRoute;
+	target_count: number;
+	transaction_marker_count: number;
 }
 
 // ─── Statements index rows ───────────────────────────────────────────────
 
 export interface DocRow {
-  account_reference: string;
-  date_delivered: string;
-  rowIndex: number;
-  title: string;
+	account_reference: string;
+	date_delivered: string;
+	rowIndex: number;
+	title: string;
 }
 
 export interface IndexRow extends StatementRow {
-  account_id: string | null;
-  account_reference: string | null;
-  date_delivered: string | null;
-  id: string;
-  rowIndex: number;
-  title: string;
+	account_id: string | null;
+	account_reference: string | null;
+	date_delivered: string | null;
+	id: string;
+	rowIndex: number;
+	title: string;
 }
 
 // ─── PDF hydration result (discriminated union) ──────────────────────────
 
 export interface HydrationResultSuccess {
-  buffer: Buffer;
-  content: StatementContentFingerprint;
-  pdfPath: string;
-  pdfSha256: string;
+	buffer: Buffer;
+	content: StatementContentFingerprint;
+	pdfPath: string;
+	pdfSha256: string;
 }
 
 export interface HydrationResultError {
-  diag?: StatementDownloadDiagnostic | null;
-  err: string;
+	diag?: StatementDownloadDiagnostic | null;
+	err: string;
 }
 
 export type HydrationResult = HydrationResultSuccess | HydrationResultError;
@@ -224,20 +227,20 @@ export type HydrationResult = HydrationResultSuccess | HydrationResultError;
 // ─── Inbox / billing parsed rows ─────────────────────────────────────────
 
 export interface InboxRow {
-  date_short: string;
-  preview: string;
-  status: string;
+	date_short: string;
+	preview: string;
+	status: string;
 }
 
 export interface BillingKv {
-  [label: string]: string | undefined;
+	[label: string]: string | undefined;
 }
 
 // ─── State / cursor ──────────────────────────────────────────────────────
 
 /** Per-account incremental watermark entry in the transactions cursor. */
 export interface TransactionsAccountCursor {
-  last_date: string | null;
+	last_date: string | null;
 }
 
 /** The transactions STATE cursor is a flat map of `accountKey ->
@@ -248,78 +251,82 @@ export interface TransactionsAccountCursor {
  *  signature stays a clean `{ last_date }` for the incremental loop —
  *  mirroring how chase keeps `per_account` separate from `fingerprints`. */
 export interface TransactionsStreamCursor {
-  [accountKey: string]: TransactionsAccountCursor | undefined;
+	[accountKey: string]: TransactionsAccountCursor | undefined;
 }
 
 export interface TransactionsPriorState {
-  [accountKey: string]: TransactionsAccountCursor | undefined;
+	[accountKey: string]: TransactionsAccountCursor | undefined;
 }
 
 // ─── Export driver ───────────────────────────────────────────────────────
 
 export interface DriveExportOptions {
-  accountType?: string;
-  capture?: CaptureSession | null;
-  captureLabel?: string;
-  onDiagnostics?: (info: DiagnosticInfo) => void;
-  /** Test-only override; production uses the verified account-settle delay. */
-  settleDelayMs?: number;
-  sinceDate: string;
-  untilDate: string;
+	accountType?: string;
+	capture?: CaptureSession | null;
+	captureLabel?: string;
+	onDiagnostics?: (info: DiagnosticInfo) => void;
+	/** Test-only override; production uses the verified account-settle delay. */
+	settleDelayMs?: number;
+	sinceDate: string;
+	untilDate: string;
 }
 
 export interface LocatedExportPage {
-  export: Locator;
-  url: string;
+	export: Locator;
+	url: string;
 }
 
 // ─── Statement-PDF parser shapes ─────────────────────────────────────────
 
 /** Closing context for toIso year-assignment. Bare number = legacy year-only. */
-export type ClosingContext = number | { closingMonth: number; closingYear: number } | null | undefined;
+export type ClosingContext =
+	| number
+	| { closingMonth: number; closingYear: number }
+	| null
+	| undefined;
 
 /** Closing month + year extracted from a statement PDF's header text. */
 export interface StatementClosing {
-  closingMonth: number;
-  closingYear: number;
+	closingMonth: number;
+	closingYear: number;
 }
 
 /** One transaction parsed from a statement PDF, pre-record-shape. */
 export interface ParsedStatementTxn {
-  amount: number;
-  balance: number | null;
-  description: string;
-  iso: string;
-  ord: number;
-  tupleKey: string;
+	amount: number;
+	balance: number | null;
+	description: string;
+	iso: string;
+	ord: number;
+	tupleKey: string;
 }
 
 /** Full transaction record emitted from a statement PDF. */
 export interface StatementTxnRecord {
-  account_id: string;
-  account_name: string | null;
-  amount: number;
-  balance_after_cents: number | null;
-  category: string | null;
-  check_number: string | null;
-  currency: "USD";
-  date: string;
-  description: string;
-  fetched_at: string;
-  id: string;
-  original_description: string;
-  source: string;
+	account_id: string;
+	account_name: string | null;
+	amount: number;
+	balance_after_cents: number | null;
+	category: string | null;
+	check_number: string | null;
+	currency: "USD";
+	date: string;
+	description: string;
+	fetched_at: string;
+	id: string;
+	original_description: string;
+	source: string;
 }
 
 export interface ParseMetaOk {
-  closingMonth?: number;
-  era: string;
-  year: number;
+	closingMonth?: number;
+	era: string;
+	year: number;
 }
 
 export interface ParseMetaUnknown {
-  era: "unknown";
-  year: number;
+	era: "unknown";
+	year: number;
 }
 
 export type ParseMeta = ParseMetaOk | ParseMetaUnknown;
@@ -327,36 +334,36 @@ export type ParseMeta = ParseMetaOk | ParseMetaUnknown;
 // ─── Statement-PDF download driver ───────────────────────────────────────
 
 export interface DownloadOk {
-  buffer: Buffer;
-  ok: true;
-  suggestedFilename: string;
+	buffer: Buffer;
+	ok: true;
+	suggestedFilename: string;
 }
 
 export interface StatementMenuDiagnostic {
-  action_count: number;
-  download_candidate_count: number;
-  item_count: number;
-  present: boolean;
+	action_count: number;
+	download_candidate_count: number;
+	item_count: number;
+	present: boolean;
 }
 
 export interface StatementResponseDiagnostic {
-  body_error_count: number;
-  candidate_count: number;
-  cdp_error: boolean;
-  cdp_ready: boolean;
-  matched_count: number;
-  source_counts: { cdp: number; playwright: number };
-  status_codes: number[];
+	body_error_count: number;
+	candidate_count: number;
+	cdp_error: boolean;
+	cdp_ready: boolean;
+	matched_count: number;
+	source_counts: { cdp: number; playwright: number };
+	status_codes: number[];
 }
 
 /** Durable statement-download evidence. Keep this closed to structural facts. */
 export interface StatementDownloadDiagnostic {
-  bytes?: number;
-  download_empty?: boolean;
-  error_class?: "Error" | "unknown";
-  menu?: StatementMenuDiagnostic;
-  response?: StatementResponseDiagnostic;
-  response_source?: "cdp" | "playwright";
+	bytes?: number;
+	download_empty?: boolean;
+	error_class?: "Error" | "unknown";
+	menu?: StatementMenuDiagnostic;
+	response?: StatementResponseDiagnostic;
+	response_source?: "cdp" | "playwright";
 }
 
 /**
@@ -366,29 +373,29 @@ export interface StatementDownloadDiagnostic {
  * connector-completeness scan can see every code statically.
  */
 export type DownloadFailReason =
-  | "direct_link_failed"
-  | "download_click_failed"
-  | "download_empty"
-  | "download_timeout"
-  | "no_download_menuitem"
-  | "no_options_affordance"
-  | "options_click_failed"
-  | "persist_failed"
-  | "row_missing";
+	| "direct_link_failed"
+	| "download_click_failed"
+	| "download_empty"
+	| "download_timeout"
+	| "no_download_menuitem"
+	| "no_options_affordance"
+	| "options_click_failed"
+	| "persist_failed"
+	| "row_missing";
 
 export interface DownloadFail {
-  diag?: StatementDownloadDiagnostic | null;
-  ok: false;
-  reason: DownloadFailReason;
+	diag?: StatementDownloadDiagnostic | null;
+	ok: false;
+	reason: DownloadFailReason;
 }
 
 export type DownloadResult = DownloadOk | DownloadFail;
 
 export interface HydratedStatement {
-  buffer: Buffer;
-  content: StatementContentFingerprint;
-  pdfPath: string;
-  pdfSha256: string;
-  statement: StatementRow;
-  suggestedFilename: string;
+	buffer: Buffer;
+	content: StatementContentFingerprint;
+	pdfPath: string;
+	pdfSha256: string;
+	statement: StatementRow;
+	suggestedFilename: string;
 }

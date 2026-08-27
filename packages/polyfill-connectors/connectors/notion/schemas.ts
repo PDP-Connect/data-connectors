@@ -33,11 +33,17 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 
 // Module-scoped regexes (Biome useTopLevelRegex).
 // Notion ids are UUIDs, returned dashed (8-4-4-4-12) or dash-stripped (32 hex).
-const NOTION_ID_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+const NOTION_ID_RE =
+	/^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-const notionIdSchema = z.string().regex(NOTION_ID_RE, "must be a Notion UUID (dashed or 32-hex)");
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const notionIdSchema = z
+	.string()
+	.regex(NOTION_ID_RE, "must be a Notion UUID (dashed or 32-hex)");
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 // parent_type / object are short structural discriminator strings, not free
 // text — bounded plain strings are the right shape (regex would be brittle as
 // Notion adds parent kinds).
@@ -48,17 +54,17 @@ const shortTagSchema = z.string().min(1).max(64).nullable();
  * Cursor: last_edited_time (descending search).
  */
 export const pagesSchema = z.object({
-  id: notionIdSchema,
-  object: z.string().min(1).max(64).nullable(),
-  parent_type: shortTagSchema,
-  parent_id: notionIdSchema.nullable(),
-  title: pdppSafeText.max(4000).nullable(),
-  url: z.url().max(4096).nullable(),
-  archived: z.boolean().nullable(),
-  created_time: isoDateTimeNullable,
-  last_edited_time: isoDateTimeNullable,
-  created_by_id: notionIdSchema.nullable(),
-  last_edited_by_id: notionIdSchema.nullable(),
+	id: notionIdSchema,
+	object: z.string().min(1).max(64).nullable(),
+	parent_type: shortTagSchema,
+	parent_id: notionIdSchema.nullable(),
+	title: pdppSafeText.max(4000).nullable(),
+	url: z.url().max(4096).nullable(),
+	archived: z.boolean().nullable(),
+	created_time: isoDateTimeNullable,
+	last_edited_time: isoDateTimeNullable,
+	created_by_id: notionIdSchema.nullable(),
+	last_edited_by_id: notionIdSchema.nullable(),
 });
 
 /**
@@ -67,23 +73,23 @@ export const pagesSchema = z.object({
  * each column name is free-form human text.
  */
 export const databasesSchema = z.object({
-  id: notionIdSchema,
-  title: pdppSafeText.max(4000).nullable(),
-  parent_type: shortTagSchema,
-  parent_id: notionIdSchema.nullable(),
-  url: z.url().max(4096).nullable(),
-  archived: z.boolean().nullable(),
-  created_time: isoDateTimeNullable,
-  last_edited_time: isoDateTimeNullable,
-  property_names: z.array(pdppSafeText.max(2000)),
+	id: notionIdSchema,
+	title: pdppSafeText.max(4000).nullable(),
+	parent_type: shortTagSchema,
+	parent_id: notionIdSchema.nullable(),
+	url: z.url().max(4096).nullable(),
+	archived: z.boolean().nullable(),
+	created_time: isoDateTimeNullable,
+	last_edited_time: isoDateTimeNullable,
+	property_names: z.array(pdppSafeText.max(2000)),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  pages: pagesSchema,
-  databases: databasesSchema,
+	pages: pagesSchema,
+	databases: databasesSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

@@ -38,38 +38,50 @@ const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const VENMO_MANIFEST_PATH = join(PACKAGE_ROOT, "manifests", "venmo.json");
 
 interface VenmoManifest {
-  capabilities?: { declared_reason_tokens?: unknown };
+	capabilities?: { declared_reason_tokens?: unknown };
 }
 
 function readDeclaredTokens(): unknown {
-  const manifest = JSON.parse(readFileSync(VENMO_MANIFEST_PATH, "utf8")) as VenmoManifest;
-  return manifest.capabilities?.declared_reason_tokens;
+	const manifest = JSON.parse(
+		readFileSync(VENMO_MANIFEST_PATH, "utf8"),
+	) as VenmoManifest;
+	return manifest.capabilities?.declared_reason_tokens;
 }
 
 test("venmo.json declares exactly the tokens VENMO_DECLARED_REASON_TOKENS names", () => {
-  const declared = readDeclaredTokens();
-  assert.ok(Array.isArray(declared), "venmo.json must declare capabilities.declared_reason_tokens as an array");
-  assert.deepEqual(
-    new Set(declared),
-    new Set(VENMO_DECLARED_REASON_TOKENS),
-    "manifest tokens drifted from the connector's own thrown vocabulary — the RI reads the MANIFEST, so a token " +
-      "missing here is redacted to [REDACTED] in the owner's UI even though the throw site still emits it"
-  );
+	const declared = readDeclaredTokens();
+	assert.ok(
+		Array.isArray(declared),
+		"venmo.json must declare capabilities.declared_reason_tokens as an array",
+	);
+	assert.deepEqual(
+		new Set(declared),
+		new Set(VENMO_DECLARED_REASON_TOKENS),
+		"manifest tokens drifted from the connector's own thrown vocabulary — the RI reads the MANIFEST, so a token " +
+			"missing here is redacted to [REDACTED] in the owner's UI even though the throw site still emits it",
+	);
 });
 
 test("venmo.json declares no duplicate reason tokens", () => {
-  const declared = readDeclaredTokens() as string[];
-  assert.equal(new Set(declared).size, declared.length, "duplicate entries in capabilities.declared_reason_tokens");
+	const declared = readDeclaredTokens() as string[];
+	assert.equal(
+		new Set(declared).size,
+		declared.length,
+		"duplicate entries in capabilities.declared_reason_tokens",
+	);
 });
 
 test("every declared venmo reason token satisfies the RI's registration gate (>=24 chars, snake_case)", () => {
-  // Mirrors `validateDeclaredReasonTokensCapability` in
-  // reference-implementation/server/connector-manifest-validation.ts. A token
-  // failing this is rejected at manifest registration, so catching it here
-  // turns a deploy-time rejection into a build-time one.
-  const snakeCase = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
-  for (const token of readDeclaredTokens() as string[]) {
-    assert.ok(token.length >= 24, `expected ${token} to be >=24 chars (got ${token.length})`);
-    assert.match(token, snakeCase, `expected ${token} to be snake_case`);
-  }
+	// Mirrors `validateDeclaredReasonTokensCapability` in
+	// reference-implementation/server/connector-manifest-validation.ts. A token
+	// failing this is rejected at manifest registration, so catching it here
+	// turns a deploy-time rejection into a build-time one.
+	const snakeCase = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+	for (const token of readDeclaredTokens() as string[]) {
+		assert.ok(
+			token.length >= 24,
+			`expected ${token} to be >=24 chars (got ${token.length})`,
+		);
+		assert.match(token, snakeCase, `expected ${token} to be snake_case`);
+	}
 });

@@ -93,29 +93,29 @@ const CENTS_MULTIPLIER = 100;
  * its description is unaffected.
  */
 export function isStatementSummaryDescription(description: string): boolean {
-  return SUMMARY_DESCRIPTION_RE.test(description.trim());
+	return SUMMARY_DESCRIPTION_RE.test(description.trim());
 }
 
 /** Parse "$33,821.48" / "-$8.65" into signed integer cents. Returns null for
  *  anything that is not a well-formed currency token, so a malformed summary
  *  line yields "no anchor" rather than a wrong one. */
 export function currencyToCents(raw: string): number | null {
-  const negative = raw.trim().startsWith("-");
-  const digits = raw.replace(CURRENCY_STRIP_RE, "").replace("-", "").trim();
-  if (!BARE_CENTS_RE.test(digits)) {
-    return null;
-  }
-  const value = Math.round(Number(digits) * CENTS_MULTIPLIER);
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-  return negative ? -value : value;
+	const negative = raw.trim().startsWith("-");
+	const digits = raw.replace(CURRENCY_STRIP_RE, "").replace("-", "").trim();
+	if (!BARE_CENTS_RE.test(digits)) {
+		return null;
+	}
+	const value = Math.round(Number(digits) * CENTS_MULTIPLIER);
+	if (!Number.isFinite(value)) {
+		return null;
+	}
+	return negative ? -value : value;
 }
 
 /** USAA's own period totals for one statement, in signed cents. */
 export interface PeriodBalances {
-  beginningCents: number;
-  endingCents: number;
+	beginningCents: number;
+	endingCents: number;
 }
 
 /**
@@ -131,27 +131,27 @@ export interface PeriodBalances {
  * nothing about a period.
  */
 export function extractPeriodBalances(text: string): PeriodBalances | null {
-  let beginningCents: number | null = null;
-  let endingCents: number | null = null;
-  for (const raw of text.split(LINE_SPLIT_RE)) {
-    const line = raw.trim();
-    if (beginningCents === null) {
-      const b = line.match(BEGINNING_BALANCE_RE);
-      if (b?.[1]) {
-        beginningCents = currencyToCents(b[1]);
-      }
-    }
-    if (endingCents === null) {
-      const e = line.match(ENDING_BALANCE_RE);
-      if (e?.[1]) {
-        endingCents = currencyToCents(e[1]);
-      }
-    }
-  }
-  if (beginningCents === null || endingCents === null) {
-    return null;
-  }
-  return { beginningCents, endingCents };
+	let beginningCents: number | null = null;
+	let endingCents: number | null = null;
+	for (const raw of text.split(LINE_SPLIT_RE)) {
+		const line = raw.trim();
+		if (beginningCents === null) {
+			const b = line.match(BEGINNING_BALANCE_RE);
+			if (b?.[1]) {
+				beginningCents = currencyToCents(b[1]);
+			}
+		}
+		if (endingCents === null) {
+			const e = line.match(ENDING_BALANCE_RE);
+			if (e?.[1]) {
+				endingCents = currencyToCents(e[1]);
+			}
+		}
+	}
+	if (beginningCents === null || endingCents === null) {
+		return null;
+	}
+	return { beginningCents, endingCents };
 }
 
 /**
@@ -164,22 +164,22 @@ export function extractPeriodBalances(text: string): PeriodBalances | null {
  * cry wolf on every credit-card statement.
  */
 export type StatementReconciliation =
-  | { status: "unavailable"; reason: "no_period_balances" }
-  | {
-      status: "reconciled";
-      beginningCents: number;
-      endingCents: number;
-      expectedDeltaCents: number;
-      observedDeltaCents: number;
-    }
-  | {
-      status: "mismatched";
-      beginningCents: number;
-      endingCents: number;
-      expectedDeltaCents: number;
-      observedDeltaCents: number;
-      differenceCents: number;
-    };
+	| { status: "unavailable"; reason: "no_period_balances" }
+	| {
+			status: "reconciled";
+			beginningCents: number;
+			endingCents: number;
+			expectedDeltaCents: number;
+			observedDeltaCents: number;
+	  }
+	| {
+			status: "mismatched";
+			beginningCents: number;
+			endingCents: number;
+			expectedDeltaCents: number;
+			observedDeltaCents: number;
+			differenceCents: number;
+	  };
 
 /**
  * Reconcile one statement period's parsed transactions against USAA's own
@@ -199,33 +199,36 @@ export type StatementReconciliation =
  * `mismatched`. The identity handles that correctly with no special case —
  * an empty sum reconciles only when the balance genuinely did not move.
  */
-export function reconcileStatementPeriod(text: string, txns: readonly ParsedStatementTxn[]): StatementReconciliation {
-  const balances = extractPeriodBalances(text);
-  if (!balances) {
-    return { status: "unavailable", reason: "no_period_balances" };
-  }
-  const { beginningCents, endingCents } = balances;
-  const expectedDeltaCents = endingCents - beginningCents;
-  const observedDeltaCents = txns
-    .filter((t) => !isStatementSummaryDescription(t.description))
-    .reduce((acc, t) => acc + t.amount, 0);
-  if (expectedDeltaCents === observedDeltaCents) {
-    return {
-      status: "reconciled",
-      beginningCents,
-      endingCents,
-      expectedDeltaCents,
-      observedDeltaCents,
-    };
-  }
-  return {
-    status: "mismatched",
-    beginningCents,
-    endingCents,
-    expectedDeltaCents,
-    observedDeltaCents,
-    differenceCents: expectedDeltaCents - observedDeltaCents,
-  };
+export function reconcileStatementPeriod(
+	text: string,
+	txns: readonly ParsedStatementTxn[],
+): StatementReconciliation {
+	const balances = extractPeriodBalances(text);
+	if (!balances) {
+		return { status: "unavailable", reason: "no_period_balances" };
+	}
+	const { beginningCents, endingCents } = balances;
+	const expectedDeltaCents = endingCents - beginningCents;
+	const observedDeltaCents = txns
+		.filter((t) => !isStatementSummaryDescription(t.description))
+		.reduce((acc, t) => acc + t.amount, 0);
+	if (expectedDeltaCents === observedDeltaCents) {
+		return {
+			status: "reconciled",
+			beginningCents,
+			endingCents,
+			expectedDeltaCents,
+			observedDeltaCents,
+		};
+	}
+	return {
+		status: "mismatched",
+		beginningCents,
+		endingCents,
+		expectedDeltaCents,
+		observedDeltaCents,
+		differenceCents: expectedDeltaCents - observedDeltaCents,
+	};
 }
 
 /**
@@ -239,13 +242,13 @@ export function reconcileStatementPeriod(text: string, txns: readonly ParsedStat
  * no account identity at all.
  */
 export function buildReconciliationDiagnostics(
-  statementId: string,
-  result: Extract<StatementReconciliation, { status: "mismatched" }>
+	statementId: string,
+	result: Extract<StatementReconciliation, { status: "mismatched" }>,
 ): Record<string, unknown> {
-  return {
-    statement_id: statementId,
-    expected_delta_cents: result.expectedDeltaCents,
-    observed_delta_cents: result.observedDeltaCents,
-    difference_cents: result.differenceCents,
-  };
+	return {
+		statement_id: statementId,
+		expected_delta_cents: result.expectedDeltaCents,
+		observed_delta_cents: result.observedDeltaCents,
+		difference_cents: result.differenceCents,
+	};
 }

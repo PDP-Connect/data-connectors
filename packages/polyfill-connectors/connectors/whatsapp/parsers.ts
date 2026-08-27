@@ -3,13 +3,13 @@
 
 import { createHash } from "node:crypto";
 import {
-  hasZipLocalFileSignature,
-  readZipEntries,
-  readZipEntriesFromFile,
-  type ZipEntry,
-  ZipPolicyViolationError,
-  type ZipReadPolicy,
-  zipBasename,
+	hasZipLocalFileSignature,
+	readZipEntries,
+	readZipEntriesFromFile,
+	type ZipEntry,
+	ZipPolicyViolationError,
+	type ZipReadPolicy,
+	zipBasename,
 } from "../../src/bounded-zip-archive.ts";
 
 const GIB = 1024 * 1024 * 1024;
@@ -31,17 +31,17 @@ const GIB = 1024 * 1024 * 1024;
 // their deployment without a code change; defaults to a generous but bounded
 // 20 GiB.
 function resolveMaxTotalUncompressedBytes(): number {
-  const raw = process.env.WHATSAPP_MAX_ARCHIVE_BYTES;
-  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20 * GIB;
+	const raw = process.env.WHATSAPP_MAX_ARCHIVE_BYTES;
+	const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 20 * GIB;
 }
 
 function whatsappZipPolicy(): ZipReadPolicy {
-  return {
-    maxEntries: 20_000,
-    maxEntryUncompressedBytes: 2 * GIB,
-    maxTotalUncompressedBytes: resolveMaxTotalUncompressedBytes(),
-  };
+	return {
+		maxEntries: 20_000,
+		maxEntryUncompressedBytes: 2 * GIB,
+		maxTotalUncompressedBytes: resolveMaxTotalUncompressedBytes(),
+	};
 }
 
 // The chat .txt entry itself (as opposed to media attachments) is parsed as
@@ -71,9 +71,9 @@ const MAX_CHAT_TEXT_BYTES = 200 * 1024 * 1024;
 // (same override pattern as WHATSAPP_MAX_ARCHIVE_BYTES above) so tests can
 // exercise the real rejection path without writing millions of lines.
 function resolveMaxMessageCount(): number {
-  const raw = process.env.WHATSAPP_MAX_MESSAGE_COUNT;
-  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2_000_000;
+	const raw = process.env.WHATSAPP_MAX_MESSAGE_COUNT;
+	const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 2_000_000;
 }
 
 /**
@@ -85,18 +85,20 @@ function resolveMaxMessageCount(): number {
  * unsupported.
  */
 export class WhatsAppMessageLimitExceededError extends Error {
-  constructor(messageCount: number, maxMessageCount: number) {
-    super(`WhatsApp export exceeds the maximum supported message count (${messageCount} > ${maxMessageCount})`);
-    this.name = "WhatsAppMessageLimitExceededError";
-  }
+	constructor(messageCount: number, maxMessageCount: number) {
+		super(
+			`WhatsApp export exceeds the maximum supported message count (${messageCount} > ${maxMessageCount})`,
+		);
+		this.name = "WhatsAppMessageLimitExceededError";
+	}
 }
 
 export interface ParsedWhatsAppMessage {
-  author: string;
-  content: string;
-  has_attachment?: boolean;
-  id: string;
-  sent_at: string;
+	author: string;
+	content: string;
+	has_attachment?: boolean;
+	id: string;
+	sent_at: string;
 }
 
 /**
@@ -111,8 +113,8 @@ export interface ParsedWhatsAppMessage {
  * attachment.
  */
 export interface ParsedWhatsAppAttachment {
-  data: () => Buffer;
-  filename: string;
+	data: () => Buffer;
+	filename: string;
 }
 
 /**
@@ -128,23 +130,23 @@ export interface ParsedWhatsAppAttachment {
  * chatId has been resolved through the persisted reconciliation cursor.
  */
 export interface WhatsAppChatSummary {
-  attachmentMessageCount: number;
-  /** Provisional chatId, derived directly from identityKey with no salt —
-   *  the caller (index.ts) MUST resolve this through its persisted
-   *  reconciliation-alias cursor (index.ts's openChatIdentityCursor) before
-   *  treating it as final and driving streamWhatsAppChatMessages with it. */
-  chatId: string;
-  firstSentAt: string | null;
-  /** Best-effort reconciliation lookup key — see deriveChatIdentityKey. */
-  identityKey: string;
-  lastSentAt: string | null;
-  messageCount: number;
-  /** Fixed-size UNIFORM RANDOM sample of message content fingerprints
-   *  (reservoir sampling, not fixed-stride) — see scanWhatsAppChatIdentity's
-   *  doc comment for why stride sampling was replaced. */
-  messageFingerprintSample: string[];
-  participants: string[];
-  title: string;
+	attachmentMessageCount: number;
+	/** Provisional chatId, derived directly from identityKey with no salt —
+	 *  the caller (index.ts) MUST resolve this through its persisted
+	 *  reconciliation-alias cursor (index.ts's openChatIdentityCursor) before
+	 *  treating it as final and driving streamWhatsAppChatMessages with it. */
+	chatId: string;
+	firstSentAt: string | null;
+	/** Best-effort reconciliation lookup key — see deriveChatIdentityKey. */
+	identityKey: string;
+	lastSentAt: string | null;
+	messageCount: number;
+	/** Fixed-size UNIFORM RANDOM sample of message content fingerprints
+	 *  (reservoir sampling, not fixed-stride) — see scanWhatsAppChatIdentity's
+	 *  doc comment for why stride sampling was replaced. */
+	messageFingerprintSample: string[];
+	participants: string[];
+	title: string;
 }
 
 // WhatsApp export line formats:
@@ -153,14 +155,15 @@ export interface WhatsAppChatSummary {
 //   Android: M/D/YY, H:MM - Author: Message
 //   Android: DD/MM/YYYY, HH:MM - Author: Message
 const LINE_RE =
-  /^\s*(?:\[)?(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}),?\s+(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)(?:\])?\s*[-–]?\s*([^:]+?):\s?(.*)$/;
+	/^\s*(?:\[)?(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}),?\s+(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)(?:\])?\s*[-–]?\s*([^:]+?):\s?(.*)$/;
 export const WHATSAPP_ATTACHMENT_RE =
-  /<attached: |<Media omitted>|image omitted|video omitted|audio omitted|document omitted/i;
+	/<attached: |<Media omitted>|image omitted|video omitted|audio omitted|document omitted/i;
 const TXT_EXT_RE = /\.txt$/i;
 export const ZIP_EXT_RE = /\.zip$/i;
 const WHATSAPP_TITLE_PREFIX_RE = /^WhatsApp Chat - /;
 const WHATSAPP_LINE_SPLIT_RE = /\r?\n/;
-const WHATSAPP_EXPORT_PROBE_RE = /\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}.*(?:-|]).*?:/;
+const WHATSAPP_EXPORT_PROBE_RE =
+	/\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}.*(?:-|]).*?:/;
 const basename = zipBasename;
 const WHATSAPP_TIME_RE = /^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*([APap][Mm]))?$/;
 
@@ -211,15 +214,21 @@ const MESSAGE_ID_HASH_LENGTH = 16;
  * set; it makes no uniqueness claim and must not be used as if it did.
  */
 export function deriveChatIdentityKey(participants: readonly string[]): string {
-  const key = [...participants].sort().join("");
-  return createHash("sha256").update(key).digest("hex").slice(0, CHAT_ID_HASH_LENGTH);
+	const key = [...participants].sort().join("");
+	return createHash("sha256")
+		.update(key)
+		.digest("hex")
+		.slice(0, CHAT_ID_HASH_LENGTH);
 }
 
 /** Mint a fresh chatId for an identity key seen for the first time. Never
  *  called directly by parseWhatsAppChatFile — see index.ts's reconciliation
  *  cursor, which looks up an existing mapping before minting a new one. */
 export function mintChatId(identityKey: string, salt: string): string {
-  return createHash("sha256").update(`${identityKey}${salt}`).digest("hex").slice(0, CHAT_ID_HASH_LENGTH);
+	return createHash("sha256")
+		.update(`${identityKey}${salt}`)
+		.digest("hex")
+		.slice(0, CHAT_ID_HASH_LENGTH);
 }
 
 /**
@@ -242,126 +251,149 @@ export function mintChatId(identityKey: string, salt: string): string {
  * recompute it or reach into message.id's string shape.
  */
 export function messageContentFingerprint(
-  message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
-  occurrenceIndex: number
+	message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
+	occurrenceIndex: number,
 ): string {
-  const key = `${message.author}${message.sent_at}${message.content}${occurrenceIndex}`;
-  return createHash("sha256").update(key).digest("hex").slice(0, MESSAGE_ID_HASH_LENGTH);
+	const key = `${message.author}${message.sent_at}${message.content}${occurrenceIndex}`;
+	return createHash("sha256")
+		.update(key)
+		.digest("hex")
+		.slice(0, MESSAGE_ID_HASH_LENGTH);
 }
 
 function deriveMessageId(
-  chatId: string,
-  message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
-  occurrenceIndex: number
+	chatId: string,
+	message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
+	occurrenceIndex: number,
 ): string {
-  return `${chatId}:${messageContentFingerprint(message, occurrenceIndex)}`;
+	return `${chatId}:${messageContentFingerprint(message, occurrenceIndex)}`;
 }
 
 export function nowIso(): string {
-  return new Date().toISOString();
+	return new Date().toISOString();
 }
 
-function parseWhatsAppDateParts(dateStr: string): { day: number; month: number; year: number } | null {
-  let separator = ".";
-  if (dateStr.includes("/")) {
-    separator = "/";
-  } else if (dateStr.includes("-")) {
-    separator = "-";
-  }
-  const parts = dateStr.split(separator);
-  if (parts.length !== 3) {
-    return null;
-  }
-  const [firstRaw, secondRaw, thirdRaw] = parts;
-  const first = Number(firstRaw);
-  const second = Number(secondRaw);
-  const third = Number(thirdRaw);
-  if (![first, second, third].every(Number.isInteger)) {
-    return null;
-  }
+function parseWhatsAppDateParts(
+	dateStr: string,
+): { day: number; month: number; year: number } | null {
+	let separator = ".";
+	if (dateStr.includes("/")) {
+		separator = "/";
+	} else if (dateStr.includes("-")) {
+		separator = "-";
+	}
+	const parts = dateStr.split(separator);
+	if (parts.length !== 3) {
+		return null;
+	}
+	const [firstRaw, secondRaw, thirdRaw] = parts;
+	const first = Number(firstRaw);
+	const second = Number(secondRaw);
+	const third = Number(thirdRaw);
+	if (![first, second, third].every(Number.isInteger)) {
+		return null;
+	}
 
-  let day: number;
-  let month: number;
-  let year: number;
-  if ((firstRaw?.length ?? 0) === 4) {
-    year = first;
-    month = second;
-    day = third;
-  } else {
-    year = third;
-    if (third >= 70 && third < 100) {
-      year = 1900 + third;
-    } else if (third < 70) {
-      year = 2000 + third;
-    }
-    if (first > 12 && second <= 12) {
-      day = first;
-      month = second;
-    } else {
-      month = first;
-      day = second;
-    }
-  }
+	let day: number;
+	let month: number;
+	let year: number;
+	if ((firstRaw?.length ?? 0) === 4) {
+		year = first;
+		month = second;
+		day = third;
+	} else {
+		year = third;
+		if (third >= 70 && third < 100) {
+			year = 1900 + third;
+		} else if (third < 70) {
+			year = 2000 + third;
+		}
+		if (first > 12 && second <= 12) {
+			day = first;
+			month = second;
+		} else {
+			month = first;
+			day = second;
+		}
+	}
 
-  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) {
-    return null;
-  }
-  return { day, month, year };
+	if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) {
+		return null;
+	}
+	return { day, month, year };
 }
 
-function parseWhatsAppTimeParts(timeStr: string): { hour: number; minute: number; second: number } | null {
-  const match = WHATSAPP_TIME_RE.exec(timeStr.trim());
-  if (!match) {
-    return null;
-  }
-  let hour = Number(match[1]);
-  const minute = Number(match[2]);
-  const second = match[3] === undefined ? 0 : Number(match[3]);
-  const meridiem = match[4]?.toLowerCase();
-  if (!(Number.isInteger(hour) && Number.isInteger(minute) && Number.isInteger(second))) {
-    return null;
-  }
-  if (meridiem) {
-    if (hour < 1 || hour > 12) {
-      return null;
-    }
-    if (meridiem === "pm" && hour !== 12) {
-      hour += 12;
-    } else if (meridiem === "am" && hour === 12) {
-      hour = 0;
-    }
-  }
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
-    return null;
-  }
-  return { hour, minute, second };
+function parseWhatsAppTimeParts(
+	timeStr: string,
+): { hour: number; minute: number; second: number } | null {
+	const match = WHATSAPP_TIME_RE.exec(timeStr.trim());
+	if (!match) {
+		return null;
+	}
+	let hour = Number(match[1]);
+	const minute = Number(match[2]);
+	const second = match[3] === undefined ? 0 : Number(match[3]);
+	const meridiem = match[4]?.toLowerCase();
+	if (
+		!(
+			Number.isInteger(hour) &&
+			Number.isInteger(minute) &&
+			Number.isInteger(second)
+		)
+	) {
+		return null;
+	}
+	if (meridiem) {
+		if (hour < 1 || hour > 12) {
+			return null;
+		}
+		if (meridiem === "pm" && hour !== 12) {
+			hour += 12;
+		} else if (meridiem === "am" && hour === 12) {
+			hour = 0;
+		}
+	}
+	if (
+		hour < 0 ||
+		hour > 23 ||
+		minute < 0 ||
+		minute > 59 ||
+		second < 0 ||
+		second > 59
+	) {
+		return null;
+	}
+	return { hour, minute, second };
 }
 
-export function parseWhatsAppDateTime(dateStr: string, timeStr: string): string | null {
-  const dateParts = parseWhatsAppDateParts(dateStr);
-  const timeParts = parseWhatsAppTimeParts(timeStr);
-  if (!(dateParts && timeParts)) {
-    return null;
-  }
-  const date = new Date(
-    dateParts.year,
-    dateParts.month - 1,
-    dateParts.day,
-    timeParts.hour,
-    timeParts.minute,
-    timeParts.second
-  );
-  if (
-    date.getFullYear() === dateParts.year &&
-    date.getMonth() === dateParts.month - 1 &&
-    date.getDate() === dateParts.day &&
-    date.getHours() === timeParts.hour &&
-    date.getMinutes() === timeParts.minute &&
-    date.getSeconds() === timeParts.second
-  ) {
-    return date.toISOString();
-  }
-  return null;
+export function parseWhatsAppDateTime(
+	dateStr: string,
+	timeStr: string,
+): string | null {
+	const dateParts = parseWhatsAppDateParts(dateStr);
+	const timeParts = parseWhatsAppTimeParts(timeStr);
+	if (!(dateParts && timeParts)) {
+		return null;
+	}
+	const date = new Date(
+		dateParts.year,
+		dateParts.month - 1,
+		dateParts.day,
+		timeParts.hour,
+		timeParts.minute,
+		timeParts.second,
+	);
+	if (
+		date.getFullYear() === dateParts.year &&
+		date.getMonth() === dateParts.month - 1 &&
+		date.getDate() === dateParts.day &&
+		date.getHours() === timeParts.hour &&
+		date.getMinutes() === timeParts.minute &&
+		date.getSeconds() === timeParts.second
+	) {
+		return date.toISOString();
+	}
+	return null;
 }
 
 /** Splits an already-in-memory chat-text string (e.g. a zip's bounded
@@ -370,42 +402,49 @@ export function parseWhatsAppDateTime(dateStr: string, timeStr: string): string 
  *  (MAX_CHAT_TEXT_BYTES or smaller) -- never against a raw .txt upload,
  *  which uses the async file-streamed APIs instead. */
 export function splitWhatsAppChatLines(content: string): string[] {
-  return content.split(WHATSAPP_LINE_SPLIT_RE);
+	return content.split(WHATSAPP_LINE_SPLIT_RE);
 }
 
 export function whatsappChatTitleFromFilename(filename: string): string {
-  return filename.replace(TXT_EXT_RE, "").replace(WHATSAPP_TITLE_PREFIX_RE, "");
+	return filename.replace(TXT_EXT_RE, "").replace(WHATSAPP_TITLE_PREFIX_RE, "");
 }
 
 export function looksLikeWhatsAppChatExport(text: string): boolean {
-  return WHATSAPP_EXPORT_PROBE_RE.test(text);
+	return WHATSAPP_EXPORT_PROBE_RE.test(text);
 }
 
-export type WhatsAppChatArtifactFormat = "whatsapp_chat_export" | "whatsapp_chat_export_zip";
+export type WhatsAppChatArtifactFormat =
+	| "whatsapp_chat_export"
+	| "whatsapp_chat_export_zip";
 
 export interface ExtractedWhatsAppChatArtifact {
-  chatFileName: string;
-  format: WhatsAppChatArtifactFormat;
-  mediaFileCount: number;
-  mediaFiles: ParsedWhatsAppAttachment[];
-  /**
-   * Media entries present in the zip's central directory but withheld from
-   * mediaFiles because extracting them would violate WHATSAPP_ZIP_POLICY
-   * (oversized, or the shared decompression budget was exhausted). Nonzero
-   * means real attachment coverage is missing from this parse — the caller
-   * MUST surface this (see index.ts), not treat mediaFiles.length as the
-   * true attachment count.
-   */
-  skippedMediaCount: number;
-  text: string;
+	chatFileName: string;
+	format: WhatsAppChatArtifactFormat;
+	mediaFileCount: number;
+	mediaFiles: ParsedWhatsAppAttachment[];
+	/**
+	 * Media entries present in the zip's central directory but withheld from
+	 * mediaFiles because extracting them would violate WHATSAPP_ZIP_POLICY
+	 * (oversized, or the shared decompression budget was exhausted). Nonzero
+	 * means real attachment coverage is missing from this parse — the caller
+	 * MUST surface this (see index.ts), not treat mediaFiles.length as the
+	 * true attachment count.
+	 */
+	skippedMediaCount: number;
+	text: string;
 }
 
 function isProbablyMediaEntry(name: string): boolean {
-  const clean = name.replaceAll("\\", "/");
-  if (!clean || clean.endsWith("/") || clean.startsWith("__MACOSX/") || clean.includes("/__MACOSX/")) {
-    return false;
-  }
-  return !TXT_EXT_RE.test(clean);
+	const clean = name.replaceAll("\\", "/");
+	if (
+		!clean ||
+		clean.endsWith("/") ||
+		clean.startsWith("__MACOSX/") ||
+		clean.includes("/__MACOSX/")
+	) {
+		return false;
+	}
+	return !TXT_EXT_RE.test(clean);
 }
 
 /**
@@ -419,12 +458,12 @@ function isProbablyMediaEntry(name: string): boolean {
  * "unsupported" hides an actionable signal from the owner.
  */
 export class WhatsAppZipPolicyRejection extends Error {
-  readonly code: InstanceType<typeof ZipPolicyViolationError>["code"];
-  constructor(cause: InstanceType<typeof ZipPolicyViolationError>) {
-    super(cause.message, { cause });
-    this.name = "WhatsAppZipPolicyRejection";
-    this.code = cause.code;
-  }
+	readonly code: InstanceType<typeof ZipPolicyViolationError>["code"];
+	constructor(cause: InstanceType<typeof ZipPolicyViolationError>) {
+		super(cause.message, { cause });
+		this.name = "WhatsAppZipPolicyRejection";
+		this.code = cause.code;
+	}
 }
 
 /**
@@ -435,52 +474,54 @@ export class WhatsAppZipPolicyRejection extends Error {
  * attachments entirely (e.g. the `attachments` stream was not requested)
  * never pays the inflation cost for entries it never reads.
  */
-function lazyMediaFiles(entries: readonly ZipEntry[]): ParsedWhatsAppAttachment[] {
-  return entries
-    .filter((e) => isProbablyMediaEntry(e.name))
-    .map((entry) => ({
-      data: entry.data,
-      filename: basename(entry.name),
-    }));
+function lazyMediaFiles(
+	entries: readonly ZipEntry[],
+): ParsedWhatsAppAttachment[] {
+	return entries
+		.filter((e) => isProbablyMediaEntry(e.name))
+		.map((entry) => ({
+			data: entry.data,
+			filename: basename(entry.name),
+		}));
 }
 
 function findChatTextEntry(
-  entries: readonly ZipEntry[],
-  mediaFiles: ParsedWhatsAppAttachment[]
+	entries: readonly ZipEntry[],
+	mediaFiles: ParsedWhatsAppAttachment[],
 ): ExtractedWhatsAppChatArtifact | null {
-  const textEntries = entries.filter((entry) => TXT_EXT_RE.test(entry.name));
-  for (const entry of textEntries) {
-    if (entry.uncompressedSize > MAX_CHAT_TEXT_BYTES) {
-      // Declared size is untrusted for bomb defense (see
-      // bounded-zip-archive.ts), but here it is only a fast-skip for an
-      // implausible chat-text entry -- if it's a lying declaration, data()
-      // below would still be bounded by the shared archive policy and would
-      // simply fail this candidate the normal way.
-      continue;
-    }
-    let text: string;
-    try {
-      text = entry.data().toString("utf8");
-    } catch {
-      continue;
-    }
-    if (looksLikeWhatsAppChatExport(text)) {
-      return {
-        chatFileName: basename(entry.name),
-        format: "whatsapp_chat_export_zip",
-        mediaFileCount: mediaFiles.length,
-        mediaFiles,
-        // skippedMediaCount is no longer knowable up front now that
-        // attachment extraction is lazy — a media entry that will fail
-        // policy/corruption checks only reveals that when its OWN data() is
-        // called, which the caller (index.ts) does per-attachment during
-        // emission. See emitAttachmentRecords' own skip accounting.
-        skippedMediaCount: 0,
-        text,
-      };
-    }
-  }
-  return null;
+	const textEntries = entries.filter((entry) => TXT_EXT_RE.test(entry.name));
+	for (const entry of textEntries) {
+		if (entry.uncompressedSize > MAX_CHAT_TEXT_BYTES) {
+			// Declared size is untrusted for bomb defense (see
+			// bounded-zip-archive.ts), but here it is only a fast-skip for an
+			// implausible chat-text entry -- if it's a lying declaration, data()
+			// below would still be bounded by the shared archive policy and would
+			// simply fail this candidate the normal way.
+			continue;
+		}
+		let text: string;
+		try {
+			text = entry.data().toString("utf8");
+		} catch {
+			continue;
+		}
+		if (looksLikeWhatsAppChatExport(text)) {
+			return {
+				chatFileName: basename(entry.name),
+				format: "whatsapp_chat_export_zip",
+				mediaFileCount: mediaFiles.length,
+				mediaFiles,
+				// skippedMediaCount is no longer knowable up front now that
+				// attachment extraction is lazy — a media entry that will fail
+				// policy/corruption checks only reveals that when its OWN data() is
+				// called, which the caller (index.ts) does per-attachment during
+				// emission. See emitAttachmentRecords' own skip accounting.
+				skippedMediaCount: 0,
+				text,
+			};
+		}
+	}
+	return null;
 }
 
 // Both the buffer-backed and file-backed entrypoints throw
@@ -488,21 +529,25 @@ function findChatTextEntry(
 // so both funnel through this: convert that into WhatsAppZipPolicyRejection
 // (a real export that tripped the policy — MUST propagate) and swallow any
 // other error into `null` (not a zip this parser recognizes).
-function extractEntriesOrNull(readEntries: () => ZipEntry[]): ZipEntry[] | null {
-  try {
-    return readEntries();
-  } catch (err) {
-    if (err instanceof ZipPolicyViolationError) {
-      // biome-ignore lint/style/useErrorCause: cause IS passed — WhatsAppZipPolicyRejection's constructor forwards it via super(cause.message, { cause }); the linter doesn't see through the wrapper class.
-      throw new WhatsAppZipPolicyRejection(err);
-    }
-    return null;
-  }
+function extractEntriesOrNull(
+	readEntries: () => ZipEntry[],
+): ZipEntry[] | null {
+	try {
+		return readEntries();
+	} catch (err) {
+		if (err instanceof ZipPolicyViolationError) {
+			// biome-ignore lint/style/useErrorCause: cause IS passed — WhatsAppZipPolicyRejection's constructor forwards it via super(cause.message, { cause }); the linter doesn't see through the wrapper class.
+			throw new WhatsAppZipPolicyRejection(err);
+		}
+		return null;
+	}
 }
 
 function extractFromZip(bytes: Buffer): ExtractedWhatsAppChatArtifact | null {
-  const entries = extractEntriesOrNull(() => readZipEntries(bytes, whatsappZipPolicy()));
-  return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
+	const entries = extractEntriesOrNull(() =>
+		readZipEntries(bytes, whatsappZipPolicy()),
+	);
+	return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
 }
 
 /**
@@ -513,32 +558,35 @@ function extractFromZip(bytes: Buffer): ExtractedWhatsAppChatArtifact | null {
  * no reason to also hold it as a Buffer.
  */
 export function extractWhatsAppChatArtifactFromFile(
-  fd: number,
-  fileSize: number
+	fd: number,
+	fileSize: number,
 ): ExtractedWhatsAppChatArtifact | null {
-  const entries = extractEntriesOrNull(() => readZipEntriesFromFile(fd, fileSize, whatsappZipPolicy()));
-  return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
+	const entries = extractEntriesOrNull(() =>
+		readZipEntriesFromFile(fd, fileSize, whatsappZipPolicy()),
+	);
+	return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
 }
 
 export function extractWhatsAppChatArtifact(
-  filename: string,
-  input: Buffer | Uint8Array | string
+	filename: string,
+	input: Buffer | Uint8Array | string,
 ): ExtractedWhatsAppChatArtifact | null {
-  const bytes = typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
-  if (ZIP_EXT_RE.test(filename) || hasZipLocalFileSignature(bytes)) {
-    return extractFromZip(bytes);
-  }
-  const text = bytes.toString("utf8");
-  return looksLikeWhatsAppChatExport(text)
-    ? {
-        chatFileName: filename,
-        format: "whatsapp_chat_export",
-        mediaFileCount: 0,
-        mediaFiles: [],
-        skippedMediaCount: 0,
-        text,
-      }
-    : null;
+	const bytes =
+		typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
+	if (ZIP_EXT_RE.test(filename) || hasZipLocalFileSignature(bytes)) {
+		return extractFromZip(bytes);
+	}
+	const text = bytes.toString("utf8");
+	return looksLikeWhatsAppChatExport(text)
+		? {
+				chatFileName: filename,
+				format: "whatsapp_chat_export",
+				mediaFileCount: 0,
+				mediaFiles: [],
+				skippedMediaCount: 0,
+				text,
+			}
+		: null;
 }
 
 /**
@@ -551,10 +599,10 @@ export function extractWhatsAppChatArtifact(
  * differs (summarize vs. assign-id-and-emit).
  */
 interface RawWhatsAppMessage {
-  author: string;
-  content: string;
-  has_attachment: boolean;
-  sent_at: string;
+	author: string;
+	content: string;
+	has_attachment: boolean;
+	sent_at: string;
 }
 
 /**
@@ -568,40 +616,47 @@ interface RawWhatsAppMessage {
  * WhatsAppMessageLimitExceededError); the reader does not catch it.
  */
 class RawWhatsAppLineReader {
-  private current: RawWhatsAppMessage | null = null;
-  private readonly onMessage: (message: RawWhatsAppMessage) => void;
-  readonly participants = new Set<string>();
+	private current: RawWhatsAppMessage | null = null;
+	private readonly onMessage: (message: RawWhatsAppMessage) => void;
+	readonly participants = new Set<string>();
 
-  constructor(onMessage: (message: RawWhatsAppMessage) => void) {
-    this.onMessage = onMessage;
-  }
+	constructor(onMessage: (message: RawWhatsAppMessage) => void) {
+		this.onMessage = onMessage;
+	}
 
-  pushLine(line: string): void {
-    const match = LINE_RE.exec(line);
-    // A line can match LINE_RE's shape yet carry an impossible date (31/02,
-    // year < 1970). Stamping nowIso() there would date the message to the
-    // run -- non-deterministic, and `sent_at` is the manifest's semantic-time
-    // source. Fold it into the preceding message instead, exactly as a
-    // non-matching continuation line: the text survives, no date is invented.
-    const sentAt = match ? parseWhatsAppDateTime(match[1] ?? "", match[2] ?? "") : null;
-    if (match && sentAt) {
-      if (this.current) {
-        this.onMessage(this.current);
-      }
-      const author = (match[3] ?? "").trim();
-      this.participants.add(author);
-      this.current = { author, content: match[4] || "", has_attachment: false, sent_at: sentAt };
-    } else if (this.current && line.trim()) {
-      this.current.content += `\n${line}`;
-    }
-  }
+	pushLine(line: string): void {
+		const match = LINE_RE.exec(line);
+		// A line can match LINE_RE's shape yet carry an impossible date (31/02,
+		// year < 1970). Stamping nowIso() there would date the message to the
+		// run -- non-deterministic, and `sent_at` is the manifest's semantic-time
+		// source. Fold it into the preceding message instead, exactly as a
+		// non-matching continuation line: the text survives, no date is invented.
+		const sentAt = match
+			? parseWhatsAppDateTime(match[1] ?? "", match[2] ?? "")
+			: null;
+		if (match && sentAt) {
+			if (this.current) {
+				this.onMessage(this.current);
+			}
+			const author = (match[3] ?? "").trim();
+			this.participants.add(author);
+			this.current = {
+				author,
+				content: match[4] || "",
+				has_attachment: false,
+				sent_at: sentAt,
+			};
+		} else if (this.current && line.trim()) {
+			this.current.content += `\n${line}`;
+		}
+	}
 
-  finish(): void {
-    if (this.current) {
-      this.onMessage(this.current);
-      this.current = null;
-    }
-  }
+	finish(): void {
+		if (this.current) {
+			this.onMessage(this.current);
+			this.current = null;
+		}
+	}
 }
 
 /** Reservoir sampling (Algorithm R): maintains a fixed-size UNIFORM RANDOM
@@ -615,28 +670,28 @@ class RawWhatsAppLineReader {
  *  probability of being in the final sample, regardless of where in the
  *  stream it appeared. */
 class ReservoirSampler<T> {
-  private seen = 0;
-  private readonly items: T[] = [];
-  private readonly capacity: number;
-  constructor(capacity: number) {
-    this.capacity = capacity;
-  }
+	private seen = 0;
+	private readonly items: T[] = [];
+	private readonly capacity: number;
+	constructor(capacity: number) {
+		this.capacity = capacity;
+	}
 
-  push(item: T): void {
-    this.seen += 1;
-    if (this.items.length < this.capacity) {
-      this.items.push(item);
-      return;
-    }
-    const replaceIndex = Math.floor(Math.random() * this.seen);
-    if (replaceIndex < this.capacity) {
-      this.items[replaceIndex] = item;
-    }
-  }
+	push(item: T): void {
+		this.seen += 1;
+		if (this.items.length < this.capacity) {
+			this.items.push(item);
+			return;
+		}
+		const replaceIndex = Math.floor(Math.random() * this.seen);
+		if (replaceIndex < this.capacity) {
+			this.items[replaceIndex] = item;
+		}
+	}
 
-  toArray(): T[] {
-    return [...this.items];
-  }
+	toArray(): T[] {
+		return [...this.items];
+	}
 }
 
 const MESSAGE_FINGERPRINT_SAMPLE_SIZE = 40;
@@ -653,11 +708,11 @@ const MESSAGE_FINGERPRINT_SAMPLE_SIZE = 40;
  * scanner's reservoir sampling was built to close.
  */
 export function sampleUniform<T>(items: readonly T[], capacity: number): T[] {
-  const sampler = new ReservoirSampler<T>(capacity);
-  for (const item of items) {
-    sampler.push(item);
-  }
-  return sampler.toArray();
+	const sampler = new ReservoirSampler<T>(capacity);
+	for (const item of items) {
+		sampler.push(item);
+	}
+	return sampler.toArray();
 }
 
 /**
@@ -680,48 +735,58 @@ export function sampleUniform<T>(items: readonly T[], capacity: number): T[] {
  *  and async wrappers below so the aggregate-tracking logic (min/max
  *  timestamps, counters, reservoir sample) exists in exactly one place. */
 class ChatIdentityAccumulator {
-  private readonly maxMessageCount = resolveMaxMessageCount();
-  private readonly occurrenceSeen = new Map<string, number>();
-  private readonly fingerprintSampler = new ReservoirSampler<string>(MESSAGE_FINGERPRINT_SAMPLE_SIZE);
-  private messageCount = 0;
-  private attachmentMessageCount = 0;
-  private firstSentAt: string | null = null;
-  private lastSentAt: string | null = null;
+	private readonly maxMessageCount = resolveMaxMessageCount();
+	private readonly occurrenceSeen = new Map<string, number>();
+	private readonly fingerprintSampler = new ReservoirSampler<string>(
+		MESSAGE_FINGERPRINT_SAMPLE_SIZE,
+	);
+	private messageCount = 0;
+	private attachmentMessageCount = 0;
+	private firstSentAt: string | null = null;
+	private lastSentAt: string | null = null;
 
-  onMessage = (message: RawWhatsAppMessage): void => {
-    this.messageCount += 1;
-    if (this.messageCount > this.maxMessageCount) {
-      throw new WhatsAppMessageLimitExceededError(this.messageCount, this.maxMessageCount);
-    }
-    if (WHATSAPP_ATTACHMENT_RE.test(message.content)) {
-      this.attachmentMessageCount += 1;
-    }
-    if (this.firstSentAt === null || message.sent_at < this.firstSentAt) {
-      this.firstSentAt = message.sent_at;
-    }
-    if (this.lastSentAt === null || message.sent_at > this.lastSentAt) {
-      this.lastSentAt = message.sent_at;
-    }
-    const dedupeKey = `${message.author}${message.sent_at}${message.content}`;
-    const occurrenceIndex = this.occurrenceSeen.get(dedupeKey) ?? 0;
-    this.occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
-    this.fingerprintSampler.push(messageContentFingerprint(message, occurrenceIndex));
-  };
+	onMessage = (message: RawWhatsAppMessage): void => {
+		this.messageCount += 1;
+		if (this.messageCount > this.maxMessageCount) {
+			throw new WhatsAppMessageLimitExceededError(
+				this.messageCount,
+				this.maxMessageCount,
+			);
+		}
+		if (WHATSAPP_ATTACHMENT_RE.test(message.content)) {
+			this.attachmentMessageCount += 1;
+		}
+		if (this.firstSentAt === null || message.sent_at < this.firstSentAt) {
+			this.firstSentAt = message.sent_at;
+		}
+		if (this.lastSentAt === null || message.sent_at > this.lastSentAt) {
+			this.lastSentAt = message.sent_at;
+		}
+		const dedupeKey = `${message.author}${message.sent_at}${message.content}`;
+		const occurrenceIndex = this.occurrenceSeen.get(dedupeKey) ?? 0;
+		this.occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
+		this.fingerprintSampler.push(
+			messageContentFingerprint(message, occurrenceIndex),
+		);
+	};
 
-  toSummary(filename: string, participants: readonly string[]): WhatsAppChatSummary {
-    const identityKey = deriveChatIdentityKey(participants);
-    return {
-      attachmentMessageCount: this.attachmentMessageCount,
-      chatId: mintChatId(identityKey, ""),
-      firstSentAt: this.firstSentAt,
-      identityKey,
-      lastSentAt: this.lastSentAt,
-      messageCount: this.messageCount,
-      messageFingerprintSample: this.fingerprintSampler.toArray(),
-      participants: [...participants],
-      title: whatsappChatTitleFromFilename(filename),
-    };
-  }
+	toSummary(
+		filename: string,
+		participants: readonly string[],
+	): WhatsAppChatSummary {
+		const identityKey = deriveChatIdentityKey(participants);
+		return {
+			attachmentMessageCount: this.attachmentMessageCount,
+			chatId: mintChatId(identityKey, ""),
+			firstSentAt: this.firstSentAt,
+			identityKey,
+			lastSentAt: this.lastSentAt,
+			messageCount: this.messageCount,
+			messageFingerprintSample: this.fingerprintSampler.toArray(),
+			participants: [...participants],
+			title: whatsappChatTitleFromFilename(filename),
+		};
+	}
 }
 
 /**
@@ -741,14 +806,17 @@ class ChatIdentityAccumulator {
  * (streamWhatsAppChatMessages), which is only ever driven with the FINAL,
  * reconciled chatId.
  */
-export function scanWhatsAppChatIdentity(filename: string, lines: Iterable<string>): WhatsAppChatSummary {
-  const accumulator = new ChatIdentityAccumulator();
-  const reader = new RawWhatsAppLineReader(accumulator.onMessage);
-  for (const line of lines) {
-    reader.pushLine(line);
-  }
-  reader.finish();
-  return accumulator.toSummary(filename, [...reader.participants]);
+export function scanWhatsAppChatIdentity(
+	filename: string,
+	lines: Iterable<string>,
+): WhatsAppChatSummary {
+	const accumulator = new ChatIdentityAccumulator();
+	const reader = new RawWhatsAppLineReader(accumulator.onMessage);
+	for (const line of lines) {
+		reader.pushLine(line);
+	}
+	reader.finish();
+	return accumulator.toSummary(filename, [...reader.participants]);
 }
 
 /**
@@ -758,16 +826,16 @@ export function scanWhatsAppChatIdentity(filename: string, lines: Iterable<strin
  * sync variant above -- only the loop's iteration protocol differs.
  */
 export async function scanWhatsAppChatIdentityStream(
-  filename: string,
-  lines: AsyncIterable<string>
+	filename: string,
+	lines: AsyncIterable<string>,
 ): Promise<WhatsAppChatSummary> {
-  const accumulator = new ChatIdentityAccumulator();
-  const reader = new RawWhatsAppLineReader(accumulator.onMessage);
-  for await (const line of lines) {
-    reader.pushLine(line);
-  }
-  reader.finish();
-  return accumulator.toSummary(filename, [...reader.participants]);
+	const accumulator = new ChatIdentityAccumulator();
+	const reader = new RawWhatsAppLineReader(accumulator.onMessage);
+	for await (const line of lines) {
+		reader.pushLine(line);
+	}
+	reader.finish();
+	return accumulator.toSummary(filename, [...reader.participants]);
 }
 
 /**
@@ -787,34 +855,37 @@ export async function scanWhatsAppChatIdentityStream(
  * caller of this sync variant does not silently inherit an unbounded pass.
  */
 export function streamWhatsAppChatMessages(
-  lines: Iterable<string>,
-  chatId: string,
-  onMessage: (message: ParsedWhatsAppMessage) => void
+	lines: Iterable<string>,
+	chatId: string,
+	onMessage: (message: ParsedWhatsAppMessage) => void,
 ): void {
-  const maxMessageCount = resolveMaxMessageCount();
-  let messageCount = 0;
-  const occurrenceSeen = new Map<string, number>();
-  const reader = new RawWhatsAppLineReader((raw) => {
-    messageCount += 1;
-    if (messageCount > maxMessageCount) {
-      throw new WhatsAppMessageLimitExceededError(messageCount, maxMessageCount);
-    }
-    const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-    const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
-    const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
-    occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
-    onMessage({
-      author: raw.author,
-      content: raw.content,
-      has_attachment: hasAttachment,
-      id: deriveMessageId(chatId, raw, occurrenceIndex),
-      sent_at: raw.sent_at,
-    });
-  });
-  for (const line of lines) {
-    reader.pushLine(line);
-  }
-  reader.finish();
+	const maxMessageCount = resolveMaxMessageCount();
+	let messageCount = 0;
+	const occurrenceSeen = new Map<string, number>();
+	const reader = new RawWhatsAppLineReader((raw) => {
+		messageCount += 1;
+		if (messageCount > maxMessageCount) {
+			throw new WhatsAppMessageLimitExceededError(
+				messageCount,
+				maxMessageCount,
+			);
+		}
+		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
+		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
+		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
+		onMessage({
+			author: raw.author,
+			content: raw.content,
+			has_attachment: hasAttachment,
+			id: deriveMessageId(chatId, raw, occurrenceIndex),
+			sent_at: raw.sent_at,
+		});
+	});
+	for (const line of lines) {
+		reader.pushLine(line);
+	}
+	reader.finish();
 }
 
 /**
@@ -834,44 +905,47 @@ export function streamWhatsAppChatMessages(
  * that is supposed to be memory-bounding, not merely a pass-1 formality.
  */
 export async function streamWhatsAppChatMessagesAsync(
-  lines: AsyncIterable<string> | Iterable<string>,
-  chatId: string,
-  onMessage: (message: ParsedWhatsAppMessage) => Promise<void> | void
+	lines: AsyncIterable<string> | Iterable<string>,
+	chatId: string,
+	onMessage: (message: ParsedWhatsAppMessage) => Promise<void> | void,
 ): Promise<void> {
-  const maxMessageCount = resolveMaxMessageCount();
-  let messageCount = 0;
-  const occurrenceSeen = new Map<string, number>();
-  let pending: Promise<void> | void | undefined;
-  const reader = new RawWhatsAppLineReader((raw) => {
-    messageCount += 1;
-    if (messageCount > maxMessageCount) {
-      throw new WhatsAppMessageLimitExceededError(messageCount, maxMessageCount);
-    }
-    const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-    const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
-    const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
-    occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
-    pending = onMessage({
-      author: raw.author,
-      content: raw.content,
-      has_attachment: hasAttachment,
-      id: deriveMessageId(chatId, raw, occurrenceIndex),
-      sent_at: raw.sent_at,
-    });
-  });
-  for await (const line of lines) {
-    reader.pushLine(line);
-    // pushLine only calls onMessage when a NEW message boundary starts
-    // (the just-finished message is what's pending) -- awaiting here, not
-    // after the loop, is what keeps at most one emission in flight rather
-    // than racing ahead through the whole file first.
-    if (pending) {
-      await pending;
-      pending = undefined;
-    }
-  }
-  reader.finish();
-  if (pending) {
-    await pending;
-  }
+	const maxMessageCount = resolveMaxMessageCount();
+	let messageCount = 0;
+	const occurrenceSeen = new Map<string, number>();
+	let pending: Promise<void> | void | undefined;
+	const reader = new RawWhatsAppLineReader((raw) => {
+		messageCount += 1;
+		if (messageCount > maxMessageCount) {
+			throw new WhatsAppMessageLimitExceededError(
+				messageCount,
+				maxMessageCount,
+			);
+		}
+		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
+		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
+		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
+		pending = onMessage({
+			author: raw.author,
+			content: raw.content,
+			has_attachment: hasAttachment,
+			id: deriveMessageId(chatId, raw, occurrenceIndex),
+			sent_at: raw.sent_at,
+		});
+	});
+	for await (const line of lines) {
+		reader.pushLine(line);
+		// pushLine only calls onMessage when a NEW message boundary starts
+		// (the just-finished message is what's pending) -- awaiting here, not
+		// after the loop, is what keeps at most one emission in flight rather
+		// than racing ahead through the whole file first.
+		if (pending) {
+			await pending;
+			pending = undefined;
+		}
+	}
+	reader.finish();
+	if (pending) {
+		await pending;
+	}
 }

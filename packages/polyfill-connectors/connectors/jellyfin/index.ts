@@ -69,18 +69,26 @@ import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { createConnectorHttpGovernor } from "../../src/connector-http-governor.ts";
 import {
-  buildDetailCoverageMessage,
-  buildFullScanCoverageMessage,
-  type CollectContext,
-  createConnectorFailure,
-  nowIso,
-  type RecordData,
-  runConnector,
+	buildDetailCoverageMessage,
+	buildFullScanCoverageMessage,
+	type CollectContext,
+	createConnectorFailure,
+	nowIso,
+	type RecordData,
+	runConnector,
 } from "../../src/connector-runtime.ts";
-import { type FingerprintCursor, openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
+import {
+	type FingerprintCursor,
+	openFingerprintCursor,
+} from "../../src/fingerprint-cursor.ts";
 import { jellyfinPacingProfile } from "../../src/provider-profile.ts";
 import { createRepairBudget } from "../../src/repair-budget.ts";
-import { validateItemsResponse, validateRecord, validateSystemInfo, validateViewsResponse } from "./schemas.ts";
+import {
+	validateItemsResponse,
+	validateRecord,
+	validateSystemInfo,
+	validateViewsResponse,
+} from "./schemas.ts";
 
 // ─── Configuration ────────────────────────────────────────────────────────
 
@@ -92,20 +100,22 @@ let MAX_PAGES_PER_STREAM = 1000; // Guard against infinite pagination (injectabl
 // leaving credential failures terminal. The first username/password attempt is
 // explicitly marked non-retryable by resolveConnection before this pattern is
 // consulted.
-export const JELLYFIN_RETRYABLE_PATTERN = /jellyfin_rate_limited|retryable status \d+|ECONN|ETIMEDOUT|fetch failed/i;
+export const JELLYFIN_RETRYABLE_PATTERN =
+	/jellyfin_rate_limited|retryable status \d+|ECONN|ETIMEDOUT|fetch failed/i;
 
 // Accepts an exact bare date, or a bare date followed by a structurally
 // valid ISO-8601 time-of-day suffix (same time-component shape the
 // libraries/items schemas' own ISO_DATETIME_RE accepts) — never an
 // arbitrary trailing suffix. Used to normalize PremiereDate.
-const DATE_OR_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})?)?$/;
+const DATE_OR_DATETIME_RE =
+	/^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})?)?$/;
 
 // ─── HTTP Governor ────────────────────────────────────────────────────────
 
 const httpGovernor = createConnectorHttpGovernor({
-  name: "jellyfin",
-  maxAttempts: 1,
-  profile: jellyfinPacingProfile(),
+	name: "jellyfin",
+	maxAttempts: 1,
+	profile: jellyfinPacingProfile(),
 });
 
 // ─── Jellyfin API Helper ──────────────────────────────────────────────────
@@ -119,26 +129,29 @@ const httpGovernor = createConnectorHttpGovernor({
  * when joined, silently routing subpath-hosted instances to the wrong host root.
  */
 function validateBaseUrl(urlStr: string): URL {
-  const url = new URL(urlStr);
+	const url = new URL(urlStr);
 
-  if (url.username || url.password) {
-    throw new Error("jellyfin_base_url_has_userinfo");
-  }
+	if (url.username || url.password) {
+		throw new Error("jellyfin_base_url_has_userinfo");
+	}
 
-  const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
-  if (url.protocol === "http:" && !isLoopback) {
-    throw new Error("jellyfin_base_url_requires_https_non_loopback");
-  }
+	const isLoopback =
+		url.hostname === "localhost" ||
+		url.hostname === "127.0.0.1" ||
+		url.hostname === "::1";
+	if (url.protocol === "http:" && !isLoopback) {
+		throw new Error("jellyfin_base_url_requires_https_non_loopback");
+	}
 
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("jellyfin_base_url_unsafe_scheme");
-  }
+	if (!["http:", "https:"].includes(url.protocol)) {
+		throw new Error("jellyfin_base_url_unsafe_scheme");
+	}
 
-  if (!url.pathname.endsWith("/")) {
-    url.pathname = `${url.pathname}/`;
-  }
+	if (!url.pathname.endsWith("/")) {
+		url.pathname = `${url.pathname}/`;
+	}
 
-  return url;
+	return url;
 }
 
 // ─── MediaBrowser Auth Header ─────────────────────────────────────────────
@@ -157,10 +170,10 @@ const MEDIA_BROWSER_VERSION = "0.1.0";
  * authenticate-by-name.test.ts so a future edit cannot silently drop one.
  */
 function buildMediaBrowserAuthHeader(deviceId: string): string {
-  if (!deviceId) {
-    throw new Error("jellyfin_media_browser_device_id_empty");
-  }
-  return `MediaBrowser Client="${MEDIA_BROWSER_CLIENT}", Device="${MEDIA_BROWSER_CLIENT}", DeviceId="${deviceId}", Version="${MEDIA_BROWSER_VERSION}"`;
+	if (!deviceId) {
+		throw new Error("jellyfin_media_browser_device_id_empty");
+	}
+	return `MediaBrowser Client="${MEDIA_BROWSER_CLIENT}", Device="${MEDIA_BROWSER_CLIENT}", DeviceId="${deviceId}", Version="${MEDIA_BROWSER_VERSION}"`;
 }
 
 /**
@@ -172,7 +185,7 @@ function buildMediaBrowserAuthHeader(deviceId: string): string {
  * same connection consistently reuse one device entry.
  */
 function deriveStableDeviceId(seed: string): string {
-  return createHash("sha256").update(seed).digest("hex").slice(0, 32);
+	return createHash("sha256").update(seed).digest("hex").slice(0, 32);
 }
 
 /**
@@ -188,74 +201,84 @@ function deriveStableDeviceId(seed: string): string {
  * is enforced against bytes actually read, not the (possibly missing or
  * lying) Content-Length header.
  */
-async function readBodyWithStreamingCap(body: ReadableStream<Uint8Array>): Promise<string> {
-  const chunks: string[] = [];
-  let totalBytes = 0;
+async function readBodyWithStreamingCap(
+	body: ReadableStream<Uint8Array>,
+): Promise<string> {
+	const chunks: string[] = [];
+	let totalBytes = 0;
 
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
 
-      totalBytes += value.byteLength;
-      if (totalBytes > MAX_JSON_BYTES) {
-        throw new Error(`jellyfin_response_too_large_streaming: ${totalBytes} bytes exceeds ${MAX_JSON_BYTES}`);
-      }
+			totalBytes += value.byteLength;
+			if (totalBytes > MAX_JSON_BYTES) {
+				throw new Error(
+					`jellyfin_response_too_large_streaming: ${totalBytes} bytes exceeds ${MAX_JSON_BYTES}`,
+				);
+			}
 
-      chunks.push(decoder.decode(value, { stream: true }));
-    }
-  } catch (e) {
-    reader.cancel();
-    throw e;
-  }
+			chunks.push(decoder.decode(value, { stream: true }));
+		}
+	} catch (e) {
+		reader.cancel();
+		throw e;
+	}
 
-  return chunks.join("");
+	return chunks.join("");
 }
 
 /** Reject a response whose advisory Content-Length header already exceeds the cap. */
 function rejectOversizedContentLengthHeader(res: Response): void {
-  const contentLength = res.headers.get("content-length");
-  if (contentLength === null) {
-    return;
-  }
-  const bytes = Number.parseInt(contentLength, 10);
-  if (!Number.isNaN(bytes) && bytes > MAX_JSON_BYTES) {
-    throw new Error(`jellyfin_response_too_large_header: ${bytes} bytes exceeds ${MAX_JSON_BYTES}`);
-  }
+	const contentLength = res.headers.get("content-length");
+	if (contentLength === null) {
+		return;
+	}
+	const bytes = Number.parseInt(contentLength, 10);
+	if (!Number.isNaN(bytes) && bytes > MAX_JSON_BYTES) {
+		throw new Error(
+			`jellyfin_response_too_large_header: ${bytes} bytes exceeds ${MAX_JSON_BYTES}`,
+		);
+	}
 }
 
-async function fetchJellyfin(url: URL, apiKey: string): Promise<JellyfinRawResponse> {
-  const res = await fetch(url.toString(), {
-    headers: {
-      Accept: "application/json",
-      "X-Emby-Token": apiKey,
-    },
-    redirect: "error", // Reject redirects
-  });
-  const retryAfter = res.headers.get("retry-after");
+async function fetchJellyfin(
+	url: URL,
+	apiKey: string,
+): Promise<JellyfinRawResponse> {
+	const res = await fetch(url.toString(), {
+		headers: {
+			Accept: "application/json",
+			"X-Emby-Token": apiKey,
+		},
+		redirect: "error", // Reject redirects
+	});
+	const retryAfter = res.headers.get("retry-after");
 
-  // Check Content-Length header as advisory fast-reject (may be missing or wrong)
-  rejectOversizedContentLengthHeader(res);
+	// Check Content-Length header as advisory fast-reject (may be missing or wrong)
+	rejectOversizedContentLengthHeader(res);
 
-  // Read body with streaming byte cap (authoritative, Content-Length is advisory)
-  const body = res.body === null ? "" : await readBodyWithStreamingCap(res.body);
+	// Read body with streaming byte cap (authoritative, Content-Length is advisory)
+	const body =
+		res.body === null ? "" : await readBodyWithStreamingCap(res.body);
 
-  return {
-    body,
-    ...(retryAfter === null ? {} : { headers: { "retry-after": retryAfter } }),
-    status: res.status,
-  };
+	return {
+		body,
+		...(retryAfter === null ? {} : { headers: { "retry-after": retryAfter } }),
+		status: res.status,
+	};
 }
 
 interface JellyfinRawResponse {
-  body: string;
-  headers?: Record<string, string | undefined>;
-  status: number;
+	body: string;
+	headers?: Record<string, string | undefined>;
+	status: number;
 }
 
 /**
@@ -266,94 +289,113 @@ interface JellyfinRawResponse {
  */
 type ReauthFn = () => Promise<string | undefined>;
 
-async function jellyfinRequest<T>(baseUrl: string, path: string, apiKey: string, onReauth?: ReauthFn): Promise<T> {
-  const base = validateBaseUrl(baseUrl);
-  const url = new URL(path, base);
+async function jellyfinRequest<T>(
+	baseUrl: string,
+	path: string,
+	apiKey: string,
+	onReauth?: ReauthFn,
+): Promise<T> {
+	const base = validateBaseUrl(baseUrl);
+	const url = new URL(path, base);
 
-  // Constrain all requests to the owner-supplied baseUrl origin.
-  // Do not follow redirects or allow cross-origin requests.
-  if (url.origin !== base.origin) {
-    throw new Error("jellyfin_ssrf_rejected_cross_origin");
-  }
+	// Constrain all requests to the owner-supplied baseUrl origin.
+	// Do not follow redirects or allow cross-origin requests.
+	if (url.origin !== base.origin) {
+		throw new Error("jellyfin_ssrf_rejected_cross_origin");
+	}
 
-  // Use X-Emby-Token header instead of query param to avoid credential log-leakage
-  const result = await httpGovernor.request<JellyfinRawResponse, JellyfinRawResponse>(
-    () => fetchJellyfin(url, apiKey),
-    (raw) => ({
-      status: raw.status,
-      ...(raw.headers === undefined ? {} : { headers: raw.headers }),
-      value: raw,
-    })
-  );
+	// Use X-Emby-Token header instead of query param to avoid credential log-leakage
+	const result = await httpGovernor.request<
+		JellyfinRawResponse,
+		JellyfinRawResponse
+	>(
+		() => fetchJellyfin(url, apiKey),
+		(raw) => ({
+			status: raw.status,
+			...(raw.headers === undefined ? {} : { headers: raw.headers }),
+			value: raw,
+		}),
+	);
 
-  if (result.value.status === 401 || result.value.status === 403) {
-    // A 401/403 partway through a run (after this same run already proved the
-    // credential valid at sign-in) is far more often a rotated/expired session
-    // token than a genuinely wrong password — see jellyfin/jellyfin session
-    // lifecycle. Self-heal ONCE: mint a fresh token and retry this exact
-    // request, but only if the new token actually differs from the one that
-    // just failed (an identical token means the server really is rejecting
-    // this credential, so retrying would just loop). Mirrors the ChatGPT
-    // connector's stale-token self-heal (chatgpt/index.ts fetchOnce). A
-    // reauth attempt that itself throws (e.g. authenticateByName 500s) must
-    // not escape here — it would bypass the jellyfin_auth_failed classification
-    // below and surface as a generic, unclassified connector error instead.
-    const freshToken = await onReauth?.().catch(() => undefined);
-    if (freshToken && freshToken !== apiKey) {
-      const retryResult = await httpGovernor.request<JellyfinRawResponse, JellyfinRawResponse>(
-        () => fetchJellyfin(url, freshToken),
-        (raw) => ({
-          status: raw.status,
-          ...(raw.headers === undefined ? {} : { headers: raw.headers }),
-          value: raw,
-        })
-      );
-      if (retryResult.value.status !== 401 && retryResult.value.status !== 403) {
-        if (retryResult.value.status < 200 || retryResult.value.status >= 300) {
-          throw new Error(`jellyfin_http_${String(retryResult.value.status)}`);
-        }
-        return JSON.parse(retryResult.value.body) as T;
-      }
-    }
-    throw new Error("jellyfin_auth_failed");
-  }
-  if (result.value.status < 200 || result.value.status >= 300) {
-    throw new Error(`jellyfin_http_${String(result.value.status)}`);
-  }
-  return JSON.parse(result.value.body) as T;
+	if (result.value.status === 401 || result.value.status === 403) {
+		// A 401/403 partway through a run (after this same run already proved the
+		// credential valid at sign-in) is far more often a rotated/expired session
+		// token than a genuinely wrong password — see jellyfin/jellyfin session
+		// lifecycle. Self-heal ONCE: mint a fresh token and retry this exact
+		// request, but only if the new token actually differs from the one that
+		// just failed (an identical token means the server really is rejecting
+		// this credential, so retrying would just loop). Mirrors the ChatGPT
+		// connector's stale-token self-heal (chatgpt/index.ts fetchOnce). A
+		// reauth attempt that itself throws (e.g. authenticateByName 500s) must
+		// not escape here — it would bypass the jellyfin_auth_failed classification
+		// below and surface as a generic, unclassified connector error instead.
+		const freshToken = await onReauth?.().catch(() => undefined);
+		if (freshToken && freshToken !== apiKey) {
+			const retryResult = await httpGovernor.request<
+				JellyfinRawResponse,
+				JellyfinRawResponse
+			>(
+				() => fetchJellyfin(url, freshToken),
+				(raw) => ({
+					status: raw.status,
+					...(raw.headers === undefined ? {} : { headers: raw.headers }),
+					value: raw,
+				}),
+			);
+			if (
+				retryResult.value.status !== 401 &&
+				retryResult.value.status !== 403
+			) {
+				if (retryResult.value.status < 200 || retryResult.value.status >= 300) {
+					throw new Error(`jellyfin_http_${String(retryResult.value.status)}`);
+				}
+				return JSON.parse(retryResult.value.body) as T;
+			}
+		}
+		throw new Error("jellyfin_auth_failed");
+	}
+	if (result.value.status < 200 || result.value.status >= 300) {
+		throw new Error(`jellyfin_http_${String(result.value.status)}`);
+	}
+	return JSON.parse(result.value.body) as T;
 }
 
 interface AuthenticateByNameResult {
-  accessToken: string;
-  userId: string;
+	accessToken: string;
+	userId: string;
 }
 
-function userHasId(user: Record<string, unknown> | undefined): user is Record<string, unknown> & { Id: string } {
-  return user !== undefined && typeof user.Id === "string" && user.Id.length > 0;
+function userHasId(
+	user: Record<string, unknown> | undefined,
+): user is Record<string, unknown> & { Id: string } {
+	return (
+		user !== undefined && typeof user.Id === "string" && user.Id.length > 0
+	);
 }
 
 async function postAuthenticateByName(
-  url: URL,
-  username: string,
-  password: string,
-  mediaBrowserHeader: string
+	url: URL,
+	username: string,
+	password: string,
+	mediaBrowserHeader: string,
 ): Promise<{ body: string; status: number }> {
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      Authorization: mediaBrowserHeader,
-    },
-    // Header auth only. Never the ApiKey=/api_key= query form, which leaks
-    // through server logs and browser history.
-    body: JSON.stringify({ Username: username, Pw: password }),
-    redirect: "error",
-  });
+	const res = await fetch(url.toString(), {
+		method: "POST",
+		headers: {
+			Accept: "application/json",
+			"Content-Type": "application/json",
+			Authorization: mediaBrowserHeader,
+		},
+		// Header auth only. Never the ApiKey=/api_key= query form, which leaks
+		// through server logs and browser history.
+		body: JSON.stringify({ Username: username, Pw: password }),
+		redirect: "error",
+	});
 
-  rejectOversizedContentLengthHeader(res);
-  const body = res.body === null ? "" : await readBodyWithStreamingCap(res.body);
-  return { body, status: res.status };
+	rejectOversizedContentLengthHeader(res);
+	const body =
+		res.body === null ? "" : await readBodyWithStreamingCap(res.body);
+	return { body, status: res.status };
 }
 
 /**
@@ -373,52 +415,64 @@ async function postAuthenticateByName(
  * rather than proceeding with an absent credential.
  */
 async function authenticateByName(
-  baseUrl: string,
-  username: string,
-  password: string,
-  deviceId: string
+	baseUrl: string,
+	username: string,
+	password: string,
+	deviceId: string,
 ): Promise<AuthenticateByNameResult> {
-  const base = validateBaseUrl(baseUrl);
-  const url = new URL("Users/AuthenticateByName", base);
-  if (url.origin !== base.origin) {
-    throw new Error("jellyfin_ssrf_rejected_cross_origin");
-  }
+	const base = validateBaseUrl(baseUrl);
+	const url = new URL("Users/AuthenticateByName", base);
+	if (url.origin !== base.origin) {
+		throw new Error("jellyfin_ssrf_rejected_cross_origin");
+	}
 
-  const mediaBrowserHeader = buildMediaBrowserAuthHeader(deviceId);
+	const mediaBrowserHeader = buildMediaBrowserAuthHeader(deviceId);
 
-  const result = await httpGovernor.request<{ body: string; status: number }, { body: string; status: number }>(
-    () => postAuthenticateByName(url, username, password, mediaBrowserHeader),
-    (raw) => ({ status: raw.status, value: raw })
-  );
+	const result = await httpGovernor.request<
+		{ body: string; status: number },
+		{ body: string; status: number }
+	>(
+		() => postAuthenticateByName(url, username, password, mediaBrowserHeader),
+		(raw) => ({ status: raw.status, value: raw }),
+	);
 
-  if (result.value.status === 401 || result.value.status === 403) {
-    throw new Error("jellyfin_auth_failed");
-  }
-  if (result.value.status < 200 || result.value.status >= 300) {
-    throw new Error(`jellyfin_http_${String(result.value.status)}`);
-  }
+	if (result.value.status === 401 || result.value.status === 403) {
+		throw new Error("jellyfin_auth_failed");
+	}
+	if (result.value.status < 200 || result.value.status >= 300) {
+		throw new Error(`jellyfin_http_${String(result.value.status)}`);
+	}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.value.body);
-  } catch {
-    // biome-ignore lint/style/useErrorCause: intentional — JSON.parse's error can echo a snippet of the response body, which is not useful beyond the message below
-    throw new Error("jellyfin_authenticate_by_name_response_malformed: response was not valid JSON");
-  }
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("jellyfin_authenticate_by_name_response_malformed: response was not an object");
-  }
-  const resp = parsed as Record<string, unknown>;
-  const accessToken = typeof resp.AccessToken === "string" ? resp.AccessToken : "";
-  const user = resp.User as Record<string, unknown> | undefined;
-  if (!accessToken) {
-    throw new Error("jellyfin_authenticate_by_name_no_access_token: response had no AccessToken");
-  }
-  if (!userHasId(user)) {
-    throw new Error("jellyfin_authenticate_by_name_no_user_id: response had no User.Id");
-  }
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(result.value.body);
+	} catch {
+		// biome-ignore lint/style/useErrorCause: intentional — JSON.parse's error can echo a snippet of the response body, which is not useful beyond the message below
+		throw new Error(
+			"jellyfin_authenticate_by_name_response_malformed: response was not valid JSON",
+		);
+	}
+	if (!parsed || typeof parsed !== "object") {
+		throw new Error(
+			"jellyfin_authenticate_by_name_response_malformed: response was not an object",
+		);
+	}
+	const resp = parsed as Record<string, unknown>;
+	const accessToken =
+		typeof resp.AccessToken === "string" ? resp.AccessToken : "";
+	const user = resp.User as Record<string, unknown> | undefined;
+	if (!accessToken) {
+		throw new Error(
+			"jellyfin_authenticate_by_name_no_access_token: response had no AccessToken",
+		);
+	}
+	if (!userHasId(user)) {
+		throw new Error(
+			"jellyfin_authenticate_by_name_no_user_id: response had no User.Id",
+		);
+	}
 
-  return { accessToken, userId: user.Id };
+	return { accessToken, userId: user.Id };
 }
 
 /**
@@ -426,23 +480,25 @@ async function authenticateByName(
  * Fail closed on missing/malformed/decreasing values.
  */
 function validateTotalRecordCount(value: unknown, priorTotal?: number): number {
-  if (typeof value !== "number") {
-    throw new Error("jellyfin_total_record_count_not_number");
-  }
-  if (!Number.isFinite(value)) {
-    throw new Error("jellyfin_total_record_count_not_finite");
-  }
-  if (value < 0) {
-    throw new Error("jellyfin_total_record_count_negative");
-  }
-  if (Number.isInteger(value) === false) {
-    throw new Error("jellyfin_total_record_count_not_integer");
-  }
-  // Detect decreasing counts (indicates malformed response or server bug)
-  if (priorTotal !== undefined && value < priorTotal) {
-    throw new Error(`jellyfin_total_record_count_decreased: ${value} < ${priorTotal}`);
-  }
-  return value;
+	if (typeof value !== "number") {
+		throw new Error("jellyfin_total_record_count_not_number");
+	}
+	if (!Number.isFinite(value)) {
+		throw new Error("jellyfin_total_record_count_not_finite");
+	}
+	if (value < 0) {
+		throw new Error("jellyfin_total_record_count_negative");
+	}
+	if (Number.isInteger(value) === false) {
+		throw new Error("jellyfin_total_record_count_not_integer");
+	}
+	// Detect decreasing counts (indicates malformed response or server bug)
+	if (priorTotal !== undefined && value < priorTotal) {
+		throw new Error(
+			`jellyfin_total_record_count_decreased: ${value} < ${priorTotal}`,
+		);
+	}
+	return value;
 }
 
 /**
@@ -451,7 +507,9 @@ function validateTotalRecordCount(value: unknown, priorTotal?: number): number {
  * share a first item ID; comparing the whole ordered sequence does not.
  */
 function pageFingerprint(pageItems: unknown[]): string {
-  return pageItems.map((item) => String((item as Record<string, unknown>)?.Id ?? "")).join(" ");
+	return pageItems
+		.map((item) => String((item as Record<string, unknown>)?.Id ?? ""))
+		.join(" ");
 }
 
 // ─── Record Builders ──────────────────────────────────────────────────────
@@ -459,13 +517,16 @@ function pageFingerprint(pageItems: unknown[]): string {
 /**
  * Build a libraries record from a Jellyfin View.
  */
-function libraryRecord(view: Record<string, unknown>, fetchedAt: string): RecordData {
-  return {
-    id: view.Id as string,
-    name: view.Name as string,
-    collection_type: (view.CollectionType ?? null) as string | null,
-    fetched_at: fetchedAt,
-  };
+function libraryRecord(
+	view: Record<string, unknown>,
+	fetchedAt: string,
+): RecordData {
+	return {
+		id: view.Id as string,
+		name: view.Name as string,
+		collection_type: (view.CollectionType ?? null) as string | null,
+		fetched_at: fetchedAt,
+	};
 }
 
 /**
@@ -476,10 +537,18 @@ function libraryRecord(view: Record<string, unknown>, fetchedAt: string): Record
  * Feb 30 rolls forward into a later real date) rather than rejecting them,
  * so a round-trip mismatch is what catches that.
  */
-function isRealUtcCalendarDate(year: number, month: number, day: number): boolean {
-  const ms = Date.UTC(year, month - 1, day);
-  const rebuilt = new Date(ms);
-  return rebuilt.getUTCFullYear() === year && rebuilt.getUTCMonth() === month - 1 && rebuilt.getUTCDate() === day;
+function isRealUtcCalendarDate(
+	year: number,
+	month: number,
+	day: number,
+): boolean {
+	const ms = Date.UTC(year, month - 1, day);
+	const rebuilt = new Date(ms);
+	return (
+		rebuilt.getUTCFullYear() === year &&
+		rebuilt.getUTCMonth() === month - 1 &&
+		rebuilt.getUTCDate() === day
+	);
 }
 
 /**
@@ -505,93 +574,107 @@ function isRealUtcCalendarDate(year: number, month: number, day: number): boolea
  * the record — only this field degrades to null.
  */
 function normalizeReleaseDate(premiereDate: unknown): string | null {
-  if (typeof premiereDate !== "string") {
-    return null;
-  }
-  const match = premiereDate.match(DATE_OR_DATETIME_RE);
-  if (!match) {
-    return null;
-  }
-  const [, yearStr, monthStr, dayStr] = match;
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  const day = Number(dayStr);
-  if (!isRealUtcCalendarDate(year, month, day)) {
-    return null;
-  }
-  return `${yearStr}-${monthStr}-${dayStr}`;
+	if (typeof premiereDate !== "string") {
+		return null;
+	}
+	const match = premiereDate.match(DATE_OR_DATETIME_RE);
+	if (!match) {
+		return null;
+	}
+	const [, yearStr, monthStr, dayStr] = match;
+	const year = Number(yearStr);
+	const month = Number(monthStr);
+	const day = Number(dayStr);
+	if (!isRealUtcCalendarDate(year, month, day)) {
+		return null;
+	}
+	return `${yearStr}-${monthStr}-${dayStr}`;
 }
 
 interface JellyfinPlaybackState {
-  playCount: number | null;
-  played: boolean | null;
+	playCount: number | null;
+	played: boolean | null;
 }
 
-function normalizePlaybackState(userData: Record<string, unknown> | undefined): JellyfinPlaybackState {
-  const rawPlayCount = userData?.PlayCount;
-  let playCount: number | null = null;
-  if (typeof rawPlayCount === "number" && Number.isInteger(rawPlayCount) && rawPlayCount >= 0) {
-    playCount = rawPlayCount;
-  }
+function normalizePlaybackState(
+	userData: Record<string, unknown> | undefined,
+): JellyfinPlaybackState {
+	const rawPlayCount = userData?.PlayCount;
+	let playCount: number | null = null;
+	if (
+		typeof rawPlayCount === "number" &&
+		Number.isInteger(rawPlayCount) &&
+		rawPlayCount >= 0
+	) {
+		playCount = rawPlayCount;
+	}
 
-  const rawPlayed = userData?.Played;
-  let played: boolean | null = null;
-  if (typeof rawPlayed === "boolean") {
-    played = rawPlayed;
-  } else if (playCount !== null) {
-    played = playCount > 0;
-  }
+	const rawPlayed = userData?.Played;
+	let played: boolean | null = null;
+	if (typeof rawPlayed === "boolean") {
+		played = rawPlayed;
+	} else if (playCount !== null) {
+		played = playCount > 0;
+	}
 
-  return { playCount, played };
+	return { playCount, played };
 }
 
 /**
  * Build an items record from a Jellyfin Item with UserData and library_id.
  */
-export function itemRecord(item: Record<string, unknown>, libraryId: string): RecordData {
-  const rawUserData = item.UserData;
-  const userData =
-    rawUserData !== null && typeof rawUserData === "object" && !Array.isArray(rawUserData)
-      ? (rawUserData as Record<string, unknown>)
-      : undefined;
-  const playback = normalizePlaybackState(userData);
-  const lastPlayedDate = (userData?.LastPlayedDate as string | null | undefined) ?? null;
+export function itemRecord(
+	item: Record<string, unknown>,
+	libraryId: string,
+): RecordData {
+	const rawUserData = item.UserData;
+	const userData =
+		rawUserData !== null &&
+		typeof rawUserData === "object" &&
+		!Array.isArray(rawUserData)
+			? (rawUserData as Record<string, unknown>)
+			: undefined;
+	const playback = normalizePlaybackState(userData);
+	const lastPlayedDate =
+		(userData?.LastPlayedDate as string | null | undefined) ?? null;
 
-  // Build image URL if PrimaryImage tag exists
-  let imageUrl: string | null = null;
-  if (item.PrimaryImageTag) {
-    imageUrl = `/Items/${item.Id as string}/Images/Primary?tag=${item.PrimaryImageTag as string}`;
-  }
+	// Build image URL if PrimaryImage tag exists
+	let imageUrl: string | null = null;
+	if (item.PrimaryImageTag) {
+		imageUrl = `/Items/${item.Id as string}/Images/Primary?tag=${item.PrimaryImageTag as string}`;
+	}
 
-  // Extract provider IDs (ProviderIds from Jellyfin API)
-  let providerIds: Record<string, string> | null = null;
-  const providerIdsObj = item.ProviderIds as Record<string, unknown> | undefined;
-  if (providerIdsObj && typeof providerIdsObj === "object") {
-    const ids: Record<string, string> = {};
-    for (const [key, val] of Object.entries(providerIdsObj)) {
-      if (typeof val === "string") {
-        ids[key] = val;
-      }
-    }
-    if (Object.keys(ids).length > 0) {
-      providerIds = ids;
-    }
-  }
+	// Extract provider IDs (ProviderIds from Jellyfin API)
+	let providerIds: Record<string, string> | null = null;
+	const providerIdsObj = item.ProviderIds as
+		| Record<string, unknown>
+		| undefined;
+	if (providerIdsObj && typeof providerIdsObj === "object") {
+		const ids: Record<string, string> = {};
+		for (const [key, val] of Object.entries(providerIdsObj)) {
+			if (typeof val === "string") {
+				ids[key] = val;
+			}
+		}
+		if (Object.keys(ids).length > 0) {
+			providerIds = ids;
+		}
+	}
 
-  return {
-    id: item.Id as string,
-    library_id: libraryId,
-    name: item.Name as string,
-    type: (item.Type ?? null) as string | null,
-    played: playback.played,
-    play_count: playback.playCount,
-    last_played_date: lastPlayedDate,
-    image_url: imageUrl,
-    genres: (item.Genres as string[]) ?? [],
-    release_date: normalizeReleaseDate(item.PremiereDate),
-    provider_ids: providerIds,
-    production_year: (item.ProductionYear ?? null) as number | null,
-  };
+	return {
+		id: item.Id as string,
+		library_id: libraryId,
+		name: item.Name as string,
+		type: (item.Type ?? null) as string | null,
+		played: playback.played,
+		play_count: playback.playCount,
+		last_played_date: lastPlayedDate,
+		image_url: imageUrl,
+		genres: (item.Genres as string[]) ?? [],
+		release_date: normalizeReleaseDate(item.PremiereDate),
+		provider_ids: providerIds,
+		production_year: (item.ProductionYear ?? null) as number | null,
+	};
 }
 
 /**
@@ -601,23 +684,23 @@ export function itemRecord(item: Record<string, unknown>, libraryId: string): Re
  * Exclude fetched_at from fingerprint since it changes on every run.
  */
 function openLibraryCursor(state: Record<string, unknown>): FingerprintCursor {
-  return openFingerprintCursor(state.libraries, {
-    excludeFromFingerprint: ["fetched_at"],
-  });
+	return openFingerprintCursor(state.libraries, {
+		excludeFromFingerprint: ["fetched_at"],
+	});
 }
 
 // ─── Main Collector ───────────────────────────────────────────────────────
 
 interface JellyfinConn {
-  apiKey: string;
-  baseUrl: string;
-  /**
-   * Present only for the primary (username/password) path — mints a fresh
-   * AccessToken via AuthenticateByName for mid-run 401/403 self-heal. Absent
-   * for the API-key path, where there is no credential to refresh.
-   */
-  reauth?: ReauthFn;
-  userId: string;
+	apiKey: string;
+	baseUrl: string;
+	/**
+	 * Present only for the primary (username/password) path — mints a fresh
+	 * AccessToken via AuthenticateByName for mid-run 401/403 self-heal. Absent
+	 * for the API-key path, where there is no credential to refresh.
+	 */
+	reauth?: ReauthFn;
+	userId: string;
 }
 
 /** Max number of display names to include in an ambiguous-user error, to avoid dumping the whole roster. */
@@ -629,17 +712,20 @@ const AMBIGUOUS_USER_SAMPLE_SIZE = 5;
  * into the new setup field, and names the field itself.
  */
 function ambiguousUserError(users: readonly Record<string, unknown>[]): Error {
-  const sampleNames = users
-    .map((user) => (typeof user.Name === "string" ? user.Name : null))
-    .filter((name): name is string => name !== null)
-    .slice(0, AMBIGUOUS_USER_SAMPLE_SIZE);
-  const sampleText = sampleNames.length > 0 ? ` Available users include: ${sampleNames.join(", ")}.` : "";
-  return new Error(
-    `jellyfin_ambiguous_user: Users list returned ${users.length} users; an API key does not identify which one to collect as.${sampleText} ` +
-      "Recommended fix: switch this connection to Username/Password sign-in instead — it identifies you " +
-      "automatically and needs no extra field. Or, to keep using the API key, set the 'Jellyfin User ID or " +
-      "Username' field on this connection to the user you want to collect as."
-  );
+	const sampleNames = users
+		.map((user) => (typeof user.Name === "string" ? user.Name : null))
+		.filter((name): name is string => name !== null)
+		.slice(0, AMBIGUOUS_USER_SAMPLE_SIZE);
+	const sampleText =
+		sampleNames.length > 0
+			? ` Available users include: ${sampleNames.join(", ")}.`
+			: "";
+	return new Error(
+		`jellyfin_ambiguous_user: Users list returned ${users.length} users; an API key does not identify which one to collect as.${sampleText} ` +
+			"Recommended fix: switch this connection to Username/Password sign-in instead — it identifies you " +
+			"automatically and needs no extra field. Or, to keep using the API key, set the 'Jellyfin User ID or " +
+			"Username' field on this connection to the user you want to collect as.",
+	);
 }
 
 /**
@@ -650,20 +736,26 @@ function ambiguousUserError(users: readonly Record<string, unknown>[]): Error {
  * that doesn't match any user fails the run rather than silently falling
  * through to a different resolution branch.
  */
-function resolveOwnerSuppliedUserId(ownerSupplied: string, users: readonly Record<string, unknown>[]): string {
-  const byId = users.find((user) => user.Id === ownerSupplied);
-  if (userHasId(byId)) {
-    return byId.Id;
-  }
-  const needle = ownerSupplied.toLowerCase();
-  const byName = users.find((user) => typeof user.Name === "string" && user.Name.toLowerCase() === needle);
-  if (userHasId(byName)) {
-    return byName.Id;
-  }
-  throw new Error(
-    `jellyfin_configured_user_not_found: no user with id or username '${ownerSupplied}' was found on this server; ` +
-      "check the 'Jellyfin User ID or Username' field on this connection"
-  );
+function resolveOwnerSuppliedUserId(
+	ownerSupplied: string,
+	users: readonly Record<string, unknown>[],
+): string {
+	const byId = users.find((user) => user.Id === ownerSupplied);
+	if (userHasId(byId)) {
+		return byId.Id;
+	}
+	const needle = ownerSupplied.toLowerCase();
+	const byName = users.find(
+		(user) =>
+			typeof user.Name === "string" && user.Name.toLowerCase() === needle,
+	);
+	if (userHasId(byName)) {
+		return byName.Id;
+	}
+	throw new Error(
+		`jellyfin_configured_user_not_found: no user with id or username '${ownerSupplied}' was found on this server; ` +
+			"check the 'Jellyfin User ID or Username' field on this connection",
+	);
 }
 
 /**
@@ -674,17 +766,17 @@ function resolveOwnerSuppliedUserId(ownerSupplied: string, users: readonly Recor
  * several.
  */
 function pickUserId(users: readonly Record<string, unknown>[]): string {
-  if (users.length === 0) {
-    throw new Error("jellyfin_no_users: Users list returned no users");
-  }
-  if (users.length > 1) {
-    throw ambiguousUserError(users);
-  }
-  const [user] = users;
-  if (!userHasId(user)) {
-    throw new Error("jellyfin_user_id_missing: Users response had no Id field");
-  }
-  return user.Id;
+	if (users.length === 0) {
+		throw new Error("jellyfin_no_users: Users list returned no users");
+	}
+	if (users.length > 1) {
+		throw ambiguousUserError(users);
+	}
+	const [user] = users;
+	if (!userHasId(user)) {
+		throw new Error("jellyfin_user_id_missing: Users response had no Id field");
+	}
+	return user.Id;
 }
 
 /**
@@ -696,22 +788,28 @@ function pickUserId(users: readonly Record<string, unknown>[]): string {
  * where a server-level key cannot. Any other failure (auth, network, 5xx)
  * propagates, since those are real problems, not an absent-signal case.
  */
-async function tryUsersMe(baseUrl: string, apiKey: string): Promise<string | undefined> {
-  let resp: unknown;
-  try {
-    resp = await jellyfinRequest<unknown>(baseUrl, "Users/Me", apiKey);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.startsWith("jellyfin_http_400") || message.startsWith("jellyfin_http_404")) {
-      return;
-    }
-    throw error;
-  }
-  if (resp === null || typeof resp !== "object") {
-    return;
-  }
-  const user = resp as Record<string, unknown>;
-  return userHasId(user) ? user.Id : undefined;
+async function tryUsersMe(
+	baseUrl: string,
+	apiKey: string,
+): Promise<string | undefined> {
+	let resp: unknown;
+	try {
+		resp = await jellyfinRequest<unknown>(baseUrl, "Users/Me", apiKey);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (
+			message.startsWith("jellyfin_http_400") ||
+			message.startsWith("jellyfin_http_404")
+		) {
+			return;
+		}
+		throw error;
+	}
+	if (resp === null || typeof resp !== "object") {
+		return;
+	}
+	const user = resp as Record<string, unknown>;
+	return userHasId(user) ? user.Id : undefined;
 }
 
 /**
@@ -727,224 +825,265 @@ async function tryUsersMe(baseUrl: string, apiKey: string): Promise<string | und
  * the true cause (auth shape, unsupported endpoint, malformed response, no
  * matching user) with a misleading generic error from a fabricated identity.
  */
-async function resolveUserId(baseUrl: string, apiKey: string, ownerSuppliedUserId?: string): Promise<string> {
-  const usersResp = await jellyfinRequest<unknown>(baseUrl, "Users", apiKey);
-  if (!Array.isArray(usersResp)) {
-    throw new Error("jellyfin_users_response_malformed: Users response was not an array");
-  }
-  const users = usersResp as Record<string, unknown>[];
+async function resolveUserId(
+	baseUrl: string,
+	apiKey: string,
+	ownerSuppliedUserId?: string,
+): Promise<string> {
+	const usersResp = await jellyfinRequest<unknown>(baseUrl, "Users", apiKey);
+	if (!Array.isArray(usersResp)) {
+		throw new Error(
+			"jellyfin_users_response_malformed: Users response was not an array",
+		);
+	}
+	const users = usersResp as Record<string, unknown>[];
 
-  if (ownerSuppliedUserId) {
-    return resolveOwnerSuppliedUserId(ownerSuppliedUserId, users);
-  }
+	if (ownerSuppliedUserId) {
+		return resolveOwnerSuppliedUserId(ownerSuppliedUserId, users);
+	}
 
-  const meUserId = await tryUsersMe(baseUrl, apiKey);
-  if (meUserId !== undefined) {
-    return meUserId;
-  }
+	const meUserId = await tryUsersMe(baseUrl, apiKey);
+	if (meUserId !== undefined) {
+		return meUserId;
+	}
 
-  return pickUserId(users);
+	return pickUserId(users);
 }
 
-async function fetchLibraries(conn: JellyfinConn): Promise<Record<string, unknown>[]> {
-  const viewsResp = await jellyfinRequest<{ Items: unknown[] }>(
-    conn.baseUrl,
-    `Users/${conn.userId}/Views`,
-    conn.apiKey,
-    conn.reauth
-  );
-  const validatedViews = validateViewsResponse(viewsResp);
-  return validatedViews.Items as Record<string, unknown>[];
+async function fetchLibraries(
+	conn: JellyfinConn,
+): Promise<Record<string, unknown>[]> {
+	const viewsResp = await jellyfinRequest<{ Items: unknown[] }>(
+		conn.baseUrl,
+		`Users/${conn.userId}/Views`,
+		conn.apiKey,
+		conn.reauth,
+	);
+	const validatedViews = validateViewsResponse(viewsResp);
+	return validatedViews.Items as Record<string, unknown>[];
 }
 
 async function collectLibraries(
-  conn: JellyfinConn,
-  ctx: Pick<CollectContext, "emit" | "emitRecord" | "progress" | "state">,
-  now: string
+	conn: JellyfinConn,
+	ctx: Pick<CollectContext, "emit" | "emitRecord" | "progress" | "state">,
+	now: string,
 ): Promise<void> {
-  const { state, emitRecord, emit, progress } = ctx;
-  await progress("Fetching Jellyfin libraries", { stream: "libraries" });
+	const { state, emitRecord, emit, progress } = ctx;
+	await progress("Fetching Jellyfin libraries", { stream: "libraries" });
 
-  const libraryCursor = openLibraryCursor(state);
-  const views = await fetchLibraries(conn);
+	const libraryCursor = openLibraryCursor(state);
+	const views = await fetchLibraries(conn);
 
-  for (const view of views) {
-    const rec = libraryRecord(view, now);
-    if (libraryCursor.shouldEmit(rec)) {
-      await emitRecord("libraries", rec);
-    }
-  }
+	for (const view of views) {
+		const rec = libraryRecord(view, now);
+		if (libraryCursor.shouldEmit(rec)) {
+			await emitRecord("libraries", rec);
+		}
+	}
 
-  libraryCursor.dropUnseenIds();
-  if (!state.libraries || typeof state.libraries !== "object") {
-    state.libraries = {};
-  }
-  (state.libraries as Record<string, unknown>).fetched_at = now;
-  (state.libraries as Record<string, unknown>).fingerprints = libraryCursor.toState();
+	libraryCursor.dropUnseenIds();
+	if (!state.libraries || typeof state.libraries !== "object") {
+		state.libraries = {};
+	}
+	(state.libraries as Record<string, unknown>).fetched_at = now;
+	(state.libraries as Record<string, unknown>).fingerprints =
+		libraryCursor.toState();
 
-  await emit({ type: "STATE", stream: "libraries", cursor: state.libraries });
-  // Declare coverage: `views.length` is the enumerated boundary size, measured at
-  // the Jellyfin Views API. Every enumerated library is either emitted or suppressed
-  // as unchanged (unchanged via fingerprint), so covered === considered.
-  await emit(buildFullScanCoverageMessage("libraries", views.length));
-  await progress(`Fetched ${views.length} libraries`, { stream: "libraries", count: views.length });
+	await emit({ type: "STATE", stream: "libraries", cursor: state.libraries });
+	// Declare coverage: `views.length` is the enumerated boundary size, measured at
+	// the Jellyfin Views API. Every enumerated library is either emitted or suppressed
+	// as unchanged (unchanged via fingerprint), so covered === considered.
+	await emit(buildFullScanCoverageMessage("libraries", views.length));
+	await progress(`Fetched ${views.length} libraries`, {
+		stream: "libraries",
+		count: views.length,
+	});
 }
 
 /** Paginate a single library's items (500/page), guarding against non-advancing and runaway pagination. */
 async function collectItemsForLibrary(
-  conn: JellyfinConn,
-  libraryId: string,
-  ctx: Pick<CollectContext, "emitRecord">
+	conn: JellyfinConn,
+	libraryId: string,
+	ctx: Pick<CollectContext, "emitRecord">,
 ): Promise<{ considered: number; covered: number }> {
-  const { emitRecord } = ctx;
-  let startIndex = 0;
-  const pageSize = 500;
-  let hasMore = true;
-  let pageCount = 0;
-  let priorTotal: number | undefined;
-  let lastPageFingerprint: string | undefined; // Full ordered-ID fingerprint of the previous page
-  let covered = 0;
+	const { emitRecord } = ctx;
+	let startIndex = 0;
+	const pageSize = 500;
+	let hasMore = true;
+	let pageCount = 0;
+	let priorTotal: number | undefined;
+	let lastPageFingerprint: string | undefined; // Full ordered-ID fingerprint of the previous page
+	let covered = 0;
 
-  while (hasMore) {
-    // Guard against infinite pagination (max pages configurable for testing)
-    if (pageCount >= MAX_PAGES_PER_STREAM) {
-      throw new Error(`jellyfin_max_pages_exceeded: library ${libraryId} exceeded ${MAX_PAGES_PER_STREAM} pages`);
-    }
+	while (hasMore) {
+		// Guard against infinite pagination (max pages configurable for testing)
+		if (pageCount >= MAX_PAGES_PER_STREAM) {
+			throw new Error(
+				`jellyfin_max_pages_exceeded: library ${libraryId} exceeded ${MAX_PAGES_PER_STREAM} pages`,
+			);
+		}
 
-    const itemsPath = `Users/${conn.userId}/Items?ParentId=${libraryId}&StartIndex=${startIndex}&Limit=${pageSize}`;
-    const itemsResp = await jellyfinRequest<{ Items: unknown[]; TotalRecordCount?: unknown }>(
-      conn.baseUrl,
-      itemsPath,
-      conn.apiKey,
-      conn.reauth
-    );
-    const validatedItems = validateItemsResponse(itemsResp);
+		const itemsPath = `Users/${conn.userId}/Items?ParentId=${libraryId}&StartIndex=${startIndex}&Limit=${pageSize}`;
+		const itemsResp = await jellyfinRequest<{
+			Items: unknown[];
+			TotalRecordCount?: unknown;
+		}>(conn.baseUrl, itemsPath, conn.apiKey, conn.reauth);
+		const validatedItems = validateItemsResponse(itemsResp);
 
-    // Validate TotalRecordCount: must exist and be finite nonnegative integer
-    if (validatedItems.TotalRecordCount === undefined || validatedItems.TotalRecordCount === null) {
-      throw new Error(`jellyfin_total_record_count_missing: library ${libraryId} page ${pageCount}`);
-    }
-    const totalCount = validateTotalRecordCount(validatedItems.TotalRecordCount, priorTotal);
-    priorTotal = totalCount;
+		// Validate TotalRecordCount: must exist and be finite nonnegative integer
+		if (
+			validatedItems.TotalRecordCount === undefined ||
+			validatedItems.TotalRecordCount === null
+		) {
+			throw new Error(
+				`jellyfin_total_record_count_missing: library ${libraryId} page ${pageCount}`,
+			);
+		}
+		const totalCount = validateTotalRecordCount(
+			validatedItems.TotalRecordCount,
+			priorTotal,
+		);
+		priorTotal = totalCount;
 
-    const pageItems = validatedItems.Items;
+		const pageItems = validatedItems.Items;
 
-    // Detect actual repeated page: fingerprint the full ordered ID sequence,
-    // not just the first item — two distinct pages that happen to share a
-    // first item ID must not be misdetected as non-advancing.
-    const currentPageFingerprint = pageFingerprint(pageItems);
-    if (pageCount > 0 && pageItems.length > 0 && currentPageFingerprint === lastPageFingerprint) {
-      throw new Error(
-        `jellyfin_pagination_non_advancing: library ${libraryId} page ${pageCount} has same ordered item-ID sequence as page ${pageCount - 1}`
-      );
-    }
+		// Detect actual repeated page: fingerprint the full ordered ID sequence,
+		// not just the first item — two distinct pages that happen to share a
+		// first item ID must not be misdetected as non-advancing.
+		const currentPageFingerprint = pageFingerprint(pageItems);
+		if (
+			pageCount > 0 &&
+			pageItems.length > 0 &&
+			currentPageFingerprint === lastPageFingerprint
+		) {
+			throw new Error(
+				`jellyfin_pagination_non_advancing: library ${libraryId} page ${pageCount} has same ordered item-ID sequence as page ${pageCount - 1}`,
+			);
+		}
 
-    for (const item of pageItems) {
-      const rec = itemRecord(item as Record<string, unknown>, libraryId);
-      if (validateRecord("items", rec).ok) {
-        covered += 1;
-      }
-      await emitRecord("items", rec);
-    }
+		for (const item of pageItems) {
+			const rec = itemRecord(item as Record<string, unknown>, libraryId);
+			if (validateRecord("items", rec).ok) {
+				covered += 1;
+			}
+			await emitRecord("items", rec);
+		}
 
-    lastPageFingerprint = currentPageFingerprint;
+		lastPageFingerprint = currentPageFingerprint;
 
-    startIndex += pageSize;
-    hasMore = startIndex < totalCount;
-    pageCount += 1;
-  }
+		startIndex += pageSize;
+		hasMore = startIndex < totalCount;
+		pageCount += 1;
+	}
 
-  // `priorTotal` holds the last validated `TotalRecordCount` — the source's own
-  // inventory size for this library, already load-bearing for the pagination
-  // stop above. A library that paginated at least once always has it; the
-  // `?? 0` only covers the unreachable no-page case (the loop runs at least
-  // once and throws when the field is missing).
-  return { considered: priorTotal ?? 0, covered };
+	// `priorTotal` holds the last validated `TotalRecordCount` — the source's own
+	// inventory size for this library, already load-bearing for the pagination
+	// stop above. A library that paginated at least once always has it; the
+	// `?? 0` only covers the unreachable no-page case (the loop runs at least
+	// once and throws when the field is missing).
+	return { considered: priorTotal ?? 0, covered };
 }
 
 async function collectItems(
-  conn: JellyfinConn,
-  ctx: Pick<CollectContext, "emit" | "emitRecord" | "progress" | "state">,
-  now: string
+	conn: JellyfinConn,
+	ctx: Pick<CollectContext, "emit" | "emitRecord" | "progress" | "state">,
+	now: string,
 ): Promise<void> {
-  const { state, emit, progress } = ctx;
-  await progress("Fetching Jellyfin items", { stream: "items" });
+	const { state, emit, progress } = ctx;
+	await progress("Fetching Jellyfin items", { stream: "items" });
 
-  if (!state.items || typeof state.items !== "object") {
-    state.items = {};
-  }
+	if (!state.items || typeof state.items !== "object") {
+		state.items = {};
+	}
 
-  const views = await fetchLibraries(conn);
-  let totalItemsCovered = 0;
-  let totalItemsConsidered = 0;
+	const views = await fetchLibraries(conn);
+	let totalItemsCovered = 0;
+	let totalItemsConsidered = 0;
 
-  for (const view of views) {
-    const libraryId = (view as Record<string, string>)?.Id;
-    if (!libraryId) {
-      continue;
-    }
+	for (const view of views) {
+		const libraryId = (view as Record<string, string>)?.Id;
+		if (!libraryId) {
+			continue;
+		}
 
-    await progress("Fetching items from library", { stream: "items" });
-    const library = await collectItemsForLibrary(conn, libraryId, ctx);
-    totalItemsCovered += library.covered;
-    totalItemsConsidered += library.considered;
+		await progress("Fetching items from library", { stream: "items" });
+		const library = await collectItemsForLibrary(conn, libraryId, ctx);
+		totalItemsCovered += library.covered;
+		totalItemsConsidered += library.considered;
 
-    (state.items as Record<string, Record<string, unknown>>)[libraryId] = { last_fetched_at: now };
-  }
+		(state.items as Record<string, Record<string, unknown>>)[libraryId] = {
+			last_fetched_at: now,
+		};
+	}
 
-  await emit({ type: "STATE", stream: "items", cursor: state.items });
-  // The denominator is the sum of each library's source-reported
-  // `TotalRecordCount`, measured at the pagination site and independent of what
-  // was emitted. `items` has no unchanged-suppression lane — every paged item is
-  // emitted — so the schema-valid count is the honest covered numerator, and a
-  // library that reported more items than it served reads partial rather than
-  // complete.
-  await emit(
-    buildDetailCoverageMessage({
-      stream: "items",
-      stateStream: "items",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: totalItemsConsidered,
-      covered: totalItemsCovered,
-    })
-  );
-  await progress(`Fetched ${totalItemsCovered} valid items across all libraries`, {
-    stream: "items",
-    count: totalItemsCovered,
-  });
+	await emit({ type: "STATE", stream: "items", cursor: state.items });
+	// The denominator is the sum of each library's source-reported
+	// `TotalRecordCount`, measured at the pagination site and independent of what
+	// was emitted. `items` has no unchanged-suppression lane — every paged item is
+	// emitted — so the schema-valid count is the honest covered numerator, and a
+	// library that reported more items than it served reads partial rather than
+	// complete.
+	await emit(
+		buildDetailCoverageMessage({
+			stream: "items",
+			stateStream: "items",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: totalItemsConsidered,
+			covered: totalItemsCovered,
+		}),
+	);
+	await progress(
+		`Fetched ${totalItemsCovered} valid items across all libraries`,
+		{
+			stream: "items",
+			count: totalItemsCovered,
+		},
+	);
 }
 
 /** Map a collect() failure to a SKIP_RESULT reason for both streams. */
 function skipReasonFor(message: string): { reason: string; message: string } {
-  if (message === "jellyfin_auth_failed") {
-    return { reason: "jellyfin_auth_failed", message: "Jellyfin username/password or API key invalid" };
-  }
-  if (message === "jellyfin_missing_credentials") {
-    return {
-      reason: "jellyfin_missing_credentials",
-      message:
-        "Missing JELLYFIN_BASE_URL and either JELLYFIN_USERNAME+JELLYFIN_PASSWORD (recommended — works for " +
-        "any account) or JELLYFIN_API_KEY (admin-only, advanced)",
-    };
-  }
-  if (message.startsWith("jellyfin_authenticate_by_name_")) {
-    return { reason: "jellyfin_auth_failed", message: `Jellyfin sign-in failed: ${message}` };
-  }
-  if (message.startsWith("jellyfin_http_")) {
-    // HTTP errors during libraries fetch affect both; during items affect only items.
-    // Since we can't easily distinguish, emit for both conservatively.
-    return { reason: "jellyfin_http_error", message: `Jellyfin HTTP error: ${message}` };
-  }
-  return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
+	if (message === "jellyfin_auth_failed") {
+		return {
+			reason: "jellyfin_auth_failed",
+			message: "Jellyfin username/password or API key invalid",
+		};
+	}
+	if (message === "jellyfin_missing_credentials") {
+		return {
+			reason: "jellyfin_missing_credentials",
+			message:
+				"Missing JELLYFIN_BASE_URL and either JELLYFIN_USERNAME+JELLYFIN_PASSWORD (recommended — works for " +
+				"any account) or JELLYFIN_API_KEY (admin-only, advanced)",
+		};
+	}
+	if (message.startsWith("jellyfin_authenticate_by_name_")) {
+		return {
+			reason: "jellyfin_auth_failed",
+			message: `Jellyfin sign-in failed: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_http_")) {
+		// HTTP errors during libraries fetch affect both; during items affect only items.
+		// Since we can't easily distinguish, emit for both conservatively.
+		return {
+			reason: "jellyfin_http_error",
+			message: `Jellyfin HTTP error: ${message}`,
+		};
+	}
+	return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
 }
 
-async function emitErrorSkipResults(emit: CollectContext["emit"], error: unknown): Promise<void> {
-  const message = error instanceof Error ? error.message : String(error);
-  const { reason, message: skipMessage } = skipReasonFor(message);
-  for (const stream of ["libraries", "items"]) {
-    await emit({ type: "SKIP_RESULT", stream, reason, message: skipMessage });
-  }
+async function emitErrorSkipResults(
+	emit: CollectContext["emit"],
+	error: unknown,
+): Promise<void> {
+	const message = error instanceof Error ? error.message : String(error);
+	const { reason, message: skipMessage } = skipReasonFor(message);
+	for (const stream of ["libraries", "items"]) {
+		await emit({ type: "SKIP_RESULT", stream, reason, message: skipMessage });
+	}
 }
 
 /**
@@ -966,127 +1105,154 @@ async function emitErrorSkipResults(emit: CollectContext["emit"], error: unknown
  * resolve.
  */
 async function resolveConnection(
-  baseUrl: string,
-  username: string | undefined,
-  password: string | undefined,
-  apiKey: string | undefined,
-  ownerSuppliedUserId: string | undefined,
-  progress: CollectContext["progress"],
-  repairBudget: ReturnType<typeof createRepairBudget>
+	baseUrl: string,
+	username: string | undefined,
+	password: string | undefined,
+	apiKey: string | undefined,
+	ownerSuppliedUserId: string | undefined,
+	progress: CollectContext["progress"],
+	repairBudget: ReturnType<typeof createRepairBudget>,
 ): Promise<JellyfinConn> {
-  if (username && password) {
-    await progress("Signing in to Jellyfin with username and password");
-    const deviceId = deriveStableDeviceId(`${baseUrl} ${username}`);
-    // The POST below sends Username/Pw over the wire the instant fetch() is
-    // called — a transport fault here (e.g. ECONNRESET) can't be told apart
-    // from "reached the server". This is the run's FIRST auth attempt: no
-    // budget/flag exists yet to stop a fresh process from redispatching and
-    // resending the identical stored password (mode 1). Force non-retryable
-    // regardless of message text, exactly like every browser connector's
-    // onCredentialSubmit marker — do NOT wrap the mid-run `reauth` call below,
-    // which is already bounded by `repairBudget` (mode 2, untouched).
-    let accessToken: string;
-    let userId: string;
-    try {
-      ({ accessToken, userId } = await authenticateByName(baseUrl, username, password, deviceId));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw createConnectorFailure("jellyfin_session_failed", `jellyfin_session_failed: ${message}`, {
-        cause: err,
-        retryable: false,
-      });
-    }
-    await progress("Signed in to Jellyfin");
+	if (username && password) {
+		await progress("Signing in to Jellyfin with username and password");
+		const deviceId = deriveStableDeviceId(`${baseUrl} ${username}`);
+		// The POST below sends Username/Pw over the wire the instant fetch() is
+		// called — a transport fault here (e.g. ECONNRESET) can't be told apart
+		// from "reached the server". This is the run's FIRST auth attempt: no
+		// budget/flag exists yet to stop a fresh process from redispatching and
+		// resending the identical stored password (mode 1). Force non-retryable
+		// regardless of message text, exactly like every browser connector's
+		// onCredentialSubmit marker — do NOT wrap the mid-run `reauth` call below,
+		// which is already bounded by `repairBudget` (mode 2, untouched).
+		let accessToken: string;
+		let userId: string;
+		try {
+			({ accessToken, userId } = await authenticateByName(
+				baseUrl,
+				username,
+				password,
+				deviceId,
+			));
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			throw createConnectorFailure(
+				"jellyfin_session_failed",
+				`jellyfin_session_failed: ${message}`,
+				{
+					cause: err,
+					retryable: false,
+				},
+			);
+		}
+		await progress("Signed in to Jellyfin");
 
-    const conn: JellyfinConn = { baseUrl, apiKey: accessToken, userId };
-    // `repairBudget` is shared across both streams and, within `items`, every
-    // library and page (see `collect`) — a token the server revokes again
-    // shortly after each self-heal must not drive one automated
-    // AuthenticateByName login per 401 across a whole catalog. Once spent,
-    // every later 401/403 gets `undefined` back, same as the API-key path's
-    // "no self-heal available".
-    conn.reauth = async () => {
-      if (!repairBudget.tryConsume()) {
-        return;
-      }
-      const refreshed = await authenticateByName(baseUrl, username, password, deviceId);
-      conn.apiKey = refreshed.accessToken;
-      return refreshed.accessToken;
-    };
-    return conn;
-  }
+		const conn: JellyfinConn = { baseUrl, apiKey: accessToken, userId };
+		// `repairBudget` is shared across both streams and, within `items`, every
+		// library and page (see `collect`) — a token the server revokes again
+		// shortly after each self-heal must not drive one automated
+		// AuthenticateByName login per 401 across a whole catalog. Once spent,
+		// every later 401/403 gets `undefined` back, same as the API-key path's
+		// "no self-heal available".
+		conn.reauth = async () => {
+			if (!repairBudget.tryConsume()) {
+				return;
+			}
+			const refreshed = await authenticateByName(
+				baseUrl,
+				username,
+				password,
+				deviceId,
+			);
+			conn.apiKey = refreshed.accessToken;
+			return refreshed.accessToken;
+		};
+		return conn;
+	}
 
-  if (apiKey) {
-    await progress("Probing Jellyfin server");
-    const sysInfo = await jellyfinRequest(baseUrl, "System/Info", apiKey);
-    validateSystemInfo(sysInfo);
-    await progress("Connected to Jellyfin server");
+	if (apiKey) {
+		await progress("Probing Jellyfin server");
+		const sysInfo = await jellyfinRequest(baseUrl, "System/Info", apiKey);
+		validateSystemInfo(sysInfo);
+		await progress("Connected to Jellyfin server");
 
-    const userId = await resolveUserId(baseUrl, apiKey, ownerSuppliedUserId);
-    return { baseUrl, apiKey, userId };
-  }
+		const userId = await resolveUserId(baseUrl, apiKey, ownerSuppliedUserId);
+		return { baseUrl, apiKey, userId };
+	}
 
-  throw new Error("jellyfin_missing_credentials");
+	throw new Error("jellyfin_missing_credentials");
 }
 
 async function collect(ctx: CollectContext): Promise<void> {
-  const { credentials, requested, emit, progress } = ctx;
+	const { credentials, requested, emit, progress } = ctx;
 
-  const baseUrl = (credentials.base_url as string | undefined) ?? process.env.JELLYFIN_BASE_URL;
-  const username = (credentials.username as string | undefined) ?? process.env.JELLYFIN_USERNAME;
-  const password = (credentials.password as string | undefined) ?? process.env.JELLYFIN_PASSWORD;
-  const apiKey = (credentials.secret as string | undefined) ?? process.env.JELLYFIN_API_KEY;
-  const ownerSuppliedUserId = (credentials.jellyfin_user_id as string | undefined) ?? process.env.JELLYFIN_USER_ID;
+	const baseUrl =
+		(credentials.base_url as string | undefined) ??
+		process.env.JELLYFIN_BASE_URL;
+	const username =
+		(credentials.username as string | undefined) ??
+		process.env.JELLYFIN_USERNAME;
+	const password =
+		(credentials.password as string | undefined) ??
+		process.env.JELLYFIN_PASSWORD;
+	const apiKey =
+		(credentials.secret as string | undefined) ?? process.env.JELLYFIN_API_KEY;
+	const ownerSuppliedUserId =
+		(credentials.jellyfin_user_id as string | undefined) ??
+		process.env.JELLYFIN_USER_ID;
 
-  if (!(baseUrl && ((username && password) || apiKey))) {
-    throw new Error("jellyfin_missing_credentials");
-  }
+	if (!(baseUrl && ((username && password) || apiKey))) {
+		throw new Error("jellyfin_missing_credentials");
+	}
 
-  const now = nowIso();
+	const now = nowIso();
 
-  // Constructed once per run, before the first stream, so the reauth budget
-  // it hands to `resolveConnection` is shared run-wide rather than reset per
-  // stream/library/page.
-  const repairBudget = createRepairBudget();
+	// Constructed once per run, before the first stream, so the reauth budget
+	// it hands to `resolveConnection` is shared run-wide rather than reset per
+	// stream/library/page.
+	const repairBudget = createRepairBudget();
 
-  try {
-    const conn = await resolveConnection(
-      baseUrl,
-      username,
-      password,
-      apiKey,
-      ownerSuppliedUserId,
-      progress,
-      repairBudget
-    );
+	try {
+		const conn = await resolveConnection(
+			baseUrl,
+			username,
+			password,
+			apiKey,
+			ownerSuppliedUserId,
+			progress,
+			repairBudget,
+		);
 
-    if (requested.has("libraries")) {
-      await collectLibraries(conn, ctx, now);
-    }
-    if (requested.has("items")) {
-      await collectItems(conn, ctx, now);
-    }
-  } catch (error) {
-    await emitErrorSkipResults(emit, error);
-    throw error;
-  }
+		if (requested.has("libraries")) {
+			await collectLibraries(conn, ctx, now);
+		}
+		if (requested.has("items")) {
+			await collectItems(conn, ctx, now);
+		}
+	} catch (error) {
+		await emitErrorSkipResults(emit, error);
+		throw error;
+	}
 }
 
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "jellyfin",
-    collect,
-    validateRecord,
-    retryablePattern: JELLYFIN_RETRYABLE_PATTERN,
-  });
+	runConnector({
+		name: "jellyfin",
+		collect,
+		validateRecord,
+		retryablePattern: JELLYFIN_RETRYABLE_PATTERN,
+	});
 }
 
 export { collect };
 // Test-only exports (allow injection of config for testing without slow network calls)
 export const __setMaxPagesPerStream = (n: number) => {
-  MAX_PAGES_PER_STREAM = n;
+	MAX_PAGES_PER_STREAM = n;
 };
 export const __setMaxJsonBytes = (n: number) => {
-  MAX_JSON_BYTES = n;
+	MAX_JSON_BYTES = n;
 };
-export { buildMediaBrowserAuthHeader, deriveStableDeviceId, normalizeReleaseDate };
+export {
+	buildMediaBrowserAuthHeader,
+	deriveStableDeviceId,
+	normalizeReleaseDate,
+};

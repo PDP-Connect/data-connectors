@@ -36,12 +36,15 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
  * are short labels; `order_date` is an ISO datetime.
  */
 export const ordersSchema = z.object({
-  id: z.string().min(1).max(200),
-  order_date: z.string().regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime").nullable(),
-  store: pdppSafeText.max(500).nullable(),
-  method: z.string().min(1).max(64).nullable(),
-  total_cents: z.number().int().min(0).nullable(),
-  item_count: z.number().int().min(0).nullable(),
+	id: z.string().min(1).max(200),
+	order_date: z
+		.string()
+		.regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime")
+		.nullable(),
+	store: pdppSafeText.max(500).nullable(),
+	method: z.string().min(1).max(64).nullable(),
+	total_cents: z.number().int().min(0).nullable(),
+	item_count: z.number().int().min(0).nullable(),
 });
 
 /**
@@ -52,14 +55,14 @@ export const ordersSchema = z.object({
  * `object|null` with no interior contract), or null when no USDA match.
  */
 export const orderItemsSchema = z.object({
-  id: z.string().min(1).max(200),
-  order_id: z.string().min(1).max(200),
-  name: pdppSafeText.max(1000),
-  quantity: z.number().min(0).nullable(),
-  unit_price_cents: z.number().int().min(0).nullable(),
-  // Opaque USDA nutrition payload, preserved verbatim; manifest gives no
-  // interior contract. Constrained to a JSON object (not an arbitrary value).
-  nutrition: z.record(z.string(), z.unknown()).nullable(),
+	id: z.string().min(1).max(200),
+	order_id: z.string().min(1).max(200),
+	name: pdppSafeText.max(1000),
+	quantity: z.number().min(0).nullable(),
+	unit_price_cents: z.number().int().min(0).nullable(),
+	// Opaque USDA nutrition payload, preserved verbatim; manifest gives no
+	// interior contract. Constrained to a JSON object (not an arbitrary value).
+	nutrition: z.record(z.string(), z.unknown()).nullable(),
 });
 
 /**
@@ -67,8 +70,8 @@ export const orderItemsSchema = z.object({
  * connector declares (and will emit once extraction is wired).
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  orders: ordersSchema,
-  order_items: orderItemsSchema,
+	orders: ordersSchema,
+	order_items: orderItemsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

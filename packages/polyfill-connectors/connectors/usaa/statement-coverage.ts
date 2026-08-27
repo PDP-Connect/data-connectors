@@ -37,8 +37,14 @@
 // account name. The DETAIL_GAP `detail_locator` carries that hash and a static
 // `kind` only. This keeps the progress-signal privacy invariant intact.
 
-import type { DetailCoverageParams, DetailGapMessage } from "../../src/connector-runtime.ts";
-import { isHydrated, type StatementHydration } from "../../src/statement-hydration-carry-forward.ts";
+import type {
+	DetailCoverageParams,
+	DetailGapMessage,
+} from "../../src/connector-runtime.ts";
+import {
+	isHydrated,
+	type StatementHydration,
+} from "../../src/statement-hydration-carry-forward.ts";
 
 /** The `statements` list stream is both the list and the detail-anchor: the
  *  index row IS the parent, and the PDF is its detail enrichment. */
@@ -51,9 +57,9 @@ export const STATEMENTS_STREAM = "statements";
  *  passed in so this module stays a pure, dependency-free leaf and never forms
  *  an import cycle with the connector's `index.ts`. */
 export interface StatementCoverageRow {
-  id: string;
-  isCandidate: boolean;
-  pointers: StatementHydration;
+	id: string;
+	isCandidate: boolean;
+	pointers: StatementHydration;
 }
 
 /** The coverage decision for a run: the params for one DETAIL_COVERAGE plus the
@@ -63,9 +69,9 @@ export interface StatementCoverageRow {
  *  (as long as enumeration itself completed) so a steady-state zero-candidate
  *  run stays measured rather than silently unreported. */
 export interface StatementCoverageResult {
-  candidateCount: number;
-  coverage: DetailCoverageParams;
-  gaps: DetailGapMessage[];
+	candidateCount: number;
+	coverage: DetailCoverageParams;
+	gaps: DetailGapMessage[];
 }
 
 /** Build a redacted, pending, retryable DETAIL_GAP for a statement-document row
@@ -75,19 +81,19 @@ export interface StatementCoverageResult {
  *  the honest reason: a statement PDF download is always retried on the next
  *  run, so the gap is recoverable, not terminal. */
 export function buildStatementDetailGap(id: string): DetailGapMessage {
-  return {
-    type: "DETAIL_GAP",
-    stream: STATEMENTS_STREAM,
-    record_key: id,
-    status: "pending",
-    reason: "temporary_unavailable",
-    detail_locator: {
-      kind: "usaa.statement",
-      statement_id: id,
-    },
-    retryable: true,
-    reference_only: true,
-  };
+	return {
+		type: "DETAIL_GAP",
+		stream: STATEMENTS_STREAM,
+		record_key: id,
+		status: "pending",
+		reason: "temporary_unavailable",
+		detail_locator: {
+			kind: "usaa.statement",
+			statement_id: id,
+		},
+		retryable: true,
+		reference_only: true,
+	};
 }
 
 /** Compute per-run statement detail coverage from the resolved rows.
@@ -104,46 +110,48 @@ export function buildStatementDetailGap(id: string): DetailGapMessage {
  *  coverage key sets stay set-like; the first occurrence's hydration state wins
  *  for that id, and a later hydrated occurrence upgrades a pending gap to
  *  hydrated (a present artifact is the more honest, less-alarming outcome). */
-export function computeStatementCoverage(rows: readonly StatementCoverageRow[]): StatementCoverageResult {
-  const hydratedIds = new Set<string>();
-  const gapIds = new Set<string>();
-  const requiredOrder: string[] = [];
-  const seen = new Set<string>();
+export function computeStatementCoverage(
+	rows: readonly StatementCoverageRow[],
+): StatementCoverageResult {
+	const hydratedIds = new Set<string>();
+	const gapIds = new Set<string>();
+	const requiredOrder: string[] = [];
+	const seen = new Set<string>();
 
-  for (const row of rows) {
-    if (!row.isCandidate) {
-      continue;
-    }
-    if (!seen.has(row.id)) {
-      seen.add(row.id);
-      requiredOrder.push(row.id);
-    }
-    if (isHydrated(row.pointers)) {
-      hydratedIds.add(row.id);
-      // A present artifact for this id supersedes a gap recorded for an
-      // earlier duplicate occurrence: do not report a gap for something we
-      // actually have.
-      gapIds.delete(row.id);
-    } else if (!hydratedIds.has(row.id)) {
-      gapIds.add(row.id);
-    }
-  }
+	for (const row of rows) {
+		if (!row.isCandidate) {
+			continue;
+		}
+		if (!seen.has(row.id)) {
+			seen.add(row.id);
+			requiredOrder.push(row.id);
+		}
+		if (isHydrated(row.pointers)) {
+			hydratedIds.add(row.id);
+			// A present artifact for this id supersedes a gap recorded for an
+			// earlier duplicate occurrence: do not report a gap for something we
+			// actually have.
+			gapIds.delete(row.id);
+		} else if (!hydratedIds.has(row.id)) {
+			gapIds.add(row.id);
+		}
+	}
 
-  const requiredKeys = requiredOrder;
-  const hydratedKeys = requiredOrder.filter((id) => hydratedIds.has(id));
-  const gapKeys = requiredOrder.filter((id) => gapIds.has(id));
+	const requiredKeys = requiredOrder;
+	const hydratedKeys = requiredOrder.filter((id) => hydratedIds.has(id));
+	const gapKeys = requiredOrder.filter((id) => gapIds.has(id));
 
-  return {
-    candidateCount: requiredKeys.length,
-    coverage: {
-      stream: STATEMENTS_STREAM,
-      stateStream: STATEMENTS_STREAM,
-      requiredKeys,
-      hydratedKeys,
-      considered: requiredKeys.length,
-      covered: hydratedKeys.length,
-      ...(gapKeys.length ? { gapKeys } : {}),
-    },
-    gaps: gapKeys.map((id) => buildStatementDetailGap(id)),
-  };
+	return {
+		candidateCount: requiredKeys.length,
+		coverage: {
+			stream: STATEMENTS_STREAM,
+			stateStream: STATEMENTS_STREAM,
+			requiredKeys,
+			hydratedKeys,
+			considered: requiredKeys.length,
+			covered: hydratedKeys.length,
+			...(gapKeys.length ? { gapKeys } : {}),
+		},
+		gaps: gapKeys.map((id) => buildStatementDetailGap(id)),
+	};
 }

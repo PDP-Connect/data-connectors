@@ -21,12 +21,12 @@
  *  record (`buildInboxMessageRecord` returned non-null) — passed in so this
  *  module never imports the connector's own parsing or `index.ts`. */
 export interface InboxCoverageRow {
-  resolved: boolean;
+	resolved: boolean;
 }
 
 export interface InboxCoverageResult {
-  considered: number;
-  covered: number;
+	considered: number;
+	covered: number;
 }
 
 /** Compute the inbox `considered`/`covered` pair from the resolved rows.
@@ -37,12 +37,14 @@ export interface InboxCoverageResult {
  *  below `considered`, so the caller reads an honest `partial`, not a false
  *  `complete`. `rows.length === 0` (a genuinely empty inbox) still returns
  *  `{ considered: 0, covered: 0 }` — verified-empty, not unmeasured. */
-export function computeInboxCoverage(rows: readonly InboxCoverageRow[]): InboxCoverageResult {
-  let covered = 0;
-  for (const row of rows) {
-    if (row.resolved) {
-      covered += 1;
-    }
-  }
-  return { considered: rows.length, covered };
+export function computeInboxCoverage(
+	rows: readonly InboxCoverageRow[],
+): InboxCoverageResult {
+	let covered = 0;
+	for (const row of rows) {
+		if (row.resolved) {
+			covered += 1;
+		}
+	}
+	return { considered: rows.length, covered };
 }

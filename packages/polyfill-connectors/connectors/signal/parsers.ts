@@ -40,13 +40,13 @@ import type { RecordData } from "../../src/connector-runtime.ts";
  * or `editHistory` altogether. Absence is normal, not corruption.
  */
 export interface SignalMessageJson {
-  attachments?: unknown[];
-  editHistory?: unknown[];
-  reactions?: Array<{
-    emoji?: string;
-    fromId?: string;
-    targetTimestamp?: number;
-  }>;
+	attachments?: unknown[];
+	editHistory?: unknown[];
+	reactions?: Array<{
+		emoji?: string;
+		fromId?: string;
+		targetTimestamp?: number;
+	}>;
 }
 
 /**
@@ -57,36 +57,40 @@ export interface SignalMessageJson {
  * `sent_at` columns worth emitting; only the JSON-derived fields
  * (has_attachments, is_edited, reactions) degrade to their empty defaults.
  */
-export function parseMessageJson(raw: string | null | undefined): SignalMessageJson {
-  if (!raw) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as SignalMessageJson) : {};
-  } catch {
-    return {};
-  }
+export function parseMessageJson(
+	raw: string | null | undefined,
+): SignalMessageJson {
+	if (!raw) {
+		return {};
+	}
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		return parsed && typeof parsed === "object"
+			? (parsed as SignalMessageJson)
+			: {};
+	} catch {
+		return {};
+	}
 }
 
 export interface SignalMessageRow {
-  body: string | null;
-  conversationId: string;
-  id: string;
-  json: string | null;
-  receivedAtMs: number | null;
-  sentAt: number | null;
-  sourceServiceId: string | null;
-  type: string | null;
+	body: string | null;
+	conversationId: string;
+	id: string;
+	json: string | null;
+	receivedAtMs: number | null;
+	sentAt: number | null;
+	sourceServiceId: string | null;
+	type: string | null;
 }
 
 export interface SignalConversationRow {
-  e164: string | null;
-  groupId: string | null;
-  id: string;
-  name: string | null;
-  serviceId: string | null;
-  type: string | null;
+	e164: string | null;
+	groupId: string | null;
+	id: string;
+	name: string | null;
+	serviceId: string | null;
+	type: string | null;
 }
 
 /**
@@ -97,21 +101,23 @@ export interface SignalConversationRow {
  * a cursor position (same null-date-skip-not-fabricate rule as imessage's
  * appleDateToIso — see index.ts's emitMessageRows for where that happens).
  */
-export function signalEpochMsToIso(raw: number | null | undefined): string | null {
-  if (!raw) {
-    return null;
-  }
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) {
-    return null;
-  }
-  return new Date(n).toISOString();
+export function signalEpochMsToIso(
+	raw: number | null | undefined,
+): string | null {
+	if (!raw) {
+		return null;
+	}
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) {
+		return null;
+	}
+	return new Date(n).toISOString();
 }
 
 export interface BuiltMessage {
-  record: RecordData;
-  /** Epoch-ms cursor value this row would advance the `sent_at` cursor to, or null if unusable. */
-  sentAtMs: number | null;
+	record: RecordData;
+	/** Epoch-ms cursor value this row would advance the `sent_at` cursor to, or null if unusable. */
+	sentAtMs: number | null;
 }
 
 /**
@@ -132,22 +138,25 @@ export interface BuiltMessage {
  * a flat SQL column.
  */
 export function buildMessageRecord(row: SignalMessageRow): BuiltMessage {
-  const json = parseMessageJson(row.json);
-  const sentAtMs = row.sentAt && row.sentAt > 0 ? row.sentAt : (row.receivedAtMs ?? null);
-  const sentAtIso = signalEpochMsToIso(row.sentAt) ?? signalEpochMsToIso(row.receivedAtMs);
-  return {
-    record: {
-      id: row.id,
-      conversation_id: row.conversationId,
-      sender: row.sourceServiceId ?? null,
-      sent_at: sentAtIso,
-      body: row.body ?? null,
-      type: row.type ?? null,
-      has_attachments: Array.isArray(json.attachments) && json.attachments.length > 0,
-      is_edited: Array.isArray(json.editHistory) && json.editHistory.length > 0,
-    },
-    sentAtMs: sentAtIso === null ? null : sentAtMs,
-  };
+	const json = parseMessageJson(row.json);
+	const sentAtMs =
+		row.sentAt && row.sentAt > 0 ? row.sentAt : (row.receivedAtMs ?? null);
+	const sentAtIso =
+		signalEpochMsToIso(row.sentAt) ?? signalEpochMsToIso(row.receivedAtMs);
+	return {
+		record: {
+			id: row.id,
+			conversation_id: row.conversationId,
+			sender: row.sourceServiceId ?? null,
+			sent_at: sentAtIso,
+			body: row.body ?? null,
+			type: row.type ?? null,
+			has_attachments:
+				Array.isArray(json.attachments) && json.attachments.length > 0,
+			is_edited: Array.isArray(json.editHistory) && json.editHistory.length > 0,
+		},
+		sentAtMs: sentAtIso === null ? null : sentAtMs,
+	};
 }
 
 /**
@@ -165,20 +174,22 @@ export function buildMessageRecord(row: SignalMessageRow): BuiltMessage {
  * imessage applies to `participants`: full resnapshot every run, no
  * incremental cursor.
  */
-export function buildConversationRecord(row: SignalConversationRow): RecordData {
-  const type = row.type === "private" || row.type === "group" ? row.type : null;
-  return {
-    id: row.id,
-    type,
-    title: row.name ?? null,
-    member_count: null,
-  };
+export function buildConversationRecord(
+	row: SignalConversationRow,
+): RecordData {
+	const type = row.type === "private" || row.type === "group" ? row.type : null;
+	return {
+		id: row.id,
+		type,
+		title: row.name ?? null,
+		member_count: null,
+	};
 }
 
 export interface SignalReactionInput {
-  emoji: string;
-  fromId: string;
-  messageId: string;
+	emoji: string;
+	fromId: string;
+	messageId: string;
 }
 
 /**
@@ -192,12 +203,12 @@ export interface SignalReactionInput {
  * string, not assumed to be a UUID.
  */
 export function buildReactionRecord(row: SignalReactionInput): RecordData {
-  return {
-    id: `${row.messageId}:${row.emoji}:${row.fromId}`,
-    message_id: row.messageId,
-    emoji: row.emoji,
-    sender: row.fromId,
-  };
+	return {
+		id: `${row.messageId}:${row.emoji}:${row.fromId}`,
+		message_id: row.messageId,
+		emoji: row.emoji,
+		sender: row.fromId,
+	};
 }
 
 /**
@@ -210,15 +221,24 @@ export function buildReactionRecord(row: SignalReactionInput): RecordData {
  * emitted with a fabricated placeholder — both are required to build the
  * composite id.
  */
-export function extractReactionsFromMessageJson(messageId: string, json: SignalMessageJson): SignalReactionInput[] {
-  if (!Array.isArray(json.reactions)) {
-    return [];
-  }
-  const out: SignalReactionInput[] = [];
-  for (const r of json.reactions) {
-    if (r && typeof r.emoji === "string" && r.emoji.length > 0 && typeof r.fromId === "string" && r.fromId.length > 0) {
-      out.push({ emoji: r.emoji, fromId: r.fromId, messageId });
-    }
-  }
-  return out;
+export function extractReactionsFromMessageJson(
+	messageId: string,
+	json: SignalMessageJson,
+): SignalReactionInput[] {
+	if (!Array.isArray(json.reactions)) {
+		return [];
+	}
+	const out: SignalReactionInput[] = [];
+	for (const r of json.reactions) {
+		if (
+			r &&
+			typeof r.emoji === "string" &&
+			r.emoji.length > 0 &&
+			typeof r.fromId === "string" &&
+			r.fromId.length > 0
+		) {
+			out.push({ emoji: r.emoji, fromId: r.fromId, messageId });
+		}
+	}
+	return out;
 }

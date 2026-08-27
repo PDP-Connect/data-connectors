@@ -28,38 +28,38 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 
 export interface FixtureMessage {
-  body: string | null;
-  conversationId: string;
-  id: string;
-  json?: string | null;
-  receivedAtMs?: number | null;
-  sentAt: number | null;
-  sourceServiceId?: string | null;
-  type?: string | null;
+	body: string | null;
+	conversationId: string;
+	id: string;
+	json?: string | null;
+	receivedAtMs?: number | null;
+	sentAt: number | null;
+	sourceServiceId?: string | null;
+	type?: string | null;
 }
 
 export interface FixtureConversation {
-  e164?: string | null;
-  groupId?: string | null;
-  id: string;
-  name?: string | null;
-  serviceId?: string | null;
-  type: "private" | "group";
+	e164?: string | null;
+	groupId?: string | null;
+	id: string;
+	name?: string | null;
+	serviceId?: string | null;
+	type: "private" | "group";
 }
 
 export interface FixtureMessageAttachment {
-  contentType: string | null;
-  fileName: string | null;
-  messageId: string;
-  size: number | null;
+	contentType: string | null;
+	fileName: string | null;
+	messageId: string;
+	size: number | null;
 }
 
 export interface SignalExportFixtureOptions {
-  conversations?: FixtureConversation[];
-  /** Omit the `message_attachments` table entirely (simulates a pre-1360 schema). */
-  includeMessageAttachmentsTable?: boolean;
-  messageAttachments?: FixtureMessageAttachment[];
-  messages: FixtureMessage[];
+	conversations?: FixtureConversation[];
+	/** Omit the `message_attachments` table entirely (simulates a pre-1360 schema). */
+	includeMessageAttachmentsTable?: boolean;
+	messageAttachments?: FixtureMessageAttachment[];
+	messages: FixtureMessage[];
 }
 
 /**
@@ -71,10 +71,13 @@ export interface SignalExportFixtureOptions {
  * script (`writeMockSigtopScript`) copies it verbatim in place of a real
  * export.
  */
-export function buildSignalExportFixture(dbPath: string, opts: SignalExportFixtureOptions): void {
-  const db = new Database(dbPath);
-  try {
-    db.exec(`
+export function buildSignalExportFixture(
+	dbPath: string,
+	opts: SignalExportFixtureOptions,
+): void {
+	const db = new Database(dbPath);
+	try {
+		db.exec(`
       CREATE TABLE conversations (
         id TEXT PRIMARY KEY,
         type TEXT,
@@ -94,8 +97,8 @@ export function buildSignalExportFixture(dbPath: string, opts: SignalExportFixtu
         json TEXT
       );
     `);
-    if (opts.includeMessageAttachmentsTable !== false) {
-      db.exec(`
+		if (opts.includeMessageAttachmentsTable !== false) {
+			db.exec(`
         CREATE TABLE message_attachments (
           messageId TEXT,
           contentType TEXT,
@@ -105,71 +108,71 @@ export function buildSignalExportFixture(dbPath: string, opts: SignalExportFixtu
           size INTEGER
         );
       `);
-    }
+		}
 
-    const insertConversation = db.prepare(
-      "INSERT INTO conversations (id, type, name, e164, serviceId, groupId) VALUES (@id, @type, @name, @e164, @serviceId, @groupId)"
-    );
-    for (const c of opts.conversations ?? []) {
-      insertConversation.run({
-        e164: c.e164 ?? null,
-        groupId: c.groupId ?? null,
-        id: c.id,
-        name: c.name ?? null,
-        serviceId: c.serviceId ?? null,
-        type: c.type,
-      });
-    }
+		const insertConversation = db.prepare(
+			"INSERT INTO conversations (id, type, name, e164, serviceId, groupId) VALUES (@id, @type, @name, @e164, @serviceId, @groupId)",
+		);
+		for (const c of opts.conversations ?? []) {
+			insertConversation.run({
+				e164: c.e164 ?? null,
+				groupId: c.groupId ?? null,
+				id: c.id,
+				name: c.name ?? null,
+				serviceId: c.serviceId ?? null,
+				type: c.type,
+			});
+		}
 
-    const insertMessage = db.prepare(
-      "INSERT INTO messages (id, conversationId, sourceServiceId, type, body, sent_at, received_at_ms, json) VALUES (@id, @conversationId, @sourceServiceId, @type, @body, @sentAt, @receivedAtMs, @json)"
-    );
-    for (const m of opts.messages) {
-      insertMessage.run({
-        body: m.body,
-        conversationId: m.conversationId,
-        id: m.id,
-        json: m.json ?? null,
-        receivedAtMs: m.receivedAtMs ?? null,
-        sentAt: m.sentAt,
-        sourceServiceId: m.sourceServiceId ?? null,
-        type: m.type ?? "incoming",
-      });
-    }
+		const insertMessage = db.prepare(
+			"INSERT INTO messages (id, conversationId, sourceServiceId, type, body, sent_at, received_at_ms, json) VALUES (@id, @conversationId, @sourceServiceId, @type, @body, @sentAt, @receivedAtMs, @json)",
+		);
+		for (const m of opts.messages) {
+			insertMessage.run({
+				body: m.body,
+				conversationId: m.conversationId,
+				id: m.id,
+				json: m.json ?? null,
+				receivedAtMs: m.receivedAtMs ?? null,
+				sentAt: m.sentAt,
+				sourceServiceId: m.sourceServiceId ?? null,
+				type: m.type ?? "incoming",
+			});
+		}
 
-    if (opts.includeMessageAttachmentsTable !== false) {
-      const insertAttachment = db.prepare(
-        "INSERT INTO message_attachments (messageId, contentType, path, fileName, localKey, size) VALUES (@messageId, @contentType, @path, @fileName, @localKey, @size)"
-      );
-      for (const a of opts.messageAttachments ?? []) {
-        insertAttachment.run({
-          contentType: a.contentType,
-          fileName: a.fileName,
-          localKey: "fixture-key",
-          messageId: a.messageId,
-          path: a.fileName,
-          size: a.size,
-        });
-      }
-    }
-  } finally {
-    db.close();
-  }
+		if (opts.includeMessageAttachmentsTable !== false) {
+			const insertAttachment = db.prepare(
+				"INSERT INTO message_attachments (messageId, contentType, path, fileName, localKey, size) VALUES (@messageId, @contentType, @path, @fileName, @localKey, @size)",
+			);
+			for (const a of opts.messageAttachments ?? []) {
+				insertAttachment.run({
+					contentType: a.contentType,
+					fileName: a.fileName,
+					localKey: "fixture-key",
+					messageId: a.messageId,
+					path: a.fileName,
+					size: a.size,
+				});
+			}
+		}
+	} finally {
+		db.close();
+	}
 }
 
 export interface MockSigtopAttachmentFile {
-  bytes: Buffer;
-  /** Conversation subdirectory name sigtop's own export would create. */
-  conversationDir: string;
-  filename: string;
+	bytes: Buffer;
+	/** Conversation subdirectory name sigtop's own export would create. */
+	conversationDir: string;
+	filename: string;
 }
 
 export interface MockSigtopOptions {
-  attachments?: MockSigtopAttachmentFile[];
-  checkDatabaseExitCode?: number;
-  checkDatabaseStdout?: string;
-  exportDatabaseExitCode?: number;
-  fixtureDbPath: string;
+	attachments?: MockSigtopAttachmentFile[];
+	checkDatabaseExitCode?: number;
+	checkDatabaseStdout?: string;
+	exportDatabaseExitCode?: number;
+	fixtureDbPath: string;
 }
 
 /**
@@ -189,26 +192,29 @@ export interface MockSigtopOptions {
  * asserting on an unexpected sigtop call fails loudly instead of silently
  * no-op'ing.
  */
-export function writeMockSigtopScript(scriptPath: string, opts: MockSigtopOptions): void {
-  const payload = {
-    attachments: (opts.attachments ?? []).map((a) => ({
-      bytesBase64: a.bytes.toString("base64"),
-      conversationDir: a.conversationDir,
-      filename: a.filename,
-    })),
-    checkDatabaseExitCode: opts.checkDatabaseExitCode ?? 0,
-    checkDatabaseStdout: opts.checkDatabaseStdout ?? "",
-    exportDatabaseExitCode: opts.exportDatabaseExitCode ?? 0,
-    fixtureDbPath: opts.fixtureDbPath,
-  };
-  // The payload is inlined directly into the generated script's source
-  // text (rather than written to a sidecar file the script re-reads at
-  // spawn time) so this fixture builder never itself performs a whole-file
-  // read — that pattern is exactly what
-  // src/local-source-bounded-read-guard.ts's mechanical scan flags for
-  // filesystem/local-DB connector directories, and this file lives in
-  // exactly such a directory (connectors/signal/).
-  const script = `#!/usr/bin/env node
+export function writeMockSigtopScript(
+	scriptPath: string,
+	opts: MockSigtopOptions,
+): void {
+	const payload = {
+		attachments: (opts.attachments ?? []).map((a) => ({
+			bytesBase64: a.bytes.toString("base64"),
+			conversationDir: a.conversationDir,
+			filename: a.filename,
+		})),
+		checkDatabaseExitCode: opts.checkDatabaseExitCode ?? 0,
+		checkDatabaseStdout: opts.checkDatabaseStdout ?? "",
+		exportDatabaseExitCode: opts.exportDatabaseExitCode ?? 0,
+		fixtureDbPath: opts.fixtureDbPath,
+	};
+	// The payload is inlined directly into the generated script's source
+	// text (rather than written to a sidecar file the script re-reads at
+	// spawn time) so this fixture builder never itself performs a whole-file
+	// read — that pattern is exactly what
+	// src/local-source-bounded-read-guard.ts's mechanical scan flags for
+	// filesystem/local-DB connector directories, and this file lives in
+	// exactly such a directory (connectors/signal/).
+	const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
 const data = ${JSON.stringify(payload)};
@@ -250,26 +256,26 @@ if (cmd === "check-database") {
   process.exit(1);
 }
 `;
-  writeFileSync(scriptPath, script, "utf8");
-  chmodSync(scriptPath, 0o755);
+	writeFileSync(scriptPath, script, "utf8");
+	chmodSync(scriptPath, 0o755);
 }
 
 /** Convenience: build the fixture DB + mock script together under `dir`. */
 export function setupMockSigtop(
-  dir: string,
-  dbOpts: SignalExportFixtureOptions,
-  mockOpts: Omit<MockSigtopOptions, "fixtureDbPath"> = {}
+	dir: string,
+	dbOpts: SignalExportFixtureOptions,
+	mockOpts: Omit<MockSigtopOptions, "fixtureDbPath"> = {},
 ): string {
-  mkdirSync(dir, { recursive: true });
-  const fixtureDbPath = join(dir, "fixture-export.sqlite");
-  buildSignalExportFixture(fixtureDbPath, dbOpts);
-  const scriptPath = join(dir, "mock-sigtop.cjs");
-  writeMockSigtopScript(scriptPath, { ...mockOpts, fixtureDbPath });
-  return scriptPath;
+	mkdirSync(dir, { recursive: true });
+	const fixtureDbPath = join(dir, "fixture-export.sqlite");
+	buildSignalExportFixture(fixtureDbPath, dbOpts);
+	const scriptPath = join(dir, "mock-sigtop.cjs");
+	writeMockSigtopScript(scriptPath, { ...mockOpts, fixtureDbPath });
+	return scriptPath;
 }
 
 // Re-exported for tests that want to copy an existing file the way the
 // mock script's export-database handler does (parity check helper).
 export function copyForFixture(from: string, to: string): void {
-  copyFileSync(from, to);
+	copyFileSync(from, to);
 }

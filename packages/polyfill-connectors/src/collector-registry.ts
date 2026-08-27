@@ -25,7 +25,10 @@ import { googleTakeoutCollectorDefinition } from "../connectors/google_takeout/c
 import { imessageCollectorDefinition } from "../connectors/imessage/collector-definition.ts";
 import { signalCollectorDefinition } from "../connectors/signal/collector-definition.ts";
 
-export type { LocalCollectorBinding, LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
+export type {
+	LocalCollectorBinding,
+	LocalCollectorDefinition,
+} from "@pdpp/connector-protocol/collector-definition";
 
 /**
  * Every connector definition the published local collector bundles, in the
@@ -47,12 +50,13 @@ export type { LocalCollectorBinding, LocalCollectorDefinition } from "@pdpp/conn
  * way — not bundled/installed by this package, a separate
  * operator-installed prerequisite documented in its manifest.
  */
-export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = Object.freeze([
-  claudeCodeCollectorDefinition,
-  codexCollectorDefinition,
-  googleTakeoutCollectorDefinition,
-  imessageCollectorDefinition,
-  applePhotosCollectorDefinition,
-  googleMessagesCollectorDefinition,
-  signalCollectorDefinition,
-]);
+export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
+	Object.freeze([
+		claudeCodeCollectorDefinition,
+		codexCollectorDefinition,
+		googleTakeoutCollectorDefinition,
+		imessageCollectorDefinition,
+		applePhotosCollectorDefinition,
+		googleMessagesCollectorDefinition,
+		signalCollectorDefinition,
+	]);

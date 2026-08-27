@@ -56,17 +56,17 @@ const CONNECTORS_DIR = join(THIS_DIR, "..", "connectors");
 // from the adversarial review: the static scan was foolable + the roster was
 // hand-maintained; this closes the "added but unlisted" hole).
 const GOVERNOR_USING_CONNECTORS = [
-  "github",
-  "google_calendar",
-  "google_contacts",
-  "groupme",
-  "jellyfin",
-  "notion",
-  "oura",
-  "spotify",
-  "steam",
-  "strava",
-  "ynab",
+	"github",
+	"google_calendar",
+	"google_contacts",
+	"groupme",
+	"jellyfin",
+	"notion",
+	"oura",
+	"spotify",
+	"steam",
+	"strava",
+	"ynab",
 ] as const;
 
 /**
@@ -76,99 +76,102 @@ const GOVERNOR_USING_CONNECTORS = [
  * against — so the roster can never silently drift from reality.
  */
 function deriveGovernorUsingConnectors(): string[] {
-  const names: string[] = [];
-  for (const entry of readdirSync(CONNECTORS_DIR)) {
-    const indexPath = join(CONNECTORS_DIR, entry, "index.ts");
-    let source: string;
-    try {
-      if (!statSync(indexPath).isFile()) {
-        continue;
-      }
-      source = readFileSync(indexPath, "utf8");
-    } catch {
-      continue; // no index.ts (e.g. a fixtures-only dir) — not a governor-using connector
-    }
-    if (/createConnectorHttpGovernor\s*\(/.test(source)) {
-      names.push(entry);
-    }
-  }
-  return names.sort((a, b) => {
-    if (a < b) {
-      return -1;
-    }
-    return a > b ? 1 : 0;
-  });
+	const names: string[] = [];
+	for (const entry of readdirSync(CONNECTORS_DIR)) {
+		const indexPath = join(CONNECTORS_DIR, entry, "index.ts");
+		let source: string;
+		try {
+			if (!statSync(indexPath).isFile()) {
+				continue;
+			}
+			source = readFileSync(indexPath, "utf8");
+		} catch {
+			continue; // no index.ts (e.g. a fixtures-only dir) — not a governor-using connector
+		}
+		if (/createConnectorHttpGovernor\s*\(/.test(source)) {
+			names.push(entry);
+		}
+	}
+	return names.sort((a, b) => {
+		if (a < b) {
+			return -1;
+		}
+		return a > b ? 1 : 0;
+	});
 }
 
 // ─── 1. Compile-time: missing profile is a BUILD ERROR ───────────────────────
 
 test("a governor wired WITHOUT a declared profile is a compile-time error (the spec's build-error bar)", () => {
-  // @ts-expect-error — `profile` is REQUIRED on ConnectorHttpGovernorOptions
-  // (spec §3 rule 6). Omitting it must be a tsc error. If this suppression ever
-  // becomes unused, the field has been weakened back to optional and tsc fails.
-  const omitProfile = () => createConnectorHttpGovernor({ name: "no-profile" });
-  assert.equal(typeof omitProfile, "function", "type-level assertion compiled");
+	// @ts-expect-error — `profile` is REQUIRED on ConnectorHttpGovernorOptions
+	// (spec §3 rule 6). Omitting it must be a tsc error. If this suppression ever
+	// becomes unused, the field has been weakened back to optional and tsc fails.
+	const omitProfile = () => createConnectorHttpGovernor({ name: "no-profile" });
+	assert.equal(typeof omitProfile, "function", "type-level assertion compiled");
 });
 
 // ─── 2. Runtime backstop: a JS caller cannot silently borrow a default ───────
 
 test("the runtime backstop throws LOUD when a profile is omitted (no silent shared default)", () => {
-  const ceilingPattern = /requires a per-provider profile\.pacingMinIntervalMs/;
-  assert.throws(
-    // @ts-expect-error — exercising the JS-caller path that bypasses tsc.
-    () => createConnectorHttpGovernor({ name: "no-profile" }),
-    ceilingPattern,
-    "an omitted safety ceiling must fail loud, never borrow ChatGPT's number"
-  );
+	const ceilingPattern = /requires a per-provider profile\.pacingMinIntervalMs/;
+	assert.throws(
+		// @ts-expect-error — exercising the JS-caller path that bypasses tsc.
+		() => createConnectorHttpGovernor({ name: "no-profile" }),
+		ceilingPattern,
+		"an omitted safety ceiling must fail loud, never borrow ChatGPT's number",
+	);
 });
 
 test("the runtime backstop also rejects a non-positive / non-finite ceiling", () => {
-  const ceilingPattern = /requires a per-provider profile\.pacingMinIntervalMs/;
-  const bad: ProviderPacingProfile[] = [
-    { pacingMinIntervalMs: 0 },
-    { pacingMinIntervalMs: -1 },
-    { pacingMinIntervalMs: Number.POSITIVE_INFINITY },
-    { pacingMinIntervalMs: Number.NaN },
-  ];
-  for (const profile of bad) {
-    assert.throws(
-      () => createConnectorHttpGovernor({ name: "bad-ceiling", profile }),
-      ceilingPattern,
-      `ceiling ${profile.pacingMinIntervalMs} must be rejected`
-    );
-  }
+	const ceilingPattern = /requires a per-provider profile\.pacingMinIntervalMs/;
+	const bad: ProviderPacingProfile[] = [
+		{ pacingMinIntervalMs: 0 },
+		{ pacingMinIntervalMs: -1 },
+		{ pacingMinIntervalMs: Number.POSITIVE_INFINITY },
+		{ pacingMinIntervalMs: Number.NaN },
+	];
+	for (const profile of bad) {
+		assert.throws(
+			() => createConnectorHttpGovernor({ name: "bad-ceiling", profile }),
+			ceilingPattern,
+			`ceiling ${profile.pacingMinIntervalMs} must be rejected`,
+		);
+	}
 });
 
 // ─── 3. Registry conformance: every governor-using connector declares one ────
 
 for (const name of GOVERNOR_USING_CONNECTORS) {
-  test(`registry conformance: ${name} declares a ProviderProfile on its shared governor`, () => {
-    const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
+	test(`registry conformance: ${name} declares a ProviderProfile on its shared governor`, () => {
+		const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
 
-    // Every createConnectorHttpGovernor call in the connector must pass a
-    // `profile`. A bare call would inherit nothing (the field is required) — the
-    // static scan pins that no such bare call slips in.
-    const callPattern = /createConnectorHttpGovernor\(\s*\{([\s\S]*?)\}\s*\)/g;
-    const calls = [...source.matchAll(callPattern)];
-    assert.ok(calls.length > 0, `${name} must construct the shared governor (it is a governor-using connector)`);
-    for (const match of calls) {
-      const [, body] = match;
-      assert.ok(body, `${name}: governor call body must be captured`);
-      assert.match(
-        body,
-        /profile:/,
-        `${name}: every createConnectorHttpGovernor call must declare a profile (spec §3 — no shared default)`
-      );
-    }
+		// Every createConnectorHttpGovernor call in the connector must pass a
+		// `profile`. A bare call would inherit nothing (the field is required) — the
+		// static scan pins that no such bare call slips in.
+		const callPattern = /createConnectorHttpGovernor\(\s*\{([\s\S]*?)\}\s*\)/g;
+		const calls = [...source.matchAll(callPattern)];
+		assert.ok(
+			calls.length > 0,
+			`${name} must construct the shared governor (it is a governor-using connector)`,
+		);
+		for (const match of calls) {
+			const [, body] = match;
+			assert.ok(body, `${name}: governor call body must be captured`);
+			assert.match(
+				body,
+				/profile:/,
+				`${name}: every createConnectorHttpGovernor call must declare a profile (spec §3 — no shared default)`,
+			);
+		}
 
-    // And it must NOT borrow ChatGPT's audited 250ms ceiling: the unaudited
-    // connectors point at the conservative profile, never a 250 literal.
-    assert.doesNotMatch(
-      source,
-      /pacingMinIntervalMs:\s*250\b/,
-      `${name} must NOT hard-code ChatGPT's 250ms ceiling — declare a per-provider value (§9-C5)`
-    );
-  });
+		// And it must NOT borrow ChatGPT's audited 250ms ceiling: the unaudited
+		// connectors point at the conservative profile, never a 250 literal.
+		assert.doesNotMatch(
+			source,
+			/pacingMinIntervalMs:\s*250\b/,
+			`${name} must NOT hard-code ChatGPT's 250ms ceiling — declare a per-provider value (§9-C5)`,
+		);
+	});
 }
 
 // ─── 4. WI-1b: the shared unaudited placeholder is RETIRED (every connector audited) ──
@@ -181,21 +184,24 @@ for (const name of GOVERNOR_USING_CONNECTORS) {
 // what makes the import at the top of this file impossible to restore silently).
 
 test("WI-1b: no connector references the retired unaudited placeholder helper (every connector is audited)", () => {
-  for (const name of GOVERNOR_USING_CONNECTORS) {
-    const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
-    assert.doesNotMatch(
-      source,
-      /unauditedConservativePacingProfile|UNAUDITED_CONSERVATIVE_PACING_MIN_INTERVAL_MS/,
-      `${name} still references the retired unaudited placeholder — it must declare an AUDITED per-provider profile (WI-1b / §9-C5)`
-    );
-  }
-  // The helper/constant must be gone from the profile module too (no silent revival).
-  const profileSource = readFileSync(join(THIS_DIR, "provider-profile.ts"), "utf8");
-  assert.doesNotMatch(
-    profileSource,
-    /unauditedConservativePacingProfile|UNAUDITED_CONSERVATIVE_PACING_MIN_INTERVAL_MS/,
-    "the unaudited placeholder helper/constant must be retired from provider-profile.ts now that every connector is audited (WI-1b)"
-  );
+	for (const name of GOVERNOR_USING_CONNECTORS) {
+		const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
+		assert.doesNotMatch(
+			source,
+			/unauditedConservativePacingProfile|UNAUDITED_CONSERVATIVE_PACING_MIN_INTERVAL_MS/,
+			`${name} still references the retired unaudited placeholder — it must declare an AUDITED per-provider profile (WI-1b / §9-C5)`,
+		);
+	}
+	// The helper/constant must be gone from the profile module too (no silent revival).
+	const profileSource = readFileSync(
+		join(THIS_DIR, "provider-profile.ts"),
+		"utf8",
+	);
+	assert.doesNotMatch(
+		profileSource,
+		/unauditedConservativePacingProfile|UNAUDITED_CONSERVATIVE_PACING_MIN_INTERVAL_MS/,
+		"the unaudited placeholder helper/constant must be retired from provider-profile.ts now that every connector is audited (WI-1b)",
+	);
 });
 
 // ─── 5. Roster hardening: the hand-maintained list cannot drift from reality ──
@@ -206,16 +212,16 @@ test("WI-1b: no connector references the retired unaudited placeholder helper (e
 // the governor) is caught immediately.
 
 test("the hand-maintained GOVERNOR_USING_CONNECTORS roster matches the filesystem-derived set (no silent drift)", () => {
-  const derived = deriveGovernorUsingConnectors();
-  const declared = [...GOVERNOR_USING_CONNECTORS].sort();
-  assert.deepEqual(
-    derived,
-    declared,
-    "a connector that constructs createConnectorHttpGovernor must be in GOVERNOR_USING_CONNECTORS.\n" +
-      `  derived from source: ${JSON.stringify(derived)}\n` +
-      `  hand-maintained:     ${JSON.stringify(declared)}\n` +
-      "If you added a governor-using connector, add it to GOVERNOR_USING_CONNECTORS (and give it a ProviderProfile)."
-  );
+	const derived = deriveGovernorUsingConnectors();
+	const declared = [...GOVERNOR_USING_CONNECTORS].sort();
+	assert.deepEqual(
+		derived,
+		declared,
+		"a connector that constructs createConnectorHttpGovernor must be in GOVERNOR_USING_CONNECTORS.\n" +
+			`  derived from source: ${JSON.stringify(derived)}\n` +
+			`  hand-maintained:     ${JSON.stringify(declared)}\n` +
+			"If you added a governor-using connector, add it to GOVERNOR_USING_CONNECTORS (and give it a ProviderProfile).",
+	);
 });
 
 // ─── 6. WI-1b complete: every governor-using connector declares an audited ceiling ──
@@ -229,15 +235,15 @@ test("the hand-maintained GOVERNOR_USING_CONNECTORS roster matches the filesyste
 // placeholder would fail §4 above (the helper no longer exists to import).
 
 test("WI-1b complete: every governor-using connector declares a per-provider pacing profile factory", () => {
-  for (const name of GOVERNOR_USING_CONNECTORS) {
-    const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
-    // Each connector imports a named `<name>PacingProfile` factory from the
-    // profile module (the audited per-connector declaration). This pins that the
-    // profile is sourced from the ONE declared home, not hand-rolled inline.
-    assert.match(
-      source,
-      new RegExp(`${name}PacingProfile`),
-      `${name} must import and use its audited ${name}PacingProfile from provider-profile.ts (WI-1b — §3, §9-C5)`
-    );
-  }
+	for (const name of GOVERNOR_USING_CONNECTORS) {
+		const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
+		// Each connector imports a named `<name>PacingProfile` factory from the
+		// profile module (the audited per-connector declaration). This pins that the
+		// profile is sourced from the ONE declared home, not hand-rolled inline.
+		assert.match(
+			source,
+			new RegExp(`${name}PacingProfile`),
+			`${name} must import and use its audited ${name}PacingProfile from provider-profile.ts (WI-1b — §3, §9-C5)`,
+		);
+	}
 });

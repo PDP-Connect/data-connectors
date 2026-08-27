@@ -25,16 +25,18 @@ const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
 const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
 
 interface ManifestShape {
-  streams?: Array<{ name?: unknown }>;
+	streams?: Array<{ name?: unknown }>;
 }
 
 function manifestDeclaresStreams(name: string): boolean {
-  const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
-  if (!existsSync(manifestPath)) {
-    return false;
-  }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ManifestShape;
-  return Array.isArray(manifest.streams) && manifest.streams.length > 0;
+	const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+	if (!existsSync(manifestPath)) {
+		return false;
+	}
+	const manifest = JSON.parse(
+		readFileSync(manifestPath, "utf8"),
+	) as ManifestShape;
+	return Array.isArray(manifest.streams) && manifest.streams.length > 0;
 }
 
 /**
@@ -44,88 +46,98 @@ function manifestDeclaresStreams(name: string): boolean {
  * like the existing honesty tests while avoiding a loose token-only pass.
  */
 function connectorWiresValidation(name: string, source: string): boolean {
-  const schemasPath = join(CONNECTORS_DIR, name, "schemas.ts");
-  const importsSiblingSchemas = /from\s+["']\.\/schemas\.ts["']/u.test(source);
-  const referencesValidator = /\bvalidateRecord(?:Raw)?\b/u.test(source);
-  return existsSync(schemasPath) && importsSiblingSchemas && referencesValidator;
+	const schemasPath = join(CONNECTORS_DIR, name, "schemas.ts");
+	const importsSiblingSchemas = /from\s+["']\.\/schemas\.ts["']/u.test(source);
+	const referencesValidator = /\bvalidateRecord(?:Raw)?\b/u.test(source);
+	return (
+		existsSync(schemasPath) && importsSiblingSchemas && referencesValidator
+	);
 }
 
 function connectorNames(): string[] {
-  return readdirSync(CONNECTORS_DIR)
-    .filter((name) => existsSync(join(CONNECTORS_DIR, name, "index.ts")))
-    .sort();
+	return readdirSync(CONNECTORS_DIR)
+		.filter((name) => existsSync(join(CONNECTORS_DIR, name, "index.ts")))
+		.sort();
 }
 
 test("every stream-declaring connector validates records or is allowlisted", () => {
-  const unexplainedGaps: string[] = [];
-  const staleAllowlistEntries: string[] = [];
+	const unexplainedGaps: string[] = [];
+	const staleAllowlistEntries: string[] = [];
 
-  for (const name of connectorNames()) {
-    if (!manifestDeclaresStreams(name)) {
-      // No streams declared → nothing to validate. Such a connector must not
-      // be on the allowlist either (it has nothing to remediate).
-      continue;
-    }
+	for (const name of connectorNames()) {
+		if (!manifestDeclaresStreams(name)) {
+			// No streams declared → nothing to validate. Such a connector must not
+			// be on the allowlist either (it has nothing to remediate).
+			continue;
+		}
 
-    const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
-    const wires = connectorWiresValidation(name, source);
-    const allowlisted = name in SCHEMALESS_CONNECTOR_ALLOWLIST;
+		const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
+		const wires = connectorWiresValidation(name, source);
+		const allowlisted = name in SCHEMALESS_CONNECTOR_ALLOWLIST;
 
-    if (wires && allowlisted) {
-      // Connector has adopted validation; its allowlist entry must be removed.
-      staleAllowlistEntries.push(name);
-    }
-    if (!(wires || allowlisted)) {
-      unexplainedGaps.push(name);
-    }
-  }
+		if (wires && allowlisted) {
+			// Connector has adopted validation; its allowlist entry must be removed.
+			staleAllowlistEntries.push(name);
+		}
+		if (!(wires || allowlisted)) {
+			unexplainedGaps.push(name);
+		}
+	}
 
-  assert.deepEqual(
-    unexplainedGaps,
-    [],
-    "Connectors declare manifest streams but neither wire validateRecord nor " +
-      `appear on the schemaless allowlist: ${unexplainedGaps.join(", ")}. ` +
-      "Wire emit-time validation (see connectors/amazon/schemas.ts) or add a " +
-      "justified entry to src/connector-schema-allowlist.ts."
-  );
+	assert.deepEqual(
+		unexplainedGaps,
+		[],
+		"Connectors declare manifest streams but neither wire validateRecord nor " +
+			`appear on the schemaless allowlist: ${unexplainedGaps.join(", ")}. ` +
+			"Wire emit-time validation (see connectors/amazon/schemas.ts) or add a " +
+			"justified entry to src/connector-schema-allowlist.ts.",
+	);
 
-  assert.deepEqual(
-    staleAllowlistEntries,
-    [],
-    "Connectors now wire validateRecord but remain on the schemaless " +
-      `allowlist: ${staleAllowlistEntries.join(", ")}. Remove their entries ` +
-      "from src/connector-schema-allowlist.ts — the allowlist may only shrink."
-  );
+	assert.deepEqual(
+		staleAllowlistEntries,
+		[],
+		"Connectors now wire validateRecord but remain on the schemaless " +
+			`allowlist: ${staleAllowlistEntries.join(", ")}. Remove their entries ` +
+			"from src/connector-schema-allowlist.ts — the allowlist may only shrink.",
+	);
 });
 
 test("schemaless allowlist contains only real, stream-declaring connectors", () => {
-  const existing = new Set(connectorNames());
-  const unknown: string[] = [];
-  const noStreams: string[] = [];
+	const existing = new Set(connectorNames());
+	const unknown: string[] = [];
+	const noStreams: string[] = [];
 
-  for (const name of Object.keys(SCHEMALESS_CONNECTOR_ALLOWLIST)) {
-    if (!existing.has(name)) {
-      unknown.push(name);
-      continue;
-    }
-    if (!manifestDeclaresStreams(name)) {
-      noStreams.push(name);
-    }
-  }
+	for (const name of Object.keys(SCHEMALESS_CONNECTOR_ALLOWLIST)) {
+		if (!existing.has(name)) {
+			unknown.push(name);
+			continue;
+		}
+		if (!manifestDeclaresStreams(name)) {
+			noStreams.push(name);
+		}
+	}
 
-  assert.deepEqual(unknown, [], `Allowlist names connectors that do not exist: ${unknown.join(", ")}.`);
-  assert.deepEqual(
-    noStreams,
-    [],
-    "Allowlist names connectors whose manifest declares no streams (nothing to " +
-      `remediate): ${noStreams.join(", ")}.`
-  );
+	assert.deepEqual(
+		unknown,
+		[],
+		`Allowlist names connectors that do not exist: ${unknown.join(", ")}.`,
+	);
+	assert.deepEqual(
+		noStreams,
+		[],
+		"Allowlist names connectors whose manifest declares no streams (nothing to " +
+			`remediate): ${noStreams.join(", ")}.`,
+	);
 });
 
 test("every allowlist entry carries a non-empty justification", () => {
-  const blank = Object.entries(SCHEMALESS_CONNECTOR_ALLOWLIST)
-    .filter(([, justification]) => justification.trim().length === 0)
-    .map(([name]) => name);
+	const blank = Object.entries(SCHEMALESS_CONNECTOR_ALLOWLIST)
+		.filter(([, justification]) => justification.trim().length === 0)
+		.map(([name]) => name);
 
-  assert.deepEqual(blank, [], `Allowlist entries must carry an owner-readable justification: ${blank.join(", ")}.`);
+	assert.deepEqual(
+		blank,
+		[],
+		`Allowlist entries must carry an owner-readable justification: ${blank.join(", ")}.`,
+	);
 });

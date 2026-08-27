@@ -18,7 +18,11 @@
  */
 
 import type { z } from "zod";
-import type { RecordData, ShapeAnomaly, ValidateRecord } from "./connector-runtime.ts";
+import type {
+	RecordData,
+	ShapeAnomaly,
+	ValidateRecord,
+} from "./connector-runtime.ts";
 
 export type SchemaRegistry = Readonly<Record<string, z.ZodTypeAny>>;
 
@@ -28,9 +32,9 @@ export type SchemaRegistry = Readonly<Record<string, z.ZodTypeAny>>;
  * covers `z.literal`, which `isOpenVocabularyIssue` filters out below.
  */
 interface InvalidValueIssue {
-  code: string;
-  path: readonly PropertyKey[];
-  values?: readonly unknown[];
+	code: string;
+	path: readonly PropertyKey[];
+	values?: readonly unknown[];
 }
 
 /**
@@ -47,19 +51,23 @@ interface InvalidValueIssue {
  * by arity: two-or-more options is a vocabulary, exactly one is a discriminator.
  */
 function isOpenVocabularyIssue(issue: InvalidValueIssue): boolean {
-  return issue.code === "invalid_value" && Array.isArray(issue.values) && issue.values.length >= 2;
+	return (
+		issue.code === "invalid_value" &&
+		Array.isArray(issue.values) &&
+		issue.values.length >= 2
+	);
 }
 
 /** Read the value actually present at `path` in the source record, for verbatim reporting. */
 function valueAtPath(data: unknown, path: readonly PropertyKey[]): unknown {
-  let cursor: unknown = data;
-  for (const segment of path) {
-    if (cursor === null || typeof cursor !== "object") {
-      return;
-    }
-    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
-  }
-  return cursor;
+	let cursor: unknown = data;
+	for (const segment of path) {
+		if (cursor === null || typeof cursor !== "object") {
+			return;
+		}
+		cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+	}
+	return cursor;
 }
 
 /**
@@ -110,36 +118,38 @@ function valueAtPath(data: unknown, path: readonly PropertyKey[]): unknown {
  * tolerance applies uniformly and no connector re-decides it.
  */
 export function makeValidateRecord(schemas: SchemaRegistry): ValidateRecord {
-  return (stream, data) => {
-    const schema = schemas[stream];
-    if (!schema) {
-      return { ok: true, data };
-    }
-    const result = schema.safeParse(data);
-    if (result.success) {
-      return { ok: true, data: result.data as RecordData };
-    }
+	return (stream, data) => {
+		const schema = schemas[stream];
+		if (!schema) {
+			return { ok: true, data };
+		}
+		const result = schema.safeParse(data);
+		if (result.success) {
+			return { ok: true, data: result.data as RecordData };
+		}
 
-    const issues = result.error.issues as readonly (InvalidValueIssue & { message: string })[];
-    // Retain only when EVERY issue is vocabulary drift; one real fault alongside
-    // the drift still skips, so this cannot mask a malformed record.
-    if (issues.length > 0 && issues.every(isOpenVocabularyIssue)) {
-      const anomalies: ShapeAnomaly[] = issues.map((issue) => ({
-        path: issue.path.join("."),
-        value: valueAtPath(data, issue.path),
-        expected: issue.values ?? [],
-      }));
-      // `data`, not `result.data`: a failed parse produces no output object, and
-      // the unrecognized value must survive exactly as the source sent it.
-      return { ok: true, data, anomalies };
-    }
+		const issues = result.error.issues as readonly (InvalidValueIssue & {
+			message: string;
+		})[];
+		// Retain only when EVERY issue is vocabulary drift; one real fault alongside
+		// the drift still skips, so this cannot mask a malformed record.
+		if (issues.length > 0 && issues.every(isOpenVocabularyIssue)) {
+			const anomalies: ShapeAnomaly[] = issues.map((issue) => ({
+				path: issue.path.join("."),
+				value: valueAtPath(data, issue.path),
+				expected: issue.values ?? [],
+			}));
+			// `data`, not `result.data`: a failed parse produces no output object, and
+			// the unrecognized value must survive exactly as the source sent it.
+			return { ok: true, data, anomalies };
+		}
 
-    return {
-      ok: false,
-      issues: issues.map((i) => ({
-        path: i.path.join("."),
-        message: i.message,
-      })),
-    };
-  };
+		return {
+			ok: false,
+			issues: issues.map((i) => ({
+				path: i.path.join("."),
+				message: i.message,
+			})),
+		};
+	};
 }

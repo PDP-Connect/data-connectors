@@ -11,15 +11,17 @@
  * whether a failed attempt still counts) is provider-specific and stays in
  * each connector.
  */
-export function createRepairBudget(maxAttempts = 1): { tryConsume: () => boolean } {
-  let spent = 0;
-  return {
-    tryConsume(): boolean {
-      if (spent >= maxAttempts) {
-        return false;
-      }
-      spent += 1;
-      return true;
-    },
-  };
+export function createRepairBudget(maxAttempts = 1): {
+	tryConsume: () => boolean;
+} {
+	let spent = 0;
+	return {
+		tryConsume(): boolean {
+			if (spent >= maxAttempts) {
+				return false;
+			}
+			spent += 1;
+			return true;
+		},
+	};
 }

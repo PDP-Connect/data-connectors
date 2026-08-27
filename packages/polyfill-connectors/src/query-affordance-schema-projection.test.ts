@@ -33,142 +33,184 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
 
 interface JsonSchema {
-  format?: string;
-  type?: string | string[];
-  x_pdpp_role?: string;
+	format?: string;
+	type?: string | string[];
+	x_pdpp_role?: string;
 }
 interface ManifestStream {
-  name?: string;
-  query?: {
-    search?: { lexical_fields?: string[]; semantic_fields?: string[] };
-    range_filters?: Record<string, unknown>;
-    aggregations?: { group_by?: string[]; group_by_time?: string[] };
-  };
-  schema?: { properties?: Record<string, JsonSchema> };
+	name?: string;
+	query?: {
+		search?: { lexical_fields?: string[]; semantic_fields?: string[] };
+		range_filters?: Record<string, unknown>;
+		aggregations?: { group_by?: string[]; group_by_time?: string[] };
+	};
+	schema?: { properties?: Record<string, JsonSchema> };
 }
 interface ConnectorManifest {
-  streams?: ManifestStream[];
+	streams?: ManifestStream[];
 }
 
 interface Capability {
-  declared: boolean;
-  operators?: string[];
-  usable: boolean;
+	declared: boolean;
+	operators?: string[];
+	usable: boolean;
 }
 interface FieldCapability {
-  aggregation: { group_by: Capability; group_by_time: Capability };
-  lexical_search: Capability;
-  range_filter: Capability;
-  role?: string;
-  semantic_search: Capability;
+	aggregation: { group_by: Capability; group_by_time: Capability };
+	lexical_search: Capability;
+	range_filter: Capability;
+	role?: string;
+	semantic_search: Capability;
 }
 
 /** Mirror of reference-implementation/server/index.js buildFieldCapabilities for the
  * affordance flags this change touches (granted=true: no field-scoped grant). */
-function projectFieldCapabilities(stream: ManifestStream): Record<string, FieldCapability> {
-  const properties = stream.schema?.properties ?? {};
-  const range = stream.query?.range_filters ?? {};
-  const lexical = new Set(stream.query?.search?.lexical_fields ?? []);
-  const semantic = new Set(stream.query?.search?.semantic_fields ?? []);
-  const groupBy = new Set(stream.query?.aggregations?.group_by ?? []);
-  const groupByTime = new Set(stream.query?.aggregations?.group_by_time ?? []);
+function projectFieldCapabilities(
+	stream: ManifestStream,
+): Record<string, FieldCapability> {
+	const properties = stream.schema?.properties ?? {};
+	const range = stream.query?.range_filters ?? {};
+	const lexical = new Set(stream.query?.search?.lexical_fields ?? []);
+	const semantic = new Set(stream.query?.search?.semantic_fields ?? []);
+	const groupBy = new Set(stream.query?.aggregations?.group_by ?? []);
+	const groupByTime = new Set(stream.query?.aggregations?.group_by_time ?? []);
 
-  const out: Record<string, FieldCapability> = {};
-  for (const [field, schema] of Object.entries(properties)) {
-    const operators = Array.isArray(range[field]) ? (range[field] as string[]) : null;
-    const flag = (declared: boolean, ops?: string[] | null): Capability => ({
-      declared,
-      usable: declared,
-      ...(declared && ops ? { operators: ops } : {}),
-    });
-    out[field] = {
-      ...(schema.x_pdpp_role ? { role: schema.x_pdpp_role } : {}),
-      range_filter: flag(Boolean(operators), operators),
-      lexical_search: flag(lexical.has(field)),
-      semantic_search: flag(semantic.has(field)),
-      aggregation: {
-        group_by: flag(groupBy.has(field)),
-        group_by_time: flag(groupByTime.has(field)),
-      },
-    };
-  }
-  return out;
+	const out: Record<string, FieldCapability> = {};
+	for (const [field, schema] of Object.entries(properties)) {
+		const operators = Array.isArray(range[field])
+			? (range[field] as string[])
+			: null;
+		const flag = (declared: boolean, ops?: string[] | null): Capability => ({
+			declared,
+			usable: declared,
+			...(declared && ops ? { operators: ops } : {}),
+		});
+		out[field] = {
+			...(schema.x_pdpp_role ? { role: schema.x_pdpp_role } : {}),
+			range_filter: flag(Boolean(operators), operators),
+			lexical_search: flag(lexical.has(field)),
+			semantic_search: flag(semantic.has(field)),
+			aggregation: {
+				group_by: flag(groupBy.has(field)),
+				group_by_time: flag(groupByTime.has(field)),
+			},
+		};
+	}
+	return out;
 }
 
 function loadStream(connectorKey: string, streamName: string): ManifestStream {
-  const manifest = JSON.parse(readFileSync(join(MANIFESTS_DIR, `${connectorKey}.json`), "utf8")) as ConnectorManifest;
-  const stream = (manifest.streams ?? []).find((s) => s.name === streamName);
-  assert.ok(stream, `${connectorKey}.${streamName} not found`);
-  return stream;
+	const manifest = JSON.parse(
+		readFileSync(join(MANIFESTS_DIR, `${connectorKey}.json`), "utf8"),
+	) as ConnectorManifest;
+	const stream = (manifest.streams ?? []).find((s) => s.name === streamName);
+	assert.ok(stream, `${connectorKey}.${streamName} not found`);
+	return stream;
 }
 
 // Representative spot-checks across each affordance kind this change introduced.
 const EXPECTATIONS: Array<{
-  file: string;
-  stream: string;
-  field: string;
-  check: (cap: FieldCapability) => void;
+	file: string;
+	stream: string;
+	field: string;
+	check: (cap: FieldCapability) => void;
 }> = [
-  {
-    file: "ical",
-    stream: "events",
-    field: "start",
-    check: (c) => {
-      assert.equal(c.range_filter.declared, true, "ical.events.start range");
-      assert.equal(c.aggregation.group_by_time.declared, true, "ical.events.start group_by_time");
-      assert.equal(c.role, "event-time", "ical.events.start role");
-    },
-  },
-  {
-    file: "ical",
-    stream: "events",
-    field: "status",
-    check: (c) => assert.equal(c.aggregation.group_by.declared, true, "ical.events.status facet"),
-  },
-  {
-    file: "google_takeout",
-    stream: "search_history",
-    field: "query",
-    check: (c) => {
-      assert.equal(c.lexical_search.declared, true, "search_history.query lexical");
-      assert.equal(c.semantic_search.declared, true, "search_history.query semantic");
-    },
-  },
-  {
-    file: "oura",
-    stream: "sleep",
-    field: "day",
-    check: (c) => {
-      assert.equal(c.range_filter.declared, true, "oura.sleep.day range");
-      assert.deepEqual(c.range_filter.operators, ["gte", "gt", "lte", "lt"], "range operators surface");
-      assert.equal(c.aggregation.group_by_time.declared, true, "oura.sleep.day group_by_time");
-    },
-  },
-  {
-    file: "uber",
-    stream: "trips",
-    field: "status",
-    check: (c) => assert.equal(c.aggregation.group_by.declared, true, "uber.trips.status facet"),
-  },
-  {
-    file: "uber",
-    stream: "trips",
-    field: "driver_name",
-    check: (c) => assert.equal(c.lexical_search.declared, true, "uber.trips.driver_name lexical"),
-  },
-  {
-    file: "meta",
-    stream: "posts",
-    field: "taken_at",
-    check: (c) => assert.equal(c.role, "event-time", "meta.posts.taken_at role"),
-  },
+	{
+		file: "ical",
+		stream: "events",
+		field: "start",
+		check: (c) => {
+			assert.equal(c.range_filter.declared, true, "ical.events.start range");
+			assert.equal(
+				c.aggregation.group_by_time.declared,
+				true,
+				"ical.events.start group_by_time",
+			);
+			assert.equal(c.role, "event-time", "ical.events.start role");
+		},
+	},
+	{
+		file: "ical",
+		stream: "events",
+		field: "status",
+		check: (c) =>
+			assert.equal(
+				c.aggregation.group_by.declared,
+				true,
+				"ical.events.status facet",
+			),
+	},
+	{
+		file: "google_takeout",
+		stream: "search_history",
+		field: "query",
+		check: (c) => {
+			assert.equal(
+				c.lexical_search.declared,
+				true,
+				"search_history.query lexical",
+			);
+			assert.equal(
+				c.semantic_search.declared,
+				true,
+				"search_history.query semantic",
+			);
+		},
+	},
+	{
+		file: "oura",
+		stream: "sleep",
+		field: "day",
+		check: (c) => {
+			assert.equal(c.range_filter.declared, true, "oura.sleep.day range");
+			assert.deepEqual(
+				c.range_filter.operators,
+				["gte", "gt", "lte", "lt"],
+				"range operators surface",
+			);
+			assert.equal(
+				c.aggregation.group_by_time.declared,
+				true,
+				"oura.sleep.day group_by_time",
+			);
+		},
+	},
+	{
+		file: "uber",
+		stream: "trips",
+		field: "status",
+		check: (c) =>
+			assert.equal(
+				c.aggregation.group_by.declared,
+				true,
+				"uber.trips.status facet",
+			),
+	},
+	{
+		file: "uber",
+		stream: "trips",
+		field: "driver_name",
+		check: (c) =>
+			assert.equal(
+				c.lexical_search.declared,
+				true,
+				"uber.trips.driver_name lexical",
+			),
+	},
+	{
+		file: "meta",
+		stream: "posts",
+		field: "taken_at",
+		check: (c) =>
+			assert.equal(c.role, "event-time", "meta.posts.taken_at role"),
+	},
 ];
 
 test("declared query affordances project into field_capabilities", () => {
-  for (const { file, stream, field, check } of EXPECTATIONS) {
-    const caps = projectFieldCapabilities(loadStream(file, stream));
-    const cap = caps[field];
-    assert.ok(cap, `${file}.${stream}.${field} missing from projection`);
-    check(cap);
-  }
+	for (const { file, stream, field, check } of EXPECTATIONS) {
+		const caps = projectFieldCapabilities(loadStream(file, stream));
+		const cap = caps[field];
+		assert.ok(cap, `${file}.${stream}.${field} missing from projection`);
+		check(cap);
+	}
 });

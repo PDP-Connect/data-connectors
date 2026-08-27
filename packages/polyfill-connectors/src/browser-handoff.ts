@@ -38,11 +38,14 @@
 import { randomBytes } from "node:crypto";
 import type { Page } from "playwright";
 
-import type { InteractionRequest, InteractionResponse } from "./connector-runtime.ts";
+import type {
+	InteractionRequest,
+	InteractionResponse,
+} from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
 import {
-  resolveStreamingRegistrationFromEnv,
-  type StreamingTargetRegistrationHooks,
+	resolveStreamingRegistrationFromEnv,
+	type StreamingTargetRegistrationHooks,
 } from "./streaming-target-registration.ts";
 
 // ─── Exact-page CDP target resolver ────────────────────────────────────────
@@ -66,8 +69,8 @@ import {
 // `browser-launch.ts`).
 
 export interface ResolveWsUrlOptions {
-  readonly host: string;
-  readonly port: number;
+	readonly host: string;
+	readonly port: number;
 }
 
 /**
@@ -80,21 +83,24 @@ export interface ResolveWsUrlOptions {
  * along the lines of "browserContext.newCDPSession: page: no object with
  * guid …"). Callers in this module catch and treat as "skip registration".
  */
-export async function resolveWsUrlForExactPage(page: Page, opts: ResolveWsUrlOptions): Promise<string> {
-  const session = await page.context().newCDPSession(page);
-  try {
-    const { targetInfo } = (await session.send("Target.getTargetInfo")) as {
-      targetInfo: { targetId: string; type: string };
-    };
-    if (targetInfo.type !== "page") {
-      throw new Error(`expected page target, got type=${targetInfo.type}`);
-    }
-    return `ws://${opts.host}:${String(opts.port)}/devtools/page/${targetInfo.targetId}`;
-  } finally {
-    // Best-effort detach; if the page is already gone Playwright may reject
-    // — that's irrelevant to our caller, which only needs the wsUrl.
-    await session.detach().catch((): undefined => undefined);
-  }
+export async function resolveWsUrlForExactPage(
+	page: Page,
+	opts: ResolveWsUrlOptions,
+): Promise<string> {
+	const session = await page.context().newCDPSession(page);
+	try {
+		const { targetInfo } = (await session.send("Target.getTargetInfo")) as {
+			targetInfo: { targetId: string; type: string };
+		};
+		if (targetInfo.type !== "page") {
+			throw new Error(`expected page target, got type=${targetInfo.type}`);
+		}
+		return `ws://${opts.host}:${String(opts.port)}/devtools/page/${targetInfo.targetId}`;
+	} finally {
+		// Best-effort detach; if the page is already gone Playwright may reject
+		// — that's irrelevant to our caller, which only needs the wsUrl.
+		await session.detach().catch((): undefined => undefined);
+	}
 }
 
 // ─── Env-var contract for the binding-local handoff ───────────────────────
@@ -121,52 +127,62 @@ const BROWSER_SURFACE_ID_ENV = "PDPP_BROWSER_SURFACE_ID";
 const BROWSER_SURFACE_LEASE_ID_ENV = "PDPP_BROWSER_SURFACE_LEASE_ID";
 const BROWSER_SURFACE_PROFILE_KEY_ENV = "PDPP_BROWSER_SURFACE_PROFILE_KEY";
 const BROWSER_SURFACE_REQUIRED_ENV = "PDPP_BROWSER_SURFACE_REQUIRED";
-const BROWSER_SURFACE_REMOTE_CDP_URL_ENV = "PDPP_BROWSER_SURFACE_REMOTE_CDP_URL";
-const BROWSER_SURFACE_STREAM_BASE_URL_ENV = "PDPP_BROWSER_SURFACE_STREAM_BASE_URL";
+const BROWSER_SURFACE_REMOTE_CDP_URL_ENV =
+	"PDPP_BROWSER_SURFACE_REMOTE_CDP_URL";
+const BROWSER_SURFACE_STREAM_BASE_URL_ENV =
+	"PDPP_BROWSER_SURFACE_STREAM_BASE_URL";
 
 interface ResolvedCdpEndpoint {
-  readonly host: string;
-  readonly port: number;
+	readonly host: string;
+	readonly port: number;
 }
 
-function resolveCdpEndpointFromEnv(env: NodeJS.ProcessEnv): ResolvedCdpEndpoint | undefined {
-  const host = env[BROWSER_CDP_HOST_ENV]?.trim();
-  const portRaw = env[BROWSER_CDP_PORT_ENV]?.trim();
-  if (!(host && portRaw)) {
-    return;
-  }
-  const port = Number.parseInt(portRaw, 10);
-  if (!(Number.isFinite(port) && port > 0)) {
-    return;
-  }
-  return { host, port };
+function resolveCdpEndpointFromEnv(
+	env: NodeJS.ProcessEnv,
+): ResolvedCdpEndpoint | undefined {
+	const host = env[BROWSER_CDP_HOST_ENV]?.trim();
+	const portRaw = env[BROWSER_CDP_PORT_ENV]?.trim();
+	if (!(host && portRaw)) {
+		return;
+	}
+	const port = Number.parseInt(portRaw, 10);
+	if (!(Number.isFinite(port) && port > 0)) {
+		return;
+	}
+	return { host, port };
 }
 
 function nonEmptyEnv(env: NodeJS.ProcessEnv, key: string): string | undefined {
-  const value = env[key]?.trim();
-  return value ? value : undefined;
+	const value = env[key]?.trim();
+	return value ? value : undefined;
 }
 
 function isManagedNekoRequired(env: NodeJS.ProcessEnv): boolean {
-  return nonEmptyEnv(env, BROWSER_SURFACE_REQUIRED_ENV)?.toLowerCase() === "neko";
+	return (
+		nonEmptyEnv(env, BROWSER_SURFACE_REQUIRED_ENV)?.toLowerCase() === "neko"
+	);
 }
 
-function resolveManagedNekoDescriptorFromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> | undefined {
-  const baseUrl = nonEmptyEnv(env, BROWSER_SURFACE_STREAM_BASE_URL_ENV);
-  const leaseId = nonEmptyEnv(env, BROWSER_SURFACE_LEASE_ID_ENV);
-  const profileKey = nonEmptyEnv(env, BROWSER_SURFACE_PROFILE_KEY_ENV);
-  const cdpHttpUrl = nonEmptyEnv(env, BROWSER_SURFACE_REMOTE_CDP_URL_ENV);
-  if (!(baseUrl && leaseId && profileKey)) {
-    return;
-  }
-  return {
-    backend: "neko",
-    base_url: baseUrl,
-    ...(cdpHttpUrl ? { cdp_http_url: cdpHttpUrl } : {}),
-    lease_id: leaseId,
-    profile_key: profileKey,
-    ...(nonEmptyEnv(env, BROWSER_SURFACE_ID_ENV) ? { surface_id: nonEmptyEnv(env, BROWSER_SURFACE_ID_ENV) } : {}),
-  };
+function resolveManagedNekoDescriptorFromEnv(
+	env: NodeJS.ProcessEnv,
+): Record<string, unknown> | undefined {
+	const baseUrl = nonEmptyEnv(env, BROWSER_SURFACE_STREAM_BASE_URL_ENV);
+	const leaseId = nonEmptyEnv(env, BROWSER_SURFACE_LEASE_ID_ENV);
+	const profileKey = nonEmptyEnv(env, BROWSER_SURFACE_PROFILE_KEY_ENV);
+	const cdpHttpUrl = nonEmptyEnv(env, BROWSER_SURFACE_REMOTE_CDP_URL_ENV);
+	if (!(baseUrl && leaseId && profileKey)) {
+		return;
+	}
+	return {
+		backend: "neko",
+		base_url: baseUrl,
+		...(cdpHttpUrl ? { cdp_http_url: cdpHttpUrl } : {}),
+		lease_id: leaseId,
+		profile_key: profileKey,
+		...(nonEmptyEnv(env, BROWSER_SURFACE_ID_ENV)
+			? { surface_id: nonEmptyEnv(env, BROWSER_SURFACE_ID_ENV) }
+			: {}),
+	};
 }
 
 // ─── Interaction-id generation ─────────────────────────────────────────────
@@ -179,58 +195,66 @@ function resolveManagedNekoDescriptorFromEnv(env: NodeJS.ProcessEnv): Record<str
 // downstream — the request_id is opaque to the protocol.
 
 function generateInteractionId(): string {
-  return `int_${String(Date.now())}_${randomBytes(4).toString("hex")}`;
+	return `int_${String(Date.now())}_${randomBytes(4).toString("hex")}`;
 }
 
 // ─── Browser-interaction target registration ────────────────────────────────
 
-export type ManualActionReason = "login" | "2fa" | "captcha" | "oauth_popup" | "manual_action";
+export type ManualActionReason =
+	| "login"
+	| "2fa"
+	| "captcha"
+	| "oauth_popup"
+	| "manual_action";
 
 export interface PrepareBrowserInteractionTargetArgs {
-  /**
-   * Test/integration seam. Defaults to `process.env`. The launcher mutates
-   * `process.env` directly after a successful patchright launch, so the
-   * default is the right thing in production.
-   */
-  readonly env?: NodeJS.ProcessEnv;
-  readonly interactionId?: string;
-  readonly page: Page;
-  readonly reason?: ManualActionReason;
-  /**
-   * Test seam. Defaults to `resolveStreamingRegistrationFromEnv`, which
-   * reads `PDPP_RUN_ID` + `PDPP_REFERENCE_BASE_URL` + a registration token
-   * from env and returns a real client. Tests inject a fake to assert the
-   * register payload without spinning up a server.
-   */
-  readonly resolveStreamingRegistration?: (
-    env?: NodeJS.ProcessEnv
-  ) => Promise<StreamingTargetRegistrationHooks | undefined>;
-  /**
-   * Test seam. Defaults to `resolveWsUrlForExactPage`. Tests inject a fake
-   * so the registration payload can be asserted without a real CDP session.
-   */
-  readonly resolveWsUrl?: (page: Page, opts: ResolveWsUrlOptions) => Promise<string>;
+	/**
+	 * Test/integration seam. Defaults to `process.env`. The launcher mutates
+	 * `process.env` directly after a successful patchright launch, so the
+	 * default is the right thing in production.
+	 */
+	readonly env?: NodeJS.ProcessEnv;
+	readonly interactionId?: string;
+	readonly page: Page;
+	readonly reason?: ManualActionReason;
+	/**
+	 * Test seam. Defaults to `resolveStreamingRegistrationFromEnv`, which
+	 * reads `PDPP_RUN_ID` + `PDPP_REFERENCE_BASE_URL` + a registration token
+	 * from env and returns a real client. Tests inject a fake to assert the
+	 * register payload without spinning up a server.
+	 */
+	readonly resolveStreamingRegistration?: (
+		env?: NodeJS.ProcessEnv,
+	) => Promise<StreamingTargetRegistrationHooks | undefined>;
+	/**
+	 * Test seam. Defaults to `resolveWsUrlForExactPage`. Tests inject a fake
+	 * so the registration payload can be asserted without a real CDP session.
+	 */
+	readonly resolveWsUrl?: (
+		page: Page,
+		opts: ResolveWsUrlOptions,
+	) => Promise<string>;
 }
 
 export type PrepareManualActionArgs = PrepareBrowserInteractionTargetArgs;
 
 export interface PrepareBrowserInteractionTargetResult {
-  /** Generated interactionId; the connector then includes this in its INTERACTION envelope. */
-  readonly interactionId: string;
-  /**
-   * `true` if registration succeeded with the reference server. `false`
-   * means streaming will fail closed for this interaction — the connector
-   * can still emit it, the operator just won't have a working browser
-   * stream. The honest failure mode.
-   */
-  readonly registered: boolean;
+	/** Generated interactionId; the connector then includes this in its INTERACTION envelope. */
+	readonly interactionId: string;
+	/**
+	 * `true` if registration succeeded with the reference server. `false`
+	 * means streaming will fail closed for this interaction — the connector
+	 * can still emit it, the operator just won't have a working browser
+	 * stream. The honest failure mode.
+	 */
+	readonly registered: boolean;
 }
 
 export type PrepareManualActionResult = PrepareBrowserInteractionTargetResult;
 
 interface ManualActionPageMetadata {
-  readonly pageTitle?: string;
-  readonly pageUrl?: string;
+	readonly pageTitle?: string;
+	readonly pageUrl?: string;
 }
 
 /**
@@ -248,129 +272,132 @@ export const DEADLINE_TIMEOUT = Symbol("pdpp.browser-handoff.deadline-timeout");
 const DEFAULT_METADATA_READ_DEADLINE_MS = 2000;
 
 export async function withDeadline<T>(
-  work: Promise<T>,
-  ms: number,
-  onTimeout?: () => void
+	work: Promise<T>,
+	ms: number,
+	onTimeout?: () => void,
 ): Promise<T | typeof DEADLINE_TIMEOUT> {
-  if (!(Number.isFinite(ms) && ms > 0)) {
-    return work;
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<typeof DEADLINE_TIMEOUT>((resolve) => {
-    timer = setTimeout(() => {
-      onTimeout?.();
-      resolve(DEADLINE_TIMEOUT);
-    }, ms);
-  });
-  try {
-    return await Promise.race([work, deadline]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
+	if (!(Number.isFinite(ms) && ms > 0)) {
+		return work;
+	}
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<typeof DEADLINE_TIMEOUT>((resolve) => {
+		timer = setTimeout(() => {
+			onTimeout?.();
+			resolve(DEADLINE_TIMEOUT);
+		}, ms);
+	});
+	try {
+		return await Promise.race([work, deadline]);
+	} finally {
+		if (timer) {
+			clearTimeout(timer);
+		}
+	}
 }
 
 async function readManualActionPageMetadata(
-  page: Page,
-  deadlineMs = DEFAULT_METADATA_READ_DEADLINE_MS
+	page: Page,
+	deadlineMs = DEFAULT_METADATA_READ_DEADLINE_MS,
 ): Promise<ManualActionPageMetadata> {
-  let pageUrl: string | undefined;
-  let pageTitle: string | undefined;
-  // URL is synchronous (read from the last navigation), so it survives even a
-  // wedged renderer and is read first — the interaction always carries it.
-  try {
-    pageUrl = page.url();
-  } catch {
-    /* page may have been closed; metadata is optional */
-  }
-  // `page.title()` is CDP-backed and has no per-call timeout: a wedged renderer
-  // can hang it forever, which would block the manual-action INTERACTION from
-  // ever being emitted (the owner never sees the prompt). Bound it so a hung
-  // title read degrades to "no title" instead of stalling the handoff.
-  try {
-    const titleResult = await withDeadline(page.title(), deadlineMs, () => {
-      process.stderr.write(
-        `[browser-handoff] page.title() timed out after ${String(deadlineMs)}ms; emitting interaction without page title.\n`
-      );
-    });
-    if (titleResult !== DEADLINE_TIMEOUT) {
-      pageTitle = titleResult;
-    }
-  } catch {
-    /* page may have been closed; metadata is optional */
-  }
-  return {
-    ...(pageUrl ? { pageUrl } : {}),
-    ...(pageTitle ? { pageTitle } : {}),
-  };
+	let pageUrl: string | undefined;
+	let pageTitle: string | undefined;
+	// URL is synchronous (read from the last navigation), so it survives even a
+	// wedged renderer and is read first — the interaction always carries it.
+	try {
+		pageUrl = page.url();
+	} catch {
+		/* page may have been closed; metadata is optional */
+	}
+	// `page.title()` is CDP-backed and has no per-call timeout: a wedged renderer
+	// can hang it forever, which would block the manual-action INTERACTION from
+	// ever being emitted (the owner never sees the prompt). Bound it so a hung
+	// title read degrades to "no title" instead of stalling the handoff.
+	try {
+		const titleResult = await withDeadline(page.title(), deadlineMs, () => {
+			process.stderr.write(
+				`[browser-handoff] page.title() timed out after ${String(deadlineMs)}ms; emitting interaction without page title.\n`,
+			);
+		});
+		if (titleResult !== DEADLINE_TIMEOUT) {
+			pageTitle = titleResult;
+		}
+	} catch {
+		/* page may have been closed; metadata is optional */
+	}
+	return {
+		...(pageUrl ? { pageUrl } : {}),
+		...(pageTitle ? { pageTitle } : {}),
+	};
 }
 
 function registerManagedNekoManualActionTarget(args: {
-  readonly env: NodeJS.ProcessEnv;
-  readonly interactionId: string;
-  readonly metadata: ManualActionPageMetadata;
-  readonly reason?: ManualActionReason;
-  readonly registration: StreamingTargetRegistrationHooks;
+	readonly env: NodeJS.ProcessEnv;
+	readonly interactionId: string;
+	readonly metadata: ManualActionPageMetadata;
+	readonly reason?: ManualActionReason;
+	readonly registration: StreamingTargetRegistrationHooks;
 }): Promise<boolean> {
-  const nekoDescriptor = resolveManagedNekoDescriptorFromEnv(args.env);
-  if (!nekoDescriptor) {
-    process.stderr.write(
-      `[browser-handoff] managed n.eko surface env is incomplete; streaming-companion target not registered for interaction ${args.interactionId}.\n`
-    );
-    return Promise.resolve(false);
-  }
-  return args.registration.register({
-    backend: "neko",
-    runId: args.registration.runId,
-    interactionId: args.interactionId,
-    descriptor: {
-      ...nekoDescriptor,
-      interaction_id: args.interactionId,
-      ...(args.metadata.pageUrl ? { start_url: args.metadata.pageUrl } : {}),
-    },
-    ...(args.metadata.pageUrl ? { pageUrl: args.metadata.pageUrl } : {}),
-    ...(args.metadata.pageTitle ? { pageTitle: args.metadata.pageTitle } : {}),
-    ...(args.reason ? { reason: args.reason } : {}),
-  });
+	const nekoDescriptor = resolveManagedNekoDescriptorFromEnv(args.env);
+	if (!nekoDescriptor) {
+		process.stderr.write(
+			`[browser-handoff] managed n.eko surface env is incomplete; streaming-companion target not registered for interaction ${args.interactionId}.\n`,
+		);
+		return Promise.resolve(false);
+	}
+	return args.registration.register({
+		backend: "neko",
+		runId: args.registration.runId,
+		interactionId: args.interactionId,
+		descriptor: {
+			...nekoDescriptor,
+			interaction_id: args.interactionId,
+			...(args.metadata.pageUrl ? { start_url: args.metadata.pageUrl } : {}),
+		},
+		...(args.metadata.pageUrl ? { pageUrl: args.metadata.pageUrl } : {}),
+		...(args.metadata.pageTitle ? { pageTitle: args.metadata.pageTitle } : {}),
+		...(args.reason ? { reason: args.reason } : {}),
+	});
 }
 
 async function resolveCdpWsUrlForManualAction(args: {
-  readonly endpoint: ResolvedCdpEndpoint;
-  readonly interactionId: string;
-  readonly page: Page;
-  readonly resolveWsUrl: (page: Page, opts: ResolveWsUrlOptions) => Promise<string>;
+	readonly endpoint: ResolvedCdpEndpoint;
+	readonly interactionId: string;
+	readonly page: Page;
+	readonly resolveWsUrl: (
+		page: Page,
+		opts: ResolveWsUrlOptions,
+	) => Promise<string>;
 }): Promise<string | undefined> {
-  let wsUrl: string | undefined;
-  try {
-    wsUrl = await args.resolveWsUrl(args.page, args.endpoint);
-  } catch (err) {
-    // Most common cause: the page closed between the connector deciding it
-    // needed manual_action and us reaching the resolver. Fail closed for
-    // streaming, return the interactionId so the INTERACTION still emits.
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      `[browser-handoff] could not resolve CDP page-target wsUrl for interaction ${args.interactionId}: ${message}; continuing without streaming.\n`
-    );
-  }
-  return wsUrl;
+	let wsUrl: string | undefined;
+	try {
+		wsUrl = await args.resolveWsUrl(args.page, args.endpoint);
+	} catch (err) {
+		// Most common cause: the page closed between the connector deciding it
+		// needed manual_action and us reaching the resolver. Fail closed for
+		// streaming, return the interactionId so the INTERACTION still emits.
+		const message = err instanceof Error ? err.message : String(err);
+		process.stderr.write(
+			`[browser-handoff] could not resolve CDP page-target wsUrl for interaction ${args.interactionId}: ${message}; continuing without streaming.\n`,
+		);
+	}
+	return wsUrl;
 }
 
 function registerCdpManualActionTarget(args: {
-  readonly interactionId: string;
-  readonly metadata: ManualActionPageMetadata;
-  readonly reason?: ManualActionReason;
-  readonly registration: StreamingTargetRegistrationHooks;
-  readonly wsUrl: string;
+	readonly interactionId: string;
+	readonly metadata: ManualActionPageMetadata;
+	readonly reason?: ManualActionReason;
+	readonly registration: StreamingTargetRegistrationHooks;
+	readonly wsUrl: string;
 }): Promise<boolean> {
-  return args.registration.register({
-    runId: args.registration.runId,
-    interactionId: args.interactionId,
-    wsUrl: args.wsUrl,
-    ...(args.metadata.pageUrl ? { pageUrl: args.metadata.pageUrl } : {}),
-    ...(args.metadata.pageTitle ? { pageTitle: args.metadata.pageTitle } : {}),
-    ...(args.reason ? { reason: args.reason } : {}),
-  });
+	return args.registration.register({
+		runId: args.registration.runId,
+		interactionId: args.interactionId,
+		wsUrl: args.wsUrl,
+		...(args.metadata.pageUrl ? { pageUrl: args.metadata.pageUrl } : {}),
+		...(args.metadata.pageTitle ? { pageTitle: args.metadata.pageTitle } : {}),
+		...(args.reason ? { reason: args.reason } : {}),
+	});
 }
 
 /**
@@ -388,81 +415,84 @@ function registerCdpManualActionTarget(args: {
  * is unavailable.
  */
 export async function prepareBrowserInteractionTarget(
-  args: PrepareBrowserInteractionTargetArgs
+	args: PrepareBrowserInteractionTargetArgs,
 ): Promise<PrepareBrowserInteractionTargetResult> {
-  const env = args.env ?? process.env;
-  const resolveStreamingRegistration = args.resolveStreamingRegistration ?? resolveStreamingRegistrationFromEnv;
-  const resolveWsUrl = args.resolveWsUrl ?? resolveWsUrlForExactPage;
-  const interactionId = args.interactionId ?? generateInteractionId();
+	const env = args.env ?? process.env;
+	const resolveStreamingRegistration =
+		args.resolveStreamingRegistration ?? resolveStreamingRegistrationFromEnv;
+	const resolveWsUrl = args.resolveWsUrl ?? resolveWsUrlForExactPage;
+	const interactionId = args.interactionId ?? generateInteractionId();
 
-  let registration: StreamingTargetRegistrationHooks | undefined;
-  try {
-    registration = await resolveStreamingRegistration(env);
-  } catch {
-    process.stderr.write(
-      `[browser-handoff] streaming registration resolver failed for interaction ${interactionId}; continuing without streaming.\n`
-    );
-    return { interactionId, registered: false };
-  }
-  if (!registration) {
-    // No PDPP_RUN_ID + base URL + token combo in env. Streaming is not
-    // configured for this run — return the interactionId so the connector
-    // can still emit the INTERACTION envelope. The resolver itself logs
-    // a hint when PDPP_RUN_ID is set but the rest is missing.
-    return { interactionId, registered: false };
-  }
+	let registration: StreamingTargetRegistrationHooks | undefined;
+	try {
+		registration = await resolveStreamingRegistration(env);
+	} catch {
+		process.stderr.write(
+			`[browser-handoff] streaming registration resolver failed for interaction ${interactionId}; continuing without streaming.\n`,
+		);
+		return { interactionId, registered: false };
+	}
+	if (!registration) {
+		// No PDPP_RUN_ID + base URL + token combo in env. Streaming is not
+		// configured for this run — return the interactionId so the connector
+		// can still emit the INTERACTION envelope. The resolver itself logs
+		// a hint when PDPP_RUN_ID is set but the rest is missing.
+		return { interactionId, registered: false };
+	}
 
-  const metadata = await readManualActionPageMetadata(args.page);
+	const metadata = await readManualActionPageMetadata(args.page);
 
-  if (isManagedNekoRequired(env)) {
-    const ok = await registerManagedNekoManualActionTarget({
-      env,
-      interactionId,
-      metadata,
-      registration,
-      ...(args.reason ? { reason: args.reason } : {}),
-    });
-    return { interactionId, registered: ok };
-  }
+	if (isManagedNekoRequired(env)) {
+		const ok = await registerManagedNekoManualActionTarget({
+			env,
+			interactionId,
+			metadata,
+			registration,
+			...(args.reason ? { reason: args.reason } : {}),
+		});
+		return { interactionId, registered: ok };
+	}
 
-  const endpoint = resolveCdpEndpointFromEnv(env);
-  if (!endpoint) {
-    process.stderr.write(
-      `[browser-handoff] ${BROWSER_CDP_HOST_ENV}/${BROWSER_CDP_PORT_ENV} not set; streaming-companion target not registered for interaction ${interactionId}.\n`
-    );
-    return { interactionId, registered: false };
-  }
+	const endpoint = resolveCdpEndpointFromEnv(env);
+	if (!endpoint) {
+		process.stderr.write(
+			`[browser-handoff] ${BROWSER_CDP_HOST_ENV}/${BROWSER_CDP_PORT_ENV} not set; streaming-companion target not registered for interaction ${interactionId}.\n`,
+		);
+		return { interactionId, registered: false };
+	}
 
-  const wsUrl = await resolveCdpWsUrlForManualAction({
-    endpoint,
-    interactionId,
-    page: args.page,
-    resolveWsUrl,
-  });
-  if (!wsUrl) {
-    return { interactionId, registered: false };
-  }
+	const wsUrl = await resolveCdpWsUrlForManualAction({
+		endpoint,
+		interactionId,
+		page: args.page,
+		resolveWsUrl,
+	});
+	if (!wsUrl) {
+		return { interactionId, registered: false };
+	}
 
-  const ok = await registerCdpManualActionTarget({
-    interactionId,
-    metadata,
-    registration,
-    wsUrl,
-    ...(args.reason ? { reason: args.reason } : {}),
-  });
+	const ok = await registerCdpManualActionTarget({
+		interactionId,
+		metadata,
+		registration,
+		wsUrl,
+		...(args.reason ? { reason: args.reason } : {}),
+	});
 
-  if (!ok) {
-    // The registration client itself logged the underlying reason
-    // (network error, 401, 4xx, etc). We don't double-log here; just
-    // surface the registered=false bit to the caller.
-    return { interactionId, registered: false };
-  }
+	if (!ok) {
+		// The registration client itself logged the underlying reason
+		// (network error, 401, 4xx, etc). We don't double-log here; just
+		// surface the registered=false bit to the caller.
+		return { interactionId, registered: false };
+	}
 
-  return { interactionId, registered: true };
+	return { interactionId, registered: true };
 }
 
-export function prepareManualAction(args: PrepareManualActionArgs): Promise<PrepareManualActionResult> {
-  return prepareBrowserInteractionTarget(args);
+export function prepareManualAction(
+	args: PrepareManualActionArgs,
+): Promise<PrepareManualActionResult> {
+	return prepareBrowserInteractionTarget(args);
 }
 
 /**
@@ -476,31 +506,35 @@ export function prepareManualAction(args: PrepareManualActionArgs): Promise<Prep
  * cannot leave an indefinitely controllable page behind.
  */
 export async function unregisterBrowserInteractionTarget(args: {
-  readonly env?: NodeJS.ProcessEnv;
-  readonly interactionId: string;
-  readonly resolveStreamingRegistration?: (
-    env?: NodeJS.ProcessEnv
-  ) => Promise<StreamingTargetRegistrationHooks | undefined>;
+	readonly env?: NodeJS.ProcessEnv;
+	readonly interactionId: string;
+	readonly resolveStreamingRegistration?: (
+		env?: NodeJS.ProcessEnv,
+	) => Promise<StreamingTargetRegistrationHooks | undefined>;
 }): Promise<boolean> {
-  if (!args.interactionId) {
-    return false;
-  }
-  const env = args.env ?? process.env;
-  const resolveStreamingRegistration = args.resolveStreamingRegistration ?? resolveStreamingRegistrationFromEnv;
-  let registration: StreamingTargetRegistrationHooks | undefined;
-  try {
-    registration = await resolveStreamingRegistration(env);
-  } catch {
-    return false;
-  }
-  if (!registration) {
-    return false;
-  }
-  try {
-    return await registration.unregister({ interactionId: args.interactionId, runId: registration.runId });
-  } catch {
-    return false;
-  }
+	if (!args.interactionId) {
+		return false;
+	}
+	const env = args.env ?? process.env;
+	const resolveStreamingRegistration =
+		args.resolveStreamingRegistration ?? resolveStreamingRegistrationFromEnv;
+	let registration: StreamingTargetRegistrationHooks | undefined;
+	try {
+		registration = await resolveStreamingRegistration(env);
+	} catch {
+		return false;
+	}
+	if (!registration) {
+		return false;
+	}
+	try {
+		return await registration.unregister({
+			interactionId: args.interactionId,
+			runId: registration.runId,
+		});
+	} catch {
+		return false;
+	}
 }
 
 // ─── manualAction: connector-author convenience layer ──────────────────────
@@ -512,37 +546,39 @@ export async function unregisterBrowserInteractionTarget(args: {
 // "the human needs to act on this page", as the advisor recommends.
 
 export interface ManualActionArgs extends PrepareManualActionArgs {
-  /** Optional fixture capture session; when enabled, captures this exact page before notifying the operator. */
-  readonly capture?: CaptureSession | null;
-  /** Human-facing prompt the operator sees in the streaming companion / interaction surface. */
-  readonly message: string;
-  /** Optional schema for the response payload — mirrors INTERACTION.schema. */
-  readonly schema?: Record<string, unknown>;
-  /** Optional timeout passthrough — mirrors INTERACTION.timeout_seconds. */
-  readonly timeoutSeconds?: number;
+	/** Optional fixture capture session; when enabled, captures this exact page before notifying the operator. */
+	readonly capture?: CaptureSession | null;
+	/** Human-facing prompt the operator sees in the streaming companion / interaction surface. */
+	readonly message: string;
+	/** Optional schema for the response payload — mirrors INTERACTION.schema. */
+	readonly schema?: Record<string, unknown>;
+	/** Optional timeout passthrough — mirrors INTERACTION.timeout_seconds. */
+	readonly timeoutSeconds?: number;
 }
 
-export type SendInteraction = (req: InteractionRequest) => Promise<InteractionResponse>;
+export type SendInteraction = (
+	req: InteractionRequest,
+) => Promise<InteractionResponse>;
 
 function captureManualActionFixture(args: {
-  readonly capture?: CaptureSession | null;
-  readonly interactionId: string;
-  readonly page: Page;
-  readonly reason?: ManualActionReason;
+	readonly capture?: CaptureSession | null;
+	readonly interactionId: string;
+	readonly page: Page;
+	readonly reason?: ManualActionReason;
 }): void {
-  if (!args.capture) {
-    return;
-  }
+	if (!args.capture) {
+		return;
+	}
 
-  try {
-    const capture = args.capture.captureDom(
-      args.page,
-      `manual-action-${args.reason ?? "manual_action"}-${args.interactionId}`
-    );
-    capture.catch((): undefined => undefined);
-  } catch {
-    // Fixture capture is diagnostic-only and must never delay or block the operator handoff.
-  }
+	try {
+		const capture = args.capture.captureDom(
+			args.page,
+			`manual-action-${args.reason ?? "manual_action"}-${args.interactionId}`,
+		);
+		capture.catch((): undefined => undefined);
+	} catch {
+		// Fixture capture is diagnostic-only and must never delay or block the operator handoff.
+	}
 }
 
 /**
@@ -563,38 +599,44 @@ function captureManualActionFixture(args: {
  * make `args` impossible to construct in tests that don't have a runtime).
  */
 export async function manualAction(
-  args: ManualActionArgs,
-  sendInteraction: SendInteraction
+	args: ManualActionArgs,
+	sendInteraction: SendInteraction,
 ): Promise<InteractionResponse> {
-  const { interactionId } = await prepareManualAction({
-    page: args.page,
-    ...(args.reason ? { reason: args.reason } : {}),
-    ...(args.env ? { env: args.env } : {}),
-    ...(args.resolveStreamingRegistration ? { resolveStreamingRegistration: args.resolveStreamingRegistration } : {}),
-    ...(args.resolveWsUrl ? { resolveWsUrl: args.resolveWsUrl } : {}),
-  });
-  captureManualActionFixture({
-    ...(args.capture ? { capture: args.capture } : {}),
-    interactionId,
-    page: args.page,
-    ...(args.reason ? { reason: args.reason } : {}),
-  });
+	const { interactionId } = await prepareManualAction({
+		page: args.page,
+		...(args.reason ? { reason: args.reason } : {}),
+		...(args.env ? { env: args.env } : {}),
+		...(args.resolveStreamingRegistration
+			? { resolveStreamingRegistration: args.resolveStreamingRegistration }
+			: {}),
+		...(args.resolveWsUrl ? { resolveWsUrl: args.resolveWsUrl } : {}),
+	});
+	captureManualActionFixture({
+		...(args.capture ? { capture: args.capture } : {}),
+		interactionId,
+		page: args.page,
+		...(args.reason ? { reason: args.reason } : {}),
+	});
 
-  try {
-    return await sendInteraction({
-      kind: "manual_action",
-      request_id: interactionId,
-      message: args.message,
-      ...(args.schema ? { schema: args.schema } : {}),
-      ...(args.timeoutSeconds === undefined ? {} : { timeout_seconds: args.timeoutSeconds }),
-    });
-  } finally {
-    await unregisterBrowserInteractionTarget({
-      interactionId,
-      ...(args.env ? { env: args.env } : {}),
-      ...(args.resolveStreamingRegistration ? { resolveStreamingRegistration: args.resolveStreamingRegistration } : {}),
-    });
-  }
+	try {
+		return await sendInteraction({
+			kind: "manual_action",
+			request_id: interactionId,
+			message: args.message,
+			...(args.schema ? { schema: args.schema } : {}),
+			...(args.timeoutSeconds === undefined
+				? {}
+				: { timeout_seconds: args.timeoutSeconds }),
+		});
+	} finally {
+		await unregisterBrowserInteractionTarget({
+			interactionId,
+			...(args.env ? { env: args.env } : {}),
+			...(args.resolveStreamingRegistration
+				? { resolveStreamingRegistration: args.resolveStreamingRegistration }
+				: {}),
+		});
+	}
 }
 
 /**
@@ -603,49 +645,49 @@ export async function manualAction(
  * signal to re-probe; site-specific session evidence stays with the connector.
  */
 export interface ManualBrowserLoginArgs<Result> {
-  readonly capture?: CaptureSession | null;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly message: string;
-  readonly page: Page;
-  readonly probe: () => Promise<Result>;
-  readonly reason?: ManualActionReason;
-  readonly sendInteraction: SendInteraction;
-  readonly timeoutSeconds?: number;
+	readonly capture?: CaptureSession | null;
+	readonly env?: NodeJS.ProcessEnv;
+	readonly message: string;
+	readonly page: Page;
+	readonly probe: () => Promise<Result>;
+	readonly reason?: ManualActionReason;
+	readonly sendInteraction: SendInteraction;
+	readonly timeoutSeconds?: number;
 }
 
 export async function manualBrowserLogin<Result>({
-  capture,
-  env,
-  message,
-  page,
-  probe,
-  reason = "login",
-  sendInteraction,
-  timeoutSeconds,
+	capture,
+	env,
+	message,
+	page,
+	probe,
+	reason = "login",
+	sendInteraction,
+	timeoutSeconds,
 }: ManualBrowserLoginArgs<Result>): Promise<Result> {
-  await manualAction(
-    {
-      ...(capture ? { capture } : {}),
-      ...(env ? { env } : {}),
-      message,
-      page,
-      reason,
-      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
-    },
-    sendInteraction
-  );
-  return await probe();
+	await manualAction(
+		{
+			...(capture ? { capture } : {}),
+			...(env ? { env } : {}),
+			message,
+			page,
+			reason,
+			...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+		},
+		sendInteraction,
+	);
+	return await probe();
 }
 
 // ─── Exports for tests ─────────────────────────────────────────────────────
 
 export {
-  BROWSER_CDP_HOST_ENV,
-  BROWSER_CDP_PORT_ENV,
-  BROWSER_SURFACE_ID_ENV,
-  BROWSER_SURFACE_LEASE_ID_ENV,
-  BROWSER_SURFACE_PROFILE_KEY_ENV,
-  BROWSER_SURFACE_REMOTE_CDP_URL_ENV,
-  BROWSER_SURFACE_REQUIRED_ENV,
-  BROWSER_SURFACE_STREAM_BASE_URL_ENV,
+	BROWSER_CDP_HOST_ENV,
+	BROWSER_CDP_PORT_ENV,
+	BROWSER_SURFACE_ID_ENV,
+	BROWSER_SURFACE_LEASE_ID_ENV,
+	BROWSER_SURFACE_PROFILE_KEY_ENV,
+	BROWSER_SURFACE_REMOTE_CDP_URL_ENV,
+	BROWSER_SURFACE_REQUIRED_ENV,
+	BROWSER_SURFACE_STREAM_BASE_URL_ENV,
 };

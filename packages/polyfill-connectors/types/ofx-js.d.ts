@@ -9,6 +9,6 @@
 // itself stops being an error. The call-site narrowing keeps us honest
 // about the actual runtime shape.
 declare module "ofx-js" {
-  const mod: unknown;
-  export default mod;
+	const mod: unknown;
+	export default mod;
 }

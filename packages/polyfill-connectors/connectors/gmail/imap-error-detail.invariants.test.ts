@@ -25,33 +25,46 @@ import { fileURLToPath } from "node:url";
 const INDEX_FILE = fileURLToPath(new URL("./index.ts", import.meta.url));
 
 function functionBody(src: string, signature: string): string {
-  const start = src.indexOf(signature);
-  assert.notEqual(start, -1, `${signature} must exist`);
-  const end = src.indexOf("\n}", start);
-  return src.slice(start, end);
+	const start = src.indexOf(signature);
+	assert.notEqual(start, -1, `${signature} must exist`);
+	const end = src.indexOf("\n}", start);
+	return src.slice(start, end);
 }
 
 test("the top-level rejection handler keeps the IMAP server's explanation", async () => {
-  const src = await readFile(INDEX_FILE, "utf8");
-  const body = functionBody(src, "function handleMainRejection(e: unknown): void {");
-  assert.match(body, /describeUnexpectedFailure\(e\)/, "must fold in responseText/executedCommand");
-  assert.doesNotMatch(
-    body,
-    /e instanceof Error \? e\.message : String\(e\)/,
-    "flattening to .message discards the only useful part of an imapflow error"
-  );
+	const src = await readFile(INDEX_FILE, "utf8");
+	const body = functionBody(
+		src,
+		"function handleMainRejection(e: unknown): void {",
+	);
+	assert.match(
+		body,
+		/describeUnexpectedFailure\(e\)/,
+		"must fold in responseText/executedCommand",
+	);
+	assert.doesNotMatch(
+		body,
+		/e instanceof Error \? e\.message : String\(e\)/,
+		"flattening to .message discards the only useful part of an imapflow error",
+	);
 });
 
 test("attachment hydration errors keep it too", async () => {
-  // Attachment downloads also go over IMAP, so they hit the same generic message.
-  const src = await readFile(INDEX_FILE, "utf8");
-  const body = functionBody(src, "function boundedHydrationError(err: unknown): string {");
-  assert.match(body, /describeUnexpectedFailure\(err\)/);
+	// Attachment downloads also go over IMAP, so they hit the same generic message.
+	const src = await readFile(INDEX_FILE, "utf8");
+	const body = functionBody(
+		src,
+		"function boundedHydrationError(err: unknown): string {",
+	);
+	assert.match(body, /describeUnexpectedFailure\(err\)/);
 });
 
 test("the helper is imported from the shared runtime, not re-implemented", async () => {
-  // A second copy would drift from the runtime's redaction guarantees — the
-  // reason executedCommand is safe to surface at all.
-  const src = await readFile(INDEX_FILE, "utf8");
-  assert.match(src, /describeUnexpectedFailure,?\n?[\s\S]{0,400}from "\.\.\/\.\.\/src\/connector-runtime\.ts"/);
+	// A second copy would drift from the runtime's redaction guarantees — the
+	// reason executedCommand is safe to surface at all.
+	const src = await readFile(INDEX_FILE, "utf8");
+	assert.match(
+		src,
+		/describeUnexpectedFailure,?\n?[\s\S]{0,400}from "\.\.\/\.\.\/src\/connector-runtime\.ts"/,
+	);
 });

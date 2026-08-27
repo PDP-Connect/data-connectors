@@ -41,13 +41,16 @@ const NAME_CRUFT_RE = /Quantity:|Price:|Add to (cart|list)|Write a review/i;
 const LOCATION_CRUFT_RE = /Status:|\$\d/;
 
 const centsSchema = z
-  .number()
-  .int()
-  .min(0)
-  .max(100_000_000) // $1,000,000 max — generous upper bound for a grocery order
-  .nullable();
+	.number()
+	.int()
+	.min(0)
+	.max(100_000_000) // $1,000,000 max — generous upper bound for a grocery order
+	.nullable();
 
-const currencyStringSchema = z.string().regex(CURRENCY_STRING_RE, "not a $N.NN formatted currency string").nullable();
+const currencyStringSchema = z
+	.string()
+	.regex(CURRENCY_STRING_RE, "not a $N.NN formatted currency string")
+	.nullable();
 
 /**
  * orders stream (manifest required: id, order_date). One record per H-E-B
@@ -62,23 +65,31 @@ const currencyStringSchema = z.string().regex(CURRENCY_STRING_RE, "not a $N.NN f
  * from one account's history.
  */
 export const ordersSchema = z.object({
-  id: z.string().regex(HEB_ORDER_ID_RE, 'id must start with "HEB"'),
-  order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
-  fulfillment_method: z.enum(["curbside", "delivery", "unknown"]),
-  fulfillment_location: pdppSafeText
-    .max(500)
-    .refine((s) => !LOCATION_CRUFT_RE.test(s), { message: "contains cruft (status/price leaked into location)" })
-    .nullable(),
-  status: z.string().min(1).max(200).nullable(),
-  status_code: z.string().min(1).max(200).nullable(),
-  store_name: pdppSafeText.max(200).nullable(),
-  timeslot_start: z.string().regex(ISO_DATETIME_RE, "timeslot_start must be an ISO-8601 datetime").nullable(),
-  timeslot_end: z.string().regex(ISO_DATETIME_RE, "timeslot_end must be an ISO-8601 datetime").nullable(),
-  total: currencyStringSchema,
-  total_cents: centsSchema,
-  item_count: z.number().int().min(0).nullable(),
-  unfulfilled_count: z.number().int().min(0).nullable(),
-  fetched_at: z.string(),
+	id: z.string().regex(HEB_ORDER_ID_RE, 'id must start with "HEB"'),
+	order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
+	fulfillment_method: z.enum(["curbside", "delivery", "unknown"]),
+	fulfillment_location: pdppSafeText
+		.max(500)
+		.refine((s) => !LOCATION_CRUFT_RE.test(s), {
+			message: "contains cruft (status/price leaked into location)",
+		})
+		.nullable(),
+	status: z.string().min(1).max(200).nullable(),
+	status_code: z.string().min(1).max(200).nullable(),
+	store_name: pdppSafeText.max(200).nullable(),
+	timeslot_start: z
+		.string()
+		.regex(ISO_DATETIME_RE, "timeslot_start must be an ISO-8601 datetime")
+		.nullable(),
+	timeslot_end: z
+		.string()
+		.regex(ISO_DATETIME_RE, "timeslot_end must be an ISO-8601 datetime")
+		.nullable(),
+	total: currencyStringSchema,
+	total_cents: centsSchema,
+	item_count: z.number().int().min(0).nullable(),
+	unfulfilled_count: z.number().int().min(0).nullable(),
+	fetched_at: z.string(),
 });
 
 /**
@@ -86,21 +97,21 @@ export const ordersSchema = z.object({
  * One record per line item on an order-detail page.
  */
 export const orderItemsSchema = z.object({
-  id: z.string().min(1).max(300),
-  order_id: z.string().regex(HEB_ORDER_ID_RE, 'order_id must start with "HEB"'),
-  name: pdppSafeText
-    .min(1)
-    .max(1024)
-    .refine((s) => !NAME_CRUFT_RE.test(s), { message: "contains UI cruft" }),
-  department: z.string().min(1).max(100).nullable(),
-  product_id: z.string().min(1).max(64).nullable(),
-  product_url: z.string().nullable(),
-  image_url: z.string().nullable(),
-  quantity: z.number().min(0).max(999).nullable(),
-  line_total: currencyStringSchema,
-  line_total_cents: centsSchema,
-  order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
-  fetched_at: z.string(),
+	id: z.string().min(1).max(300),
+	order_id: z.string().regex(HEB_ORDER_ID_RE, 'order_id must start with "HEB"'),
+	name: pdppSafeText
+		.min(1)
+		.max(1024)
+		.refine((s) => !NAME_CRUFT_RE.test(s), { message: "contains UI cruft" }),
+	department: z.string().min(1).max(100).nullable(),
+	product_id: z.string().min(1).max(64).nullable(),
+	product_url: z.string().nullable(),
+	image_url: z.string().nullable(),
+	quantity: z.number().min(0).max(999).nullable(),
+	line_total: currencyStringSchema,
+	line_total_cents: centsSchema,
+	order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
+	fetched_at: z.string(),
 });
 
 // Internal: shape returned by list-page extraction (pre-shape-check). Used to
@@ -109,29 +120,34 @@ export const orderItemsSchema = z.object({
 // diagnostics than silently emit garbage orders. Mirrors Amazon's
 // `listPageOrderShape`.
 export const listPageOrderShape = z.object({
-  orderId: z.string().regex(HEB_ORDER_ID_RE, 'orderId must start with "HEB"'),
-  orderDateRaw: z.string().min(4).max(60).nullable(),
-  fulfillmentMethod: z.enum(["curbside", "delivery", "unknown"]),
-  fulfillmentLocation: z.string().max(500).nullable(),
-  status: z.string().max(200).nullable(),
-  statusCode: z.string().max(200).nullable(),
-  storeName: z.string().max(200).nullable(),
-  timeslotStart: z.string().max(60).nullable(),
-  timeslotEnd: z.string().max(60).nullable(),
-  total: z.string().regex(CURRENCY_STRING_RE, "total must be $N.NN when present").nullable(),
-  itemCount: z.number().int().min(0).nullable(),
-  unfulfilledCount: z.number().int().min(0).nullable(),
+	orderId: z.string().regex(HEB_ORDER_ID_RE, 'orderId must start with "HEB"'),
+	orderDateRaw: z.string().min(4).max(60).nullable(),
+	fulfillmentMethod: z.enum(["curbside", "delivery", "unknown"]),
+	fulfillmentLocation: z.string().max(500).nullable(),
+	status: z.string().max(200).nullable(),
+	statusCode: z.string().max(200).nullable(),
+	storeName: z.string().max(200).nullable(),
+	timeslotStart: z.string().max(60).nullable(),
+	timeslotEnd: z.string().max(60).nullable(),
+	total: z
+		.string()
+		.regex(CURRENCY_STRING_RE, "total must be $N.NN when present")
+		.nullable(),
+	itemCount: z.number().int().min(0).nullable(),
+	unfulfilledCount: z.number().int().min(0).nullable(),
 });
 
 /** Sanity-check that fetched_at is a well-formed ISO-8601 datetime, used only
  *  by tests that want to assert on the emitted shape directly. */
-export const fetchedAtSchema = z.string().regex(ISO_DATETIME_RE, "fetched_at must be an ISO-8601 datetime");
+export const fetchedAtSchema = z
+	.string()
+	.regex(ISO_DATETIME_RE, "fetched_at must be an ISO-8601 datetime");
 
 // Map stream name → schema. Single source of truth for what streams this
 // connector produces at shape-check time.
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  orders: ordersSchema,
-  order_items: orderItemsSchema,
+	orders: ordersSchema,
+	order_items: orderItemsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

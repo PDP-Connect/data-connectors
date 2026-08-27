@@ -30,70 +30,72 @@ import { test } from "node:test";
 const MANIFESTS_DIR = new URL("../../manifests/", import.meta.url);
 
 interface ManifestStream {
-  readonly coverage_strategy?: string;
-  readonly freshness_strategy?: string;
-  readonly name: string;
+	readonly coverage_strategy?: string;
+	readonly freshness_strategy?: string;
+	readonly name: string;
 }
 
 interface Manifest {
-  readonly connector_key?: string;
-  readonly setup?: { readonly modality?: string };
-  readonly streams?: readonly ManifestStream[];
+	readonly connector_key?: string;
+	readonly setup?: { readonly modality?: string };
+	readonly streams?: readonly ManifestStream[];
 }
 
 function readManifest(fileName: string): Manifest {
-  return JSON.parse(readFileSync(new URL(fileName, MANIFESTS_DIR), "utf8")) as Manifest;
+	return JSON.parse(
+		readFileSync(new URL(fileName, MANIFESTS_DIR), "utf8"),
+	) as Manifest;
 }
 
 /** Every connector whose setup modality is a manual file upload. */
 function manualUploadManifests(): { manifest: Manifest; name: string }[] {
-  return readdirSync(new URL(MANIFESTS_DIR))
-    .filter((file) => file.endsWith(".json"))
-    .map((file) => ({ manifest: readManifest(file), name: file }))
-    .filter(({ manifest }) => manifest.setup?.modality === "manual_or_upload");
+	return readdirSync(new URL(MANIFESTS_DIR))
+		.filter((file) => file.endsWith(".json"))
+		.map((file) => ({ manifest: readManifest(file), name: file }))
+		.filter(({ manifest }) => manifest.setup?.modality === "manual_or_upload");
 }
 
 test("every manual-upload connector is discoverable by setup modality", () => {
-  // `connector_key` is optional on the manifest type, so a missing key would
-  // otherwise sort as a silent `undefined` hole. Surface it as the literal
-  // string instead: the deepEqual below then fails loudly on the real defect
-  // rather than on an unexplained gap in the roster.
-  const found = manualUploadManifests()
-    .map(({ manifest }) => manifest.connector_key ?? "<missing connector_key>")
-    .sort((a, b) => a.localeCompare(b));
-  // Guards the filter itself: if `setup.modality` were renamed, the roster
-  // would silently empty and every assertion below would vacuously pass.
-  assert.deepEqual(found, ["google-maps", "netflix-export", "whatsapp"]);
+	// `connector_key` is optional on the manifest type, so a missing key would
+	// otherwise sort as a silent `undefined` hole. Surface it as the literal
+	// string instead: the deepEqual below then fails loudly on the real defect
+	// rather than on an unexplained gap in the roster.
+	const found = manualUploadManifests()
+		.map(({ manifest }) => manifest.connector_key ?? "<missing connector_key>")
+		.sort((a, b) => a.localeCompare(b));
+	// Guards the filter itself: if `setup.modality` were renamed, the roster
+	// would silently empty and every assertion below would vacuously pass.
+	assert.deepEqual(found, ["google-maps", "netflix-export", "whatsapp"]);
 });
 
 test("manual-upload data streams declare snapshot_import_receipt coverage", () => {
-  for (const { manifest, name } of manualUploadManifests()) {
-    for (const stream of manifest.streams ?? []) {
-      // `parent_detail_accounting` is a stricter per-item obligation (it owes
-      // a numerator that actually satisfies its denominator), so a stream that
-      // declares it is making a stronger claim, not evading this one.
-      if (stream.coverage_strategy === "parent_detail_accounting") {
-        continue;
-      }
-      assert.equal(
-        stream.coverage_strategy,
-        "snapshot_import_receipt",
-        `${name}: stream '${stream.name}' is a finished one-time import, so it must declare ` +
-          `snapshot_import_receipt (got '${String(stream.coverage_strategy)}')`
-      );
-    }
-  }
+	for (const { manifest, name } of manualUploadManifests()) {
+		for (const stream of manifest.streams ?? []) {
+			// `parent_detail_accounting` is a stricter per-item obligation (it owes
+			// a numerator that actually satisfies its denominator), so a stream that
+			// declares it is making a stronger claim, not evading this one.
+			if (stream.coverage_strategy === "parent_detail_accounting") {
+				continue;
+			}
+			assert.equal(
+				stream.coverage_strategy,
+				"snapshot_import_receipt",
+				`${name}: stream '${stream.name}' is a finished one-time import, so it must declare ` +
+					`snapshot_import_receipt (got '${String(stream.coverage_strategy)}')`,
+			);
+		}
+	}
 });
 
 test("no manual-upload stream claims a rolling checkpoint window", () => {
-  for (const { manifest, name } of manualUploadManifests()) {
-    for (const stream of manifest.streams ?? []) {
-      assert.notEqual(
-        stream.coverage_strategy,
-        "checkpoint_window",
-        `${name}: stream '${stream.name}' declares a rolling checkpoint window, but a manual ` +
-          "upload has no window to roll -- nothing will run again after the import"
-      );
-    }
-  }
+	for (const { manifest, name } of manualUploadManifests()) {
+		for (const stream of manifest.streams ?? []) {
+			assert.notEqual(
+				stream.coverage_strategy,
+				"checkpoint_window",
+				`${name}: stream '${stream.name}' declares a rolling checkpoint window, but a manual ` +
+					"upload has no window to roll -- nothing will run again after the import",
+			);
+		}
+	}
 });

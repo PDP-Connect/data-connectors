@@ -4,17 +4,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserContext, Locator, Page } from "playwright";
-import { REDDIT_RETRYABLE_PATTERN, redditEnsureSession } from "../../connectors/reddit/index.ts";
-import type { InteractionRequest, InteractionResponse } from "../connector-runtime.ts";
-import { establishSession, type SessionEstablishArgs } from "../session-establish.ts";
-import { ensureRedditSession, isSessionLive, isSessionLiveWithRetry, REDDIT_JSON_ORIGIN } from "./reddit.ts";
+import {
+	REDDIT_RETRYABLE_PATTERN,
+	redditEnsureSession,
+} from "../../connectors/reddit/index.ts";
+import type {
+	InteractionRequest,
+	InteractionResponse,
+} from "../connector-runtime.ts";
+import {
+	establishSession,
+	type SessionEstablishArgs,
+} from "../session-establish.ts";
+import {
+	ensureRedditSession,
+	isSessionLive,
+	isSessionLiveWithRetry,
+	REDDIT_JSON_ORIGIN,
+} from "./reddit.ts";
 
 type BrowserCookie = Awaited<ReturnType<BrowserContext["cookies"]>>[number];
 const STREAMING_ENV_KEYS = [
-  "PDPP_RUN_ID",
-  "PDPP_REFERENCE_BASE_URL",
-  "PDPP_STREAMING_REGISTRATION_TOKEN",
-  "PDPP_LOCAL_DEVICE_TOKEN",
+	"PDPP_RUN_ID",
+	"PDPP_REFERENCE_BASE_URL",
+	"PDPP_STREAMING_REGISTRATION_TOKEN",
+	"PDPP_LOCAL_DEVICE_TOKEN",
 ] as const;
 
 /**
@@ -29,152 +43,201 @@ const STREAMING_ENV_KEYS = [
  * right one, exactly as in production.
  */
 function makeNavigation(startUrl = "https://www.reddit.com/") {
-  const state = { url: startUrl };
-  return {
-    goto(url: string): Promise<null> {
-      state.url = url;
-      return Promise.resolve(null);
-    },
-    url(): string {
-      return state.url;
-    },
-  };
+	const state = { url: startUrl };
+	return {
+		goto(url: string): Promise<null> {
+			state.url = url;
+			return Promise.resolve(null);
+		},
+		url(): string {
+			return state.url;
+		},
+	};
 }
 
 function makeContext(cookies: BrowserCookie[] = []): BrowserContext {
-  const fake: Pick<BrowserContext, "cookies"> = {
-    cookies(..._urls: Parameters<BrowserContext["cookies"]>): ReturnType<BrowserContext["cookies"]> {
-      return Promise.resolve(cookies);
-    },
-  };
-  return fake as BrowserContext;
+	const fake: Pick<BrowserContext, "cookies"> = {
+		cookies(
+			..._urls: Parameters<BrowserContext["cookies"]>
+		): ReturnType<BrowserContext["cookies"]> {
+			return Promise.resolve(cookies);
+		},
+	};
+	return fake as BrowserContext;
 }
 
 function makePageWithoutLoginInputs(): Page {
-  // Mirrors real Playwright: `waitFor` rejects on timeout when the element
-  // never attaches (never resolves `undefined` the way a stubbed no-op would).
-  const emptyLocator: Pick<Locator, "count" | "first" | "waitFor"> = {
-    count: (): Promise<number> => Promise.resolve(0),
-    first(): Locator {
-      return emptyLocator as Locator;
-    },
-    waitFor: (): Promise<void> => Promise.reject(new Error("Timeout waiting for locator")),
-  };
-  const nav = makeNavigation();
-  const fake: Pick<Page, "goto" | "locator" | "url"> = {
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(_selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      return emptyLocator as Locator;
-    },
-  };
-  return fake as Page;
+	// Mirrors real Playwright: `waitFor` rejects on timeout when the element
+	// never attaches (never resolves `undefined` the way a stubbed no-op would).
+	const emptyLocator: Pick<Locator, "count" | "first" | "waitFor"> = {
+		count: (): Promise<number> => Promise.resolve(0),
+		first(): Locator {
+			return emptyLocator as Locator;
+		},
+		waitFor: (): Promise<void> =>
+			Promise.reject(new Error("Timeout waiting for locator")),
+	};
+	const nav = makeNavigation();
+	const fake: Pick<Page, "goto" | "locator" | "url"> = {
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			_selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			return emptyLocator as Locator;
+		},
+	};
+	return fake as Page;
 }
 
-function makeLocator({ count = 1, visible = true }: { count?: number; visible?: boolean } = {}): Locator {
-  const fake: Pick<Locator, "click" | "count" | "fill" | "first" | "isVisible" | "waitFor"> = {
-    click: (): Promise<void> => Promise.resolve(),
-    count: (): Promise<number> => Promise.resolve(count),
-    fill: (_value: string): Promise<void> => Promise.resolve(),
-    first(): Locator {
-      return fake as Locator;
-    },
-    isVisible(): Promise<boolean> {
-      return Promise.resolve(visible);
-    },
-    // Mirrors real Playwright: `state: "visible"` (the default state's closest
-    // fake analog) must actually consult `visible`, not just `count > 0` — a
-    // hidden-but-attached element (count > 0, visible: false) genuinely times
-    // out waiting for visibility. Only `state: "attached"` is satisfied by
-    // DOM presence alone. Without this distinction a fixture claiming
-    // "hidden OTP field" would silently pass a `waitFor({state:"visible"})`
-    // check it should fail, masking exactly the kind of race this file's OTP
-    // tests exist to catch.
-    waitFor(options?: Parameters<Locator["waitFor"]>[0]): Promise<void> {
-      const attached = count > 0;
-      const satisfied = options?.state === "attached" ? attached : attached && visible;
-      return satisfied ? Promise.resolve() : Promise.reject(new Error("Timeout waiting for locator"));
-    },
-  };
-  return fake as Locator;
+function makeLocator({
+	count = 1,
+	visible = true,
+}: {
+	count?: number;
+	visible?: boolean;
+} = {}): Locator {
+	const fake: Pick<
+		Locator,
+		"click" | "count" | "fill" | "first" | "isVisible" | "waitFor"
+	> = {
+		click: (): Promise<void> => Promise.resolve(),
+		count: (): Promise<number> => Promise.resolve(count),
+		fill: (_value: string): Promise<void> => Promise.resolve(),
+		first(): Locator {
+			return fake as Locator;
+		},
+		isVisible(): Promise<boolean> {
+			return Promise.resolve(visible);
+		},
+		// Mirrors real Playwright: `state: "visible"` (the default state's closest
+		// fake analog) must actually consult `visible`, not just `count > 0` — a
+		// hidden-but-attached element (count > 0, visible: false) genuinely times
+		// out waiting for visibility. Only `state: "attached"` is satisfied by
+		// DOM presence alone. Without this distinction a fixture claiming
+		// "hidden OTP field" would silently pass a `waitFor({state:"visible"})`
+		// check it should fail, masking exactly the kind of race this file's OTP
+		// tests exist to catch.
+		waitFor(options?: Parameters<Locator["waitFor"]>[0]): Promise<void> {
+			const attached = count > 0;
+			const satisfied =
+				options?.state === "attached" ? attached : attached && visible;
+			return satisfied
+				? Promise.resolve()
+				: Promise.reject(new Error("Timeout waiting for locator"));
+		},
+	};
+	return fake as Locator;
 }
 
 /** Models the login input attaching to the DOM after a render delay. */
-function makeDelayedAttachLocator({ attachesAfterMs }: { attachesAfterMs: number }): {
-  fillCalls: string[];
-  locator: Locator;
+function makeDelayedAttachLocator({
+	attachesAfterMs,
+}: {
+	attachesAfterMs: number;
+}): {
+	fillCalls: string[];
+	locator: Locator;
 } {
-  const start = Date.now();
-  const fillCalls: string[] = [];
-  const attached = (): boolean => Date.now() - start >= attachesAfterMs;
-  const fake: Pick<Locator, "click" | "count" | "fill" | "first" | "isVisible" | "waitFor"> = {
-    click: (): Promise<void> => Promise.resolve(),
-    count: (): Promise<number> => Promise.resolve(attached() ? 1 : 0),
-    fill: (value: string): Promise<void> => {
-      fillCalls.push(value);
-      return Promise.resolve();
-    },
-    first(): Locator {
-      return fake as Locator;
-    },
-    isVisible(): Promise<boolean> {
-      return Promise.resolve(attached());
-    },
-    async waitFor(options?: Parameters<Locator["waitFor"]>[0]): Promise<void> {
-      const timeout = options?.timeout ?? 30_000;
-      const deadline = Date.now() + timeout;
-      while (!attached()) {
-        if (Date.now() >= deadline) {
-          throw new Error("Timeout waiting for locator to be attached");
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-    },
-  };
-  return { fillCalls, locator: fake as Locator };
+	const start = Date.now();
+	const fillCalls: string[] = [];
+	const attached = (): boolean => Date.now() - start >= attachesAfterMs;
+	const fake: Pick<
+		Locator,
+		"click" | "count" | "fill" | "first" | "isVisible" | "waitFor"
+	> = {
+		click: (): Promise<void> => Promise.resolve(),
+		count: (): Promise<number> => Promise.resolve(attached() ? 1 : 0),
+		fill: (value: string): Promise<void> => {
+			fillCalls.push(value);
+			return Promise.resolve();
+		},
+		first(): Locator {
+			return fake as Locator;
+		},
+		isVisible(): Promise<boolean> {
+			return Promise.resolve(attached());
+		},
+		async waitFor(options?: Parameters<Locator["waitFor"]>[0]): Promise<void> {
+			const timeout = options?.timeout ?? 30_000;
+			const deadline = Date.now() + timeout;
+			while (!attached()) {
+				if (Date.now() >= deadline) {
+					throw new Error("Timeout waiting for locator to be attached");
+				}
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+		},
+	};
+	return { fillCalls, locator: fake as Locator };
 }
 
 function makePageWithHiddenOtp(): Page {
-  const username = makeLocator();
-  const password = makeLocator();
-  const hiddenOtp = makeLocator({ visible: false });
-  const empty = makeLocator({ count: 0, visible: false });
-  const submit = makeLocator();
-  const nav = makeNavigation();
-  const fake: Pick<Page, "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-    getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-      return submit;
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("username")) {
-        return username;
-      }
-      if (selector.includes("password")) {
-        return password;
-      }
-      if (selector.includes("otp") || selector.includes("verification_code") || selector.includes("one-time-code")) {
-        return hiddenOtp;
-      }
-      return empty;
-    },
-    waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-      return Promise.resolve();
-    },
-    waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-      return Promise.resolve();
-    },
-  };
-  return fake as Page;
+	const username = makeLocator();
+	const password = makeLocator();
+	const hiddenOtp = makeLocator({ visible: false });
+	const empty = makeLocator({ count: 0, visible: false });
+	const submit = makeLocator();
+	const nav = makeNavigation();
+	const fake: Pick<
+		Page,
+		| "getByRole"
+		| "goto"
+		| "locator"
+		| "url"
+		| "waitForLoadState"
+		| "waitForTimeout"
+	> = {
+		getByRole(
+			_role: Parameters<Page["getByRole"]>[0],
+			_options?: Parameters<Page["getByRole"]>[1],
+		): Locator {
+			return submit;
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("username")) {
+				return username;
+			}
+			if (selector.includes("password")) {
+				return password;
+			}
+			if (
+				selector.includes("otp") ||
+				selector.includes("verification_code") ||
+				selector.includes("one-time-code")
+			) {
+				return hiddenOtp;
+			}
+			return empty;
+		},
+		waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+			return Promise.resolve();
+		},
+		waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+			return Promise.resolve();
+		},
+	};
+	return fake as Page;
 }
 
 /**
@@ -185,92 +248,128 @@ function makePageWithHiddenOtp(): Page {
  * it to something else alongside a rendered logout link.
  */
 function makePageWithVisibleOtpAndLiveSessionAfterBrowserCompletion({
-  savedJsonStatus = 200,
+	savedJsonStatus = 200,
 }: {
-  savedJsonStatus?: number;
+	savedJsonStatus?: number;
 } = {}): Page {
-  const username = makeLocator();
-  const password = makeLocator();
-  const visibleOtp = makeLocator();
-  const submit = makeLocator();
-  const logout = makeLocator();
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  const fake: Pick<
-    Page,
-    "evaluate" | "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"
-  > = {
-    evaluate(): ReturnType<Page["evaluate"]> {
-      return Promise.resolve({ status: savedJsonStatus });
-    },
-    getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-      return submit;
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("/logout") || selector.includes("logout")) {
-        return logout;
-      }
-      if (selector.includes("username")) {
-        return username;
-      }
-      if (selector.includes("password")) {
-        return password;
-      }
-      if (selector.includes("otp") || selector.includes("verification_code") || selector.includes("one-time-code")) {
-        return visibleOtp;
-      }
-      return empty;
-    },
-    waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-      return Promise.resolve();
-    },
-    waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-      return Promise.resolve();
-    },
-  };
-  return fake as Page;
+	const username = makeLocator();
+	const password = makeLocator();
+	const visibleOtp = makeLocator();
+	const submit = makeLocator();
+	const logout = makeLocator();
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	const fake: Pick<
+		Page,
+		| "evaluate"
+		| "getByRole"
+		| "goto"
+		| "locator"
+		| "url"
+		| "waitForLoadState"
+		| "waitForTimeout"
+	> = {
+		evaluate(): ReturnType<Page["evaluate"]> {
+			return Promise.resolve({ status: savedJsonStatus });
+		},
+		getByRole(
+			_role: Parameters<Page["getByRole"]>[0],
+			_options?: Parameters<Page["getByRole"]>[1],
+		): Locator {
+			return submit;
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("/logout") || selector.includes("logout")) {
+				return logout;
+			}
+			if (selector.includes("username")) {
+				return username;
+			}
+			if (selector.includes("password")) {
+				return password;
+			}
+			if (
+				selector.includes("otp") ||
+				selector.includes("verification_code") ||
+				selector.includes("one-time-code")
+			) {
+				return visibleOtp;
+			}
+			return empty;
+		},
+		waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+			return Promise.resolve();
+		},
+		waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+			return Promise.resolve();
+		},
+	};
+	return fake as Page;
 }
 
 /** Login page whose submit control never appears — a genuinely pre-submit UI fault. */
 function makePageWithMissingSubmit(): Page {
-  const username = makeLocator();
-  const password = makeLocator();
-  const hiddenSubmit = makeLocator({ visible: false });
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  const fake: Pick<Page, "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-    getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-      return hiddenSubmit;
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("username")) {
-        return username;
-      }
-      if (selector.includes("password")) {
-        return password;
-      }
-      return empty;
-    },
-    waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-      return Promise.resolve();
-    },
-    waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-      return Promise.resolve();
-    },
-  };
-  return fake as Page;
+	const username = makeLocator();
+	const password = makeLocator();
+	const hiddenSubmit = makeLocator({ visible: false });
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	const fake: Pick<
+		Page,
+		| "getByRole"
+		| "goto"
+		| "locator"
+		| "url"
+		| "waitForLoadState"
+		| "waitForTimeout"
+	> = {
+		getByRole(
+			_role: Parameters<Page["getByRole"]>[0],
+			_options?: Parameters<Page["getByRole"]>[1],
+		): Locator {
+			return hiddenSubmit;
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("username")) {
+				return username;
+			}
+			if (selector.includes("password")) {
+				return password;
+			}
+			return empty;
+		},
+		waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+			return Promise.resolve();
+		},
+		waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+			return Promise.resolve();
+		},
+	};
+	return fake as Page;
 }
 
 /**
@@ -282,67 +381,80 @@ function makePageWithMissingSubmit(): Page {
  * went out. With `failFromCall: 1` the same fault fires before any credential
  * is touched.
  */
-function makeContextWithCookieFault(failFromCall: number, faultMessage: string): BrowserContext {
-  let calls = 0;
-  const fake: Pick<BrowserContext, "cookies"> = {
-    cookies(..._urls: Parameters<BrowserContext["cookies"]>): ReturnType<BrowserContext["cookies"]> {
-      calls += 1;
-      if (calls >= failFromCall) {
-        return Promise.reject(new Error(faultMessage));
-      }
-      return Promise.resolve([]);
-    },
-  };
-  return fake as BrowserContext;
+function makeContextWithCookieFault(
+	failFromCall: number,
+	faultMessage: string,
+): BrowserContext {
+	let calls = 0;
+	const fake: Pick<BrowserContext, "cookies"> = {
+		cookies(
+			..._urls: Parameters<BrowserContext["cookies"]>
+		): ReturnType<BrowserContext["cookies"]> {
+			calls += 1;
+			if (calls >= failFromCall) {
+				return Promise.reject(new Error(faultMessage));
+			}
+			return Promise.resolve([]);
+		},
+	};
+	return fake as BrowserContext;
 }
 
 async function withRedditCredentialValues(
-  credentials: { password?: string; username?: string },
-  run: () => Promise<void>
+	credentials: { password?: string; username?: string },
+	run: () => Promise<void>,
 ): Promise<void> {
-  const priorUsername = process.env.REDDIT_USERNAME;
-  const priorPassword = process.env.REDDIT_PASSWORD;
-  const priorStreamingEnv = new Map<(typeof STREAMING_ENV_KEYS)[number], string | undefined>();
-  for (const key of STREAMING_ENV_KEYS) {
-    priorStreamingEnv.set(key, process.env[key]);
-    delete process.env[key];
-  }
-  if (credentials.username) {
-    process.env.REDDIT_USERNAME = credentials.username;
-  }
-  if (credentials.password) {
-    process.env.REDDIT_PASSWORD = credentials.password;
-  }
-  try {
-    await run();
-  } finally {
-    if (priorUsername === undefined) {
-      delete process.env.REDDIT_USERNAME;
-    } else {
-      process.env.REDDIT_USERNAME = priorUsername;
-    }
-    if (priorPassword === undefined) {
-      delete process.env.REDDIT_PASSWORD;
-    } else {
-      process.env.REDDIT_PASSWORD = priorPassword;
-    }
-    for (const key of STREAMING_ENV_KEYS) {
-      const value = priorStreamingEnv.get(key);
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
+	const priorUsername = process.env.REDDIT_USERNAME;
+	const priorPassword = process.env.REDDIT_PASSWORD;
+	const priorStreamingEnv = new Map<
+		(typeof STREAMING_ENV_KEYS)[number],
+		string | undefined
+	>();
+	for (const key of STREAMING_ENV_KEYS) {
+		priorStreamingEnv.set(key, process.env[key]);
+		delete process.env[key];
+	}
+	if (credentials.username) {
+		process.env.REDDIT_USERNAME = credentials.username;
+	}
+	if (credentials.password) {
+		process.env.REDDIT_PASSWORD = credentials.password;
+	}
+	try {
+		await run();
+	} finally {
+		if (priorUsername === undefined) {
+			delete process.env.REDDIT_USERNAME;
+		} else {
+			process.env.REDDIT_USERNAME = priorUsername;
+		}
+		if (priorPassword === undefined) {
+			delete process.env.REDDIT_PASSWORD;
+		} else {
+			process.env.REDDIT_PASSWORD = priorPassword;
+		}
+		for (const key of STREAMING_ENV_KEYS) {
+			const value = priorStreamingEnv.get(key);
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		}
+	}
 }
 
 async function withRedditCredentials(run: () => Promise<void>): Promise<void> {
-  await withRedditCredentialValues({ password: "test-password", username: "test-user" }, run);
+	await withRedditCredentialValues(
+		{ password: "test-password", username: "test-user" },
+		run,
+	);
 }
 
-async function withoutRedditCredentials(run: () => Promise<void>): Promise<void> {
-  await withRedditCredentialValues({}, run);
+async function withoutRedditCredentials(
+	run: () => Promise<void>,
+): Promise<void> {
+	await withRedditCredentialValues({}, run);
 }
 
 /**
@@ -352,43 +464,49 @@ async function withoutRedditCredentials(run: () => Promise<void>): Promise<void>
  * independently — the whole point of the fix is that they can now disagree.
  */
 function makePageForSessionLiveProbe({
-  savedJsonStatus,
-  logoutLinkCount,
+	savedJsonStatus,
+	logoutLinkCount,
 }: {
-  savedJsonStatus: number;
-  logoutLinkCount: number;
+	savedJsonStatus: number;
+	logoutLinkCount: number;
 }): Page {
-  const logout = makeLocator({ count: logoutLinkCount });
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
-    // Models the browser's actual CORS behavior, which is the whole defect:
-    // Reddit sends no `Access-Control-Allow-Origin`, so a credentialed fetch
-    // issued from any origin OTHER than the target is blocked before it
-    // reaches the network and reaches page JS as `TypeError: Failed to fetch`.
-    // `isSessionLive`'s callback catches that and reports `status: 0`. A fake
-    // that returned `savedJsonStatus` regardless of the page's origin is
-    // exactly why this bug passed every test while breaking production.
-    evaluate(): ReturnType<Page["evaluate"]> {
-      if (new URL(nav.url()).origin !== REDDIT_JSON_ORIGIN) {
-        return Promise.resolve({ status: 0 });
-      }
-      return Promise.resolve({ status: savedJsonStatus });
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("/logout") || selector.includes("logout")) {
-        return logout;
-      }
-      return empty;
-    },
-  };
-  return fake as Page;
+	const logout = makeLocator({ count: logoutLinkCount });
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
+		// Models the browser's actual CORS behavior, which is the whole defect:
+		// Reddit sends no `Access-Control-Allow-Origin`, so a credentialed fetch
+		// issued from any origin OTHER than the target is blocked before it
+		// reaches the network and reaches page JS as `TypeError: Failed to fetch`.
+		// `isSessionLive`'s callback catches that and reports `status: 0`. A fake
+		// that returned `savedJsonStatus` regardless of the page's origin is
+		// exactly why this bug passed every test while breaking production.
+		evaluate(): ReturnType<Page["evaluate"]> {
+			if (new URL(nav.url()).origin !== REDDIT_JSON_ORIGIN) {
+				return Promise.resolve({ status: 0 });
+			}
+			return Promise.resolve({ status: savedJsonStatus });
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("/logout") || selector.includes("logout")) {
+				return logout;
+			}
+			return empty;
+		},
+	};
+	return fake as Page;
 }
 
 /**
@@ -397,23 +515,29 @@ function makePageForSessionLiveProbe({
  * issue its fetch at all, which is NOT the same fact as "the session is dead".
  */
 function makePageStuckOffJsonOrigin(): Page {
-  const empty = makeLocator({ count: 0, visible: false });
-  const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
-    evaluate(): ReturnType<Page["evaluate"]> {
-      // Must never be reached: the guard returns before probing.
-      return Promise.reject(new Error("probe issued from the wrong origin"));
-    },
-    goto(_url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return Promise.resolve(null); // resolves, but the URL never changes
-    },
-    locator(_selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      return empty;
-    },
-    url(): string {
-      return "https://www.reddit.com/login/";
-    },
-  };
-  return fake as Page;
+	const empty = makeLocator({ count: 0, visible: false });
+	const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
+		evaluate(): ReturnType<Page["evaluate"]> {
+			// Must never be reached: the guard returns before probing.
+			return Promise.reject(new Error("probe issued from the wrong origin"));
+		},
+		goto(
+			_url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return Promise.resolve(null); // resolves, but the URL never changes
+		},
+		locator(
+			_selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			return empty;
+		},
+		url(): string {
+			return "https://www.reddit.com/login/";
+		},
+	};
+	return fake as Page;
 }
 
 /**
@@ -424,50 +548,65 @@ function makePageStuckOffJsonOrigin(): Page {
  * DOM answer would be identical either way.
  */
 function makePageWithLogoutLinkOnlyOnJsonOrigin(): Page {
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
-    evaluate(): ReturnType<Page["evaluate"]> {
-      return Promise.resolve({ status: 0 });
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("logout")) {
-        const onJsonOrigin = new URL(nav.url()).origin === REDDIT_JSON_ORIGIN;
-        return makeLocator({ count: onJsonOrigin ? 1 : 0 });
-      }
-      return empty;
-    },
-    url(): string {
-      return nav.url();
-    },
-  };
-  return fake as Page;
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
+		evaluate(): ReturnType<Page["evaluate"]> {
+			return Promise.resolve({ status: 0 });
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("logout")) {
+				const onJsonOrigin = new URL(nav.url()).origin === REDDIT_JSON_ORIGIN;
+				return makeLocator({ count: onJsonOrigin ? 1 : 0 });
+			}
+			return empty;
+		},
+		url(): string {
+			return nav.url();
+		},
+	};
+	return fake as Page;
 }
 
 /** A page already sitting on the JSON origin, counting navigations so a
  *  redundant `goto` on every probe is visible rather than silently wasteful. */
-function makePageAlreadyOnJsonOrigin(): { gotoCalls: () => number; page: Page } {
-  const empty = makeLocator({ count: 0, visible: false });
-  let gotoCalls = 0;
-  const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
-    evaluate(): ReturnType<Page["evaluate"]> {
-      return Promise.resolve({ status: 200 });
-    },
-    goto(_url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      gotoCalls += 1;
-      return Promise.resolve(null);
-    },
-    locator(_selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      return empty;
-    },
-    url(): string {
-      return `${REDDIT_JSON_ORIGIN}/`;
-    },
-  };
-  return { gotoCalls: () => gotoCalls, page: fake as Page };
+function makePageAlreadyOnJsonOrigin(): {
+	gotoCalls: () => number;
+	page: Page;
+} {
+	const empty = makeLocator({ count: 0, visible: false });
+	let gotoCalls = 0;
+	const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url"> = {
+		evaluate(): ReturnType<Page["evaluate"]> {
+			return Promise.resolve({ status: 200 });
+		},
+		goto(
+			_url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			gotoCalls += 1;
+			return Promise.resolve(null);
+		},
+		locator(
+			_selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			return empty;
+		},
+		url(): string {
+			return `${REDDIT_JSON_ORIGIN}/`;
+		},
+	};
+	return { gotoCalls: () => gotoCalls, page: fake as Page };
 }
 
 // ─── isSessionLive: the owner-only JSON probe is the durable signal ───────
@@ -481,17 +620,23 @@ function makePageAlreadyOnJsonOrigin(): { gotoCalls: () => number; page: Page } 
 // would have (once) said "live".
 
 test("isSessionLive PASSES on a live session whose DOM lacks the logout link (the regression this fixes)", async () => {
-  await withRedditCredentials(async () => {
-    const page = makePageForSessionLiveProbe({ savedJsonStatus: 200, logoutLinkCount: 0 });
-    assert.equal(await isSessionLive(page), true);
-  });
+	await withRedditCredentials(async () => {
+		const page = makePageForSessionLiveProbe({
+			savedJsonStatus: 200,
+			logoutLinkCount: 0,
+		});
+		assert.equal(await isSessionLive(page), true);
+	});
 });
 
 test("isSessionLive FAILS on a genuinely logged-out session even if a stale logout link is still in the DOM (COUNTERWEIGHT)", async () => {
-  await withRedditCredentials(async () => {
-    const page = makePageForSessionLiveProbe({ savedJsonStatus: 403, logoutLinkCount: 1 });
-    assert.equal(await isSessionLive(page), false);
-  });
+	await withRedditCredentials(async () => {
+		const page = makePageForSessionLiveProbe({
+			savedJsonStatus: 403,
+			logoutLinkCount: 1,
+		});
+		assert.equal(await isSessionLive(page), false);
+	});
 });
 
 // ─── The origin guard: production run_1787164349370 ──────────────────────
@@ -504,139 +649,183 @@ test("isSessionLive FAILS on a genuinely logged-out session even if a stale logo
 // disagreed completely: www => 200, old => TypeError: Failed to fetch.
 
 test("isSessionLive establishes the JSON origin before probing, so a LIVE session on www.reddit.com reads live (the production defect)", async () => {
-  await withRedditCredentials(async () => {
-    // Starts on www.reddit.com — a real signed-in session's page — where the
-    // cross-origin fetch is blocked. Only the origin guard makes this pass.
-    const page = makePageForSessionLiveProbe({ savedJsonStatus: 200, logoutLinkCount: 0 });
-    assert.equal(page.url(), "https://www.reddit.com/", "fixture must start on the wrong origin to be meaningful");
-    assert.equal(await isSessionLive(page), true);
-    assert.equal(new URL(page.url()).origin, REDDIT_JSON_ORIGIN, "the probe must have established the JSON origin");
-  });
+	await withRedditCredentials(async () => {
+		// Starts on www.reddit.com — a real signed-in session's page — where the
+		// cross-origin fetch is blocked. Only the origin guard makes this pass.
+		const page = makePageForSessionLiveProbe({
+			savedJsonStatus: 200,
+			logoutLinkCount: 0,
+		});
+		assert.equal(
+			page.url(),
+			"https://www.reddit.com/",
+			"fixture must start on the wrong origin to be meaningful",
+		);
+		assert.equal(await isSessionLive(page), true);
+		assert.equal(
+			new URL(page.url()).origin,
+			REDDIT_JSON_ORIGIN,
+			"the probe must have established the JSON origin",
+		);
+	});
 });
 
 test("isSessionLive does NOT weaken: a logged-out session still reads not-live once the origin is correct (COUNTERWEIGHT)", async () => {
-  await withRedditCredentials(async () => {
-    // Same navigation, genuine 403. The guard must not launder a dead session
-    // into a live one by making the fetch merely reachable.
-    const page = makePageForSessionLiveProbe({ savedJsonStatus: 403, logoutLinkCount: 1 });
-    assert.equal(await isSessionLive(page), false);
-    assert.equal(new URL(page.url()).origin, REDDIT_JSON_ORIGIN);
-  });
+	await withRedditCredentials(async () => {
+		// Same navigation, genuine 403. The guard must not launder a dead session
+		// into a live one by making the fetch merely reachable.
+		const page = makePageForSessionLiveProbe({
+			savedJsonStatus: 403,
+			logoutLinkCount: 1,
+		});
+		assert.equal(await isSessionLive(page), false);
+		assert.equal(new URL(page.url()).origin, REDDIT_JSON_ORIGIN);
+	});
 });
 
 test("isSessionLive reports an unreachable origin distinctly from a logged-out session (a CORS/navigation fault must not collapse into 'not live')", async () => {
-  await withRedditCredentials(async () => {
-    const stages: string[] = [];
-    // Navigation never lands on the JSON origin — the probe cannot even ask.
-    const page = makePageStuckOffJsonOrigin();
-    assert.equal(await isSessionLive(page, { onProbeTimeout: (stage) => stages.push(stage) }), false);
-    // Same verdict as logged-out, but it must be NAMEABLE in diagnostics —
-    // "we could not ask" is a different operator action than "you are logged
-    // out", and collapsing them is what hid this bug for eleven weeks.
-    assert.deepEqual(stages, ["origin"], "an unestablished origin must be nameable in diagnostics");
-  });
+	await withRedditCredentials(async () => {
+		const stages: string[] = [];
+		// Navigation never lands on the JSON origin — the probe cannot even ask.
+		const page = makePageStuckOffJsonOrigin();
+		assert.equal(
+			await isSessionLive(page, {
+				onProbeTimeout: (stage) => stages.push(stage),
+			}),
+			false,
+		);
+		// Same verdict as logged-out, but it must be NAMEABLE in diagnostics —
+		// "we could not ask" is a different operator action than "you are logged
+		// out", and collapsing them is what hid this bug for eleven weeks.
+		assert.deepEqual(
+			stages,
+			["origin"],
+			"an unestablished origin must be nameable in diagnostics",
+		);
+	});
 });
 
 test("isSessionLive: a logged-out session reports NO origin fault (COUNTERWEIGHT — the two diagnoses must stay distinct)", async () => {
-  await withRedditCredentials(async () => {
-    const stages: string[] = [];
-    const page = makePageForSessionLiveProbe({ savedJsonStatus: 403, logoutLinkCount: 0 });
-    assert.equal(await isSessionLive(page, { onProbeTimeout: (stage) => stages.push(stage) }), false);
-    assert.deepEqual(stages, [], "a genuine logout is not an origin fault");
-  });
+	await withRedditCredentials(async () => {
+		const stages: string[] = [];
+		const page = makePageForSessionLiveProbe({
+			savedJsonStatus: 403,
+			logoutLinkCount: 0,
+		});
+		assert.equal(
+			await isSessionLive(page, {
+				onProbeTimeout: (stage) => stages.push(stage),
+			}),
+			false,
+		);
+		assert.deepEqual(stages, [], "a genuine logout is not an origin fault");
+	});
 });
 
 test("isSessionLive's credential-less DOM fallback establishes the JSON origin too — the logout link only exists there", async () => {
-  await withoutRedditCredentials(async () => {
-    // Starts on www.reddit.com, whose modern markup has no logout link. Without
-    // the origin guard the fallback reads the wrong page's DOM, counts 0, and
-    // reports a live session as dead — the same defect as the JSON probe, on
-    // the path that runs when no credentials are configured.
-    const page = makePageWithLogoutLinkOnlyOnJsonOrigin();
-    assert.equal(await isSessionLive(page), true);
-    assert.equal(new URL(page.url()).origin, REDDIT_JSON_ORIGIN);
-  });
+	await withoutRedditCredentials(async () => {
+		// Starts on www.reddit.com, whose modern markup has no logout link. Without
+		// the origin guard the fallback reads the wrong page's DOM, counts 0, and
+		// reports a live session as dead — the same defect as the JSON probe, on
+		// the path that runs when no credentials are configured.
+		const page = makePageWithLogoutLinkOnlyOnJsonOrigin();
+		assert.equal(await isSessionLive(page), true);
+		assert.equal(new URL(page.url()).origin, REDDIT_JSON_ORIGIN);
+	});
 });
 
 test("isSessionLive skips redundant navigation when the page is ALREADY on the JSON origin", async () => {
-  await withRedditCredentials(async () => {
-    const { page, gotoCalls } = makePageAlreadyOnJsonOrigin();
-    assert.equal(await isSessionLive(page), true);
-    assert.equal(gotoCalls(), 0, "an already-correct origin must not be re-navigated on every probe");
-  });
+	await withRedditCredentials(async () => {
+		const { page, gotoCalls } = makePageAlreadyOnJsonOrigin();
+		assert.equal(await isSessionLive(page), true);
+		assert.equal(
+			gotoCalls(),
+			0,
+			"an already-correct origin must not be re-navigated on every probe",
+		);
+	});
 });
 
 test("isSessionLive falls back to the DOM logout-link probe when no username is known yet (credential-less manual hand-off)", async () => {
-  await withoutRedditCredentials(async () => {
-    const live = makePageForSessionLiveProbe({ savedJsonStatus: 403, logoutLinkCount: 1 });
-    assert.equal(await isSessionLive(live), true);
+	await withoutRedditCredentials(async () => {
+		const live = makePageForSessionLiveProbe({
+			savedJsonStatus: 403,
+			logoutLinkCount: 1,
+		});
+		assert.equal(await isSessionLive(live), true);
 
-    const dead = makePageForSessionLiveProbe({ savedJsonStatus: 200, logoutLinkCount: 0 });
-    assert.equal(await isSessionLive(dead), false);
-  });
+		const dead = makePageForSessionLiveProbe({
+			savedJsonStatus: 200,
+			logoutLinkCount: 0,
+		});
+		assert.equal(await isSessionLive(dead), false);
+	});
 });
 
 test("ensureRedditSession hands off when optional credentials are absent", async () => {
-  await withoutRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
+	await withoutRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        // See the identical note on the "blocked login inputs" test below:
-        // keeps this "never becomes live" case from burning the real retry
-        // window or calling the undefined page.waitForTimeout on this fake.
-        manualHandoffProbeRetry: { retryForMs: 0 },
-        page: makePageWithoutLoginInputs(),
-        sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-          requests.push(req);
-          return Promise.resolve({
-            request_id: req.request_id ?? "test_interaction",
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-        },
-      }),
-      /reddit_login_manual_incomplete/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				// See the identical note on the "blocked login inputs" test below:
+				// keeps this "never becomes live" case from burning the real retry
+				// window or calling the undefined page.waitForTimeout on this fake.
+				manualHandoffProbeRetry: { retryForMs: 0 },
+				page: makePageWithoutLoginInputs(),
+				sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+					requests.push(req);
+					return Promise.resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				},
+			}),
+			/reddit_login_manual_incomplete/u,
+		);
 
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.kind, "manual_action");
-    assert.match(requests[0]?.message ?? "", /No optional Reddit sign-in details/);
-    assert.doesNotMatch(requests[0]?.message ?? "", /password|test-user/u);
-  });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.match(
+			requests[0]?.message ?? "",
+			/No optional Reddit sign-in details/,
+		);
+		assert.doesNotMatch(requests[0]?.message ?? "", /password|test-user/u);
+	});
 });
 
 test("ensureRedditSession emits manual_action when login inputs are blocked", async () => {
-  await withRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
+	await withRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        // retryForMs: 0 keeps this test's "never becomes live" case from
-        // burning the real (production) retry window; a 0-length window
-        // still exercises the give-up-and-throw path without ever calling
-        // page.waitForTimeout, which this fake intentionally doesn't define.
-        manualHandoffProbeRetry: { retryForMs: 0 },
-        page: makePageWithoutLoginInputs(),
-        sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-          requests.push(req);
-          return Promise.resolve({
-            request_id: req.request_id ?? "test_interaction",
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-        },
-      }),
-      /reddit_login_unexpected_ui/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				// retryForMs: 0 keeps this test's "never becomes live" case from
+				// burning the real (production) retry window; a 0-length window
+				// still exercises the give-up-and-throw path without ever calling
+				// page.waitForTimeout, which this fake intentionally doesn't define.
+				manualHandoffProbeRetry: { retryForMs: 0 },
+				page: makePageWithoutLoginInputs(),
+				sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+					requests.push(req);
+					return Promise.resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				},
+			}),
+			/reddit_login_unexpected_ui/u,
+		);
 
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.kind, "manual_action");
-    assert.ok(requests[0]?.request_id?.startsWith("int_"));
-    assert.match(requests[0]?.message ?? "", /Cloudflare challenge/u);
-  });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.ok(requests[0]?.request_id?.startsWith("int_"));
+		assert.match(requests[0]?.message ?? "", /Cloudflare challenge/u);
+	});
 });
 
 /**
@@ -647,44 +836,65 @@ test("ensureRedditSession emits manual_action when login inputs are blocked", as
  * post-submit OTP fix. `waitForTimeout` resolves immediately so the test
  * doesn't actually wait on wall-clock time between polls.
  */
-function makePageBlockedThenLiveAfterProbes({ liveAfterProbeCall }: { liveAfterProbeCall: number }): {
-  page: Page;
-  probeCallCount: () => number;
+function makePageBlockedThenLiveAfterProbes({
+	liveAfterProbeCall,
+}: {
+	liveAfterProbeCall: number;
+}): {
+	page: Page;
+	probeCallCount: () => number;
 } {
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  let probeCalls = 0;
-  const fake: Pick<Page, "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-    getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-      return empty;
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    // A PROBE is a logout-link read, not a navigation. These used to be the
-    // same event because the DOM fallback navigated unconditionally on every
-    // call; the origin guard now navigates only when the page is on the wrong
-    // origin, so after the first probe lands there are no further `goto`s and
-    // a navigation-counting fake would freeze at 1 and never go live. Counting
-    // the read keeps this fixture measuring what it claims to measure.
-    locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      if (selector.includes("logout")) {
-        probeCalls += 1;
-        return makeLocator({ count: probeCalls >= liveAfterProbeCall ? 1 : 0 });
-      }
-      return empty;
-    },
-    waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-      return Promise.resolve();
-    },
-    waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-      return Promise.resolve();
-    },
-  };
-  return { page: fake as Page, probeCallCount: () => probeCalls };
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	let probeCalls = 0;
+	const fake: Pick<
+		Page,
+		| "getByRole"
+		| "goto"
+		| "locator"
+		| "url"
+		| "waitForLoadState"
+		| "waitForTimeout"
+	> = {
+		getByRole(
+			_role: Parameters<Page["getByRole"]>[0],
+			_options?: Parameters<Page["getByRole"]>[1],
+		): Locator {
+			return empty;
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		// A PROBE is a logout-link read, not a navigation. These used to be the
+		// same event because the DOM fallback navigated unconditionally on every
+		// call; the origin guard now navigates only when the page is on the wrong
+		// origin, so after the first probe lands there are no further `goto`s and
+		// a navigation-counting fake would freeze at 1 and never go live. Counting
+		// the read keeps this fixture measuring what it claims to measure.
+		locator(
+			selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			if (selector.includes("logout")) {
+				probeCalls += 1;
+				return makeLocator({ count: probeCalls >= liveAfterProbeCall ? 1 : 0 });
+			}
+			return empty;
+		},
+		waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+			return Promise.resolve();
+		},
+		waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+			return Promise.resolve();
+		},
+	};
+	return { page: fake as Page, probeCallCount: () => probeCalls };
 }
 
 // ─── Manual-handoff re-probe: don't trust a single check right after the
@@ -703,160 +913,193 @@ function makePageBlockedThenLiveAfterProbes({ liveAfterProbeCall }: { liveAfterP
 // goto+DOM logout-link probe rather than the JSON-fetch branch.
 
 test("isSessionLive FAILS on a single post-captcha probe that reads live one beat too late (fail-before, pins the pre-fix bug)", async () => {
-  await withoutRedditCredentials(async () => {
-    const { page } = makePageBlockedThenLiveAfterProbes({ liveAfterProbeCall: 2 });
-    // A single, unretried isSessionLive call (the pre-fix shape) reads the
-    // session as dead on the first probe (the session only reads live once
-    // 2 probe calls have happened) — i.e. the exact race the fix closes.
-    assert.equal(await isSessionLive(page), false);
-  });
+	await withoutRedditCredentials(async () => {
+		const { page } = makePageBlockedThenLiveAfterProbes({
+			liveAfterProbeCall: 2,
+		});
+		// A single, unretried isSessionLive call (the pre-fix shape) reads the
+		// session as dead on the first probe (the session only reads live once
+		// 2 probe calls have happened) — i.e. the exact race the fix closes.
+		assert.equal(await isSessionLive(page), false);
+	});
 });
 
 test("ensureRedditSession re-probes past a session that settles a beat after the owner's continue click (pass-after, proves the fix)", async () => {
-  await withoutRedditCredentials(async () => {
-    const { page, probeCallCount } = makePageBlockedThenLiveAfterProbes({ liveAfterProbeCall: 2 });
-    const requests: InteractionRequest[] = [];
+	await withoutRedditCredentials(async () => {
+		const { page, probeCallCount } = makePageBlockedThenLiveAfterProbes({
+			liveAfterProbeCall: 2,
+		});
+		const requests: InteractionRequest[] = [];
 
-    await ensureRedditSession({
-      context: makeContext(),
-      // Small but real retry window: proves the fix re-probes rather than
-      // trusting a single check, without burning the production 15s window.
-      manualHandoffProbeRetry: { pollIntervalMs: 0, retryForMs: 5000 },
-      page,
-      sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-        requests.push(req);
-        return Promise.resolve({
-          request_id: req.request_id ?? "test_interaction",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        });
-      },
-    });
+		await ensureRedditSession({
+			context: makeContext(),
+			// Small but real retry window: proves the fix re-probes rather than
+			// trusting a single check, without burning the production 15s window.
+			manualHandoffProbeRetry: { pollIntervalMs: 0, retryForMs: 5000 },
+			page,
+			sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+				requests.push(req);
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
+			},
+		});
 
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.kind, "manual_action");
-    assert.ok(probeCallCount() >= 2, `expected at least 2 probe calls, got ${probeCallCount()}`);
-  });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.ok(
+			probeCallCount() >= 2,
+			`expected at least 2 probe calls, got ${probeCallCount()}`,
+		);
+	});
 });
 
 test("isSessionLiveWithRetry gives up and returns false once the retry window elapses without the session ever going live (COUNTERWEIGHT)", async () => {
-  await withoutRedditCredentials(async () => {
-    const { page, probeCallCount } = makePageBlockedThenLiveAfterProbes({
-      liveAfterProbeCall: Number.POSITIVE_INFINITY,
-    });
-    const live = await isSessionLiveWithRetry(page, { pollIntervalMs: 0, retryForMs: 20 });
-    assert.equal(live, false);
-    // Bounded, not infinite: the fake's waitForTimeout resolves instantly, so
-    // an unbounded retry would spin forever. Confirms the deadline actually
-    // stops the loop rather than the fake accidentally terminating it.
-    assert.ok(probeCallCount() >= 1);
-  });
+	await withoutRedditCredentials(async () => {
+		const { page, probeCallCount } = makePageBlockedThenLiveAfterProbes({
+			liveAfterProbeCall: Number.POSITIVE_INFINITY,
+		});
+		const live = await isSessionLiveWithRetry(page, {
+			pollIntervalMs: 0,
+			retryForMs: 20,
+		});
+		assert.equal(live, false);
+		// Bounded, not infinite: the fake's waitForTimeout resolves instantly, so
+		// an unbounded retry would spin forever. Confirms the deadline actually
+		// stops the loop rather than the fake accidentally terminating it.
+		assert.ok(probeCallCount() >= 1);
+	});
 });
 
 test("ensureRedditSession waits past a slow client-side render instead of treating it as blocked", async () => {
-  await withRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
-    const { fillCalls, locator: username } = makeDelayedAttachLocator({ attachesAfterMs: 150 });
-    const password = makeLocator();
-    const submit = makeLocator();
-    const empty = makeLocator({ count: 0, visible: false });
-    const nav = makeNavigation();
-    const page: Pick<Page, "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-      getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-        return submit;
-      },
-      goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-        return nav.goto(url);
-      },
-      url(): string {
-        return nav.url();
-      },
-      locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-        if (selector.includes("username")) {
-          return username;
-        }
-        if (selector.includes("password")) {
-          return password;
-        }
-        return empty;
-      },
-      waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-        return Promise.resolve();
-      },
-      waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-        return Promise.resolve();
-      },
-    };
+	await withRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
+		const { fillCalls, locator: username } = makeDelayedAttachLocator({
+			attachesAfterMs: 150,
+		});
+		const password = makeLocator();
+		const submit = makeLocator();
+		const empty = makeLocator({ count: 0, visible: false });
+		const nav = makeNavigation();
+		const page: Pick<
+			Page,
+			| "getByRole"
+			| "goto"
+			| "locator"
+			| "url"
+			| "waitForLoadState"
+			| "waitForTimeout"
+		> = {
+			getByRole(
+				_role: Parameters<Page["getByRole"]>[0],
+				_options?: Parameters<Page["getByRole"]>[1],
+			): Locator {
+				return submit;
+			},
+			goto(
+				url: string,
+				_options?: Parameters<Page["goto"]>[1],
+			): ReturnType<Page["goto"]> {
+				return nav.goto(url);
+			},
+			url(): string {
+				return nav.url();
+			},
+			locator(
+				selector: string,
+				_options?: Parameters<Page["locator"]>[1],
+			): Locator {
+				if (selector.includes("username")) {
+					return username;
+				}
+				if (selector.includes("password")) {
+					return password;
+				}
+				return empty;
+			},
+			waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+				return Promise.resolve();
+			},
+			waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+				return Promise.resolve();
+			},
+		};
 
-    // The run doesn't reach a live session in this fixture (no cookie
-    // machinery wired up) — the assertion is about the fill, not the outcome.
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        page: page as Page,
-        sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-          requests.push(req);
-          return Promise.resolve({
-            request_id: req.request_id ?? "test_interaction",
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-        },
-      })
-    );
+		// The run doesn't reach a live session in this fixture (no cookie
+		// machinery wired up) — the assertion is about the fill, not the outcome.
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				page: page as Page,
+				sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+					requests.push(req);
+					return Promise.resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				},
+			}),
+		);
 
-    // The pre-fix `count()` snapshot would have read 0 at t=0 and handed off
-    // to the operator without ever calling fill(); the correct behavior is
-    // to wait past the render delay and fill the real value.
-    assert.deepEqual(fillCalls, ["test-user"]);
-    assert.equal(requests.length, 0, "must not hand off to the operator for a field that arrives within budget");
-  });
+		// The pre-fix `count()` snapshot would have read 0 at t=0 and handed off
+		// to the operator without ever calling fill(); the correct behavior is
+		// to wait past the render delay and fill the real value.
+		assert.deepEqual(fillCalls, ["test-user"]);
+		assert.equal(
+			requests.length,
+			0,
+			"must not hand off to the operator for a field that arrives within budget",
+		);
+	});
 });
 
 test("ensureRedditSession ignores hidden OTP fields instead of asking the owner too early", async () => {
-  await withRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
+	await withRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        page: makePageWithHiddenOtp(),
-        sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-          requests.push(req);
-          return Promise.resolve({
-            request_id: req.request_id ?? "test_interaction",
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-        },
-      }),
-      /reddit_login_post_submit_failed/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				page: makePageWithHiddenOtp(),
+				sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+					requests.push(req);
+					return Promise.resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				},
+			}),
+			/reddit_login_post_submit_failed/u,
+		);
 
-    assert.equal(requests.length, 0);
-  });
+		assert.equal(requests.length, 0);
+	});
 });
 
 test("ensureRedditSession accepts browser-completed OTP when the session is live", async () => {
-  await withRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
+	await withRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
 
-    await ensureRedditSession({
-      context: makeContext(),
-      page: makePageWithVisibleOtpAndLiveSessionAfterBrowserCompletion(),
-      sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-        requests.push(req);
-        return Promise.resolve({
-          request_id: req.request_id ?? "test_interaction",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        });
-      },
-    });
+		await ensureRedditSession({
+			context: makeContext(),
+			page: makePageWithVisibleOtpAndLiveSessionAfterBrowserCompletion(),
+			sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+				requests.push(req);
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
+			},
+		});
 
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.kind, "otp");
-  });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "otp");
+	});
 });
 
 /**
@@ -874,68 +1117,95 @@ test("ensureRedditSession accepts browser-completed OTP when the session is live
  * interaction_required event, no manual_action, just a post-submit failure).
  */
 test("ensureRedditSession detects an OTP field that renders 1.2s after submit instead of silently missing it (REGRESSION)", async () => {
-  await withRedditCredentials(async () => {
-    const requests: InteractionRequest[] = [];
-    const username = makeLocator();
-    const password = makeLocator();
-    const submit = makeLocator();
-    const empty = makeLocator({ count: 0, visible: false });
-    const { locator: delayedOtp } = makeDelayedAttachLocator({ attachesAfterMs: 1200 });
-    const nav = makeNavigation();
-    const page: Pick<Page, "getByRole" | "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-      getByRole(_role: Parameters<Page["getByRole"]>[0], _options?: Parameters<Page["getByRole"]>[1]): Locator {
-        return submit;
-      },
-      goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-        return nav.goto(url);
-      },
-      url(): string {
-        return nav.url();
-      },
-      locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-        if (selector.includes("username")) {
-          return username;
-        }
-        if (selector.includes("password")) {
-          return password;
-        }
-        if (selector.includes("otp") || selector.includes("verification_code") || selector.includes("one-time-code")) {
-          return delayedOtp;
-        }
-        return empty;
-      },
-      waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-        return Promise.resolve();
-      },
-      waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-        return Promise.resolve();
-      },
-    };
+	await withRedditCredentials(async () => {
+		const requests: InteractionRequest[] = [];
+		const username = makeLocator();
+		const password = makeLocator();
+		const submit = makeLocator();
+		const empty = makeLocator({ count: 0, visible: false });
+		const { locator: delayedOtp } = makeDelayedAttachLocator({
+			attachesAfterMs: 1200,
+		});
+		const nav = makeNavigation();
+		const page: Pick<
+			Page,
+			| "getByRole"
+			| "goto"
+			| "locator"
+			| "url"
+			| "waitForLoadState"
+			| "waitForTimeout"
+		> = {
+			getByRole(
+				_role: Parameters<Page["getByRole"]>[0],
+				_options?: Parameters<Page["getByRole"]>[1],
+			): Locator {
+				return submit;
+			},
+			goto(
+				url: string,
+				_options?: Parameters<Page["goto"]>[1],
+			): ReturnType<Page["goto"]> {
+				return nav.goto(url);
+			},
+			url(): string {
+				return nav.url();
+			},
+			locator(
+				selector: string,
+				_options?: Parameters<Page["locator"]>[1],
+			): Locator {
+				if (selector.includes("username")) {
+					return username;
+				}
+				if (selector.includes("password")) {
+					return password;
+				}
+				if (
+					selector.includes("otp") ||
+					selector.includes("verification_code") ||
+					selector.includes("one-time-code")
+				) {
+					return delayedOtp;
+				}
+				return empty;
+			},
+			waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+				return Promise.resolve();
+			},
+			waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+				return Promise.resolve();
+			},
+		};
 
-    // The fixture has no cookie machinery wired up, so the flow still can't
-    // reach a live session after the (correctly-detected) OTP prompt — the
-    // assertion under test is that the owner gets ASKED, not the ultimate
-    // outcome. Pre-fix, `requests` would be empty and the rejection message
-    // would be `reddit_login_post_submit_failed` with no interaction ever sent.
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        page: page as Page,
-        sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-          requests.push(req);
-          return Promise.resolve({
-            request_id: req.request_id ?? "test_interaction",
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-        },
-      }),
-      /reddit_2fa_cancelled/u
-    );
+		// The fixture has no cookie machinery wired up, so the flow still can't
+		// reach a live session after the (correctly-detected) OTP prompt — the
+		// assertion under test is that the owner gets ASKED, not the ultimate
+		// outcome. Pre-fix, `requests` would be empty and the rejection message
+		// would be `reddit_login_post_submit_failed` with no interaction ever sent.
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				page: page as Page,
+				sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+					requests.push(req);
+					return Promise.resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				},
+			}),
+			/reddit_2fa_cancelled/u,
+		);
 
-    assert.equal(requests.length, 1, "a slow-rendering OTP field must still reach the owner as an interaction");
-    assert.equal(requests[0]?.kind, "otp");
-  });
+		assert.equal(
+			requests.length,
+			1,
+			"a slow-rendering OTP field must still reach the owner as an interaction",
+		);
+		assert.equal(requests[0]?.kind, "otp");
+	});
 });
 
 // ─── Post-submit credential safety: the onCredentialSubmit marker ─────────
@@ -950,183 +1220,233 @@ test("ensureRedditSession detects an OTP field that renders 1.2s after submit in
 
 const POST_SUBMIT_TRANSPORT_FAULT = "ETIMEDOUT: browser transport lost";
 
-function makeRedditEstablishArgs(context: BrowserContext, page: Page): SessionEstablishArgs {
-  return {
-    assist: () => Promise.resolve("asst_test"),
-    capture: null,
-    checkpoint: () => Promise.resolve(),
-    completeAssistance: () => Promise.resolve(),
-    context,
-    name: "reddit",
-    page,
-    progress: () => Promise.resolve(),
-    retryablePattern: REDDIT_RETRYABLE_PATTERN,
-    sendInteraction: (req: InteractionRequest) =>
-      Promise.resolve({
-        request_id: req.request_id ?? "test_interaction",
-        status: "success",
-        type: "INTERACTION_RESPONSE",
-      } as InteractionResponse),
-  };
+function makeRedditEstablishArgs(
+	context: BrowserContext,
+	page: Page,
+): SessionEstablishArgs {
+	return {
+		assist: () => Promise.resolve("asst_test"),
+		capture: null,
+		checkpoint: () => Promise.resolve(),
+		completeAssistance: () => Promise.resolve(),
+		context,
+		name: "reddit",
+		page,
+		progress: () => Promise.resolve(),
+		retryablePattern: REDDIT_RETRYABLE_PATTERN,
+		sendInteraction: (req: InteractionRequest) =>
+			Promise.resolve({
+				request_id: req.request_id ?? "test_interaction",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			} as InteractionResponse),
+	};
 }
 
 test("ensureRedditSession fires onCredentialSubmit exactly once, at the password submit click", async () => {
-  await withRedditCredentials(async () => {
-    let markerCalls = 0;
+	await withRedditCredentials(async () => {
+		let markerCalls = 0;
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        onCredentialSubmit: () => {
-          markerCalls += 1;
-        },
-        page: makePageWithHiddenOtp(),
-        sendInteraction: () => Promise.reject(new Error("sendInteraction must not be called")),
-      }),
-      /reddit_login_post_submit_failed/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				onCredentialSubmit: () => {
+					markerCalls += 1;
+				},
+				page: makePageWithHiddenOtp(),
+				sendInteraction: () =>
+					Promise.reject(new Error("sendInteraction must not be called")),
+			}),
+			/reddit_login_post_submit_failed/u,
+		);
 
-    assert.equal(markerCalls, 1, "full login flow must mark the credential submit exactly once");
-  });
+		assert.equal(
+			markerCalls,
+			1,
+			"full login flow must mark the credential submit exactly once",
+		);
+	});
 });
 
 test("ensureRedditSession fires onCredentialSubmit exactly once via the CSS-fallback submit path too", async () => {
-  await withRedditCredentials(async () => {
-    let markerCalls = 0;
-    const username = makeLocator();
-    const password = makeLocator();
-    const submit = makeLocator();
-    const empty = makeLocator({ count: 0, visible: false });
-    // No getByRole on this page shape, so clickRedditLoginSubmit must take
-    // its CSS-selector fallback branch — the second marker call site.
-    const nav = makeNavigation();
-    const page: Pick<Page, "goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"> = {
-      goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-        return nav.goto(url);
-      },
-      url(): string {
-        return nav.url();
-      },
-      locator(selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-        if (selector.includes("username")) {
-          return username;
-        }
-        if (selector.includes("password")) {
-          return password;
-        }
-        if (selector.includes('button[type="submit"]')) {
-          return submit;
-        }
-        return empty;
-      },
-      waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
-        return Promise.resolve();
-      },
-      waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-        return Promise.resolve();
-      },
-    };
+	await withRedditCredentials(async () => {
+		let markerCalls = 0;
+		const username = makeLocator();
+		const password = makeLocator();
+		const submit = makeLocator();
+		const empty = makeLocator({ count: 0, visible: false });
+		// No getByRole on this page shape, so clickRedditLoginSubmit must take
+		// its CSS-selector fallback branch — the second marker call site.
+		const nav = makeNavigation();
+		const page: Pick<
+			Page,
+			"goto" | "locator" | "url" | "waitForLoadState" | "waitForTimeout"
+		> = {
+			goto(
+				url: string,
+				_options?: Parameters<Page["goto"]>[1],
+			): ReturnType<Page["goto"]> {
+				return nav.goto(url);
+			},
+			url(): string {
+				return nav.url();
+			},
+			locator(
+				selector: string,
+				_options?: Parameters<Page["locator"]>[1],
+			): Locator {
+				if (selector.includes("username")) {
+					return username;
+				}
+				if (selector.includes("password")) {
+					return password;
+				}
+				if (selector.includes('button[type="submit"]')) {
+					return submit;
+				}
+				return empty;
+			},
+			waitForLoadState(): ReturnType<Page["waitForLoadState"]> {
+				return Promise.resolve();
+			},
+			waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+				return Promise.resolve();
+			},
+		};
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        onCredentialSubmit: () => {
-          markerCalls += 1;
-        },
-        page: page as Page,
-        sendInteraction: () => Promise.reject(new Error("sendInteraction must not be called")),
-      }),
-      /reddit_login_post_submit_failed/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				onCredentialSubmit: () => {
+					markerCalls += 1;
+				},
+				page: page as Page,
+				sendInteraction: () =>
+					Promise.reject(new Error("sendInteraction must not be called")),
+			}),
+			/reddit_login_post_submit_failed/u,
+		);
 
-    assert.equal(markerCalls, 1, "the fallback submit click must mark the credential submit exactly once");
-  });
+		assert.equal(
+			markerCalls,
+			1,
+			"the fallback submit click must mark the credential submit exactly once",
+		);
+	});
 });
 
 test("ensureRedditSession never fires onCredentialSubmit when the existing session is reused (COUNTERWEIGHT)", async () => {
-  await withRedditCredentials(async () => {
-    let markerCalls = 0;
-    const liveCookie = { name: "reddit_session", value: "live-session" } as BrowserCookie;
+	await withRedditCredentials(async () => {
+		let markerCalls = 0;
+		const liveCookie = {
+			name: "reddit_session",
+			value: "live-session",
+		} as BrowserCookie;
 
-    await ensureRedditSession({
-      context: makeContext([liveCookie]),
-      onCredentialSubmit: () => {
-        markerCalls += 1;
-      },
-      // Fixture renders a logout link, so the reuse probe reports live.
-      page: makePageWithVisibleOtpAndLiveSessionAfterBrowserCompletion(),
-      sendInteraction: () => Promise.reject(new Error("sendInteraction must not be called")),
-    });
+		await ensureRedditSession({
+			context: makeContext([liveCookie]),
+			onCredentialSubmit: () => {
+				markerCalls += 1;
+			},
+			// Fixture renders a logout link, so the reuse probe reports live.
+			page: makePageWithVisibleOtpAndLiveSessionAfterBrowserCompletion(),
+			sendInteraction: () =>
+				Promise.reject(new Error("sendInteraction must not be called")),
+		});
 
-    assert.equal(markerCalls, 0, "session reuse must not report a credential submit that never happened");
-  });
+		assert.equal(
+			markerCalls,
+			0,
+			"session reuse must not report a credential submit that never happened",
+		);
+	});
 });
 
 test("ensureRedditSession does not fire onCredentialSubmit when the submit control is missing (pre-submit stays pre-submit)", async () => {
-  await withRedditCredentials(async () => {
-    let markerCalls = 0;
+	await withRedditCredentials(async () => {
+		let markerCalls = 0;
 
-    await assert.rejects(
-      ensureRedditSession({
-        context: makeContext(),
-        onCredentialSubmit: () => {
-          markerCalls += 1;
-        },
-        page: makePageWithMissingSubmit(),
-        sendInteraction: () => Promise.reject(new Error("sendInteraction must not be called")),
-      }),
-      /reddit_login_submit_missing/u
-    );
+		await assert.rejects(
+			ensureRedditSession({
+				context: makeContext(),
+				onCredentialSubmit: () => {
+					markerCalls += 1;
+				},
+				page: makePageWithMissingSubmit(),
+				sendInteraction: () =>
+					Promise.reject(new Error("sendInteraction must not be called")),
+			}),
+			/reddit_login_submit_missing/u,
+		);
 
-    assert.equal(markerCalls, 0, "a login that never submitted must not claim the credential went out");
-  });
+		assert.equal(
+			markerCalls,
+			0,
+			"a login that never submitted must not claim the credential went out",
+		);
+	});
 });
 
 test("establishSession via redditEnsureSession: a post-submit fault is non-retryable even when its literal matches REDDIT_RETRYABLE_PATTERN", async () => {
-  await withRedditCredentials(async () => {
-    // Oracle precondition: this fault WOULD be retryable by vocabulary alone.
-    // If it stopped matching, this test would degrade into the literal-based
-    // guarantee we are replacing, so pin the collision explicitly.
-    assert.equal(REDDIT_RETRYABLE_PATTERN.test(POST_SUBMIT_TRANSPORT_FAULT), true);
+	await withRedditCredentials(async () => {
+		// Oracle precondition: this fault WOULD be retryable by vocabulary alone.
+		// If it stopped matching, this test would degrade into the literal-based
+		// guarantee we are replacing, so pin the collision explicitly.
+		assert.equal(
+			REDDIT_RETRYABLE_PATTERN.test(POST_SUBMIT_TRANSPORT_FAULT),
+			true,
+		);
 
-    await assert.rejects(
-      establishSession(
-        { ensureSession: redditEnsureSession, probeSession: undefined },
-        makeRedditEstablishArgs(makeContextWithCookieFault(2, POST_SUBMIT_TRANSPORT_FAULT), makePageWithHiddenOtp())
-      ),
-      (err: unknown) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /reddit_session_failed: ETIMEDOUT: browser transport lost/u);
-        assert.equal(
-          (err as { retryable?: boolean }).retryable,
-          false,
-          "a fault after the password went out must never redispatch, whatever its message says"
-        );
-        return true;
-      }
-    );
-  });
+		await assert.rejects(
+			establishSession(
+				{ ensureSession: redditEnsureSession, probeSession: undefined },
+				makeRedditEstablishArgs(
+					makeContextWithCookieFault(2, POST_SUBMIT_TRANSPORT_FAULT),
+					makePageWithHiddenOtp(),
+				),
+			),
+			(err: unknown) => {
+				assert.ok(err instanceof Error);
+				assert.match(
+					err.message,
+					/reddit_session_failed: ETIMEDOUT: browser transport lost/u,
+				);
+				assert.equal(
+					(err as { retryable?: boolean }).retryable,
+					false,
+					"a fault after the password went out must never redispatch, whatever its message says",
+				);
+				return true;
+			},
+		);
+	});
 });
 
 test("establishSession via redditEnsureSession: the same fault BEFORE the password goes out stays retryable (COUNTERWEIGHT)", async () => {
-  await withRedditCredentials(async () => {
-    await assert.rejects(
-      establishSession(
-        { ensureSession: redditEnsureSession, probeSession: undefined },
-        makeRedditEstablishArgs(makeContextWithCookieFault(1, POST_SUBMIT_TRANSPORT_FAULT), makePageWithHiddenOtp())
-      ),
-      (err: unknown) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /reddit_session_failed: ETIMEDOUT: browser transport lost/u);
-        assert.equal(
-          (err as { retryable?: boolean }).retryable,
-          true,
-          "pre-submit transport faults must keep their ordinary pattern classification"
-        );
-        return true;
-      }
-    );
-  });
+	await withRedditCredentials(async () => {
+		await assert.rejects(
+			establishSession(
+				{ ensureSession: redditEnsureSession, probeSession: undefined },
+				makeRedditEstablishArgs(
+					makeContextWithCookieFault(1, POST_SUBMIT_TRANSPORT_FAULT),
+					makePageWithHiddenOtp(),
+				),
+			),
+			(err: unknown) => {
+				assert.ok(err instanceof Error);
+				assert.match(
+					err.message,
+					/reddit_session_failed: ETIMEDOUT: browser transport lost/u,
+				);
+				assert.equal(
+					(err as { retryable?: boolean }).retryable,
+					true,
+					"pre-submit transport faults must keep their ordinary pattern classification",
+				);
+				return true;
+			},
+		);
+	});
 });
 
 // ─── B5-shaped regression: Reddit's retryablePattern has no naming collision ─
@@ -1140,34 +1460,47 @@ test("establishSession via redditEnsureSession: the same fault BEFORE the passwo
 // a bare transport term (as USAA's `source_unavailable` did) breaks this
 // test immediately instead of silently reopening the mode-1 defect class.
 const REDDIT_POST_SUBMIT_THROW_MESSAGES = [
-  "reddit_login_submit_missing",
-  "reddit_2fa_cancelled",
-  "reddit_login_post_submit_failed",
+	"reddit_login_submit_missing",
+	"reddit_2fa_cancelled",
+	"reddit_login_post_submit_failed",
 ] as const;
 
 test("REDDIT_RETRYABLE_PATTERN does not match any post-submit throw message reddit.ts can produce", () => {
-  for (const message of REDDIT_POST_SUBMIT_THROW_MESSAGES) {
-    assert.equal(
-      REDDIT_RETRYABLE_PATTERN.test(message),
-      false,
-      `${message} must not match REDDIT_RETRYABLE_PATTERN — a match here would let a post-submit fault redispatch and resubmit the saved password`
-    );
-  }
+	for (const message of REDDIT_POST_SUBMIT_THROW_MESSAGES) {
+		assert.equal(
+			REDDIT_RETRYABLE_PATTERN.test(message),
+			false,
+			`${message} must not match REDDIT_RETRYABLE_PATTERN — a match here would let a post-submit fault redispatch and resubmit the saved password`,
+		);
+	}
 });
 
 test("REDDIT_RETRYABLE_PATTERN does not match the runtime's session_failed-wrapped form of any post-submit throw", () => {
-  for (const message of REDDIT_POST_SUBMIT_THROW_MESSAGES) {
-    const wrapped = `reddit_session_failed: ${message}`;
-    assert.equal(REDDIT_RETRYABLE_PATTERN.test(wrapped), false, `${wrapped} must not match REDDIT_RETRYABLE_PATTERN`);
-  }
+	for (const message of REDDIT_POST_SUBMIT_THROW_MESSAGES) {
+		const wrapped = `reddit_session_failed: ${message}`;
+		assert.equal(
+			REDDIT_RETRYABLE_PATTERN.test(wrapped),
+			false,
+			`${wrapped} must not match REDDIT_RETRYABLE_PATTERN`,
+		);
+	}
 });
 
 test("REDDIT_RETRYABLE_PATTERN still matches its intended legitimate pre-submit retry vocabulary (COUNTERWEIGHT)", () => {
-  // Proves the non-collision tests above aren't vacuously true because the
-  // pattern matches nothing at all.
-  for (const message of ["ECONNRESET", "ETIMEDOUT", "fetch failed: network error", "reddit_rate_limited"]) {
-    assert.equal(REDDIT_RETRYABLE_PATTERN.test(message), true, `${message} should still be retryable`);
-  }
+	// Proves the non-collision tests above aren't vacuously true because the
+	// pattern matches nothing at all.
+	for (const message of [
+		"ECONNRESET",
+		"ETIMEDOUT",
+		"fetch failed: network error",
+		"reddit_rate_limited",
+	]) {
+		assert.equal(
+			REDDIT_RETRYABLE_PATTERN.test(message),
+			true,
+			`${message} should still be retryable`,
+		);
+	}
 });
 
 // ─── Bounded liveness probe: a hang must never reach the watchdog ─────────
@@ -1203,132 +1536,187 @@ const PROBE_BOUND_MS = 50;
  * loop cost is not what is being measured.
  */
 function makeHangingProbePage(): { evaluateCalls: () => number; page: Page } {
-  let evaluateCalls = 0;
-  const empty = makeLocator({ count: 0, visible: false });
-  const nav = makeNavigation();
-  const fake: Pick<Page, "evaluate" | "goto" | "locator" | "url" | "waitForTimeout"> = {
-    evaluate(): ReturnType<Page["evaluate"]> {
-      evaluateCalls += 1;
-      // Never resolves, never rejects. A `catch` cannot see this.
-      return new Promise<never>(() => undefined);
-    },
-    goto(url: string, _options?: Parameters<Page["goto"]>[1]): ReturnType<Page["goto"]> {
-      return nav.goto(url);
-    },
-    url(): string {
-      return nav.url();
-    },
-    locator(_selector: string, _options?: Parameters<Page["locator"]>[1]): Locator {
-      return empty;
-    },
-    waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
-      return Promise.resolve();
-    },
-  };
-  return { evaluateCalls: () => evaluateCalls, page: fake as Page };
+	let evaluateCalls = 0;
+	const empty = makeLocator({ count: 0, visible: false });
+	const nav = makeNavigation();
+	const fake: Pick<
+		Page,
+		"evaluate" | "goto" | "locator" | "url" | "waitForTimeout"
+	> = {
+		evaluate(): ReturnType<Page["evaluate"]> {
+			evaluateCalls += 1;
+			// Never resolves, never rejects. A `catch` cannot see this.
+			return new Promise<never>(() => undefined);
+		},
+		goto(
+			url: string,
+			_options?: Parameters<Page["goto"]>[1],
+		): ReturnType<Page["goto"]> {
+			return nav.goto(url);
+		},
+		url(): string {
+			return nav.url();
+		},
+		locator(
+			_selector: string,
+			_options?: Parameters<Page["locator"]>[1],
+		): Locator {
+			return empty;
+		},
+		waitForTimeout(): ReturnType<Page["waitForTimeout"]> {
+			return Promise.resolve();
+		},
+	};
+	return { evaluateCalls: () => evaluateCalls, page: fake as Page };
 }
 
 test("isSessionLive returns false (never hangs, never throws) when the in-page probe never resolves", async () => {
-  await withRedditCredentials(async () => {
-    const { page } = makeHangingProbePage();
-    const startedAt = Date.now();
-    // The assertion that matters is that this line is REACHED at all: before
-    // the fix this await never settles and the test dies on node:test's
-    // timeout rather than failing.
-    const live = await isSessionLive(page, { evaluateTimeoutMs: PROBE_BOUND_MS });
-    const elapsed = Date.now() - startedAt;
-    assert.equal(live, false, "a probe that could not answer must read as 'not live', not throw and not hang");
-    assert.ok(elapsed < 30_000, `probe should resolve within its own bound, took ${elapsed}ms`);
-  });
+	await withRedditCredentials(async () => {
+		const { page } = makeHangingProbePage();
+		const startedAt = Date.now();
+		// The assertion that matters is that this line is REACHED at all: before
+		// the fix this await never settles and the test dies on node:test's
+		// timeout rather than failing.
+		const live = await isSessionLive(page, {
+			evaluateTimeoutMs: PROBE_BOUND_MS,
+		});
+		const elapsed = Date.now() - startedAt;
+		assert.equal(
+			live,
+			false,
+			"a probe that could not answer must read as 'not live', not throw and not hang",
+		);
+		assert.ok(
+			elapsed < 30_000,
+			`probe should resolve within its own bound, took ${elapsed}ms`,
+		);
+	});
 });
 
 test("isSessionLive reports a timed-out probe distinctly from a genuinely dead session (diagnostics must not collapse)", async () => {
-  await withRedditCredentials(async () => {
-    const { page: hanging } = makeHangingProbePage();
-    const timeoutStages: string[] = [];
-    assert.equal(
-      await isSessionLive(hanging, {
-        evaluateTimeoutMs: PROBE_BOUND_MS,
-        onProbeTimeout: (stage) => timeoutStages.push(stage),
-      }),
-      false
-    );
-    assert.deepEqual(timeoutStages, ["evaluate"], "a tarpit must be nameable in diagnostics");
+	await withRedditCredentials(async () => {
+		const { page: hanging } = makeHangingProbePage();
+		const timeoutStages: string[] = [];
+		assert.equal(
+			await isSessionLive(hanging, {
+				evaluateTimeoutMs: PROBE_BOUND_MS,
+				onProbeTimeout: (stage) => timeoutStages.push(stage),
+			}),
+			false,
+		);
+		assert.deepEqual(
+			timeoutStages,
+			["evaluate"],
+			"a tarpit must be nameable in diagnostics",
+		);
 
-    // COUNTERWEIGHT: the same `false` verdict from a session that really is
-    // logged out must NOT fire the timeout signal — otherwise the signal
-    // carries no information.
-    const deadStages: string[] = [];
-    const dead = makePageForSessionLiveProbe({ logoutLinkCount: 0, savedJsonStatus: 403 });
-    assert.equal(
-      await isSessionLive(dead, {
-        evaluateTimeoutMs: PROBE_BOUND_MS,
-        onProbeTimeout: (stage) => deadStages.push(stage),
-      }),
-      false
-    );
-    assert.deepEqual(deadStages, [], "a genuinely dead session is not a probe timeout");
-  });
+		// COUNTERWEIGHT: the same `false` verdict from a session that really is
+		// logged out must NOT fire the timeout signal — otherwise the signal
+		// carries no information.
+		const deadStages: string[] = [];
+		const dead = makePageForSessionLiveProbe({
+			logoutLinkCount: 0,
+			savedJsonStatus: 403,
+		});
+		assert.equal(
+			await isSessionLive(dead, {
+				evaluateTimeoutMs: PROBE_BOUND_MS,
+				onProbeTimeout: (stage) => deadStages.push(stage),
+			}),
+			false,
+		);
+		assert.deepEqual(
+			deadStages,
+			[],
+			"a genuinely dead session is not a probe timeout",
+		);
+	});
 });
 
 test("isSessionLive still returns true for a normal 200 and false for a normal non-200 (the bound changes nothing else)", async () => {
-  await withRedditCredentials(async () => {
-    assert.equal(await isSessionLive(makePageForSessionLiveProbe({ logoutLinkCount: 0, savedJsonStatus: 200 })), true);
-    assert.equal(await isSessionLive(makePageForSessionLiveProbe({ logoutLinkCount: 1, savedJsonStatus: 403 })), false);
-  });
+	await withRedditCredentials(async () => {
+		assert.equal(
+			await isSessionLive(
+				makePageForSessionLiveProbe({
+					logoutLinkCount: 0,
+					savedJsonStatus: 200,
+				}),
+			),
+			true,
+		);
+		assert.equal(
+			await isSessionLive(
+				makePageForSessionLiveProbe({
+					logoutLinkCount: 1,
+					savedJsonStatus: 403,
+				}),
+			),
+			false,
+		);
+	});
 });
 
 test("isSessionLiveWithRetry's total bound holds even when EVERY probe times out", async () => {
-  await withRedditCredentials(async () => {
-    const { evaluateCalls, page } = makeHangingProbePage();
-    const startedAt = Date.now();
-    const live = await isSessionLiveWithRetry(page, {
-      evaluateTimeoutMs: PROBE_BOUND_MS,
-      pollIntervalMs: 0,
-      retryForMs: 20,
-    });
-    const elapsed = Date.now() - startedAt;
-    assert.equal(live, false);
-    // The wrapper checks its deadline only BETWEEN probes, so its window is
-    // real only because each probe is itself bounded. One hanging probe used
-    // to pin this open forever.
-    assert.ok(evaluateCalls() >= 1, "the wrapper must actually have probed");
-    assert.ok(elapsed < 60_000, `retry wrapper must stay bounded, took ${elapsed}ms`);
-  });
+	await withRedditCredentials(async () => {
+		const { evaluateCalls, page } = makeHangingProbePage();
+		const startedAt = Date.now();
+		const live = await isSessionLiveWithRetry(page, {
+			evaluateTimeoutMs: PROBE_BOUND_MS,
+			pollIntervalMs: 0,
+			retryForMs: 20,
+		});
+		const elapsed = Date.now() - startedAt;
+		assert.equal(live, false);
+		// The wrapper checks its deadline only BETWEEN probes, so its window is
+		// real only because each probe is itself bounded. One hanging probe used
+		// to pin this open forever.
+		assert.ok(evaluateCalls() >= 1, "the wrapper must actually have probed");
+		assert.ok(
+			elapsed < 60_000,
+			`retry wrapper must stay bounded, took ${elapsed}ms`,
+		);
+	});
 });
 
 test("ensureRedditSession checkpoints BEFORE the probe, so a stall there is named rather than silent", async () => {
-  await withRedditCredentials(async () => {
-    const { page } = makeHangingProbePage();
-    const checkpoints: string[] = [];
-    // A live cookie plus a hanging probe is exactly run_1787109028586's shape:
-    // the cookie check passes and the run then disappears into the probe.
-    await ensureRedditSession({
-      checkpoint: (label: string): Promise<void> => {
-        checkpoints.push(label);
-        return Promise.resolve();
-      },
-      context: makeContext([{ domain: ".reddit.com", name: "reddit_session", path: "/", value: "live" } as never]),
-      manualHandoffProbeRetry: { pollIntervalMs: 0, retryForMs: 0 },
-      page,
-      sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-        return Promise.resolve({
-          request_id: req.request_id ?? "test_interaction",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        });
-      },
-      sessionProbe: { evaluateTimeoutMs: PROBE_BOUND_MS },
-    }).catch((): undefined => undefined);
+	await withRedditCredentials(async () => {
+		const { page } = makeHangingProbePage();
+		const checkpoints: string[] = [];
+		// A live cookie plus a hanging probe is exactly run_1787109028586's shape:
+		// the cookie check passes and the run then disappears into the probe.
+		await ensureRedditSession({
+			checkpoint: (label: string): Promise<void> => {
+				checkpoints.push(label);
+				return Promise.resolve();
+			},
+			context: makeContext([
+				{
+					domain: ".reddit.com",
+					name: "reddit_session",
+					path: "/",
+					value: "live",
+				} as never,
+			]),
+			manualHandoffProbeRetry: { pollIntervalMs: 0, retryForMs: 0 },
+			page,
+			sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
+			},
+			sessionProbe: { evaluateTimeoutMs: PROBE_BOUND_MS },
+		}).catch((): undefined => undefined);
 
-    assert.equal(
-      checkpoints[0],
-      "reddit-session-probe",
-      `the FIRST checkpoint must name the probe, so the watchdog stops reporting the runtime's own session-establish:begin as the last known phase; got ${JSON.stringify(checkpoints)}`
-    );
-    assert.ok(
-      checkpoints.some((c) => c.startsWith("reddit-session-probe-timeout:")),
-      `a timed-out probe must leave a distinct diagnostic marker; got ${JSON.stringify(checkpoints)}`
-    );
-  });
+		assert.equal(
+			checkpoints[0],
+			"reddit-session-probe",
+			`the FIRST checkpoint must name the probe, so the watchdog stops reporting the runtime's own session-establish:begin as the last known phase; got ${JSON.stringify(checkpoints)}`,
+		);
+		assert.ok(
+			checkpoints.some((c) => c.startsWith("reddit-session-probe-timeout:")),
+			`a timed-out probe must leave a distinct diagnostic marker; got ${JSON.stringify(checkpoints)}`,
+		);
+	});
 });

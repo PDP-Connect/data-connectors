@@ -32,46 +32,51 @@ const MANIFEST_DIR = join(PKG_ROOT, "manifests");
 const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 
 function listSchemaConnectors(): string[] {
-  return readdirSync(CONNECTORS_DIR)
-    .filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
-    .sort();
+	return readdirSync(CONNECTORS_DIR)
+		.filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
+		.sort();
 }
 
 function emitSourcePathsFor(name: string): string[] {
-  return ["index.ts", "parsers.ts"].map((f) => join(CONNECTORS_DIR, name, f)).filter(existsSync);
+	return ["index.ts", "parsers.ts"]
+		.map((f) => join(CONNECTORS_DIR, name, f))
+		.filter(existsSync);
 }
 
 const connectors = listSchemaConnectors();
 
 assert.ok(
-  connectors.length > 0,
-  "expected at least one connector with schemas.ts; reconciler regression net is meaningless without coverage"
+	connectors.length > 0,
+	"expected at least one connector with schemas.ts; reconciler regression net is meaningless without coverage",
 );
 
 for (const name of connectors) {
-  test(`reconcile/${name}: manifest, schema, and emit literals align`, () => {
-    const manifestPath = join(MANIFEST_DIR, `${name}.json`);
-    assert.ok(existsSync(manifestPath), `${name}: schemas.ts exists but no matching manifest`);
-    const r = reconcileFromDisk({
-      connector: name,
-      manifestPath,
-      schemaPath: join(CONNECTORS_DIR, name, "schemas.ts"),
-      emitSourcePaths: emitSourcePathsFor(name),
-    });
-    if (!r.ok) {
-      const detail = JSON.stringify(
-        {
-          missing_manifest: r.missing_manifest,
-          missing_schema: r.missing_schema,
-          missing_emit: r.missing_emit,
-          declared: r.declared,
-          registered: r.registered,
-          emitted: r.emitted,
-        },
-        null,
-        2
-      );
-      assert.fail(`${name} reconciliation drift:\n${detail}`);
-    }
-  });
+	test(`reconcile/${name}: manifest, schema, and emit literals align`, () => {
+		const manifestPath = join(MANIFEST_DIR, `${name}.json`);
+		assert.ok(
+			existsSync(manifestPath),
+			`${name}: schemas.ts exists but no matching manifest`,
+		);
+		const r = reconcileFromDisk({
+			connector: name,
+			manifestPath,
+			schemaPath: join(CONNECTORS_DIR, name, "schemas.ts"),
+			emitSourcePaths: emitSourcePathsFor(name),
+		});
+		if (!r.ok) {
+			const detail = JSON.stringify(
+				{
+					missing_manifest: r.missing_manifest,
+					missing_schema: r.missing_schema,
+					missing_emit: r.missing_emit,
+					declared: r.declared,
+					registered: r.registered,
+					emitted: r.emitted,
+				},
+				null,
+				2,
+			);
+			assert.fail(`${name} reconciliation drift:\n${detail}`);
+		}
+	});
 }

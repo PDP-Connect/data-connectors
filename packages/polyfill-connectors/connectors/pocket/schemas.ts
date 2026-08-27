@@ -39,7 +39,10 @@ const NUMERIC_ID_RE = /^\d{1,30}$/; // String(numeric Pocket item_id)
 const POCKET_STATUS_RE = /^[012]$/; // 0 unread, 1 archived, 2 deleted
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-const isoDateTimeNullable = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime").nullable();
+const isoDateTimeNullable = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.nullable();
 const countSchema = z.number().int().min(0).nullable();
 
 /**
@@ -48,27 +51,30 @@ const countSchema = z.number().int().min(0).nullable();
  * Tombstone: status === "2".
  */
 export const itemsSchema = z.object({
-  id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric Pocket item id"),
-  status: z.string().regex(POCKET_STATUS_RE, "status must be 0, 1, or 2").optional(),
-  url: z.url().max(4096).optional(),
-  title: pdppSafeText.max(2000).nullable(),
-  author: pdppSafeText.max(2000).nullable(),
-  time_added: isoDateTimeNullable,
-  time_updated: isoDateTimeNullable,
-  time_read: isoDateTimeNullable,
-  time_favorited: isoDateTimeNullable,
-  tags: z.array(pdppSafeText.max(200)),
-  archived: z.boolean(),
-  favorite: z.boolean(),
-  word_count: countSchema,
-  reading_time_minutes: countSchema,
+	id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric Pocket item id"),
+	status: z
+		.string()
+		.regex(POCKET_STATUS_RE, "status must be 0, 1, or 2")
+		.optional(),
+	url: z.url().max(4096).optional(),
+	title: pdppSafeText.max(2000).nullable(),
+	author: pdppSafeText.max(2000).nullable(),
+	time_added: isoDateTimeNullable,
+	time_updated: isoDateTimeNullable,
+	time_read: isoDateTimeNullable,
+	time_favorited: isoDateTimeNullable,
+	tags: z.array(pdppSafeText.max(200)),
+	archived: z.boolean(),
+	favorite: z.boolean(),
+	word_count: countSchema,
+	reading_time_minutes: countSchema,
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  items: itemsSchema,
+	items: itemsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

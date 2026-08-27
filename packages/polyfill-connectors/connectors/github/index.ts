@@ -26,48 +26,48 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import {
-  buildCollectionRateProgress,
-  buildPacingStateFields,
-  type ConnectorHttpGovernor,
-  createConnectorHttpGovernor,
-  readPersistedPacingInterval,
+	buildCollectionRateProgress,
+	buildPacingStateFields,
+	type ConnectorHttpGovernor,
+	createConnectorHttpGovernor,
+	readPersistedPacingInterval,
 } from "../../src/connector-http-governor.ts";
 import {
-  buildDetailCoverageMessage,
-  createConnectorFailure,
-  type EmittedMessage,
-  nowIso,
-  runConnector,
+	buildDetailCoverageMessage,
+	createConnectorFailure,
+	type EmittedMessage,
+	nowIso,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
 import { RetryBudget } from "../../src/provider-budget.ts";
 import { githubPacingProfile } from "../../src/provider-profile.ts";
 import {
-  API_BASE as BASE,
-  gistRecord,
-  isAtOrAfterUntil,
-  isBeforeSince,
-  issueRecord,
-  laterIso,
-  parseNextLink,
-  pullRequestRecord,
-  repoFullFromUrl,
-  repoRecord,
-  starredRecord,
-  userRecord,
-  userStatsRecord,
+	API_BASE as BASE,
+	gistRecord,
+	isAtOrAfterUntil,
+	isBeforeSince,
+	issueRecord,
+	laterIso,
+	parseNextLink,
+	pullRequestRecord,
+	repoFullFromUrl,
+	repoRecord,
+	starredRecord,
+	userRecord,
+	userStatsRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
-  GhFetchOptions,
-  GhResult,
-  GitHubGist,
-  GitHubIssue,
-  GitHubPullDetail,
-  GitHubRepo,
-  GitHubSearchResponse,
-  GitHubStarredEntry,
-  GitHubUser,
+	GhFetchOptions,
+	GhResult,
+	GitHubGist,
+	GitHubIssue,
+	GitHubPullDetail,
+	GitHubRepo,
+	GitHubSearchResponse,
+	GitHubStarredEntry,
+	GitHubUser,
 } from "./types.ts";
 
 const USER_AGENT = "pdpp-connector-github/0.1";
@@ -89,19 +89,29 @@ const USER_AGENT = "pdpp-connector-github/0.1";
 // docs/research/per-connector-rate-profiles-2026-06-13.md for the derivation.
 
 interface GithubHttpGovernorOptions {
-  restoredIntervalMs?: number;
-  retrySleep?: (ms: number) => void | Promise<void>;
+	restoredIntervalMs?: number;
+	retrySleep?: (ms: number) => void | Promise<void>;
 }
 
-export function createGithubHttpGovernor(options: GithubHttpGovernorOptions = {}): ConnectorHttpGovernor {
-  return createConnectorHttpGovernor({
-    name: "github",
-    maxAttempts: 4,
-    profile: githubPacingProfile(),
-    retryBudget: new RetryBudget({ capacity: 8, initialTokens: 2, refillPerSuccess: 0.25 }),
-    ...(options.retrySleep === undefined ? {} : { retrySleep: options.retrySleep }),
-    ...(options.restoredIntervalMs === undefined ? {} : { restoredIntervalMs: options.restoredIntervalMs }),
-  });
+export function createGithubHttpGovernor(
+	options: GithubHttpGovernorOptions = {},
+): ConnectorHttpGovernor {
+	return createConnectorHttpGovernor({
+		name: "github",
+		maxAttempts: 4,
+		profile: githubPacingProfile(),
+		retryBudget: new RetryBudget({
+			capacity: 8,
+			initialTokens: 2,
+			refillPerSuccess: 0.25,
+		}),
+		...(options.retrySleep === undefined
+			? {}
+			: { retrySleep: options.retrySleep }),
+		...(options.restoredIntervalMs === undefined
+			? {}
+			: { restoredIntervalMs: options.restoredIntervalMs }),
+	});
 }
 
 const DEFAULT_GITHUB_MAX_LIST_PAGES = 200;
@@ -109,14 +119,14 @@ let maxGithubListPages = DEFAULT_GITHUB_MAX_LIST_PAGES;
 
 /** Runtime retry classification, including the governor's exhausted 5xx form. */
 export const GITHUB_RETRYABLE_PATTERN =
-  /github_malformed_response|rate_limited|ECONN|fetch failed|retryable status \d+/i;
+	/github_malformed_response|rate_limited|ECONN|fetch failed|retryable status \d+/i;
 
 /** Test-only cap injection; production keeps the bounded default. */
 export function __setMaxGithubListPages(maxPages: number): void {
-  if (!Number.isInteger(maxPages) || maxPages <= 0) {
-    throw new Error("github_pagination_invalid_max_pages");
-  }
-  maxGithubListPages = maxPages;
+	if (!Number.isInteger(maxPages) || maxPages <= 0) {
+		throw new Error("github_pagination_invalid_max_pages");
+	}
+	maxGithubListPages = maxPages;
 }
 
 /**
@@ -124,159 +134,182 @@ export function __setMaxGithubListPages(maxPages: number): void {
  * read off the `user` stream cursor where the previous run persisted it (see
  * `collectUser`). A stale or absent value cold-starts at the discovery seed.
  */
-function restoreGithubPacing(state: Record<string, unknown>): ConnectorHttpGovernor {
-  const userCursor = state.user as Record<string, unknown> | undefined;
-  const restoredIntervalMs = readPersistedPacingInterval(userCursor);
-  return createGithubHttpGovernor(restoredIntervalMs === null ? {} : { restoredIntervalMs });
+function restoreGithubPacing(
+	state: Record<string, unknown>,
+): ConnectorHttpGovernor {
+	const userCursor = state.user as Record<string, unknown> | undefined;
+	const restoredIntervalMs = readPersistedPacingInterval(userCursor);
+	return createGithubHttpGovernor(
+		restoredIntervalMs === null ? {} : { restoredIntervalMs },
+	);
 }
 
 interface ProgressExtra {
-  count?: number;
-  cursor_present?: boolean;
-  item_count?: number;
-  page_index?: number;
-  phase?: string;
-  rate_limit_pressure?: number;
-  stream?: string;
-  total?: number;
-  total_seen?: number;
+	count?: number;
+	cursor_present?: boolean;
+	item_count?: number;
+	page_index?: number;
+	phase?: string;
+	rate_limit_pressure?: number;
+	stream?: string;
+	total?: number;
+	total_seen?: number;
 }
 
 interface GhRawResponse {
-  body: string;
-  link: string | null;
-  rateLimited: boolean;
-  retryAfter?: string;
-  status: number;
+	body: string;
+	link: string | null;
+	rateLimited: boolean;
+	retryAfter?: string;
+	status: number;
 }
 
 async function gh<T>(
-  ctx: StreamCtx,
-  path: string,
-  { accept = "application/vnd.github+json" }: GhFetchOptions = {},
-  extra?: ProgressExtra
+	ctx: StreamCtx,
+	path: string,
+	{ accept = "application/vnd.github+json" }: GhFetchOptions = {},
+	extra?: ProgressExtra,
 ): Promise<GhResult<T>> {
-  let raw: GhRawResponse;
-  try {
-    const r = await ctx.httpGovernor.request<GhRawResponse, GhRawResponse>(
-      async (): Promise<GhRawResponse> => {
-        const res = await fetch(`${BASE}${path}`, {
-          headers: {
-            Authorization: `Bearer ${ctx.token}`,
-            Accept: accept,
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": USER_AGENT,
-          },
-        });
-        const retryAfter = res.headers.get("retry-after");
-        return {
-          body: await res.text().catch((): string => ""),
-          link: res.headers.get("link"),
-          // GitHub signals quota exhaustion as 403 + x-ratelimit-remaining: 0
-          // (not 429). Surface it to the governor as the rate-limit terminal.
-          rateLimited: res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0",
-          ...(retryAfter === null ? {} : { retryAfter }),
-          status: res.status,
-        };
-      },
-      (resp) => ({
-        // Map GitHub's 403-quota-exhausted onto 429 so the governor's
-        // Retry-After honor and `github_rate_limited` terminal apply uniformly.
-        status: resp.rateLimited ? 429 : resp.status,
-        ...(resp.retryAfter === undefined ? {} : { headers: { "retry-after": resp.retryAfter } }),
-        value: resp,
-      })
-    );
-    raw = r.value;
-  } catch (error) {
-    if (error instanceof Error && error.message === "github_rate_limited") {
-      await ctx.progress("GitHub request rate limited", { ...extra, phase: "rate_limit", rate_limit_pressure: 1 });
-    }
-    throw error;
-  }
-  if (raw.status === 401) {
-    throw new Error("github_auth_failed");
-  }
-  if (raw.status < 200 || raw.status >= 300) {
-    throw new Error(`github_http_${String(raw.status)}: ${raw.body.slice(0, 200)}`);
-  }
-  const data = JSON.parse(raw.body) as T;
-  const nextUrl = parseNextLink(raw.link);
-  return { data, nextUrl };
+	let raw: GhRawResponse;
+	try {
+		const r = await ctx.httpGovernor.request<GhRawResponse, GhRawResponse>(
+			async (): Promise<GhRawResponse> => {
+				const res = await fetch(`${BASE}${path}`, {
+					headers: {
+						Authorization: `Bearer ${ctx.token}`,
+						Accept: accept,
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": USER_AGENT,
+					},
+				});
+				const retryAfter = res.headers.get("retry-after");
+				return {
+					body: await res.text().catch((): string => ""),
+					link: res.headers.get("link"),
+					// GitHub signals quota exhaustion as 403 + x-ratelimit-remaining: 0
+					// (not 429). Surface it to the governor as the rate-limit terminal.
+					rateLimited:
+						res.status === 403 &&
+						res.headers.get("x-ratelimit-remaining") === "0",
+					...(retryAfter === null ? {} : { retryAfter }),
+					status: res.status,
+				};
+			},
+			(resp) => ({
+				// Map GitHub's 403-quota-exhausted onto 429 so the governor's
+				// Retry-After honor and `github_rate_limited` terminal apply uniformly.
+				status: resp.rateLimited ? 429 : resp.status,
+				...(resp.retryAfter === undefined
+					? {}
+					: { headers: { "retry-after": resp.retryAfter } }),
+				value: resp,
+			}),
+		);
+		raw = r.value;
+	} catch (error) {
+		if (error instanceof Error && error.message === "github_rate_limited") {
+			await ctx.progress("GitHub request rate limited", {
+				...extra,
+				phase: "rate_limit",
+				rate_limit_pressure: 1,
+			});
+		}
+		throw error;
+	}
+	if (raw.status === 401) {
+		throw new Error("github_auth_failed");
+	}
+	if (raw.status < 200 || raw.status >= 300) {
+		throw new Error(
+			`github_http_${String(raw.status)}: ${raw.body.slice(0, 200)}`,
+		);
+	}
+	const data = JSON.parse(raw.body) as T;
+	const nextUrl = parseNextLink(raw.link);
+	return { data, nextUrl };
 }
 
 function parseGithubListResponse<T>(data: unknown, stream: string): T[] {
-  if (!Array.isArray(data)) {
-    throw createConnectorFailure(
-      "github_malformed_response",
-      `GitHub ${stream} list returned a malformed 200 response; collection is incomplete`,
-      { retryable: true }
-    );
-  }
-  return data as T[];
+	if (!Array.isArray(data)) {
+		throw createConnectorFailure(
+			"github_malformed_response",
+			`GitHub ${stream} list returned a malformed 200 response; collection is incomplete`,
+			{ retryable: true },
+		);
+	}
+	return data as T[];
 }
 
 // ─── Stream collectors ──────────────────────────────────────────────────
 
 export interface StreamCtx {
-  emit: (
-    msg:
-      | { type: "STATE"; stream: string; cursor: unknown }
-      | Extract<EmittedMessage, { type: "SKIP_RESULT" }>
-      | Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }>
-  ) => Promise<void>;
-  emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>;
-  httpGovernor: ConnectorHttpGovernor;
-  progress: (message: string, extra?: ProgressExtra) => Promise<void>;
-  requested: Map<string, { name?: string; time_range?: { since?: string; until?: string } }>;
-  state: Record<string, unknown>;
-  token: string;
-  /**
-   * Warm-start carrier: when `collectUser` writes the `user` STATE cursor it
-   * records the cursor object here so `collect` can re-emit it at run end merged
-   * with the FINAL learned pacing interval — persisting the rate the controller
-   * settled on after the whole run, not the early-run rate. Undefined when `user`
-   * was not collected (warm-start simply does not persist this run).
-   */
-  userCursor?: Record<string, unknown>;
+	emit: (
+		msg:
+			| { type: "STATE"; stream: string; cursor: unknown }
+			| Extract<EmittedMessage, { type: "SKIP_RESULT" }>
+			| Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }>,
+	) => Promise<void>;
+	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>;
+	httpGovernor: ConnectorHttpGovernor;
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	requested: Map<
+		string,
+		{ name?: string; time_range?: { since?: string; until?: string } }
+	>;
+	state: Record<string, unknown>;
+	token: string;
+	/**
+	 * Warm-start carrier: when `collectUser` writes the `user` STATE cursor it
+	 * records the cursor object here so `collect` can re-emit it at run end merged
+	 * with the FINAL learned pacing interval — persisting the rate the controller
+	 * settled on after the whole run, not the early-run rate. Undefined when `user`
+	 * was not collected (warm-start simply does not persist this run).
+	 */
+	userCursor?: Record<string, unknown>;
 }
 
 async function failGithubPagination(
-  ctx: StreamCtx,
-  stream: string,
-  kind: "page_cap" | "repeated_next",
-  pageIndex: number
+	ctx: StreamCtx,
+	stream: string,
+	kind: "page_cap" | "repeated_next",
+	pageIndex: number,
 ): Promise<never> {
-  const repeated = kind === "repeated_next";
-  const reason = repeated ? "github_pagination_repeated_next" : "github_pagination_cap_exceeded";
-  const message = repeated
-    ? `GitHub ${stream} pagination returned a repeated next link after ${String(pageIndex)} page(s)`
-    : `GitHub ${stream} pagination reached its ${String(maxGithubListPages)}-page safety cap with more pages remaining`;
-  await ctx.emit({
-    type: "SKIP_RESULT",
-    stream,
-    reason,
-    message,
-    diagnostics: repeated ? { page_count: pageIndex } : { page_cap: maxGithubListPages, page_count: pageIndex },
-    recovery_hint: { action: "retry_by_runtime", retryable: true },
-  });
-  throw createConnectorFailure("github_pagination_gap", message, { retryable: true });
+	const repeated = kind === "repeated_next";
+	const reason = repeated
+		? "github_pagination_repeated_next"
+		: "github_pagination_cap_exceeded";
+	const message = repeated
+		? `GitHub ${stream} pagination returned a repeated next link after ${String(pageIndex)} page(s)`
+		: `GitHub ${stream} pagination reached its ${String(maxGithubListPages)}-page safety cap with more pages remaining`;
+	await ctx.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason,
+		message,
+		diagnostics: repeated
+			? { page_count: pageIndex }
+			: { page_cap: maxGithubListPages, page_count: pageIndex },
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+	});
+	throw createConnectorFailure("github_pagination_gap", message, {
+		retryable: true,
+	});
 }
 
 async function guardGithubPagination(
-  ctx: StreamCtx,
-  stream: string,
-  path: string,
-  pageIndex: number,
-  visitedPaths: Set<string>
+	ctx: StreamCtx,
+	stream: string,
+	path: string,
+	pageIndex: number,
+	visitedPaths: Set<string>,
 ): Promise<void> {
-  if (pageIndex >= maxGithubListPages) {
-    await failGithubPagination(ctx, stream, "page_cap", pageIndex);
-  }
-  if (visitedPaths.has(path)) {
-    await failGithubPagination(ctx, stream, "repeated_next", pageIndex);
-  }
-  visitedPaths.add(path);
+	if (pageIndex >= maxGithubListPages) {
+		await failGithubPagination(ctx, stream, "page_cap", pageIndex);
+	}
+	if (visitedPaths.has(path)) {
+		await failGithubPagination(ctx, stream, "repeated_next", pageIndex);
+	}
+	visitedPaths.add(path);
 }
 
 /**
@@ -343,359 +376,411 @@ async function guardGithubPagination(
  * and tombstone the upstream-absent ids rather than counting them as loss.
  */
 async function declareListConsidered(
-  ctx: StreamCtx,
-  stream: string,
-  considered: number,
-  covered?: number
+	ctx: StreamCtx,
+	stream: string,
+	considered: number,
+	covered?: number,
 ): Promise<void> {
-  if (!Number.isInteger(considered) || considered < 0) {
-    return;
-  }
-  await ctx.emit(
-    buildDetailCoverageMessage({
-      stream,
-      stateStream: stream,
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered,
-      ...(covered === undefined ? {} : { covered }),
-    })
-  );
+	if (!Number.isInteger(considered) || considered < 0) {
+		return;
+	}
+	await ctx.emit(
+		buildDetailCoverageMessage({
+			stream,
+			stateStream: stream,
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered,
+			...(covered === undefined ? {} : { covered }),
+		}),
+	);
 }
 
 export async function collectUser(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching user profile", { stream: "user" });
-  const { data: u } = await gh<GitHubUser>(ctx, "/user");
+	await ctx.progress("Fetching user profile", { stream: "user" });
+	const { data: u } = await gh<GitHubUser>(ctx, "/user");
 
-  if (ctx.requested.has("user")) {
-    // Entity record: stable identity fields only. Gate on fingerprint so
-    // re-fetches that find no profile changes do not create new entity versions.
-    const entityRec = userRecord(u);
-    const userFpCursor = openFingerprintCursor(ctx.state.user, {
-      excludeFromFingerprint: [],
-    });
-    if (userFpCursor.shouldEmit(entityRec)) {
-      await ctx.emitRecord("user", entityRec);
-    }
-    const userCursor: Record<string, unknown> = {
-      fetched_at: nowIso(),
-      fingerprints: userFpCursor.toState(),
-    };
-    // Record the cursor so `collect` can re-emit it at run end with the final
-    // learned pacing interval merged in (warm-start carrier).
-    ctx.userCursor = userCursor;
-    await ctx.emit({
-      type: "STATE",
-      stream: "user",
-      cursor: userCursor,
-    });
-    // `user` is a `singleton_presence` stream (manifest: required): a committed
-    // checkpoint with no coverage measurement reads `checkpoint_only`, never
-    // `complete` (the contract explicitly rejects laundering a bare checkpoint
-    // into proof — see coherence.ts). The `/user` fetch above already proved the
-    // one entity this stream owns was reached; declare that boundary explicitly
-    // so a steady-state run (fingerprint unchanged, nothing emitted) still reads
-    // `complete` rather than `unknown`. Only reached after the fetch above
-    // succeeded — never claim presence on a failed fetch.
-    await declareListConsidered(ctx, "user", 1, 1);
-  }
+	if (ctx.requested.has("user")) {
+		// Entity record: stable identity fields only. Gate on fingerprint so
+		// re-fetches that find no profile changes do not create new entity versions.
+		const entityRec = userRecord(u);
+		const userFpCursor = openFingerprintCursor(ctx.state.user, {
+			excludeFromFingerprint: [],
+		});
+		if (userFpCursor.shouldEmit(entityRec)) {
+			await ctx.emitRecord("user", entityRec);
+		}
+		const userCursor: Record<string, unknown> = {
+			fetched_at: nowIso(),
+			fingerprints: userFpCursor.toState(),
+		};
+		// Record the cursor so `collect` can re-emit it at run end with the final
+		// learned pacing interval merged in (warm-start carrier).
+		ctx.userCursor = userCursor;
+		await ctx.emit({
+			type: "STATE",
+			stream: "user",
+			cursor: userCursor,
+		});
+		// `user` is a `singleton_presence` stream (manifest: required): a committed
+		// checkpoint with no coverage measurement reads `checkpoint_only`, never
+		// `complete` (the contract explicitly rejects laundering a bare checkpoint
+		// into proof — see coherence.ts). The `/user` fetch above already proved the
+		// one entity this stream owns was reached; declare that boundary explicitly
+		// so a steady-state run (fingerprint unchanged, nothing emitted) still reads
+		// `complete` rather than `unknown`. Only reached after the fetch above
+		// succeeded — never claim presence on a failed fetch.
+		await declareListConsidered(ctx, "user", 1, 1);
+	}
 
-  // Stats record: sampled metrics keyed by {user_id}:{YYYY-MM-DD}.
-  // The append key ensures idempotency within a calendar day.
-  if (ctx.requested.has("user_stats")) {
-    const observedOn = nowIso().slice(0, 10);
-    await ctx.emitRecord("user_stats", userStatsRecord(u, observedOn));
-    await ctx.emit({
-      type: "STATE",
-      stream: "user_stats",
-      cursor: { observed_on: observedOn, fetched_at: nowIso() },
-    });
-    // Same `singleton_presence` honesty requirement as `user` above: the daily
-    // sample was successfully derived from the same proven `/user` fetch.
-    await declareListConsidered(ctx, "user_stats", 1, 1);
-  }
+	// Stats record: sampled metrics keyed by {user_id}:{YYYY-MM-DD}.
+	// The append key ensures idempotency within a calendar day.
+	if (ctx.requested.has("user_stats")) {
+		const observedOn = nowIso().slice(0, 10);
+		await ctx.emitRecord("user_stats", userStatsRecord(u, observedOn));
+		await ctx.emit({
+			type: "STATE",
+			stream: "user_stats",
+			cursor: { observed_on: observedOn, fetched_at: nowIso() },
+		});
+		// Same `singleton_presence` honesty requirement as `user` above: the daily
+		// sample was successfully derived from the same proven `/user` fetch.
+		await declareListConsidered(ctx, "user_stats", 1, 1);
+	}
 }
 
 interface ReposPageResult {
-  /** Items this page the loop actually inspected (walked up to and including
-   *  a stop match). Items after a stop match within the same page are never
-   *  visited, so they must not count toward `considered`. */
-  evaluated: number;
-  latest: string | null | undefined;
-  stop: boolean;
+	/** Items this page the loop actually inspected (walked up to and including
+	 *  a stop match). Items after a stop match within the same page are never
+	 *  visited, so they must not count toward `considered`. */
+	evaluated: number;
+	latest: string | null | undefined;
+	stop: boolean;
 }
 
 async function emitRepositoriesPage(
-  ctx: StreamCtx,
-  items: GitHubRepo[],
-  priorPushed: string | undefined,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	items: GitHubRepo[],
+	priorPushed: string | undefined,
+	latestIn: string | null | undefined,
 ): Promise<ReposPageResult> {
-  let latest = latestIn;
-  let evaluated = 0;
-  for (const r of items) {
-    evaluated += 1;
-    if (priorPushed && r.pushed_at && r.pushed_at <= priorPushed) {
-      return { evaluated, latest, stop: true };
-    }
-    await ctx.emitRecord("repositories", repoRecord(r));
-    latest = laterIso(latest, r.pushed_at);
-  }
-  return { evaluated, latest, stop: false };
+	let latest = latestIn;
+	let evaluated = 0;
+	for (const r of items) {
+		evaluated += 1;
+		if (priorPushed && r.pushed_at && r.pushed_at <= priorPushed) {
+			return { evaluated, latest, stop: true };
+		}
+		await ctx.emitRecord("repositories", repoRecord(r));
+		latest = laterIso(latest, r.pushed_at);
+	}
+	return { evaluated, latest, stop: false };
 }
 
 export async function collectRepositories(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching repositories", { stream: "repositories", phase: "start" });
-  let path: string | null = "/user/repos?per_page=100&sort=pushed&direction=desc";
-  const repoState = ctx.state.repositories as { last_pushed_at?: string } | undefined;
-  const priorPushed = repoState?.last_pushed_at;
-  let latestPushed: string | null | undefined = priorPushed;
-  let stop = false;
-  let pageIndex = 0;
-  let totalSeen = 0;
-  const visitedPaths = new Set<string>();
-  // Items the loop actually evaluated against the incremental cursor, summed
-  // across pages. This is the honest `considered` denominator: it excludes any
-  // page tail past an early stop match, which the loop never visits (see
-  // `emitRepositoriesPage`). Every evaluated item is either emitted (new) or
-  // is itself the stop match confirming the boundary was reached, so
-  // `covered === evaluated` — nothing evaluated is ever silently dropped.
-  let totalEvaluated = 0;
-  while (path && !stop) {
-    await guardGithubPagination(ctx, "repositories", path, pageIndex, visitedPaths);
-    const pageExtra = {
-      stream: "repositories",
-      phase: "fetch",
-      page_index: pageIndex,
-      total_seen: totalSeen,
-      cursor_present: pageIndex > 0,
-    };
-    await ctx.progress("Fetching GitHub repositories page", pageExtra);
-    const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
-    const items = parseGithubListResponse<GitHubRepo>(page.data, "repositories");
-    totalSeen += items.length;
-    await ctx.progress("Fetched GitHub repositories page", {
-      stream: "repositories",
-      phase: "page",
-      page_index: pageIndex,
-      item_count: items.length,
-      total_seen: totalSeen,
-      cursor_present: Boolean(page.nextUrl),
-    });
-    const result = await emitRepositoriesPage(ctx, items, priorPushed, latestPushed);
-    latestPushed = result.latest;
-    ({ stop } = result);
-    totalEvaluated += result.evaluated;
-    path = page.nextUrl;
-    pageIndex += 1;
-  }
-  // The run evaluated `totalEvaluated` repositories against the incremental
-  // cursor within its boundary. Declare that as `considered`; every evaluated
-  // item was either emitted (new) or is the stop match confirming the rest of
-  // the boundary is unchanged, so `covered` equals the same count. This proves
-  // a zero-changed steady-state run `complete` rather than leaving it to the
-  // strategy's checkpoint-only fallback.
-  await declareListConsidered(ctx, "repositories", totalEvaluated, totalEvaluated);
-  await ctx.emit({
-    type: "STATE",
-    stream: "repositories",
-    cursor: { last_pushed_at: latestPushed || priorPushed || null },
-  });
+	await ctx.progress("Fetching repositories", {
+		stream: "repositories",
+		phase: "start",
+	});
+	let path: string | null =
+		"/user/repos?per_page=100&sort=pushed&direction=desc";
+	const repoState = ctx.state.repositories as
+		| { last_pushed_at?: string }
+		| undefined;
+	const priorPushed = repoState?.last_pushed_at;
+	let latestPushed: string | null | undefined = priorPushed;
+	let stop = false;
+	let pageIndex = 0;
+	let totalSeen = 0;
+	const visitedPaths = new Set<string>();
+	// Items the loop actually evaluated against the incremental cursor, summed
+	// across pages. This is the honest `considered` denominator: it excludes any
+	// page tail past an early stop match, which the loop never visits (see
+	// `emitRepositoriesPage`). Every evaluated item is either emitted (new) or
+	// is itself the stop match confirming the boundary was reached, so
+	// `covered === evaluated` — nothing evaluated is ever silently dropped.
+	let totalEvaluated = 0;
+	while (path && !stop) {
+		await guardGithubPagination(
+			ctx,
+			"repositories",
+			path,
+			pageIndex,
+			visitedPaths,
+		);
+		const pageExtra = {
+			stream: "repositories",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+			cursor_present: pageIndex > 0,
+		};
+		await ctx.progress("Fetching GitHub repositories page", pageExtra);
+		const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
+		const items = parseGithubListResponse<GitHubRepo>(
+			page.data,
+			"repositories",
+		);
+		totalSeen += items.length;
+		await ctx.progress("Fetched GitHub repositories page", {
+			stream: "repositories",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: items.length,
+			total_seen: totalSeen,
+			cursor_present: Boolean(page.nextUrl),
+		});
+		const result = await emitRepositoriesPage(
+			ctx,
+			items,
+			priorPushed,
+			latestPushed,
+		);
+		latestPushed = result.latest;
+		({ stop } = result);
+		totalEvaluated += result.evaluated;
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	// The run evaluated `totalEvaluated` repositories against the incremental
+	// cursor within its boundary. Declare that as `considered`; every evaluated
+	// item was either emitted (new) or is the stop match confirming the rest of
+	// the boundary is unchanged, so `covered` equals the same count. This proves
+	// a zero-changed steady-state run `complete` rather than leaving it to the
+	// strategy's checkpoint-only fallback.
+	await declareListConsidered(
+		ctx,
+		"repositories",
+		totalEvaluated,
+		totalEvaluated,
+	);
+	await ctx.emit({
+		type: "STATE",
+		stream: "repositories",
+		cursor: { last_pushed_at: latestPushed || priorPushed || null },
+	});
 }
 
 interface StarredPageResult {
-  /** Entries whose `repo` was missing, so starredRecord() returned null. */
-  dropped: number;
-  /** Entries this page the loop actually inspected (walked up to and including
-   *  a stop match). Entries after a stop match within the same page are never
-   *  visited, so they must not count toward `considered`. */
-  evaluated: number;
-  latest: string | null | undefined;
-  stop: boolean;
+	/** Entries whose `repo` was missing, so starredRecord() returned null. */
+	dropped: number;
+	/** Entries this page the loop actually inspected (walked up to and including
+	 *  a stop match). Entries after a stop match within the same page are never
+	 *  visited, so they must not count toward `considered`. */
+	evaluated: number;
+	latest: string | null | undefined;
+	stop: boolean;
 }
 
 async function emitStarredPage(
-  ctx: StreamCtx,
-  entries: GitHubStarredEntry[],
-  priorStarred: string | undefined,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	entries: GitHubStarredEntry[],
+	priorStarred: string | undefined,
+	latestIn: string | null | undefined,
 ): Promise<StarredPageResult> {
-  let latest = latestIn;
-  let dropped = 0;
-  let evaluated = 0;
-  for (const entry of entries) {
-    evaluated += 1;
-    const starredAt = entry.starred_at || null;
-    if (priorStarred && starredAt && starredAt <= priorStarred) {
-      return { dropped, evaluated, latest, stop: true };
-    }
-    const rec = starredRecord(entry);
-    if (!rec) {
-      // Entry has no `repo` object (e.g. repo deleted/made private since the
-      // star). starredRecord() returns null; we cannot build a record. Count
-      // it so a run that silently drops such entries does not look complete.
-      dropped += 1;
-      continue;
-    }
-    await ctx.emitRecord("starred", rec);
-    latest = laterIso(latest, starredAt);
-  }
-  return { dropped, evaluated, latest, stop: false };
+	let latest = latestIn;
+	let dropped = 0;
+	let evaluated = 0;
+	for (const entry of entries) {
+		evaluated += 1;
+		const starredAt = entry.starred_at || null;
+		if (priorStarred && starredAt && starredAt <= priorStarred) {
+			return { dropped, evaluated, latest, stop: true };
+		}
+		const rec = starredRecord(entry);
+		if (!rec) {
+			// Entry has no `repo` object (e.g. repo deleted/made private since the
+			// star). starredRecord() returns null; we cannot build a record. Count
+			// it so a run that silently drops such entries does not look complete.
+			dropped += 1;
+			continue;
+		}
+		await ctx.emitRecord("starred", rec);
+		latest = laterIso(latest, starredAt);
+	}
+	return { dropped, evaluated, latest, stop: false };
 }
 
 export async function collectStarred(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching starred repositories", { stream: "starred", phase: "start" });
-  const starredState = ctx.state.starred as { last_starred_at?: string } | undefined;
-  const priorStarred = starredState?.last_starred_at;
-  let latestStarred: string | null | undefined = priorStarred;
-  let path: string | null = "/user/starred?per_page=100&sort=created&direction=desc";
-  let stop = false;
-  let pageIndex = 0;
-  let totalSeen = 0;
-  let droppedTotal = 0;
-  // Entries the loop actually evaluated against the incremental cursor, summed
-  // across pages — excludes any page tail past an early stop match (see
-  // `emitStarredPage`). The honest `considered` denominator.
-  let totalEvaluated = 0;
-  const visitedPaths = new Set<string>();
-  while (path && !stop) {
-    await guardGithubPagination(ctx, "starred", path, pageIndex, visitedPaths);
-    // Use star:timestamp media type to get starred_at
-    const pageExtra = {
-      stream: "starred",
-      phase: "fetch",
-      page_index: pageIndex,
-      total_seen: totalSeen,
-      cursor_present: pageIndex > 0,
-    };
-    await ctx.progress("Fetching GitHub starred page", pageExtra);
-    const page: GhResult<unknown> = await gh<unknown>(
-      ctx,
-      path,
-      {
-        accept: "application/vnd.github.star+json",
-      },
-      pageExtra
-    );
-    const entries = parseGithubListResponse<GitHubStarredEntry>(page.data, "starred");
-    totalSeen += entries.length;
-    await ctx.progress("Fetched GitHub starred page", {
-      stream: "starred",
-      phase: "page",
-      page_index: pageIndex,
-      item_count: entries.length,
-      total_seen: totalSeen,
-      cursor_present: Boolean(page.nextUrl),
-    });
-    const result = await emitStarredPage(ctx, entries, priorStarred, latestStarred);
-    latestStarred = result.latest;
-    ({ stop } = result);
-    droppedTotal += result.dropped;
-    totalEvaluated += result.evaluated;
-    path = page.nextUrl;
-    pageIndex += 1;
-  }
-  // Stream-level skip evidence: a run that silently drops malformed/unavailable
-  // starred entries must not look complete. One bounded summary per run (count
-  // only — there is nothing to identify; `repo` was absent). No per-item flood.
-  if (droppedTotal > 0) {
-    await ctx.emit({
-      type: "SKIP_RESULT",
-      stream: "starred",
-      reason: "starred_entry_missing_repo",
-      message: `dropped ${String(droppedTotal)} starred entr${droppedTotal === 1 ? "y" : "ies"} with no repo object (repo deleted or made private since starring)`,
-      diagnostics: { dropped: droppedTotal, total_seen: totalSeen },
-    });
-  }
-  // `totalEvaluated` is every starred entry actually evaluated in this run's
-  // boundary, including the ones dropped for a missing `repo`. Declaring it as
-  // `considered` makes a run that silently dropped entries read `partial`
-  // (covered < considered), never falsely complete. `covered` excludes the
-  // dropped entries — they were evaluated but never accounted for — so a
-  // steady-state run with zero drops reads `complete`, and a run that drops
-  // entries still reads an honest `partial`.
-  await declareListConsidered(ctx, "starred", totalEvaluated, totalEvaluated - droppedTotal);
-  await ctx.emit({
-    type: "STATE",
-    stream: "starred",
-    cursor: { last_starred_at: latestStarred || priorStarred || null },
-  });
+	await ctx.progress("Fetching starred repositories", {
+		stream: "starred",
+		phase: "start",
+	});
+	const starredState = ctx.state.starred as
+		| { last_starred_at?: string }
+		| undefined;
+	const priorStarred = starredState?.last_starred_at;
+	let latestStarred: string | null | undefined = priorStarred;
+	let path: string | null =
+		"/user/starred?per_page=100&sort=created&direction=desc";
+	let stop = false;
+	let pageIndex = 0;
+	let totalSeen = 0;
+	let droppedTotal = 0;
+	// Entries the loop actually evaluated against the incremental cursor, summed
+	// across pages — excludes any page tail past an early stop match (see
+	// `emitStarredPage`). The honest `considered` denominator.
+	let totalEvaluated = 0;
+	const visitedPaths = new Set<string>();
+	while (path && !stop) {
+		await guardGithubPagination(ctx, "starred", path, pageIndex, visitedPaths);
+		// Use star:timestamp media type to get starred_at
+		const pageExtra = {
+			stream: "starred",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+			cursor_present: pageIndex > 0,
+		};
+		await ctx.progress("Fetching GitHub starred page", pageExtra);
+		const page: GhResult<unknown> = await gh<unknown>(
+			ctx,
+			path,
+			{
+				accept: "application/vnd.github.star+json",
+			},
+			pageExtra,
+		);
+		const entries = parseGithubListResponse<GitHubStarredEntry>(
+			page.data,
+			"starred",
+		);
+		totalSeen += entries.length;
+		await ctx.progress("Fetched GitHub starred page", {
+			stream: "starred",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: entries.length,
+			total_seen: totalSeen,
+			cursor_present: Boolean(page.nextUrl),
+		});
+		const result = await emitStarredPage(
+			ctx,
+			entries,
+			priorStarred,
+			latestStarred,
+		);
+		latestStarred = result.latest;
+		({ stop } = result);
+		droppedTotal += result.dropped;
+		totalEvaluated += result.evaluated;
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	// Stream-level skip evidence: a run that silently drops malformed/unavailable
+	// starred entries must not look complete. One bounded summary per run (count
+	// only — there is nothing to identify; `repo` was absent). No per-item flood.
+	if (droppedTotal > 0) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "starred",
+			reason: "starred_entry_missing_repo",
+			message: `dropped ${String(droppedTotal)} starred entr${droppedTotal === 1 ? "y" : "ies"} with no repo object (repo deleted or made private since starring)`,
+			diagnostics: { dropped: droppedTotal, total_seen: totalSeen },
+		});
+	}
+	// `totalEvaluated` is every starred entry actually evaluated in this run's
+	// boundary, including the ones dropped for a missing `repo`. Declaring it as
+	// `considered` makes a run that silently dropped entries read `partial`
+	// (covered < considered), never falsely complete. `covered` excludes the
+	// dropped entries — they were evaluated but never accounted for — so a
+	// steady-state run with zero drops reads `complete`, and a run that drops
+	// entries still reads an honest `partial`.
+	await declareListConsidered(
+		ctx,
+		"starred",
+		totalEvaluated,
+		totalEvaluated - droppedTotal,
+	);
+	await ctx.emit({
+		type: "STATE",
+		stream: "starred",
+		cursor: { last_starred_at: latestStarred || priorStarred || null },
+	});
 }
 
 async function emitIssuesPage(
-  ctx: StreamCtx,
-  items: GitHubIssue[],
-  until: string | null,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	items: GitHubIssue[],
+	until: string | null,
+	latestIn: string | null | undefined,
 ): Promise<string | null | undefined> {
-  let latest = latestIn;
-  for (const it of items) {
-    if (isAtOrAfterUntil(it.updated_at, until)) {
-      continue;
-    }
-    await ctx.emitRecord("issues", issueRecord(it));
-    latest = laterIso(latest, it.updated_at);
-  }
-  return latest;
+	let latest = latestIn;
+	for (const it of items) {
+		if (isAtOrAfterUntil(it.updated_at, until)) {
+			continue;
+		}
+		await ctx.emitRecord("issues", issueRecord(it));
+		latest = laterIso(latest, it.updated_at);
+	}
+	return latest;
 }
 
 export async function collectIssues(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching issues", { stream: "issues", phase: "start" });
-  const req = ctx.requested.get("issues");
-  const issuesState = ctx.state.issues as { last_updated_at?: string } | undefined;
-  const priorUpdated = issuesState?.last_updated_at;
-  // Prefer explicit scope time_range.since over stored cursor (narrower wins).
-  const sinceParam = req?.time_range?.since || priorUpdated || null;
-  const until = req?.time_range?.until || null;
-  let latestUpdated: string | null | undefined = priorUpdated;
-  const qs = ["filter=all", "state=all", "per_page=100", "sort=updated", "direction=desc"];
-  if (sinceParam) {
-    qs.push(`since=${encodeURIComponent(sinceParam)}`);
-  }
-  let path: string | null = `/issues?${qs.join("&")}`;
-  let pageIndex = 0;
-  let totalSeen = 0;
-  const visitedPaths = new Set<string>();
-  while (path) {
-    await guardGithubPagination(ctx, "issues", path, pageIndex, visitedPaths);
-    const pageExtra = {
-      stream: "issues",
-      phase: "fetch",
-      page_index: pageIndex,
-      total_seen: totalSeen,
-      cursor_present: pageIndex > 0 || Boolean(sinceParam),
-    };
-    await ctx.progress("Fetching GitHub issues page", pageExtra);
-    const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
-    const items = parseGithubListResponse<GitHubIssue>(page.data, "issues");
-    totalSeen += items.length;
-    await ctx.progress("Fetched GitHub issues page", {
-      stream: "issues",
-      phase: "page",
-      page_index: pageIndex,
-      item_count: items.length,
-      total_seen: totalSeen,
-      cursor_present: Boolean(page.nextUrl),
-    });
-    latestUpdated = await emitIssuesPage(ctx, items, until, latestUpdated);
-    path = page.nextUrl;
-    pageIndex += 1;
-  }
-  // `totalSeen` is every issue the run enumerated AND evaluated in its
-  // `[since, until]` boundary (every fetched page is walked in full by
-  // `emitIssuesPage`, so nothing is left unvisited). `until`-filtered items are
-  // considered-but-not-emitted — but the run DID make an accounting decision for
-  // every one of them (emit, or correctly exclude as outside the requested
-  // window), so `covered` equals the same count. A steady-state run (nothing
-  // new since the cursor, no `until`) reads `complete`; a window genuinely
-  // capped by pagination truncation would surface via the run's own terminal
-  // evidence, not a considered/covered mismatch here.
-  await declareListConsidered(ctx, "issues", totalSeen, totalSeen);
-  await ctx.emit({
-    type: "STATE",
-    stream: "issues",
-    cursor: { last_updated_at: latestUpdated || priorUpdated || null },
-  });
+	await ctx.progress("Fetching issues", { stream: "issues", phase: "start" });
+	const req = ctx.requested.get("issues");
+	const issuesState = ctx.state.issues as
+		| { last_updated_at?: string }
+		| undefined;
+	const priorUpdated = issuesState?.last_updated_at;
+	// Prefer explicit scope time_range.since over stored cursor (narrower wins).
+	const sinceParam = req?.time_range?.since || priorUpdated || null;
+	const until = req?.time_range?.until || null;
+	let latestUpdated: string | null | undefined = priorUpdated;
+	const qs = [
+		"filter=all",
+		"state=all",
+		"per_page=100",
+		"sort=updated",
+		"direction=desc",
+	];
+	if (sinceParam) {
+		qs.push(`since=${encodeURIComponent(sinceParam)}`);
+	}
+	let path: string | null = `/issues?${qs.join("&")}`;
+	let pageIndex = 0;
+	let totalSeen = 0;
+	const visitedPaths = new Set<string>();
+	while (path) {
+		await guardGithubPagination(ctx, "issues", path, pageIndex, visitedPaths);
+		const pageExtra = {
+			stream: "issues",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+			cursor_present: pageIndex > 0 || Boolean(sinceParam),
+		};
+		await ctx.progress("Fetching GitHub issues page", pageExtra);
+		const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
+		const items = parseGithubListResponse<GitHubIssue>(page.data, "issues");
+		totalSeen += items.length;
+		await ctx.progress("Fetched GitHub issues page", {
+			stream: "issues",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: items.length,
+			total_seen: totalSeen,
+			cursor_present: Boolean(page.nextUrl),
+		});
+		latestUpdated = await emitIssuesPage(ctx, items, until, latestUpdated);
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	// `totalSeen` is every issue the run enumerated AND evaluated in its
+	// `[since, until]` boundary (every fetched page is walked in full by
+	// `emitIssuesPage`, so nothing is left unvisited). `until`-filtered items are
+	// considered-but-not-emitted — but the run DID make an accounting decision for
+	// every one of them (emit, or correctly exclude as outside the requested
+	// window), so `covered` equals the same count. A steady-state run (nothing
+	// new since the cursor, no `until`) reads `complete`; a window genuinely
+	// capped by pagination truncation would surface via the run's own terminal
+	// evidence, not a considered/covered mismatch here.
+	await declareListConsidered(ctx, "issues", totalSeen, totalSeen);
+	await ctx.emit({
+		type: "STATE",
+		stream: "issues",
+		cursor: { last_updated_at: latestUpdated || priorUpdated || null },
+	});
 }
 
 // PULL_REQUESTS
@@ -721,90 +806,103 @@ export async function collectIssues(ctx: StreamCtx): Promise<void> {
 // PRs updated since the last cursor is almost never >1000, and a window that
 // somehow still exceeds the cap emits a terminal-gap SKIP_RESULT so the run is
 // honestly incomplete rather than silently truncated.
-const PR_ERROR_BUBBLE_PATTERN = /rate_limited|auth_failed|ECONN|fetch failed|retryable status [45]\d\d\b/i;
+const PR_ERROR_BUBBLE_PATTERN =
+	/rate_limited|auth_failed|ECONN|fetch failed|retryable status [45]\d\d\b/i;
 
 // A single search window that still reports more than this many total results
 // cannot be fully drained (the API stops at ~1000). We treat any window whose
 // reported total exceeds this as cap-truncated and surface it as a gap.
 const PR_SEARCH_RESULT_CAP = 1000;
 
-function parsePrSearchResponse(data: unknown): { items: GitHubIssue[]; total_count: number } {
-  if (!data || typeof data !== "object") {
-    throw createConnectorFailure(
-      "github_malformed_response",
-      "GitHub pull-request search returned a malformed 200 response; collection is incomplete",
-      { retryable: true }
-    );
-  }
-  const { items, total_count: totalCount } = data as { items?: unknown; total_count?: unknown };
-  if (!(Array.isArray(items) && Number.isInteger(totalCount))) {
-    throw createConnectorFailure(
-      "github_malformed_response",
-      "GitHub pull-request search returned a malformed 200 response; collection is incomplete",
-      { retryable: true }
-    );
-  }
-  const count = totalCount as number;
-  if (count < 0 || count < items.length || (count > 0 && items.length === 0)) {
-    throw createConnectorFailure(
-      "github_malformed_response",
-      "GitHub pull-request search returned a malformed 200 response; collection is incomplete",
-      { retryable: true }
-    );
-  }
-  return { items: items as GitHubIssue[], total_count: count };
+function parsePrSearchResponse(data: unknown): {
+	items: GitHubIssue[];
+	total_count: number;
+} {
+	if (!data || typeof data !== "object") {
+		throw createConnectorFailure(
+			"github_malformed_response",
+			"GitHub pull-request search returned a malformed 200 response; collection is incomplete",
+			{ retryable: true },
+		);
+	}
+	const { items, total_count: totalCount } = data as {
+		items?: unknown;
+		total_count?: unknown;
+	};
+	if (!(Array.isArray(items) && Number.isInteger(totalCount))) {
+		throw createConnectorFailure(
+			"github_malformed_response",
+			"GitHub pull-request search returned a malformed 200 response; collection is incomplete",
+			{ retryable: true },
+		);
+	}
+	const count = totalCount as number;
+	if (count < 0 || count < items.length || (count > 0 && items.length === 0)) {
+		throw createConnectorFailure(
+			"github_malformed_response",
+			"GitHub pull-request search returned a malformed 200 response; collection is incomplete",
+			{ retryable: true },
+		);
+	}
+	return { items: items as GitHubIssue[], total_count: count };
 }
 
 interface PullDetailResult {
-  detail: GitHubPullDetail | null;
-  /** True when the detail fetch failed (non-fatally), so the emitted PR record
-   *  is degraded to search-summary fields only (merged_at, commits, diff stats,
-   *  reviewers absent). False when there was simply no detail to fetch. */
-  detailFailed: boolean;
+	detail: GitHubPullDetail | null;
+	/** True when the detail fetch failed (non-fatally), so the emitted PR record
+	 *  is degraded to search-summary fields only (merged_at, commits, diff stats,
+	 *  reviewers absent). False when there was simply no detail to fetch. */
+	detailFailed: boolean;
 }
 
 async function fetchPullDetail(
-  ctx: StreamCtx,
-  repoFull: string | null,
-  number: number | undefined
+	ctx: StreamCtx,
+	repoFull: string | null,
+	number: number | undefined,
 ): Promise<PullDetailResult> {
-  if (!(repoFull && number !== undefined)) {
-    return { detail: null, detailFailed: false };
-  }
-  try {
-    const r = await gh<GitHubPullDetail>(ctx, `/repos/${repoFull}/pulls/${String(number)}`);
-    return { detail: r.data, detailFailed: false };
-  } catch (e) {
-    // Non-fatal: emit what we have from search. Rate-limit errors
-    // bubble up from gh() and abort the whole run (retryable).
-    const msg = e instanceof Error ? e.message : String(e);
-    if (PR_ERROR_BUBBLE_PATTERN.test(msg)) {
-      throw e;
-    }
-    return { detail: null, detailFailed: true };
-  }
+	if (!(repoFull && number !== undefined)) {
+		return { detail: null, detailFailed: false };
+	}
+	try {
+		const r = await gh<GitHubPullDetail>(
+			ctx,
+			`/repos/${repoFull}/pulls/${String(number)}`,
+		);
+		return { detail: r.data, detailFailed: false };
+	} catch (e) {
+		// Non-fatal: emit what we have from search. Rate-limit errors
+		// bubble up from gh() and abort the whole run (retryable).
+		const msg = e instanceof Error ? e.message : String(e);
+		if (PR_ERROR_BUBBLE_PATTERN.test(msg)) {
+			throw e;
+		}
+		return { detail: null, detailFailed: true };
+	}
 }
 
 interface PrSearchPathOptions {
-  /** Inclusive `created:` window (YYYY-MM-DD..YYYY-MM-DD) for cap partitioning. */
-  createdRange?: { from: string; to: string };
-  sinceParam?: string | null;
+	/** Inclusive `created:` window (YYYY-MM-DD..YYYY-MM-DD) for cap partitioning. */
+	createdRange?: { from: string; to: string };
+	sinceParam?: string | null;
 }
 
-function buildPrSearchPath(login: string, options: PrSearchPathOptions = {}): string {
-  const { sinceParam = null, createdRange } = options;
-  const qParts = ["type:pr", `author:${login}`];
-  if (sinceParam) {
-    // Search API date-precision; strict `since` still applied per-item.
-    qParts.push(`updated:>=${sinceParam.slice(0, 10)}`);
-  }
-  if (createdRange) {
-    // Immutable partitioning field: each PR falls in exactly one window, so
-    // windows can be drained independently and unioned without dedup.
-    qParts.push(`created:${createdRange.from}..${createdRange.to}`);
-  }
-  const q = encodeURIComponent(qParts.join(" "));
-  return `/search/issues?q=${q}&sort=updated&order=desc&per_page=100`;
+function buildPrSearchPath(
+	login: string,
+	options: PrSearchPathOptions = {},
+): string {
+	const { sinceParam = null, createdRange } = options;
+	const qParts = ["type:pr", `author:${login}`];
+	if (sinceParam) {
+		// Search API date-precision; strict `since` still applied per-item.
+		qParts.push(`updated:>=${sinceParam.slice(0, 10)}`);
+	}
+	if (createdRange) {
+		// Immutable partitioning field: each PR falls in exactly one window, so
+		// windows can be drained independently and unioned without dedup.
+		qParts.push(`created:${createdRange.from}..${createdRange.to}`);
+	}
+	const q = encodeURIComponent(qParts.join(" "));
+	return `/search/issues?q=${q}&sort=updated&order=desc&per_page=100`;
 }
 
 /**
@@ -813,101 +911,114 @@ function buildPrSearchPath(login: string, options: PrSearchPathOptions = {}): st
  * `floorYear` is the user's account-creation year — no authored PR predates
  * the account. Exported for unit testing the window math without a network.
  */
-export function prCreatedWindows(currentYear: number, floorYear: number): Array<{ from: string; to: string }> {
-  const top = Math.max(currentYear, floorYear);
-  const bottom = Math.min(currentYear, floorYear);
-  const windows: Array<{ from: string; to: string }> = [];
-  for (let year = top; year >= bottom; year -= 1) {
-    windows.push({ from: `${String(year)}-01-01`, to: `${String(year)}-12-31` });
-  }
-  return windows;
+export function prCreatedWindows(
+	currentYear: number,
+	floorYear: number,
+): Array<{ from: string; to: string }> {
+	const top = Math.max(currentYear, floorYear);
+	const bottom = Math.min(currentYear, floorYear);
+	const windows: Array<{ from: string; to: string }> = [];
+	for (let year = top; year >= bottom; year -= 1) {
+		windows.push({
+			from: `${String(year)}-01-01`,
+			to: `${String(year)}-12-31`,
+		});
+	}
+	return windows;
 }
 
 /** Year of an ISO timestamp, or null when absent/unparseable. */
 export function isoYear(iso: string | null | undefined): number | null {
-  if (!iso) {
-    return null;
-  }
-  const year = Number.parseInt(iso.slice(0, 4), 10);
-  return Number.isInteger(year) && year > 0 ? year : null;
+	if (!iso) {
+		return null;
+	}
+	const year = Number.parseInt(iso.slice(0, 4), 10);
+	return Number.isInteger(year) && year > 0 ? year : null;
 }
 
 interface PrPageResult {
-  /** PRs emitted with degraded detail because the per-PR detail fetch failed. */
-  detailFailed: number;
-  /** PR records actually emitted after since/until filters. */
-  emitted: number;
-  /** Items this page the loop actually inspected (walked up to and including
-   *  a `since` stop match). Items after a stop match within the same page are
-   *  never visited, so they must not count toward `considered`. */
-  evaluated: number;
-  latest: string | null | undefined;
-  stop: boolean;
+	/** PRs emitted with degraded detail because the per-PR detail fetch failed. */
+	detailFailed: number;
+	/** PR records actually emitted after since/until filters. */
+	emitted: number;
+	/** Items this page the loop actually inspected (walked up to and including
+	 *  a `since` stop match). Items after a stop match within the same page are
+	 *  never visited, so they must not count toward `considered`. */
+	evaluated: number;
+	latest: string | null | undefined;
+	stop: boolean;
 }
 
 interface PrWindowResult {
-  /** True when this window's reported total exceeded the search cap (gap). */
-  capTruncated: boolean;
-  detailFailed: number;
-  emitted: number;
-  /** Items across this window's pages the loop actually evaluated (see
-   *  `PrPageResult.evaluated`) — excludes any page tail past a `since` stop. */
-  evaluated: number;
-  /** Raw search hits seen across this window's pages (before since/until filters). */
-  fetched: number;
-  latest: string | null | undefined;
-  /** Highest reported total_count seen for this window (for gap diagnostics). */
-  reportedTotal: number;
+	/** True when this window's reported total exceeded the search cap (gap). */
+	capTruncated: boolean;
+	detailFailed: number;
+	emitted: number;
+	/** Items across this window's pages the loop actually evaluated (see
+	 *  `PrPageResult.evaluated`) — excludes any page tail past a `since` stop. */
+	evaluated: number;
+	/** Raw search hits seen across this window's pages (before since/until filters). */
+	fetched: number;
+	latest: string | null | undefined;
+	/** Highest reported total_count seen for this window (for gap diagnostics). */
+	reportedTotal: number;
 }
 
 interface PrItemResult {
-  detailFailed: boolean;
-  latest: string | null | undefined;
+	detailFailed: boolean;
+	latest: string | null | undefined;
 }
 
 async function emitPullRequestItem(
-  ctx: StreamCtx,
-  it: GitHubIssue,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	it: GitHubIssue,
+	latestIn: string | null | undefined,
 ): Promise<PrItemResult> {
-  const repoFull = repoFullFromUrl(it.repository_url);
-  // Fetch PR detail for fields not in search summary.
-  const { detail, detailFailed } = await fetchPullDetail(ctx, repoFull, it.number);
-  // Streaming is intentional: a later fatal detail/page failure retains this
-  // already-emitted idempotent record. The collector withholds coverage and
-  // STATE until the collection succeeds; a retry re-emits the same stable key
-  // and storage upsert makes the replay logical-duplicate free.
-  await ctx.emitRecord("pull_requests", pullRequestRecord(it, detail, repoFull));
-  return { detailFailed, latest: laterIso(latestIn, it.updated_at) };
+	const repoFull = repoFullFromUrl(it.repository_url);
+	// Fetch PR detail for fields not in search summary.
+	const { detail, detailFailed } = await fetchPullDetail(
+		ctx,
+		repoFull,
+		it.number,
+	);
+	// Streaming is intentional: a later fatal detail/page failure retains this
+	// already-emitted idempotent record. The collector withholds coverage and
+	// STATE until the collection succeeds; a retry re-emits the same stable key
+	// and storage upsert makes the replay logical-duplicate free.
+	await ctx.emitRecord(
+		"pull_requests",
+		pullRequestRecord(it, detail, repoFull),
+	);
+	return { detailFailed, latest: laterIso(latestIn, it.updated_at) };
 }
 
 async function emitPullRequestPage(
-  ctx: StreamCtx,
-  items: GitHubIssue[],
-  sinceParam: string | null,
-  until: string | null,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	items: GitHubIssue[],
+	sinceParam: string | null,
+	until: string | null,
+	latestIn: string | null | undefined,
 ): Promise<PrPageResult> {
-  let latest = latestIn;
-  let detailFailed = 0;
-  let emitted = 0;
-  let evaluated = 0;
-  for (const it of items) {
-    evaluated += 1;
-    if (isBeforeSince(it.updated_at, sinceParam)) {
-      return { detailFailed, emitted, evaluated, latest, stop: true };
-    }
-    if (isAtOrAfterUntil(it.updated_at, until)) {
-      continue;
-    }
-    const item = await emitPullRequestItem(ctx, it, latest);
-    ({ latest } = item);
-    emitted += 1;
-    if (item.detailFailed) {
-      detailFailed += 1;
-    }
-  }
-  return { detailFailed, emitted, evaluated, latest, stop: false };
+	let latest = latestIn;
+	let detailFailed = 0;
+	let emitted = 0;
+	let evaluated = 0;
+	for (const it of items) {
+		evaluated += 1;
+		if (isBeforeSince(it.updated_at, sinceParam)) {
+			return { detailFailed, emitted, evaluated, latest, stop: true };
+		}
+		if (isAtOrAfterUntil(it.updated_at, until)) {
+			continue;
+		}
+		const item = await emitPullRequestItem(ctx, it, latest);
+		({ latest } = item);
+		emitted += 1;
+		if (item.detailFailed) {
+			detailFailed += 1;
+		}
+	}
+	return { detailFailed, emitted, evaluated, latest, stop: false };
 }
 
 /**
@@ -918,177 +1029,219 @@ async function emitPullRequestPage(
  * results are unreachable and the run is honestly incomplete for that window.
  */
 async function drainPrSearchWindow(
-  ctx: StreamCtx,
-  login: string,
-  sinceParam: string | null,
-  until: string | null,
-  createdRange: { from: string; to: string } | undefined,
-  latestIn: string | null | undefined,
-  pageIndexStart: number
+	ctx: StreamCtx,
+	login: string,
+	sinceParam: string | null,
+	until: string | null,
+	createdRange: { from: string; to: string } | undefined,
+	latestIn: string | null | undefined,
+	pageIndexStart: number,
 ): Promise<PrWindowResult & { pageIndexEnd: number }> {
-  let path: string | null = buildPrSearchPath(login, { sinceParam, ...(createdRange ? { createdRange } : {}) });
-  let stop = false;
-  let pageIndex = pageIndexStart;
-  let fetchedCount = 0;
-  let detailFailed = 0;
-  let emitted = 0;
-  let evaluated = 0;
-  let reportedTotal = 0;
-  let latest = latestIn;
-  const visitedPaths = new Set<string>();
-  while (path && !stop) {
-    await guardGithubPagination(ctx, "pull_requests", path, pageIndex, visitedPaths);
-    const pageExtra = {
-      stream: "pull_requests",
-      phase: "fetch",
-      page_index: pageIndex,
-      total_seen: fetchedCount,
-      cursor_present: pageIndex > pageIndexStart || Boolean(sinceParam) || Boolean(createdRange),
-    };
-    await ctx.progress("Fetching GitHub pull requests page", pageExtra);
-    let page: GhResult<GitHubSearchResponse>;
-    try {
-      page = await gh<GitHubSearchResponse>(ctx, path, {}, pageExtra);
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        throw createConnectorFailure(
-          "github_malformed_response",
-          "GitHub pull-request search returned invalid JSON in a 200 response; collection is incomplete",
-          { retryable: true }
-        );
-      }
-      throw error;
-    }
-    const search = parsePrSearchResponse(page.data);
-    const { items, total_count: totalCount } = search;
-    reportedTotal = Math.max(reportedTotal, totalCount);
-    const result = await emitPullRequestPage(ctx, items, sinceParam, until, latest);
-    ({ latest } = result);
-    ({ stop } = result);
-    detailFailed += result.detailFailed;
-    emitted += result.emitted;
-    evaluated += result.evaluated;
-    fetchedCount += items.length;
-    await ctx.progress("Fetched GitHub pull requests page", {
-      stream: "pull_requests",
-      phase: "page",
-      page_index: pageIndex,
-      item_count: items.length,
-      total_seen: fetchedCount,
-      cursor_present: Boolean(page.nextUrl),
-      count: Math.min(fetchedCount, totalCount),
-      total: totalCount,
-    });
-    path = page.nextUrl;
-    pageIndex += 1;
-  }
-  return {
-    capTruncated: reportedTotal > PR_SEARCH_RESULT_CAP,
-    detailFailed,
-    emitted,
-    evaluated,
-    fetched: fetchedCount,
-    reportedTotal,
-    latest,
-    pageIndexEnd: pageIndex,
-  };
+	let path: string | null = buildPrSearchPath(login, {
+		sinceParam,
+		...(createdRange ? { createdRange } : {}),
+	});
+	let stop = false;
+	let pageIndex = pageIndexStart;
+	let fetchedCount = 0;
+	let detailFailed = 0;
+	let emitted = 0;
+	let evaluated = 0;
+	let reportedTotal = 0;
+	let latest = latestIn;
+	const visitedPaths = new Set<string>();
+	while (path && !stop) {
+		await guardGithubPagination(
+			ctx,
+			"pull_requests",
+			path,
+			pageIndex,
+			visitedPaths,
+		);
+		const pageExtra = {
+			stream: "pull_requests",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: fetchedCount,
+			cursor_present:
+				pageIndex > pageIndexStart ||
+				Boolean(sinceParam) ||
+				Boolean(createdRange),
+		};
+		await ctx.progress("Fetching GitHub pull requests page", pageExtra);
+		let page: GhResult<GitHubSearchResponse>;
+		try {
+			page = await gh<GitHubSearchResponse>(ctx, path, {}, pageExtra);
+		} catch (error) {
+			if (error instanceof SyntaxError) {
+				throw createConnectorFailure(
+					"github_malformed_response",
+					"GitHub pull-request search returned invalid JSON in a 200 response; collection is incomplete",
+					{ retryable: true },
+				);
+			}
+			throw error;
+		}
+		const search = parsePrSearchResponse(page.data);
+		const { items, total_count: totalCount } = search;
+		reportedTotal = Math.max(reportedTotal, totalCount);
+		const result = await emitPullRequestPage(
+			ctx,
+			items,
+			sinceParam,
+			until,
+			latest,
+		);
+		({ latest } = result);
+		({ stop } = result);
+		detailFailed += result.detailFailed;
+		emitted += result.emitted;
+		evaluated += result.evaluated;
+		fetchedCount += items.length;
+		await ctx.progress("Fetched GitHub pull requests page", {
+			stream: "pull_requests",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: items.length,
+			total_seen: fetchedCount,
+			cursor_present: Boolean(page.nextUrl),
+			count: Math.min(fetchedCount, totalCount),
+			total: totalCount,
+		});
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	return {
+		capTruncated: reportedTotal > PR_SEARCH_RESULT_CAP,
+		detailFailed,
+		emitted,
+		evaluated,
+		fetched: fetchedCount,
+		reportedTotal,
+		latest,
+		pageIndexEnd: pageIndex,
+	};
 }
 
 export async function collectPullRequests(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching pull requests", { stream: "pull_requests", phase: "start" });
-  const req = ctx.requested.get("pull_requests");
-  const prState = ctx.state.pull_requests as { last_updated_at?: string } | undefined;
-  const priorUpdated = prState?.last_updated_at;
-  const sinceParam = req?.time_range?.since || priorUpdated || null;
-  const until = req?.time_range?.until || null;
-  let latestUpdated: string | null | undefined = priorUpdated;
+	await ctx.progress("Fetching pull requests", {
+		stream: "pull_requests",
+		phase: "start",
+	});
+	const req = ctx.requested.get("pull_requests");
+	const prState = ctx.state.pull_requests as
+		| { last_updated_at?: string }
+		| undefined;
+	const priorUpdated = prState?.last_updated_at;
+	const sinceParam = req?.time_range?.since || priorUpdated || null;
+	const until = req?.time_range?.until || null;
+	let latestUpdated: string | null | undefined = priorUpdated;
 
-  // Need the login to build the search query (and created_at to floor the
-  // full-resync windowing at the user's account-creation year).
-  const { data: me } = await gh<GitHubUser>(ctx, "/user");
+	// Need the login to build the search query (and created_at to floor the
+	// full-resync windowing at the user's account-creation year).
+	const { data: me } = await gh<GitHubUser>(ctx, "/user");
 
-  // Full resync (no incremental `since`) is the cap-prone path: partition by
-  // immutable `created:` year so each window stays under the search cap.
-  // Incremental runs use one `updated:>=` query (rarely >1000 results).
-  const windows = resolvePrSearchWindows(sinceParam, me.created_at);
+	// Full resync (no incremental `since`) is the cap-prone path: partition by
+	// immutable `created:` year so each window stays under the search cap.
+	// Incremental runs use one `updated:>=` query (rarely >1000 results).
+	const windows = resolvePrSearchWindows(sinceParam, me.created_at);
 
-  let detailFailedTotal = 0;
-  let emittedCount = 0;
-  let fetchedTotal = 0;
-  let evaluatedTotal = 0;
-  let capTruncatedWindows = 0;
-  let maxReportedTotal = 0;
-  let pageIndex = 0;
-  for (const createdRange of windows) {
-    const result = await drainPrSearchWindow(ctx, me.login, sinceParam, until, createdRange, latestUpdated, pageIndex);
-    latestUpdated = result.latest;
-    detailFailedTotal += result.detailFailed;
-    emittedCount += result.emitted;
-    fetchedTotal += result.fetched;
-    evaluatedTotal += result.evaluated;
-    maxReportedTotal = Math.max(maxReportedTotal, result.reportedTotal);
-    if (result.capTruncated) {
-      capTruncatedWindows += 1;
-    }
-    pageIndex = result.pageIndexEnd;
-  }
+	let detailFailedTotal = 0;
+	let emittedCount = 0;
+	let fetchedTotal = 0;
+	let evaluatedTotal = 0;
+	let capTruncatedWindows = 0;
+	let maxReportedTotal = 0;
+	let pageIndex = 0;
+	for (const createdRange of windows) {
+		const result = await drainPrSearchWindow(
+			ctx,
+			me.login,
+			sinceParam,
+			until,
+			createdRange,
+			latestUpdated,
+			pageIndex,
+		);
+		latestUpdated = result.latest;
+		detailFailedTotal += result.detailFailed;
+		emittedCount += result.emitted;
+		fetchedTotal += result.fetched;
+		evaluatedTotal += result.evaluated;
+		maxReportedTotal = Math.max(maxReportedTotal, result.reportedTotal);
+		if (result.capTruncated) {
+			capTruncatedWindows += 1;
+		}
+		pageIndex = result.pageIndexEnd;
+	}
 
-  // Terminal-gap evidence: a window whose reported total exceeded the search
-  // cap could not be fully drained, so the oldest PRs in that window were never
-  // emitted. One bounded summary per run (counts only — no PR identifiers). The
-  // runtime forwards this to the run's known_gap so the projection is honestly
-  // incomplete rather than silently truncated.
-  if (capTruncatedWindows > 0) {
-    const message =
-      `${String(capTruncatedWindows)} search window(s) reported more than ${String(PR_SEARCH_RESULT_CAP)} ` +
-      "pull requests; GitHub's search API caps results so the oldest in those windows could not be collected";
-    await ctx.emit({
-      type: "SKIP_RESULT",
-      stream: "pull_requests",
-      reason: "pr_search_cap_truncated",
-      message,
-      diagnostics: {
-        cap_truncated_windows: capTruncatedWindows,
-        result_cap: PR_SEARCH_RESULT_CAP,
-        max_reported_total: maxReportedTotal,
-      },
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-    throw createConnectorFailure("github_pagination_gap", message, { retryable: true });
-  }
+	// Terminal-gap evidence: a window whose reported total exceeded the search
+	// cap could not be fully drained, so the oldest PRs in that window were never
+	// emitted. One bounded summary per run (counts only — no PR identifiers). The
+	// runtime forwards this to the run's known_gap so the projection is honestly
+	// incomplete rather than silently truncated.
+	if (capTruncatedWindows > 0) {
+		const message =
+			`${String(capTruncatedWindows)} search window(s) reported more than ${String(PR_SEARCH_RESULT_CAP)} ` +
+			"pull requests; GitHub's search API caps results so the oldest in those windows could not be collected";
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "pull_requests",
+			reason: "pr_search_cap_truncated",
+			message,
+			diagnostics: {
+				cap_truncated_windows: capTruncatedWindows,
+				result_cap: PR_SEARCH_RESULT_CAP,
+				max_reported_total: maxReportedTotal,
+			},
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+		throw createConnectorFailure("github_pagination_gap", message, {
+			retryable: true,
+		});
+	}
 
-  // Stream-level evidence that some PR records are degraded: the search summary
-  // was emitted but the per-PR detail fetch failed (merged_at, commit/diff
-  // stats, reviewers are absent on those records). One bounded summary per run
-  // (count only — no repo/PR identifiers). Records are NOT dropped, so this is
-  // a coverage-degradation marker, not a terminal skip of the items.
-  if (detailFailedTotal > 0) {
-    await ctx.emit({
-      type: "SKIP_RESULT",
-      stream: "pull_requests",
-      reason: "pr_detail_fetch_failed",
-      message: `${String(detailFailedTotal)} of ${String(emittedCount)} pull request record(s) emitted without detail fields (per-PR detail fetch failed)`,
-      diagnostics: { detail_failed: detailFailedTotal, total_emitted: emittedCount, total_seen: fetchedTotal },
-    });
-  }
-  // Declare the enumerated inventory as `considered` ONLY when every window
-  // drained fully. A cap-truncated window could not see its oldest results, so
-  // the run's true denominator is unknowable — leave `considered` unknown and
-  // let the `pr_search_cap_truncated` terminal-gap above carry the incompleteness
-  // honestly rather than under-reporting a denominator that looks complete.
-  // `evaluatedTotal` (not `fetchedTotal`) excludes any page tail past a `since`
-  // stop match that the loop never visited (see `emitPullRequestPage`); every
-  // evaluated PR was either emitted (possibly detail-degraded, but not dropped)
-  // or is the stop match confirming the rest is already known, so `covered`
-  // equals the same count.
-  if (capTruncatedWindows === 0) {
-    await declareListConsidered(ctx, "pull_requests", evaluatedTotal, evaluatedTotal);
-  }
-  await ctx.emit({
-    type: "STATE",
-    stream: "pull_requests",
-    cursor: { last_updated_at: latestUpdated || priorUpdated || null },
-  });
+	// Stream-level evidence that some PR records are degraded: the search summary
+	// was emitted but the per-PR detail fetch failed (merged_at, commit/diff
+	// stats, reviewers are absent on those records). One bounded summary per run
+	// (count only — no repo/PR identifiers). Records are NOT dropped, so this is
+	// a coverage-degradation marker, not a terminal skip of the items.
+	if (detailFailedTotal > 0) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "pull_requests",
+			reason: "pr_detail_fetch_failed",
+			message: `${String(detailFailedTotal)} of ${String(emittedCount)} pull request record(s) emitted without detail fields (per-PR detail fetch failed)`,
+			diagnostics: {
+				detail_failed: detailFailedTotal,
+				total_emitted: emittedCount,
+				total_seen: fetchedTotal,
+			},
+		});
+	}
+	// Declare the enumerated inventory as `considered` ONLY when every window
+	// drained fully. A cap-truncated window could not see its oldest results, so
+	// the run's true denominator is unknowable — leave `considered` unknown and
+	// let the `pr_search_cap_truncated` terminal-gap above carry the incompleteness
+	// honestly rather than under-reporting a denominator that looks complete.
+	// `evaluatedTotal` (not `fetchedTotal`) excludes any page tail past a `since`
+	// stop match that the loop never visited (see `emitPullRequestPage`); every
+	// evaluated PR was either emitted (possibly detail-degraded, but not dropped)
+	// or is the stop match confirming the rest is already known, so `covered`
+	// equals the same count.
+	if (capTruncatedWindows === 0) {
+		await declareListConsidered(
+			ctx,
+			"pull_requests",
+			evaluatedTotal,
+			evaluatedTotal,
+		);
+	}
+	await ctx.emit({
+		type: "STATE",
+		stream: "pull_requests",
+		cursor: { last_updated_at: latestUpdated || priorUpdated || null },
+	});
 }
 
 /**
@@ -1100,154 +1253,166 @@ export async function collectPullRequests(ctx: StreamCtx): Promise<void> {
  * wall-clock dependence.
  */
 export function resolvePrSearchWindows(
-  sinceParam: string | null,
-  accountCreatedAt: string | null | undefined,
-  now: Date = new Date()
+	sinceParam: string | null,
+	accountCreatedAt: string | null | undefined,
+	now: Date = new Date(),
 ): Array<{ from: string; to: string } | undefined> {
-  if (sinceParam) {
-    return [undefined];
-  }
-  const currentYear = now.getUTCFullYear();
-  const floorYear = isoYear(accountCreatedAt) ?? currentYear;
-  return prCreatedWindows(currentYear, floorYear);
+	if (sinceParam) {
+		return [undefined];
+	}
+	const currentYear = now.getUTCFullYear();
+	const floorYear = isoYear(accountCreatedAt) ?? currentYear;
+	return prCreatedWindows(currentYear, floorYear);
 }
 
 async function emitGistsPage(
-  ctx: StreamCtx,
-  items: GitHubGist[],
-  until: string | null,
-  latestIn: string | null | undefined
+	ctx: StreamCtx,
+	items: GitHubGist[],
+	until: string | null,
+	latestIn: string | null | undefined,
 ): Promise<string | null | undefined> {
-  let latest = latestIn;
-  for (const g of items) {
-    if (isAtOrAfterUntil(g.updated_at, until)) {
-      continue;
-    }
-    await ctx.emitRecord("gists", gistRecord(g));
-    latest = laterIso(latest, g.updated_at);
-  }
-  return latest;
+	let latest = latestIn;
+	for (const g of items) {
+		if (isAtOrAfterUntil(g.updated_at, until)) {
+			continue;
+		}
+		await ctx.emitRecord("gists", gistRecord(g));
+		latest = laterIso(latest, g.updated_at);
+	}
+	return latest;
 }
 
 export async function collectGists(ctx: StreamCtx): Promise<void> {
-  await ctx.progress("Fetching gists", { stream: "gists", phase: "start" });
-  const req = ctx.requested.get("gists");
-  const gistState = ctx.state.gists as { last_updated_at?: string } | undefined;
-  const priorUpdated = gistState?.last_updated_at;
-  const sinceParam = req?.time_range?.since || priorUpdated || null;
-  const until = req?.time_range?.until || null;
-  let latestUpdated: string | null | undefined = priorUpdated;
-  const qs = ["per_page=100"];
-  if (sinceParam) {
-    qs.push(`since=${encodeURIComponent(sinceParam)}`);
-  }
-  let path: string | null = `/gists?${qs.join("&")}`;
-  let pageIndex = 0;
-  let totalSeen = 0;
-  const visitedPaths = new Set<string>();
-  while (path) {
-    await guardGithubPagination(ctx, "gists", path, pageIndex, visitedPaths);
-    const pageExtra = {
-      stream: "gists",
-      phase: "fetch",
-      page_index: pageIndex,
-      total_seen: totalSeen,
-      cursor_present: pageIndex > 0 || Boolean(sinceParam),
-    };
-    await ctx.progress("Fetching GitHub gists page", pageExtra);
-    const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
-    const items = parseGithubListResponse<GitHubGist>(page.data, "gists");
-    totalSeen += items.length;
-    await ctx.progress("Fetched GitHub gists page", {
-      stream: "gists",
-      phase: "page",
-      page_index: pageIndex,
-      item_count: items.length,
-      total_seen: totalSeen,
-      cursor_present: Boolean(page.nextUrl),
-    });
-    latestUpdated = await emitGistsPage(ctx, items, until, latestUpdated);
-    path = page.nextUrl;
-    pageIndex += 1;
-  }
-  // Every gist enumerated AND evaluated in the run's boundary (full page walk,
-  // nothing left unvisited); `until`-filtered gists were still accounted for
-  // (see `collectIssues` for the same reasoning), so `covered` equals the same
-  // count.
-  await declareListConsidered(ctx, "gists", totalSeen, totalSeen);
-  await ctx.emit({
-    type: "STATE",
-    stream: "gists",
-    cursor: { last_updated_at: latestUpdated || priorUpdated || null },
-  });
+	await ctx.progress("Fetching gists", { stream: "gists", phase: "start" });
+	const req = ctx.requested.get("gists");
+	const gistState = ctx.state.gists as { last_updated_at?: string } | undefined;
+	const priorUpdated = gistState?.last_updated_at;
+	const sinceParam = req?.time_range?.since || priorUpdated || null;
+	const until = req?.time_range?.until || null;
+	let latestUpdated: string | null | undefined = priorUpdated;
+	const qs = ["per_page=100"];
+	if (sinceParam) {
+		qs.push(`since=${encodeURIComponent(sinceParam)}`);
+	}
+	let path: string | null = `/gists?${qs.join("&")}`;
+	let pageIndex = 0;
+	let totalSeen = 0;
+	const visitedPaths = new Set<string>();
+	while (path) {
+		await guardGithubPagination(ctx, "gists", path, pageIndex, visitedPaths);
+		const pageExtra = {
+			stream: "gists",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+			cursor_present: pageIndex > 0 || Boolean(sinceParam),
+		};
+		await ctx.progress("Fetching GitHub gists page", pageExtra);
+		const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
+		const items = parseGithubListResponse<GitHubGist>(page.data, "gists");
+		totalSeen += items.length;
+		await ctx.progress("Fetched GitHub gists page", {
+			stream: "gists",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: items.length,
+			total_seen: totalSeen,
+			cursor_present: Boolean(page.nextUrl),
+		});
+		latestUpdated = await emitGistsPage(ctx, items, until, latestUpdated);
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	// Every gist enumerated AND evaluated in the run's boundary (full page walk,
+	// nothing left unvisited); `until`-filtered gists were still accounted for
+	// (see `collectIssues` for the same reasoning), so `covered` equals the same
+	// count.
+	await declareListConsidered(ctx, "gists", totalSeen, totalSeen);
+	await ctx.emit({
+		type: "STATE",
+		stream: "gists",
+		cursor: { last_updated_at: latestUpdated || priorUpdated || null },
+	});
 }
 
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "github",
-    retryablePattern: GITHUB_RETRYABLE_PATTERN,
-    validateRecord,
-    // GITHUB_TOKEN is the universal GitHub-CI env var; accept it as a fallback.
-    auth: {
-      kind: "env",
-      required: [["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"]],
-    },
-    async collect({ state, requested, credentials, emit, emitRecord, progress }) {
-      const token = credentials.GITHUB_PERSONAL_ACCESS_TOKEN || credentials.GITHUB_TOKEN;
-      if (!token) {
-        throw new Error("github_auth_failed");
-      }
-      // Warm-start the adaptive rate controller from the prior run's learned
-      // interval (line 1 of the seam: restore).
-      const httpGovernor = restoreGithubPacing(state);
-      const ctx: StreamCtx = {
-        token,
-        state,
-        requested,
-        emit,
-        emitRecord,
-        httpGovernor,
-        progress,
-      };
+	runConnector({
+		name: "github",
+		retryablePattern: GITHUB_RETRYABLE_PATTERN,
+		validateRecord,
+		// GITHUB_TOKEN is the universal GitHub-CI env var; accept it as a fallback.
+		auth: {
+			kind: "env",
+			required: [["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"]],
+		},
+		async collect({
+			state,
+			requested,
+			credentials,
+			emit,
+			emitRecord,
+			progress,
+		}) {
+			const token =
+				credentials.GITHUB_PERSONAL_ACCESS_TOKEN || credentials.GITHUB_TOKEN;
+			if (!token) {
+				throw new Error("github_auth_failed");
+			}
+			// Warm-start the adaptive rate controller from the prior run's learned
+			// interval (line 1 of the seam: restore).
+			const httpGovernor = restoreGithubPacing(state);
+			const ctx: StreamCtx = {
+				token,
+				state,
+				requested,
+				emit,
+				emitRecord,
+				httpGovernor,
+				progress,
+			};
 
-      if (requested.has("user") || requested.has("user_stats")) {
-        await collectUser(ctx);
-      }
-      if (requested.has("repositories")) {
-        await collectRepositories(ctx);
-      }
-      if (requested.has("starred")) {
-        await collectStarred(ctx);
-      }
-      if (requested.has("issues")) {
-        await collectIssues(ctx);
-      }
-      if (requested.has("pull_requests")) {
-        await collectPullRequests(ctx);
-      }
-      if (requested.has("gists")) {
-        await collectGists(ctx);
-      }
+			if (requested.has("user") || requested.has("user_stats")) {
+				await collectUser(ctx);
+			}
+			if (requested.has("repositories")) {
+				await collectRepositories(ctx);
+			}
+			if (requested.has("starred")) {
+				await collectStarred(ctx);
+			}
+			if (requested.has("issues")) {
+				await collectIssues(ctx);
+			}
+			if (requested.has("pull_requests")) {
+				await collectPullRequests(ctx);
+			}
+			if (requested.has("gists")) {
+				await collectGists(ctx);
+			}
 
-      // Surface the controller's live rate to the operator (legibility) using the
-      // shared helper — a connector author never hand-rolls rate observability.
-      const collectionRate = buildCollectionRateProgress(httpGovernor);
-      if (collectionRate) {
-        await emit({
-          type: "PROGRESS",
-          message: `Collection rate ${collectionRate.effective_rate_per_min}/min (interval ${collectionRate.current_interval_ms}ms; ceiling ${collectionRate.ceiling_rate_per_min}/min)`,
-          collection_rate: collectionRate,
-        });
-      }
-      // Persist the FINAL learned interval so the next run warm-starts from it.
-      // It rides the already-declared `user` stream cursor (re-emitted here,
-      // last-write-wins, merged with the fingerprint cursor collectUser built).
-      // Skipped when `user` was not collected — warm-start simply does not
-      // persist this run rather than emitting a STATE for an undeclared stream.
-      const pacingFields = buildPacingStateFields(httpGovernor);
-      if (ctx.userCursor && Object.keys(pacingFields).length > 0) {
-        await emit({ type: "STATE", stream: "user", cursor: { ...ctx.userCursor, ...pacingFields } });
-      }
-    },
-  });
+			// Surface the controller's live rate to the operator (legibility) using the
+			// shared helper — a connector author never hand-rolls rate observability.
+			const collectionRate = buildCollectionRateProgress(httpGovernor);
+			if (collectionRate) {
+				await emit({
+					type: "PROGRESS",
+					message: `Collection rate ${collectionRate.effective_rate_per_min}/min (interval ${collectionRate.current_interval_ms}ms; ceiling ${collectionRate.ceiling_rate_per_min}/min)`,
+					collection_rate: collectionRate,
+				});
+			}
+			// Persist the FINAL learned interval so the next run warm-starts from it.
+			// It rides the already-declared `user` stream cursor (re-emitted here,
+			// last-write-wins, merged with the fingerprint cursor collectUser built).
+			// Skipped when `user` was not collected — warm-start simply does not
+			// persist this run rather than emitting a STATE for an undeclared stream.
+			const pacingFields = buildPacingStateFields(httpGovernor);
+			if (ctx.userCursor && Object.keys(pacingFields).length > 0) {
+				await emit({
+					type: "STATE",
+					stream: "user",
+					cursor: { ...ctx.userCursor, ...pacingFields },
+				});
+			}
+		},
+	});
 }

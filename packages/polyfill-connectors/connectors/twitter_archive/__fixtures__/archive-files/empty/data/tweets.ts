@@ -2,5 +2,5 @@
 export const emptyTweetsFixture: readonly [] = [];
 
 export function renderEmptyTweetsFixture(): string {
-  return "window.YTD.tweets.part0 = [];\n";
+	return "window.YTD.tweets.part0 = [];\n";
 }

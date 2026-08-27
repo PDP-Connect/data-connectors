@@ -44,34 +44,41 @@ const latlngSchema = z.array(z.number()).max(2);
  * Cursor: last_start_epoch (derived from start_date).
  */
 export const activitiesSchema = z.object({
-  id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric Strava activity id"),
-  name: pdppSafeText.max(2000).nullable(),
-  type: z.string().min(1).max(64).nullable(),
-  sport_type: z.string().min(1).max(64).nullable(),
-  start_date: z.string().regex(ISO_DT_RE, "start_date must be an ISO-8601 datetime"),
-  start_date_local: z.string().regex(ISO_DT_RE, "start_date_local must be an ISO-8601 datetime").nullable(),
-  timezone: z.string().min(1).max(128).nullable(),
-  distance_m: metricSchema,
-  moving_time_s: metricSchema,
-  elapsed_time_s: metricSchema,
-  total_elevation_gain_m: metricSchema,
-  average_speed_mps: metricSchema,
-  max_speed_mps: metricSchema,
-  average_heartrate: metricSchema,
-  max_heartrate: metricSchema,
-  kudos_count: countSchema,
-  comment_count: countSchema,
-  achievement_count: countSchema,
-  start_latlng: latlngSchema,
-  end_latlng: latlngSchema,
-  map_polyline: z.string().max(65_000).nullable(),
+	id: z
+		.string()
+		.regex(NUMERIC_ID_RE, "id must be a numeric Strava activity id"),
+	name: pdppSafeText.max(2000).nullable(),
+	type: z.string().min(1).max(64).nullable(),
+	sport_type: z.string().min(1).max(64).nullable(),
+	start_date: z
+		.string()
+		.regex(ISO_DT_RE, "start_date must be an ISO-8601 datetime"),
+	start_date_local: z
+		.string()
+		.regex(ISO_DT_RE, "start_date_local must be an ISO-8601 datetime")
+		.nullable(),
+	timezone: z.string().min(1).max(128).nullable(),
+	distance_m: metricSchema,
+	moving_time_s: metricSchema,
+	elapsed_time_s: metricSchema,
+	total_elevation_gain_m: metricSchema,
+	average_speed_mps: metricSchema,
+	max_speed_mps: metricSchema,
+	average_heartrate: metricSchema,
+	max_heartrate: metricSchema,
+	kudos_count: countSchema,
+	comment_count: countSchema,
+	achievement_count: countSchema,
+	start_latlng: latlngSchema,
+	end_latlng: latlngSchema,
+	map_polyline: z.string().max(65_000).nullable(),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  activities: activitiesSchema,
+	activities: activitiesSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

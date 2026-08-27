@@ -4,43 +4,48 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserContext, Locator, Page } from "playwright";
-import type { InteractionRequest, InteractionResponse } from "../connector-runtime.ts";
+import type {
+	InteractionRequest,
+	InteractionResponse,
+} from "../connector-runtime.ts";
 import { ensureAmazonSession } from "./amazon.ts";
 
 const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
 const SIGNIN_URL = "https://www.amazon.com/ap/signin";
 
 const STREAMING_ENV_KEYS = [
-  "PDPP_RUN_ID",
-  "PDPP_REFERENCE_BASE_URL",
-  "PDPP_STREAMING_REGISTRATION_TOKEN",
-  "PDPP_LOCAL_DEVICE_TOKEN",
+	"PDPP_RUN_ID",
+	"PDPP_REFERENCE_BASE_URL",
+	"PDPP_STREAMING_REGISTRATION_TOKEN",
+	"PDPP_LOCAL_DEVICE_TOKEN",
 ] as const;
 
 interface InteractionHarness {
-  requests: InteractionRequest[];
-  sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
+	requests: InteractionRequest[];
+	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
 }
 
 function makeContext(): BrowserContext {
-  // ensureAmazonSession ignores the context (named `_context`); the deep probe
-  // works entirely off page.url()/locators, so a bare stub is sufficient.
-  return {} as BrowserContext;
+	// ensureAmazonSession ignores the context (named `_context`); the deep probe
+	// works entirely off page.url()/locators, so a bare stub is sufficient.
+	return {} as BrowserContext;
 }
 
-function makeInteractionHarness(status: InteractionResponse["status"] = "success"): InteractionHarness {
-  const requests: InteractionRequest[] = [];
-  return {
-    requests,
-    sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
-      requests.push(req);
-      return Promise.resolve({
-        request_id: req.request_id ?? "test_interaction",
-        status,
-        type: "INTERACTION_RESPONSE",
-      });
-    },
-  };
+function makeInteractionHarness(
+	status: InteractionResponse["status"] = "success",
+): InteractionHarness {
+	const requests: InteractionRequest[] = [];
+	return {
+		requests,
+		sendInteraction(req: InteractionRequest): Promise<InteractionResponse> {
+			requests.push(req);
+			return Promise.resolve({
+				request_id: req.request_id ?? "test_interaction",
+				status,
+				type: "INTERACTION_RESPONSE",
+			});
+		},
+	};
 }
 
 /**
@@ -53,107 +58,121 @@ function makeInteractionHarness(status: InteractionResponse["status"] = "success
  *
  * `becomeLoggedInAfterGoto = Infinity` models "operator never logged in".
  */
-function makeChallengePage({ becomeLoggedInAfterGoto }: { becomeLoggedInAfterGoto: number }): {
-  gotoCalls: string[];
-  page: Page;
+function makeChallengePage({
+	becomeLoggedInAfterGoto,
+}: {
+	becomeLoggedInAfterGoto: number;
+}): {
+	gotoCalls: string[];
+	page: Page;
 } {
-  const gotoCalls: string[] = [];
-  let currentUrl = SIGNIN_URL;
+	const gotoCalls: string[] = [];
+	let currentUrl = SIGNIN_URL;
 
-  const emptyLocator: Pick<Locator, "count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"> = {
-    count: (): Promise<number> => Promise.resolve(0),
-    first(): Locator {
-      return emptyLocator as Locator;
-    },
-    isVisible: (): Promise<boolean> => Promise.resolve(false),
-    inputValue: (): Promise<string> => Promise.resolve(""),
-    nth(): Locator {
-      return emptyLocator as Locator;
-    },
-    fill: (): Promise<void> => Promise.resolve(),
-  };
+	const emptyLocator: Pick<
+		Locator,
+		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"
+	> = {
+		count: (): Promise<number> => Promise.resolve(0),
+		first(): Locator {
+			return emptyLocator as Locator;
+		},
+		isVisible: (): Promise<boolean> => Promise.resolve(false),
+		inputValue: (): Promise<string> => Promise.resolve(""),
+		nth(): Locator {
+			return emptyLocator as Locator;
+		},
+		fill: (): Promise<void> => Promise.resolve(),
+	};
 
-  const loggedIn = (): boolean => gotoCalls.length >= becomeLoggedInAfterGoto;
+	const loggedIn = (): boolean => gotoCalls.length >= becomeLoggedInAfterGoto;
 
-  const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
-    goto(url: string): ReturnType<Page["goto"]> {
-      gotoCalls.push(url);
-      // The orders-page deep probe is the only navigation that flips us to a
-      // logged-in URL once the operator has completed login.
-      if (url === ORDERS_URL && loggedIn()) {
-        currentUrl = ORDERS_URL;
-      }
-      return Promise.resolve(null);
-    },
-    locator(_selector: string): Locator {
-      // signIn form is "visible" only while still parked on the sign-in URL.
-      if (_selector.includes("signIn")) {
-        const formVisible = !loggedIn();
-        return {
-          ...emptyLocator,
-          first(): Locator {
-            return this as Locator;
-          },
-          isVisible: (): Promise<boolean> => Promise.resolve(formVisible),
-        } as Locator;
-      }
-      return emptyLocator as Locator;
-    },
-    url(): string {
-      return currentUrl;
-    },
-    waitForTimeout(): Promise<void> {
-      return Promise.resolve();
-    },
-  };
-  return { gotoCalls, page: page as Page };
+	const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
+		goto(url: string): ReturnType<Page["goto"]> {
+			gotoCalls.push(url);
+			// The orders-page deep probe is the only navigation that flips us to a
+			// logged-in URL once the operator has completed login.
+			if (url === ORDERS_URL && loggedIn()) {
+				currentUrl = ORDERS_URL;
+			}
+			return Promise.resolve(null);
+		},
+		locator(_selector: string): Locator {
+			// signIn form is "visible" only while still parked on the sign-in URL.
+			if (_selector.includes("signIn")) {
+				const formVisible = !loggedIn();
+				return {
+					...emptyLocator,
+					first(): Locator {
+						return this as Locator;
+					},
+					isVisible: (): Promise<boolean> => Promise.resolve(formVisible),
+				} as Locator;
+			}
+			return emptyLocator as Locator;
+		},
+		url(): string {
+			return currentUrl;
+		},
+		waitForTimeout(): Promise<void> {
+			return Promise.resolve();
+		},
+	};
+	return { gotoCalls, page: page as Page };
 }
 
 function makeVisibleFieldFillFailurePage(): {
-  page: Page;
+	page: Page;
 } {
-  const visibleLoginForm: Pick<Locator, "count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"> = {
-    count: (): Promise<number> => Promise.resolve(1),
-    first(): Locator {
-      return visibleLoginForm as Locator;
-    },
-    isVisible: (): Promise<boolean> => Promise.resolve(true),
-    inputValue: (): Promise<string> => Promise.resolve(""),
-    nth(): Locator {
-      return visibleLoginForm as Locator;
-    },
-    fill: (): Promise<void> => Promise.reject(new Error("amazon_input_fill_failed")),
-  };
-  const emptyLocator: Pick<Locator, "count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"> = {
-    count: (): Promise<number> => Promise.resolve(0),
-    first(): Locator {
-      return emptyLocator as Locator;
-    },
-    isVisible: (): Promise<boolean> => Promise.resolve(false),
-    inputValue: (): Promise<string> => Promise.resolve(""),
-    nth(): Locator {
-      return emptyLocator as Locator;
-    },
-    fill: (): Promise<void> => Promise.resolve(),
-  };
-  const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
-    goto(): ReturnType<Page["goto"]> {
-      return Promise.resolve(null);
-    },
-    locator(selector: string): Locator {
-      if (selector.includes("signIn") || selector.includes("ap_email")) {
-        return visibleLoginForm as Locator;
-      }
-      return emptyLocator as Locator;
-    },
-    url(): string {
-      return SIGNIN_URL;
-    },
-    waitForTimeout(): Promise<void> {
-      return Promise.resolve();
-    },
-  };
-  return { page: page as Page };
+	const visibleLoginForm: Pick<
+		Locator,
+		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"
+	> = {
+		count: (): Promise<number> => Promise.resolve(1),
+		first(): Locator {
+			return visibleLoginForm as Locator;
+		},
+		isVisible: (): Promise<boolean> => Promise.resolve(true),
+		inputValue: (): Promise<string> => Promise.resolve(""),
+		nth(): Locator {
+			return visibleLoginForm as Locator;
+		},
+		fill: (): Promise<void> =>
+			Promise.reject(new Error("amazon_input_fill_failed")),
+	};
+	const emptyLocator: Pick<
+		Locator,
+		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"
+	> = {
+		count: (): Promise<number> => Promise.resolve(0),
+		first(): Locator {
+			return emptyLocator as Locator;
+		},
+		isVisible: (): Promise<boolean> => Promise.resolve(false),
+		inputValue: (): Promise<string> => Promise.resolve(""),
+		nth(): Locator {
+			return emptyLocator as Locator;
+		},
+		fill: (): Promise<void> => Promise.resolve(),
+	};
+	const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
+		goto(): ReturnType<Page["goto"]> {
+			return Promise.resolve(null);
+		},
+		locator(selector: string): Locator {
+			if (selector.includes("signIn") || selector.includes("ap_email")) {
+				return visibleLoginForm as Locator;
+			}
+			return emptyLocator as Locator;
+		},
+		url(): string {
+			return SIGNIN_URL;
+		},
+		waitForTimeout(): Promise<void> {
+			return Promise.resolve();
+		},
+	};
+	return { page: page as Page };
 }
 
 /**
@@ -166,8 +185,8 @@ function makeVisibleFieldFillFailurePage(): {
  * `credentials` key — no process-env mutation needed either way.
  */
 const AMAZON_TEST_CREDENTIALS = Object.freeze({
-  AMAZON_PASSWORD: "test-password",
-  AMAZON_USERNAME: "test-user@example.com",
+	AMAZON_PASSWORD: "test-password",
+	AMAZON_USERNAME: "test-user@example.com",
 });
 
 /**
@@ -175,139 +194,165 @@ const AMAZON_TEST_CREDENTIALS = Object.freeze({
  * of this: an absent credential is expressed by passing no `credentials` to
  * `ensureAmazonSession`, not by mutating `process.env`.
  */
-async function withClearedStreamingEnv(run: () => Promise<void>): Promise<void> {
-  const priorStreamingEnv = new Map<(typeof STREAMING_ENV_KEYS)[number], string | undefined>();
-  for (const key of STREAMING_ENV_KEYS) {
-    priorStreamingEnv.set(key, process.env[key]);
-    delete process.env[key];
-  }
-  try {
-    await run();
-  } finally {
-    for (const key of STREAMING_ENV_KEYS) {
-      const value = priorStreamingEnv.get(key);
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
+async function withClearedStreamingEnv(
+	run: () => Promise<void>,
+): Promise<void> {
+	const priorStreamingEnv = new Map<
+		(typeof STREAMING_ENV_KEYS)[number],
+		string | undefined
+	>();
+	for (const key of STREAMING_ENV_KEYS) {
+		priorStreamingEnv.set(key, process.env[key]);
+		delete process.env[key];
+	}
+	try {
+		await run();
+	} finally {
+		for (const key of STREAMING_ENV_KEYS) {
+			const value = priorStreamingEnv.get(key);
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		}
+	}
 }
 
 test("ensureAmazonSession hands off to the secure browser when optional credentials are absent", async () => {
-  await withClearedStreamingEnv(async () => {
-    const { gotoCalls, page } = makeChallengePage({ becomeLoggedInAfterGoto: 2 });
-    const interactions = makeInteractionHarness();
+	await withClearedStreamingEnv(async () => {
+		const { gotoCalls, page } = makeChallengePage({
+			becomeLoggedInAfterGoto: 2,
+		});
+		const interactions = makeInteractionHarness();
 
-    const ok = await ensureAmazonSession({
-      context: makeContext(),
-      page,
-      sendInteraction: interactions.sendInteraction,
-    });
+		const ok = await ensureAmazonSession({
+			context: makeContext(),
+			page,
+			sendInteraction: interactions.sendInteraction,
+		});
 
-    assert.equal(ok, true);
-    assert.equal(interactions.requests.length, 1);
-    assert.equal(interactions.requests[0]?.kind, "manual_action");
-    // The owner-facing reason must lead with the CREDENTIAL, not the page.
-    // Before `resolveLoginCredentials`, an absent credential produced copy
-    // that read like a provider/page problem ("optional sign-in details");
-    // an owner could not tell "nothing was stored for this connection" from
-    // "Amazon failed to render".
-    assert.match(
-      interactions.requests[0]?.message ?? "",
-      /no stored credential for this amazon connection \(missing: AMAZON_USERNAME, AMAZON_PASSWORD\)/u
-    );
-    assert.match(interactions.requests[0]?.message ?? "", /Automated sign-in was not attempted/u);
-    assert.match(interactions.requests[0]?.message ?? "", /secure browser/);
-    assert.doesNotMatch(interactions.requests[0]?.message ?? "", /password|test-user|example\.com/u);
-    assert.ok(gotoCalls.includes(ORDERS_URL));
-  });
+		assert.equal(ok, true);
+		assert.equal(interactions.requests.length, 1);
+		assert.equal(interactions.requests[0]?.kind, "manual_action");
+		// The owner-facing reason must lead with the CREDENTIAL, not the page.
+		// Before `resolveLoginCredentials`, an absent credential produced copy
+		// that read like a provider/page problem ("optional sign-in details");
+		// an owner could not tell "nothing was stored for this connection" from
+		// "Amazon failed to render".
+		assert.match(
+			interactions.requests[0]?.message ?? "",
+			/no stored credential for this amazon connection \(missing: AMAZON_USERNAME, AMAZON_PASSWORD\)/u,
+		);
+		assert.match(
+			interactions.requests[0]?.message ?? "",
+			/Automated sign-in was not attempted/u,
+		);
+		assert.match(interactions.requests[0]?.message ?? "", /secure browser/);
+		assert.doesNotMatch(
+			interactions.requests[0]?.message ?? "",
+			/password|test-user|example\.com/u,
+		);
+		assert.ok(gotoCalls.includes(ORDERS_URL));
+	});
 });
 
 test("ensureAmazonSession emits manual_action when the sign-in form is replaced by a challenge", async () => {
-  await withClearedStreamingEnv(async () => {
-    // Initial deep probe (goto #1) sees the sign-in URL. The email field never
-    // renders, so the challenge fallback fires. The operator completes login,
-    // so the re-probe (goto after manual action) lands on orders and returns.
-    const { gotoCalls, page } = makeChallengePage({ becomeLoggedInAfterGoto: 3 });
-    const interactions = makeInteractionHarness();
+	await withClearedStreamingEnv(async () => {
+		// Initial deep probe (goto #1) sees the sign-in URL. The email field never
+		// renders, so the challenge fallback fires. The operator completes login,
+		// so the re-probe (goto after manual action) lands on orders and returns.
+		const { gotoCalls, page } = makeChallengePage({
+			becomeLoggedInAfterGoto: 3,
+		});
+		const interactions = makeInteractionHarness();
 
-    const ok = await ensureAmazonSession({
-      context: makeContext(),
-      credentials: AMAZON_TEST_CREDENTIALS,
-      fieldTimeoutMs: 1,
-      page,
-      sendInteraction: interactions.sendInteraction,
-    });
+		const ok = await ensureAmazonSession({
+			context: makeContext(),
+			credentials: AMAZON_TEST_CREDENTIALS,
+			fieldTimeoutMs: 1,
+			page,
+			sendInteraction: interactions.sendInteraction,
+		});
 
-    assert.equal(ok, true);
-    assert.equal(interactions.requests.length, 1);
-    assert.equal(interactions.requests[0]?.kind, "manual_action");
-    assert.ok(interactions.requests[0]?.request_id?.startsWith("int_"));
-    assert.match(interactions.requests[0]?.message ?? "", /CAPTCHA\/puzzle|approve-on-device/u);
-    assert.match(interactions.requests[0]?.message ?? "", /PDPP_BROWSER_HEADLESS=0/u);
-    // The handoff message must never leak the stored credentials.
-    assert.doesNotMatch(interactions.requests[0]?.message ?? "", /test-user|test-password|example\.com/u);
-    // Re-probe navigated to the orders page after the manual action.
-    assert.ok(gotoCalls.includes(ORDERS_URL));
-  });
+		assert.equal(ok, true);
+		assert.equal(interactions.requests.length, 1);
+		assert.equal(interactions.requests[0]?.kind, "manual_action");
+		assert.ok(interactions.requests[0]?.request_id?.startsWith("int_"));
+		assert.match(
+			interactions.requests[0]?.message ?? "",
+			/CAPTCHA\/puzzle|approve-on-device/u,
+		);
+		assert.match(
+			interactions.requests[0]?.message ?? "",
+			/PDPP_BROWSER_HEADLESS=0/u,
+		);
+		// The handoff message must never leak the stored credentials.
+		assert.doesNotMatch(
+			interactions.requests[0]?.message ?? "",
+			/test-user|test-password|example\.com/u,
+		);
+		// Re-probe navigated to the orders page after the manual action.
+		assert.ok(gotoCalls.includes(ORDERS_URL));
+	});
 });
 
 test("ensureAmazonSession throws amazon_login_unexpected_ui when the manual action leaves no session", async () => {
-  await withClearedStreamingEnv(async () => {
-    const { page } = makeChallengePage({ becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY });
-    const interactions = makeInteractionHarness();
+	await withClearedStreamingEnv(async () => {
+		const { page } = makeChallengePage({
+			becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
+		});
+		const interactions = makeInteractionHarness();
 
-    await assert.rejects(
-      ensureAmazonSession({
-        context: makeContext(),
-        credentials: AMAZON_TEST_CREDENTIALS,
-        fieldTimeoutMs: 1,
-        page,
-        sendInteraction: interactions.sendInteraction,
-      }),
-      /amazon_login_unexpected_ui/u
-    );
-    // Exactly one manual_action handoff at the email-form stage; we do not
-    // hammer the operator with repeated prompts for the same challenge.
-    assert.equal(interactions.requests.length, 1);
-    assert.equal(interactions.requests[0]?.kind, "manual_action");
-  });
+		await assert.rejects(
+			ensureAmazonSession({
+				context: makeContext(),
+				credentials: AMAZON_TEST_CREDENTIALS,
+				fieldTimeoutMs: 1,
+				page,
+				sendInteraction: interactions.sendInteraction,
+			}),
+			/amazon_login_unexpected_ui/u,
+		);
+		// Exactly one manual_action handoff at the email-form stage; we do not
+		// hammer the operator with repeated prompts for the same challenge.
+		assert.equal(interactions.requests.length, 1);
+		assert.equal(interactions.requests[0]?.kind, "manual_action");
+	});
 });
 
 test("ensureAmazonSession does not mask visible field-fill failures as manual challenges", async () => {
-  await withClearedStreamingEnv(async () => {
-    const { page } = makeVisibleFieldFillFailurePage();
-    const interactions = makeInteractionHarness();
+	await withClearedStreamingEnv(async () => {
+		const { page } = makeVisibleFieldFillFailurePage();
+		const interactions = makeInteractionHarness();
 
-    await assert.rejects(
-      ensureAmazonSession({
-        context: makeContext(),
-        credentials: AMAZON_TEST_CREDENTIALS,
-        page,
-        sendInteraction: interactions.sendInteraction,
-      }),
-      /amazon_input_fill_failed/u
-    );
-    assert.equal(interactions.requests.length, 0);
-  });
+		await assert.rejects(
+			ensureAmazonSession({
+				context: makeContext(),
+				credentials: AMAZON_TEST_CREDENTIALS,
+				page,
+				sendInteraction: interactions.sendInteraction,
+			}),
+			/amazon_input_fill_failed/u,
+		);
+		assert.equal(interactions.requests.length, 0);
+	});
 });
 
 test("ensureAmazonSession returns true without any interaction when already logged in", async () => {
-  await withClearedStreamingEnv(async () => {
-    // becomeLoggedInAfterGoto=1 → the very first deep-probe goto lands on orders.
-    const { page } = makeChallengePage({ becomeLoggedInAfterGoto: 1 });
-    const interactions = makeInteractionHarness();
+	await withClearedStreamingEnv(async () => {
+		// becomeLoggedInAfterGoto=1 → the very first deep-probe goto lands on orders.
+		const { page } = makeChallengePage({ becomeLoggedInAfterGoto: 1 });
+		const interactions = makeInteractionHarness();
 
-    const ok = await ensureAmazonSession({
-      context: makeContext(),
-      credentials: AMAZON_TEST_CREDENTIALS,
-      page,
-      sendInteraction: interactions.sendInteraction,
-    });
+		const ok = await ensureAmazonSession({
+			context: makeContext(),
+			credentials: AMAZON_TEST_CREDENTIALS,
+			page,
+			sendInteraction: interactions.sendInteraction,
+		});
 
-    assert.equal(ok, true);
-    assert.equal(interactions.requests.length, 0);
-  });
+		assert.equal(ok, true);
+		assert.equal(interactions.requests.length, 0);
+	});
 });

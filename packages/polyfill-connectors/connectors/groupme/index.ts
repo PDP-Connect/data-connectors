@@ -63,29 +63,29 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { SaxesParser } from "saxes";
 import { createConnectorHttpGovernor } from "../../src/connector-http-governor.ts";
 import {
-  buildDetailCoverageMessage,
-  buildFullScanCoverageMessage,
-  type CollectContext,
-  type DetailCoverageMessage,
-  type RecordData,
-  runConnector,
+	buildDetailCoverageMessage,
+	buildFullScanCoverageMessage,
+	type CollectContext,
+	type DetailCoverageMessage,
+	type RecordData,
+	runConnector,
 } from "../../src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
 import { groupmePacingProfile } from "../../src/provider-profile.ts";
 import {
-  makeReferenceBlobUploader,
-  type ReferenceBlobRef,
-  runtimeBlobUploadAvailable,
+	makeReferenceBlobUploader,
+	type ReferenceBlobRef,
+	runtimeBlobUploadAvailable,
 } from "../../src/reference-blob-uploader.ts";
 import { validateRecord } from "./schemas.ts";
 
 let httpGovernor = createConnectorHttpGovernor({
-  name: "groupme",
-  // Retry transient 5xx/transport failures at the request boundary. This is
-  // deliberately bounded and shared: a failed page is retried in place, so
-  // successful chats are never replayed and the run is never replayed here.
-  maxAttempts: 3,
-  profile: groupmePacingProfile(),
+	name: "groupme",
+	// Retry transient 5xx/transport failures at the request boundary. This is
+	// deliberately bounded and shared: a failed page is retried in place, so
+	// successful chats are never replayed and the run is never replayed here.
+	maxAttempts: 3,
+	profile: groupmePacingProfile(),
 });
 
 /**
@@ -98,51 +98,51 @@ let httpGovernor = createConnectorHttpGovernor({
  * `resetHttpGovernorForTests()` so tests remain isolated from each other.
  */
 export function __setZeroDelayHttpGovernorForTests(): void {
-  httpGovernor = createConnectorHttpGovernor({
-    name: "groupme",
-    maxAttempts: 3,
-    profile: groupmePacingProfile(),
-    pacingInitialIntervalMs: 0,
-  });
+	httpGovernor = createConnectorHttpGovernor({
+		name: "groupme",
+		maxAttempts: 3,
+		profile: groupmePacingProfile(),
+		pacingInitialIntervalMs: 0,
+	});
 }
 
 /** Restore the real, production-paced governor after a test that called
  *  `__setZeroDelayHttpGovernorForTests()`. */
 export function __resetHttpGovernorForTests(): void {
-  httpGovernor = createConnectorHttpGovernor({
-    name: "groupme",
-    maxAttempts: 3,
-    profile: groupmePacingProfile(),
-  });
+	httpGovernor = createConnectorHttpGovernor({
+		name: "groupme",
+		maxAttempts: 3,
+		profile: groupmePacingProfile(),
+	});
 }
 
 interface GroupMeGroup {
-  archived?: boolean | null;
-  avatar_url?: string | null;
-  created_at?: number | null;
-  description?: string | null;
-  id: string;
-  image_url?: string | null;
-  members_count?: number | null;
-  /**
-   * GroupMe's own documented per-group message envelope on `GET /groups`:
-   * `{ count, last_message_id, last_message_created_at, preview }`.
-   *
-   * The connector previously read only a FLAT `messages_count`, which is
-   * absent from that documented shape — and live evidence agrees: all 156
-   * of this owner's groups carry `messages_count: null` across every
-   * version ever collected, while the sibling `members_count` populates
-   * normally. So the flat field was never the real one.
-   */
-  messages?: { count?: number | null } | null;
-  messages_count?: number | null;
-  muted?: boolean | null;
-  name?: string | null;
-  office_mode?: boolean | null;
-  phone_number?: string | null;
-  share_url?: string | null;
-  show_full_last_message?: boolean | null;
-  updated_at?: number | null;
+	archived?: boolean | null;
+	avatar_url?: string | null;
+	created_at?: number | null;
+	description?: string | null;
+	id: string;
+	image_url?: string | null;
+	members_count?: number | null;
+	/**
+	 * GroupMe's own documented per-group message envelope on `GET /groups`:
+	 * `{ count, last_message_id, last_message_created_at, preview }`.
+	 *
+	 * The connector previously read only a FLAT `messages_count`, which is
+	 * absent from that documented shape — and live evidence agrees: all 156
+	 * of this owner's groups carry `messages_count: null` across every
+	 * version ever collected, while the sibling `members_count` populates
+	 * normally. So the flat field was never the real one.
+	 */
+	messages?: { count?: number | null } | null;
+	messages_count?: number | null;
+	muted?: boolean | null;
+	name?: string | null;
+	office_mode?: boolean | null;
+	phone_number?: string | null;
+	share_url?: string | null;
+	show_full_last_message?: boolean | null;
+	updated_at?: number | null;
 }
 
 /**
@@ -162,71 +162,71 @@ interface GroupMeGroup {
  * instead of silently becoming a fabricated anchor.
  */
 export function providerMessageCount(group: GroupMeGroup): number | null {
-  const candidate = group.messages?.count ?? group.messages_count;
-  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
-    return null;
-  }
-  if (!Number.isInteger(candidate) || candidate < 0) {
-    return null;
-  }
-  return candidate;
+	const candidate = group.messages?.count ?? group.messages_count;
+	if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+		return null;
+	}
+	if (!Number.isInteger(candidate) || candidate < 0) {
+		return null;
+	}
+	return candidate;
 }
 
 interface GroupMeAttachment {
-  charmap?: [number, number][] | null;
-  file_id?: string | null;
-  lat?: string | null;
-  lng?: string | null;
-  name?: string | null;
-  picture_url?: string | null;
-  type: "image" | "file" | "location" | "emoji";
-  url?: string | null;
+	charmap?: [number, number][] | null;
+	file_id?: string | null;
+	lat?: string | null;
+	lng?: string | null;
+	name?: string | null;
+	picture_url?: string | null;
+	type: "image" | "file" | "location" | "emoji";
+	url?: string | null;
 }
 
 interface GroupMeMessage {
-  attachments?: GroupMeAttachment[] | null;
-  avatar_url?: string | null;
-  created_at: number;
-  favorited_by?: string[] | null;
-  id: string;
-  name?: string | null;
-  system?: boolean | null;
-  text?: string | null;
-  user_id?: string | null;
+	attachments?: GroupMeAttachment[] | null;
+	avatar_url?: string | null;
+	created_at: number;
+	favorited_by?: string[] | null;
+	id: string;
+	name?: string | null;
+	system?: boolean | null;
+	text?: string | null;
+	user_id?: string | null;
 }
 
 interface GroupMeDirectChat {
-  avatar_url?: string | null;
-  created_at?: number | null;
-  id?: string | null;
-  last_message?:
-    | string
-    | {
-        created_at?: number | null;
-        text?: string | null;
-      }
-    | null;
-  last_message_at?: number | null;
-  messages_count?: number | null;
-  muted?: boolean | null;
-  other_user?: {
-    avatar_url?: string | null;
-    id?: string | null;
-    name?: string | null;
-  } | null;
-  updated_at?: number | null;
+	avatar_url?: string | null;
+	created_at?: number | null;
+	id?: string | null;
+	last_message?:
+		| string
+		| {
+				created_at?: number | null;
+				text?: string | null;
+		  }
+		| null;
+	last_message_at?: number | null;
+	messages_count?: number | null;
+	muted?: boolean | null;
+	other_user?: {
+		avatar_url?: string | null;
+		id?: string | null;
+		name?: string | null;
+	} | null;
+	updated_at?: number | null;
 }
 
 interface ProgressExtra {
-  after_id?: string;
-  before_id?: string;
-  cursor_present?: boolean;
-  item_count?: number;
-  page?: number;
-  phase?: string;
-  rate_limit_pressure?: number;
-  stream?: string;
-  total_seen?: number;
+	after_id?: string;
+	before_id?: string;
+	cursor_present?: boolean;
+	item_count?: number;
+	page?: number;
+	phase?: string;
+	rate_limit_pressure?: number;
+	stream?: string;
+	total_seen?: number;
 }
 
 const API_BASE = "https://api.groupme.com/v3";
@@ -241,34 +241,46 @@ const BLOB_MAX_BYTES = 50 * 1024 * 1024; // 50 MiB hard limit
  * Validates attachment URL origin, protocol, port, and auth.
  * Fails closed: only https://i.groupme.com (no port, no userinfo, no redirect).
  */
-export function validateAttachmentUrl(urlString: string): { valid: boolean; reason?: string } {
-  try {
-    const url = new URL(urlString);
+export function validateAttachmentUrl(urlString: string): {
+	valid: boolean;
+	reason?: string;
+} {
+	try {
+		const url = new URL(urlString);
 
-    // Require HTTPS (not http://)
-    if (url.protocol !== "https:") {
-      return { valid: false, reason: `protocol must be https, got ${url.protocol}` };
-    }
+		// Require HTTPS (not http://)
+		if (url.protocol !== "https:") {
+			return {
+				valid: false,
+				reason: `protocol must be https, got ${url.protocol}`,
+			};
+		}
 
-    // Require exact hostname (no subdomain lookalikes)
-    if (!APPROVED_BLOB_HOSTS.includes(url.hostname)) {
-      return { valid: false, reason: `hostname not approved: ${url.hostname}` };
-    }
+		// Require exact hostname (no subdomain lookalikes)
+		if (!APPROVED_BLOB_HOSTS.includes(url.hostname)) {
+			return { valid: false, reason: `hostname not approved: ${url.hostname}` };
+		}
 
-    // Require default HTTPS port (no arbitrary ports like :8080, :4443)
-    if (url.port !== "") {
-      return { valid: false, reason: `port must be default (empty), got ${url.port}` };
-    }
+		// Require default HTTPS port (no arbitrary ports like :8080, :4443)
+		if (url.port !== "") {
+			return {
+				valid: false,
+				reason: `port must be default (empty), got ${url.port}`,
+			};
+		}
 
-    // Reject userinfo (no username:password@)
-    if (url.username || url.password) {
-      return { valid: false, reason: "userinfo not allowed in attachment URL" };
-    }
+		// Reject userinfo (no username:password@)
+		if (url.username || url.password) {
+			return { valid: false, reason: "userinfo not allowed in attachment URL" };
+		}
 
-    return { valid: true };
-  } catch (error) {
-    return { valid: false, reason: `invalid URL: ${error instanceof Error ? error.message : String(error)}` };
-  }
+		return { valid: true };
+	} catch (error) {
+		return {
+			valid: false,
+			reason: `invalid URL: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
 }
 
 // Content-Types GroupMe's CDN is known to serve for image/file attachments.
@@ -276,13 +288,13 @@ export function validateAttachmentUrl(urlString: string): { valid: boolean; reas
 // type-based guess rather than passing an arbitrary provider-supplied string
 // through to blob storage.
 const SAFE_ATTACHMENT_CONTENT_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "image/heic",
-  "application/octet-stream",
-  "application/pdf",
+	"image/jpeg",
+	"image/png",
+	"image/gif",
+	"image/webp",
+	"image/heic",
+	"application/octet-stream",
+	"application/pdf",
 ]);
 
 /**
@@ -290,51 +302,55 @@ const SAFE_ATTACHMENT_CONTENT_TYPES = new Set([
  * type, or null if the header is missing/malformed/not in the allowed set.
  * Strips parameters (e.g. `; charset=utf-8`) before matching.
  */
-export function normalizeAttachmentContentType(rawHeader: string | null | undefined): string | null {
-  if (!rawHeader) {
-    return null;
-  }
-  const base = rawHeader.split(";")[0]?.trim().toLowerCase();
-  if (!base) {
-    return null;
-  }
-  return SAFE_ATTACHMENT_CONTENT_TYPES.has(base) ? base : null;
+export function normalizeAttachmentContentType(
+	rawHeader: string | null | undefined,
+): string | null {
+	if (!rawHeader) {
+		return null;
+	}
+	const base = rawHeader.split(";")[0]?.trim().toLowerCase();
+	if (!base) {
+		return null;
+	}
+	return SAFE_ATTACHMENT_CONTENT_TYPES.has(base) ? base : null;
 }
 
 async function readAttachmentBody(
-  res: Response,
-  recordKey: string,
-  maxBytes = BLOB_MAX_BYTES
+	res: Response,
+	recordKey: string,
+	maxBytes = BLOB_MAX_BYTES,
 ): Promise<{ buffer: Buffer; size: number } | null> {
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
+	const chunks: Buffer[] = [];
+	let totalBytes = 0;
 
-  const reader = res.body?.getReader();
-  if (!reader) {
-    // eslint-disable-next-line no-console
-    console.warn(`groupme: attachment body not readable (${recordKey})`);
-    return null;
-  }
+	const reader = res.body?.getReader();
+	if (!reader) {
+		// eslint-disable-next-line no-console
+		console.warn(`groupme: attachment body not readable (${recordKey})`);
+		return null;
+	}
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) {
+			break;
+		}
 
-    totalBytes += value.byteLength;
-    if (totalBytes > maxBytes) {
-      reader.cancel();
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment streaming exceeded limit (${recordKey}): ${totalBytes} > ${maxBytes}`);
-      return null;
-    }
+		totalBytes += value.byteLength;
+		if (totalBytes > maxBytes) {
+			reader.cancel();
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment streaming exceeded limit (${recordKey}): ${totalBytes} > ${maxBytes}`,
+			);
+			return null;
+		}
 
-    chunks.push(Buffer.from(value));
-  }
+		chunks.push(Buffer.from(value));
+	}
 
-  const buffer = Buffer.concat(chunks);
-  return { buffer, size: buffer.length };
+	const buffer = Buffer.concat(chunks);
+	return { buffer, size: buffer.length };
 }
 
 /**
@@ -343,156 +359,198 @@ async function readAttachmentBody(
  * Records the failure (caller must emit record even if blob fetch fails).
  */
 export async function fetchAttachmentBlob(
-  urlString: string,
-  recordKey: string
-): Promise<{ buffer: Buffer; contentType: string | null; size: number } | null> {
-  const outcome = await fetchAttachmentBlobOutcome(urlString, recordKey);
-  return outcome.kind === "available" ? outcome.blob : null;
+	urlString: string,
+	recordKey: string,
+): Promise<{
+	buffer: Buffer;
+	contentType: string | null;
+	size: number;
+} | null> {
+	const outcome = await fetchAttachmentBlobOutcome(urlString, recordKey);
+	return outcome.kind === "available" ? outcome.blob : null;
 }
 
 export type AttachmentFetchOutcome =
-  | { kind: "available"; blob: { buffer: Buffer; contentType: string | null; size: number } }
-  | { kind: "failed"; reason: string }
-  | { kind: "unavailable"; reason: "provider_object_unavailable" };
+	| {
+			kind: "available";
+			blob: { buffer: Buffer; contentType: string | null; size: number };
+	  }
+	| { kind: "failed"; reason: string }
+	| { kind: "unavailable"; reason: "provider_object_unavailable" };
 
 const GROUPME_PROVIDER_ERROR_MAX_BYTES = 16 * 1024;
 const DECIMAL_HEADER_RE = /^\d+$/;
-const GROUPME_PROVIDER_ERROR_FIELDS = new Set(["Code", "HostId", "Key", "Message", "RequestId", "Resource"]);
+const GROUPME_PROVIDER_ERROR_FIELDS = new Set([
+	"Code",
+	"HostId",
+	"Key",
+	"Message",
+	"RequestId",
+	"Resource",
+]);
 
-function parseTerminalProviderErrorCode(xml: string): "AccessDenied" | "NoSuchKey" | null {
-  let code = "";
-  let codeCount = 0;
-  let depth = 0;
-  let invalid = false;
-  let insideCode = false;
-  let rootCount = 0;
-  const seenFields = new Set<string>();
-  const parser = new SaxesParser({ xmlns: false });
+function parseTerminalProviderErrorCode(
+	xml: string,
+): "AccessDenied" | "NoSuchKey" | null {
+	let code = "";
+	let codeCount = 0;
+	let depth = 0;
+	let invalid = false;
+	let insideCode = false;
+	let rootCount = 0;
+	const seenFields = new Set<string>();
+	const parser = new SaxesParser({ xmlns: false });
 
-  parser.on("opentag", (tag) => {
-    depth += 1;
-    if (depth === 1) {
-      rootCount += 1;
-      invalid ||= tag.name !== "Error" || Object.keys(tag.attributes).length !== 0;
-      return;
-    }
-    if (depth === 2) {
-      if (
-        !GROUPME_PROVIDER_ERROR_FIELDS.has(tag.name) ||
-        seenFields.has(tag.name) ||
-        Object.keys(tag.attributes).length !== 0
-      ) {
-        invalid = true;
-      }
-      seenFields.add(tag.name);
-      if (tag.name === "Code") {
-        codeCount += 1;
-        insideCode = true;
-      }
-      return;
-    }
-    invalid = true;
-  });
-  parser.on("text", (text) => {
-    if (insideCode) {
-      code += text;
-    } else if (depth < 2 && text.trim()) {
-      invalid = true;
-    }
-  });
-  parser.on("closetag", (tag) => {
-    if (depth === 2 && tag.name === "Code") {
-      insideCode = false;
-    }
-    depth -= 1;
-  });
-  parser.on("cdata", () => {
-    invalid = true;
-  });
-  parser.on("comment", () => {
-    invalid = true;
-  });
-  parser.on("doctype", () => {
-    invalid = true;
-  });
-  parser.on("processinginstruction", () => {
-    invalid = true;
-  });
-  parser.on("error", () => {
-    invalid = true;
-  });
+	parser.on("opentag", (tag) => {
+		depth += 1;
+		if (depth === 1) {
+			rootCount += 1;
+			invalid ||=
+				tag.name !== "Error" || Object.keys(tag.attributes).length !== 0;
+			return;
+		}
+		if (depth === 2) {
+			if (
+				!GROUPME_PROVIDER_ERROR_FIELDS.has(tag.name) ||
+				seenFields.has(tag.name) ||
+				Object.keys(tag.attributes).length !== 0
+			) {
+				invalid = true;
+			}
+			seenFields.add(tag.name);
+			if (tag.name === "Code") {
+				codeCount += 1;
+				insideCode = true;
+			}
+			return;
+		}
+		invalid = true;
+	});
+	parser.on("text", (text) => {
+		if (insideCode) {
+			code += text;
+		} else if (depth < 2 && text.trim()) {
+			invalid = true;
+		}
+	});
+	parser.on("closetag", (tag) => {
+		if (depth === 2 && tag.name === "Code") {
+			insideCode = false;
+		}
+		depth -= 1;
+	});
+	parser.on("cdata", () => {
+		invalid = true;
+	});
+	parser.on("comment", () => {
+		invalid = true;
+	});
+	parser.on("doctype", () => {
+		invalid = true;
+	});
+	parser.on("processinginstruction", () => {
+		invalid = true;
+	});
+	parser.on("error", () => {
+		invalid = true;
+	});
 
-  try {
-    parser.write(xml).close();
-  } catch {
-    return null;
-  }
-  const normalizedCode = code.trim();
-  if (invalid || rootCount !== 1 || depth !== 0 || insideCode || codeCount !== 1) {
-    return null;
-  }
-  return normalizedCode === "AccessDenied" || normalizedCode === "NoSuchKey" ? normalizedCode : null;
+	try {
+		parser.write(xml).close();
+	} catch {
+		return null;
+	}
+	const normalizedCode = code.trim();
+	if (
+		invalid ||
+		rootCount !== 1 ||
+		depth !== 0 ||
+		insideCode ||
+		codeCount !== 1
+	) {
+		return null;
+	}
+	return normalizedCode === "AccessDenied" || normalizedCode === "NoSuchKey"
+		? normalizedCode
+		: null;
 }
 
-async function readTerminalProviderErrorCode(response: Response): Promise<"AccessDenied" | "NoSuchKey" | null> {
-  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  if (contentType !== "application/xml" && contentType !== "text/xml") {
-    return null;
-  }
-  const declaredLengthHeader = response.headers.get("content-length");
-  let declaredLength: number | null = null;
-  if (declaredLengthHeader !== null) {
-    if (!DECIMAL_HEADER_RE.test(declaredLengthHeader)) {
-      return null;
-    }
-    declaredLength = Number(declaredLengthHeader);
-    if (
-      !Number.isSafeInteger(declaredLength) ||
-      declaredLength < 1 ||
-      declaredLength > GROUPME_PROVIDER_ERROR_MAX_BYTES
-    ) {
-      return null;
-    }
-  }
-  const body = await readAttachmentBody(response, "provider-error", GROUPME_PROVIDER_ERROR_MAX_BYTES);
-  if (!body || (declaredLength !== null && body.size !== declaredLength)) {
-    return null;
-  }
-  return parseTerminalProviderErrorCode(body.buffer.toString("utf8").trim());
+async function readTerminalProviderErrorCode(
+	response: Response,
+): Promise<"AccessDenied" | "NoSuchKey" | null> {
+	const contentType = response.headers
+		.get("content-type")
+		?.split(";")[0]
+		?.trim()
+		.toLowerCase();
+	if (contentType !== "application/xml" && contentType !== "text/xml") {
+		return null;
+	}
+	const declaredLengthHeader = response.headers.get("content-length");
+	let declaredLength: number | null = null;
+	if (declaredLengthHeader !== null) {
+		if (!DECIMAL_HEADER_RE.test(declaredLengthHeader)) {
+			return null;
+		}
+		declaredLength = Number(declaredLengthHeader);
+		if (
+			!Number.isSafeInteger(declaredLength) ||
+			declaredLength < 1 ||
+			declaredLength > GROUPME_PROVIDER_ERROR_MAX_BYTES
+		) {
+			return null;
+		}
+	}
+	const body = await readAttachmentBody(
+		response,
+		"provider-error",
+		GROUPME_PROVIDER_ERROR_MAX_BYTES,
+	);
+	if (!body || (declaredLength !== null && body.size !== declaredLength)) {
+		return null;
+	}
+	return parseTerminalProviderErrorCode(body.buffer.toString("utf8").trim());
 }
 
-async function classifyAttachmentHttpFailure(response: Response, recordKey: string): Promise<AttachmentFetchOutcome> {
-  const terminalCode = await readTerminalProviderErrorCode(response);
-  const providerObjectUnavailable =
-    (response.status === 403 && terminalCode === "AccessDenied") ||
-    (response.status === 404 && terminalCode === "NoSuchKey");
-  if (providerObjectUnavailable) {
-    // eslint-disable-next-line no-console
-    console.warn(`groupme: attachment is unavailable from the provider (${recordKey}): HTTP ${response.status}`);
-    return { kind: "unavailable", reason: "provider_object_unavailable" };
-  }
-  // eslint-disable-next-line no-console
-  console.warn(`groupme: attachment fetch failed (${recordKey}): HTTP ${response.status}`);
-  return { kind: "failed", reason: `attachment_http_${response.status}` };
+async function classifyAttachmentHttpFailure(
+	response: Response,
+	recordKey: string,
+): Promise<AttachmentFetchOutcome> {
+	const terminalCode = await readTerminalProviderErrorCode(response);
+	const providerObjectUnavailable =
+		(response.status === 403 && terminalCode === "AccessDenied") ||
+		(response.status === 404 && terminalCode === "NoSuchKey");
+	if (providerObjectUnavailable) {
+		// eslint-disable-next-line no-console
+		console.warn(
+			`groupme: attachment is unavailable from the provider (${recordKey}): HTTP ${response.status}`,
+		);
+		return { kind: "unavailable", reason: "provider_object_unavailable" };
+	}
+	// eslint-disable-next-line no-console
+	console.warn(
+		`groupme: attachment fetch failed (${recordKey}): HTTP ${response.status}`,
+	);
+	return { kind: "failed", reason: `attachment_http_${response.status}` };
 }
 
 function canonicalAttachmentFetchUrl(urlString: string): string {
-  try {
-    const url = new URL(urlString);
-    if (
-      url.protocol === "http:" &&
-      url.hostname === "i.groupme.com" &&
-      url.port === "" &&
-      !url.username &&
-      !url.password
-    ) {
-      url.protocol = "https:";
-      return url.toString();
-    }
-  } catch {
-    // The validator below owns the typed invalid-URL outcome.
-  }
-  return urlString;
+	try {
+		const url = new URL(urlString);
+		if (
+			url.protocol === "http:" &&
+			url.hostname === "i.groupme.com" &&
+			url.port === "" &&
+			!url.username &&
+			!url.password
+		) {
+			url.protocol = "https:";
+			return url.toString();
+		}
+	} catch {
+		// The validator below owns the typed invalid-URL outcome.
+	}
+	return urlString;
 }
 
 /**
@@ -501,111 +559,131 @@ function canonicalAttachmentFetchUrl(urlString: string): string {
  * unavailable objects; every other failure remains retryable/unproven.
  */
 export async function fetchAttachmentBlobOutcome(
-  urlString: string,
-  recordKey: string
+	urlString: string,
+	recordKey: string,
 ): Promise<AttachmentFetchOutcome> {
-  const fetchUrl = canonicalAttachmentFetchUrl(urlString);
-  const validation = validateAttachmentUrl(fetchUrl);
-  if (!validation.valid) {
-    // eslint-disable-next-line no-console
-    console.warn(`groupme: attachment validation failed (${recordKey}): ${validation.reason}`);
-    return { kind: "failed", reason: "attachment_url_invalid" };
-  }
+	const fetchUrl = canonicalAttachmentFetchUrl(urlString);
+	const validation = validateAttachmentUrl(fetchUrl);
+	if (!validation.valid) {
+		// eslint-disable-next-line no-console
+		console.warn(
+			`groupme: attachment validation failed (${recordKey}): ${validation.reason}`,
+		);
+		return { kind: "failed", reason: "attachment_url_invalid" };
+	}
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), BLOB_FETCH_TIMEOUT_MS);
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), BLOB_FETCH_TIMEOUT_MS);
 
-  try {
-    const res = await fetch(fetchUrl, {
-      signal: controller.signal,
-      redirect: "error", // Fail closed on any redirect
-    });
+	try {
+		const res = await fetch(fetchUrl, {
+			signal: controller.signal,
+			redirect: "error", // Fail closed on any redirect
+		});
 
-    if (!res.ok) {
-      return classifyAttachmentHttpFailure(res, recordKey);
-    }
+		if (!res.ok) {
+			return classifyAttachmentHttpFailure(res, recordKey);
+		}
 
-    // Validate Content-Length header exists and is within bounds
-    const contentLengthHeader = res.headers.get("content-length");
-    if (!contentLengthHeader) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment missing content-length (${recordKey})`);
-      return { kind: "failed", reason: "attachment_content_length_missing" };
-    }
+		// Validate Content-Length header exists and is within bounds
+		const contentLengthHeader = res.headers.get("content-length");
+		if (!contentLengthHeader) {
+			// eslint-disable-next-line no-console
+			console.warn(`groupme: attachment missing content-length (${recordKey})`);
+			return { kind: "failed", reason: "attachment_content_length_missing" };
+		}
 
-    if (!DECIMAL_HEADER_RE.test(contentLengthHeader)) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment invalid content-length (${recordKey}): ${contentLengthHeader}`);
-      return { kind: "failed", reason: "attachment_content_length_invalid" };
-    }
-    const contentLength = Number(contentLengthHeader);
-    if (!Number.isSafeInteger(contentLength)) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment invalid content-length (${recordKey}): ${contentLengthHeader}`);
-      return { kind: "failed", reason: "attachment_content_length_invalid" };
-    }
+		if (!DECIMAL_HEADER_RE.test(contentLengthHeader)) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment invalid content-length (${recordKey}): ${contentLengthHeader}`,
+			);
+			return { kind: "failed", reason: "attachment_content_length_invalid" };
+		}
+		const contentLength = Number(contentLengthHeader);
+		if (!Number.isSafeInteger(contentLength)) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment invalid content-length (${recordKey}): ${contentLengthHeader}`,
+			);
+			return { kind: "failed", reason: "attachment_content_length_invalid" };
+		}
 
-    if (contentLength > BLOB_MAX_BYTES) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment exceeds size limit (${recordKey}): ${contentLength} > ${BLOB_MAX_BYTES}`);
-      return { kind: "failed", reason: "attachment_too_large" };
-    }
+		if (contentLength > BLOB_MAX_BYTES) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment exceeds size limit (${recordKey}): ${contentLength} > ${BLOB_MAX_BYTES}`,
+			);
+			return { kind: "failed", reason: "attachment_too_large" };
+		}
 
-    const body = await readAttachmentBody(res, recordKey);
-    if (!body) {
-      return { kind: "failed", reason: "attachment_body_unreadable" };
-    }
-    if (body.size !== contentLength) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment content-length mismatch (${recordKey}): ${body.size} != ${contentLength}`);
-      return { kind: "failed", reason: "attachment_content_length_mismatch" };
-    }
-    return {
-      kind: "available",
-      blob: { ...body, contentType: normalizeAttachmentContentType(res.headers.get("content-type")) },
-    };
-  } catch (error) {
-    if (error instanceof TypeError && error.message.includes("redirect")) {
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: attachment redirect rejected (${recordKey})`);
-    } else {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `groupme: attachment fetch error (${recordKey}): ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    return { kind: "failed", reason: "attachment_fetch_failed" };
-  } finally {
-    clearTimeout(timeoutId);
-  }
+		const body = await readAttachmentBody(res, recordKey);
+		if (!body) {
+			return { kind: "failed", reason: "attachment_body_unreadable" };
+		}
+		if (body.size !== contentLength) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment content-length mismatch (${recordKey}): ${body.size} != ${contentLength}`,
+			);
+			return { kind: "failed", reason: "attachment_content_length_mismatch" };
+		}
+		return {
+			kind: "available",
+			blob: {
+				...body,
+				contentType: normalizeAttachmentContentType(
+					res.headers.get("content-type"),
+				),
+			},
+		};
+	} catch (error) {
+		if (error instanceof TypeError && error.message.includes("redirect")) {
+			// eslint-disable-next-line no-console
+			console.warn(`groupme: attachment redirect rejected (${recordKey})`);
+		} else {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: attachment fetch error (${recordKey}): ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		return { kind: "failed", reason: "attachment_fetch_failed" };
+	} finally {
+		clearTimeout(timeoutId);
+	}
 }
 
-function convertTimestamp(unixSeconds: number | undefined | null, context = "unknown"): string {
-  if (!(unixSeconds && Number.isFinite(unixSeconds) && unixSeconds > 0)) {
-    throw new Error(`groupme_missing_timestamp: ${context}`);
-  }
-  return new Date(unixSeconds * 1000).toISOString();
+function convertTimestamp(
+	unixSeconds: number | undefined | null,
+	context = "unknown",
+): string {
+	if (!(unixSeconds && Number.isFinite(unixSeconds) && unixSeconds > 0)) {
+		throw new Error(`groupme_missing_timestamp: ${context}`);
+	}
+	return new Date(unixSeconds * 1000).toISOString();
 }
 
-function convertOptionalTimestamp(unixSeconds: number | undefined | null): string | null {
-  return unixSeconds && Number.isFinite(unixSeconds) && unixSeconds > 0
-    ? new Date(unixSeconds * 1000).toISOString()
-    : null;
+function convertOptionalTimestamp(
+	unixSeconds: number | undefined | null,
+): string | null {
+	return unixSeconds && Number.isFinite(unixSeconds) && unixSeconds > 0
+		? new Date(unixSeconds * 1000).toISOString()
+		: null;
 }
 
 interface NormalizedAttachment {
-  blob_id?: string | null;
-  lat?: number | null;
-  lng?: number | null;
-  name: string | null;
-  type: "image" | "file" | "location" | "emoji";
-  url: string | null;
+	blob_id?: string | null;
+	lat?: number | null;
+	lng?: number | null;
+	name: string | null;
+	type: "image" | "file" | "location" | "emoji";
+	url: string | null;
 }
 
 type AttachmentRecordEmitter = (data: RecordData) => Promise<void>;
 
 export function attachmentContentType(att: GroupMeAttachment): string {
-  return att.type === "image" ? "image/jpeg" : "application/octet-stream";
+	return att.type === "image" ? "image/jpeg" : "application/octet-stream";
 }
 
 /**
@@ -617,92 +695,111 @@ export function attachmentContentType(att: GroupMeAttachment): string {
  * within that message's attachment array, which is stable across reruns of
  * the same message.
  */
-export function attachmentRecordId(messageId: string, index: number, url: string | null): string {
-  const urlHash = url ? createHash("sha256").update(url).digest("hex").slice(0, 16) : "no-url";
-  return `${messageId}:attachment:${index}:${urlHash}`;
+export function attachmentRecordId(
+	messageId: string,
+	index: number,
+	url: string | null,
+): string {
+	const urlHash = url
+		? createHash("sha256").update(url).digest("hex").slice(0, 16)
+		: "no-url";
+	return `${messageId}:attachment:${index}:${urlHash}`;
 }
 
 export async function normalizeOneAttachment(
-  att: GroupMeAttachment,
-  index: number,
-  messageId: string,
-  messageStream: "group_messages" | "direct_chat_messages",
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined
+	att: GroupMeAttachment,
+	index: number,
+	messageId: string,
+	messageStream: "group_messages" | "direct_chat_messages",
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
 ): Promise<NormalizedAttachment> {
-  const url = att.url || att.picture_url || null;
-  const normalized: NormalizedAttachment = {
-    type: att.type,
-    url,
-    name: att.name || null,
-    ...(att.lat && att.lng ? { lat: Number.parseFloat(att.lat), lng: Number.parseFloat(att.lng) } : {}),
-  };
+	const url = att.url || att.picture_url || null;
+	const normalized: NormalizedAttachment = {
+		type: att.type,
+		url,
+		name: att.name || null,
+		...(att.lat && att.lng
+			? { lat: Number.parseFloat(att.lat), lng: Number.parseFloat(att.lng) }
+			: {}),
+	};
 
-  // Attempt blob hydration for images/files with URLs
-  if (!(url && (att.type === "image" || att.type === "file"))) {
-    return normalized;
-  }
+	// Attempt blob hydration for images/files with URLs
+	if (!(url && (att.type === "image" || att.type === "file"))) {
+		return normalized;
+	}
 
-  const contentType = attachmentContentType(att);
-  const recordId = attachmentRecordId(messageId, index, url);
-  let blobRef: ReferenceBlobRef | null = null;
-  let hydrationStatus: HydrationStatus = "deferred";
-  let hydrationError: string | null = null;
+	const contentType = attachmentContentType(att);
+	const recordId = attachmentRecordId(messageId, index, url);
+	let blobRef: ReferenceBlobRef | null = null;
+	let hydrationStatus: HydrationStatus = "deferred";
+	let hydrationError: string | null = null;
 
-  if (uploader) {
-    try {
-      const uploadResult = await uploader(url, contentType, recordId);
-      // Keep the exported normalization seam compatible with callers that
-      // provide a direct blob uploader; the production uploader returns the
-      // richer tagged outcome needed for unavailable-vs-failed accounting.
-      const applied = applyBlobUploadResult(uploadResult);
-      ({ blobRef, hydrationError, hydrationStatus } = applied);
-      if (blobRef) {
-        normalized.blob_id = blobRef.blob_id;
-      }
-    } catch (error) {
-      // Per-item failure: log but continue, don't fail the whole record
-      hydrationStatus = "failed";
-      hydrationError = error instanceof Error ? error.message : String(error);
-      // eslint-disable-next-line no-console
-      console.warn(`groupme: blob upload failed for ${att.type}: ${hydrationError}`);
-    }
-  }
+	if (uploader) {
+		try {
+			const uploadResult = await uploader(url, contentType, recordId);
+			// Keep the exported normalization seam compatible with callers that
+			// provide a direct blob uploader; the production uploader returns the
+			// richer tagged outcome needed for unavailable-vs-failed accounting.
+			const applied = applyBlobUploadResult(uploadResult);
+			({ blobRef, hydrationError, hydrationStatus } = applied);
+			if (blobRef) {
+				normalized.blob_id = blobRef.blob_id;
+			}
+		} catch (error) {
+			// Per-item failure: log but continue, don't fail the whole record
+			hydrationStatus = "failed";
+			hydrationError = error instanceof Error ? error.message : String(error);
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: blob upload failed for ${att.type}: ${hydrationError}`,
+			);
+		}
+	}
 
-  if (emitAttachmentRecord) {
-    await emitAttachmentRecord({
-      id: recordId,
-      message_id: messageId,
-      message_stream: messageStream,
-      type: att.type,
-      content_type: blobRef?.mime_type ?? contentType,
-      size_bytes: blobRef?.size_bytes ?? null,
-      content_sha256: blobRef?.sha256 ?? null,
-      hydration_status: hydrationStatus,
-      hydration_error: hydrationError,
-      blob_ref: blobRef,
-    });
-  }
+	if (emitAttachmentRecord) {
+		await emitAttachmentRecord({
+			id: recordId,
+			message_id: messageId,
+			message_stream: messageStream,
+			type: att.type,
+			content_type: blobRef?.mime_type ?? contentType,
+			size_bytes: blobRef?.size_bytes ?? null,
+			content_sha256: blobRef?.sha256 ?? null,
+			hydration_status: hydrationStatus,
+			hydration_error: hydrationError,
+			blob_ref: blobRef,
+		});
+	}
 
-  return normalized;
+	return normalized;
 }
 
 export async function normalizeAttachments(
-  attachments: GroupMeAttachment[] | undefined | null,
-  messageId: string,
-  messageStream: "group_messages" | "direct_chat_messages",
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined
+	attachments: GroupMeAttachment[] | undefined | null,
+	messageId: string,
+	messageStream: "group_messages" | "direct_chat_messages",
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
 ): Promise<NormalizedAttachment[]> {
-  if (!(attachments && Array.isArray(attachments))) {
-    return [];
-  }
+	if (!(attachments && Array.isArray(attachments))) {
+		return [];
+	}
 
-  const result: NormalizedAttachment[] = [];
-  for (const [index, att] of attachments.entries()) {
-    result.push(await normalizeOneAttachment(att, index, messageId, messageStream, uploader, emitAttachmentRecord));
-  }
-  return result;
+	const result: NormalizedAttachment[] = [];
+	for (const [index, att] of attachments.entries()) {
+		result.push(
+			await normalizeOneAttachment(
+				att,
+				index,
+				messageId,
+				messageStream,
+				uploader,
+				emitAttachmentRecord,
+			),
+		);
+	}
+	return result;
 }
 
 /**
@@ -721,9 +818,9 @@ export async function normalizeAttachments(
  * ordinary unexpected-status error.
  */
 class EmptyPageResponse extends Error {
-  constructor() {
-    super("groupme_messages_empty_page_304");
-  }
+	constructor() {
+		super("groupme_messages_empty_page_304");
+	}
 }
 
 /**
@@ -740,54 +837,66 @@ class EmptyPageResponse extends Error {
  * triggering an expensive, unsignaled full backward rescan.
  */
 class GroupMeHttpError extends Error {
-  readonly status: number;
-  constructor(status: number, body: string) {
-    super(`groupme_http_${status}: ${body.slice(0, 200)}`);
-    this.name = "GroupMeHttpError";
-    this.status = status;
-  }
+	readonly status: number;
+	constructor(status: number, body: string) {
+		super(`groupme_http_${status}: ${body.slice(0, 200)}`);
+		this.name = "GroupMeHttpError";
+		this.status = status;
+	}
 }
 
-async function makeRequest<T>(token: string, path: string, queryParams?: Record<string, string | number>): Promise<T> {
-  const url = new URL(`${API_BASE}${path}`);
-  if (queryParams) {
-    for (const [key, value] of Object.entries(queryParams)) {
-      url.searchParams.set(key, String(value));
-    }
-  }
+async function makeRequest<T>(
+	token: string,
+	path: string,
+	queryParams?: Record<string, string | number>,
+): Promise<T> {
+	const url = new URL(`${API_BASE}${path}`);
+	if (queryParams) {
+		for (const [key, value] of Object.entries(queryParams)) {
+			url.searchParams.set(key, String(value));
+		}
+	}
 
-  const r = await httpGovernor.request<
-    { body: string; status: number; headers: Record<string, string | undefined> },
-    { body: string; status: number; headers: Record<string, string | undefined> }
-  >(
-    async () => {
-      const res = await fetch(url.toString(), {
-        headers: {
-          "X-Access-Token": token,
-        },
-      });
-      return {
-        body: await res.text().catch((): string => ""),
-        headers: { "retry-after": res.headers.get("retry-after") ?? undefined },
-        status: res.status,
-      };
-    },
-    (resp) => ({ headers: resp.headers, status: resp.status, value: resp })
-  );
-  const raw = r.value;
+	const r = await httpGovernor.request<
+		{
+			body: string;
+			status: number;
+			headers: Record<string, string | undefined>;
+		},
+		{
+			body: string;
+			status: number;
+			headers: Record<string, string | undefined>;
+		}
+	>(
+		async () => {
+			const res = await fetch(url.toString(), {
+				headers: {
+					"X-Access-Token": token,
+				},
+			});
+			return {
+				body: await res.text().catch((): string => ""),
+				headers: { "retry-after": res.headers.get("retry-after") ?? undefined },
+				status: res.status,
+			};
+		},
+		(resp) => ({ headers: resp.headers, status: resp.status, value: resp }),
+	);
+	const raw = r.value;
 
-  if (raw.status === 401 || raw.status === 403) {
-    throw new Error("groupme_auth_failed");
-  }
-  if (raw.status === 304) {
-    throw new EmptyPageResponse();
-  }
-  if (raw.status < 200 || raw.status >= 300) {
-    throw new GroupMeHttpError(raw.status, raw.body);
-  }
+	if (raw.status === 401 || raw.status === 403) {
+		throw new Error("groupme_auth_failed");
+	}
+	if (raw.status === 304) {
+		throw new EmptyPageResponse();
+	}
+	if (raw.status < 200 || raw.status >= 300) {
+		throw new GroupMeHttpError(raw.status, raw.body);
+	}
 
-  const json = JSON.parse(raw.body) as { response: T };
-  return json.response;
+	const json = JSON.parse(raw.body) as { response: T };
+	return json.response;
 }
 
 /**
@@ -798,22 +907,26 @@ async function makeRequest<T>(token: string, path: string, queryParams?: Record<
  * pagination parameter produced the empty result.
  */
 async function fetchMessagesPage(
-  token: string,
-  groupId: string,
-  params: Record<string, string | number>
+	token: string,
+	groupId: string,
+	params: Record<string, string | number>,
 ): Promise<GroupMessagesResponse> {
-  try {
-    return await makeRequest<GroupMessagesResponse>(token, `/groups/${groupId}/messages`, params);
-  } catch (error) {
-    if (error instanceof EmptyPageResponse) {
-      return { count: 0, messages: [] };
-    }
-    throw error;
-  }
+	try {
+		return await makeRequest<GroupMessagesResponse>(
+			token,
+			`/groups/${groupId}/messages`,
+			params,
+		);
+	} catch (error) {
+		if (error instanceof EmptyPageResponse) {
+			return { count: 0, messages: [] };
+		}
+		throw error;
+	}
 }
 
 interface PaginatedListResult<T> {
-  items: T[];
+	items: T[];
 }
 
 /**
@@ -830,152 +943,182 @@ interface PaginatedListResult<T> {
  * `failed: true`.
  */
 async function fetchPaginatedList<T extends { id?: string | null }>(
-  token: string,
-  path: string,
-  stream: string,
-  progressWithSignals: ProgressFn,
-  identityOf: (item: T) => string = (item) => (item.id === null || item.id === undefined ? "" : String(item.id).trim())
+	token: string,
+	path: string,
+	stream: string,
+	progressWithSignals: ProgressFn,
+	identityOf: (item: T) => string = (item) =>
+		item.id === null || item.id === undefined ? "" : String(item.id).trim(),
 ): Promise<PaginatedListResult<T>> {
-  const items: T[] = [];
-  const seenIds = new Set<string>();
-  let page = 1;
+	const items: T[] = [];
+	const seenIds = new Set<string>();
+	let page = 1;
 
-  for (;;) {
-    await progressWithSignals(`Fetching ${path}`, { stream, phase: "fetch", page, total_seen: items.length });
-    const pageItems = await makeRequest<T[]>(token, path, { page, per_page: PAGE_SIZE });
-    const newItems = pageItems.filter((item) => !seenIds.has(identityOf(item)));
-    if (pageItems.length >= PAGE_SIZE && newItems.length === 0) {
-      throw new NonProgressError(path, "forward", String(page));
-    }
-    for (const item of newItems) {
-      const itemId = identityOf(item);
-      if (!itemId) {
-        throw new NonProgressError(path, "forward", String(page));
-      }
-      seenIds.add(itemId);
-      items.push(item);
-    }
-    await progressWithSignals(`Fetched ${path} page`, {
-      stream,
-      phase: "page",
-      page,
-      item_count: pageItems.length,
-      total_seen: items.length,
-    });
+	for (;;) {
+		await progressWithSignals(`Fetching ${path}`, {
+			stream,
+			phase: "fetch",
+			page,
+			total_seen: items.length,
+		});
+		const pageItems = await makeRequest<T[]>(token, path, {
+			page,
+			per_page: PAGE_SIZE,
+		});
+		const newItems = pageItems.filter((item) => !seenIds.has(identityOf(item)));
+		if (pageItems.length >= PAGE_SIZE && newItems.length === 0) {
+			throw new NonProgressError(path, "forward", String(page));
+		}
+		for (const item of newItems) {
+			const itemId = identityOf(item);
+			if (!itemId) {
+				throw new NonProgressError(path, "forward", String(page));
+			}
+			seenIds.add(itemId);
+			items.push(item);
+		}
+		await progressWithSignals(`Fetched ${path} page`, {
+			stream,
+			phase: "page",
+			page,
+			item_count: pageItems.length,
+			total_seen: items.length,
+		});
 
-    if (pageItems.length < PAGE_SIZE) {
-      return { items };
-    }
-    page += 1;
-  }
+		if (pageItems.length < PAGE_SIZE) {
+			return { items };
+		}
+		page += 1;
+	}
 }
 
 function toGroupRecord(g: GroupMeGroup): RecordData {
-  return {
-    id: g.id,
-    name: g.name ?? null,
-    description: g.description ?? null,
-    avatar_url: g.avatar_url ?? g.image_url ?? null,
-    created_at: convertTimestamp(g.created_at),
-    updated_at: convertTimestamp(g.updated_at),
-    member_count: g.members_count ?? null,
-    // Reads whichever shape the API returned. The prior flat-only read is
-    // why all 156 of this owner's groups persisted `messages_count: null`.
-    messages_count: providerMessageCount(g),
-  };
+	return {
+		id: g.id,
+		name: g.name ?? null,
+		description: g.description ?? null,
+		avatar_url: g.avatar_url ?? g.image_url ?? null,
+		created_at: convertTimestamp(g.created_at),
+		updated_at: convertTimestamp(g.updated_at),
+		member_count: g.members_count ?? null,
+		// Reads whichever shape the API returned. The prior flat-only read is
+		// why all 156 of this owner's groups persisted `messages_count: null`.
+		messages_count: providerMessageCount(g),
+	};
 }
 
 async function toGroupMessageRecord(
-  msg: GroupMeMessage,
-  groupId: string,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined
+	msg: GroupMeMessage,
+	groupId: string,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
 ): Promise<RecordData> {
-  return {
-    id: msg.id,
-    group_id: groupId,
-    user_id: msg.user_id ?? null,
-    name: msg.name ?? null,
-    text: msg.text ?? null,
-    avatar_url: msg.avatar_url ?? null,
-    created_at: convertTimestamp(msg.created_at, `group message ${msg.id}`),
-    attachments: await normalizeAttachments(msg.attachments, msg.id, "group_messages", uploader, emitAttachmentRecord),
-    like_count: msg.favorited_by ? msg.favorited_by.length : null,
-    system: msg.system ?? null,
-  };
+	return {
+		id: msg.id,
+		group_id: groupId,
+		user_id: msg.user_id ?? null,
+		name: msg.name ?? null,
+		text: msg.text ?? null,
+		avatar_url: msg.avatar_url ?? null,
+		created_at: convertTimestamp(msg.created_at, `group message ${msg.id}`),
+		attachments: await normalizeAttachments(
+			msg.attachments,
+			msg.id,
+			"group_messages",
+			uploader,
+			emitAttachmentRecord,
+		),
+		like_count: msg.favorited_by ? msg.favorited_by.length : null,
+		system: msg.system ?? null,
+	};
 }
 
 function directChatIdentity(chat: GroupMeDirectChat): string {
-  const chatId = chat.id?.trim() || chat.other_user?.id?.trim();
-  if (!chatId) {
-    throw new Error("groupme_direct_chat_missing_identity");
-  }
-  return chatId;
+	const chatId = chat.id?.trim() || chat.other_user?.id?.trim();
+	if (!chatId) {
+		throw new Error("groupme_direct_chat_missing_identity");
+	}
+	return chatId;
 }
 
 function toDirectChatRecord(chat: GroupMeDirectChat): RecordData {
-  const chatId = directChatIdentity(chat);
-  const lastMessage = chat.last_message;
-  const lastMessageText = typeof lastMessage === "string" ? lastMessage : (lastMessage?.text ?? null);
-  const lastMessageAt = chat.last_message_at ?? (typeof lastMessage === "object" ? lastMessage?.created_at : null);
-  return {
-    id: chatId,
-    other_user_id: chat.other_user?.id ?? null,
-    other_user_name: chat.other_user?.name ?? null,
-    avatar_url: chat.avatar_url ?? chat.other_user?.avatar_url ?? null,
-    last_message: lastMessageText,
-    last_message_at: convertOptionalTimestamp(lastMessageAt),
-  };
+	const chatId = directChatIdentity(chat);
+	const lastMessage = chat.last_message;
+	const lastMessageText =
+		typeof lastMessage === "string" ? lastMessage : (lastMessage?.text ?? null);
+	const lastMessageAt =
+		chat.last_message_at ??
+		(typeof lastMessage === "object" ? lastMessage?.created_at : null);
+	return {
+		id: chatId,
+		other_user_id: chat.other_user?.id ?? null,
+		other_user_name: chat.other_user?.name ?? null,
+		avatar_url: chat.avatar_url ?? chat.other_user?.avatar_url ?? null,
+		last_message: lastMessageText,
+		last_message_at: convertOptionalTimestamp(lastMessageAt),
+	};
 }
 
 async function toDirectChatMessageRecord(
-  msg: GroupMeMessage,
-  chatId: string,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined
+	msg: GroupMeMessage,
+	chatId: string,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
 ): Promise<RecordData> {
-  return {
-    id: msg.id,
-    chat_id: chatId,
-    user_id: msg.user_id ?? null,
-    name: msg.name ?? null,
-    text: msg.text ?? null,
-    avatar_url: msg.avatar_url ?? null,
-    created_at: convertTimestamp(msg.created_at, `direct message ${msg.id}`),
-    attachments: await normalizeAttachments(
-      msg.attachments,
-      msg.id,
-      "direct_chat_messages",
-      uploader,
-      emitAttachmentRecord
-    ),
-  };
+	return {
+		id: msg.id,
+		chat_id: chatId,
+		user_id: msg.user_id ?? null,
+		name: msg.name ?? null,
+		text: msg.text ?? null,
+		avatar_url: msg.avatar_url ?? null,
+		created_at: convertTimestamp(msg.created_at, `direct message ${msg.id}`),
+		attachments: await normalizeAttachments(
+			msg.attachments,
+			msg.id,
+			"direct_chat_messages",
+			uploader,
+			emitAttachmentRecord,
+		),
+	};
 }
 
 type BlobHydrationOutcome =
-  | { kind: "failed"; reason: string }
-  | { kind: "hydrated"; blobRef: ReferenceBlobRef }
-  | { kind: "unavailable"; reason: "provider_object_unavailable" };
+	| { kind: "failed"; reason: string }
+	| { kind: "hydrated"; blobRef: ReferenceBlobRef }
+	| { kind: "unavailable"; reason: "provider_object_unavailable" };
 type BlobUploader = (
-  url: string,
-  mimeType: string,
-  recordKey: string
+	url: string,
+	mimeType: string,
+	recordKey: string,
 ) => Promise<BlobHydrationOutcome | ReferenceBlobRef | null>;
 
-function applyBlobUploadResult(uploadResult: BlobHydrationOutcome | ReferenceBlobRef | null): {
-  blobRef: ReferenceBlobRef | null;
-  hydrationError: string | null;
-  hydrationStatus: HydrationStatus;
+function applyBlobUploadResult(
+	uploadResult: BlobHydrationOutcome | ReferenceBlobRef | null,
+): {
+	blobRef: ReferenceBlobRef | null;
+	hydrationError: string | null;
+	hydrationStatus: HydrationStatus;
 } {
-  if (uploadResult === null) {
-    return { blobRef: null, hydrationError: null, hydrationStatus: "deferred" };
-  }
-  const outcome: BlobHydrationOutcome =
-    "kind" in uploadResult ? uploadResult : { kind: "hydrated", blobRef: uploadResult };
-  if (outcome.kind === "hydrated") {
-    return { blobRef: outcome.blobRef, hydrationError: null, hydrationStatus: "hydrated" };
-  }
-  return { blobRef: null, hydrationError: outcome.reason, hydrationStatus: outcome.kind };
+	if (uploadResult === null) {
+		return { blobRef: null, hydrationError: null, hydrationStatus: "deferred" };
+	}
+	const outcome: BlobHydrationOutcome =
+		"kind" in uploadResult
+			? uploadResult
+			: { kind: "hydrated", blobRef: uploadResult };
+	if (outcome.kind === "hydrated") {
+		return {
+			blobRef: outcome.blobRef,
+			hydrationError: null,
+			hydrationStatus: "hydrated",
+		};
+	}
+	return {
+		blobRef: null,
+		hydrationError: outcome.reason,
+		hydrationStatus: outcome.kind,
+	};
 }
 
 type HydrationStatus = "deferred" | "failed" | "hydrated" | "unavailable";
@@ -986,55 +1129,64 @@ type ProgressFn = (message: string, extra?: ProgressExtra) => Promise<void>;
  * the pre-fetch type-based guess. `observedContentType` is already
  * normalized/allowlisted by `normalizeAttachmentContentType` upstream.
  */
-export function resolveUploadMimeType(observedContentType: string | null, fallbackGuess: string): string {
-  return observedContentType ?? fallbackGuess;
+export function resolveUploadMimeType(
+	observedContentType: string | null,
+	fallbackGuess: string,
+): string {
+	return observedContentType ?? fallbackGuess;
 }
 
 function makeUploader(): BlobUploader | undefined {
-  if (!runtimeBlobUploadAvailable()) {
-    return;
-  }
-  const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-  const ownerToken = process.env.PDPP_OWNER_TOKEN;
-  if (!(rsUrl && ownerToken)) {
-    return;
-  }
-  const blobUploader = makeReferenceBlobUploader({
-    connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-    ownerToken,
-    rsUrl,
-  });
-  return async (url: string, mimeType: string, recordKey: string): Promise<BlobHydrationOutcome> => {
-    const fetched = await fetchAttachmentBlobOutcome(url, recordKey);
-    if (fetched.kind !== "available") {
-      return fetched;
-    }
-    const { blob } = fetched;
-    const resolvedMimeType = resolveUploadMimeType(blob.contentType, mimeType);
+	if (!runtimeBlobUploadAvailable()) {
+		return;
+	}
+	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
+	const ownerToken = process.env.PDPP_OWNER_TOKEN;
+	if (!(rsUrl && ownerToken)) {
+		return;
+	}
+	const blobUploader = makeReferenceBlobUploader({
+		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
+		ownerToken,
+		rsUrl,
+	});
+	return async (
+		url: string,
+		mimeType: string,
+		recordKey: string,
+	): Promise<BlobHydrationOutcome> => {
+		const fetched = await fetchAttachmentBlobOutcome(url, recordKey);
+		if (fetched.kind !== "available") {
+			return fetched;
+		}
+		const { blob } = fetched;
+		const resolvedMimeType = resolveUploadMimeType(blob.contentType, mimeType);
 
-    try {
-      const blobRef = await blobUploader({
-        connectorId: "groupme",
-        connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-        content: [blob.buffer],
-        mimeType: resolvedMimeType,
-        recordKey,
-        stream: "attachments",
-      });
-      return blobRef ? { kind: "hydrated", blobRef } : { kind: "failed", reason: "attachment_blob_upload_failed" };
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `groupme: blob upload failed (${recordKey}): ${error instanceof Error ? error.message : String(error)}`
-      );
-      return { kind: "failed", reason: "attachment_blob_upload_failed" };
-    }
-  };
+		try {
+			const blobRef = await blobUploader({
+				connectorId: "groupme",
+				connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
+				content: [blob.buffer],
+				mimeType: resolvedMimeType,
+				recordKey,
+				stream: "attachments",
+			});
+			return blobRef
+				? { kind: "hydrated", blobRef }
+				: { kind: "failed", reason: "attachment_blob_upload_failed" };
+		} catch (error) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`groupme: blob upload failed (${recordKey}): ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return { kind: "failed", reason: "attachment_blob_upload_failed" };
+		}
+	};
 }
 
 interface GroupMessagesResponse {
-  count: number;
-  messages: GroupMeMessage[];
+	count: number;
+	messages: GroupMeMessage[];
 }
 
 /**
@@ -1087,9 +1239,11 @@ interface GroupMessagesResponse {
  * `fetchMessagesPage`, so the documented terminal page can never reach this
  * predicate as a false positive.
  */
-export function pageEndedShortOfProviderCount(resp: GroupMessagesResponse): boolean {
-  const served = (resp.messages || []).length;
-  return served === 0 && typeof resp.count === "number" && resp.count > 0;
+export function pageEndedShortOfProviderCount(
+	resp: GroupMessagesResponse,
+): boolean {
+	const served = (resp.messages || []).length;
+	return served === 0 && typeof resp.count === "number" && resp.count > 0;
 }
 
 /**
@@ -1101,29 +1255,29 @@ export function pageEndedShortOfProviderCount(resp: GroupMessagesResponse): bool
  * mistaken for "this group has no more messages."
  */
 interface PerConversationWalkResult {
-  /** The `id` of the newest message this walk fetched (page 1's first
-   *  message for a backward walk, or the last id reached for a forward
-   *  walk), or `undefined` if the group/chat returned no messages at all.
-   *  This becomes next run's cursor — an opaque, provider-issued boundary
-   *  marker, never a locally-computed time window. Undefined for walks that
-   *  don't track a cursor (direct chat messages, which have no documented
-   *  ordering to license one). */
-  newestMessageId: string | undefined;
-  totalSeen: number;
-  /**
-   * True when this walk RAN OUT OF SERVABLE HISTORY before reaching the
-   * provider's total (see `pageEndedShortOfProviderCount`) — an empty array
-   * served against a non-zero `count`. The walk's boundary is then UNPROVEN:
-   * the remainder may be gone from the provider for good (retention), or it
-   * may be temporarily unserved, and the response carries nothing that tells
-   * them apart.
-   *
-   * Callers must not treat such a walk as proof of completeness. It is
-   * deliberately separate from `failed`: nothing errored, the request
-   * succeeded, and partial results already emitted stay valid — only the
-   * COMPLETENESS claim is withheld.
-   */
-  unprovenBoundary: boolean;
+	/** The `id` of the newest message this walk fetched (page 1's first
+	 *  message for a backward walk, or the last id reached for a forward
+	 *  walk), or `undefined` if the group/chat returned no messages at all.
+	 *  This becomes next run's cursor — an opaque, provider-issued boundary
+	 *  marker, never a locally-computed time window. Undefined for walks that
+	 *  don't track a cursor (direct chat messages, which have no documented
+	 *  ordering to license one). */
+	newestMessageId: string | undefined;
+	totalSeen: number;
+	/**
+	 * True when this walk RAN OUT OF SERVABLE HISTORY before reaching the
+	 * provider's total (see `pageEndedShortOfProviderCount`) — an empty array
+	 * served against a non-zero `count`. The walk's boundary is then UNPROVEN:
+	 * the remainder may be gone from the provider for good (retention), or it
+	 * may be temporarily unserved, and the response carries nothing that tells
+	 * them apart.
+	 *
+	 * Callers must not treat such a walk as proof of completeness. It is
+	 * deliberately separate from `failed`: nothing errored, the request
+	 * succeeded, and partial results already emitted stay valid — only the
+	 * COMPLETENESS claim is withheld.
+	 */
+	unprovenBoundary: boolean;
 }
 
 /**
@@ -1147,10 +1301,16 @@ interface PerConversationWalkResult {
  * are withheld for the boundary this walk never proved.
  */
 class NonProgressError extends Error {
-  constructor(subject: string, direction: "forward" | "backward", cursor: string) {
-    super(`groupme: ${subject} ${direction} walk made no progress at cursor ${cursor} — refusing to loop`);
-    this.name = "NonProgressError";
-  }
+	constructor(
+		subject: string,
+		direction: "forward" | "backward",
+		cursor: string,
+	) {
+		super(
+			`groupme: ${subject} ${direction} walk made no progress at cursor ${cursor} — refusing to loop`,
+		);
+		this.name = "NonProgressError";
+	}
 }
 
 /**
@@ -1170,13 +1330,13 @@ class NonProgressError extends Error {
  * unchanged content still no-ops through the fingerprint cursor).
  */
 class InvalidResumeCursorError extends Error {
-  constructor(groupId: string, cursor: string, cause: unknown) {
-    super(
-      `groupme: group ${groupId}'s persisted cursor ${cursor} was rejected by the provider — falling back to a full backward walk for this group`,
-      { cause }
-    );
-    this.name = "InvalidResumeCursorError";
-  }
+	constructor(groupId: string, cursor: string, cause: unknown) {
+		super(
+			`groupme: group ${groupId}'s persisted cursor ${cursor} was rejected by the provider — falling back to a full backward walk for this group`,
+			{ cause },
+		);
+		this.name = "InvalidResumeCursorError";
+	}
 }
 
 /**
@@ -1190,14 +1350,14 @@ class InvalidResumeCursorError extends Error {
  * row regardless of intra-page order.
  */
 function applySinceBoundToPage(
-  messages: GroupMeMessage[],
-  sinceEpochSeconds: number | null
+	messages: GroupMeMessage[],
+	sinceEpochSeconds: number | null,
 ): { inScope: GroupMeMessage[]; pageFullyOutOfScope: boolean } {
-  if (sinceEpochSeconds === null) {
-    return { inScope: messages, pageFullyOutOfScope: false };
-  }
-  const inScope = messages.filter((msg) => msg.created_at >= sinceEpochSeconds);
-  return { inScope, pageFullyOutOfScope: inScope.length === 0 };
+	if (sinceEpochSeconds === null) {
+		return { inScope: messages, pageFullyOutOfScope: false };
+	}
+	const inScope = messages.filter((msg) => msg.created_at >= sinceEpochSeconds);
+	return { inScope, pageFullyOutOfScope: inScope.length === 0 };
 }
 
 /**
@@ -1211,14 +1371,14 @@ function applySinceBoundToPage(
  * silently trusted.
  */
 function isDescendingByCreatedAt(messages: readonly GroupMeMessage[]): boolean {
-  for (let i = 1; i < messages.length; i += 1) {
-    const prev = messages[i - 1];
-    const curr = messages[i];
-    if (prev && curr && curr.created_at > prev.created_at) {
-      return false;
-    }
-  }
-  return true;
+	for (let i = 1; i < messages.length; i += 1) {
+		const prev = messages[i - 1];
+		const curr = messages[i];
+		if (prev && curr && curr.created_at > prev.created_at) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /**
@@ -1254,46 +1414,59 @@ function isDescendingByCreatedAt(messages: readonly GroupMeMessage[]): boolean {
  * there's nothing left.
  */
 export interface GroupMessageCursors {
-  [groupId: string]: string;
+	[groupId: string]: string;
 }
 
 /** Decode `state.group_messages.cursors` tolerantly: any missing/malformed
  *  shape yields an empty map (cold start — walk backward to the natural
  *  end instead), matching `decodePriorFingerprints`'s tolerance policy in
  *  fingerprint-cursor.ts. */
-export function decodeGroupMessageCursors(priorState: unknown): GroupMessageCursors {
-  const out: GroupMessageCursors = {};
-  if (!priorState || typeof priorState !== "object" || Array.isArray(priorState)) {
-    return out;
-  }
-  const raw = (priorState as Record<string, unknown>).cursors;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [groupId, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) {
-      out[groupId] = value;
-    }
-  }
-  return out;
+export function decodeGroupMessageCursors(
+	priorState: unknown,
+): GroupMessageCursors {
+	const out: GroupMessageCursors = {};
+	if (
+		!priorState ||
+		typeof priorState !== "object" ||
+		Array.isArray(priorState)
+	) {
+		return out;
+	}
+	const raw = (priorState as Record<string, unknown>).cursors;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [groupId, value] of Object.entries(
+		raw as Record<string, unknown>,
+	)) {
+		if (typeof value === "string" && value.length > 0) {
+			out[groupId] = value;
+		}
+	}
+	return out;
 }
 
 /** Emit every in-scope group message through the fingerprint cursor. Shared
  *  by both the forward (`after_id`) and backward (`before_id`) walks. */
 async function emitInScopeGroupMessages(
-  inScope: readonly GroupMeMessage[],
-  groupId: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>
+	inScope: readonly GroupMeMessage[],
+	groupId: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
 ): Promise<void> {
-  for (const msg of inScope) {
-    const record = await toGroupMessageRecord(msg, groupId, uploader, emitAttachmentRecord);
-    if (cursor.shouldEmit(record)) {
-      await emitRecord("group_messages", record);
-    }
-  }
+	for (const msg of inScope) {
+		const record = await toGroupMessageRecord(
+			msg,
+			groupId,
+			uploader,
+			emitAttachmentRecord,
+		);
+		if (cursor.shouldEmit(record)) {
+			await emitRecord("group_messages", record);
+		}
+	}
 }
 
 /**
@@ -1304,14 +1477,14 @@ async function emitInScopeGroupMessages(
  * backward endpoint's documented order.
  */
 function isAscendingByCreatedAt(messages: readonly GroupMeMessage[]): boolean {
-  for (let i = 1; i < messages.length; i += 1) {
-    const prev = messages[i - 1];
-    const curr = messages[i];
-    if (prev && curr && curr.created_at < prev.created_at) {
-      return false;
-    }
-  }
-  return true;
+	for (let i = 1; i < messages.length; i += 1) {
+		const prev = messages[i - 1];
+		const curr = messages[i];
+		if (prev && curr && curr.created_at < prev.created_at) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /**
@@ -1329,103 +1502,114 @@ function isAscendingByCreatedAt(messages: readonly GroupMeMessage[]): boolean {
  * withheld exactly as they are for any other fetch/parse failure.
  */
 async function collectGroupMessagesForwardFromCursor(
-  token: string,
-  group: GroupMeGroup,
-  startAfterId: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>
+	token: string,
+	group: GroupMeGroup,
+	startAfterId: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
 ): Promise<PerConversationWalkResult> {
-  let afterId = startAfterId;
-  let totalSeen = 0;
-  let newestMessageId: string | undefined;
-  let isFirstFetch = true;
-  const usedCursors = new Set<string>([startAfterId]);
+	let afterId = startAfterId;
+	let totalSeen = 0;
+	let newestMessageId: string | undefined;
+	let isFirstFetch = true;
+	const usedCursors = new Set<string>([startAfterId]);
 
-  for (;;) {
-    await progressWithSignals("Fetching group messages", {
-      stream: "group_messages",
-      phase: "fetch",
-      after_id: afterId,
-      total_seen: totalSeen,
-    });
+	for (;;) {
+		await progressWithSignals("Fetching group messages", {
+			stream: "group_messages",
+			phase: "fetch",
+			after_id: afterId,
+			total_seen: totalSeen,
+		});
 
-    let resp: GroupMessagesResponse;
-    try {
-      resp = await fetchMessagesPage(token, group.id, {
-        limit: PAGE_SIZE,
-        after_id: afterId,
-      });
-    } catch (error) {
-      // Only the FIRST fetch of a resumed walk gets the invalid-cursor
-      // fallback treatment — see InvalidResumeCursorError's doc comment. A
-      // mid-walk failure (any fetch after the first) is an ordinary
-      // transient error and propagates normally.
-      //
-      // The fallback trigger is INTENTIONALLY narrow: only a structured
-      // GroupMeHttpError with status 400 or 404 — the closest thing
-      // GroupMe's docs gesture at for "this identifier doesn't resolve"
-      // (see EmptyPageResponse's doc comment on the docs' silence for
-      // after_id specifically). This must NEVER match 401/403 (a separate,
-      // unstructured "groupme_auth_failed" Error — auth failures propagate
-      // untouched, the whole run is dead, not just this cursor), and must
-      // NEVER match 429/5xx (a transient provider condition, not evidence
-      // the cursor itself is invalid) — matching those would silently
-      // convert a temporary blip into an expensive, unsignaled full
-      // backward rescan with no retry and no operator-visible failure. A
-      // prior revision matched on `error.message.startsWith("groupme_http_")`,
-      // which is true for every status alike; this is the fix for that P1.
-      if (isFirstFetch && error instanceof GroupMeHttpError && (error.status === 400 || error.status === 404)) {
-        // biome-ignore lint/style/useErrorCause: InvalidResumeCursorError's 3rd constructor arg forwards to super(message, { cause })
-        throw new InvalidResumeCursorError(group.id, afterId, error);
-      }
-      throw error;
-    }
-    isFirstFetch = false;
+		let resp: GroupMessagesResponse;
+		try {
+			resp = await fetchMessagesPage(token, group.id, {
+				limit: PAGE_SIZE,
+				after_id: afterId,
+			});
+		} catch (error) {
+			// Only the FIRST fetch of a resumed walk gets the invalid-cursor
+			// fallback treatment — see InvalidResumeCursorError's doc comment. A
+			// mid-walk failure (any fetch after the first) is an ordinary
+			// transient error and propagates normally.
+			//
+			// The fallback trigger is INTENTIONALLY narrow: only a structured
+			// GroupMeHttpError with status 400 or 404 — the closest thing
+			// GroupMe's docs gesture at for "this identifier doesn't resolve"
+			// (see EmptyPageResponse's doc comment on the docs' silence for
+			// after_id specifically). This must NEVER match 401/403 (a separate,
+			// unstructured "groupme_auth_failed" Error — auth failures propagate
+			// untouched, the whole run is dead, not just this cursor), and must
+			// NEVER match 429/5xx (a transient provider condition, not evidence
+			// the cursor itself is invalid) — matching those would silently
+			// convert a temporary blip into an expensive, unsignaled full
+			// backward rescan with no retry and no operator-visible failure. A
+			// prior revision matched on `error.message.startsWith("groupme_http_")`,
+			// which is true for every status alike; this is the fix for that P1.
+			if (
+				isFirstFetch &&
+				error instanceof GroupMeHttpError &&
+				(error.status === 400 || error.status === 404)
+			) {
+				// biome-ignore lint/style/useErrorCause: InvalidResumeCursorError's 3rd constructor arg forwards to super(message, { cause })
+				throw new InvalidResumeCursorError(group.id, afterId, error);
+			}
+			throw error;
+		}
+		isFirstFetch = false;
 
-    const messages = resp.messages || [];
-    if (!messages.length) {
-      // NOT checked against the provider count here, unlike the backward
-      // walk. This is a forward resume from a cursor, so `count` describes
-      // the group's WHOLE history while this page describes only what is
-      // NEW since that cursor. `count > 0` with an empty page is the normal,
-      // coherent shape of an up-to-date incremental walk — applying the
-      // backward walk's predicate here would flag every healthy incremental
-      // run as unproven.
-      return { totalSeen, newestMessageId, unprovenBoundary: false };
-    }
-    if (!isAscendingByCreatedAt(messages)) {
-      // The provider violated its own documented ordering contract for this
-      // response — nothing about this page's cursor can be trusted to
-      // safely resume from. Fail loudly rather than silently accept a page
-      // that might have skipped or reordered messages.
-      throw new NonProgressError(group.id, "forward", afterId);
-    }
+		const messages = resp.messages || [];
+		if (!messages.length) {
+			// NOT checked against the provider count here, unlike the backward
+			// walk. This is a forward resume from a cursor, so `count` describes
+			// the group's WHOLE history while this page describes only what is
+			// NEW since that cursor. `count > 0` with an empty page is the normal,
+			// coherent shape of an up-to-date incremental walk — applying the
+			// backward walk's predicate here would flag every healthy incremental
+			// run as unproven.
+			return { totalSeen, newestMessageId, unprovenBoundary: false };
+		}
+		if (!isAscendingByCreatedAt(messages)) {
+			// The provider violated its own documented ordering contract for this
+			// response — nothing about this page's cursor can be trusted to
+			// safely resume from. Fail loudly rather than silently accept a page
+			// that might have skipped or reordered messages.
+			throw new NonProgressError(group.id, "forward", afterId);
+		}
 
-    totalSeen += messages.length;
-    await progressWithSignals("Fetched group messages page", {
-      stream: "group_messages",
-      phase: "page",
-      item_count: messages.length,
-      total_seen: totalSeen,
-    });
+		totalSeen += messages.length;
+		await progressWithSignals("Fetched group messages page", {
+			stream: "group_messages",
+			phase: "page",
+			item_count: messages.length,
+			total_seen: totalSeen,
+		});
 
-    await emitInScopeGroupMessages(messages, group.id, cursor, uploader, emitAttachmentRecord, emitRecord);
-    newestMessageId = messages.at(-1)?.id ?? newestMessageId;
+		await emitInScopeGroupMessages(
+			messages,
+			group.id,
+			cursor,
+			uploader,
+			emitAttachmentRecord,
+			emitRecord,
+		);
+		newestMessageId = messages.at(-1)?.id ?? newestMessageId;
 
-    if (messages.length < PAGE_SIZE) {
-      return { totalSeen, newestMessageId, unprovenBoundary: false };
-    }
+		if (messages.length < PAGE_SIZE) {
+			return { totalSeen, newestMessageId, unprovenBoundary: false };
+		}
 
-    const nextAfterId = messages.at(-1)?.id;
-    if (!nextAfterId || usedCursors.has(nextAfterId)) {
-      throw new NonProgressError(group.id, "forward", afterId);
-    }
-    usedCursors.add(nextAfterId);
-    afterId = nextAfterId;
-  }
+		const nextAfterId = messages.at(-1)?.id;
+		if (!nextAfterId || usedCursors.has(nextAfterId)) {
+			throw new NonProgressError(group.id, "forward", afterId);
+		}
+		usedCursors.add(nextAfterId);
+		afterId = nextAfterId;
+	}
 }
 
 /**
@@ -1437,18 +1621,18 @@ async function collectGroupMessagesForwardFromCursor(
  * the lint ceiling — no behavior change from inlining it.
  */
 function backwardPageReachedNaturalEnd(
-  messages: readonly GroupMeMessage[],
-  inScope: readonly GroupMeMessage[],
-  pageFullyOutOfScope: boolean,
-  sinceEpochSeconds: number | null
+	messages: readonly GroupMeMessage[],
+	inScope: readonly GroupMeMessage[],
+	pageFullyOutOfScope: boolean,
+	sinceEpochSeconds: number | null,
 ): boolean {
-  if (pageFullyOutOfScope) {
-    return true;
-  }
-  if (sinceEpochSeconds !== null && inScope.length < messages.length) {
-    return true;
-  }
-  return messages.length < PAGE_SIZE;
+	if (pageFullyOutOfScope) {
+		return true;
+	}
+	if (sinceEpochSeconds !== null && inScope.length < messages.length) {
+		return true;
+	}
+	return messages.length < PAGE_SIZE;
 }
 
 /**
@@ -1464,88 +1648,109 @@ function backwardPageReachedNaturalEnd(
  * the walk early since everything after it is out of the declared scope.
  */
 async function collectGroupMessagesBackwardToNaturalEnd(
-  token: string,
-  group: GroupMeGroup,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  sinceEpochSeconds: number | null
+	token: string,
+	group: GroupMeGroup,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	sinceEpochSeconds: number | null,
 ): Promise<PerConversationWalkResult> {
-  let beforeId: string | undefined;
-  let totalSeen = 0;
-  let newestMessageId: string | undefined;
-  const usedCursors = new Set<string>();
+	let beforeId: string | undefined;
+	let totalSeen = 0;
+	let newestMessageId: string | undefined;
+	const usedCursors = new Set<string>();
 
-  for (;;) {
-    await progressWithSignals("Fetching group messages", {
-      stream: "group_messages",
-      phase: "fetch",
-      ...(beforeId ? { before_id: beforeId } : {}),
-      total_seen: totalSeen,
-    });
+	for (;;) {
+		await progressWithSignals("Fetching group messages", {
+			stream: "group_messages",
+			phase: "fetch",
+			...(beforeId ? { before_id: beforeId } : {}),
+			total_seen: totalSeen,
+		});
 
-    const resp = await fetchMessagesPage(token, group.id, {
-      limit: PAGE_SIZE,
-      ...(beforeId ? { before_id: beforeId } : {}),
-    });
+		const resp = await fetchMessagesPage(token, group.id, {
+			limit: PAGE_SIZE,
+			...(beforeId ? { before_id: beforeId } : {}),
+		});
 
-    const messages = resp.messages || [];
-    if (!messages.length) {
-      // An empty page ends the walk either way — there is no cursor to
-      // continue from. What differs is whether that ending PROVES the group
-      // was fully walked. An empty page served against a non-zero lifetime
-      // total proves nothing (see `pageEndedShortOfProviderCount`), so the
-      // boundary is reported as unproven instead of silently passing for
-      // complete.
-      return { totalSeen, newestMessageId, unprovenBoundary: pageEndedShortOfProviderCount(resp) };
-    }
+		const messages = resp.messages || [];
+		if (!messages.length) {
+			// An empty page ends the walk either way — there is no cursor to
+			// continue from. What differs is whether that ending PROVES the group
+			// was fully walked. An empty page served against a non-zero lifetime
+			// total proves nothing (see `pageEndedShortOfProviderCount`), so the
+			// boundary is reported as unproven instead of silently passing for
+			// complete.
+			return {
+				totalSeen,
+				newestMessageId,
+				unprovenBoundary: pageEndedShortOfProviderCount(resp),
+			};
+		}
 
-    if (newestMessageId === undefined) {
-      newestMessageId = messages[0]?.id;
-    }
+		if (newestMessageId === undefined) {
+			newestMessageId = messages[0]?.id;
+		}
 
-    // GroupMe's docs guarantee GET /groups/:id/messages with `before_id` is
-    // created_at-descending. A page that violates this is not safe to
-    // continue from: the trailing `before_id` (`messages.at(-1)`) is only
-    // guaranteed to be "the oldest on this page" if the page is genuinely
-    // ordered — on a non-descending page that id could sit anywhere in
-    // time, and paginating from it could silently skip or re-walk
-    // messages. Fail loudly (caught by runCollectionPass, becomes an
-    // ordinary `failed: true`) rather than trust an unverified cursor.
-    // Checked BEFORE emitting so a page this connector cannot trust never
-    // contributes to considered/emitted counts under a false "in scope"
-    // read of its own now-unreliable ordering.
-    if (!isDescendingByCreatedAt(messages)) {
-      throw new NonProgressError(group.id, "backward", beforeId ?? "(start)");
-    }
+		// GroupMe's docs guarantee GET /groups/:id/messages with `before_id` is
+		// created_at-descending. A page that violates this is not safe to
+		// continue from: the trailing `before_id` (`messages.at(-1)`) is only
+		// guaranteed to be "the oldest on this page" if the page is genuinely
+		// ordered — on a non-descending page that id could sit anywhere in
+		// time, and paginating from it could silently skip or re-walk
+		// messages. Fail loudly (caught by runCollectionPass, becomes an
+		// ordinary `failed: true`) rather than trust an unverified cursor.
+		// Checked BEFORE emitting so a page this connector cannot trust never
+		// contributes to considered/emitted counts under a false "in scope"
+		// read of its own now-unreliable ordering.
+		if (!isDescendingByCreatedAt(messages)) {
+			throw new NonProgressError(group.id, "backward", beforeId ?? "(start)");
+		}
 
-    const { inScope, pageFullyOutOfScope } = applySinceBoundToPage(messages, sinceEpochSeconds);
-    totalSeen += inScope.length;
-    await progressWithSignals("Fetched group messages page", {
-      stream: "group_messages",
-      phase: "page",
-      item_count: inScope.length,
-      total_seen: totalSeen,
-    });
+		const { inScope, pageFullyOutOfScope } = applySinceBoundToPage(
+			messages,
+			sinceEpochSeconds,
+		);
+		totalSeen += inScope.length;
+		await progressWithSignals("Fetched group messages page", {
+			stream: "group_messages",
+			phase: "page",
+			item_count: inScope.length,
+			total_seen: totalSeen,
+		});
 
-    await emitInScopeGroupMessages(inScope, group.id, cursor, uploader, emitAttachmentRecord, emitRecord);
+		await emitInScopeGroupMessages(
+			inScope,
+			group.id,
+			cursor,
+			uploader,
+			emitAttachmentRecord,
+			emitRecord,
+		);
 
-    if (backwardPageReachedNaturalEnd(messages, inScope, pageFullyOutOfScope, sinceEpochSeconds)) {
-      // A natural end reached on a page that DID serve messages: the
-      // provider gave content right up to the boundary, so the boundary is
-      // proven in the ordinary way.
-      return { totalSeen, newestMessageId, unprovenBoundary: false };
-    }
+		if (
+			backwardPageReachedNaturalEnd(
+				messages,
+				inScope,
+				pageFullyOutOfScope,
+				sinceEpochSeconds,
+			)
+		) {
+			// A natural end reached on a page that DID serve messages: the
+			// provider gave content right up to the boundary, so the boundary is
+			// proven in the ordinary way.
+			return { totalSeen, newestMessageId, unprovenBoundary: false };
+		}
 
-    const nextBeforeId = messages.at(-1)?.id;
-    if (!nextBeforeId || usedCursors.has(nextBeforeId)) {
-      throw new NonProgressError(group.id, "backward", beforeId ?? "(start)");
-    }
-    usedCursors.add(nextBeforeId);
-    beforeId = nextBeforeId;
-  }
+		const nextBeforeId = messages.at(-1)?.id;
+		if (!nextBeforeId || usedCursors.has(nextBeforeId)) {
+			throw new NonProgressError(group.id, "backward", beforeId ?? "(start)");
+		}
+		usedCursors.add(nextBeforeId);
+		beforeId = nextBeforeId;
+	}
 }
 
 /**
@@ -1560,8 +1765,8 @@ async function collectGroupMessagesBackwardToNaturalEnd(
  * claiming.
  */
 export interface CollectionOutcome {
-  considered: number;
-  failed: boolean;
+	considered: number;
+	failed: boolean;
 }
 
 /**
@@ -1590,32 +1795,34 @@ export interface CollectionOutcome {
  * durable control-plane metadata. A missing uploader is handled the same way.
  */
 export interface AttachmentDetailCoverage {
-  hydratedKeys: string[];
-  requiredKeys: string[];
-  unavailableKeys: string[];
+	hydratedKeys: string[];
+	requiredKeys: string[];
+	unavailableKeys: string[];
 }
 
 type AttachmentParentStream = "direct_chat_messages" | "group_messages";
 
 /** Fresh, empty accumulator for one run's attachments detail pass. */
 export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
-  return { hydratedKeys: [], requiredKeys: [], unavailableKeys: [] };
+	return { hydratedKeys: [], requiredKeys: [], unavailableKeys: [] };
 }
 
 interface AttachmentRecordEmitterDeps {
-  attachmentCursor: ReturnType<typeof openFingerprintCursor>;
-  coverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage>;
-  emitRecord: CollectContext["emitRecord"];
+	attachmentCursor: ReturnType<typeof openFingerprintCursor>;
+	coverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage>;
+	emitRecord: CollectContext["emitRecord"];
 }
 
-function createAttachmentRecordEmitter(deps: AttachmentRecordEmitterDeps): AttachmentRecordEmitter {
-  return async (data: RecordData): Promise<void> => {
-    const parent = data.message_stream as AttachmentParentStream;
-    recordAttachmentCoverage(deps.coverageByParent[parent], data);
-    if (deps.attachmentCursor.shouldEmit(data)) {
-      await deps.emitRecord("attachments", data);
-    }
-  };
+function createAttachmentRecordEmitter(
+	deps: AttachmentRecordEmitterDeps,
+): AttachmentRecordEmitter {
+	return async (data: RecordData): Promise<void> => {
+		const parent = data.message_stream as AttachmentParentStream;
+		recordAttachmentCoverage(deps.coverageByParent[parent], data);
+		if (deps.attachmentCursor.shouldEmit(data)) {
+			await deps.emitRecord("attachments", data);
+		}
+	};
 }
 
 /**
@@ -1626,11 +1833,11 @@ function createAttachmentRecordEmitter(deps: AttachmentRecordEmitterDeps): Attac
  * keep that function's cognitive complexity within the lint ceiling.
  */
 function attachmentParentCompleted(
-  requested: CollectContext["requested"],
-  parent: AttachmentParentStream,
-  outcome: CollectionOutcome | undefined
+	requested: CollectContext["requested"],
+	parent: AttachmentParentStream,
+	outcome: CollectionOutcome | undefined,
 ): boolean {
-  return requested.has(parent) && outcome?.failed === false;
+	return requested.has(parent) && outcome?.failed === false;
 }
 
 /**
@@ -1641,14 +1848,17 @@ function attachmentParentCompleted(
  * the same record shape `emitRecord` will independently (re-)validate —
  * this accumulator must never assume the runtime accepted the record.
  */
-export function recordAttachmentCoverage(coverage: AttachmentDetailCoverage, data: RecordData): void {
-  const key = typeof data.id === "string" ? data.id : String(data.id ?? "");
-  coverage.requiredKeys.push(key);
-  if (data.hydration_status === "hydrated") {
-    coverage.hydratedKeys.push(key);
-  } else if (data.hydration_status === "unavailable") {
-    coverage.unavailableKeys.push(key);
-  }
+export function recordAttachmentCoverage(
+	coverage: AttachmentDetailCoverage,
+	data: RecordData,
+): void {
+	const key = typeof data.id === "string" ? data.id : String(data.id ?? "");
+	coverage.requiredKeys.push(key);
+	if (data.hydration_status === "hydrated") {
+		coverage.hydratedKeys.push(key);
+	} else if (data.hydration_status === "unavailable") {
+		coverage.unavailableKeys.push(key);
+	}
 }
 
 /**
@@ -1657,32 +1867,54 @@ export function recordAttachmentCoverage(coverage: AttachmentDetailCoverage, dat
  * whose message walk produced the missing attachment.
  */
 export function buildAttachmentDetailCoverageMessage(
-  coverage: AttachmentDetailCoverage,
-  stateStream: AttachmentParentStream
+	coverage: AttachmentDetailCoverage,
+	stateStream: AttachmentParentStream,
 ): DetailCoverageMessage {
-  return buildDetailCoverageMessage({
-    stream: "attachments",
-    stateStream,
-    requiredKeys: coverage.requiredKeys,
-    hydratedKeys: coverage.hydratedKeys,
-    optionalSkipKeys: coverage.unavailableKeys,
-    considered: coverage.requiredKeys.length,
-    covered: coverage.hydratedKeys.length + coverage.unavailableKeys.length,
-  });
+	return buildDetailCoverageMessage({
+		stream: "attachments",
+		stateStream,
+		requiredKeys: coverage.requiredKeys,
+		hydratedKeys: coverage.hydratedKeys,
+		optionalSkipKeys: coverage.unavailableKeys,
+		considered: coverage.requiredKeys.length,
+		covered: coverage.hydratedKeys.length + coverage.unavailableKeys.length,
+	});
 }
 
 async function emitAttachmentCoverageByParent(
-  requested: CollectContext["requested"],
-  coverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage>,
-  outcomes: Record<AttachmentParentStream, CollectionOutcome | undefined>,
-  emit: CollectContext["emit"]
+	requested: CollectContext["requested"],
+	coverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage>,
+	outcomes: Record<AttachmentParentStream, CollectionOutcome | undefined>,
+	emit: CollectContext["emit"],
 ): Promise<void> {
-  if (attachmentParentCompleted(requested, "group_messages", outcomes.group_messages)) {
-    await emit(buildAttachmentDetailCoverageMessage(coverageByParent.group_messages, "group_messages"));
-  }
-  if (attachmentParentCompleted(requested, "direct_chat_messages", outcomes.direct_chat_messages)) {
-    await emit(buildAttachmentDetailCoverageMessage(coverageByParent.direct_chat_messages, "direct_chat_messages"));
-  }
+	if (
+		attachmentParentCompleted(
+			requested,
+			"group_messages",
+			outcomes.group_messages,
+		)
+	) {
+		await emit(
+			buildAttachmentDetailCoverageMessage(
+				coverageByParent.group_messages,
+				"group_messages",
+			),
+		);
+	}
+	if (
+		attachmentParentCompleted(
+			requested,
+			"direct_chat_messages",
+			outcomes.direct_chat_messages,
+		)
+	) {
+		await emit(
+			buildAttachmentDetailCoverageMessage(
+				coverageByParent.direct_chat_messages,
+				"direct_chat_messages",
+			),
+		);
+	}
 }
 
 /**
@@ -1700,98 +1932,109 @@ async function emitAttachmentCoverageByParent(
  * "truncated but not failed" outcome).
  */
 async function runCollectionPass(
-  stream: string,
-  errorLabel: string,
-  progressWithSignals: ProgressFn,
-  body: () => Promise<{ considered: number }>,
-  reportStreamFailure?: CollectContext["reportStreamFailure"]
+	stream: string,
+	errorLabel: string,
+	progressWithSignals: ProgressFn,
+	body: () => Promise<{ considered: number }>,
+	reportStreamFailure?: CollectContext["reportStreamFailure"],
 ): Promise<CollectionOutcome> {
-  try {
-    const { considered } = await body();
-    return { considered, failed: false };
-  } catch (error) {
-    if (error instanceof Error && error.message === "groupme_auth_failed") {
-      throw error;
-    }
-    await progressWithSignals(
-      `Error fetching ${errorLabel}: ${error instanceof Error ? error.message : String(error)}`,
-      {
-        stream,
-        phase: "error",
-      }
-    );
-    await reportStreamFailure?.(
-      stream,
-      `Error fetching ${errorLabel}: ${error instanceof Error ? error.message : String(error)}`,
-      { retryable: true }
-    );
-    return { considered: 0, failed: true };
-  }
+	try {
+		const { considered } = await body();
+		return { considered, failed: false };
+	} catch (error) {
+		if (error instanceof Error && error.message === "groupme_auth_failed") {
+			throw error;
+		}
+		await progressWithSignals(
+			`Error fetching ${errorLabel}: ${error instanceof Error ? error.message : String(error)}`,
+			{
+				stream,
+				phase: "error",
+			},
+		);
+		await reportStreamFailure?.(
+			stream,
+			`Error fetching ${errorLabel}: ${error instanceof Error ? error.message : String(error)}`,
+			{ retryable: true },
+		);
+		return { considered: 0, failed: true };
+	}
 }
 
 export async function collectGroups(
-  token: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  reportStreamFailure?: CollectContext["reportStreamFailure"]
+	token: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	reportStreamFailure?: CollectContext["reportStreamFailure"],
 ): Promise<CollectionOutcome> {
-  await progressWithSignals("Fetching GroupMe groups", { stream: "groups", phase: "start" });
-  return await runCollectionPass(
-    "groups",
-    "groups",
-    progressWithSignals,
-    async () => {
-      const { items: groups } = await fetchPaginatedList<GroupMeGroup>(token, "/groups", "groups", progressWithSignals);
+	await progressWithSignals("Fetching GroupMe groups", {
+		stream: "groups",
+		phase: "start",
+	});
+	return await runCollectionPass(
+		"groups",
+		"groups",
+		progressWithSignals,
+		async () => {
+			const { items: groups } = await fetchPaginatedList<GroupMeGroup>(
+				token,
+				"/groups",
+				"groups",
+				progressWithSignals,
+			);
 
-      for (const group of groups) {
-        const record = toGroupRecord(group);
-        if (cursor.shouldEmit(record)) {
-          await emitRecord("groups", record);
-        }
-      }
-      return { considered: groups.length };
-    },
-    reportStreamFailure
-  );
+			for (const group of groups) {
+				const record = toGroupRecord(group);
+				if (cursor.shouldEmit(record)) {
+					await emitRecord("groups", record);
+				}
+			}
+			return { considered: groups.length };
+		},
+		reportStreamFailure,
+	);
 }
 
 export async function collectDirectChats(
-  token: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  reportStreamFailure?: CollectContext["reportStreamFailure"]
+	token: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	reportStreamFailure?: CollectContext["reportStreamFailure"],
 ): Promise<CollectionOutcome> {
-  await progressWithSignals("Fetching GroupMe direct chats", { stream: "direct_messages", phase: "start" });
-  return await runCollectionPass(
-    "direct_messages",
-    "direct chats",
-    progressWithSignals,
-    async () => {
-      const { items: chats } = await fetchPaginatedList<GroupMeDirectChat>(
-        token,
-        "/chats",
-        "direct_messages",
-        progressWithSignals,
-        directChatIdentity
-      );
+	await progressWithSignals("Fetching GroupMe direct chats", {
+		stream: "direct_messages",
+		phase: "start",
+	});
+	return await runCollectionPass(
+		"direct_messages",
+		"direct chats",
+		progressWithSignals,
+		async () => {
+			const { items: chats } = await fetchPaginatedList<GroupMeDirectChat>(
+				token,
+				"/chats",
+				"direct_messages",
+				progressWithSignals,
+				directChatIdentity,
+			);
 
-      for (const chat of chats) {
-        const record = toDirectChatRecord(chat);
-        if (cursor.shouldEmit(record)) {
-          await emitRecord("direct_messages", record);
-        }
-      }
-      return { considered: chats.length };
-    },
-    reportStreamFailure
-  );
+			for (const chat of chats) {
+				const record = toDirectChatRecord(chat);
+				if (cursor.shouldEmit(record)) {
+					await emitRecord("direct_messages", record);
+				}
+			}
+			return { considered: chats.length };
+		},
+		reportStreamFailure,
+	);
 }
 
 interface DirectMessagesResponse {
-  count: number;
-  direct_messages: GroupMeMessage[];
+	count: number;
+	direct_messages: GroupMeMessage[];
 }
 
 /**
@@ -1824,131 +2067,143 @@ interface DirectMessagesResponse {
  * under-report a truncated scan as complete.
  */
 async function collectDirectChatMessagesForChat(
-  token: string,
-  chat: GroupMeDirectChat,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  sinceEpochSeconds: number | null = null
+	token: string,
+	chat: GroupMeDirectChat,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	sinceEpochSeconds: number | null = null,
 ): Promise<PerConversationWalkResult> {
-  let beforeId: string | undefined;
-  let totalSeen = 0;
-  const usedCursors = new Set<string>();
-  const otherUserId = chat.other_user?.id;
-  const chatId = directChatIdentity(chat);
-  if (!otherUserId) {
-    throw new Error(`groupme_direct_chat_missing_other_user: ${chatId}`);
-  }
+	let beforeId: string | undefined;
+	let totalSeen = 0;
+	const usedCursors = new Set<string>();
+	const otherUserId = chat.other_user?.id;
+	const chatId = directChatIdentity(chat);
+	if (!otherUserId) {
+		throw new Error(`groupme_direct_chat_missing_other_user: ${chatId}`);
+	}
 
-  for (;;) {
-    const pageExtra: ProgressExtra = {
-      stream: "direct_chat_messages",
-      phase: "fetch",
-      ...(beforeId ? { before_id: beforeId } : {}),
-      total_seen: totalSeen,
-    };
-    await progressWithSignals("Fetching direct messages", pageExtra);
+	for (;;) {
+		const pageExtra: ProgressExtra = {
+			stream: "direct_chat_messages",
+			phase: "fetch",
+			...(beforeId ? { before_id: beforeId } : {}),
+			total_seen: totalSeen,
+		};
+		await progressWithSignals("Fetching direct messages", pageExtra);
 
-    const resp = await makeRequest<DirectMessagesResponse>(token, "/direct_messages", {
-      other_user_id: otherUserId,
-      limit: PAGE_SIZE,
-      ...(beforeId ? { before_id: beforeId } : {}),
-    });
+		const resp = await makeRequest<DirectMessagesResponse>(
+			token,
+			"/direct_messages",
+			{
+				other_user_id: otherUserId,
+				limit: PAGE_SIZE,
+				...(beforeId ? { before_id: beforeId } : {}),
+			},
+		);
 
-    const messages = resp.direct_messages || [];
-    if (!messages.length) {
-      // Same short-of-total check as the group backward walk. This walk is
-      // always backward-to-natural-end (never a forward cursor resume), so
-      // the response's `count` and its served page describe the same whole
-      // history, and a `count > 0` empty page means this walk stopped before
-      // reaching everything the total implies.
-      return {
-        totalSeen,
-        newestMessageId: undefined,
-        unprovenBoundary: pageEndedShortOfProviderCount({ count: resp.count, messages }),
-      };
-    }
+		const messages = resp.direct_messages || [];
+		if (!messages.length) {
+			// Same short-of-total check as the group backward walk. This walk is
+			// always backward-to-natural-end (never a forward cursor resume), so
+			// the response's `count` and its served page describe the same whole
+			// history, and a `count > 0` empty page means this walk stopped before
+			// reaching everything the total implies.
+			return {
+				totalSeen,
+				newestMessageId: undefined,
+				unprovenBoundary: pageEndedShortOfProviderCount({
+					count: resp.count,
+					messages,
+				}),
+			};
+		}
 
-    // In-scope-only accounting, same as the group_messages backward walk: a
-    // page spanning the boundary must not credit its out-of-scope tail as
-    // part of what was "considered". No early-stop on `pageFullyOutOfScope`
-    // here — see the function doc comment: this endpoint's ordering is
-    // undocumented, so the walk always continues to the natural end.
-    const { inScope } = applySinceBoundToPage(messages, sinceEpochSeconds);
-    totalSeen += inScope.length;
-    await progressWithSignals("Fetched direct messages page", {
-      stream: "direct_chat_messages",
-      phase: "page",
-      item_count: inScope.length,
-      total_seen: totalSeen,
-    });
+		// In-scope-only accounting, same as the group_messages backward walk: a
+		// page spanning the boundary must not credit its out-of-scope tail as
+		// part of what was "considered". No early-stop on `pageFullyOutOfScope`
+		// here — see the function doc comment: this endpoint's ordering is
+		// undocumented, so the walk always continues to the natural end.
+		const { inScope } = applySinceBoundToPage(messages, sinceEpochSeconds);
+		totalSeen += inScope.length;
+		await progressWithSignals("Fetched direct messages page", {
+			stream: "direct_chat_messages",
+			phase: "page",
+			item_count: inScope.length,
+			total_seen: totalSeen,
+		});
 
-    for (const msg of inScope) {
-      const record = await toDirectChatMessageRecord(msg, chatId, uploader, emitAttachmentRecord);
-      if (cursor.shouldEmit(record)) {
-        await emitRecord("direct_chat_messages", record);
-      }
-    }
+		for (const msg of inScope) {
+			const record = await toDirectChatMessageRecord(
+				msg,
+				chatId,
+				uploader,
+				emitAttachmentRecord,
+			);
+			if (cursor.shouldEmit(record)) {
+				await emitRecord("direct_chat_messages", record);
+			}
+		}
 
-    if (messages.length < PAGE_SIZE) {
-      return { totalSeen, newestMessageId: undefined, unprovenBoundary: false };
-    }
+		if (messages.length < PAGE_SIZE) {
+			return { totalSeen, newestMessageId: undefined, unprovenBoundary: false };
+		}
 
-    const nextBeforeId = messages.at(-1)?.id;
-    if (!nextBeforeId || usedCursors.has(nextBeforeId)) {
-      throw new NonProgressError(chatId, "backward", beforeId ?? "(start)");
-    }
-    usedCursors.add(nextBeforeId);
-    beforeId = nextBeforeId;
-  }
+		const nextBeforeId = messages.at(-1)?.id;
+		if (!nextBeforeId || usedCursors.has(nextBeforeId)) {
+			throw new NonProgressError(chatId, "backward", beforeId ?? "(start)");
+		}
+		usedCursors.add(nextBeforeId);
+		beforeId = nextBeforeId;
+	}
 }
 
 export async function collectDirectChatMessages(
-  token: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  sinceEpochSeconds: number | null = null,
-  reportStreamFailure?: CollectContext["reportStreamFailure"]
+	token: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	sinceEpochSeconds: number | null = null,
+	reportStreamFailure?: CollectContext["reportStreamFailure"],
 ): Promise<CollectionOutcome> {
-  await progressWithSignals("Fetching GroupMe direct messages", {
-    stream: "direct_chat_messages",
-    phase: "start",
-  });
-  return await runCollectionPass(
-    "direct_chat_messages",
-    "direct messages",
-    progressWithSignals,
-    async () => {
-      let considered = 0;
-      const { items: chats } = await fetchPaginatedList<GroupMeDirectChat>(
-        token,
-        "/chats",
-        "direct_chat_messages",
-        progressWithSignals,
-        directChatIdentity
-      );
-      for (const chat of chats) {
-        const chatResult = await collectDirectChatMessagesForChat(
-          token,
-          chat,
-          cursor,
-          uploader,
-          emitAttachmentRecord,
-          progressWithSignals,
-          emitRecord,
-          sinceEpochSeconds
-        );
-        considered += chatResult.totalSeen;
-      }
-      return { considered };
-    },
-    reportStreamFailure
-  );
+	await progressWithSignals("Fetching GroupMe direct messages", {
+		stream: "direct_chat_messages",
+		phase: "start",
+	});
+	return await runCollectionPass(
+		"direct_chat_messages",
+		"direct messages",
+		progressWithSignals,
+		async () => {
+			let considered = 0;
+			const { items: chats } = await fetchPaginatedList<GroupMeDirectChat>(
+				token,
+				"/chats",
+				"direct_chat_messages",
+				progressWithSignals,
+				directChatIdentity,
+			);
+			for (const chat of chats) {
+				const chatResult = await collectDirectChatMessagesForChat(
+					token,
+					chat,
+					cursor,
+					uploader,
+					emitAttachmentRecord,
+					progressWithSignals,
+					emitRecord,
+					sinceEpochSeconds,
+				);
+				considered += chatResult.totalSeen;
+			}
+			return { considered };
+		},
+		reportStreamFailure,
+	);
 }
 
 /**
@@ -1958,29 +2213,29 @@ export async function collectDirectChatMessages(
  * the fingerprint cursor's STATE emit (see `CollectionOutcome`'s doc comment).
  */
 export interface GroupMessagesCollectionOutcome extends CollectionOutcome {
-  nextCursors: GroupMessageCursors;
-  /** Per-group provider-count reconciliation for this run. */
-  shortfalls: GroupMessageShortfall[];
-  /** Groups whose walk could not be anchored because the provider reported no count. */
-  unanchoredGroupIds: string[];
+	nextCursors: GroupMessageCursors;
+	/** Per-group provider-count reconciliation for this run. */
+	shortfalls: GroupMessageShortfall[];
+	/** Groups whose walk could not be anchored because the provider reported no count. */
+	unanchoredGroupIds: string[];
 }
 
 /** One group where the provider reported MORE messages than the walk saw. */
 export interface GroupMessageShortfall {
-  groupId: string;
-  providerCount: number;
-  /**
-   * True when the walk that produced this shortfall ran out of servable
-   * history before reaching the provider's total (see
-   * `pageEndedShortOfProviderCount`) — so the shortfall is UNEXPLAINED: the
-   * connector cannot tell retention (the oldest messages are gone from the
-   * provider) from a transient refusal to serve them.
-   *
-   * Optional so existing constructions (and fixtures) stay valid; absent is
-   * read as `false`.
-   */
-  unprovenBoundary?: boolean;
-  walked: number;
+	groupId: string;
+	providerCount: number;
+	/**
+	 * True when the walk that produced this shortfall ran out of servable
+	 * history before reaching the provider's total (see
+	 * `pageEndedShortOfProviderCount`) — so the shortfall is UNEXPLAINED: the
+	 * connector cannot tell retention (the oldest messages are gone from the
+	 * provider) from a transient refusal to serve them.
+	 *
+	 * Optional so existing constructions (and fixtures) stay valid; absent is
+	 * read as `false`.
+	 */
+	unprovenBoundary?: boolean;
+	walked: number;
 }
 
 /**
@@ -2021,20 +2276,22 @@ export interface GroupMessageShortfall {
  * still an absent message, and saying so honestly is the whole point of the
  * anchor.
  */
-export function partitionGroupMessageShortfalls(shortfalls: readonly GroupMessageShortfall[]): {
-  partial: GroupMessageShortfall[];
-  unexplained: GroupMessageShortfall[];
+export function partitionGroupMessageShortfalls(
+	shortfalls: readonly GroupMessageShortfall[],
+): {
+	partial: GroupMessageShortfall[];
+	unexplained: GroupMessageShortfall[];
 } {
-  const partial: GroupMessageShortfall[] = [];
-  const unexplained: GroupMessageShortfall[] = [];
-  for (const s of shortfalls) {
-    if (s.unprovenBoundary === true) {
-      unexplained.push(s);
-    } else {
-      partial.push(s);
-    }
-  }
-  return { partial, unexplained };
+	const partial: GroupMessageShortfall[] = [];
+	const unexplained: GroupMessageShortfall[] = [];
+	for (const s of shortfalls) {
+		if (s.unprovenBoundary === true) {
+			unexplained.push(s);
+		} else {
+			partial.push(s);
+		}
+	}
+	return { partial, unexplained };
 }
 
 /**
@@ -2057,18 +2314,24 @@ export function partitionGroupMessageShortfalls(shortfalls: readonly GroupMessag
  * anchor detects magnitude only — see the connector README note.
  */
 export function groupMessageShortfall(
-  group: GroupMeGroup,
-  walked: number,
-  unprovenBoundary = false
-): { kind: "ok" } | { kind: "short"; shortfall: GroupMessageShortfall } | { kind: "unanchored" } {
-  const providerCount = providerMessageCount(group);
-  if (providerCount === null) {
-    return { kind: "unanchored" };
-  }
-  if (providerCount > walked) {
-    return { kind: "short", shortfall: { groupId: group.id, providerCount, unprovenBoundary, walked } };
-  }
-  return { kind: "ok" };
+	group: GroupMeGroup,
+	walked: number,
+	unprovenBoundary = false,
+):
+	| { kind: "ok" }
+	| { kind: "short"; shortfall: GroupMessageShortfall }
+	| { kind: "unanchored" } {
+	const providerCount = providerMessageCount(group);
+	if (providerCount === null) {
+		return { kind: "unanchored" };
+	}
+	if (providerCount > walked) {
+		return {
+			kind: "short",
+			shortfall: { groupId: group.id, providerCount, unprovenBoundary, walked },
+		};
+	}
+	return { kind: "ok" };
 }
 
 /**
@@ -2079,50 +2342,53 @@ export function groupMessageShortfall(
  * `collectGroupMessages`'s cognitive complexity within the lint ceiling.
  */
 async function collectOneGroupMessages(
-  token: string,
-  group: GroupMeGroup,
-  priorCursor: string | undefined,
-  bypassCursor: boolean,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  sinceEpochSeconds: number | null
+	token: string,
+	group: GroupMeGroup,
+	priorCursor: string | undefined,
+	bypassCursor: boolean,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	sinceEpochSeconds: number | null,
 ): Promise<PerConversationWalkResult> {
-  if (priorCursor !== undefined && !bypassCursor) {
-    try {
-      return await collectGroupMessagesForwardFromCursor(
-        token,
-        group,
-        priorCursor,
-        cursor,
-        uploader,
-        emitAttachmentRecord,
-        progressWithSignals,
-        emitRecord
-      );
-    } catch (error) {
-      if (!(error instanceof InvalidResumeCursorError)) {
-        throw error;
-      }
-      await progressWithSignals(error.message, { stream: "group_messages", phase: "cursor_reset" });
-      // Falls through to the same backward-to-natural-end walk a cold start
-      // uses — bounded to exactly one fallback attempt for this group, no
-      // retry loop. If this ALSO fails, it propagates normally and the
-      // whole pass fails, same as any other walk error.
-    }
-  }
-  return await collectGroupMessagesBackwardToNaturalEnd(
-    token,
-    group,
-    cursor,
-    uploader,
-    emitAttachmentRecord,
-    progressWithSignals,
-    emitRecord,
-    sinceEpochSeconds
-  );
+	if (priorCursor !== undefined && !bypassCursor) {
+		try {
+			return await collectGroupMessagesForwardFromCursor(
+				token,
+				group,
+				priorCursor,
+				cursor,
+				uploader,
+				emitAttachmentRecord,
+				progressWithSignals,
+				emitRecord,
+			);
+		} catch (error) {
+			if (!(error instanceof InvalidResumeCursorError)) {
+				throw error;
+			}
+			await progressWithSignals(error.message, {
+				stream: "group_messages",
+				phase: "cursor_reset",
+			});
+			// Falls through to the same backward-to-natural-end walk a cold start
+			// uses — bounded to exactly one fallback attempt for this group, no
+			// retry loop. If this ALSO fails, it propagates normally and the
+			// whole pass fails, same as any other walk error.
+		}
+	}
+	return await collectGroupMessagesBackwardToNaturalEnd(
+		token,
+		group,
+		cursor,
+		uploader,
+		emitAttachmentRecord,
+		progressWithSignals,
+		emitRecord,
+		sinceEpochSeconds,
+	);
 }
 
 /** Cap on ids/entries listed in an anchor diagnostic; counts are always exact. */
@@ -2157,164 +2423,190 @@ const MAX_ANCHOR_IDS_IN_DIAGNOSTIC = 50;
  * that is preservation of messages GroupMe has since deleted, not loss.
  */
 async function emitGroupMessageAnchorEvidence(
-  emit: CollectContext["emit"],
-  outcome: GroupMessagesCollectionOutcome
+	emit: CollectContext["emit"],
+	outcome: GroupMessagesCollectionOutcome,
 ): Promise<void> {
-  const { partial, unexplained } = partitionGroupMessageShortfalls(outcome.shortfalls);
-  if (partial.length > 0) {
-    const missingTotal = partial.reduce((sum, s) => sum + (s.providerCount - s.walked), 0);
-    const visible = partial.slice(0, MAX_ANCHOR_IDS_IN_DIAGNOSTIC);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "group_messages",
-      reason: "provider_reports_more_messages_than_walked",
-      message:
-        `GroupMe reports more messages than this run walked in ${String(partial.length)} group(s): ` +
-        `${String(missingTotal)} message(s) unaccounted for. Their history may be incomplete.`,
-      diagnostics: {
-        short_group_count: partial.length,
-        missing_message_total: missingTotal,
-        groups: visible.map((s) => ({ group_id: s.groupId, provider_count: s.providerCount, walked: s.walked })),
-        truncated: visible.length < partial.length,
-      },
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-  }
-  if (unexplained.length > 0) {
-    const unexplainedTotal = unexplained.reduce((sum, s) => sum + (s.providerCount - s.walked), 0);
-    const visible = unexplained.slice(0, MAX_ANCHOR_IDS_IN_DIAGNOSTIC);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "group_messages",
-      reason: "history_ended_before_provider_count",
-      message:
-        `GroupMe's history ran out before reaching its own message total in ${String(unexplained.length)} group(s): ` +
-        `${String(unexplainedTotal)} message(s) are included in GroupMe's totals but were not served to us. ` +
-        "GroupMe's total counts a group's whole lifetime, while the messages it will hand back can stop earlier — " +
-        "most often because the oldest messages are no longer stored on its side. Everything collected is saved; " +
-        "these group(s) are simply not claimed as fully read.",
-      diagnostics: {
-        unexplained_group_count: unexplained.length,
-        unexplained_message_total: unexplainedTotal,
-        groups: visible.map((s) => ({ group_id: s.groupId, provider_count: s.providerCount, walked: s.walked })),
-        truncated: visible.length < unexplained.length,
-      },
-      // Retryable, and deliberately so. The most likely cause is retention
-      // (the oldest messages are gone from the provider), which retrying
-      // will NOT recover — but a transient refusal produces the identical
-      // response, and the connector cannot tell them apart per-group. The
-      // honest hint is the one that leaves the door open; claiming
-      // `not_retriable` would assert a certainty the evidence does not
-      // support.
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-  }
-  if (outcome.unanchoredGroupIds.length > 0) {
-    const visible = outcome.unanchoredGroupIds.slice(0, MAX_ANCHOR_IDS_IN_DIAGNOSTIC);
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "group_messages",
-      reason: "group_message_count_unanchored",
-      message:
-        `GroupMe reported no per-group message count for ${String(outcome.unanchoredGroupIds.length)} group(s), so their ` +
-        "walk has no external completeness anchor. Coverage for these groups is unproven, not proven complete.",
-      diagnostics: {
-        unanchored_group_count: outcome.unanchoredGroupIds.length,
-        unanchored_group_ids: visible,
-        truncated: visible.length < outcome.unanchoredGroupIds.length,
-      },
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-    });
-  }
+	const { partial, unexplained } = partitionGroupMessageShortfalls(
+		outcome.shortfalls,
+	);
+	if (partial.length > 0) {
+		const missingTotal = partial.reduce(
+			(sum, s) => sum + (s.providerCount - s.walked),
+			0,
+		);
+		const visible = partial.slice(0, MAX_ANCHOR_IDS_IN_DIAGNOSTIC);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "group_messages",
+			reason: "provider_reports_more_messages_than_walked",
+			message:
+				`GroupMe reports more messages than this run walked in ${String(partial.length)} group(s): ` +
+				`${String(missingTotal)} message(s) unaccounted for. Their history may be incomplete.`,
+			diagnostics: {
+				short_group_count: partial.length,
+				missing_message_total: missingTotal,
+				groups: visible.map((s) => ({
+					group_id: s.groupId,
+					provider_count: s.providerCount,
+					walked: s.walked,
+				})),
+				truncated: visible.length < partial.length,
+			},
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
+	if (unexplained.length > 0) {
+		const unexplainedTotal = unexplained.reduce(
+			(sum, s) => sum + (s.providerCount - s.walked),
+			0,
+		);
+		const visible = unexplained.slice(0, MAX_ANCHOR_IDS_IN_DIAGNOSTIC);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "group_messages",
+			reason: "history_ended_before_provider_count",
+			message:
+				`GroupMe's history ran out before reaching its own message total in ${String(unexplained.length)} group(s): ` +
+				`${String(unexplainedTotal)} message(s) are included in GroupMe's totals but were not served to us. ` +
+				"GroupMe's total counts a group's whole lifetime, while the messages it will hand back can stop earlier — " +
+				"most often because the oldest messages are no longer stored on its side. Everything collected is saved; " +
+				"these group(s) are simply not claimed as fully read.",
+			diagnostics: {
+				unexplained_group_count: unexplained.length,
+				unexplained_message_total: unexplainedTotal,
+				groups: visible.map((s) => ({
+					group_id: s.groupId,
+					provider_count: s.providerCount,
+					walked: s.walked,
+				})),
+				truncated: visible.length < unexplained.length,
+			},
+			// Retryable, and deliberately so. The most likely cause is retention
+			// (the oldest messages are gone from the provider), which retrying
+			// will NOT recover — but a transient refusal produces the identical
+			// response, and the connector cannot tell them apart per-group. The
+			// honest hint is the one that leaves the door open; claiming
+			// `not_retriable` would assert a certainty the evidence does not
+			// support.
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
+	if (outcome.unanchoredGroupIds.length > 0) {
+		const visible = outcome.unanchoredGroupIds.slice(
+			0,
+			MAX_ANCHOR_IDS_IN_DIAGNOSTIC,
+		);
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "group_messages",
+			reason: "group_message_count_unanchored",
+			message:
+				`GroupMe reported no per-group message count for ${String(outcome.unanchoredGroupIds.length)} group(s), so their ` +
+				"walk has no external completeness anchor. Coverage for these groups is unproven, not proven complete.",
+			diagnostics: {
+				unanchored_group_count: outcome.unanchoredGroupIds.length,
+				unanchored_group_ids: visible,
+				truncated: visible.length < outcome.unanchoredGroupIds.length,
+			},
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
 }
 
 export async function collectGroupMessages(
-  token: string,
-  cursor: ReturnType<typeof openFingerprintCursor>,
-  uploader: BlobUploader | undefined,
-  emitAttachmentRecord: AttachmentRecordEmitter | undefined,
-  progressWithSignals: ProgressFn,
-  emitRecord: (stream: string, data: RecordData) => Promise<void>,
-  sinceEpochSeconds: number | null = null,
-  priorCursors: GroupMessageCursors = {},
-  collectionMode: "full_refresh" | "incremental" = "incremental",
-  reportStreamFailure?: CollectContext["reportStreamFailure"]
+	token: string,
+	cursor: ReturnType<typeof openFingerprintCursor>,
+	uploader: BlobUploader | undefined,
+	emitAttachmentRecord: AttachmentRecordEmitter | undefined,
+	progressWithSignals: ProgressFn,
+	emitRecord: (stream: string, data: RecordData) => Promise<void>,
+	sinceEpochSeconds: number | null = null,
+	priorCursors: GroupMessageCursors = {},
+	collectionMode: "full_refresh" | "incremental" = "incremental",
+	reportStreamFailure?: CollectContext["reportStreamFailure"],
 ): Promise<GroupMessagesCollectionOutcome> {
-  await progressWithSignals("Fetching GroupMe group messages", { stream: "group_messages", phase: "start" });
-  // Seeded from the prior cursors so a group absent from THIS run's listing
-  // (deleted, or the account left it) still carries its last-known cursor
-  // forward — mirrors the fingerprint cursor's carry-forward-by-default
-  // policy, and is safe because collect() only persists this map when the
-  // overall pass is clean (a group truly gone would simply never be walked
-  // again; its stale cursor is inert, not harmful).
-  const nextCursors: GroupMessageCursors = { ...priorCursors };
-  // full_refresh is an explicit owner/operator bypass (START.collection_mode
-  // — see CollectContext.collectionMode's doc comment): every group walks
-  // BACKWARD to its natural end this run regardless of any persisted
-  // cursor. The cursor MAP is still rebuilt from what this full walk
-  // observes, so the next ordinary run resumes forward-incrementally again.
-  const bypassCursor = collectionMode === "full_refresh";
-  const shortfalls: GroupMessageShortfall[] = [];
-  const unanchoredGroupIds: string[] = [];
-  const outcome = await runCollectionPass(
-    "group_messages",
-    "group messages",
-    progressWithSignals,
-    async () => {
-      let considered = 0;
-      const { items: groups } = await fetchPaginatedList<GroupMeGroup>(
-        token,
-        "/groups",
-        "group_messages",
-        progressWithSignals
-      );
-      for (const group of groups) {
-        const priorCursor = priorCursors[group.id];
-        const walkedWholeGroup = priorCursor === undefined || bypassCursor;
-        const groupResult = await collectOneGroupMessages(
-          token,
-          group,
-          priorCursor,
-          bypassCursor,
-          cursor,
-          uploader,
-          emitAttachmentRecord,
-          progressWithSignals,
-          emitRecord,
-          sinceEpochSeconds
-        );
-        considered += groupResult.totalSeen;
-        // The provider count describes the group's WHOLE history, so it can
-        // only be compared against a walk that covered the whole history: a
-        // cold start or an explicit full_refresh. An incremental forward
-        // resume deliberately sees only new messages, and comparing a total
-        // against that window would report a false shortfall on every
-        // healthy incremental run. A `since`-scoped walk is excluded for the
-        // same reason.
-        if (walkedWholeGroup && sinceEpochSeconds === null) {
-          const verdict = groupMessageShortfall(group, groupResult.totalSeen, groupResult.unprovenBoundary);
-          if (verdict.kind === "short") {
-            shortfalls.push(verdict.shortfall);
-          } else if (verdict.kind === "unanchored") {
-            unanchoredGroupIds.push(group.id);
-          }
-        }
-        if (groupResult.newestMessageId !== undefined) {
-          nextCursors[group.id] = groupResult.newestMessageId;
-        }
-      }
-      return { considered };
-    },
-    reportStreamFailure
-  );
-  return {
-    ...outcome,
-    nextCursors: outcome.failed ? {} : nextCursors,
-    // A failed pass proves nothing about completeness — withhold both
-    // findings exactly as the cursor map is withheld.
-    shortfalls: outcome.failed ? [] : shortfalls,
-    unanchoredGroupIds: outcome.failed ? [] : unanchoredGroupIds,
-  };
+	await progressWithSignals("Fetching GroupMe group messages", {
+		stream: "group_messages",
+		phase: "start",
+	});
+	// Seeded from the prior cursors so a group absent from THIS run's listing
+	// (deleted, or the account left it) still carries its last-known cursor
+	// forward — mirrors the fingerprint cursor's carry-forward-by-default
+	// policy, and is safe because collect() only persists this map when the
+	// overall pass is clean (a group truly gone would simply never be walked
+	// again; its stale cursor is inert, not harmful).
+	const nextCursors: GroupMessageCursors = { ...priorCursors };
+	// full_refresh is an explicit owner/operator bypass (START.collection_mode
+	// — see CollectContext.collectionMode's doc comment): every group walks
+	// BACKWARD to its natural end this run regardless of any persisted
+	// cursor. The cursor MAP is still rebuilt from what this full walk
+	// observes, so the next ordinary run resumes forward-incrementally again.
+	const bypassCursor = collectionMode === "full_refresh";
+	const shortfalls: GroupMessageShortfall[] = [];
+	const unanchoredGroupIds: string[] = [];
+	const outcome = await runCollectionPass(
+		"group_messages",
+		"group messages",
+		progressWithSignals,
+		async () => {
+			let considered = 0;
+			const { items: groups } = await fetchPaginatedList<GroupMeGroup>(
+				token,
+				"/groups",
+				"group_messages",
+				progressWithSignals,
+			);
+			for (const group of groups) {
+				const priorCursor = priorCursors[group.id];
+				const walkedWholeGroup = priorCursor === undefined || bypassCursor;
+				const groupResult = await collectOneGroupMessages(
+					token,
+					group,
+					priorCursor,
+					bypassCursor,
+					cursor,
+					uploader,
+					emitAttachmentRecord,
+					progressWithSignals,
+					emitRecord,
+					sinceEpochSeconds,
+				);
+				considered += groupResult.totalSeen;
+				// The provider count describes the group's WHOLE history, so it can
+				// only be compared against a walk that covered the whole history: a
+				// cold start or an explicit full_refresh. An incremental forward
+				// resume deliberately sees only new messages, and comparing a total
+				// against that window would report a false shortfall on every
+				// healthy incremental run. A `since`-scoped walk is excluded for the
+				// same reason.
+				if (walkedWholeGroup && sinceEpochSeconds === null) {
+					const verdict = groupMessageShortfall(
+						group,
+						groupResult.totalSeen,
+						groupResult.unprovenBoundary,
+					);
+					if (verdict.kind === "short") {
+						shortfalls.push(verdict.shortfall);
+					} else if (verdict.kind === "unanchored") {
+						unanchoredGroupIds.push(group.id);
+					}
+				}
+				if (groupResult.newestMessageId !== undefined) {
+					nextCursors[group.id] = groupResult.newestMessageId;
+				}
+			}
+			return { considered };
+		},
+		reportStreamFailure,
+	);
+	return {
+		...outcome,
+		nextCursors: outcome.failed ? {} : nextCursors,
+		// A failed pass proves nothing about completeness — withhold both
+		// findings exactly as the cursor map is withheld.
+		shortfalls: outcome.failed ? [] : shortfalls,
+		unanchoredGroupIds: outcome.failed ? [] : unanchoredGroupIds,
+	};
 }
 
 /**
@@ -2324,13 +2616,16 @@ export async function collectGroupMessages(
  * malformed, or unparseable bound — never throws, since a scope-less run
  * (the default) must behave exactly as before this stop condition existed.
  */
-function parseSinceEpochSeconds(requested: CollectContext["requested"], stream: string): number | null {
-  const since = requested.get(stream)?.time_range?.since;
-  if (typeof since !== "string" || !since.trim()) {
-    return null;
-  }
-  const parsed = Date.parse(since);
-  return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
+function parseSinceEpochSeconds(
+	requested: CollectContext["requested"],
+	stream: string,
+): number | null {
+	const since = requested.get(stream)?.time_range?.since;
+	if (typeof since !== "string" || !since.trim()) {
+		return null;
+	}
+	const parsed = Date.parse(since);
+	return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
 }
 
 /**
@@ -2347,156 +2642,220 @@ function parseSinceEpochSeconds(requested: CollectContext["requested"], stream: 
  * shipped a build that read these keys.
  */
 export async function collect(
-  { state, requested, credentials, emit, emitRecord, progress, reportStreamFailure, collectionMode }: CollectContext,
-  testDependencies: { uploader?: BlobUploader } = {}
+	{
+		state,
+		requested,
+		credentials,
+		emit,
+		emitRecord,
+		progress,
+		reportStreamFailure,
+		collectionMode,
+	}: CollectContext,
+	testDependencies: { uploader?: BlobUploader } = {},
 ): Promise<void> {
-  const progressWithSignals = progress as ProgressFn;
-  const token = credentials.GROUPME_ACCESS_TOKEN;
-  if (!token) {
-    throw new Error("groupme_auth_failed");
-  }
-  // Absent collectionMode (a test harness or caller that predates the field)
-  // must behave exactly as an ordinary incremental run — see
-  // BaseCollectContext.collectionMode's doc comment.
-  const effectiveCollectionMode = collectionMode === "full_refresh" ? "full_refresh" : "incremental";
+	const progressWithSignals = progress as ProgressFn;
+	const token = credentials.GROUPME_ACCESS_TOKEN;
+	if (!token) {
+		throw new Error("groupme_auth_failed");
+	}
+	// Absent collectionMode (a test harness or caller that predates the field)
+	// must behave exactly as an ordinary incremental run — see
+	// BaseCollectContext.collectionMode's doc comment.
+	const effectiveCollectionMode =
+		collectionMode === "full_refresh" ? "full_refresh" : "incremental";
 
-  const uploader = "uploader" in testDependencies ? testDependencies.uploader : makeUploader();
+	const uploader =
+		"uploader" in testDependencies ? testDependencies.uploader : makeUploader();
 
-  const groupCursor = openFingerprintCursor(state.groups);
-  const groupMessageCursor = openFingerprintCursor(state.group_messages);
-  const directChatCursor = openFingerprintCursor(state.direct_messages);
-  const directChatMessageCursor = openFingerprintCursor(state.direct_chat_messages);
-  const attachmentCursor = openFingerprintCursor(state.attachments);
+	const groupCursor = openFingerprintCursor(state.groups);
+	const groupMessageCursor = openFingerprintCursor(state.group_messages);
+	const directChatCursor = openFingerprintCursor(state.direct_messages);
+	const directChatMessageCursor = openFingerprintCursor(
+		state.direct_chat_messages,
+	);
+	const attachmentCursor = openFingerprintCursor(state.attachments);
 
-  const attachmentsRequested = requested.has("attachments");
-  const attachmentCoverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage> = {
-    direct_chat_messages: makeAttachmentDetailCoverage(),
-    group_messages: makeAttachmentDetailCoverage(),
-  };
-  const emitAttachmentRecord = attachmentsRequested
-    ? createAttachmentRecordEmitter({
-        attachmentCursor,
-        coverageByParent: attachmentCoverageByParent,
-        emitRecord,
-      })
-    : undefined;
+	const attachmentsRequested = requested.has("attachments");
+	const attachmentCoverageByParent: Record<
+		AttachmentParentStream,
+		AttachmentDetailCoverage
+	> = {
+		direct_chat_messages: makeAttachmentDetailCoverage(),
+		group_messages: makeAttachmentDetailCoverage(),
+	};
+	const emitAttachmentRecord = attachmentsRequested
+		? createAttachmentRecordEmitter({
+				attachmentCursor,
+				coverageByParent: attachmentCoverageByParent,
+				emitRecord,
+			})
+		: undefined;
 
-  let groupsOutcome: CollectionOutcome | undefined;
-  if (requested.has("groups")) {
-    groupsOutcome = await collectGroups(token, groupCursor, progressWithSignals, emitRecord, reportStreamFailure);
-  }
-  let groupMessagesOutcome: GroupMessagesCollectionOutcome | undefined;
-  if (requested.has("group_messages")) {
-    groupMessagesOutcome = await collectGroupMessages(
-      token,
-      groupMessageCursor,
-      uploader,
-      emitAttachmentRecord,
-      progressWithSignals,
-      emitRecord,
-      parseSinceEpochSeconds(requested, "group_messages"),
-      decodeGroupMessageCursors(state.group_messages),
-      effectiveCollectionMode,
-      reportStreamFailure
-    );
-    await emitGroupMessageAnchorEvidence(emit, groupMessagesOutcome);
-  }
-  let directChatsOutcome: CollectionOutcome | undefined;
-  if (requested.has("direct_messages")) {
-    directChatsOutcome = await collectDirectChats(
-      token,
-      directChatCursor,
-      progressWithSignals,
-      emitRecord,
-      reportStreamFailure
-    );
-  }
-  let directChatMessagesOutcome: CollectionOutcome | undefined;
-  if (requested.has("direct_chat_messages")) {
-    directChatMessagesOutcome = await collectDirectChatMessages(
-      token,
-      directChatMessageCursor,
-      uploader,
-      emitAttachmentRecord,
-      progressWithSignals,
-      emitRecord,
-      parseSinceEpochSeconds(requested, "direct_chat_messages"),
-      reportStreamFailure
-    );
-  }
+	let groupsOutcome: CollectionOutcome | undefined;
+	if (requested.has("groups")) {
+		groupsOutcome = await collectGroups(
+			token,
+			groupCursor,
+			progressWithSignals,
+			emitRecord,
+			reportStreamFailure,
+		);
+	}
+	let groupMessagesOutcome: GroupMessagesCollectionOutcome | undefined;
+	if (requested.has("group_messages")) {
+		groupMessagesOutcome = await collectGroupMessages(
+			token,
+			groupMessageCursor,
+			uploader,
+			emitAttachmentRecord,
+			progressWithSignals,
+			emitRecord,
+			parseSinceEpochSeconds(requested, "group_messages"),
+			decodeGroupMessageCursors(state.group_messages),
+			effectiveCollectionMode,
+			reportStreamFailure,
+		);
+		await emitGroupMessageAnchorEvidence(emit, groupMessagesOutcome);
+	}
+	let directChatsOutcome: CollectionOutcome | undefined;
+	if (requested.has("direct_messages")) {
+		directChatsOutcome = await collectDirectChats(
+			token,
+			directChatCursor,
+			progressWithSignals,
+			emitRecord,
+			reportStreamFailure,
+		);
+	}
+	let directChatMessagesOutcome: CollectionOutcome | undefined;
+	if (requested.has("direct_chat_messages")) {
+		directChatMessagesOutcome = await collectDirectChatMessages(
+			token,
+			directChatMessageCursor,
+			uploader,
+			emitAttachmentRecord,
+			progressWithSignals,
+			emitRecord,
+			parseSinceEpochSeconds(requested, "direct_chat_messages"),
+			reportStreamFailure,
+		);
+	}
 
-  // Each stream owns its own top-level STATE key (`state.<stream>`) — the
-  // only shape that survives the runtime's per-stream last-wins STATE
-  // projection (see the `collect` doc comment above). A stream's own
-  // checkpoint and coverage proof are gated on that stream's collection pass
-  // having completed cleanly — a fetch/parse failure must commit neither a
-  // STATE checkpoint nor a coverage claim for the boundary it never finished
-  // walking (see CollectionOutcome). Withholding the emit on failure, rather
-  // than emitting a stale/empty replacement, is also what preserves a failed
-  // stream's prior cursor: its previously persisted top-level key is simply
-  // untouched this run and is still readable next run.
-  if (requested.has("groups") && groupsOutcome && !groupsOutcome.failed) {
-    await emit({
-      type: "STATE",
-      stream: "groups",
-      cursor: { fingerprints: groupCursor.toState() },
-    });
-    await emit(buildFullScanCoverageMessage("groups", groupsOutcome.considered));
-  }
-  if (requested.has("group_messages") && groupMessagesOutcome && !groupMessagesOutcome.failed) {
-    await emit({
-      type: "STATE",
-      stream: "group_messages",
-      cursor: { fingerprints: groupMessageCursor.toState(), cursors: groupMessagesOutcome.nextCursors },
-    });
-    await emit(buildFullScanCoverageMessage("group_messages", groupMessagesOutcome.considered));
-  }
-  if (requested.has("direct_messages") && directChatsOutcome && !directChatsOutcome.failed) {
-    await emit({
-      type: "STATE",
-      stream: "direct_messages",
-      cursor: { fingerprints: directChatCursor.toState() },
-    });
-    await emit(buildFullScanCoverageMessage("direct_messages", directChatsOutcome.considered));
-  }
-  if (requested.has("direct_chat_messages") && directChatMessagesOutcome && !directChatMessagesOutcome.failed) {
-    await emit({
-      type: "STATE",
-      stream: "direct_chat_messages",
-      cursor: { fingerprints: directChatMessageCursor.toState() },
-    });
-    await emit(buildFullScanCoverageMessage("direct_chat_messages", directChatMessagesOutcome.considered));
-  }
-  if (attachmentsRequested) {
-    const parentOutcomes = {
-      direct_chat_messages: directChatMessagesOutcome,
-      group_messages: groupMessagesOutcome,
-    };
-    const anyParentCompleted = Object.entries(parentOutcomes).some(([parent, outcome]) =>
-      attachmentParentCompleted(requested, parent as AttachmentParentStream, outcome)
-    );
-    if (anyParentCompleted) {
-      await emit({
-        type: "STATE",
-        stream: "attachments",
-        cursor: { fingerprints: attachmentCursor.toState() },
-      });
-      await emitAttachmentCoverageByParent(requested, attachmentCoverageByParent, parentOutcomes, emit);
-    }
-    // A failed parent already emitted its own stream_collection_failed result
-    // in runCollectionPass. Do not also fail the shared attachments stream:
-    // that would implicate the successful parent's independently proven cursor.
-  }
+	// Each stream owns its own top-level STATE key (`state.<stream>`) — the
+	// only shape that survives the runtime's per-stream last-wins STATE
+	// projection (see the `collect` doc comment above). A stream's own
+	// checkpoint and coverage proof are gated on that stream's collection pass
+	// having completed cleanly — a fetch/parse failure must commit neither a
+	// STATE checkpoint nor a coverage claim for the boundary it never finished
+	// walking (see CollectionOutcome). Withholding the emit on failure, rather
+	// than emitting a stale/empty replacement, is also what preserves a failed
+	// stream's prior cursor: its previously persisted top-level key is simply
+	// untouched this run and is still readable next run.
+	if (requested.has("groups") && groupsOutcome && !groupsOutcome.failed) {
+		await emit({
+			type: "STATE",
+			stream: "groups",
+			cursor: { fingerprints: groupCursor.toState() },
+		});
+		await emit(
+			buildFullScanCoverageMessage("groups", groupsOutcome.considered),
+		);
+	}
+	if (
+		requested.has("group_messages") &&
+		groupMessagesOutcome &&
+		!groupMessagesOutcome.failed
+	) {
+		await emit({
+			type: "STATE",
+			stream: "group_messages",
+			cursor: {
+				fingerprints: groupMessageCursor.toState(),
+				cursors: groupMessagesOutcome.nextCursors,
+			},
+		});
+		await emit(
+			buildFullScanCoverageMessage(
+				"group_messages",
+				groupMessagesOutcome.considered,
+			),
+		);
+	}
+	if (
+		requested.has("direct_messages") &&
+		directChatsOutcome &&
+		!directChatsOutcome.failed
+	) {
+		await emit({
+			type: "STATE",
+			stream: "direct_messages",
+			cursor: { fingerprints: directChatCursor.toState() },
+		});
+		await emit(
+			buildFullScanCoverageMessage(
+				"direct_messages",
+				directChatsOutcome.considered,
+			),
+		);
+	}
+	if (
+		requested.has("direct_chat_messages") &&
+		directChatMessagesOutcome &&
+		!directChatMessagesOutcome.failed
+	) {
+		await emit({
+			type: "STATE",
+			stream: "direct_chat_messages",
+			cursor: { fingerprints: directChatMessageCursor.toState() },
+		});
+		await emit(
+			buildFullScanCoverageMessage(
+				"direct_chat_messages",
+				directChatMessagesOutcome.considered,
+			),
+		);
+	}
+	if (attachmentsRequested) {
+		const parentOutcomes = {
+			direct_chat_messages: directChatMessagesOutcome,
+			group_messages: groupMessagesOutcome,
+		};
+		const anyParentCompleted = Object.entries(parentOutcomes).some(
+			([parent, outcome]) =>
+				attachmentParentCompleted(
+					requested,
+					parent as AttachmentParentStream,
+					outcome,
+				),
+		);
+		if (anyParentCompleted) {
+			await emit({
+				type: "STATE",
+				stream: "attachments",
+				cursor: { fingerprints: attachmentCursor.toState() },
+			});
+			await emitAttachmentCoverageByParent(
+				requested,
+				attachmentCoverageByParent,
+				parentOutcomes,
+				emit,
+			);
+		}
+		// A failed parent already emitted its own stream_collection_failed result
+		// in runCollectionPass. Do not also fail the shared attachments stream:
+		// that would implicate the successful parent's independently proven cursor.
+	}
 }
 
 if (isMainModule(import.meta.url)) {
-  runConnector({
-    name: "groupme",
-    validateRecord,
-    retryablePattern: /ECONN|fetch failed|rate_limited/i,
-    auth: { kind: "env", required: ["GROUPME_ACCESS_TOKEN"] },
-    collect,
-  });
+	runConnector({
+		name: "groupme",
+		validateRecord,
+		retryablePattern: /ECONN|fetch failed|rate_limited/i,
+		auth: { kind: "env", required: ["GROUPME_ACCESS_TOKEN"] },
+		collect,
+	});
 }
 
 /**

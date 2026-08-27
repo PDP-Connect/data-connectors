@@ -20,48 +20,76 @@ import { test } from "node:test";
 import { errorDetail } from "./index.ts";
 
 test("errorDetail: a hostile error.message cannot leak a bearer token, secret, or email", () => {
-  const hostile = JSON.stringify({
-    error: {
-      message:
-        "callback https://user:pw@evil.example.com/cb?access_token=BODYSECRET failed; " +
-        "Authorization: Bearer BODYBEARER; password=BODYPASS; contact owner@example.com",
-    },
-  });
-  const detail = errorDetail(hostile);
-  for (const leak of ["BODYSECRET", "BODYBEARER", "BODYPASS", "owner@example.com", "user:pw", "evil.example.com"]) {
-    assert.doesNotMatch(detail, new RegExp(leak), `${leak} must not survive the body diagnostic`);
-  }
+	const hostile = JSON.stringify({
+		error: {
+			message:
+				"callback https://user:pw@evil.example.com/cb?access_token=BODYSECRET failed; " +
+				"Authorization: Bearer BODYBEARER; password=BODYPASS; contact owner@example.com",
+		},
+	});
+	const detail = errorDetail(hostile);
+	for (const leak of [
+		"BODYSECRET",
+		"BODYBEARER",
+		"BODYPASS",
+		"owner@example.com",
+		"user:pw",
+		"evil.example.com",
+	]) {
+		assert.doesNotMatch(
+			detail,
+			new RegExp(leak),
+			`${leak} must not survive the body diagnostic`,
+		);
+	}
 });
 
 test("errorDetail: a non-envelope body (proxy/HTML dump) is redacted wholesale and bounded to 200 chars", () => {
-  const proxyDump = `<html>gateway error for https://user:pw@proxy.example.com/x?token=PROXYSECRET
+	const proxyDump = `<html>gateway error for https://user:pw@proxy.example.com/x?token=PROXYSECRET
     contact ops@example.com</html>${"padding ".repeat(60)}`;
-  const detail = errorDetail(proxyDump);
-  for (const leak of ["PROXYSECRET", "ops@example.com", "user:pw", "proxy.example.com"]) {
-    assert.doesNotMatch(detail, new RegExp(leak), `${leak} must not survive an unrecognized body`);
-  }
-  assert.ok(detail.length <= 200, `expected a bounded diagnostic, got ${detail.length}`);
+	const detail = errorDetail(proxyDump);
+	for (const leak of [
+		"PROXYSECRET",
+		"ops@example.com",
+		"user:pw",
+		"proxy.example.com",
+	]) {
+		assert.doesNotMatch(
+			detail,
+			new RegExp(leak),
+			`${leak} must not survive an unrecognized body`,
+		);
+	}
+	assert.ok(
+		detail.length <= 200,
+		`expected a bounded diagnostic, got ${detail.length}`,
+	);
 });
 
 test("errorDetail: redaction runs BEFORE the 200-char bound, so no secret survives as a truncated fragment", () => {
-  // The secret sits past the bound: slicing first would cut through the token
-  // rather than redacting it, leaving a fragment of the real value behind.
-  const body = JSON.stringify({
-    error: { message: `${"padding ".repeat(30)}token=TAILSECRETVALUE` },
-  });
-  const detail = errorDetail(body);
-  assert.doesNotMatch(detail, /TAILSECRETVALUE/, "no whole secret");
-  assert.doesNotMatch(detail, /TAILSECRET/, "not even a truncated fragment");
+	// The secret sits past the bound: slicing first would cut through the token
+	// rather than redacting it, leaving a fragment of the real value behind.
+	const body = JSON.stringify({
+		error: { message: `${"padding ".repeat(30)}token=TAILSECRETVALUE` },
+	});
+	const detail = errorDetail(body);
+	assert.doesNotMatch(detail, /TAILSECRETVALUE/, "no whole secret");
+	assert.doesNotMatch(detail, /TAILSECRET/, "not even a truncated fragment");
 });
 
 test("errorDetail: a plain-text (non-JSON) failure with a query-string secret is redacted", () => {
-  const detail = errorDetail("plain text failure https://api.venmo.com/v1/oauth/access_token?secret=abc");
-  assert.doesNotMatch(detail, /secret=abc/);
+	const detail = errorDetail(
+		"plain text failure https://api.venmo.com/v1/oauth/access_token?secret=abc",
+	);
+	assert.doesNotMatch(detail, /secret=abc/);
 });
 
 test("errorDetail: an ordinary benign error.message still reads usefully end to end (COUNTERWEIGHT)", () => {
-  // Sanitizing must not gut a benign, useful error — this is the counterweight
-  // for the hostile-input work above.
-  assert.match(errorDetail(JSON.stringify({ error: { message: "account disabled" } })), /account disabled/);
-  assert.match(errorDetail("upstream boom"), /upstream boom/);
+	// Sanitizing must not gut a benign, useful error — this is the counterweight
+	// for the hostile-input work above.
+	assert.match(
+		errorDetail(JSON.stringify({ error: { message: "account disabled" } })),
+		/account disabled/,
+	);
+	assert.match(errorDetail("upstream boom"), /upstream boom/);
 });

@@ -26,37 +26,40 @@
 
 const DEFAULT_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
-export type GoogleOAuthFetch = (url: string, init: RequestInit) => Promise<Response>;
+export type GoogleOAuthFetch = (
+	url: string,
+	init: RequestInit,
+) => Promise<Response>;
 
 export interface GoogleOAuthCredentials {
-  readonly clientId: string;
-  readonly clientSecret: string;
-  readonly refreshToken: string;
+	readonly clientId: string;
+	readonly clientSecret: string;
+	readonly refreshToken: string;
 }
 
 export interface GoogleAccessToken {
-  readonly accessToken: string;
-  /** Epoch ms this token expires at, per Google's `expires_in` (seconds). */
-  readonly expiresAt: number;
+	readonly accessToken: string;
+	/** Epoch ms this token expires at, per Google's `expires_in` (seconds). */
+	readonly expiresAt: number;
 }
 
 export class GoogleOAuthError extends Error {
-  readonly bodySnippet: string;
-  readonly status: number;
-  constructor(status: number, bodySnippet: string) {
-    super(`google_oauth_token_error: ${status}`);
-    this.name = "GoogleOAuthError";
-    this.status = status;
-    this.bodySnippet = bodySnippet;
-  }
+	readonly bodySnippet: string;
+	readonly status: number;
+	constructor(status: number, bodySnippet: string) {
+		super(`google_oauth_token_error: ${status}`);
+		this.name = "GoogleOAuthError";
+		this.status = status;
+		this.bodySnippet = bodySnippet;
+	}
 }
 
 function assertNonEmpty(value: string | undefined, code: string): string {
-  const trimmed = (value ?? "").trim();
-  if (!trimmed) {
-    throw new Error(code);
-  }
-  return trimmed;
+	const trimmed = (value ?? "").trim();
+	if (!trimmed) {
+		throw new Error(code);
+	}
+	return trimmed;
 }
 
 /**
@@ -67,14 +70,23 @@ function assertNonEmpty(value: string | undefined, code: string): string {
  * client id/secret.
  */
 export function resolveGoogleOAuthCredentials(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
-  refreshTokenEnvVar: string
+	env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+	refreshTokenEnvVar: string,
 ): GoogleOAuthCredentials {
-  return {
-    clientId: assertNonEmpty(env.GOOGLE_OAUTH_CLIENT_ID, "google_oauth_client_id_missing"),
-    clientSecret: assertNonEmpty(env.GOOGLE_OAUTH_CLIENT_SECRET, "google_oauth_client_secret_missing"),
-    refreshToken: assertNonEmpty(env[refreshTokenEnvVar], `google_oauth_refresh_token_missing:${refreshTokenEnvVar}`),
-  };
+	return {
+		clientId: assertNonEmpty(
+			env.GOOGLE_OAUTH_CLIENT_ID,
+			"google_oauth_client_id_missing",
+		),
+		clientSecret: assertNonEmpty(
+			env.GOOGLE_OAUTH_CLIENT_SECRET,
+			"google_oauth_client_secret_missing",
+		),
+		refreshToken: assertNonEmpty(
+			env[refreshTokenEnvVar],
+			`google_oauth_refresh_token_missing:${refreshTokenEnvVar}`,
+		),
+	};
 }
 
 /**
@@ -84,35 +96,45 @@ export function resolveGoogleOAuthCredentials(
  * call so it stays testable with an injected `fetch`.
  */
 export async function refreshGoogleAccessToken(
-  credentials: GoogleOAuthCredentials,
-  options: { fetch?: GoogleOAuthFetch; now?: () => number; tokenUrl?: string } = {}
+	credentials: GoogleOAuthCredentials,
+	options: {
+		fetch?: GoogleOAuthFetch;
+		now?: () => number;
+		tokenUrl?: string;
+	} = {},
 ): Promise<GoogleAccessToken> {
-  const fetchImpl = options.fetch ?? fetch;
-  const tokenUrl = options.tokenUrl ?? DEFAULT_TOKEN_URL;
-  const now = options.now ?? Date.now;
-  const body = new URLSearchParams({
-    client_id: credentials.clientId,
-    client_secret: credentials.clientSecret,
-    refresh_token: credentials.refreshToken,
-    grant_type: "refresh_token",
-  });
-  const response = await fetchImpl(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new GoogleOAuthError(response.status, text.slice(0, 500));
-  }
-  const parsed = JSON.parse(text) as { access_token?: unknown; expires_in?: unknown };
-  const accessToken = typeof parsed.access_token === "string" ? parsed.access_token.trim() : "";
-  if (!accessToken) {
-    throw new Error("google_oauth_access_token_missing");
-  }
-  const expiresInSeconds =
-    typeof parsed.expires_in === "number" && Number.isFinite(parsed.expires_in) ? parsed.expires_in : 3600;
-  return { accessToken, expiresAt: now() + expiresInSeconds * 1000 };
+	const fetchImpl = options.fetch ?? fetch;
+	const tokenUrl = options.tokenUrl ?? DEFAULT_TOKEN_URL;
+	const now = options.now ?? Date.now;
+	const body = new URLSearchParams({
+		client_id: credentials.clientId,
+		client_secret: credentials.clientSecret,
+		refresh_token: credentials.refreshToken,
+		grant_type: "refresh_token",
+	});
+	const response = await fetchImpl(tokenUrl, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: body.toString(),
+	});
+	const text = await response.text();
+	if (!response.ok) {
+		throw new GoogleOAuthError(response.status, text.slice(0, 500));
+	}
+	const parsed = JSON.parse(text) as {
+		access_token?: unknown;
+		expires_in?: unknown;
+	};
+	const accessToken =
+		typeof parsed.access_token === "string" ? parsed.access_token.trim() : "";
+	if (!accessToken) {
+		throw new Error("google_oauth_access_token_missing");
+	}
+	const expiresInSeconds =
+		typeof parsed.expires_in === "number" && Number.isFinite(parsed.expires_in)
+			? parsed.expires_in
+			: 3600;
+	return { accessToken, expiresAt: now() + expiresInSeconds * 1000 };
 }
 
 /**
@@ -124,12 +146,12 @@ export async function refreshGoogleAccessToken(
  * conditions explicitly rather than treating every 401 as retryable.
  */
 export function isGoogleOAuthGrantInvalid(error: unknown): boolean {
-  if (error instanceof GoogleOAuthError) {
-    // invalid_grant (400) is Google's documented response for a revoked or
-    // expired refresh token. 401 from the token endpoint indicates bad client
-    // credentials, which is a deployment-config problem, not owner-fixable —
-    // still surfaced as non-retryable so it does not loop forever.
-    return error.status === 400 || error.status === 401;
-  }
-  return false;
+	if (error instanceof GoogleOAuthError) {
+		// invalid_grant (400) is Google's documented response for a revoked or
+		// expired refresh token. 401 from the token endpoint indicates bad client
+		// credentials, which is a deployment-config problem, not owner-fixable —
+		// still surfaced as non-retryable so it does not loop forever.
+		return error.status === 400 || error.status === 401;
+	}
+	return false;
 }
