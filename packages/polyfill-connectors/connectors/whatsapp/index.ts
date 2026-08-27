@@ -820,7 +820,7 @@ async function emitAttachmentRecords(
 	exportOrdinal: number,
 	exportTotal: number,
 	emit: EmitEvent,
-): Promise<{ emitted: number; processed: number }> {
+): Promise<{ covered: number; emitted: number; processed: number }> {
 	let emitted = 0;
 	let skipped = 0;
 	for (let index = 0; index < attachments.length; index += 1) {
@@ -864,7 +864,15 @@ async function emitAttachmentRecords(
 			message: `${skipped} media file(s) in WhatsApp export ${exportOrdinal} of ${exportTotal} exceeded the archive read policy and were not imported.`,
 		});
 	}
-	return { emitted, processed: attachments.length };
+	// `covered` excludes media the read policy dropped. The runtime's coverage
+	// contract is explicit that a weighed-but-dropped item belongs to neither the
+	// collected nor the covered count, so counting the raw discovered length here
+	// would report a chat with skipped media as fully covered.
+	return {
+		covered: attachments.length - skipped,
+		emitted,
+		processed: attachments.length,
+	};
 }
 
 function openWhatsAppCursors(state: Record<string, unknown>): WhatsAppCursors {
@@ -1142,8 +1150,14 @@ async function emitParsedExport(
 	progress: EmitProgress,
 	exportOrdinal: number,
 	exportTotal: number,
-): Promise<{ attachments: number; messages: number; records: number }> {
+): Promise<{
+	attachments: number;
+	attachmentsCovered: number;
+	messages: number;
+	records: number;
+}> {
 	let records = 0;
+	let attachmentsCovered = 0;
 	if (requested.has("chats")) {
 		await emitChatRecord(summary, cursors.chats, emitRecord);
 		records += 1;
@@ -1188,6 +1202,7 @@ async function emitParsedExport(
 				emit,
 			);
 			records += attachmentSummary.emitted;
+			attachmentsCovered += attachmentSummary.covered;
 		}
 	}
 
@@ -1199,6 +1214,7 @@ async function emitParsedExport(
 	});
 	return {
 		attachments: source.attachments.length,
+		attachmentsCovered,
 		messages: summary.messageCount,
 		records,
 	};
@@ -1210,7 +1226,7 @@ function pruneRequestedCursors(
 ): void {
 	for (const [stream, cursor] of Object.entries(cursors)) {
 		if (requested.has(stream)) {
-			cursor.pruneStale();
+			cursor.dropUnseenIds();
 		}
 	}
 }
@@ -1321,8 +1337,13 @@ runConnector({
 			return;
 		}
 
+		// The discovery walk is the chat coverage boundary. Every export file is
+		// considered even when parsing later rejects it; only successfully parsed
+		// exports are covered.
+		const consideredExports = files.length;
 		let importedExports = 0;
 		let totalAttachments = 0;
+		let totalAttachmentsCovered = 0;
 		let totalMessages = 0;
 		let totalRecords = 0;
 		for (let index = 0; index < files.length; index += 1) {
@@ -1388,6 +1409,7 @@ runConnector({
 				);
 				importedExports += 1;
 				totalAttachments += emitSummary.attachments;
+				totalAttachmentsCovered += emitSummary.attachmentsCovered;
 				totalMessages += emitSummary.messages;
 				totalRecords += emitSummary.records;
 			} finally {
@@ -1403,8 +1425,9 @@ runConnector({
 		// counts the files that yielded a chat, measured at the discovery walk
 		// above rather than from the emit count, so a steady-state run whose chats
 		// were all fingerprint-suppressed still reads covered. Files rejected by
-		// `parseExportFile` emit their own SKIP_RESULT and stay out of both counts,
-		// so a rejected export correctly reads partial.
+		// `parseExportFile` emit their own SKIP_RESULT: they remain in the
+		// enumeration denominator but stay out of `covered`, so a rejected export
+		// correctly reads partial.
 		if (requested.has("chats")) {
 			await emit(
 				buildDetailCoverageMessage({
@@ -1412,7 +1435,7 @@ runConnector({
 					stateStream: "chats",
 					requiredKeys: [],
 					hydratedKeys: [],
-					considered: importedExports,
+					considered: consideredExports,
 					covered: importedExports,
 				}),
 			);
@@ -1442,7 +1465,9 @@ runConnector({
 					requiredKeys: [],
 					hydratedKeys: [],
 					considered: totalAttachments,
-					covered: totalAttachments,
+					// Media dropped by the bounded-read policy is discovered but not
+					// collected, so it must not inflate `covered` into a false complete.
+					covered: totalAttachmentsCovered,
 				}),
 			);
 		}

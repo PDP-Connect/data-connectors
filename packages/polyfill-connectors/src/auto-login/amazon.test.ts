@@ -175,25 +175,28 @@ function makeVisibleFieldFillFailurePage(): {
 	return { page: page as Page };
 }
 
-async function withAmazonCredentials(run: () => Promise<void>): Promise<void> {
-	await withAmazonCredentialValues(
-		{ password: "test-password", username: "test-user@example.com" },
-		run,
-	);
-}
+/**
+ * Amazon's sign-in pair as the runtime hands it to `ensureAmazonSession`.
+ *
+ * Formerly this suite set `process.env.AMAZON_USERNAME` / `_PASSWORD` around
+ * each test. `ensureAmazonSession` now takes the connection's credentials as
+ * an argument (see `login-credentials.ts`), so a present credential is a
+ * plain object passed straight into the call and an absent one is simply no
+ * `credentials` key — no process-env mutation needed either way.
+ */
+const AMAZON_TEST_CREDENTIALS = Object.freeze({
+	AMAZON_PASSWORD: "test-password",
+	AMAZON_USERNAME: "test-user@example.com",
+});
 
-async function withoutAmazonCredentials(
+/**
+ * Runs `run` with the streaming env cleared. Credentials are no longer part
+ * of this: an absent credential is expressed by passing no `credentials` to
+ * `ensureAmazonSession`, not by mutating `process.env`.
+ */
+async function withClearedStreamingEnv(
 	run: () => Promise<void>,
 ): Promise<void> {
-	await withAmazonCredentialValues({}, run);
-}
-
-async function withAmazonCredentialValues(
-	credentials: { password?: string; username?: string },
-	run: () => Promise<void>,
-): Promise<void> {
-	const priorUsername = process.env.AMAZON_USERNAME;
-	const priorPassword = process.env.AMAZON_PASSWORD;
 	const priorStreamingEnv = new Map<
 		(typeof STREAMING_ENV_KEYS)[number],
 		string | undefined
@@ -202,25 +205,9 @@ async function withAmazonCredentialValues(
 		priorStreamingEnv.set(key, process.env[key]);
 		delete process.env[key];
 	}
-	if (credentials.username) {
-		process.env.AMAZON_USERNAME = credentials.username;
-	}
-	if (credentials.password) {
-		process.env.AMAZON_PASSWORD = credentials.password;
-	}
 	try {
 		await run();
 	} finally {
-		if (priorUsername === undefined) {
-			delete process.env.AMAZON_USERNAME;
-		} else {
-			process.env.AMAZON_USERNAME = priorUsername;
-		}
-		if (priorPassword === undefined) {
-			delete process.env.AMAZON_PASSWORD;
-		} else {
-			process.env.AMAZON_PASSWORD = priorPassword;
-		}
 		for (const key of STREAMING_ENV_KEYS) {
 			const value = priorStreamingEnv.get(key);
 			if (value === undefined) {
@@ -233,7 +220,7 @@ async function withAmazonCredentialValues(
 }
 
 test("ensureAmazonSession hands off to the secure browser when optional credentials are absent", async () => {
-	await withoutAmazonCredentials(async () => {
+	await withClearedStreamingEnv(async () => {
 		const { gotoCalls, page } = makeChallengePage({
 			becomeLoggedInAfterGoto: 2,
 		});
@@ -248,9 +235,18 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 		assert.equal(ok, true);
 		assert.equal(interactions.requests.length, 1);
 		assert.equal(interactions.requests[0]?.kind, "manual_action");
+		// The owner-facing reason must lead with the CREDENTIAL, not the page.
+		// Before `resolveLoginCredentials`, an absent credential produced copy
+		// that read like a provider/page problem ("optional sign-in details");
+		// an owner could not tell "nothing was stored for this connection" from
+		// "Amazon failed to render".
 		assert.match(
 			interactions.requests[0]?.message ?? "",
-			/No optional Amazon sign-in details/,
+			/no stored credential for this amazon connection \(missing: AMAZON_USERNAME, AMAZON_PASSWORD\)/u,
+		);
+		assert.match(
+			interactions.requests[0]?.message ?? "",
+			/Automated sign-in was not attempted/u,
 		);
 		assert.match(interactions.requests[0]?.message ?? "", /secure browser/);
 		assert.doesNotMatch(
@@ -262,7 +258,7 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 });
 
 test("ensureAmazonSession emits manual_action when the sign-in form is replaced by a challenge", async () => {
-	await withAmazonCredentials(async () => {
+	await withClearedStreamingEnv(async () => {
 		// Initial deep probe (goto #1) sees the sign-in URL. The email field never
 		// renders, so the challenge fallback fires. The operator completes login,
 		// so the re-probe (goto after manual action) lands on orders and returns.
@@ -273,6 +269,7 @@ test("ensureAmazonSession emits manual_action when the sign-in form is replaced 
 
 		const ok = await ensureAmazonSession({
 			context: makeContext(),
+			credentials: AMAZON_TEST_CREDENTIALS,
 			fieldTimeoutMs: 1,
 			page,
 			sendInteraction: interactions.sendInteraction,
@@ -301,7 +298,7 @@ test("ensureAmazonSession emits manual_action when the sign-in form is replaced 
 });
 
 test("ensureAmazonSession throws amazon_login_unexpected_ui when the manual action leaves no session", async () => {
-	await withAmazonCredentials(async () => {
+	await withClearedStreamingEnv(async () => {
 		const { page } = makeChallengePage({
 			becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
 		});
@@ -310,6 +307,7 @@ test("ensureAmazonSession throws amazon_login_unexpected_ui when the manual acti
 		await assert.rejects(
 			ensureAmazonSession({
 				context: makeContext(),
+				credentials: AMAZON_TEST_CREDENTIALS,
 				fieldTimeoutMs: 1,
 				page,
 				sendInteraction: interactions.sendInteraction,
@@ -324,13 +322,14 @@ test("ensureAmazonSession throws amazon_login_unexpected_ui when the manual acti
 });
 
 test("ensureAmazonSession does not mask visible field-fill failures as manual challenges", async () => {
-	await withAmazonCredentials(async () => {
+	await withClearedStreamingEnv(async () => {
 		const { page } = makeVisibleFieldFillFailurePage();
 		const interactions = makeInteractionHarness();
 
 		await assert.rejects(
 			ensureAmazonSession({
 				context: makeContext(),
+				credentials: AMAZON_TEST_CREDENTIALS,
 				page,
 				sendInteraction: interactions.sendInteraction,
 			}),
@@ -341,13 +340,14 @@ test("ensureAmazonSession does not mask visible field-fill failures as manual ch
 });
 
 test("ensureAmazonSession returns true without any interaction when already logged in", async () => {
-	await withAmazonCredentials(async () => {
+	await withClearedStreamingEnv(async () => {
 		// becomeLoggedInAfterGoto=1 → the very first deep-probe goto lands on orders.
 		const { page } = makeChallengePage({ becomeLoggedInAfterGoto: 1 });
 		const interactions = makeInteractionHarness();
 
 		const ok = await ensureAmazonSession({
 			context: makeContext(),
+			credentials: AMAZON_TEST_CREDENTIALS,
 			page,
 			sendInteraction: interactions.sendInteraction,
 		});

@@ -33,7 +33,9 @@ export interface LocalJsonlScanResult {
 }
 
 export interface ScanLocalJsonlArgs {
-	onLine: (line: Buffer) => Promise<void>;
+	/** The second argument is the byte boundary that would be committed if the
+	 * callback completes successfully. */
+	onLine: (line: Buffer, committedOffsetBytes: number) => Promise<void>;
 	path: string;
 	prior: LocalJsonlPhysicalCursorV1 | undefined;
 }
@@ -42,6 +44,17 @@ export class LocalJsonlUnstableSourceError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "LocalJsonlUnstableSourceError";
+	}
+}
+
+/** A complete line was present but could not be parsed as JSON. */
+export class LocalJsonlMalformedLineError extends Error {
+	readonly committed_offset_bytes: number;
+
+	constructor(committedOffsetBytes: number, options?: ErrorOptions) {
+		super("malformed complete JSONL line", options);
+		this.name = "LocalJsonlMalformedLineError";
+		this.committed_offset_bytes = committedOffsetBytes;
 	}
 }
 
@@ -162,10 +175,11 @@ async function proveCommittedPrefix(input: {
 
 /**
  * Scan one local JSONL file through a fixed open-file snapshot. The callback is
- * invoked only for LF-terminated lines; malformed JSON remains the caller's
- * policy. STATE is returned only after the path stays compatible with the
- * opened handle, so a caller that emits it after this promise resolves keeps
- * the connector's existing checkpoint barrier intact.
+ * invoked only for LF-terminated lines. A caller that rejects a malformed line
+ * prevents this function from returning a cursor, so the source boundary stays
+ * before the rejected line. STATE is returned only after the path stays
+ * compatible with the opened handle, so a caller that emits it after this
+ * promise resolves keeps the connector's existing checkpoint barrier intact.
  */
 export async function scanLocalJsonl({
 	onLine,
@@ -245,7 +259,7 @@ export async function scanLocalJsonl({
 				// Hash the bytes before invoking the callback: this is the exact
 				// committed prefix the callback observed, including the LF boundary.
 				deliveredPrefix.update(pending.subarray(0, lineEnd + 1));
-				await onLine(pending.subarray(0, lineEnd));
+				await onLine(pending.subarray(0, lineEnd), committed);
 				linesDelivered += 1;
 				committed += lineEnd + 1;
 				pending = pending.subarray(lineEnd + 1);

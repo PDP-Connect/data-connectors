@@ -28,7 +28,11 @@ import type { ProgressExtra } from "@pdpp/connector-protocol/connector-runtime-p
 import type { BrowserContext, Page } from "playwright";
 import { manualAction } from "./browser-handoff.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
-import { TerminalError, type TerminalErrorDetails } from "./terminal-error.ts";
+import {
+	isConnectorErrorCodeShaped,
+	TerminalError,
+	type TerminalErrorDetails,
+} from "./terminal-error.ts";
 
 export const DEFAULT_RETRYABLE_PATTERN = /ECONN|ETIMEDOUT|timeout/i;
 
@@ -196,9 +200,25 @@ export async function establishSession(
 				retryablePattern,
 				credentialSubmitted,
 			);
+			// `message` is about to be redacted (`boundConnectorErrorMessage`) before
+			// it reaches the owner — free-form text is untrusted by contract. Most
+			// connector ensureSession throw sites (heb.ts, usaa.ts, etc.) already
+			// throw a bare `Error("some_snake_case_reason")`: the ENTIRE thrown
+			// message is already a short, non-PII, machine-actionable token — the
+			// exact shape the unredacted `code` channel exists for (terminal-error.ts).
+			// Recover it as `code` here so the redaction below cannot destroy it: a
+			// long/opaque-looking-but-innocuous token like
+			// "heb_verification_code_not_provided" (35 chars) would otherwise be
+			// wholesale-matched by stderr-redact.ts's LONG_OPAQUE_RE and collapsed to
+			// a bare "[REDACTED]" with zero diagnostic value. A compound message
+			// (anything with a space or colon, e.g. "source_unavailable: USAA
+			// reported...") fails the code charset and is correctly left to the
+			// redacted `message` channel only.
+			const code = isConnectorErrorCodeShaped(message) ? message : undefined;
 			throw new TerminalError(terminalError.message, {
 				retryable: terminalError.retryable,
 				cause: err,
+				...(code ? { code } : {}),
 			});
 		}
 	}
