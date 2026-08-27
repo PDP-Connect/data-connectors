@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,21 @@ import {
 } from "./resolve-tsx-binary.ts";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+// packages/cli is a sibling package inside the PDP-Connect/pdpp monorepo
+// (@pdpp/local-collector) that this repository does not carry — only
+// polyfill-connectors was extracted (see docs/migration/polyfill-commit-map.txt).
+// The next test's cross-file sync check is therefore only runnable in pdpp
+// itself; skip it here rather than fail on a path that can never resolve.
+const CLI_RUNNER_PATH = join(
+	PACKAGE_ROOT,
+	"..",
+	"cli",
+	"src",
+	"collector",
+	"runner.ts",
+);
+const HAS_SIBLING_CLI_PACKAGE = existsSync(CLI_RUNNER_PATH);
 
 test("resolveTsxBinary finds node_modules/.bin/tsx by walking up from a nested dir", async () => {
 	const root = await mkdtemp(join(tmpdir(), "tsx-resolve-"));
@@ -89,16 +105,17 @@ test("resolveConnectorCommand passes a non-tsx command through untouched", () =>
 	);
 });
 
-test("TSX_MISSING_MESSAGE stays textually in sync with the CLI copy", async () => {
+test("TSX_MISSING_MESSAGE stays textually in sync with the CLI copy", {
+	skip: HAS_SIBLING_CLI_PACKAGE
+		? false
+		: "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)",
+}, async () => {
 	// packages/cli cannot import this module: its tsconfig.build.json pins
 	// rootDir to the cli package, so a cross-package import fails with TS6059,
 	// and @pdpp/cli deliberately ships zero runtime dependencies. The two
 	// copies are therefore kept in sync by this assertion rather than by an
 	// import. If this fails, update both copies together.
-	const cliRunner = await readFile(
-		join(PACKAGE_ROOT, "..", "cli", "src", "collector", "runner.ts"),
-		"utf8",
-	);
+	const cliRunner = await readFile(CLI_RUNNER_PATH, "utf8");
 	assert.ok(
 		cliRunner.includes(TSX_MISSING_MESSAGE.replaceAll('"', '\\"')) ||
 			cliRunner.includes("Could not locate tsx"),
