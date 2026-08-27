@@ -20,7 +20,12 @@ const MANIFEST_DIRS = [
 	{ label: "polyfill", path: join(PACKAGE_ROOT, "manifests") },
 	{
 		label: "reference",
-		path: join(REPO_ROOT, "reference-implementation", "manifests"),
+		path: join(
+			REPO_ROOT,
+			"reference-implementation",
+			"fixtures",
+			"seed-manifests",
+		),
 	},
 ];
 

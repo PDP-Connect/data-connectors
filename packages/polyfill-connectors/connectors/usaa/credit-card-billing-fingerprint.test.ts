@@ -112,7 +112,7 @@ test("credit_card_billing: a no-op refresh (only fetched_at differs) is suppress
 		true,
 		"first observation emits",
 	);
-	cursor1.pruneStale();
+	cursor1.dropUnseenIds();
 	const state1 = {
 		credit_card_billing: {
 			fetched_at: RUN1_AT,
@@ -145,7 +145,7 @@ test("credit_card_billing: a balance / rewards / cycle-status move does NOT re-e
 			excludeFromFingerprint: ["fetched_at"],
 		});
 		wouldEmit(cursor1, a, makeBilling(), RUN1_AT);
-		cursor1.pruneStale();
+		cursor1.dropUnseenIds();
 		const state1 = { credit_card_billing: { fingerprints: cursor1.toState() } };
 
 		const cursor2 = openFingerprintCursor(state1.credit_card_billing, {
@@ -171,7 +171,7 @@ test("credit_card_billing: a credit-limit / APR / nickname move each re-emit the
 			excludeFromFingerprint: ["fetched_at"],
 		});
 		wouldEmit(cursor1, a, makeBilling(), RUN1_AT);
-		cursor1.pruneStale();
+		cursor1.dropUnseenIds();
 		const state1 = { credit_card_billing: { fingerprints: cursor1.toState() } };
 
 		const cursor2 = openFingerprintCursor(state1.credit_card_billing, {
@@ -192,7 +192,7 @@ test("credit_card_billing: STATE round-trips a fingerprints map keyed by card id
 		excludeFromFingerprint: ["fetched_at"],
 	});
 	wouldEmit(cursor, a, makeBilling(), RUN1_AT);
-	cursor.pruneStale();
+	cursor.dropUnseenIds();
 	const state = {
 		credit_card_billing: {
 			fetched_at: RUN1_AT,

@@ -18,12 +18,16 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../src/test-harness.ts";
 import {
 	collectAllStreams,
 	collectTransactions,
+	establishVenmoCollectOrigin,
 	fetchAllFriends,
+	MAX_FRIENDS_PAGES,
+	MAX_TRANSACTION_PAGES,
 	type VenmoPageFetch,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -173,6 +177,7 @@ test("collectTransactions: a partial page emits every modeled record and clears 
 					],
 				},
 			},
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx, emitted } = makeCtx({}, ["transactions"]);
@@ -184,6 +189,27 @@ test("collectTransactions: a partial page emits every modeled record and clears 
 		result.latestSeenAt,
 		"2026-07-02T00:00:00Z",
 		"latest date_created across the page wins",
+	);
+});
+
+test("collectTransactions: a short non-empty page does not terminate the walk", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		"/stories/target-or-actor/1111111111111111111": [
+			{ body: { data: [story("4101", "2026-07-01T00:00:00Z")] } },
+			{ body: { data: [story("4102", "2026-06-01T00:00:00Z")] } },
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx, emitted } = makeCtx({}, ["transactions"]);
+
+	const result = await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
+
+	assert.equal(result.considered, 2, "both non-empty pages must be enumerated");
+	assert.equal(emitted.length, 2, "both pages must emit their modeled records");
+	assert.equal(
+		calls.length,
+		3,
+		"the walk must continue until the provider returns an empty page",
 	);
 });
 
@@ -210,6 +236,7 @@ test("collectTransactions: prior STATE.before_id is never read — every run sta
 	const { fetchPath, calls } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: [story("5001", "2026-04-01T00:00:00Z")] } },
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx, emitted } = makeCtx(
@@ -336,7 +363,6 @@ test("collectTransactions: two runs over exact-multiple-of-50 history — run2 s
 // page, nothing is persisted that would make the next run skip the head.
 test("collectTransactions: hitting the page cap still starts the next run at the head", async () => {
 	const PAGE_SIZE = 50;
-	const MAX_TRANSACTION_PAGES = 400;
 	const fullPage = (offset: number) =>
 		Array.from({ length: PAGE_SIZE }, (_, i) =>
 			story(String(offset + i), "2026-01-01T00:00:00Z"),
@@ -359,8 +385,8 @@ test("collectTransactions: hitting the page cap still starts the next run at the
 	);
 	assert.equal(
 		result1.considered,
-		PAGE_SIZE * MAX_TRANSACTION_PAGES,
-		"the run consumes every page up to the cap",
+		PAGE_SIZE * MAX_TRANSACTION_PAGES + 1,
+		"the run marks the unread page at the cap",
 	);
 	assert.equal(
 		calls.length,
@@ -384,6 +410,38 @@ test("collectTransactions: hitting the page cap still starts the next run at the
 	);
 });
 
+test("collectTransactions: a page-cap-truncated walk counts its unread remainder as uncovered", async () => {
+	const PAGE_SIZE = 50;
+	const MAX_PAGES = 400;
+	const fullPage = (offset: number) =>
+		Array.from({ length: PAGE_SIZE }, (_, i) =>
+			story(String(20_000 + offset + i), "2026-01-01T00:00:00Z"),
+		);
+	const script: Record<string, Array<{ body: unknown }>> = {
+		"/stories/target-or-actor/1111111111111111111": Array.from(
+			{ length: MAX_PAGES },
+			(_, page) => ({
+				body: { data: fullPage(page * PAGE_SIZE) },
+			}),
+		),
+	};
+	const { fetchPath } = makeScriptedFetch(script);
+	const { ctx } = makeCtx({}, ["transactions"]);
+
+	const result = await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
+
+	assert.equal(
+		result.considered,
+		MAX_PAGES * PAGE_SIZE + 1,
+		"one unread page marker must be counted",
+	);
+	assert.equal(
+		result.covered,
+		MAX_PAGES * PAGE_SIZE,
+		"the unread remainder must not be covered",
+	);
+});
+
 // ─── Page pacing (F10) ──────────────────────────────────────────────────────
 
 test("collectTransactions: paces between pages via the injected delay, not a bare back-to-back loop", async () => {
@@ -396,6 +454,7 @@ test("collectTransactions: paces between pages via the injected delay, not a bar
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: page1 } },
 			{ body: { data: page2 } },
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx } = makeCtx({}, ["transactions"]);
@@ -407,8 +466,8 @@ test("collectTransactions: paces between pages via the injected delay, not a bar
 	await collectTransactions(ctx, fetchPath, OWNER_ID, recordingDelay);
 	assert.deepEqual(
 		delays,
-		[500],
-		"one page-to-page transition must pace exactly once, via the injected delay",
+		[500, 500],
+		"both non-empty page transitions must be paced",
 	);
 });
 
@@ -416,6 +475,7 @@ test("collectTransactions: a single (non-continuing) page never paces — nothin
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: [story("3000", "2026-01-01T00:00:00Z")] } },
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx } = makeCtx({}, ["transactions"]);
@@ -426,8 +486,8 @@ test("collectTransactions: a single (non-continuing) page never paces — nothin
 	});
 	assert.equal(
 		delayCalls,
-		0,
-		"a run with only one page has nothing to pace between",
+		1,
+		"a short non-empty page must pace before the explicit empty terminal page",
 	);
 });
 
@@ -443,10 +503,11 @@ test("fetchAllFriends: paces between pages via the injected delay", async () => 
 		[`/users/${OWNER_ID}/friends`]: [
 			{ body: { data: page1 } },
 			{ body: { data: page2 } },
+			{ body: { data: [] } },
 		],
 	});
 	const delays: number[] = [];
-	const all = await fetchAllFriends(
+	const { friends: all } = await fetchAllFriends(
 		fetchPath,
 		OWNER_ID,
 		() => Promise.resolve(),
@@ -458,9 +519,126 @@ test("fetchAllFriends: paces between pages via the injected delay", async () => 
 	assert.equal(all.length, FRIENDS_PAGE_SIZE + 1);
 	assert.deepEqual(
 		delays,
-		[500],
-		"one page-to-page transition must pace exactly once",
+		[500, 500],
+		"both non-empty page transitions must be paced",
 	);
+});
+
+test("fetchAllFriends: a short non-empty page does not terminate the walk", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		[`/users/${OWNER_ID}/friends`]: [
+			{
+				body: {
+					data: [{ id: "6000", username: "first", display_name: "First" }],
+				},
+			},
+			{
+				body: {
+					data: [{ id: "6001", username: "second", display_name: "Second" }],
+				},
+			},
+			{ body: { data: [] } },
+		],
+	});
+
+	const result = await fetchAllFriends(
+		fetchPath,
+		OWNER_ID,
+		() => Promise.resolve(),
+		NO_DELAY,
+	);
+
+	assert.equal(
+		result.friends.length,
+		2,
+		"both non-empty pages must be enumerated",
+	);
+	assert.equal(
+		result.truncated,
+		false,
+		"the empty page is an honest completion",
+	);
+	assert.equal(
+		calls.length,
+		3,
+		"the walk must continue until the provider returns an empty page",
+	);
+});
+
+test("collectAllStreams: a capped Venmo friends walk is partial and holds its fingerprint checkpoint", async () => {
+	const page = Array.from({ length: 200 }, (_, i) => ({
+		id: String(30_000 + i),
+		username: `friend${i}`,
+		display_name: `Friend ${i}`,
+	}));
+	const { fetchPath, calls } = makeScriptedFetch({
+		[`/users/${OWNER_ID}/friends`]: Array.from(
+			{ length: MAX_FRIENDS_PAGES },
+			() => ({ body: { data: page } }),
+		),
+	});
+	const { ctx, messages } = makeCtx(
+		{ friends: { fingerprints: { prior: "fingerprint" } } },
+		["friends"],
+	);
+
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+
+	const coverage = messages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "friends",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, MAX_FRIENDS_PAGES * page.length + 1);
+	assert.equal(coverage.covered, MAX_FRIENDS_PAGES * page.length);
+	assert.equal(calls.length, MAX_FRIENDS_PAGES);
+	assert.ok(
+		messages.some((m) => m.type === "SKIP_RESULT" && m.stream === "friends"),
+	);
+	const state = messages.find(
+		(m) => m.type === "STATE" && m.stream === "friends",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(state.cursor, { fingerprints: { prior: "fingerprint" } });
+});
+
+test("collectAllStreams: a capped Venmo transactions walk is partial and holds its date checkpoint", async () => {
+	const page = Array.from({ length: 50 }, (_, i) =>
+		story(String(40_000 + i), "2026-01-01T00:00:00Z"),
+	);
+	const { fetchPath, calls } = makeScriptedFetch({
+		"/stories/target-or-actor/1111111111111111111": Array.from(
+			{
+				length: MAX_TRANSACTION_PAGES,
+			},
+			() => ({ body: { data: page } }),
+		),
+	});
+	const { ctx, messages } = makeCtx(
+		{ transactions: { last_seen_date_created: "2020-01-01T00:00:00Z" } },
+		["transactions"],
+	);
+
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+
+	const coverage = messages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "transactions",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, MAX_TRANSACTION_PAGES * page.length + 1);
+	assert.equal(coverage.covered, MAX_TRANSACTION_PAGES * page.length);
+	assert.equal(calls.length, MAX_TRANSACTION_PAGES);
+	assert.ok(
+		messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "transactions",
+		),
+	);
+	const state = messages.find(
+		(m) => m.type === "STATE" && m.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(state.cursor, {
+		last_seen_date_created: "2020-01-01T00:00:00Z",
+	});
 });
 
 // ─── Endpoint failure classification ────────────────────────────────────────
@@ -548,6 +726,7 @@ test("collectAllStreams: friends stream emits DETAIL_COVERAGE with honest consid
 					],
 				},
 			},
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx, emitted, messages } = makeCtx({}, ["friends"]);
@@ -585,6 +764,7 @@ test("collectAllStreams: transactions DETAIL_COVERAGE distinguishes considered f
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: [modeled, unmodeled] } },
+			{ body: { data: [] } },
 		],
 	});
 	const { ctx, emitted, messages } = makeCtx({}, ["transactions"]);
@@ -602,6 +782,7 @@ test("collectAllStreams: records emit before STATE for each requested stream", a
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: [story("7001", "2026-06-01T00:00:00Z")] } },
+			{ body: { data: [] } },
 		],
 	});
 	const harness = makeRecordingEmit(validateRecord);
@@ -671,4 +852,62 @@ test("collectAllStreams: never calls globalThis.fetch — every read goes throug
 	} finally {
 		globalThis.fetch = original;
 	}
+});
+
+// ─── establishVenmoCollectOrigin: collect()'s own origin guard ─────────────
+//
+// `ensureSession` may leave the page wherever sign-in redirected it (e.g.
+// `id.venmo.com`), so `collect()` re-establishes the `venmo.com` origin
+// itself before its first credentialed fetch. Regression coverage for
+// production run_1787101857760 (2026-08-18): a navigation that resolves
+// without actually landing on venmo.com must fail fast with a diagnosable,
+// retryable name — `venmo_transport_error` — rather than let the next fetch
+// throw a bare, unclassified "Failed to fetch" from an opaque origin.
+
+test("establishVenmoCollectOrigin: a stuck-on-about:blank navigation throws venmo_transport_error, not a bare opaque-origin failure", async () => {
+	const gotoUrls: string[] = [];
+	const page: Pick<Page, "goto" | "url"> = {
+		goto(url: string): ReturnType<Page["goto"]> {
+			gotoUrls.push(url);
+			// Resolves without the page actually leaving about:blank — the exact
+			// production defect (ensureVenmoOrigin's old `.catch(() => undefined)`
+			// returned regardless of whether the navigation landed).
+			return Promise.resolve(null);
+		},
+		url(): string {
+			return "about:blank";
+		},
+	};
+	await assert.rejects(
+		establishVenmoCollectOrigin(page as Page),
+		(err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(
+				err.message,
+				/venmo_transport_error/,
+				"must match VENMO_RETRYABLE_PATTERN, not escape unclassified",
+			);
+			assert.match(
+				err.message,
+				/venmo_origin_navigation_failed/,
+				"the underlying cause stays legible",
+			);
+			return true;
+		},
+	);
+	assert.deepEqual(gotoUrls, ["https://venmo.com/"]);
+});
+
+test("establishVenmoCollectOrigin: a successful navigation to venmo.com resolves without throwing", async () => {
+	let currentUrl = "about:blank";
+	const page: Pick<Page, "goto" | "url"> = {
+		goto(url: string): ReturnType<Page["goto"]> {
+			currentUrl = url;
+			return Promise.resolve(null);
+		},
+		url(): string {
+			return currentUrl;
+		},
+	};
+	await assert.doesNotReject(establishVenmoCollectOrigin(page as Page));
 });
