@@ -667,13 +667,11 @@ test("coverage STATE parser still fails closed when a required store is missing"
 	assert.ok(expected);
 	const parsed = parseCoverageDiagnosticsStateSnapshot("claude-code", {
 		fetched_at: "2026-07-21T12:00:00.000Z",
-		stores: expected
-			.slice(1)
-			.map(({ store, stream }) => ({
-				status: "inventory_only" as const,
-				store,
-				stream,
-			})),
+		stores: expected.slice(1).map(({ store, stream }) => ({
+			status: "inventory_only" as const,
+			store,
+			stream,
+		})),
 	});
 	assert.equal(parsed.hasCommittedSnapshot, false);
 	assert.equal(parsed.missingStores.length, 1);

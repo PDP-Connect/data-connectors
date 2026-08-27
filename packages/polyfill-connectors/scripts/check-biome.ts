@@ -31,18 +31,43 @@
  * format as non-compliant, so this script filters exactly those four
  * diagnostics — nothing else — out of the result.
  *
- * src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts is a
- * different class of exception, same mechanism: it's a documented
- * byte-for-byte copy of pdpp's reference-implementation/runtime/
- * recovery-reason-codes.ts (see that directory's README.md), enforced by
+ * src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts and
+ * .../stderr-redact.ts are a different class of exception, same mechanism:
+ * both are documented byte-for-byte copies of pdpp's
+ * reference-implementation/runtime/ modules of the same name (see that
+ * directory's README.md), enforced by
  * .github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs's
- * raw SHA-256 comparison against pdpp's canonical file at the pinned SHA.
- * pdpp formats that file with 2-space indentation, not this package's tabs
- * — reformatting it here would silently break byte-identity with the
+ * raw SHA-256 comparison against pdpp's canonical files at the pinned SHA.
+ * pdpp formats both files with 2-space indentation, not this package's tabs
+ * — reformatting them here would silently break byte-identity with the
  * upstream source on the next `biome check --write .`, which is exactly the
- * drift that motivated this exception. Keep this file out of Biome's write
- * path for as long as the stand-in exists (see its README's "Removal
- * trigger").
+ * drift that motivated this exception. Keep these files out of Biome's write
+ * path for as long as the stand-ins exist (see the README's "Removal
+ * trigger"). NOTE: .../connector-gap-bounding.ts in the same directory is
+ * NOT in this exception list — it is a partial, hand-extracted stand-in
+ * (see its own header comment), not a byte-for-byte copy, so it is written
+ * with this package's normal tabs convention like any other authored file.
+ *
+ * `__fixtures__` HTML fixture files (glob: __fixtures__ then any path then
+ * .html; same shape for the top-level fixtures/ directory) are the SAME
+ * class of bug (#1 above), discovered only when the polyfill-connectors
+ * catch-up merge with pdpp added the first such files that
+ * happen to trip `lint/a11y/*` rules or Biome's strict HTML parser
+ * (`category: "parse"`, e.g. an unclosed `<div>` in a captured, real-world,
+ * intentionally-messy page snapshot). biome.jsonc's own `files.includes`
+ * already lists connectors/.../__fixtures__/... .html and fixtures/... .html
+ * glob excludes (see biome.jsonc itself for the exact patterns) — that
+ * exclusion is silently inert under the same extends-chain bug as the rest
+ * of this file's exceptions, so it must be re-applied here instead. These
+ * are captured/scrubbed DOM fixtures the connector's own scraping code
+ * reads with tolerant DOM APIs, never strict-parsed HTML documents; "fixing"
+ * a real captured page's mismatched tags or missing `lang`/alt text to
+ * satisfy a11y rules would corrupt its fidelity to what the connector
+ * actually has to handle in production, for zero real accessibility benefit
+ * (nothing renders these files to an end user). Excluded by glob, not an
+ * exact-path list like the two sets below, since new connector work adds
+ * new HTML fixture captures on an ongoing basis and each one would
+ * otherwise need adding by hand.
  *
  * Re-collapse into biome.jsonc's files.includes/overrides (removing this
  * wrapper) the moment a Biome release fixes either bug above.
@@ -64,7 +89,13 @@ const TWITTER_ARCHIVE_JS_FIXTURES = new Set([
 
 const REFERENCE_CONTRACT_STAND_IN_FILES = new Set([
 	"src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts",
+	"src/reference-implementation-stand-in/runtime/stderr-redact.ts",
 ]);
+
+// Mirrors biome.jsonc's `!!connectors/**/__fixtures__/**/*.html` and
+// `!!fixtures/**/*.html` — see the header comment above for why these are
+// excluded from every category, not just format.
+const FIXTURE_HTML_RE = /(^|\/)(__fixtures__|fixtures)\/.*\.html$/;
 
 interface BiomeDiagnostic {
 	severity?: string;
@@ -101,14 +132,25 @@ function main(): void {
 			(TWITTER_ARCHIVE_JS_FIXTURES.has(d.location.path) ||
 				REFERENCE_CONTRACT_STAND_IN_FILES.has(d.location.path)),
 	);
-	const remaining = report.diagnostics.filter(
-		(d) => !allowedFormatExceptions.includes(d),
+	const allowedFixtureHtmlExceptions = report.diagnostics.filter(
+		(d) => d.location?.path && FIXTURE_HTML_RE.test(d.location.path),
 	);
+	const allowedExceptions = new Set([
+		...allowedFormatExceptions,
+		...allowedFixtureHtmlExceptions,
+	]);
+	const remaining = report.diagnostics.filter((d) => !allowedExceptions.has(d));
 	const remainingErrors = remaining.filter((d) => d.severity === "error");
 
 	if (allowedFormatExceptions.length > 0) {
 		console.log(
 			`[check-biome] ${allowedFormatExceptions.length} format finding(s) in the checked-in Twitter archive .js fixture / reference-contract stand-in exception list — expected, not a failure (see this script's header comment).`,
+		);
+	}
+
+	if (allowedFixtureHtmlExceptions.length > 0) {
+		console.log(
+			`[check-biome] ${allowedFixtureHtmlExceptions.length} finding(s) in captured __fixtures__/**/*.html or fixtures/**/*.html DOM snapshots — expected, not a failure (see this script's header comment).`,
 		);
 	}
 

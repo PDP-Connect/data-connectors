@@ -638,7 +638,7 @@ test("mutation-kill: a compound (non-code-shaped) ensureSession throw does NOT g
 
 test("the recovered code round-trips through the actual redaction the connector_error_message column applies (proves the fix, not just the plumbing)", async () => {
 	const { boundConnectorErrorCode, boundConnectorErrorMessage } = await import(
-		"../../../reference-implementation/runtime/connector-gap-bounding.ts"
+		"./reference-implementation-stand-in/runtime/connector-gap-bounding.ts"
 	);
 	await assert.rejects(
 		establishSession(
