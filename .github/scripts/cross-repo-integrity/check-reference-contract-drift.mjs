@@ -59,6 +59,16 @@ const LOCAL_STAND_IN_MAPPINGS = [
     standIn: "src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts",
     canonical: "reference-implementation/runtime/recovery-reason-codes.ts",
   },
+  {
+    standIn: "src/reference-implementation-stand-in/runtime/stderr-redact.ts",
+    canonical: "reference-implementation/runtime/stderr-redact.ts",
+  },
+  // connector-gap-bounding.ts is deliberately NOT in this list: it is a partial
+  // extraction (two functions plus their dependency chain), not a byte-for-byte
+  // copy of the canonical file, so a raw SHA-256 comparison against the whole
+  // upstream module would always fail. See its own header comment and this
+  // repo's src/reference-implementation-stand-in/README.md for what IS pinned
+  // (the source commit its extracted bodies were copied from).
 ];
 
 function sha256(buf) {
