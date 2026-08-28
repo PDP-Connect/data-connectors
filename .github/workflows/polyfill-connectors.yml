@@ -89,12 +89,30 @@ jobs:
         # packages/polyfill-connectors/vendor/README.md for why its two
         # @pdpp/* dependencies install from a checked-in tarball instead of a
         # workspace/registry entry). --ignore-scripts skips patchright's
-        # postinstall browser download; verify + test don't launch a browser.
+        # postinstall browser download; the browser the tests DO need is
+        # installed explicitly in the next step, so the skip stays deliberate
+        # rather than accidental.
         working-directory: packages/polyfill-connectors
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
+
+      - name: Install Chromium for the capture-redaction proofs
+        # `src/capture-trace-redaction.test.ts` launches a real browser: the
+        # thing under test is what Playwright WRITES to disk (trace zips,
+        # screenshots, DOM snapshots), so a stub cannot prove the redaction.
+        # `--with-deps` because the runner image carries no shared libs for it.
+        # Run from the package: `playwright` is a dependency of
+        # polyfill-connectors, not of the repo root.
+        #
+        # Ported from PDP-Connect/pdpp's own polyfill-connectors workflow,
+        # which already installs exactly this for exactly this suite. Move A
+        # brought that suite into this repo but not the browser step, so the
+        # install comment above ("verify + test don't launch a browser") became
+        # false and six tests failed on a missing chrome-headless-shell.
+        working-directory: packages/polyfill-connectors
+        run: npx playwright install --with-deps chromium
 
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
