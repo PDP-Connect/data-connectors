@@ -4,7 +4,7 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792"
+    "commit": "684f6c2184cd80d928a1f922f28d8dfa147b552a"
   },
   "source_inventory": {
     "upstream_connector": [
@@ -30,7 +30,7 @@
       },
       {
         "path": "packages/polyfill-connectors/package.json",
-        "sha256": "sha256:788eb5c595710ab598e3f6b837e16e41663cf9f8998727a2e4e16db87cd07f9d"
+        "sha256": "sha256:976df447daf221243d960b80169a6e780a8e03525d39fa86419da14efc5c3601"
       }
     ],
     "upstream_runtime": [
@@ -138,9 +138,9 @@
     "bundled_dependencies": [
       {
         "name": "zod",
-        "version": "4.3.6",
+        "version": "4.4.3",
         "package_path": "node_modules/zod",
-        "package_json_sha256": "sha256:1a316ad36e36c6c500bce6e9a6dcbec8efda1083f49a72185226b35573b543ba",
+        "package_json_sha256": "sha256:c630bd10b52dcf71c112a2bf78dbf2734b9db58d62de663b8d86c2ec2c8cda2e",
         "files": [
           {
             "path": "index.js",
@@ -160,7 +160,7 @@
           },
           {
             "path": "v4/classic/errors.js",
-            "sha256": "sha256:fd807f79ded4f88928ab8205de1922901a4d3a8c9b93d072e1ab8c0a44a95df5"
+            "sha256": "sha256:b155316267f79068ddc2dddc7046e13785804b768ca36e6deff1691d154f7c20"
           },
           {
             "path": "v4/classic/external.js",
@@ -168,7 +168,7 @@
           },
           {
             "path": "v4/classic/from-json-schema.js",
-            "sha256": "sha256:826d3386506f0e92b77c9917c04c67b8349c67815e002ac1f712b0e68d7538a7"
+            "sha256": "sha256:d8866bf5232e55d12cda032bde6a56a05a0a8b276945c2e4eed66432ef5cc9b2"
           },
           {
             "path": "v4/classic/iso.js",
@@ -180,11 +180,11 @@
           },
           {
             "path": "v4/classic/schemas.js",
-            "sha256": "sha256:74f7043b7de6f35661a86c378e7b0f9198b6170336dfb85b30e6c8d1a43f8ef7"
+            "sha256": "sha256:eb4af7946a092aff8678b9251728ea58dab40154920cd65ec4a2ca1d4df68393"
           },
           {
             "path": "v4/core/api.js",
-            "sha256": "sha256:b0249f67024345bab7b455b0363eccf40dd58c326f492d0321bf825888a71c9a"
+            "sha256": "sha256:00cb5edcfde8098e5a169e66c1dce50c101484d21436e3d78e137e1fa87c4836"
           },
           {
             "path": "v4/core/checks.js",
@@ -192,7 +192,7 @@
           },
           {
             "path": "v4/core/core.js",
-            "sha256": "sha256:3a988a40d75ea5729a6ffcb2c94619e244ba0341ff1ed981d5a1725229952442"
+            "sha256": "sha256:a5e713beaac4647151e03716a83f51ab714e5337cf66850f3b28eaf072a0bbfe"
           },
           {
             "path": "v4/core/doc.js",
@@ -200,7 +200,7 @@
           },
           {
             "path": "v4/core/errors.js",
-            "sha256": "sha256:c920e5549c1abcb8fc95824678beabb43023407d6a92020a3ac4a223af0a7a4b"
+            "sha256": "sha256:bdd0ed8fd4a6e9d04fe6423b0f9df3a0b403939bc7dcedd8930a4b8df1fb118c"
           },
           {
             "path": "v4/core/index.js",
@@ -212,7 +212,7 @@
           },
           {
             "path": "v4/core/json-schema-processors.js",
-            "sha256": "sha256:1872537015ed25ea43461fa109491c70ddccf43dc4995329354fb80a8971d22e"
+            "sha256": "sha256:ff15f567c9401dd7d3151ce11736283ff747c9a9e205cc08ee96f90eadc1c0c6"
           },
           {
             "path": "v4/core/json-schema.js",
@@ -220,11 +220,11 @@
           },
           {
             "path": "v4/core/parse.js",
-            "sha256": "sha256:a58b9c7be78e29d71f969f01807fe5f9be1f68d222a0f60c25e32e24f3b6639c"
+            "sha256": "sha256:2578b8d1341c3882a6c089f9ec57ce1c1a16b8b2b477721d4d89ba3d3ee50c9c"
           },
           {
             "path": "v4/core/regexes.js",
-            "sha256": "sha256:a89562e9bea575edbbf5da84b7762fed64e20c4ff6c105dca318dfc60915706a"
+            "sha256": "sha256:3cb122080c1154321331322ebc0cbe04878fe104c8c7b335891d9f85fc4b3f63"
           },
           {
             "path": "v4/core/registries.js",
@@ -232,19 +232,19 @@
           },
           {
             "path": "v4/core/schemas.js",
-            "sha256": "sha256:8f25b8fe962d889812763c51e1a10b439996ef59c65b3ee7c46df911f82c4b59"
+            "sha256": "sha256:09da9b0cb9b9d2d795c349bc47c7521d5aaffe241885f0c9728f2aa7de3834c9"
           },
           {
             "path": "v4/core/to-json-schema.js",
-            "sha256": "sha256:7224e53b6d3110925b67d7abd1b61389e5a359f6cca6a982e27c8271b27ea19e"
+            "sha256": "sha256:fb3c9ab59947582f7671a53c8e20a3ced5eaa92d1c220ce8b27717a59033ad0d"
           },
           {
             "path": "v4/core/util.js",
-            "sha256": "sha256:e41f9e774b96a9fe2b04c08f5aad32e6db2f6aa090671d2a375e7062b4f178aa"
+            "sha256": "sha256:968e3433e810cf7ba5efb609a1cb6d9a6cfb51215fd1f699938228f7ac25deb3"
           },
           {
             "path": "v4/core/versions.js",
-            "sha256": "sha256:070e8cb9b31440b1bf0ae0de74a5fd7e8d410217a08df8a927c3d620477cc01e"
+            "sha256": "sha256:bf082fde98fa7725412d713c7f56da3a5603bdef199d68d5769263f30ce9c756"
           },
           {
             "path": "v4/locales/ar.js",
@@ -279,8 +279,12 @@
             "sha256": "sha256:521a4ed29fcaf3f781163875dc282cfb5262047773aa2b70a852996b1d8a51b9"
           },
           {
+            "path": "v4/locales/el.js",
+            "sha256": "sha256:9857a9e4909282b2efd86317fc3e67ed86e24287f32329cfa5ab833c05fc0d81"
+          },
+          {
             "path": "v4/locales/en.js",
-            "sha256": "sha256:3e2c03ebed517345ad73a247a8134577e5986622c22e7b6c760b8b9af5827442"
+            "sha256": "sha256:232a0828d64df8e410b23ac9825a667bd9d485fd70acdc4b4d0870539faef0a4"
           },
           {
             "path": "v4/locales/eo.js",
@@ -304,11 +308,15 @@
           },
           {
             "path": "v4/locales/fr.js",
-            "sha256": "sha256:af85482fed4a3e4c97565ef849b4a14193b979b88b385844633d6af9b2e5ae30"
+            "sha256": "sha256:3ea466ca5737984bb5acc9008822060272f596317004618cfe1e05109f707577"
           },
           {
             "path": "v4/locales/he.js",
             "sha256": "sha256:290512e43d2907700211da09dc3959fd98d120bfb89f8836e6e3f83a472e26fe"
+          },
+          {
+            "path": "v4/locales/hr.js",
+            "sha256": "sha256:1ea65433c32b89bead43113ac69b3acc520bb73ae231dd2e05fedf8e8c5656d6"
           },
           {
             "path": "v4/locales/hu.js",
@@ -324,7 +332,7 @@
           },
           {
             "path": "v4/locales/index.js",
-            "sha256": "sha256:8b23cfb530a5af9375303c0ffbec9ee260fff97ac59a1f780171f288b6e2f2da"
+            "sha256": "sha256:d73f41a76614855d43eea493030a1aa05dca30c9a17015a0da5b8b70da61b6b1"
           },
           {
             "path": "v4/locales/is.js",
@@ -332,7 +340,7 @@
           },
           {
             "path": "v4/locales/it.js",
-            "sha256": "sha256:1409d5c02a8d5922f21577f1d0f892aa141f56f3a3b49a13fe4802395ddaa0ac"
+            "sha256": "sha256:439969d199427d77ebf1e477bf2295b226712804b25437d442f9dfc78aca95e0"
           },
           {
             "path": "v4/locales/ja.js",
@@ -340,7 +348,7 @@
           },
           {
             "path": "v4/locales/ka.js",
-            "sha256": "sha256:b25387ebafa764efb3b1142eda956a24ed3bba8ea523d97a8ace4dc2973f0e38"
+            "sha256": "sha256:0ab5322368f9ac6e6b58f93dac484a4f4f06cdf4c0677f4df88164e9d8b4bf81"
           },
           {
             "path": "v4/locales/kh.js",
@@ -391,6 +399,10 @@
             "sha256": "sha256:df172afc585544dee7c063c484f5a07b5ed103e2c1072a782c763ad8ceb08e17"
           },
           {
+            "path": "v4/locales/ro.js",
+            "sha256": "sha256:ecae409f4299ab91e2aff1095db14e23f3cf2c05b3654e242047655352c7f46b"
+          },
+          {
             "path": "v4/locales/ru.js",
             "sha256": "sha256:c397a473e94d7d189a9c09c7890fe379c4f6f46d9556d52a040a90ffa56f7b93"
           },
@@ -428,7 +440,7 @@
           },
           {
             "path": "v4/locales/uz.js",
-            "sha256": "sha256:287481257de95c9d99b91e070773ade607fb5c68cf5fb74df311376950d507b6"
+            "sha256": "sha256:d540bed482d15c47cb45439cff34e053379c53019c7c7c5fbe43f222d0c81f04"
           },
           {
             "path": "v4/locales/vi.js",
@@ -447,18 +459,18 @@
             "sha256": "sha256:37dcae620e1553e9174a4b9434bbcc4e465150a627e80c9c17fd01de8baaf59a"
           }
         ],
-        "closure_sha256": "sha256:383fca47786f1014fb18793dc56de432e19514d4233c2c101e14ecb59f1e5147"
+        "closure_sha256": "sha256:70892c1e0ad9ef125fc8b4f750adb476648271dc619b8d3cac8f9f6f14ba45ce"
       }
     ],
     "maintained_local": [
       {
         "path": "artifact.json",
-        "sha256": "sha256:dae5d888e69b632791d13cf71ea57748f2bebe1ccc23ed82111423bf4b1a122b"
+        "sha256": "sha256:812fbed6ebf9acf3290fc9970666977b39109a84502d355e5640f0e96d41f90e"
       }
     ]
   },
   "build": {
-    "esbuild_version": "0.28.1",
+    "esbuild_version": "0.28.2",
     "options": {
       "bundle": true,
       "format": "esm",
@@ -489,7 +501,7 @@
   ],
   "outputs": {
     "profile/collection-profile.json": "sha256:e2c66b9d584ff935b31790e3a698a5576168002988ccc8076ded327f189beff0",
-    "dist/collection-profile.mjs": "sha256:2c813fb3ae7fb6cc94af327a17ea17347a43b78aa4a401718a660b2edd6a25cc",
+    "dist/collection-profile.mjs": "sha256:68fced5a803e38810d49feb9607ee14d7aa8e1b4e95c27871f07fd6f37b76698",
     "undeclared_external_imports": []
   }
 }
