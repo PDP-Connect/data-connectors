@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Typed fixture source. `tweets.js` is the generated Twitter archive artifact.
 export interface TweetFixture {
 	tweet: Record<string, unknown>;
