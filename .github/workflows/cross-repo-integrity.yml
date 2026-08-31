@@ -123,6 +123,7 @@ jobs:
       contents: read
     outputs:
       data-connect-sha: ${{ steps.pins.outputs.data-connect-sha }}
+      data-connect-1-0-0-sha: ${{ steps.pins.outputs.data-connect-1-0-0-sha }}
       pdpp-sha: ${{ steps.pins.outputs.pdpp-sha }}
       data-connect-track-ref: ${{ steps.pins.outputs.data-connect-track-ref }}
       pdpp-track-ref: ${{ steps.pins.outputs.pdpp-track-ref }}
@@ -137,6 +138,7 @@ jobs:
         id: pins
         run: |
           DATA_CONNECT_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].sha')"
+          DATA_CONNECT_1_0_0_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect-1-0-0"].sha')"
           PDPP_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].sha')"
           # During a coordinated cutover, a pin can deliberately track an unmerged PR-head
           # branch rather than the producer's main (see cross-repo-pins.json's own "branch"
@@ -151,7 +153,7 @@ jobs:
           # downstream jobs. Reject anything that isn't exactly 40 lowercase hex characters
           # before it ever reaches a shell — no symbolic refs, no option-like strings (e.g.
           # "--upload-pack=..."), no whitespace, no other JSON type coerced to a string.
-          for name_sha in "data-connect:$DATA_CONNECT_SHA" "pdpp:$PDPP_SHA"; do
+          for name_sha in "data-connect:$DATA_CONNECT_SHA" "data-connect-1-0-0:$DATA_CONNECT_1_0_0_SHA" "pdpp:$PDPP_SHA"; do
             name="${name_sha%%:*}"
             sha="${name_sha#*:}"
             if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
@@ -173,6 +175,7 @@ jobs:
           done
 
           echo "data-connect-sha=$DATA_CONNECT_SHA" >> "$GITHUB_OUTPUT"
+          echo "data-connect-1-0-0-sha=$DATA_CONNECT_1_0_0_SHA" >> "$GITHUB_OUTPUT"
           echo "data-connect-track-ref=$DATA_CONNECT_TRACK_REF" >> "$GITHUB_OUTPUT"
           echo "pdpp-track-ref=$PDPP_TRACK_REF" >> "$GITHUB_OUTPUT"
           echo "pdpp-sha=$PDPP_SHA" >> "$GITHUB_OUTPUT"
@@ -221,6 +224,24 @@ jobs:
             exit 1
           fi
 
+      # A SEPARATE, later data-connect SHA from the one above — see cross-repo-pins.json's
+      # "data-connect-1-0-0" entry for why the tarball-digests job needs two different
+      # data-connect checkouts: pdpp's vendor/SHA256SUMS records 1.0.0 tarballs packed from a
+      # later commit than the 0.0.1 tarballs this repo's own vendor/SHA256SUMS and jobs
+      # (a)/(b) compare against.
+      - name: Checkout data-connect @ pinned 1.0.0-release SHA
+        if: matrix.check.id == 'tarball-digests'
+        env:
+          DATA_CONNECT_1_0_0_SHA: ${{ needs.read-pins.outputs.data-connect-1-0-0-sha }}
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/data-connect.git data-connect-1-0-0
+          git -C data-connect-1-0-0 checkout --detach "$DATA_CONNECT_1_0_0_SHA"
+          RESOLVED="$(git -C data-connect-1-0-0 rev-parse HEAD)"
+          if [ "$RESOLVED" != "$DATA_CONNECT_1_0_0_SHA" ]; then
+            echo "::error::data-connect-1-0-0 checked out to $RESOLVED, not the requested pin $DATA_CONNECT_1_0_0_SHA" >&2
+            exit 1
+          fi
+
       - name: Checkout pdpp @ pinned SHA
         if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
         env:
@@ -253,7 +274,7 @@ jobs:
 
       - name: Run drift check — tarball-digests
         if: matrix.check.id == 'tarball-digests'
-        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp
+        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp data-connect-1-0-0
 
       - name: Run drift check — reference-contract
         if: matrix.check.id == 'reference-contract'
