@@ -486,6 +486,8 @@ The runner reads the connector's sibling `.json` metadata to resolve the `connec
 
 ## Contributing
 
+For sign-off (DCO) and AI-assistance disclosure, see [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md). The steps below cover connector specifics.
+
 ### Adding a legacy Playwright connector by exception
 
 1. Fork this repo
