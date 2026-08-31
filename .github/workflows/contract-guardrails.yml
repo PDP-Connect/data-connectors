@@ -72,3 +72,6 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref || 'main' }}
         run: node scripts/check-additive-schemas.mjs
+
+      - name: Check SPDX license headers
+        run: node scripts/check-spdx-headers.mjs
