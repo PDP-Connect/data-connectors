@@ -5,16 +5,16 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "9155e57ae47ab145214eb10551ed2c2185d7098a",
+      "sha": "0bc3f8c5b4ffdc1cbbfb43f1a251915456859886",
       "branch": "main",
-      "note": "Head of PDP-Connect/data-connect main as of 2026-08-20, verified via `gh api repos/PDP-Connect/data-connect/branches/main` at pin time. This is the merge commit of PR #30, which ports three hunks pdpp's own rebase of fix/preservation-fixes-0819 had dropped (bare-specifier package validation, iMessage fixture date fix, connector-spawn tsx-resolution hardening). Supersedes the prior 9ef24d46 pin (PR #29, consumer-pin-required activation): only packages/collector-runtime changed between the two pins (see this repo's vendor/SHA256SUMS refresh in the same PR that updated this field). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
+      "note": "Merge commit of PDP-Connect/data-connect PR #34 ('rebuild rejected terminal commits'), confirmed an ancestor of main as of 2026-08-31 via `git merge-base --is-ancestor`. Discovered stale: pdpp's own committed vendor/pdpp-collector-runtime-0.0.1.tgz (see pdpp's vendor/README.md provenance commits d8470bcfd5/ceb6ced321) was packed from this commit, not from the prior 9155e57 pin here — the tarball-digest drift check (job c) failed against 9155e57 and passes against this SHA (verified locally: fresh repack of pdpp-collector-runtime-0.0.1.tgz from this commit is byte-identical to pdpp's committed copy, sha256 39a94ba1...). This repo's own vendor/pdpp-collector-runtime-0.0.1.tgz and vendor/pdpp-connector-protocol-0.0.1.tgz were re-packed from this SHA in the same change that moved this pin (see packages/polyfill-connectors/vendor/SHA256SUMS). Supersedes the prior 9155e57ae4 pin (PR #30, 2026-08-20). Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, (c) tarball digests."
     },
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "5eacd82e2f9822b555bda869429b842be66b1ff7",
-      "branch": "main",
-      "note": "Head of PDP-Connect/pdpp main as of 2026-08-20, verified via `gh api repos/PDP-Connect/pdpp/branches/main` at pin time. This is the merge commit of PR #171, which refreshed pdpp's own vendor/pdpp-collector-runtime-0.0.1.tgz to match data-connect's new pin above (both moves are part of the same coordinated data-connect PR #30 repin). Required here: drift job (c) (vendored tarball digests) checks pdpp's vendor/SHA256SUMS against a fresh repack from the data-connect pin too, and pdpp's tarball at the PRIOR a0924e9a pin predates PR #171, so it would fail that comparison without this move. packages/reference-contract (what this pin otherwise backs, for drift job (d)) did not change in PR #171. Supersedes the prior a0924e9a pin (PR #170, consumer-pin-required activation)."
+      "sha": "8d42fe86eb6bac6cf266b37c451f8b9909539b6e",
+      "branch": "waspflow/vendor-protocol-stream-evidence-0828",
+      "note": "Head of PDP-Connect/pdpp PR #238 (`waspflow/vendor-protocol-stream-evidence-0828`) as of 2026-08-31, tagged `pr238-freeze-20260831-8d42fe86e` at pin time. PR #238 is still open (not yet merged to main), so `branch` deliberately tracks the PR-head branch rather than `main` per this workflow's own coordinated-cutover mechanism (see cross-repo-integrity.yml's read-pins/pin-freshness comments) — main and this branch are expected to disagree on packages/reference-contract and reference-implementation until #238 merges. Revert `branch` to `main` once #238 lands. Supersedes the prior 5eacd82e pin (main as of 2026-08-20)."
     }
   }
 }
