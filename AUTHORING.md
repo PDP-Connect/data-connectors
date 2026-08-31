@@ -1,16 +1,16 @@
 # Connector authoring
 
-Use PDPP for new connector work by default. Keep source code and the canonical Collection Profile in the `PDP-Connect/pdpp` repository.
+This repository is the single home of PDPP connector content. Keep source code and the canonical Collection Profile here, under `connectors/`.
 
-This repository packages a pinned PDPP commit for DataConnect. It does not own the primary implementation of a new connector.
+`PDP-Connect/pdpp`'s copy of `packages/polyfill-connectors` is frozen for direct edits: it continues to run the product, but is no longer the source of truth for new connector work, and does not own the primary implementation of a new connector.
 
 ## Default workflow
 
-1. Add or change the connector in `PDP-Connect/pdpp` under `packages/polyfill-connectors/`.
+1. Add or change the connector here, in this repository.
 
-2. Test the connector and its Collection Profile in that repository.
+2. Test the connector and its Collection Profile here.
 
-3. Commit the PDPP work and select the exact source commit.
+3. Commit the work and select the exact source commit.
 
 4. Add an `artifact.json` descriptor in this repository.
 

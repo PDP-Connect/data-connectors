@@ -2,7 +2,7 @@
 
 This repository contains two different connector artifact families. They do not share a runtime or authoring workflow.
 
-- For new connector work, start with [Connector authoring](AUTHORING.md). Author the connector in `PDP-Connect/pdpp`, then package its pinned PDPP artifact here.
+- For new connector work, start with [Connector authoring](AUTHORING.md). This repository is the single home of PDPP connector content: begin the connector here, not in `PDP-Connect/pdpp`. `PDP-Connect/pdpp`'s copy of `packages/polyfill-connectors` is frozen for direct edits: it still runs the product, but is no longer the source of truth for new connector work.
 - For existing `*-playwright` maintenance, use [Legacy Playwright connector maintenance](#legacy-playwright-connector-maintenance). A new legacy connector requires an explicit exception.
 
 The existing Playwright connectors use browser automation for local desktop collection. The bundled `playwright-runner/` runs that legacy format. It does not run PDPP Collection Profiles.
@@ -366,7 +366,7 @@ The runner classifies each run into one of:
 
 ## Legacy Playwright connector maintenance
 
-Use this path to maintain an existing legacy browser connector. New connector work belongs in `PDP-Connect/pdpp` by default. See [Connector authoring](AUTHORING.md).
+Use this path to maintain an existing legacy browser connector. New connector work belongs here by default, not in `PDP-Connect/pdpp`. See [Connector authoring](AUTHORING.md).
 
 Read [`CONNECTOR-GUIDELINES.md`](CONNECTOR-GUIDELINES.md) first: the rules that keep a
 connector running unchanged on both the desktop runner and the mobile WebView shim. They
