@@ -12,9 +12,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "8d42fe86eb6bac6cf266b37c451f8b9909539b6e",
+      "sha": "c3e5ae15746df3cf7ce23ce00c27462ef6198b23",
       "branch": "waspflow/vendor-protocol-stream-evidence-0828",
-      "note": "Head of PDP-Connect/pdpp PR #238 (`waspflow/vendor-protocol-stream-evidence-0828`) as of 2026-08-31, tagged `pr238-freeze-20260831-8d42fe86e` at pin time. PR #238 is still open (not yet merged to main), so `branch` deliberately tracks the PR-head branch rather than `main` per this workflow's own coordinated-cutover mechanism (see cross-repo-integrity.yml's read-pins/pin-freshness comments) — main and this branch are expected to disagree on packages/reference-contract and reference-implementation until #238 merges. Revert `branch` to `main` once #238 lands. Supersedes the prior 5eacd82e pin (main as of 2026-08-20)."
+      "note": "Head of PDP-Connect/pdpp PR #238 (`waspflow/vendor-protocol-stream-evidence-0828`) as of 2026-08-31, one commit ahead of the prior 8d42fe86e pin (`chore(vendor): refresh data-connect package artifacts`, no intervening commits). `branch` unchanged: c3e5ae157 is on the same PR-head branch, still open, not yet merged to main. Verified no-op for drift jobs (a)/(b)/(d): packages/reference-contract/src/{common/index.ts,evidence/coherence.ts,evidence/collection-scope.ts} are byte-identical between 8d42fe86e and c3e5ae157 (`git diff` empty for all three), and the commit between them touches only pdpp's own vendor/ and pin-verification scripts, not collector-definitions or connector sources. PR #238 is still open (not yet merged to main), so `branch` deliberately tracks the PR-head branch rather than `main` per this workflow's own coordinated-cutover mechanism (see cross-repo-integrity.yml's read-pins/pin-freshness comments) — main and this branch are expected to disagree on packages/reference-contract and reference-implementation until #238 merges. Revert `branch` to `main` once #238 lands. Supersedes the prior 8d42fe86e pin (2026-08-31, PR #44) and 5eacd82e pin (main as of 2026-08-20)."
     }
   }
 }
