@@ -3,7 +3,7 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
+    "commit": "684f6c2184cd80d928a1f922f28d8dfa147b552a",
     "manifest": "packages/polyfill-connectors/manifests/chatgpt.json",
     "entrypoint": "packages/polyfill-connectors/connectors/chatgpt/index.ts",
     "connector_files": [

@@ -46,9 +46,9 @@
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
         "manifestSha256": "sha256:e2c66b9d584ff935b31790e3a698a5576168002988ccc8076ded327f189beff0",
-        "entrypointSha256": "sha256:2c813fb3ae7fb6cc94af327a17ea17347a43b78aa4a401718a660b2edd6a25cc",
-        "provenanceSha256": "sha256:95635fdd7865401deeecde499621d181397b301cc266a7fdf659c175ec04e4cf",
-        "artifactSha256": "sha256:0188385dbb782cf23a5331f0b05a4dddbab422cc21113b0ba8b5c1f72b42772f",
+        "entrypointSha256": "sha256:68fced5a803e38810d49feb9607ee14d7aa8e1b4e95c27871f07fd6f37b76698",
+        "provenanceSha256": "sha256:c84240a0c2706ce20ad470917cdb2f88bb5d39a4b5b97ed9227c135fba1af48d",
+        "artifactSha256": "sha256:9828a6d877d852b521bf7fc1d14ad7890e92e21b0e97b6c13c69bbdc6778c983",
         "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.0.tgz",
         "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.0.tgz",
         "publishedAt": "2026-07-31T00:00:00Z",
@@ -219,6 +219,42 @@
           "iconKey": "chatgpt",
           "defaultScope": "chatgpt.conversations"
         }
+      },
+      {
+        "connectorId": "chatgpt-playwright",
+        "company": "openai",
+        "version": "4.0.1",
+        "name": "ChatGPT",
+        "status": "stable",
+        "description": "Exports your email, memories, and all conversations from ChatGPT.",
+        "sourceFiles": {
+          "script": "openai/chatgpt-playwright.js",
+          "metadata": "openai/chatgpt-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "dependabot/npm_and_yarn/npm-85cc294878",
+        "sourceCommit": "fedd4d10c2aa11dcf193bed4dffbcdaa2983458e",
+        "releaseId": "connectors-fedd4d10c2aa",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:49b5030df2ec654ede7a66a14a01b80e9e383b28e48d90c5ca672fae0156c9c9",
+        "scriptSha256": "sha256:3203d552cb989457048c83a4801cc8204328260fcf9c43075688f5f9a79e7e45",
+        "artifactSha256": "sha256:80572e72546c267c22abd6a98054907e943d4ebe50841b35d1417ee3fc7323d5",
+        "artifactPath": "artifacts/chatgpt-playwright/chatgpt-playwright-4.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/fedd4d10c2aa11dcf193bed4dffbcdaa2983458e/artifacts/chatgpt-playwright/chatgpt-playwright-4.0.1.tgz",
+        "scopes": [
+          "chatgpt.memories",
+          "chatgpt.conversations"
+        ],
+        "consumerMetadata": {
+          "sourceId": "chatgpt",
+          "displayName": "ChatGPT",
+          "brandDomain": "chatgpt.com",
+          "aliases": [
+            "openai"
+          ],
+          "iconKey": "chatgpt",
+          "defaultScope": "chatgpt.conversations"
+        }
       }
     ],
     "claude-code-local": [
@@ -349,9 +385,9 @@
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
         "manifestSha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
-        "entrypointSha256": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
-        "provenanceSha256": "sha256:3a33cd545496a19508efd520fcf03de226d80ddbf1122fea61bc4bcfe5b0eca3",
-        "artifactSha256": "sha256:685b35ee84e84c287cf4bd6df548b984699de84db7bf69966b5bda54a94aa47b",
+        "entrypointSha256": "sha256:a954eebcd789473237406424e76d697d791042c858ea1fc1b704f87456d01e98",
+        "provenanceSha256": "sha256:d1a36450cc8d5dac7b6f487f9cdb68681a6c62c4588c6ba84d29d436775908c0",
+        "artifactSha256": "sha256:bf8529b2d6fd9cfaf91adb8093898d3afb6cb2a3671403da3cec5d57cb239564",
         "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.0.tgz",
         "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.0.tgz",
         "publishedAt": "2026-07-30T00:00:00Z",
@@ -1273,9 +1309,9 @@
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
         "manifestSha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
-        "entrypointSha256": "sha256:8dac8ccb0e7a5f0e71d5891d0d50f6b48485fcbfe834d7afb32b5485b30bf23b",
-        "provenanceSha256": "sha256:9cf13d74868f658be0e1282c7a4e98db3b238ec2afac581ad5d02a9fbfce4ecd",
-        "artifactSha256": "sha256:42eb6571e6ee1bc83dc7027f208d07eccd6cc770c86a78eca5c99305693f7f8e",
+        "entrypointSha256": "sha256:3d9246db2fbb4a35a235f7423569364413c4fb400047868e43be89a16af34669",
+        "provenanceSha256": "sha256:80785422f96f5df8fc43b41d7472ee4c91d798c768ffa18f10e0a667391af4a2",
+        "artifactSha256": "sha256:d5a0db1c66e0f1c897e6144de8147599a905f93479252b507792db20b639bb98",
         "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.0.tgz",
         "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
         "publishedAt": "2026-08-13T00:00:00Z",
