@@ -1,0 +1,48 @@
+{
+  "name": "Claude Code Prompts",
+  "version": "1.0.0",
+  "scope": "claude_code.prompts",
+  "dialect": "json",
+  "description": "The prompts you typed into Claude Code, drawn from your local command history, each with its timestamp, the project it was issued in, and the session it belonged to. Pasted attachment bodies are excluded; only a flag indicating their presence is kept.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "profile": { "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).", "$ref": "#/$defs/profile" },
+      "prompts": {
+        "type": "array",
+        "description": "Prompt history entries, newest first.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "display": { "type": "string", "description": "The prompt text as typed (including slash commands like '/clear')." },
+            "timestamp": { "type": ["string", "null"], "format": "date-time", "description": "When the prompt was submitted (ISO 8601)." },
+            "project": { "type": ["string", "null"], "description": "Absolute path of the working directory the prompt was issued in." },
+            "sessionId": { "type": ["string", "null"], "description": "Identifier of the session the prompt belonged to." },
+            "hasPastedContent": { "type": "boolean", "description": "Whether the prompt carried pasted attachment content (the content itself is not exported)." }
+          },
+          "required": ["display"],
+          "additionalProperties": true
+        }
+      },
+      "total": { "type": "number", "description": "Number of prompts exported." },
+      "source": { "type": "string", "description": "How this data was collected (e.g. 'history-jsonl')." }
+    },
+    "required": ["profile", "prompts", "total", "source"],
+    "additionalProperties": true
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).",
+      "properties": {
+        "displayName": { "type": ["string", "null"], "description": "Account display name." },
+        "email": { "type": ["string", "null"], "format": "email", "description": "Account email address." },
+        "organizationName": { "type": ["string", "null"], "description": "Organization the account belongs to." },
+        "plan": { "type": ["string", "null"], "description": "Subscription tier / plan label." },
+        "numStartups": { "type": ["number", "null"], "description": "Number of times Claude Code has been launched on this machine." },
+        "firstStartTime": { "type": ["string", "null"], "format": "date-time", "description": "First launch timestamp on this machine (ISO 8601)." }
+      },
+      "additionalProperties": true
+    }
+  }
+}

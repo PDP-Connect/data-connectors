@@ -1,0 +1,344 @@
+{
+  "name": "Claude Code Trajectories",
+  "version": "1.0.0",
+  "scope": "claude_code.trajectories",
+  "dialect": "json",
+  "description": "Full agent traces from local Claude Code sessions: for each session, the ordered steps of the run \u2014 your prompts, the assistant's reasoning and replies, each tool call with its input, and each tool result with its output. Tool calls and results are linked by callId so the action-observation loop can be reconstructed. Bodies contain source code, file paths, and command output from the machine; credential-shaped strings are redacted and long bodies are truncated, both reported in the payload.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "profile": {
+        "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).",
+        "$ref": "#/$defs/profile"
+      },
+      "sessions": {
+        "type": "array",
+        "description": "One entry per traced session, most recently active first.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Unique session identifier (the transcript filename)."
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "session",
+                "subagent",
+                null
+              ],
+              "description": "Whether this trace is a main session thread or one subagent run dispatched by a session."
+            },
+            "parentSessionId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a subagent trace, the session that dispatched it; null for a main thread."
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Absolute path of the working directory the session ran in."
+            },
+            "gitBranch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Git branch checked out during the session, if any."
+            },
+            "cliVersion": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Claude Code CLI version that produced the session."
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "AI-generated session title or summary, if one was recorded."
+            },
+            "firstTimestamp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time",
+              "description": "Timestamp of the first message in the session (ISO 8601)."
+            },
+            "lastTimestamp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time",
+              "description": "Timestamp of the last message in the session (ISO 8601)."
+            },
+            "userMessageCount": {
+              "type": "number",
+              "description": "Number of user messages in the session."
+            },
+            "assistantMessageCount": {
+              "type": "number",
+              "description": "Number of assistant messages in the session."
+            },
+            "messageCount": {
+              "type": "number",
+              "description": "Total user + assistant messages in the session."
+            },
+            "models": {
+              "type": "array",
+              "description": "Distinct model identifiers used in the session.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "steps": {
+              "type": "array",
+              "description": "The trace, in the order the steps happened.",
+              "items": {
+                "$ref": "#/$defs/step"
+              }
+            },
+            "stepCounts": {
+              "type": "object",
+              "description": "Count of steps by type for this session (prompt, thinking, message, tool_call, tool_result).",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          },
+          "required": [
+            "sessionId",
+            "steps"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "total": {
+        "type": "number",
+        "description": "Number of sessions traced in this export."
+      },
+      "totalSteps": {
+        "type": "number",
+        "description": "Total steps across all exported sessions."
+      },
+      "toolCalls": {
+        "type": "number",
+        "description": "Total tool calls across all exported sessions."
+      },
+      "approximateBytes": {
+        "type": "number",
+        "description": "Approximate serialized size of the exported traces, used against the budget."
+      },
+      "limits": {
+        "type": "object",
+        "description": "The caps this export ran under.",
+        "properties": {
+          "maxStepChars": {
+            "type": "number",
+            "description": "Per-step body cap in characters (CLAUDE_CODE_MAX_STEP_CHARS)."
+          },
+          "maxBytes": {
+            "type": "number",
+            "description": "Whole-scope payload budget in bytes (CLAUDE_CODE_MAX_MB)."
+          },
+          "includeThinking": {
+            "type": "boolean",
+            "description": "Whether assistant reasoning blocks were included (CLAUDE_CODE_INCLUDE_THINKING)."
+          }
+        },
+        "additionalProperties": true
+      },
+      "truncatedSteps": {
+        "type": "number",
+        "description": "How many step bodies were cut at maxStepChars."
+      },
+      "skippedForBudget": {
+        "type": "number",
+        "description": "How many sessions were left out because the payload budget was reached."
+      },
+      "redactions": {
+        "type": "object",
+        "description": "How many credential-shaped strings were replaced, by type. The matched text is never exported.",
+        "properties": {
+          "total": {
+            "type": "number",
+            "description": "Total redactions applied."
+          },
+          "byType": {
+            "type": "object",
+            "description": "Redaction count keyed by pattern label (e.g. anthropic_key, jwt, secret_assignment).",
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "source": {
+        "type": "string",
+        "description": "How this data was collected (e.g. 'projects-transcripts')."
+      }
+    },
+    "required": [
+      "profile",
+      "sessions",
+      "total",
+      "source"
+    ],
+    "additionalProperties": true
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "description": "One thing that happened in the run.",
+      "properties": {
+        "index": {
+          "type": "number",
+          "description": "Zero-based position of this step within the session."
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When the step happened (ISO 8601)."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "user",
+            "assistant",
+            "tool"
+          ],
+          "description": "Who produced the step: the user, the model, or a tool returning an observation."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "thinking",
+            "message",
+            "tool_call",
+            "tool_result"
+          ],
+          "description": "What kind of step this is."
+        },
+        "text": {
+          "type": "string",
+          "description": "Body for prompt, thinking, and message steps."
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Tool name, on tool_call steps."
+        },
+        "callId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Links a tool_call to its tool_result."
+        },
+        "input": {
+          "description": "Tool arguments, on tool_call steps; shape depends on the tool."
+        },
+        "output": {
+          "type": "string",
+          "description": "What the tool returned, on tool_result steps."
+        },
+        "isError": {
+          "type": "boolean",
+          "description": "Whether the tool result was an error."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model that produced this assistant step."
+        },
+        "sidechain": {
+          "type": "boolean",
+          "description": "True when the step belongs to a subagent run rather than the main thread."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the body was cut at maxStepChars."
+        },
+        "originalLength": {
+          "type": "number",
+          "description": "Length of the body before truncation."
+        }
+      },
+      "required": [
+        "index",
+        "role",
+        "type"
+      ],
+      "additionalProperties": true
+    },
+    "profile": {
+      "type": "object",
+      "description": "Identifying account context for the Claude Code installation (read locally; never includes credentials).",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Account display name."
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email",
+          "description": "Account email address."
+        },
+        "organizationName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Organization the account belongs to."
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Subscription tier / plan label."
+        },
+        "numStartups": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Number of times Claude Code has been launched on this machine."
+        },
+        "firstStartTime": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "First launch timestamp on this machine (ISO 8601)."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
