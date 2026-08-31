@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "lastUpdated": "2026-07-29T00:00:00Z",
+  "lastUpdated": "2026-08-13T00:00:00Z",
   "baseUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/main/connectors",
   "connectors": [
     {
@@ -79,6 +79,32 @@
         "manifest": "github-pdpp/collection-profile.json",
         "entrypoint": "github-pdpp/dist/collection-profile.mjs",
         "provenance": "github-pdpp/provenance.json"
+      }
+    },
+    {
+      "id": "whoop-pdpp",
+      "company": "whoop",
+      "version": "0.1.0",
+      "name": "WHOOP (PDPP Collection Profile)",
+      "status": "experimental",
+      "description": "Collects your WHOOP profile, body measurements, cycles, recoveries, sleeps, and workouts through the PDPP Collection Profile protocol.",
+      "artifactKind": "pdpp-collection-profile",
+      "manifestPath": "profile/collection-profile.json",
+      "entrypointPath": "dist/collection-profile.mjs",
+      "provenancePath": "provenance.json",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
+      "releaseId": "unpublished",
+      "sourceTag": "pdpp-4f50aa21c6abd9f796b51b82e408224ee75a0048",
+      "sourceCommit": "4f50aa21c6abd9f796b51b82e408224ee75a0048",
+      "publishedAt": "2026-08-13T00:00:00Z",
+      "upstream": {
+        "repository": "https://github.com/PDP-Connect/pdpp",
+        "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
+      },
+      "files": {
+        "manifest": "whoop-pdpp/collection-profile.json",
+        "entrypoint": "whoop-pdpp/dist/collection-profile.mjs",
+        "provenance": "whoop-pdpp/provenance.json"
       }
     },
     {

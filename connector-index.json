@@ -1,7 +1,7 @@
 {
   "indexVersion": "2.0",
   "sourceRepo": "https://github.com/PDP-Connect/data-connectors",
-  "generatedAt": "2026-07-29T00:00:00Z",
+  "generatedAt": "2026-08-13T00:00:00Z",
   "signature": null,
   "connectors": {
     "amazon-playwright": [
@@ -1227,6 +1227,43 @@
           "iconKey": "wholefoods",
           "defaultScope": "wholefoods.orders"
         }
+      }
+    ],
+    "whoop-pdpp": [
+      {
+        "connectorId": "whoop-pdpp",
+        "company": "whoop",
+        "version": "0.1.0",
+        "name": "WHOOP (PDPP Collection Profile)",
+        "status": "experimental",
+        "description": "Collects your WHOOP profile, body measurements, cycles, recoveries, sleeps, and workouts through the PDPP Collection Profile protocol.",
+        "artifactKind": "pdpp-collection-profile",
+        "manifestPath": "profile/collection-profile.json",
+        "entrypointPath": "dist/collection-profile.mjs",
+        "provenancePath": "provenance.json",
+        "manifestSha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
+        "entrypointSha256": "sha256:8dac8ccb0e7a5f0e71d5891d0d50f6b48485fcbfe834d7afb32b5485b30bf23b",
+        "provenanceSha256": "sha256:9cf13d74868f658be0e1282c7a4e98db3b238ec2afac581ad5d02a9fbfce4ecd",
+        "artifactSha256": "sha256:42eb6571e6ee1bc83dc7027f208d07eccd6cc770c86a78eca5c99305693f7f8e",
+        "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.0.tgz",
+        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "pdpp-4f50aa21c6abd9f796b51b82e408224ee75a0048",
+        "sourceCommit": "4f50aa21c6abd9f796b51b82e408224ee75a0048",
+        "releaseId": "unpublished",
+        "upstream": {
+          "repository": "https://github.com/PDP-Connect/pdpp",
+          "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
+        },
+        "scopes": [
+          "profile",
+          "body",
+          "cycles",
+          "recoveries",
+          "sleeps",
+          "workouts"
+        ],
+        "consumerMetadata": null
       }
     ],
     "youtube-playwright": [

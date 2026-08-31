@@ -8,6 +8,8 @@ connectors/github-pdpp/dist/
 connectors/github-pdpp/.pinned-source/
 connectors/chatgpt-pdpp/dist/
 connectors/chatgpt-pdpp/.pinned-source/
+connectors/whoop-pdpp/dist/
+connectors/whoop-pdpp/.pinned-source/
 
 # Test runner output
 connector-result.json
