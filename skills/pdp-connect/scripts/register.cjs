@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * register.cjs — Add a connector to registry.json with checksums.
  *

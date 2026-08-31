@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Classifier regression test for the Claude export connector's result envelopes.
  * Locks the resumable contract: a complete run is `success`, an export that is

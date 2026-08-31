@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');

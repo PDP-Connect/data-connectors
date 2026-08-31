@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 # setup-canary.sh — Install/uninstall/status for the connector smoke test canary.
 #
 # Usage:
