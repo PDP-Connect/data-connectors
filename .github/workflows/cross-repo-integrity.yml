@@ -197,6 +197,8 @@ jobs:
             label: vendored tarball digests
           - id: reference-contract
             label: reference-contract stand-in
+          - id: option-kind-registry
+            label: connector config option-kind registry + options schema
     steps:
       - name: Checkout data-connectors (this repo, current ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,7 +224,7 @@ jobs:
           fi
 
       - name: Checkout pdpp @ pinned SHA
-        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
+        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract' || matrix.check.id == 'option-kind-registry'
         env:
           PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
         run: |
@@ -258,6 +260,10 @@ jobs:
       - name: Run drift check — reference-contract
         if: matrix.check.id == 'reference-contract'
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
+
+      - name: Run drift check — option-kind-registry
+        if: matrix.check.id == 'option-kind-registry'
+        run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-connector-option-kind-drift.mjs pdpp data-connectors
 
   integration:
     name: Integration (Node ${{ matrix.node-version }}) — github/index.test.ts + bin/orchestrate.ts against the real RI
@@ -409,10 +415,14 @@ jobs:
             label: pdpp
             url: https://github.com/PDP-Connect/pdpp.git
             pin-output: pdpp-sha
-            # Canonical paths that back drift job (d) reference-contract + the integration
-            # job's RI-server checkout — see .github/cross-repo-pins.json's own note on
-            # pdpp's pin.
-            paths: "packages/reference-contract reference-implementation"
+            # Canonical paths that back drift job (d) reference-contract, drift job (e)
+            # option-kind-registry, and the integration job's RI-server checkout — see
+            # .github/cross-repo-pins.json's own note on pdpp's pin.
+            paths: >-
+              packages/reference-contract
+              reference-implementation
+              packages/polyfill-connectors/src/connector-config-option-kind-registry.ts
+              packages/polyfill-connectors/src/connector-options-schema.ts
     needs: [changes, read-pins]
     if: always() && needs.changes.result == 'success'
     steps:

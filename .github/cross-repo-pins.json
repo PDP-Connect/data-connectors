@@ -14,7 +14,7 @@
       "repo": "pdpp",
       "sha": "8d42fe86eb6bac6cf266b37c451f8b9909539b6e",
       "branch": "waspflow/vendor-protocol-stream-evidence-0828",
-      "note": "Head of PDP-Connect/pdpp PR #238 (`waspflow/vendor-protocol-stream-evidence-0828`) as of 2026-08-31, tagged `pr238-freeze-20260831-8d42fe86e` at pin time. PR #238 is still open (not yet merged to main), so `branch` deliberately tracks the PR-head branch rather than `main` per this workflow's own coordinated-cutover mechanism (see cross-repo-integrity.yml's read-pins/pin-freshness comments) — main and this branch are expected to disagree on packages/reference-contract and reference-implementation until #238 merges. Revert `branch` to `main` once #238 lands. Supersedes the prior 5eacd82e pin (main as of 2026-08-20)."
+      "note": "Head of PDP-Connect/pdpp PR #238 (`waspflow/vendor-protocol-stream-evidence-0828`) as of 2026-08-31, tagged `pr238-freeze-20260831-8d42fe86e` at pin time. PR #238 is still open (not yet merged to main), so `branch` deliberately tracks the PR-head branch rather than `main` per this workflow's own coordinated-cutover mechanism (see cross-repo-integrity.yml's read-pins/pin-freshness comments) — main and this branch are expected to disagree on packages/reference-contract and reference-implementation until #238 merges. Revert `branch` to `main` once #238 lands. Supersedes the prior 5eacd82e pin (main as of 2026-08-20). This SHA is also the source of truth for drift job (e) option-kind-registry (packages/polyfill-connectors/src/connector-config-option-kind-registry.ts and connector-options-schema.ts), added when this repo implemented those two files against reference-implementation/server/routes/owner-connection-config.ts's contract at this exact commit."
     }
   }
 }
