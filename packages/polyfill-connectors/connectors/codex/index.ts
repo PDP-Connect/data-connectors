@@ -1483,7 +1483,7 @@ async function processRolloutEntry(
 	},
 	args: ScanRolloutsArgs,
 	rolloutOrdinal: number,
-): Promise<"missing" | "parsed" | "skipped"> {
+): Promise<"missing" | "parsed" | "skipped" | "duplicate"> {
 	let st: Stats;
 	try {
 		st = statSync(entry.path);
@@ -1505,8 +1505,15 @@ async function processRolloutEntry(
 	// never a "the file disappeared, therefore deleted" inference — it is the
 	// same content encountered twice in one walk, using the same identity the
 	// per-run cursor already trusts.
+	//
+	// This is distinct from a plain "skipped" (the legacy mtime fast path, or
+	// an unchanged-file skip below): those carry a cursor whose examined counts
+	// have NOT yet been added to this scan's totals, so the caller adds them.
+	// A "duplicate" sighting's cursor was already counted at first sighting —
+	// counting it again would double `messagesExamined`/`functionCallsExamined`
+	// for a file that was only actually examined once.
 	if (args.seenCursorKeysThisScan.has(cursorKey)) {
-		return "skipped";
+		return "duplicate";
 	}
 	args.seenCursorKeysThisScan.add(cursorKey);
 
@@ -1674,6 +1681,9 @@ async function scanRollouts(
 					// A "parsed" file was just examined; a "skipped" file may still carry
 					// examined counts forward from a prior run's cursor — either way, the
 					// cursor at this key (fresh or carried-forward) is the source of truth.
+					// A "duplicate" (mid-move-race second sighting of the same UUID this
+					// scan) contributes nothing: its cursor was already counted at first
+					// sighting, so adding it again would double-count the file.
 					if (result === "parsed" || result === "skipped") {
 						const counts = examinedCountsFromCursor(
 							args.newFileCursors[cursorKeyForEntry(entry)],

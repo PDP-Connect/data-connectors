@@ -62,7 +62,8 @@ only the root changes.
   relocated from the primary root to the archive root is recognized as the
   SAME file: the next scan does not reparse it from scratch and does not
   re-emit its already-emitted `messages`/`function_calls` records. See
-  `append-cursor.test.ts` — "rescan after relocation" tests.
+  `archive-scan.test.ts` — "safety case 2" tests, e.g. "a rollout file moved
+  from sessions/ to sessions-archive/ and rescanned emits ZERO new records".
 - **Relocation is never confused with deletion.** The connector's
   `isTombstone` mechanism (see `src/connector-runtime.ts`) only fires on an
   explicit deletion marker inside a record's own payload — it is never
