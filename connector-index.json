@@ -286,6 +286,35 @@
           "claude_code.trajectories"
         ],
         "consumerMetadata": null
+      },
+      {
+        "connectorId": "claude-code-local",
+        "company": "Anthropic",
+        "version": "1.1.1",
+        "name": "Claude Code",
+        "status": "experimental",
+        "description": "Exports your local Claude Code (CLI) data: usage, session metadata, prompt history, and full agent traces. Reads ~/.claude directly, no login or browser.",
+        "sourceFiles": {
+          "script": "anthropic/claude-code-local.js",
+          "metadata": "anthropic/claude-code-local.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "repin-pdpp-8d42fe86e-0831",
+        "sourceCommit": "3eee731738dffa0ed791166d3ce1374cd565b20a",
+        "releaseId": "connectors-3eee731738df",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:8fb72259e178e92ca8efb9a15e4996153216ae5d0626f2629f2cefea4d0f5a86",
+        "scriptSha256": "sha256:3f9f8c95371c77b38d751de3721e3e468ba7a9781684e2332273210cf9457d66",
+        "artifactSha256": "sha256:11910fd9e2c774abe7809f9597f3fc36dd2ffa23042ef829f2e3f259177c7415",
+        "artifactPath": "artifacts/claude-code-local/claude-code-local-1.1.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/3eee731738dffa0ed791166d3ce1374cd565b20a/artifacts/claude-code-local/claude-code-local-1.1.1.tgz",
+        "scopes": [
+          "claude_code.usage",
+          "claude_code.sessions",
+          "claude_code.prompts",
+          "claude_code.trajectories"
+        ],
+        "consumerMetadata": null
       }
     ],
     "claude-export-playwright": [

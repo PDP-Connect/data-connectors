@@ -432,7 +432,7 @@
     {
       "id": "claude-code-local",
       "company": "Anthropic",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "name": "Claude Code",
       "status": "experimental",
       "description": "Exports your local Claude Code (CLI) data: usage, session metadata, prompt history, and full agent traces. Reads ~/.claude directly, no login or browser.",
@@ -441,8 +441,8 @@
         "metadata": "anthropic/claude-code-local.json"
       },
       "checksums": {
-        "script": "sha256:577002d34e3655afff031761049e46c3fe0f9580f6a03e422c69b473cca1f25b",
-        "metadata": "sha256:6cbc62ab72d2ee245f4fc74b3afaedc88c5ffbd576c429098f67a546550a986b"
+        "script": "sha256:3f9f8c95371c77b38d751de3721e3e468ba7a9781684e2332273210cf9457d66",
+        "metadata": "sha256:8fb72259e178e92ca8efb9a15e4996153216ae5d0626f2629f2cefea4d0f5a86"
       }
     },
     {
