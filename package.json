@@ -43,6 +43,6 @@
   "devDependencies": {
     "ajv": "^8.20.0",
     "esbuild": "0.28.2",
-    "zod": "4.4.3"
+    "zod": "4.5.2"
   }
 }
