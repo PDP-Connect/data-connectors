@@ -517,12 +517,25 @@ stream. It MUST NOT derive the value only from emitted and gapped messages. It
 MUST withhold the message when it did not enumerate that stream. A connector
 MAY emit at most one `STREAM_EVIDENCE` per stream per run.
 
+`STREAM_EVIDENCE` is final for that stream in the run. After it emits the
+message, a connector MUST NOT emit a `RECORD`, `DETAIL_GAP`, or
+`DETAIL_GAP_RECOVERED` for the same stream.
+
 A runtime MUST reject an invalid count partition, a duplicate message, an
-out-of-scope stream, or a stream that does not declare `state_stream`. The
-runtime can compare `emitted` and `gapped` with messages it observed. It cannot
-independently verify `unchanged`, a withheld message, or how the connector
-derived `considered`. Those values remain connector assertions and MUST NOT be
-used to widen scope or commit a checkpoint.
+out-of-scope stream, a stream that does not declare `state_stream`, or a later
+message that reopens the stream. Before it accepts the evidence, the runtime
+MUST verify two observable counts:
+
+1. `outcomes.emitted` equals the number of distinct record keys that the
+   durable write path accepted for that stream in this run.
+2. `outcomes.gapped` equals the number of distinct, unrecovered durable detail
+   gaps for that stream in this run.
+
+The second check proves count equality, not gap-key identity, because the
+message contains no gap identifiers. The runtime cannot independently verify
+`unchanged`, a withheld message, or how the connector derived `considered`.
+Those values remain connector assertions and MUST NOT be used to widen scope or
+commit a checkpoint.
 
 ### 5.8 `DONE` and checkpoint commit
 
