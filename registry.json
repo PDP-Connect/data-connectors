@@ -42,12 +42,12 @@
       "provenancePath": "provenance.json",
       "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.0.tgz",
       "releaseId": "unpublished",
-      "sourceTag": "pdpp-684f6c2184cd80d928a1f922f28d8dfa147b552a",
-      "sourceCommit": "684f6c2184cd80d928a1f922f28d8dfa147b552a",
+      "sourceTag": "pdpp-76effa378dc40b269095db6f85682d6a10920f68",
+      "sourceCommit": "76effa378dc40b269095db6f85682d6a10920f68",
       "publishedAt": "2026-07-31T00:00:00Z",
       "upstream": {
         "repository": "https://github.com/PDP-Connect/pdpp",
-        "commit": "684f6c2184cd80d928a1f922f28d8dfa147b552a"
+        "commit": "76effa378dc40b269095db6f85682d6a10920f68"
       },
       "files": {
         "manifest": "chatgpt-pdpp/collection-profile.json",
