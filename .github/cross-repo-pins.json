@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "d250afcf6f25f1251d9b1ed8287c0d3ed25e0e9b",
+      "sha": "0d3deca19186a2185a6a15ab76c71352d10e627e",
       "branch": "main",
-      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (PR #270, 'chore(vendor): resync pdpp-collector-runtime-0.0.1.tgz to data-connect main' \u2014 the pdpp-side half of this same tarball-digests fix). Supersedes the prior ab415be6c pin (PR #238's merge commit, 2026-09-02T08:20:22Z), which itself superseded de9e61690 (PR #238's pre-merge head on branch `waspflow/vendor-protocol-stream-evidence-0828` during the coordinated cutover this workflow's read-pins/pin-freshness jobs support; `branch` reverted to `main` once #238 landed). Verified no-op for drift job (d): PR #270 touches only vendor/ (`git diff` against ab415be6c shows only vendor/README.md, vendor/SHA256SUMS, vendor/pdpp-collector-runtime-0.0.1.tgz), not packages/reference-contract/src."
+      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (pdpp#272, 'fix: correct 401 challenge port for direct MCP clients, fix record-count pluralization' \u2014 unrelated to Move A, caught by this same PR's pin-freshness \u2014 pdpp check going red mid-task since main moved while this PR was open). Supersedes the prior d250afcf6 pin (PR #270's merge). Verified no-op for drift job (d): pdpp#272 touches only reference-implementation/server/{index,reference-topology}.ts and their tests, not packages/reference-contract (confirmed via `gh api .../compare` \u2014 zero files under packages/reference-contract in the diff), so check-reference-contract-drift.mjs's documented per-file provenance (which points at older, unrelated pdpp commits) is unaffected. The integration job's real-RI checkout DOES pick up pdpp#272 (reference-implementation/server/index.ts is exactly what that job boots) \u2014 re-verified locally against a fresh pdpp clone at this SHA before moving the pin."
     }
   }
 }
