@@ -1,11 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+// Plain JavaScript, not TypeScript: this file runs as an npm postinstall
+// hook, which spawns it with plain `node`, no TypeScript loader. That's
+// fine for this package's own development and for consumers importing its
+// exports (both go through a loader like tsx) — but a package installed as
+// a dependency lands under node_modules, and Node refuses to strip types
+// from any file there by policy, regardless of loader flags a caller might
+// pass. A .ts version of this exact file, once vendored into another repo's
+// node_modules, crashed every `npm ci` with
+// ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING before this file's own logic
+// (which already skips the browser download in most CI runs) ever got to
+// run.
+
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { arch, platform } from "node:process";
 
-const isTruthyEnv = (value: string | undefined): boolean => {
+const isTruthyEnv = (value) => {
 	if (value === undefined) {
 		return false;
 	}

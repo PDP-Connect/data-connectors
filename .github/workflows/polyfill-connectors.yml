@@ -125,6 +125,18 @@ jobs:
         # reinstatement note (that package isn't part of Move A's scope).
         run: npm run test
 
+      - name: Pack, install, and run (proves a real npm install of the published tarball works)
+        # This step's own dependency install above used --ignore-scripts, so
+        # it would never catch a regression here: a real consumer's plain
+        # `npm ci` (no --ignore-scripts) runs this package's postinstall
+        # hook unconditionally, and a .ts postinstall crashes there with
+        # ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING (Node refuses to strip
+        # types from any file under node_modules). That crash blocked every
+        # downstream consumer's CI at the dependency-install step, before
+        # any of that consumer's own code ran — see scripts/pack-install-run.mjs.
+        working-directory: packages/polyfill-connectors
+        run: npm run pack-install-run
+
   gate:
     name: Polyfill Connectors Gate
     needs: [changes, verify]
