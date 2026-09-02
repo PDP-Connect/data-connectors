@@ -1876,10 +1876,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/run-tests.mjs",
-			line: 32,
+			line: 33,
 			column: 2,
 			category: "dependent_file_cursor",
-			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 3 patterns, no reason to parallelize",
+			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 4 patterns, no reason to parallelize",
 		},
 		{
 			path: "src/adaptive-lane.ts",
