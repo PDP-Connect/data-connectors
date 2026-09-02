@@ -148,17 +148,17 @@ The standard unqualified binding names are:
 
 | Binding | Meaning |
 | --- | --- |
-| `browser_automation` | A runtime-managed browser surface. |
-| `browser_profile` | A persistent browser profile directory. |
+| `browser` | A runtime-managed browser surface. |
+| `desktop_session` | The active local desktop session and its operating-system facilities. |
 | `filesystem` | Local filesystem access. |
 | `interactive` | Handling for `INTERACTION` messages. |
-| `loopback_listen` | Permission to bind to local ports. |
 | `network` | Outbound network access. |
 
 A binding declaration can contain binding-specific fields. A connector MUST
-ignore declaration fields it does not understand. Extension bindings use
-namespaced identifiers. A runtime MUST reject an unknown required binding. It
-MUST fail a missing required binding before it starts the connector.
+ignore declaration fields it does not understand. The binding-name set is
+closed in v0.1. A runtime MUST reject any other binding name, whether the
+binding is required or optional. It MUST fail a missing required binding before
+it starts the connector.
 
 ### 3.4 Human interaction and protocol capabilities
 
