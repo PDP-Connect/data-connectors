@@ -89,12 +89,15 @@ Profile manifest. The root `schemas/manifest.schema.json` validates only legacy
 | --- | --- |
 | Five standard bindings | The vendored collector runtime advertises `network`, `browser`, `filesystem`, and `local_device`. It does not advertise `desktop_session` or `interactive`. `local_device` is not a v0.1 standard binding. |
 | Manifest validation before spawn | Placement checks bindings and protocol capabilities, but no local validator checks the full Collection Profile manifest. |
+| Stream semantics | Five checked-in streams use the legacy value `append` instead of `append_only`: `github.user_stats`, `slack.channel_stats`, `usaa.account_stats`, `usaa.credit_card_billing_stats`, and `ynab.account_stats`. |
 | Exactly one `START` | The first line is checked. A later `START` is not rejected by the connector-side runtime. |
 | Scope stream enforcement | A non-empty scope is required. `emitRecord()` does not reject an undeclared stream or project `fields`. The parent runtime enforces both before durable write. |
+| Record envelope | The parent runtime checks key, data, operation, and a non-empty `emitted_at`. It does not validate the timestamp format or reject delete for an `append_only` stream. The ingest path remains responsible for schema and record-identity checks. |
 | Interaction timeout | The parent runtime creates a `timeout` response. The vendored connector-protocol type incorrectly declares `error` instead. |
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |
 | Recovery-hint vocabulary | The package types admit arbitrary action strings. They do not enforce the portable closed set. |
 | `STREAM_EVIDENCE` capability | The type and placement gate exist. Current runtime capability profiles advertise no support, and current connectors declare none. |
+| Terminal status | Connector-protocol types expose only `succeeded` and `failed`. The parent runtime also accepts connector-emitted `cancelled` for compatibility, although cancellation is a runtime event in this profile. |
 
 The normative profile is the target contract. Do not describe the current
 package as fully conforming until these gaps close.

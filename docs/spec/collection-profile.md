@@ -231,13 +231,19 @@ graph is acyclic and ends at one or more self-mapped streams.
 ### 3.7 Implementation metadata
 
 Current artifacts can contain `setup`, `profiles`, `reason_display_messages`,
-`options_schema`, `capabilities.refresh_policy`,
-`capabilities.public_listing`, and `capabilities.proven`. Stream declarations
-can contain `required`, `compaction_fingerprint`, `availability`, and
-`coverage_policy`. These members are not part of portable v0.1 conformance. A
-runtime MAY support them as implementation metadata. A connector MUST NOT use
-such a declaration to grant itself authority, widen collection scope, or bypass
-owner approval.
+`options_schema`, `external_docs`, `runtime_requirements.environment_variables`,
+`runtime_requirements.local_paths`, and `runtime_requirements.external_tools`.
+Capability metadata includes `refresh_policy`, `public_listing`, `proven`,
+`browser_surface_kind`, `auth`, `declared_reason_tokens`, and
+`record_identity`. Stream metadata includes `required`,
+`compaction_fingerprint`, `compaction_class`, `compaction_class_note`,
+`cursor_shape`, `availability`, and `coverage_policy`.
+
+These members are not part of portable v0.1 conformance. A runtime MAY support
+them as implementation metadata. Any manifest member that this profile does
+not define is also outside portable v0.1. A connector MUST NOT use such a
+declaration to grant itself authority, widen collection scope, or bypass owner
+approval.
 
 In particular, a connector-authored option kind is only a claim. Runtime or
 operator policy decides whether an option changes collection scope. An unknown
