@@ -250,6 +250,7 @@ async function runFixture(
 				PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 				PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 			},
+			protocol_capabilities: [],
 			runtime_requirements: { bindings: {} },
 			streams: fixture.streams,
 			timeScopableStreams: fixture.timeScopableStreams,

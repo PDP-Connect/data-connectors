@@ -68,7 +68,35 @@ try {
   const scratchPolyfillConnectors = join(scratchRoot, "packages/polyfill-connectors");
 
   execFileSync("mkdir", ["-p", scratchLocalCollectorScripts, scratchPolyfillConnectors], { stdio: "inherit" });
-  writeFileSync(join(scratchRoot, "package.json"), JSON.stringify({ type: "module" }));
+
+  // The generator imports `isConnectorProtocolCapabilityArray` from
+  // `@pdpp/connector-protocol` as a runtime value (data-connect PR #36 added the
+  // protocol_capabilities validation loop below), not just as a type — so unlike the
+  // LocalCollectorDefinition/LocalCollectorBinding type-only imports elsewhere in this
+  // scratch tree, this one DOES need a real, resolvable package. Install it from
+  // data-connectors' own vendored tarball: the same artifact drift job (c)
+  // (check-tarball-digest-drift.sh) already verifies is a faithful repack of the pinned
+  // data-connect commit, so trusting it here does not introduce a second, unverified
+  // source of truth for the package's contents.
+  const connectorProtocolTarball = join(
+    dataConnectorsDir,
+    "packages/polyfill-connectors/vendor/pdpp-connector-protocol-0.0.1.tgz",
+  );
+  if (!existsSync(connectorProtocolTarball)) {
+    console.error(`FAIL: vendored @pdpp/connector-protocol tarball not found at ${connectorProtocolTarball}`);
+    process.exit(1);
+  }
+  writeFileSync(
+    join(scratchRoot, "package.json"),
+    JSON.stringify({
+      type: "module",
+      dependencies: { "@pdpp/connector-protocol": `file:${connectorProtocolTarball}` },
+    }),
+  );
+  execFileSync("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"], {
+    cwd: scratchRoot,
+    stdio: "inherit",
+  });
 
   // Mirror only what the generator's import graph needs: collector-registry.ts and every
   // connector's collector-definition.ts it imports, preserving data-connectors' real directory
@@ -87,14 +115,21 @@ try {
     { stdio: "inherit" },
   );
 
+  // Copy the whole scripts/ directory, not just the generator file: data-connect PR #36
+  // split part of the generator into a sibling module (collector-definitions-literal.ts)
+  // that it now imports by relative path. Copying the directory wholesale means a future
+  // sibling split doesn't silently break this scratch tree again.
   const scratchGeneratorPath = join(scratchLocalCollectorScripts, "generate-collector-definitions-snapshot.ts");
-  execFileSync("cp", [generatorPath, scratchGeneratorPath], { stdio: "inherit" });
+  execFileSync("cp", ["-r", join(dataConnectDir, "packages/local-collector/scripts/") + "/.", scratchLocalCollectorScripts], {
+    stdio: "inherit",
+  });
 
   // @pdpp/connector-protocol is imported by collector-registry.ts and every
   // collector-definition.ts ONLY as `import type` (verified: both files import
-  // LocalCollectorDefinition/LocalCollectorBinding as types only, never a value). Node's
-  // --experimental-strip-types erases type-only imports without resolving them as real
-  // modules, so no node_modules/install is required here.
+  // LocalCollectorDefinition/LocalCollectorBinding as types only, never a value), so those
+  // sites don't need the npm-installed package above. The generator script itself does need
+  // it now (see the npm install above) for its runtime `isConnectorProtocolCapabilityArray`
+  // check.
   const outputPath = join(scratchRoot, "generated-collector-definitions.ts");
   execFileSync(process.execPath, ["--experimental-strip-types", scratchGeneratorPath, outputPath], {
     stdio: "inherit",
