@@ -25,6 +25,7 @@ const EXCLUDED = new Set(["connectors/github/index.test.ts"]);
 const patterns = [
 	"bin/**/*.test.ts",
 	"connectors/**/*.test.ts",
+	"scripts/**/*.test.mjs",
 	"src/**/*.test.ts",
 ];
 const files = [];
