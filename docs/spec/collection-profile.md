@@ -177,13 +177,15 @@ MUST NOT start that connector.
 
 ### 3.5 Coverage and freshness strategies
 
-`coverage_strategy` defines checkpoint evidence. This profile constrains these
-two values. A runtime can define other values:
+`coverage_strategy` is a closed set:
 
 | `coverage_strategy` | Meaning |
 | --- | --- |
 | `checkpoint_window` | A cursor and its evidence account for the completed incremental window. |
+| `full_inventory` | A run accounts for the full current source inventory. |
 | `parent_detail_accounting` | A parent checkpoint depends on detail-record accounting. |
+| `snapshot_import_receipt` | A source snapshot receipt bounds a completed import. |
+| `singleton_presence` | A run checks one stable singleton record. |
 
 `freshness_strategy` is also a closed set:
 
@@ -195,8 +197,9 @@ two values. A runtime can define other values:
 | `scheduled_window` | A scheduled collection window establishes freshness. |
 | `source_reported_as_of` | The source supplies an explicit observation time. |
 
-A strategy is a claim about the evidence shape. It does not prove that a run
-produced the required evidence.
+A manifest validator MUST reject any value outside these sets. A strategy is a
+claim about the evidence shape. It does not prove that a run produced the
+required evidence.
 
 ### 3.6 Checkpoint dependencies
 
