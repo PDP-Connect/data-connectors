@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "icloud-notes-playwright",
   "source_id": "icloud_notes",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "name": "iCloud Notes",
   "company": "Apple",
   "description": "Exports your Apple Notes and folders from iCloud.",

@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "amazon-playwright",
   "source_id": "amazon",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Amazon",
   "company": "Amazon",
   "description": "Exports your Amazon order history and profile information.",

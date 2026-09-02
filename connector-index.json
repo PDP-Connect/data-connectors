@@ -31,6 +31,33 @@
           "amazon.orders"
         ],
         "consumerMetadata": null
+      },
+      {
+        "connectorId": "amazon-playwright",
+        "company": "amazon",
+        "version": "1.0.1",
+        "name": "Amazon",
+        "status": "beta",
+        "description": "Exports your Amazon order history and profile information.",
+        "sourceFiles": {
+          "script": "amazon/amazon-playwright.js",
+          "metadata": "amazon/amazon-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:6ea1b42d208cc02f2c47a96edd658ac9f1e5ff034812a0ea60076a7eb9dab5ca",
+        "scriptSha256": "sha256:4672adf8cac1c61133a6dd91d034be956d47cc5db6685e779bded2b2b2b581f7",
+        "artifactSha256": "sha256:cab3a81398ccb155beade1693cb0b88a7cb4756532cddc9c5683dbf466a11ce9",
+        "artifactPath": "artifacts/amazon-playwright/amazon-playwright-1.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/amazon-playwright/amazon-playwright-1.0.1.tgz",
+        "scopes": [
+          "amazon.profile",
+          "amazon.orders"
+        ],
+        "consumerMetadata": null
       }
     ],
     "chatgpt-pdpp": [
@@ -371,6 +398,33 @@
           "claude.projects"
         ],
         "consumerMetadata": null
+      },
+      {
+        "connectorId": "claude-export-playwright",
+        "company": "Anthropic",
+        "version": "2.0.2",
+        "name": "Claude",
+        "status": "experimental",
+        "description": "Exports your Claude conversations and projects via Anthropic's official data export (one complete archive, no per-conversation rate limiting).",
+        "sourceFiles": {
+          "script": "anthropic/claude-export-playwright.js",
+          "metadata": "anthropic/claude-export-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:b8eeeb95b0405f6fda6991c7696ea417ec88546b637dc0778398cd11675dfa18",
+        "scriptSha256": "sha256:23f12002156caa670c28f506ff17784ca70efb1fd7b2ee92c9fd0e2958ca525c",
+        "artifactSha256": "sha256:41274f1d2c14fb00da83f7136553e13cb9835f19f5073ac2be999af77c438fbd",
+        "artifactPath": "artifacts/claude-export-playwright/claude-export-playwright-2.0.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/claude-export-playwright/claude-export-playwright-2.0.2.tgz",
+        "scopes": [
+          "claude.conversations",
+          "claude.projects"
+        ],
+        "consumerMetadata": null
       }
     ],
     "doordash-playwright": [
@@ -395,6 +449,32 @@
         "artifactSha256": "sha256:8ebf6b293954d3b56b665653fd30236de5055398b04d40ee6df23ebab20e677a",
         "artifactPath": "artifacts/doordash-playwright/doordash-playwright-1.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/doordash-playwright/doordash-playwright-1.0.0.tgz",
+        "scopes": [
+          "doordash.orders"
+        ],
+        "consumerMetadata": null
+      },
+      {
+        "connectorId": "doordash-playwright",
+        "company": "doordash",
+        "version": "1.0.1",
+        "name": "DoorDash",
+        "status": "beta",
+        "description": "Exports your DoorDash order history including restaurant names, items ordered, dates, totals, and delivery status.",
+        "sourceFiles": {
+          "script": "doordash/doordash-playwright.js",
+          "metadata": "doordash/doordash-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:71b2d3ba30a32470aa66c7fc5531531803c1c32a6dd29177a8b447bbec1e8380",
+        "scriptSha256": "sha256:92eaa7e23fc56ec2364ffbcafef4a211b72fc0808ad2c39f2adb83f5f1de3b8e",
+        "artifactSha256": "sha256:4cabb28e5db295867c4f1c063f40f7698872dc103efe9df7800b4021378f70ea",
+        "artifactPath": "artifacts/doordash-playwright/doordash-playwright-1.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/doordash-playwright/doordash-playwright-1.0.1.tgz",
         "scopes": [
           "doordash.orders"
         ],
@@ -553,6 +633,43 @@
           "iconKey": "github",
           "defaultScope": "github.profile"
         }
+      },
+      {
+        "connectorId": "github-playwright",
+        "company": "github",
+        "version": "1.5.1",
+        "name": "GitHub",
+        "status": "stable",
+        "description": "Exports your GitHub profile, repositories, starred repositories, public activity events, and contribution graph.",
+        "sourceFiles": {
+          "script": "github/github-playwright.js",
+          "metadata": "github/github-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:07ba0abd62362bfdd262a0927a9e45a4c5c48087e4967d707905b1934397d5b2",
+        "scriptSha256": "sha256:06c61e3a238738778f41fb3b7e71c58f5fd52f7df65b1b51291f06b5c5567848",
+        "artifactSha256": "sha256:7ee18936162fa33071a9d347b6493790746c0f72b68855dd43a105731bd654c8",
+        "artifactPath": "artifacts/github-playwright/github-playwright-1.5.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/github-playwright/github-playwright-1.5.1.tgz",
+        "scopes": [
+          "github.profile",
+          "github.repositories",
+          "github.starred",
+          "github.events",
+          "github.contributions",
+          "github.history"
+        ],
+        "consumerMetadata": {
+          "sourceId": "github",
+          "displayName": "GitHub",
+          "brandDomain": "github.com",
+          "iconKey": "github",
+          "defaultScope": "github.profile"
+        }
       }
     ],
     "heb-playwright": [
@@ -577,6 +694,40 @@
         "artifactSha256": "sha256:7ca896ad6e9ffdb7f54b1ba9f4dd4cf05aa4498f12527fa66970db699525bc71",
         "artifactPath": "artifacts/heb-playwright/heb-playwright-1.1.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/heb-playwright/heb-playwright-1.1.0.tgz",
+        "scopes": [
+          "heb.profile",
+          "heb.orders",
+          "heb.nutrition"
+        ],
+        "consumerMetadata": {
+          "sourceId": "heb",
+          "displayName": "H-E-B",
+          "brandDomain": "heb.com",
+          "iconKey": "heb",
+          "defaultScope": "heb.orders"
+        }
+      },
+      {
+        "connectorId": "heb-playwright",
+        "company": "HEB",
+        "version": "1.1.1",
+        "name": "H-E-B",
+        "status": "experimental",
+        "description": "Exports your H-E-B account profile, order history, and product nutrition data.",
+        "sourceFiles": {
+          "script": "heb/heb-playwright.js",
+          "metadata": "heb/heb-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:15936948468d24e53fd7eb7485dcb27caff5ae2f00053fda30adfe7daa15d915",
+        "scriptSha256": "sha256:b2c65e03fe7f28372879d32943373ef73a6a1561de9e9432a18d1b0116ee9149",
+        "artifactSha256": "sha256:9533d12287fe39fe17d4c1fcc6420a2d671c18dd93d950cacec248c2a5b27077",
+        "artifactPath": "artifacts/heb-playwright/heb-playwright-1.1.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/heb-playwright/heb-playwright-1.1.1.tgz",
         "scopes": [
           "heb.profile",
           "heb.orders",
@@ -694,6 +845,39 @@
           "iconKey": "icloud_notes",
           "defaultScope": "icloud_notes.notes"
         }
+      },
+      {
+        "connectorId": "icloud-notes-playwright",
+        "company": "Apple",
+        "version": "0.2.2",
+        "name": "iCloud Notes",
+        "status": "experimental",
+        "description": "Exports your Apple Notes and folders from iCloud.",
+        "sourceFiles": {
+          "script": "apple/icloud-notes-playwright.js",
+          "metadata": "apple/icloud-notes-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:d1af7734ee4b9307d3a549246ba58d0766e1e162d7996cbd20b0d91835693f43",
+        "scriptSha256": "sha256:a5298e28c6be711bdd4066506f5958ca4a7a7059e5269fa3072f30d89260f1a8",
+        "artifactSha256": "sha256:64a2458d8e2fa5e5ffba3b56c3e53f04750c5a6ceb91203b904b80d9b0745d5d",
+        "artifactPath": "artifacts/icloud-notes-playwright/icloud-notes-playwright-0.2.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/icloud-notes-playwright/icloud-notes-playwright-0.2.2.tgz",
+        "scopes": [
+          "icloud_notes.notes",
+          "icloud_notes.folders"
+        ],
+        "consumerMetadata": {
+          "sourceId": "icloud_notes",
+          "displayName": "iCloud Notes",
+          "brandDomain": "icloud.com",
+          "iconKey": "icloud_notes",
+          "defaultScope": "icloud_notes.notes"
+        }
       }
     ],
     "instagram-ads-playwright": [
@@ -755,6 +939,38 @@
         "artifactSha256": "sha256:f682c0c714c4d045d00272517d24e44142cbc91ab4fcb045876ed14298c1da58",
         "artifactPath": "artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/c690bc129e25d38fb9bc3eb40eec3b58a8da2fc2/artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.0.tgz",
+        "scopes": [
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram Ads",
+          "brandDomain": "instagram.com",
+          "iconKey": "instagram",
+          "defaultScope": "instagram.ads"
+        }
+      },
+      {
+        "connectorId": "instagram-ads-playwright",
+        "company": "meta",
+        "version": "1.1.1",
+        "name": "Instagram Ads",
+        "status": "beta",
+        "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+        "sourceFiles": {
+          "script": "meta/instagram-ads-playwright.js",
+          "metadata": "meta/instagram-ads-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:b107f26010253933530c365f421857a044cc717aeb2de95d0a3283d15e1e801b",
+        "scriptSha256": "sha256:020014022969a9fa26612388f44215299f0f74ca217e0926ce7a9548ebac9ca5",
+        "artifactSha256": "sha256:0d74cee12898b152d922920d1c7d5bee6bb1c2cb4a06c2cee6321daba7a5edec",
+        "artifactPath": "artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/instagram-ads-playwright/instagram-ads-playwright-1.1.1.tgz",
         "scopes": [
           "instagram.ads"
         ],
@@ -928,6 +1144,44 @@
           "iconKey": "instagram",
           "defaultScope": "instagram.posts"
         }
+      },
+      {
+        "connectorId": "instagram-playwright",
+        "company": "meta",
+        "version": "2.2.2",
+        "name": "Instagram",
+        "status": "stable",
+        "description": "Exports your Instagram profile and posts.",
+        "sourceFiles": {
+          "script": "meta/instagram-playwright.js",
+          "metadata": "meta/instagram-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:5d685316cf6cbc46c5442a53bf7527863372c83f2f03d1db4f6583ff1469801c",
+        "scriptSha256": "sha256:b20a875f7d0555dc00f8cc7991987697e40e6327220ad53cc80cf05f7d18d665",
+        "artifactSha256": "sha256:44394fcdd0f623af44edbbdc1ac03f172fdc67fb3870c8e629b766859cfb40a9",
+        "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.2.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/instagram-playwright/instagram-playwright-2.2.2.tgz",
+        "scopes": [
+          "instagram.profile",
+          "instagram.posts",
+          "instagram.following",
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram",
+          "brandDomain": "instagram.com",
+          "aliases": [
+            "meta"
+          ],
+          "iconKey": "instagram",
+          "defaultScope": "instagram.posts"
+        }
       }
     ],
     "linkedin-playwright": [
@@ -952,6 +1206,43 @@
         "artifactSha256": "sha256:744b69e19045209c763e71a99fad9b3ee081604c6b99b69f3387e0880d813ed6",
         "artifactPath": "artifacts/linkedin-playwright/linkedin-playwright-5.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/linkedin-playwright/linkedin-playwright-5.0.0.tgz",
+        "scopes": [
+          "linkedin.profile",
+          "linkedin.experience",
+          "linkedin.education",
+          "linkedin.skills",
+          "linkedin.languages",
+          "linkedin.connections"
+        ],
+        "consumerMetadata": {
+          "sourceId": "linkedin",
+          "displayName": "LinkedIn",
+          "brandDomain": "linkedin.com",
+          "iconKey": "linkedin",
+          "defaultScope": "linkedin.profile"
+        }
+      },
+      {
+        "connectorId": "linkedin-playwright",
+        "company": "linkedin",
+        "version": "5.0.1",
+        "name": "LinkedIn",
+        "status": "stable",
+        "description": "Exports your LinkedIn profile, work experience, education, skills, languages, and connections.",
+        "sourceFiles": {
+          "script": "linkedin/linkedin-playwright.js",
+          "metadata": "linkedin/linkedin-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:1fe348d63893b334083aadfa017179627ef251d98edce31ce380faa0d828717f",
+        "scriptSha256": "sha256:751d453b968737f0fcc65f4b65d695c4df76020259c2dbdd95964df33f3935d5",
+        "artifactSha256": "sha256:9e5811ee5dcbef4c0477dc39a9a756d62c3ce541f0a706caca70bf27dd56d559",
+        "artifactPath": "artifacts/linkedin-playwright/linkedin-playwright-5.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/linkedin-playwright/linkedin-playwright-5.0.1.tgz",
         "scopes": [
           "linkedin.profile",
           "linkedin.experience",
@@ -1047,6 +1338,43 @@
           "iconKey": "oura",
           "defaultScope": "oura.readiness"
         }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "2.0.1",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity.",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:ac7e4bca651e57ecf869c8615ba947d47206620228cd87e19528cc65b87e2d4a",
+        "scriptSha256": "sha256:ac0096e3939f5b9d8c5f600b4e23bb96bf82bb33a0f51523fe11d549d66629e6",
+        "artifactSha256": "sha256:9ffa09a9494bc9b1c1c9f9c24333a6d2cca88a2650a841b3d4bf0592c0ca34be",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-2.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/oura-playwright/oura-playwright-2.0.1.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
       }
     ],
     "shop-playwright": [
@@ -1071,6 +1399,41 @@
         "artifactSha256": "sha256:5b3cd873b15a68ef13dd1ef2b6057a0aea2dc6fbcffdd2e85bd55a7bd8a77608",
         "artifactPath": "artifacts/shop-playwright/shop-playwright-1.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/shop-playwright/shop-playwright-1.0.0.tgz",
+        "scopes": [
+          "shop.orders"
+        ],
+        "consumerMetadata": {
+          "sourceId": "shop",
+          "displayName": "Shop",
+          "brandDomain": "shop.app",
+          "aliases": [
+            "shopify"
+          ],
+          "iconKey": "shop",
+          "defaultScope": "shop.orders"
+        }
+      },
+      {
+        "connectorId": "shop-playwright",
+        "company": "shopify",
+        "version": "1.0.1",
+        "name": "Shop",
+        "status": "beta",
+        "description": "Exports your Shop app order history.",
+        "sourceFiles": {
+          "script": "shopify/shop-playwright.js",
+          "metadata": "shopify/shop-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:56da0680401e33ba14559aa4fdd5e86ead7e5545a4f9cbd2c30e643a22a91527",
+        "scriptSha256": "sha256:c44c7ad9460ad8f0fc6a8c8f0238de76bc381b4c477b3999745c1791ce7ba3bd",
+        "artifactSha256": "sha256:5849bebad8a3da3faf2304017bb28ae9e81b597f5d2681546bb3cd929a9c7c1d",
+        "artifactPath": "artifacts/shop-playwright/shop-playwright-1.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/shop-playwright/shop-playwright-1.0.1.tgz",
         "scopes": [
           "shop.orders"
         ],
@@ -1188,6 +1551,40 @@
           "iconKey": "spotify",
           "defaultScope": "spotify.savedTracks"
         }
+      },
+      {
+        "connectorId": "spotify-playwright",
+        "company": "spotify",
+        "version": "1.1.2",
+        "name": "Spotify",
+        "status": "stable",
+        "description": "Exports your Spotify library, playlists, listening history, and preferences.",
+        "sourceFiles": {
+          "script": "spotify/spotify-playwright.js",
+          "metadata": "spotify/spotify-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:584b6c2cd3091c398f4def15d3552b09899c5506beb61235e8e13d12a122d994",
+        "scriptSha256": "sha256:b851d1345d0d3d9aa96d3c1d7af02b7c784fbb7dc2683da300b9d49f091996e5",
+        "artifactSha256": "sha256:6caf48c1468e55a44783e31aeff38ac34aad9c77066dc0770a3972fd61b823ab",
+        "artifactPath": "artifacts/spotify-playwright/spotify-playwright-1.1.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/spotify-playwright/spotify-playwright-1.1.2.tgz",
+        "scopes": [
+          "spotify.profile",
+          "spotify.savedTracks",
+          "spotify.playlists"
+        ],
+        "consumerMetadata": {
+          "sourceId": "spotify",
+          "displayName": "Spotify",
+          "brandDomain": "spotify.com",
+          "iconKey": "spotify",
+          "defaultScope": "spotify.savedTracks"
+        }
       }
     ],
     "steam-playwright": [
@@ -1218,6 +1615,34 @@
           "steam.friends"
         ],
         "consumerMetadata": null
+      },
+      {
+        "connectorId": "steam-playwright",
+        "company": "valve",
+        "version": "1.0.1",
+        "name": "Steam",
+        "status": "experimental",
+        "description": "Exports your Steam profile, game library with playtime stats, and friend list using the Steam Web API.",
+        "sourceFiles": {
+          "script": "valve/steam-playwright.js",
+          "metadata": "valve/steam-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:f39b816c42414a1720f052520f4c5f104071a46c6a7430943c179d75abc9b17e",
+        "scriptSha256": "sha256:d574065ef144e82721c1b3ff0d340bf8e9a477bd326a2a8be8a567b9619bfe3f",
+        "artifactSha256": "sha256:32b7b734e5a3f112b073b6f271637e5b477a3458870ae8dbbf9f44bb5c9d5d71",
+        "artifactPath": "artifacts/steam-playwright/steam-playwright-1.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/steam-playwright/steam-playwright-1.0.1.tgz",
+        "scopes": [
+          "steam.profile",
+          "steam.games",
+          "steam.friends"
+        ],
+        "consumerMetadata": null
       }
     ],
     "uber-playwright": [
@@ -1242,6 +1667,33 @@
         "artifactSha256": "sha256:8df669cd8d811f1e89ddc04b26f91cc53f8441557f300556e47eb56db70e028a",
         "artifactPath": "artifacts/uber-playwright/uber-playwright-1.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/vana-com/data-connectors/27585aab07b35521c961de8d7cb5ccffe81af533/artifacts/uber-playwright/uber-playwright-1.0.0.tgz",
+        "scopes": [
+          "uber.trips",
+          "uber.receipts"
+        ],
+        "consumerMetadata": null
+      },
+      {
+        "connectorId": "uber-playwright",
+        "company": "uber",
+        "version": "1.0.1",
+        "name": "Uber",
+        "status": "beta",
+        "description": "Exports your Uber trip history and receipts.",
+        "sourceFiles": {
+          "script": "uber/uber-playwright.js",
+          "metadata": "uber/uber-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:47d5ffd399fd8bc96d4e7b8cb104f6eedd82ae3df775cfab7be3acc873013ed8",
+        "scriptSha256": "sha256:fcf764d271b0aaef8c5c32ab3784a41b8e18e00de26fafd60ba56317be8058cb",
+        "artifactSha256": "sha256:228e0b15b9b054848f3f26251d8dc6d5ab334d9bbd7df80bc04b0450947256f5",
+        "artifactPath": "artifacts/uber-playwright/uber-playwright-1.0.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/uber-playwright/uber-playwright-1.0.1.tgz",
         "scopes": [
           "uber.trips",
           "uber.receipts"
@@ -1308,6 +1760,43 @@
         "artifactSha256": "sha256:5f1262b008e96360385af589b2cee71e8512fde6505382ed6e4c39087181ddd0",
         "artifactPath": "artifacts/wholefoods-playwright/wholefoods-playwright-1.0.1.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/37b45c33d159281f718bf2f1da325520ce0f50c4/artifacts/wholefoods-playwright/wholefoods-playwright-1.0.1.tgz",
+        "scopes": [
+          "wholefoods.profile",
+          "wholefoods.orders",
+          "wholefoods.nutrition"
+        ],
+        "consumerMetadata": {
+          "sourceId": "wholefoods",
+          "displayName": "Whole Foods Market",
+          "brandDomain": "wholefoodsmarket.com",
+          "aliases": [
+            "whole foods"
+          ],
+          "iconKey": "wholefoods",
+          "defaultScope": "wholefoods.orders"
+        }
+      },
+      {
+        "connectorId": "wholefoods-playwright",
+        "company": "wholefoods",
+        "version": "1.0.2",
+        "name": "Whole Foods Market",
+        "status": "experimental",
+        "description": "Exports your Whole Foods Market order history (via Amazon) and product nutrition data.",
+        "sourceFiles": {
+          "script": "wholefoods/wholefoods-playwright.js",
+          "metadata": "wholefoods/wholefoods-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:96694102a48be77c6b8d07ac69a9b2e2188cd46a6d51d126dfc58c392eda8e81",
+        "scriptSha256": "sha256:55b08116972ad5bfd248435830cfa839bc40723ba475d364e9a2ece7e0d6e7a5",
+        "artifactSha256": "sha256:e6301ff2826c00739c1c6d6c55f5092abf021c4bdc8ff5d11a5fce354b121ecb",
+        "artifactPath": "artifacts/wholefoods-playwright/wholefoods-playwright-1.0.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/wholefoods-playwright/wholefoods-playwright-1.0.2.tgz",
         "scopes": [
           "wholefoods.profile",
           "wholefoods.orders",
@@ -1465,6 +1954,44 @@
         "artifactSha256": "sha256:5c3a6ea50007e8d6882e658fa8305f9769ad78dfac6cc8c9351f19e712756c1b",
         "artifactPath": "artifacts/youtube-playwright/youtube-playwright-1.2.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/6cfa9586e1d6dd7c18f986ff9cf5dfc2b1c30bae/artifacts/youtube-playwright/youtube-playwright-1.2.0.tgz",
+        "scopes": [
+          "youtube.profile",
+          "youtube.subscriptions",
+          "youtube.playlists",
+          "youtube.playlistItems",
+          "youtube.likes",
+          "youtube.watchLater",
+          "youtube.history"
+        ],
+        "consumerMetadata": {
+          "sourceId": "youtube",
+          "displayName": "YouTube",
+          "brandDomain": "youtube.com",
+          "iconKey": "youtube",
+          "defaultScope": "youtube.profile"
+        }
+      },
+      {
+        "connectorId": "youtube-playwright",
+        "company": "google",
+        "version": "1.2.1",
+        "name": "YouTube",
+        "status": "beta",
+        "description": "Exports your YouTube profile, subscriptions, playlists, playlist items, liked videos, watch later list, and top 50 recent watch history entries.",
+        "sourceFiles": {
+          "script": "google/youtube-playwright.js",
+          "metadata": "google/youtube-playwright.json"
+        },
+        "publishedAt": "2026-08-13T00:00:00Z",
+        "sourceTag": "waspflow/dcx-spdx-17-0902",
+        "sourceCommit": "f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25",
+        "releaseId": "connectors-f9f6c8c2f37a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:104380a835913785011afe25395482b83bbf9fdacad5e2ed3e41b68819c55f11",
+        "scriptSha256": "sha256:514cbf8eb0c41861f84a5142785541303b26408fd57c22293f73e36207194244",
+        "artifactSha256": "sha256:2ff21b5f7b2fbd865b7bc812c85ddbdc366e29a6503447cc7fc5e45e77dea6f8",
+        "artifactPath": "artifacts/youtube-playwright/youtube-playwright-1.2.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/youtube-playwright/youtube-playwright-1.2.1.tgz",
         "scopes": [
           "youtube.profile",
           "youtube.subscriptions",

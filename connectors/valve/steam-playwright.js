@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 
 (async () => {
   const STEAM_API = 'https://api.steampowered.com';

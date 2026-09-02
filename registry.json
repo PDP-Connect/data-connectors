@@ -110,7 +110,7 @@
     {
       "id": "github-playwright",
       "company": "github",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "name": "GitHub",
       "status": "stable",
       "description": "Exports your GitHub profile, repositories, starred repositories, public activity events, and contribution graph.",
@@ -126,14 +126,14 @@
         "metadata": "github/github-playwright.json"
       },
       "checksums": {
-        "script": "sha256:61eb4be00e1d267075cd78d7e14648615c62aa7cebffeae73ab4135acfe58b2f",
-        "metadata": "sha256:8c67662e3efa1c3a8660ead8a030ce4996d54ebd3afb194a59c04efe12340c96"
+        "script": "sha256:06c61e3a238738778f41fb3b7e71c58f5fd52f7df65b1b51291f06b5c5567848",
+        "metadata": "sha256:07ba0abd62362bfdd262a0927a9e45a4c5c48087e4967d707905b1934397d5b2"
       }
     },
     {
       "id": "instagram-playwright",
       "company": "meta",
-      "version": "2.2.1",
+      "version": "2.2.2",
       "name": "Instagram",
       "status": "stable",
       "description": "Exports your Instagram profile and posts.",
@@ -152,14 +152,14 @@
         "metadata": "meta/instagram-playwright.json"
       },
       "checksums": {
-        "script": "sha256:0f64f1149616a712c82473608a7b8a520d2582d26b58adac2fea2cc8be4be530",
-        "metadata": "sha256:ecc60960baf6acae0dddef65b8cf7861010e3b0473ca014c3a67fef8a269116d"
+        "script": "sha256:b20a875f7d0555dc00f8cc7991987697e40e6327220ad53cc80cf05f7d18d665",
+        "metadata": "sha256:5d685316cf6cbc46c5442a53bf7527863372c83f2f03d1db4f6583ff1469801c"
       }
     },
     {
       "id": "instagram-ads-playwright",
       "company": "meta",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "name": "Instagram Ads",
       "status": "beta",
       "description": "Exports your Instagram ad interests \u2014 advertisers and ad topics.",
@@ -175,14 +175,14 @@
         "metadata": "meta/instagram-ads-playwright.json"
       },
       "checksums": {
-        "script": "sha256:ef759279f73e52a05b063cf8e6a6bceb63409039f35f529b342bc1af004c972d",
-        "metadata": "sha256:c7bc1657723ff545225cbfdea4274e48a72c5d429363e9e97662f39b4663351f"
+        "script": "sha256:020014022969a9fa26612388f44215299f0f74ca217e0926ce7a9548ebac9ca5",
+        "metadata": "sha256:b107f26010253933530c365f421857a044cc717aeb2de95d0a3283d15e1e801b"
       }
     },
     {
       "id": "linkedin-playwright",
       "company": "linkedin",
-      "version": "5.0.0",
+      "version": "5.0.1",
       "name": "LinkedIn",
       "status": "stable",
       "description": "Exports your LinkedIn profile, work experience, education, skills, languages, and connections.",
@@ -198,14 +198,14 @@
         "metadata": "linkedin/linkedin-playwright.json"
       },
       "checksums": {
-        "script": "sha256:351a1a6706903bfbd7055c332f8baa118faa1ccb556cf019005f77cde422480b",
-        "metadata": "sha256:7e0a1f8ff7d4572a7e09f507011025bbe8c84c59f550628879aacf8900a4624e"
+        "script": "sha256:751d453b968737f0fcc65f4b65d695c4df76020259c2dbdd95964df33f3935d5",
+        "metadata": "sha256:1fe348d63893b334083aadfa017179627ef251d98edce31ce380faa0d828717f"
       }
     },
     {
       "id": "spotify-playwright",
       "company": "spotify",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "name": "Spotify",
       "status": "stable",
       "description": "Exports your Spotify library, playlists, listening history, and preferences.",
@@ -221,14 +221,14 @@
         "metadata": "spotify/spotify-playwright.json"
       },
       "checksums": {
-        "script": "sha256:7a7424c9533b75f80444970bd4259756d2c45c253b30f4dbc96bf5b940e99b87",
-        "metadata": "sha256:731c42ca58401df05573be47e663adde25456fef611da19ac4895c26c6a207b9"
+        "script": "sha256:b851d1345d0d3d9aa96d3c1d7af02b7c784fbb7dc2683da300b9d49f091996e5",
+        "metadata": "sha256:584b6c2cd3091c398f4def15d3552b09899c5506beb61235e8e13d12a122d994"
       }
     },
     {
       "id": "youtube-playwright",
       "company": "google",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "name": "YouTube",
       "status": "beta",
       "description": "Exports your YouTube profile, subscriptions, playlists, playlist items, liked videos, watch later list, and top 50 recent watch history entries.",
@@ -244,14 +244,14 @@
         "metadata": "google/youtube-playwright.json"
       },
       "checksums": {
-        "script": "sha256:8dcb7e8a9a2a02e21e69374141ad44e6f5d778d6c6a314d216c74dc5115cc9ae",
-        "metadata": "sha256:16dc3966b5d235d5ff93ee07720c0ddf9d06479dca30387f026482fff8fbdf72"
+        "script": "sha256:514cbf8eb0c41861f84a5142785541303b26408fd57c22293f73e36207194244",
+        "metadata": "sha256:104380a835913785011afe25395482b83bbf9fdacad5e2ed3e41b68819c55f11"
       }
     },
     {
       "id": "shop-playwright",
       "company": "shopify",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "name": "Shop",
       "status": "beta",
       "description": "Exports your Shop app order history.",
@@ -270,14 +270,14 @@
         "metadata": "shopify/shop-playwright.json"
       },
       "checksums": {
-        "script": "sha256:d9364d7cbaf95fbf0e3130b9221195099b33afe3bb700f411d336e40a705d37f",
-        "metadata": "sha256:5eded7e19e3381743d2935a4f6ee41b3ef77524357bcade27bad754791b5cf4c"
+        "script": "sha256:c44c7ad9460ad8f0fc6a8c8f0238de76bc381b4c477b3999745c1791ce7ba3bd",
+        "metadata": "sha256:56da0680401e33ba14559aa4fdd5e86ead7e5545a4f9cbd2c30e643a22a91527"
       }
     },
     {
       "id": "oura-playwright",
       "company": "oura",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "name": "Oura Ring",
       "status": "stable",
       "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity.",
@@ -296,14 +296,14 @@
         "metadata": "oura/oura-playwright.json"
       },
       "checksums": {
-        "script": "sha256:2aa33b0e5dab3838faff8fac1d2b219378b3ac5540572911143479299442c4db",
-        "metadata": "sha256:628564732b13157fe9ad9be09495d3fc6d2b9f32ca9ba30bee20f5e165814d49"
+        "script": "sha256:ac0096e3939f5b9d8c5f600b4e23bb96bf82bb33a0f51523fe11d549d66629e6",
+        "metadata": "sha256:ac7e4bca651e57ecf869c8615ba947d47206620228cd87e19528cc65b87e2d4a"
       }
     },
     {
       "id": "wholefoods-playwright",
       "company": "wholefoods",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "name": "Whole Foods Market",
       "status": "experimental",
       "description": "Exports your Whole Foods Market order history (via Amazon) and product nutrition data.",
@@ -322,14 +322,14 @@
         "metadata": "wholefoods/wholefoods-playwright.json"
       },
       "checksums": {
-        "script": "sha256:2ebb4426258b87a8e3699b9609c36ff69b03f050e747ed530c54ee1e7f84c59b",
-        "metadata": "sha256:b374a547bacfe49c0fcce7cea41db0630e8335c9f655e644a43a11b2eae9e0e1"
+        "script": "sha256:55b08116972ad5bfd248435830cfa839bc40723ba475d364e9a2ece7e0d6e7a5",
+        "metadata": "sha256:96694102a48be77c6b8d07ac69a9b2e2188cd46a6d51d126dfc58c392eda8e81"
       }
     },
     {
       "id": "steam-playwright",
       "company": "valve",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "name": "Steam",
       "status": "experimental",
       "description": "Exports your Steam profile, game library with playtime stats, and friend list using the Steam Web API.",
@@ -338,14 +338,14 @@
         "metadata": "valve/steam-playwright.json"
       },
       "checksums": {
-        "script": "sha256:6d81afd55a3769de991d7a096dcf4f16008f41cf60a42e141b1d4311e36e85af",
-        "metadata": "sha256:e323a76acb3b0687562e9d58adedbfa76406f52e6a4fe381a519306ca5ab70fd"
+        "script": "sha256:d574065ef144e82721c1b3ff0d340bf8e9a477bd326a2a8be8a567b9619bfe3f",
+        "metadata": "sha256:f39b816c42414a1720f052520f4c5f104071a46c6a7430943c179d75abc9b17e"
       }
     },
     {
       "id": "heb-playwright",
       "company": "HEB",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "name": "H-E-B",
       "status": "experimental",
       "description": "Exports your H-E-B account profile, order history, and product nutrition data.",
@@ -361,14 +361,14 @@
         "metadata": "heb/heb-playwright.json"
       },
       "checksums": {
-        "script": "sha256:83919643aaebe8e59386acc2868fd89e1ac94dc3464e26f5afedb570e96a7b9f",
-        "metadata": "sha256:27082d90d8ec77fe906e2a4cb1af0ed43fbd0c883a43ae31d9cb513c15501dc9"
+        "script": "sha256:b2c65e03fe7f28372879d32943373ef73a6a1561de9e9432a18d1b0116ee9149",
+        "metadata": "sha256:15936948468d24e53fd7eb7485dcb27caff5ae2f00053fda30adfe7daa15d915"
       }
     },
     {
       "id": "amazon-playwright",
       "company": "amazon",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "name": "Amazon",
       "status": "beta",
       "description": "Exports your Amazon order history and profile information.",
@@ -377,14 +377,14 @@
         "metadata": "amazon/amazon-playwright.json"
       },
       "checksums": {
-        "script": "sha256:4a318b3c3884661929d8625ec04fac57b9fcd0d7508b699a8a3c9eba758c8f0a",
-        "metadata": "sha256:5d6a4ef2e0b81084a956dc7e2520567f420c18ee3890cb17725d026d245513f4"
+        "script": "sha256:4672adf8cac1c61133a6dd91d034be956d47cc5db6685e779bded2b2b2b581f7",
+        "metadata": "sha256:6ea1b42d208cc02f2c47a96edd658ac9f1e5ff034812a0ea60076a7eb9dab5ca"
       }
     },
     {
       "id": "doordash-playwright",
       "company": "doordash",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "name": "DoorDash",
       "status": "beta",
       "description": "Exports your DoorDash order history including restaurant names, items ordered, dates, totals, and delivery status.",
@@ -393,14 +393,14 @@
         "metadata": "doordash/doordash-playwright.json"
       },
       "checksums": {
-        "script": "sha256:a880b496f9d68076879fdbcbe874a627b55ea0e4433b7db8332aa72f51d0c889",
-        "metadata": "sha256:eb57a0b0855acf40ba246d778fbb28a15442690957bdef0df23b332db640c413"
+        "script": "sha256:92eaa7e23fc56ec2364ffbcafef4a211b72fc0808ad2c39f2adb83f5f1de3b8e",
+        "metadata": "sha256:71b2d3ba30a32470aa66c7fc5531531803c1c32a6dd29177a8b447bbec1e8380"
       }
     },
     {
       "id": "uber-playwright",
       "company": "uber",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "name": "Uber",
       "status": "beta",
       "description": "Exports your Uber trip history and receipts.",
@@ -409,14 +409,14 @@
         "metadata": "uber/uber-playwright.json"
       },
       "checksums": {
-        "script": "sha256:5b10877fbcd4d3cba5393820dabcf90812bc901532789c4221025e8035bb224e",
-        "metadata": "sha256:7b4549741d5184641d9d1a3ef26fc5e20a14954f200f0150b692b3d8b2e98c33"
+        "script": "sha256:fcf764d271b0aaef8c5c32ab3784a41b8e18e00de26fafd60ba56317be8058cb",
+        "metadata": "sha256:47d5ffd399fd8bc96d4e7b8cb104f6eedd82ae3df775cfab7be3acc873013ed8"
       }
     },
     {
       "id": "claude-export-playwright",
       "company": "Anthropic",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "name": "Claude",
       "status": "experimental",
       "description": "Exports your Claude conversations and projects via Anthropic's official data export (one complete archive, no per-conversation rate limiting).",
@@ -425,8 +425,8 @@
         "metadata": "anthropic/claude-export-playwright.json"
       },
       "checksums": {
-        "script": "sha256:12a068a5186aececdd13e999b84f14a281d8e3d256c1eec70b812afd17142152",
-        "metadata": "sha256:7213ef42d1bcbde91db4972ae22a8f0b445f2ff47d85c95548b34ce20054c315"
+        "script": "sha256:23f12002156caa670c28f506ff17784ca70efb1fd7b2ee92c9fd0e2958ca525c",
+        "metadata": "sha256:b8eeeb95b0405f6fda6991c7696ea417ec88546b637dc0778398cd11675dfa18"
       }
     },
     {
@@ -448,7 +448,7 @@
     {
       "id": "icloud-notes-playwright",
       "company": "Apple",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "name": "iCloud Notes",
       "status": "experimental",
       "description": "Exports your Apple Notes and folders from iCloud.",
@@ -464,8 +464,8 @@
         "metadata": "apple/icloud-notes-playwright.json"
       },
       "checksums": {
-        "script": "sha256:e58841373d8e52b9cd52d0537da3f9c209b9dc9db1c86f005f3cf526ac840a73",
-        "metadata": "sha256:20c79f11d934c4ca990c75995405fef1abd34648956a5d06e89e7f90298e7c56"
+        "script": "sha256:a5298e28c6be711bdd4066506f5958ca4a7a7059e5269fa3072f30d89260f1a8",
+        "metadata": "sha256:d1af7734ee4b9307d3a549246ba58d0766e1e162d7996cbd20b0d91835693f43"
       }
     }
   ]

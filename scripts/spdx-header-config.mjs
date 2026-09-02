@@ -28,29 +28,6 @@ export const EXCLUDED_PATH_SEGMENTS = ["node_modules", "dist", "build"];
  * structural category.
  */
 export const EXCLUDED_FILES = new Map([
-  // Hash-locked versioned connector scripts (tracking issue #42): each has a
-  // pinned version/hash in connector-index.json, so editing content trips
-  // the "maintained source changed without a version bump" gate. Header
-  // coverage rides along the next time each connector changes for a real
-  // reason.
-  ["connectors/amazon/amazon-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/anthropic/claude-export-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/apple/icloud-notes-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/doordash/doordash-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/github/github-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/google/youtube-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/heb/heb-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/linkedin/linkedin-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/meta/instagram-ads-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/meta/instagram-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/openai/chatgpt-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/oura/oura-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/shopify/shop-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/spotify/spotify-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/uber/uber-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/valve/steam-playwright.js", "hash-locked versioned connector script (#42)"],
-  ["connectors/wholefoods/wholefoods-playwright.js", "hash-locked versioned connector script (#42)"],
-
   // Same hash-pinning reason, for the github-pdpp connector (PR #9's second commit).
   ["connectors/github-pdpp/src/connector/index.ts", "hash-locked versioned connector source (#42)"],
   ["connectors/github-pdpp/src/connector/parsers.ts", "hash-locked versioned connector source (#42)"],
