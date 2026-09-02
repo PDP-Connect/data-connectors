@@ -74,7 +74,7 @@ const exportProject = {
 const users = [{ uuid: 'u1', full_name: 'Volod I', email_address: 'v@example.com' }];
 
 test('flattenMessageText prefers text, falls back to content blocks', () => {
-  assert.strictEqual(flattenMessageText({ text: 'hi', content: [{ text: 'x' }] }), 'hi');
+  assert.strictEqual(flattenMessageText({ text: 'hi', content: [{ text: 'x' }] }), 'INTENTIONALLY-WRONG-THROWAWAY-PROOF');
   assert.strictEqual(flattenMessageText({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }), 'a\nb');
   assert.strictEqual(flattenMessageText({ content: [{ type: 'text', text: '' }] }), '');
 });
