@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`0bc3f8c5b4ffdc1cbbfb43f1a251915456859886` (see `.github/cross-repo-pins.json`). This package
+`63a3792762e6568315c8d210852ea8f5c4f3b3d2` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,12 +22,14 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@0bc3f8c5b4ffdc1cbbfb43f1a251915456859886`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Resynced 2026-08-31: the
-  tarball-digest drift check (job c) failed against the prior 9155e57ae4 pin because pdpp's own
-  committed `pdpp-collector-runtime-0.0.1.tgz` had already been repacked from this newer
-  data-connect commit (PR #34, "rebuild rejected terminal commits") without a matching pin move
-  here — this repin closes that gap. Both tarballs' contents changed.
+  `PDP-Connect/data-connect@63a3792762e6568315c8d210852ea8f5c4f3b3d2`, workspace packages
+  `packages/collector-runtime` and `packages/connector-protocol`. Resynced 2026-09-02: the
+  pin-freshness — data-connect check went red because data-connect's main had moved past the
+  prior `0bc3f8c5b4` pin in these packages' own source paths (unrelated to the PDPP #238/
+  data-connect #36 cutover this same repin handles). Both tarballs' contents changed (verified
+  locally: per-file content manifest diff between the prior committed tarballs and a fresh
+  repack from the new pin was non-empty for every file under `dist/`, `package.json`, and
+  `README.md`). Supersedes the prior `0bc3f8c5b4` pin (PR #34, 2026-08-31).
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
