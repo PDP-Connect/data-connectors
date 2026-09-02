@@ -1,6 +1,6 @@
 # Connector authoring
 
-This repository is the single home of PDPP connector content. Keep source code and the canonical Collection Profile here, under `connectors/`.
+This repository is the single home of PDPP connector content. Keep connector source and artifacts under `connectors/`. Follow the [PDPP Collection Profile](docs/spec/collection-profile.md) for the normative manifest, runtime, and wire contract. The [runtime note](packages/polyfill-connectors/docs/collection-profile-runtime.md) records current package entry points and known implementation gaps.
 
 `PDP-Connect/pdpp` keeps a copy of `packages/polyfill-connectors`, but production does not build from it. DataConnect builds the production package from this repository, and pdpp's copy does not own the primary implementation of a new connector.
 
