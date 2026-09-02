@@ -132,6 +132,17 @@ Each stream declaration has these connector-facing fields:
 | `coverage_strategy` | REQUIRED coverage strategy from Section 3.5. |
 | `freshness_strategy` | REQUIRED freshness strategy from Section 3.5. |
 
+An `append_only` stream contains immutable events. A connector adds records and
+MUST NOT update or delete an existing record. Repeating the same key is an
+idempotent retry. A `mutable_state` stream contains the current state of an
+entity. A connector can update or delete that state by primary key.
+
+`primary_key` names the data fields that uniquely identify a record in its
+stream. For a composite key, declaration order is significant. A declared
+`cursor_field` defines stable ordering by `(cursor_field, primary_key)`. A
+declared `consent_time_field` MUST contain an ISO 8601 timestamp in each emitted
+record.
+
 The manifest can contain Core declaration fields such as `description`,
 `display`, `selection`, `views`, `relationships`, and `query`. A connector
 runtime MAY preserve them for a resource server, but this profile does not
@@ -315,6 +326,16 @@ fields. `time_range` is an OPTIONAL object with `since` and `until` timestamps.
 A runtime MUST resolve wildcards and view names before `START`. It MUST NOT send
 a wildcard stream name or an issuance-time `necessity` value.
 
+A simple canonical record key is its string value. A composite canonical key is
+the minified JSON array of its string components in `primary_key` order. For
+example, `["user-1","2026-09-02"]` is one canonical key string. Each
+`resources` entry uses this form.
+
+`time_range.since` and `time_range.until` MUST be ISO 8601 timestamps. `since`
+is inclusive and `until` is exclusive. The connector applies both bounds to
+the declared `consent_time_field`. A runtime MUST NOT send `time_range` for a
+stream without that field.
+
 The runtime MUST include a descriptor for each required manifest binding. A
 connector MUST fail if a required descriptor is missing. It MUST ignore
 additional binding descriptors.
@@ -346,13 +367,20 @@ defined in the runtime note. They are not portable v0.1 fields.
 }
 ```
 
-`stream`, `key`, `data`, and `emitted_at` are REQUIRED. `key` is a string or
-an array of strings. An array preserves composite-key field order. `data` MUST
-conform to the stream schema.
+`stream`, `key`, and `emitted_at` are REQUIRED. `stream` names a declared,
+in-scope stream. `key` is a non-empty string or a non-empty array of strings.
+An array preserves composite-key field order. `emitted_at` is the ISO 8601 time
+when the connector emitted the message.
+
+`data` is REQUIRED unless `op` is `delete`. It MUST conform to the stream
+schema. For each primary-key field, the value in `data` MUST identify the same
+value as the corresponding component of `key`. A runtime MUST reject a record
+when these identities disagree.
 
 `op` is OPTIONAL. The only explicit value is `delete`. Absence means upsert.
-A delete identifies a record by `stream` and `key`. Its `data` object MAY
-contain only key fields.
+A delete identifies a record by `stream` and `key`. It can omit `data`. If
+`data` is present, it MAY contain only key fields. A connector MUST NOT delete
+from an `append_only` stream.
 
 ### 5.3 `STATE`
 
