@@ -144,6 +144,16 @@ portable `DETAIL_GAP` evidence required for `gap_keys`. The profile gives
 `optional_skip_keys` no portable coverage credit. These implementations remain
 runtime-specific until the evidence is reconciled.
 
+## Provisional source-backed fulfillment
+
+`fulfillment.source_backed` is not implemented in this package. Accepted design
+work proposes a static per-stream capability and an owner-selected,
+per-connection posture. It also proposes an accepted-not-collected health
+disposition for a stream served on demand.
+
+This work remains provisional pending OD-4. It is not a v0.1 conformance
+requirement. This note does not decide its permanent document or schema home.
+
 ## Section map from the previous document
 
 | Previous section | New location | Treatment |
@@ -157,3 +167,4 @@ runtime-specific until the evidence is reconciled.
 | Connector and runtime conformance | Profile Section 6 | Kept as separate claims. |
 | TypeScript types | `@pdpp/connector-protocol/connector-runtime-protocol` | Moved to the runtime package. |
 | Profile versioning | Profile Section 8 | Added for the independent normative document. |
+| Source-backed fulfillment | Profile Section 9 and this note | Marked provisional pending OD-4. |

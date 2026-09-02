@@ -645,3 +645,40 @@ A runtime MUST NOT infer compatibility from an unknown version. It MUST either
 support that exact version or apply an explicit compatibility rule that it
 advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
+
+## 9. Provisional source-backed fulfillment
+
+This section is non-normative. It records accepted design work that is not yet
+implemented and does not decide the permanent specification home of the feature.
+
+The proposal adds a per-stream `fulfillment.source_backed` object. That object
+declares static adapter capability. It does not activate the posture. An owner
+selects `source_backed` separately for one stream on one connection. The active
+posture determines the effective query capability. It also excludes that stream
+from ordinary collection and canonical ingest while leaving retained rows
+dormant until the owner deletes them explicitly.
+
+The accepted design gives the provisional capability these constraints:
+
+- The stream has `append_only` semantics, a stable source-native primary key,
+  and a `cursor_field` that supports deterministic ordering by
+  `(cursor_field, primary_key)` in both directions.
+- The adapter supports bounded list pages, exact top-level scalar filters,
+  field and view projection, and single-record detail reads. A source that
+  cannot provide a bounded unfiltered list is not eligible.
+- The stream schema has no `blob_ref` field. Source-backed blob lifecycle is
+  deferred.
+- `fulfillment.source_backed.query` uses the stream `query` grammar and is a
+  subset of the overall stream query surface.
+- Connection configuration selects `retained` or `source_backed` per stream.
+  The default is `retained`. A manifest never selects connection posture.
+- Source-backed responses disclose `live` or `cache` origin and report honest
+  freshness. Upstream failure is a structured error, not an empty success.
+- The resource server continues to enforce grants locally. It never forwards a
+  client access token or owner token to the source.
+- A switch to `source_backed` does not delete retained rows. It makes them
+  dormant until a separate owner deletion or a later return to `retained`.
+
+The proposal remains pending OD-4. A manifest that contains this member does
+not gain v0.1 conformance, and a runtime MUST NOT infer support from the member
+alone.
