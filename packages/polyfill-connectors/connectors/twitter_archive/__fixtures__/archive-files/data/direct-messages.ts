@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Typed fixture source. `direct-messages.js` is the generated Twitter archive artifact.
 export interface DirectMessageFixture {
 	dmConversation: {

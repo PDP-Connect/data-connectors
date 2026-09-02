@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -12,7 +15,7 @@ import { fetchResolvedArtifact, generateLock, installFromLock, loadConnectorInde
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "chatgpt-pdpp");
 const artifact = join(root, "artifacts", "chatgpt-pdpp", "chatgpt-pdpp-0.1.0.tgz");
-const expectedCommit = "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792";
+const expectedCommit = "684f6c2184cd80d928a1f922f28d8dfa147b552a";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 const pinnedFile = (repository, path) =>
@@ -47,7 +50,7 @@ test("chatgpt-pdpp preserves the canonical browser profile and complete stream c
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.3.6", files: 76 }]);
+  })), [{ name: "zod", version: "4.4.3", files: 79 }]);
   assert.deepEqual(provenance.outputs.undeclared_external_imports, []);
   assert.equal(provenance.source_inventory.upstream_connector.length, 6);
   assert.ok(provenance.source_inventory.upstream_runtime.length > 0);

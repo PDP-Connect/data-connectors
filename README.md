@@ -32,6 +32,7 @@ The catalog describes only the local desktop collection path. Registered legacy 
 |---|---|---|
 | `amazon` | `amazon.orders`, `amazon.profile` | amazon-playwright (beta) |
 | `chatgpt` | `chatgpt.conversations`, `chatgpt.memories` | chatgpt-playwright (stable) |
+| `claude_code` | `claude_code.prompts`, `claude_code.sessions`, `claude_code.trajectories`, `claude_code.usage` | claude-code-local (experimental) |
 | `claude` | `claude.conversations`, `claude.projects` | claude-export-playwright (experimental) |
 | `doordash` | `doordash.orders` | doordash-playwright (beta) |
 | `github` | `github.contributions`, `github.events`, `github.history`, `github.profile`, `github.repositories`, `github.starred` | github-playwright (stable) |
@@ -367,6 +368,11 @@ The runner classifies each run into one of:
 
 Use this path to maintain an existing legacy browser connector. New connector work belongs in `PDP-Connect/pdpp` by default. See [Connector authoring](AUTHORING.md).
 
+Read [`CONNECTOR-GUIDELINES.md`](CONNECTOR-GUIDELINES.md) first: the rules that keep a
+connector running unchanged on both the desktop runner and the mobile WebView shim. They
+apply to legacy Playwright connectors here and to PDPP Collection Profiles alike, since
+both are written against the same `page` API.
+
 Creating a new legacy connector requires an explicit exception. The creation tools reject requests without `--legacy-exception`. See [`skills/pdp-connect/CREATE.md`](skills/pdp-connect/CREATE.md) after the exception is approved.
 
 Summary:
@@ -480,6 +486,8 @@ The runner reads the connector's sibling `.json` metadata to resolve the `connec
 ---
 
 ## Contributing
+
+For sign-off (DCO) and AI-assistance disclosure, see [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md). The steps below cover connector specifics.
 
 ### Adding a legacy Playwright connector by exception
 

@@ -18,7 +18,7 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "sigstore": "^4.1.1"
+    "sigstore": "^5.0.0"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
@@ -29,6 +29,8 @@
     "github-pdpp:test": "node --test ./test/github-pdpp/github-pdpp.test.mjs",
     "chatgpt-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact chatgpt-pdpp",
     "chatgpt-pdpp:test": "node --test ./test/chatgpt-pdpp/chatgpt-pdpp.test.mjs",
+    "whoop-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact whoop-pdpp",
+    "whoop-pdpp:test": "node --test ./test/whoop-pdpp/whoop-pdpp.test.mjs",
     "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./schemas/connector-index.schema.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
@@ -39,8 +41,8 @@
     "release:sign": "node ./scripts/sign-release-assets.mjs"
   },
   "devDependencies": {
-    "ajv": "^8.17.1",
-    "esbuild": "0.28.1",
-    "zod": "4.3.6"
+    "ajv": "^8.20.0",
+    "esbuild": "0.28.2",
+    "zod": "4.5.2"
   }
 }

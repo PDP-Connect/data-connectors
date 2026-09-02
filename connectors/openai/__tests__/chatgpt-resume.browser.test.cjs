@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * End-to-end resume / rate-limit test for the ChatGPT connector.
  *

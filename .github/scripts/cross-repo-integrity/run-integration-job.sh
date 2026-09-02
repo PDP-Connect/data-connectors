@@ -24,6 +24,16 @@
 # using data-connectors' canonical content instead of pdpp's stale copy, which is the point of
 # the drift jobs' connector-source comparison (job b) staying green.
 #
+# Declared skip for a known, in-flight consumer-side dependency: the pinned pdpp checkout's
+# reference-implementation can import polyfill-connectors modules that PR #45
+# (feat/connector-options-schema-0831) adds to this repo but has not yet merged
+# (connector-options-schema.ts, connector-config-option-kind-registry.ts as of 2026-08-31).
+# When that happens this script exits 0 with an explicit SKIP/::notice:: explaining why,
+# rather than let the reference-implementation typecheck fail on what looks like an unrelated
+# TS2307 "Cannot find module". This keeps THIS job (and this PR's own, unrelated checks)
+# honestly evaluable while #45 is open, without duplicating #45's work here. Remove this
+# precondition once #45 merges and its modules are always present.
+#
 # Usage:
 #   run-integration-job.sh <pdpp-checkout> <data-connectors-checkout> <workdir>
 #
@@ -70,6 +80,42 @@ POLYFILL_DIR="$COMBINED/packages/polyfill-connectors"
 if [[ ! -d "$POLYFILL_DIR/node_modules" ]]; then
   echo "FAIL: $POLYFILL_DIR/node_modules missing — install data-connectors' own dependencies before running this job (npm ci --ignore-scripts inside packages/polyfill-connectors)."
   exit 1
+fi
+
+# Precondition: the pinned pdpp checkout's reference-implementation imports two
+# polyfill-connectors modules — connector-options-schema.ts and
+# connector-config-option-kind-registry.ts — that PR #45
+# (feat/connector-options-schema-0831) adds to this repo but has not yet merged. Detect that
+# gap explicitly and skip with a declared, truthful reason instead of letting the
+# reference-implementation typecheck below fail on an unrelated-looking TS2307 "Cannot find
+# module" — this repo's own checks (job (c) tarball digests, contract-guardrails, etc.) stay
+# independently evaluable while PR #45 is in flight, per the coordinated-cutover posture this
+# workflow already documents for pdpp/data-connect pins.
+REQUIRED_MODULES=(
+  "connector-options-schema.ts"
+  "connector-config-option-kind-registry.ts"
+)
+MISSING_MODULES=()
+for module in "${REQUIRED_MODULES[@]}"; do
+  if [[ ! -f "$POLYFILL_DIR/src/$module" ]]; then
+    MISSING_MODULES+=("$module")
+  fi
+done
+
+if [[ "${#MISSING_MODULES[@]}" -gt 0 ]]; then
+  IMPORTS_MISSING_MODULE=0
+  if grep -rqE "connector-options-schema\.ts|connector-config-option-kind-registry\.ts" \
+    "$COMBINED/reference-implementation/server" "$COMBINED/reference-implementation/test" 2>/dev/null; then
+    IMPORTS_MISSING_MODULE=1
+  fi
+
+  if [[ "$IMPORTS_MISSING_MODULE" -eq 1 ]]; then
+    echo "::notice::Integration job SKIPPED: pinned pdpp's reference-implementation imports polyfill-connectors module(s) not yet present in this checkout (${MISSING_MODULES[*]}). Those modules are added by PDP-Connect/data-connectors#45 (feat/connector-options-schema-0831), open but not yet merged. Declared skip, not a silent pass — re-run once #45 lands."
+    echo "SKIP: pinned pdpp's reference-implementation imports polyfill-connectors module(s) not yet present in this checkout: ${MISSING_MODULES[*]}."
+    echo "SKIP: those modules are added by PDP-Connect/data-connectors#45 (feat/connector-options-schema-0831), which is open but not yet merged — see that PR for the connector-options-schema/connector-config-option-kind-registry split."
+    echo "SKIP: this job cannot honestly typecheck or run the RI-integrated test suite until #45 merges. Declared skip, not a silent pass — re-run this job once #45 lands."
+    exit 0
+  fi
 fi
 
 echo

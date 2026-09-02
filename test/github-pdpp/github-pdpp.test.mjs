@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -48,7 +51,7 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.3.6", files: 76 }]);
+  })), [{ name: "zod", version: "4.4.3", files: 79 }]);
   assert.match(readFileSync(entrypoint, "utf8"), /Browser runtime is unavailable/);
   assert.doesNotMatch(execFileSync("tar", ["-xOf", artifact, "./provenance.json"], { encoding: "utf8" }), new RegExp(secret));
   assert.deepEqual(execFileSync("tar", ["-xOf", artifact, "./provenance.json"]), readFileSync(join(connectorRoot, "provenance.json")));

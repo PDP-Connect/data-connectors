@@ -240,6 +240,9 @@ export function buildConnectorSpec(
 		...(options.resources ? { resources: options.resources } : {}),
 		command,
 		args,
+		// None of this CLI's known connectors emit STREAM_EVIDENCE today; see
+		// each connector's collector-definition.ts for the source of truth.
+		protocol_capabilities: [],
 		runtime_requirements: { bindings: defaults?.bindings ?? {} },
 	};
 }

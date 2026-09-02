@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 const user = { id: 1, login: "octocat", name: "Octocat", created_at: "2020-01-01T00:00:00Z", updated_at: "2020-01-01T00:00:00Z" };
 const repository = { id: 2, name: "hello", full_name: "octocat/hello", private: false, fork: false, archived: false, disabled: false, owner: { login: "octocat" }, created_at: "2020-01-01T00:00:00Z", updated_at: "2020-01-01T00:00:00Z", pushed_at: "2020-01-01T00:00:00Z" };
 globalThis.fetch = async (url, options) => {

@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+
 /**
  * Formats stream-json output from `claude -p --output-format stream-json` into
  * human-readable logs. Shows the agent's thinking, tool calls, and results in real-time.

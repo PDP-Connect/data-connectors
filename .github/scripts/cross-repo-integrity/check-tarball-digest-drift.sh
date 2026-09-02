@@ -8,8 +8,13 @@
 # Rebuilds @pdpp/collector-runtime and @pdpp/connector-protocol from a data-connect checkout
 # pinned to .github/cross-repo-pins.json's data-connect SHA, using the same method documented
 # in packages/polyfill-connectors/vendor/README.md (npm run build, then npm pack, from inside
-# the data-connect workspace so sibling deps resolve). Compares the resulting SHA-256 digests
-# against:
+# the data-connect workspace so sibling deps resolve). Also rebuilds both packages' 1.0.0
+# release-boundary artifacts from a SEPARATE, later data-connect checkout (pinned to
+# cross-repo-pins.json's "data-connect-1-0-0" SHA — see that entry for why it must differ from
+# the SHA above) by reproducing the release pipeline's lockstep version bump (see pdpp's
+# vendor/README.md "Current 1.0.0 release-boundary pins") and packing that too, since pdpp's
+# own vendor/SHA256SUMS records 1.0.0 tarballs that this repo's own (still-0.0.1) vendor pin
+# does not. Compares the resulting SHA-256 digests against:
 #   - this repo's packages/polyfill-connectors/vendor/SHA256SUMS
 #   - pdpp's vendor/SHA256SUMS (if a pdpp checkout is provided)
 #
@@ -18,12 +23,13 @@
 # check-reference-contract-drift.mjs (drift job d).
 #
 # Usage:
-#   check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout]
+#   check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout] [data-connect-1-0-0-checkout]
 set -euo pipefail
 
-DATA_CONNECT_DIR="${1:?usage: check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout]}"
-DATA_CONNECTORS_DIR="${2:?usage: check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout]}"
+DATA_CONNECT_DIR="${1:?usage: check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout] [data-connect-1-0-0-checkout]}"
+DATA_CONNECTORS_DIR="${2:?usage: check-tarball-digest-drift.sh <data-connect-checkout> <data-connectors-checkout> [pdpp-checkout] [data-connect-1-0-0-checkout]}"
 PDPP_DIR="${3:-}"
+DATA_CONNECT_1_0_0_DIR="${4:-}"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -132,6 +138,102 @@ for pkg in connector-protocol collector-runtime; do
     npm pack --pack-destination "$REPACK_OUT"
   )
 done
+
+# pdpp's vendor/SHA256SUMS additionally records 1.0.0 tarballs (see pdpp's vendor/README.md
+# "Current 1.0.0 release-boundary pins"), packed from a LATER data-connect commit than the
+# 0.0.1 pin above (cross-repo-pins.json's "data-connect-1-0-0" entry explains why these two
+# pins must differ). data-connect's `.releaserc.yaml` semantic-release pipeline publishes both
+# packages in lockstep from a single computed `nextRelease.version`, applying exactly two
+# mutations before packing — no registry, no other source changes:
+#   1. `scripts/pin-collector-runtime-protocol-dependency.ts <version>` (the pipeline's
+#      `prepareCmd` step, run first): rewrites collector-runtime's committed
+#      `@pdpp/connector-protocol` dependency (a local-install floor, "0.0.1") to the release
+#      version, since @semantic-release/npm's own prepare step only bumps each pkgRoot's OWN
+#      `version` field and never touches a sibling's `dependencies`.
+#   2. `npm version <version> --no-git-tag-version --allow-same-version` in each package (what
+#      @semantic-release/npm's prepare step itself runs).
+# Reproduce that here, in the SEPARATE data-connect-1-0-0 checkout, then repack.
+if [[ -n "$DATA_CONNECT_1_0_0_DIR" ]]; then
+  PDPP_1_0_0_PIN_SCRIPT="$DATA_CONNECT_1_0_0_DIR/scripts/pin-collector-runtime-protocol-dependency.ts"
+  if [[ ! -f "$PDPP_1_0_0_PIN_SCRIPT" ]]; then
+    echo "WARN: $PDPP_1_0_0_PIN_SCRIPT not found — cannot reproduce the 1.0.0 release-pipeline version bump at this data-connect-1-0-0 pin. Any 1.0.0 entries in a SHA256SUMS file below will correctly FAIL as unproduced." >&2
+  else
+    echo "== Installing typescript into an isolated scratch dir (data-connect-1-0-0's own root devDependency) =="
+    TSC_SHIM_1_0_0="$WORKDIR/tsc-shim-1-0-0"
+    mkdir -p "$TSC_SHIM_1_0_0"
+    TSC_VERSION_1_0_0="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_1_0_0_DIR")"
+    (
+      cd "$TSC_SHIM_1_0_0"
+      npm init -y > /dev/null
+      npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@$TSC_VERSION_1_0_0"
+    )
+
+    echo "== Temporarily neutralizing prepare scripts (npm 10.x --ignore-scripts gap for -w installs) =="
+    node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    for (const pkg of ["collector-runtime", "connector-protocol"]) {
+      const pkgJsonPath = path.join(process.argv[1], "packages", pkg, "package.json");
+      const data = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+      if (data.scripts?.prepare) {
+        data.scripts.prepare = "true";
+        fs.writeFileSync(pkgJsonPath, JSON.stringify(data, null, 2) + "\n");
+      }
+    }
+    ' "$DATA_CONNECT_1_0_0_DIR"
+
+    echo "== Installing data-connect-1-0-0's collector-runtime + connector-protocol workspaces (fresh cache) =="
+    (
+      cd "$DATA_CONNECT_1_0_0_DIR"
+      npm install \
+        --cache "$FRESH_CACHE" \
+        --ignore-scripts \
+        --no-audit --no-fund \
+        -w packages/collector-runtime -w packages/connector-protocol
+    )
+
+    echo "== Restoring package.json (undoing the prepare neutralization) =="
+    (
+      cd "$DATA_CONNECT_1_0_0_DIR"
+      git checkout -- packages/collector-runtime/package.json packages/connector-protocol/package.json
+    )
+
+    for pkg in connector-protocol collector-runtime; do
+      mkdir -p "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/.bin"
+      cp -r "$TSC_SHIM_1_0_0/node_modules/typescript" "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/typescript"
+      ln -sf ../typescript/bin/tsc "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/.bin/tsc"
+    done
+
+    echo "== Reproducing the release-pipeline version bump (1.0.0) for @pdpp/collector-runtime + @pdpp/connector-protocol =="
+    (
+      cd "$DATA_CONNECT_1_0_0_DIR"
+      node --experimental-strip-types scripts/pin-collector-runtime-protocol-dependency.ts 1.0.0
+    )
+    for pkg in connector-protocol collector-runtime; do
+      (
+        cd "$DATA_CONNECT_1_0_0_DIR/packages/$pkg"
+        npm version 1.0.0 --no-git-tag-version --allow-same-version --ignore-scripts
+      )
+    done
+
+    for pkg in connector-protocol collector-runtime; do
+      echo "== Building + packing @pdpp/$pkg @ 1.0.0 from data-connect-1-0-0 @ pinned SHA =="
+      (
+        cd "$DATA_CONNECT_1_0_0_DIR/packages/$pkg"
+        npm run build
+        npm pack --pack-destination "$REPACK_OUT"
+      )
+    done
+
+    echo "== Restoring package.json (undoing the 1.0.0 version bump) =="
+    (
+      cd "$DATA_CONNECT_1_0_0_DIR"
+      git checkout -- packages/collector-runtime/package.json packages/connector-protocol/package.json
+    )
+  fi
+else
+  echo "SKIP: no data-connect-1-0-0 checkout provided — cannot reproduce a 1.0.0 repack. Any 1.0.0 entries in a SHA256SUMS file below will FAIL as unproduced."
+fi
 
 echo
 echo "== Freshly packed digests =="

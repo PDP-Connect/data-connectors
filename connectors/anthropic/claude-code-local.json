@@ -1,0 +1,47 @@
+{
+  "manifest_version": "1.0",
+  "connector_id": "claude-code-local",
+  "source_id": "claude_code",
+  "version": "1.1.1",
+  "name": "Claude Code",
+  "company": "Anthropic",
+  "description": "Exports your local Claude Code (CLI) data: usage statistics, session metadata, prompt history, and full agent traces read from ~/.claude. No login or browser required — runs against on-device files.",
+  "runtime": "vanilla",
+  "page_api_version": 1,
+  "connect_url": "https://docs.claude.com/en/docs/claude-code/overview",
+  "connect_selector": "body",
+  "icon": "icons/claude.svg",
+  "runtime_requirements": {
+    "node": ">=18"
+  },
+  "scopes": [
+    {
+      "scope": "claude_code.usage",
+      "label": "Your Claude Code usage",
+      "description": "Aggregate Claude Code usage: total sessions and messages, per-model token consumption and cost, day-by-day activity, hour-of-day distribution, and your longest session."
+    },
+    {
+      "scope": "claude_code.sessions",
+      "label": "Your Claude Code sessions",
+      "description": "Per-session metadata across all of your Claude Code projects: project path, git branch, CLI version, start/end time, message counts, models used, and the session title. Message bodies are not exported."
+    },
+    {
+      "scope": "claude_code.prompts",
+      "label": "Your Claude Code prompts",
+      "description": "The prompts you typed into Claude Code, with timestamp and project, derived from your local command history. Pasted attachment bodies are excluded."
+    },
+    {
+      "scope": "claude_code.trajectories",
+      "label": "Your Claude Code agent traces",
+      "description": "The full step-by-step trace of each Claude Code session: your prompts, the assistant's reasoning and replies, every tool call with its input, and every tool result with its output, in order. This includes source code, file paths, and command output from your machine. Credential-shaped strings are redacted and long step bodies are truncated."
+    }
+  ],
+  "exportFrequency": "weekly",
+  "vectorize_config": {
+    "documents": "display"
+  },
+  "id": "claude-code-local",
+  "connectURL": "https://docs.claude.com/en/docs/claude-code/overview",
+  "connectSelector": "body",
+  "iconURL": "icons/claude.svg"
+}

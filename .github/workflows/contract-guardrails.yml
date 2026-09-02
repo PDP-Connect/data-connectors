@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install contract tooling dependencies
         run: npm ci
@@ -39,7 +39,7 @@ jobs:
       - name: Checkout pinned PDPP source for ChatGPT artifact provenance
         run: |
           git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp"
-          git -C "$RUNNER_TEMP/pdpp" checkout cc07e3a896c2c0df7841da4ec6b2c660ffe1e792
+          git -C "$RUNNER_TEMP/pdpp" checkout 684f6c2184cd80d928a1f922f28d8dfa147b552a
 
       - name: Test ChatGPT PDPP artifact provenance
         env:
@@ -72,3 +72,6 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref || 'main' }}
         run: node scripts/check-additive-schemas.mjs
+
+      - name: Check SPDX license headers
+        run: node scripts/check-spdx-headers.mjs
