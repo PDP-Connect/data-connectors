@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "0d3deca19186a2185a6a15ab76c71352d10e627e",
+      "sha": "7d8a66107e499a09aafa23f9a44bcbfa76268bd0",
       "branch": "main",
-      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (pdpp#272, 'fix: correct 401 challenge port for direct MCP clients, fix record-count pluralization' \u2014 unrelated to Move A, caught by this same PR's pin-freshness \u2014 pdpp check going red mid-task since main moved while this PR was open). Supersedes the prior d250afcf6 pin (PR #270's merge). Verified no-op for drift job (d): pdpp#272 touches only reference-implementation/server/{index,reference-topology}.ts and their tests, not packages/reference-contract (confirmed via `gh api .../compare` \u2014 zero files under packages/reference-contract in the diff), so check-reference-contract-drift.mjs's documented per-file provenance (which points at older, unrelated pdpp commits) is unaffected. The integration job's real-RI checkout DOES pick up pdpp#272 (reference-implementation/server/index.ts is exactly what that job boots) \u2014 re-verified locally against a fresh pdpp clone at this SHA before moving the pin."
+      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (pdpp#273, 'chore(vendor): resync pdpp-collector-runtime-0.0.1.tgz to data-connect main (again)' \u2014 the pdpp-side half of the tarball-digests fix this data-connect pin bump requires; touches only vendor/, not packages/reference-contract or reference-implementation, so this bump is purely to pick up pdpp's own repacked vendor/pdpp-collector-runtime-0.0.1.tgz for drift job (c), not a pin-freshness response). Supersedes the prior 0d3deca19 pin (pdpp#272's merge, itself an unrelated pin-freshness catch-up). Verified no-op for drift job (d) and pin-freshness: `gh api .../compare` between 0d3deca19 and 7d8a66107 shows only vendor/README.md, vendor/SHA256SUMS, vendor/pdpp-collector-runtime-0.0.1.tgz \u2014 zero files under packages/reference-contract or reference-implementation."
     }
   }
 }
