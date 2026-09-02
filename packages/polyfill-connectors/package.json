@@ -59,10 +59,11 @@
 		"check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
 		"conformance": "tsx scripts/conformance.ts",
 		"fix": "ultracite fix",
-		"postinstall": "node ./scripts/install-patchright-browser.ts",
+		"postinstall": "node ./scripts/install-patchright-browser.mjs",
 		"test": "node scripts/run-tests.mjs",
 		"typecheck": "tsc --noEmit",
-		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry"
+		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
+		"pack-install-run": "node ./scripts/pack-install-run.mjs"
 	},
 	"dependencies": {
 		"@pdpp/collector-runtime": "file:./vendor/pdpp-collector-runtime-0.0.1.tgz",
