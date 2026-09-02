@@ -23,7 +23,6 @@ import { codexCollectorDefinition } from "../connectors/codex/collector-definiti
 import { googleMessagesCollectorDefinition } from "../connectors/google_messages/collector-definition.ts";
 import { googleTakeoutCollectorDefinition } from "../connectors/google_takeout/collector-definition.ts";
 import { imessageCollectorDefinition } from "../connectors/imessage/collector-definition.ts";
-import { signalCollectorDefinition } from "../connectors/signal/collector-definition.ts";
 
 export type {
 	LocalCollectorBinding,
@@ -34,7 +33,7 @@ export type {
  * Every connector definition the published local collector bundles, in the
  * supported public order on a fresh host: Claude Code, then Codex
  * transcripts, then Google Takeout, then iMessage, then Apple Photos, then
- * Google Messages, then Signal.
+ * Google Messages.
  *
  * iMessage reads chat.db via `node:sqlite` (built into Node.js, not a
  * native npm module), so it carries no native compiled dependency and can
@@ -45,10 +44,18 @@ export type {
  * this package, a separate operator-installed prerequisite documented in
  * its manifest and surfaced by the guided setup flow, the same
  * arms-length-subprocess shape this repo's Slack connector already uses
- * for slackdump. Signal spawns the external `sigtop` binary
- * (github.com/tbvdm/sigtop, ISC license) the same arms-length-subprocess
- * way — not bundled/installed by this package, a separate
- * operator-installed prerequisite documented in its manifest.
+ * for slackdump.
+ *
+ * Signal is intentionally NOT included here yet. Its connector source
+ * lives at `../connectors/signal/`, imported into this canonical registry
+ * from pdpp's history, but `data-connect`'s `packages/local-collector`
+ * consumer does not vendor it yet (its committed
+ * `collector-definitions.generated.ts` snapshot stops at Google Messages).
+ * Adding Signal to this registry without a matching data-connect companion
+ * change breaks the Cross-Repo Integrity Gate's collector-definitions-
+ * snapshot drift check. Per the Move A execution plan §3b, Signal is
+ * deferred to a later, separately-gated PR once data-connect support
+ * lands — not dropped, just sequenced after this catch-up.
  */
 export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 	Object.freeze([
@@ -58,5 +65,4 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 		imessageCollectorDefinition,
 		applePhotosCollectorDefinition,
 		googleMessagesCollectorDefinition,
-		signalCollectorDefinition,
 	]);

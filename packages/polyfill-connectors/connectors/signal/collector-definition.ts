@@ -52,6 +52,7 @@ export const signalCollectorDefinition: LocalCollectorDefinition = {
 	connector_id: "signal",
 	entry: "signal",
 	bindings: { filesystem: { required: true } },
+	protocol_capabilities: [],
 	streams: SIGNAL_DEFAULT_STREAMS,
 	time_scopable_streams: SIGNAL_TIME_SCOPABLE_STREAMS,
 };

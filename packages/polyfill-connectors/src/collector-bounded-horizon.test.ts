@@ -525,6 +525,7 @@ test("claude_code: a declared `since` does not prune a file by its mtime — eve
 					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 				},
+				protocol_capabilities: [],
 				runtime_requirements: { bindings: {} },
 				// Declaring these as time-scopable is what makes the runtime pass
 				// `time_range` down at all; if claude_code pruned by mtime, this is
