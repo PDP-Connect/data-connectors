@@ -48,6 +48,14 @@ const coverageStrategies = [
   "snapshot_import_receipt",
   "singleton_presence",
 ];
+const streamSemantics = ["append_only", "mutable_state"];
+const knownLegacySemantics = [
+  "github.user_stats=append",
+  "slack.channel_stats=append",
+  "usaa.account_stats=append",
+  "usaa.credit_card_billing_stats=append",
+  "ynab.account_stats=append",
+];
 const polyfillManifestPaths = readdirSync(
   join(root, "packages/polyfill-connectors/manifests"),
 )
@@ -213,6 +221,10 @@ assert.match(
   collectionProfile,
   /The response status is `success`, `cancelled`, or `timeout`/,
 );
+assert.match(
+  collectionProfile,
+  /returns a\s+`timeout` response when the interaction times out/,
+);
 for (const startField of ["run_id", "bindings", "fields"]) {
   assert.match(
     collectionProfile,
@@ -222,6 +234,7 @@ for (const startField of ["run_id", "bindings", "fields"]) {
 }
 
 assert.ok(polyfillManifests.length > 0, "polyfill manifests must be present");
+const observedLegacySemantics = [];
 for (const manifest of polyfillManifests) {
   assert.equal(manifest.protocol_version, "0.1.0");
   assert.match(manifest.connector_key, /^[a-z0-9][a-z0-9._-]*$/);
@@ -237,12 +250,18 @@ for (const manifest of polyfillManifests) {
     );
   }
   for (const stream of manifest.streams) {
+    if (!streamSemantics.includes(stream.semantics)) {
+      observedLegacySemantics.push(
+        `${manifest.connector_key}.${stream.name}=${stream.semantics}`,
+      );
+    }
     assert.ok(
       coverageStrategies.includes(stream.coverage_strategy),
       `${manifest.connector_key}.${stream.name} uses unknown coverage_strategy`,
     );
   }
 }
+assert.deepEqual(observedLegacySemantics.sort(), knownLegacySemantics.sort());
 
 const chatgptPaths = [
   "connectors/chatgpt-pdpp/artifact.json",
@@ -301,5 +320,5 @@ for (const path of [
 }
 
 console.log(
-  "PDPP authoring routes, links, fragments, manifests, and publication status are consistent.",
+  "PDPP authoring links, profile vocabularies, and known manifest exceptions are consistent.",
 );
