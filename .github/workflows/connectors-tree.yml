@@ -1,0 +1,140 @@
+name: Connectors Tree
+
+# Native connectors/** (e.g. connectors/anthropic, connectors/openai) has its own
+# per-connector unit tests under connectors/*/__tests__/*.test.cjs, but no workflow
+# ran them: polyfill-connectors.yml's "changes" job only recognizes
+# packages/polyfill-connectors/** (the pdpp-mirrored copy, added by Move A / #41),
+# so a PR touching only connectors/** got relevant=false there and no connector test
+# ran at all (found by @volod-vana on #25 — connectors/anthropic/** landed with zero
+# connector-test CI). publish-connector-release-index.yml triggers on connectors/**
+# but only regenerates the release index; it never runs a connector's own tests.
+#
+# Same required-check design as polyfill-connectors.yml / cross-repo-integrity.yml
+# (see their top-of-file comments for the citation trail): no `pull_request.paths`
+# filter (a required workflow skipped via path filtering leaves its check
+# permanently "Pending" and blocks merging), a `changes` job that always runs and
+# computes relevance via plain `git diff`, the real `test` job gated on that
+# relevance via `needs`+`if`, and one stable always-produced `gate` job that is the
+# only context named in branch protection.
+#
+# *.browser.test.cjs files (e.g. connectors/openai/__tests__/chatgpt-resume.browser.test.cjs)
+# need a real Chromium + PLAYWRIGHT_RUNNER_DIR and are excluded here, matching
+# polyfill-connectors.yml's own exclusion of browser-launching suites from its CI
+# "Test" step.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "connectors/**"
+      - "scripts/validate-honest-telemetry-conformance.cjs"
+      - ".github/workflows/connectors-tree.yml"
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connectors-tree-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine whether relevant paths changed
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
+          else
+            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
+          fi
+
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qE '^(connectors/|scripts/validate-honest-telemetry-conformance\.cjs$|\.github/workflows/connectors-tree\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: connector unit tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install root dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Run per-connector unit tests
+        # Excludes *.browser.test.cjs — those need a real Chromium + a
+        # PLAYWRIGHT_RUNNER_DIR checkout, not available in this job.
+        run: |
+          mapfile -t TEST_FILES < <(find connectors -type f -name '*.test.cjs' ! -name '*.browser.test.cjs' | sort)
+          if [ "${#TEST_FILES[@]}" -eq 0 ]; then
+            echo "::error::no connector test files found under connectors/*/__tests__ — expected at least the anthropic/openai suites"
+            exit 1
+          fi
+          printf '%s\n' "${TEST_FILES[@]}"
+          node --test "${TEST_FILES[@]}"
+
+  gate:
+    name: Connectors Tree Gate
+    needs: [changes, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate all job results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "changes: $CHANGES_RESULT"
+          echo "test:    $TEST_RESULT"
+
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
+            exit 1
+          fi
+
+          case "$TEST_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::test reported '$TEST_RESULT' — expected 'success' or 'skipped'"
+              exit 1
+              ;;
+          esac
+
+          echo "Connectors Tree Gate: test succeeded or was correctly skipped as irrelevant."
