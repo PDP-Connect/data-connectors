@@ -45,8 +45,9 @@ make that field part of v0.1 conformance.
 The current projection is not exact. Its `StartMessage` omits `run_id`,
 `bindings`, and stream-level `fields`, although the parent runtime sends and
 validates them. It also declares `INTERACTION_RESPONSE.status: "error"`, while
-the parent runtime sends and accepts `timeout`. The normative profile follows
-the parent runtime behavior for both cases.
+the parent runtime sends and accepts `timeout`. Its record union omits explicit
+`op: "upsert"`, which the parent runtime accepts. The normative profile follows
+the parent runtime behavior in these cases.
 
 ## Current behavior
 
@@ -92,7 +93,8 @@ Profile manifest. The root `schemas/manifest.schema.json` validates only legacy
 | Stream semantics | Five checked-in streams use the legacy value `append` instead of `append_only`: `github.user_stats`, `slack.channel_stats`, `usaa.account_stats`, `usaa.credit_card_billing_stats`, and `ynab.account_stats`. |
 | Exactly one `START` | The first line is checked. A later `START` is not rejected by the connector-side runtime. |
 | Scope stream enforcement | A non-empty scope is required. `emitRecord()` does not reject an undeclared stream or project `fields`. The parent runtime enforces both before durable write. |
-| Record envelope | The parent runtime checks key, data, operation, and a non-empty `emitted_at`. It does not validate the timestamp format or reject delete for an `append_only` stream. The ingest path remains responsible for schema and record-identity checks. |
+| Record envelope | The parent runtime checks key, data, operation, and ISO 8601 `emitted_at`. It does not reject delete for an `append_only` stream. The ingest path remains responsible for schema and record-identity checks. |
+| Consent time | Time-bounded runs reject absent or unparseable values. Three Steam streams declare integer Unix-time fields instead of ISO 8601 strings, and the runtime does not define their unit. |
 | Interaction timeout | The parent runtime creates a `timeout` response. The vendored connector-protocol type incorrectly declares `error` instead. |
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |
 | Recovery-hint vocabulary | The package types admit arbitrary action strings. They do not enforce the portable closed set. |
@@ -165,7 +167,7 @@ requirement. This note does not decide its permanent document or schema home.
 | Manifest extensions and bindings | Profile Section 3 | Rewritten as a self-contained manifest contract. |
 | Checkpoint dependency and validation | Profile Sections 3.6 and 5.3-5.8 | Kept and separated from implementation projections. |
 | Run lifecycle | Profile Section 4 | Kept. Cancellation and restart are external failed outcomes. |
-| Portable messages | Profile Section 5 | Kept and aligned with the shipped protocol types. |
+| Portable messages | Profile Section 5 | Kept and reconciled with runtime behavior; projection gaps remain in this note. |
 | Runtime-specific message fields | This note | Moved out of normative v0.1. |
 | Connector and runtime conformance | Profile Section 6 | Kept as separate claims. |
 | TypeScript types | `@pdpp/connector-protocol/connector-runtime-protocol` | Moved to the runtime package. |

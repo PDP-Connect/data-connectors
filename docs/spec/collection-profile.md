@@ -139,9 +139,8 @@ entity. A connector can update or delete that state by primary key.
 
 `primary_key` names the data fields that uniquely identify a record in its
 stream. For a composite key, declaration order is significant. A declared
-`cursor_field` defines stable ordering by `(cursor_field, primary_key)`. A
-declared `consent_time_field` MUST contain an ISO 8601 timestamp in each emitted
-record.
+`cursor_field` defines stable ordering by `(cursor_field, primary_key)`.
+`consent_time_field` names the field used for `time_range` filtering.
 
 The manifest can contain Core declaration fields such as `description`,
 `display`, `selection`, `views`, `relationships`, and `query`. A connector
@@ -340,7 +339,9 @@ example, `["user-1","2026-09-02"]` is one canonical key string. Each
 `time_range.since` and `time_range.until` MUST be ISO 8601 timestamps. `since`
 is inclusive and `until` is exclusive. The connector applies both bounds to
 the declared `consent_time_field`. A runtime MUST NOT send `time_range` for a
-stream without that field.
+stream without that field. During a time-bounded run, the connector MUST NOT
+emit a record whose consent-time value is absent, null, or not a valid ISO 8601
+timestamp.
 
 The runtime MUST include a descriptor for each required manifest binding. A
 connector MUST fail if a required descriptor is missing. It MUST ignore
@@ -383,10 +384,10 @@ schema. For each primary-key field, the value in `data` MUST identify the same
 value as the corresponding component of `key`. A runtime MUST reject a record
 when these identities disagree.
 
-`op` is OPTIONAL. The only explicit value is `delete`. Absence means upsert.
-A delete identifies a record by `stream` and `key`. It can omit `data`. If
-`data` is present, it MAY contain only key fields. A connector MUST NOT delete
-from an `append_only` stream.
+`op` is OPTIONAL. Its values are `upsert` and `delete`. Absence means upsert. A
+delete identifies a record by `stream` and `key`. It can omit `data`. If `data`
+is present, it MAY contain only key fields. A connector MUST NOT delete from an
+`append_only` stream.
 
 ### 5.3 `STATE`
 
@@ -394,8 +395,9 @@ from an `append_only` stream.
 { "type": "STATE", "stream": "items", "cursor": { "cursor": "abc" } }
 ```
 
-`stream` and `cursor` are REQUIRED. The cursor is opaque to the runtime. Only
-the connector interprets it on a later run.
+`stream` and `cursor` are REQUIRED. `cursor` is an object or `null`. Its object
+members are opaque to the runtime. Only the connector interprets them on a
+later run.
 
 The runtime stages `STATE` only after it durably writes all prior records. It
 commits staged state only after successful `DONE`, except for the certified
