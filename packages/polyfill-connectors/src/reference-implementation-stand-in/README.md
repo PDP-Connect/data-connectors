@@ -1,11 +1,15 @@
 # `reference-implementation` stand-in (transitional, Gate B finding B2)
 
 Not the real `reference-implementation` package (that stays in `PDP-Connect/pdpp` and is out of
-scope for this move). This directory exists only to satisfy
-`src/reason-display-messages.test.ts`'s import of `RUNTIME_GENERIC_REASON_CODES`, which the real
-test imports by monorepo-relative path
-(`../../../reference-implementation/runtime/recovery-reason-codes.ts`) — a path that no longer
-resolves once `polyfill-connectors` lives in its own repository.
+scope for this move). This directory exists to satisfy two test files' imports of `reference-implementation` modules by
+monorepo-relative path, paths that no longer resolve once `polyfill-connectors` lives in its own
+repository:
+
+- `src/reason-display-messages.test.ts`'s import of `RUNTIME_GENERIC_REASON_CODES`
+  (`../../../reference-implementation/runtime/recovery-reason-codes.ts`).
+- `src/connector-runtime-session-watchdog.test.ts`'s dynamic `import()` of
+  `boundConnectorErrorCode`/`boundConnectorErrorMessage`
+  (`../../../reference-implementation/runtime/connector-gap-bounding.ts`).
 
 This is a source-file stand-in, not a vendored npm package like `vendor/pdpp-reference-contract`:
 the original import is a relative path into a sibling directory, not a package-name resolution
@@ -18,15 +22,29 @@ copy instead.
 | Stand-in file | Source path | Source commit |
 |---|---|---|
 | `runtime/recovery-reason-codes.ts` | `reference-implementation/runtime/recovery-reason-codes.ts` | `e6135fb2fc8dbc5ac38dd7609a6c2a544b394e72` (`PDP-Connect/pdpp`, branch `move-r-pdpp-removal`) |
+| `runtime/stderr-redact.ts` | `reference-implementation/runtime/stderr-redact.ts` | `c0357945b2f6925f84a4f6c1b23491890f72ee4b` (`PDP-Connect/pdpp`, `origin/main`) |
+| `runtime/connector-gap-bounding.ts` | `reference-implementation/runtime/connector-gap-bounding.ts` (PARTIAL — see below) | `c0357945b2f6925f84a4f6c1b23491890f72ee4b` (`PDP-Connect/pdpp`, `origin/main`) |
 
-Byte-identical copy, confirmed by diff against the source commit before copying.
+`recovery-reason-codes.ts` and `stderr-redact.ts` are byte-identical copies, confirmed by diff
+against the source commit before copying.
 
-This module is safe to copy in isolation because it is self-documented in the real
+`connector-gap-bounding.ts` here is NOT byte-identical to its source — the real module is
+1,000+ lines covering a whole connector-output bounding/projection policy cluster (gap
+diagnostics, scope normalization, recovery hints, browser-surface posture, etc.). Only the two
+functions `connector-runtime-session-watchdog.test.ts` actually imports —
+`boundConnectorErrorCode` and `boundConnectorErrorMessage` — plus their exact, self-contained
+dependency chain (the `CONNECTOR_ERROR_MESSAGE_MAX`/`CONNECTOR_ERROR_CODE_RE` constants and the
+`redactStderrTail` import) are extracted byte-identical from the source function bodies. See
+that file's own header comment for the extraction rationale.
+
+`recovery-reason-codes.ts` is safe to copy in isolation because it is self-documented in the real
 `reference-implementation` as a deliberately dependency-free leaf: its own header states "This
 module has no external dependencies, allowing test packages to import the authoritative reason
 set without pulling in server-side modules (auth, CIMD, etc.) that have incompatible lib
 typings." Confirmed independently: the file contains zero `import` statements at the pinned
-commit.
+commit. `stderr-redact.ts` is likewise confirmed to have zero imports at the pinned commit, which
+is what makes extracting `connector-gap-bounding.ts`'s two functions safe: their only dependency
+outside self-contained local constants is `redactStderrTail`.
 
 ## Why NOT `bin/orchestrate.ts` or `connectors/github/index.test.ts`
 

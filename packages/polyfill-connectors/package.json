@@ -22,22 +22,23 @@
 	"scripts": {
 		"check": "node --import tsx ./scripts/check-biome.ts",
 		"check:noAwaitInLoops-conformance": "node --import tsx ./scripts/check-no-await-in-loops-conformance.ts",
+		"check:noDirectCredentialEnv": "node --import tsx ./scripts/check-no-direct-credential-env.ts",
 		"check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
 		"conformance": "tsx scripts/conformance.ts",
 		"fix": "ultracite fix",
 		"postinstall": "node ./scripts/install-patchright-browser.ts",
 		"test": "node scripts/run-tests.mjs",
 		"typecheck": "tsc --noEmit",
-		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noUnnecessaryConditions-expiry"
+		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry"
 	},
 	"dependencies": {
 		"@pdpp/collector-runtime": "file:./vendor/pdpp-collector-runtime-0.0.1.tgz",
 		"@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
 		"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz",
-		"@streamparser/json": "^0.0.23",
+		"@streamparser/json": "^0.0.25",
 		"better-sqlite3": "^13.0.3",
 		"dotenv": "^17.4.2",
-		"imapflow": "^1.6.6",
+		"imapflow": "^1.7.1",
 		"linkedom": "^0.18.13",
 		"ofx-js": "^1.1.1",
 		"p-queue": "^9.3.3",
@@ -50,12 +51,12 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@babel/parser": "7.29.2",
-		"@biomejs/biome": "2.5.7",
-		"@types/better-sqlite3": "^7.6.13",
+		"@babel/parser": "8.0.4",
+		"@biomejs/biome": "2.5.8",
+		"@types/better-sqlite3": "^9.6.0",
 		"@types/ws": "^8.18.1",
 		"tsx": "^4.23.11",
-		"ultracite": "7.10.2"
+		"ultracite": "7.10.5"
 	},
 	"overrides": {
 		"@pdpp/collector-runtime": {

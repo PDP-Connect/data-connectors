@@ -15,7 +15,7 @@ import { fetchResolvedArtifact, generateLock, installFromLock, loadConnectorInde
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "chatgpt-pdpp");
 const artifact = join(root, "artifacts", "chatgpt-pdpp", "chatgpt-pdpp-0.1.0.tgz");
-const expectedCommit = "684f6c2184cd80d928a1f922f28d8dfa147b552a";
+const expectedCommit = "76effa378dc40b269095db6f85682d6a10920f68";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 const pinnedFile = (repository, path) =>
@@ -43,6 +43,10 @@ test("chatgpt-pdpp preserves the canonical browser profile and complete stream c
   assert.equal(provenance.upstream.commit, expectedCommit);
   assert.deepEqual(provenance.runtime_requirements, manifest.runtime_requirements);
   assert.deepEqual(provenance.external_runtime_packages, [
+    { name: "@pdpp/connector-protocol", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/auth", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/http-retry", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/pdpp-safe-text", version: "^1.0.0" },
     { name: "p-queue", version: "^9.3.3" },
     { name: "patchright", version: "^1.61.1" },
   ]);
@@ -50,7 +54,7 @@ test("chatgpt-pdpp preserves the canonical browser profile and complete stream c
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.4.3", files: 79 }]);
+  })), [{ name: "zod", version: "4.5.2", files: 94 }]);
   assert.deepEqual(provenance.outputs.undeclared_external_imports, []);
   assert.equal(provenance.source_inventory.upstream_connector.length, 6);
   assert.ok(provenance.source_inventory.upstream_runtime.length > 0);

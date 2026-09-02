@@ -45,6 +45,17 @@ export type {
  * its manifest and surfaced by the guided setup flow, the same
  * arms-length-subprocess shape this repo's Slack connector already uses
  * for slackdump.
+ *
+ * Signal is intentionally NOT included here yet. Its connector source
+ * lives at `../connectors/signal/`, imported into this canonical registry
+ * from pdpp's history, but `data-connect`'s `packages/local-collector`
+ * consumer does not vendor it yet (its committed
+ * `collector-definitions.generated.ts` snapshot stops at Google Messages).
+ * Adding Signal to this registry without a matching data-connect companion
+ * change breaks the Cross-Repo Integrity Gate's collector-definitions-
+ * snapshot drift check. Per the Move A execution plan §3b, Signal is
+ * deferred to a later, separately-gated PR once data-connect support
+ * lands — not dropped, just sequenced after this catch-up.
  */
 export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 	Object.freeze([

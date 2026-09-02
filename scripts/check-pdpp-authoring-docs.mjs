@@ -170,6 +170,10 @@ if (presentChatgptPaths.length > 0) {
   assert.deepEqual(chatgptArtifact.build.external_packages, [
     { name: "p-queue", version: "^9.3.3" },
     { name: "patchright", version: "^1.61.1" },
+    { name: "@pdpp/connector-protocol", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/auth", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/http-retry", version: "^1.0.0" },
+    { name: "@pdpp/connector-protocol/pdpp-safe-text", version: "^1.0.0" },
   ]);
 } else {
   assert.fail(

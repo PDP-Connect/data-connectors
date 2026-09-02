@@ -82,6 +82,7 @@ function fakeDeps(
 			return Promise.resolve();
 		},
 		emittedAt: "2026-07-10T00:00:00.000Z",
+		failedStreams: new Set(),
 		fingerprintCursors: new Map(),
 		progress: () => Promise.resolve(),
 		requested: new Map(requested.map((name) => [name, { name }])),
@@ -419,8 +420,10 @@ test("contrast: a REQUIRED stream's failure is NOT caught by runOptionalStream a
 	const deps: StreamDeps = {
 		db,
 		emit: () => Promise.resolve(),
-		emitRecord: () => Promise.reject(new Error("emitRecord_boom")),
+		emitRecord: (): Promise<void> =>
+			Promise.reject(new Error("emitRecord_boom")),
 		emittedAt: "2026-07-10T00:00:00.000Z",
+		failedStreams: new Set(),
 		fingerprintCursors: new Map(),
 		progress: () => Promise.resolve(),
 		requested: new Map([["users", { name: "users" }]]),

@@ -78,7 +78,7 @@ function runPass(
 			emitted.push(record);
 		}
 	}
-	cursor.pruneStale();
+	cursor.dropUnseenIds();
 	const priorPayeeLocs = priorState.payee_locations;
 	const carry: Record<string, { fingerprints?: Record<string, string> }> =
 		priorPayeeLocs &&
@@ -336,7 +336,7 @@ function runBudgetPass(
 			emitted.push(record);
 		}
 	}
-	cursor.pruneStale();
+	cursor.dropUnseenIds();
 	return {
 		emitted,
 		state: {

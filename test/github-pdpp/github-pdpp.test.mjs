@@ -51,7 +51,7 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.4.3", files: 79 }]);
+  })), [{ name: "zod", version: "4.5.2", files: 94 }]);
   assert.match(readFileSync(entrypoint, "utf8"), /Browser runtime is unavailable/);
   assert.doesNotMatch(execFileSync("tar", ["-xOf", artifact, "./provenance.json"], { encoding: "utf8" }), new RegExp(secret));
   assert.deepEqual(execFileSync("tar", ["-xOf", artifact, "./provenance.json"]), readFileSync(join(connectorRoot, "provenance.json")));

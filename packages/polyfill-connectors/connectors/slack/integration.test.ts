@@ -193,6 +193,7 @@ function makeChannelDeps(requestedStreams: readonly string[]): {
 			},
 			emitRecord: harness.emitRecord,
 			emittedAt: "2026-06-03T12:00:00.000Z",
+			failedStreams: new Set(),
 			fingerprintCursors: new Map([
 				["channels", openFingerprintCursor({}, { excludeFromFingerprint: [] })],
 			]),
@@ -296,13 +297,15 @@ test("runRequestedStreams: archive message enumeration bounds both derived strea
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		emittedAt: "2026-06-03T12:00:00.000Z",
+		failedStreams: new Set(),
 		fingerprintCursors: new Map(),
 		progress: () => Promise.resolve(),
 		requested,
 	};
 
+	let result: Awaited<ReturnType<typeof runRequestedStreams>>;
 	try {
-		await runRequestedStreams(
+		result = await runRequestedStreams(
 			deps,
 			{},
 			{} as Parameters<typeof runRequestedStreams>[2],
@@ -312,37 +315,27 @@ test("runRequestedStreams: archive message enumeration bounds both derived strea
 		db.close();
 	}
 
-	const coverage = harness.protocolMessages
-		.filter((message) => message.type === "DETAIL_COVERAGE")
-		.map((message) => ({
-			stream: message.stream,
-			stateStream: message.state_stream,
-			considered: message.considered,
-			covered: message.covered,
-		}));
-	assert.deepEqual(
-		coverage,
-		[
-			{
-				stream: "messages",
-				stateStream: "messages",
-				considered: 2,
-				covered: 2,
-			},
-			{
-				stream: "reactions",
-				stateStream: "messages",
-				considered: 2,
-				covered: 2,
-			},
-			{
-				stream: "message_attachments",
-				stateStream: "messages",
-				considered: 2,
-				covered: 2,
-			},
-		],
-		"each derived stream uses the two retained MESSAGE rows as its measured boundary, not child counts",
+	// runRequestedStreams itself no longer emits the messages/reactions/
+	// message_attachments DETAIL_COVERAGE (see
+	// openspec/changes/fix-slack-scoped-archive-coverage-duplication): a
+	// scoped-archive fold calls this function once per archive, and emitting
+	// here made every call after the first a duplicate (state_stream, stream)
+	// pair the runtime rejects. The caller now emits once, after every archive
+	// is folded into one merged total. What's still true here, and what this
+	// test asserts: the two retained MESSAGE rows are the boundary BOTH
+	// derived streams' eventual coverage is measured against, carried on the
+	// returned `considered`, not the emitted child-record counts (3 reactions,
+	// 2 attachments).
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE",
+		),
+		false,
+	);
+	assert.equal(
+		result.considered,
+		2,
+		"considered is the two retained MESSAGE rows, not the child counts",
 	);
 });
 
@@ -458,8 +451,15 @@ test("emitMessagesPass: messages disabled — reactions + attachments still flow
 test("emitMessagesPass: all three streams disabled — no records emit, rows still iterate", async () => {
 	// Production caller guards entry on `requested.has("messages" | ...)`,
 	// so this is the defense-in-depth contract: if called with none of the
-	// three requested, the loop runs silently. maxMessageTs still advances
-	// so a STATE checkpoint written by the caller stays correct.
+	// three requested, the loop runs silently.
+	//
+	// The DURABLE cursor must NOT advance here. This assertion previously
+	// required the opposite ("ts tracking still advances") on the reasoning
+	// that it kept the caller's STATE checkpoint accurate — but a checkpoint
+	// over rows that were never emitted is precisely what makes them
+	// unreachable on the next run, whose query is `TS > cursor`. Accurate
+	// meant "matches what we collected", and we collected nothing.
+	// The walked ts stays visible via `iteratedChannelMaxTs`.
 	const { deps, emitted } = makeHarness({ requested: ["channels"] });
 	const row = makeRow(
 		{},
@@ -476,8 +476,13 @@ test("emitMessagesPass: all three streams disabled — no records emit, rows sti
 	);
 	assert.equal(
 		result.maxMessageTs,
+		null,
+		"an unemitted row must not raise the durable cursor",
+	);
+	assert.equal(
+		result.iteratedChannelMaxTs[row.CHANNEL_ID],
 		"1700000000.000100",
-		"ts tracking still advances",
+		"the walked ts stays observable for progress reporting",
 	);
 });
 

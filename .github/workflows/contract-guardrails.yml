@@ -39,7 +39,7 @@ jobs:
       - name: Checkout pinned PDPP source for ChatGPT artifact provenance
         run: |
           git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp"
-          git -C "$RUNNER_TEMP/pdpp" checkout 684f6c2184cd80d928a1f922f28d8dfa147b552a
+          git -C "$RUNNER_TEMP/pdpp" checkout 76effa378dc40b269095db6f85682d6a10920f68
 
       - name: Test ChatGPT PDPP artifact provenance
         env:

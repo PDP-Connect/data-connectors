@@ -212,7 +212,7 @@ test("two-pass invariant: unchanged thread aggregates emit on pass 1, zero on pa
 	const run1 = makeRecordingEmit();
 	const cursor1 = openCursorFromState({});
 	await emitChangedThreads(aggregates, cursor1, run1.emitRecord);
-	cursor1.pruneStale();
+	cursor1.dropUnseenIds();
 	assert.equal(run1.emitted.length, 2, "first pass emits both threads");
 	assert.deepEqual(
 		run1.emitted
@@ -231,7 +231,7 @@ test("two-pass invariant: unchanged thread aggregates emit on pass 1, zero on pa
 	const run2 = makeRecordingEmit();
 	const cursor2 = openCursorFromState(state);
 	await emitChangedThreads(aggregates, cursor2, run2.emitRecord);
-	cursor2.pruneStale();
+	cursor2.dropUnseenIds();
 	assert.equal(
 		run2.emitted.length,
 		0,
@@ -243,7 +243,7 @@ test("two-pass invariant: unchanged thread aggregates emit on pass 1, zero on pa
 	const run3 = makeRecordingEmit();
 	const cursor3 = openCursorFromState(state2);
 	await emitChangedThreads(aggregates, cursor3, run3.emitRecord);
-	cursor3.pruneStale();
+	cursor3.dropUnseenIds();
 	assert.equal(
 		run3.emitted.length,
 		0,
@@ -269,7 +269,7 @@ test("two-pass invariant: a real change to one thread re-emits only that thread 
 	const run1 = makeRecordingEmit();
 	const cursor1 = openCursorFromState({});
 	await emitChangedThreads([baseT1, baseT2], cursor1, run1.emitRecord);
-	cursor1.pruneStale();
+	cursor1.dropUnseenIds();
 	assert.equal(run1.emitted.length, 2);
 
 	// T2 gains a message; T1 unchanged.
@@ -282,7 +282,7 @@ test("two-pass invariant: a real change to one thread re-emits only that thread 
 	const run2 = makeRecordingEmit();
 	const cursor2 = openCursorFromState(state);
 	await emitChangedThreads([baseT1, changedT2], cursor2, run2.emitRecord);
-	cursor2.pruneStale();
+	cursor2.dropUnseenIds();
 	assert.equal(run2.emitted.length, 1, "only the changed thread re-emits");
 	const [row] = run2.emitted;
 	assert.ok(row, "row was captured");
@@ -307,7 +307,7 @@ test("two-pass invariant: thread present in pass 1 but absent in pass 2 is prune
 	const cursor1 = openCursorFromState({});
 	const run1 = makeRecordingEmit();
 	await emitChangedThreads([baseT1, baseT2], cursor1, run1.emitRecord);
-	cursor1.pruneStale();
+	cursor1.dropUnseenIds();
 	assert.equal(Object.keys(cursor1.toState()).length, 2);
 
 	// T2 disappeared from the source between runs.
@@ -321,7 +321,7 @@ test("two-pass invariant: thread present in pass 1 but absent in pass 2 is prune
 		2,
 		"carry-forward keeps T2 pre-prune",
 	);
-	cursor2.pruneStale();
+	cursor2.dropUnseenIds();
 	const post = cursor2.toState();
 	assert.equal(Object.keys(post).length, 1, "stale id dropped after prune");
 	assert.ok(post.T1, "seen id retained");
@@ -350,7 +350,7 @@ test("two-pass invariant: a legacy STATE without thread_fingerprints triggers on
 	const cursor1 = openCursorFromState(legacyState);
 	const run1 = makeRecordingEmit();
 	await emitChangedThreads([agg], cursor1, run1.emitRecord);
-	cursor1.pruneStale();
+	cursor1.dropUnseenIds();
 	assert.equal(
 		run1.emitted.length,
 		1,
@@ -361,7 +361,7 @@ test("two-pass invariant: a legacy STATE without thread_fingerprints triggers on
 	const cursor2 = openCursorFromState(state);
 	const run2 = makeRecordingEmit();
 	await emitChangedThreads([agg], cursor2, run2.emitRecord);
-	cursor2.pruneStale();
+	cursor2.dropUnseenIds();
 	assert.equal(
 		run2.emitted.length,
 		0,
