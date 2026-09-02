@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "7d8a66107e499a09aafa23f9a44bcbfa76268bd0",
+      "sha": "f1e8357d046912c62989a0bde1ceb117ce83c84b",
       "branch": "main",
-      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (pdpp#273, 'chore(vendor): resync pdpp-collector-runtime-0.0.1.tgz to data-connect main (again)' \u2014 the pdpp-side half of the tarball-digests fix this data-connect pin bump requires; touches only vendor/, not packages/reference-contract or reference-implementation, so this bump is purely to pick up pdpp's own repacked vendor/pdpp-collector-runtime-0.0.1.tgz for drift job (c), not a pin-freshness response). Supersedes the prior 0d3deca19 pin (pdpp#272's merge, itself an unrelated pin-freshness catch-up). Verified no-op for drift job (d) and pin-freshness: `gh api .../compare` between 0d3deca19 and 7d8a66107 shows only vendor/README.md, vendor/SHA256SUMS, vendor/pdpp-collector-runtime-0.0.1.tgz \u2014 zero files under packages/reference-contract or reference-implementation."
+      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (merge of PR #281, on top of pdpp#269/#271/#272/#273/#276/#277/#280 \u2014 pin-freshness catch-up after main advanced past the prior pin while unrelated pdpp work landed). Supersedes the prior 7d8a66107 pin (pdpp#273's vendor resync). Verified no-op for drift job (c) and (d): `gh api .../compare` between 7d8a66107 and f1e8357d0 touches only apps/site/**, packages/reference-operations-sandbox/**, .github/workflows/{polyfill-connectors,reference-implementation}.yml, pnpm-lock.yaml, reference-implementation/test/device-ingest-conformance.test.ts, and design-notes/** \u2014 zero files under vendor/, packages/reference-contract, or reference-implementation/runtime (the stand-in source paths). Re-ran check-reference-contract-drift.mjs locally against a fresh pdpp clone at f1e8357d0: all five documented stand-in modules still match byte-for-byte. Re-verified pdpp's own vendor/SHA256SUMS against a fresh `sha256sum vendor/*.tgz` at this SHA: unchanged, all three digests match. data-connect pin (82a45176e) is unchanged by this update \u2014 already current as of the prior PR."
     }
   }
 }
