@@ -3,25 +3,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Drift job (d): the reference-contract stand-in modules, byte-compared against pdpp's
- * canonical source at the pinned SHA.
+ * Drift job (d): the reference-contract vendor tarball, byte-compared against pdpp's canonical
+ * source at the pinned SHA.
  *
- * This repo carries two documented, minimal source stand-ins for modules that otherwise live
+ * This repo carries a documented, minimal vendored stand-in for a package that otherwise lives
  * in `PDP-Connect/pdpp` (see finding S5 — "a de facto compatibility surface" that "must not
  * silently become an independent contract implementation"):
  *
- *   1. `packages/polyfill-connectors/vendor/pdpp-reference-contract-0.0.1.tgz` — a vendored
- *      tarball carrying THREE copied source files (`common/index.ts`, `evidence/coherence.ts`,
- *      `evidence/collection-scope.ts`) plus one hand-written barrel (`evidence/index.ts`,
- *      NOT copied from pdpp — deliberately excluded from this comparison, per
- *      `vendor/README.md`).
- *   2. `packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts`
- *      — a direct source-file copy.
+ *   `packages/polyfill-connectors/vendor/pdpp-reference-contract-0.0.1.tgz` — a vendored
+ *   tarball carrying THREE copied source files (`common/index.ts`, `evidence/coherence.ts`,
+ *   `evidence/collection-scope.ts`) plus one hand-written barrel (`evidence/index.ts`,
+ *   NOT copied from pdpp — deliberately excluded from this comparison, per `vendor/README.md`).
+ *   `packages/reference-contract` stays in `PDP-Connect/pdpp` (pdpp#284, decision D-22), so
+ *   this half of the check still has a live canonical source to compare against.
  *
- * Both READMEs document an exact source path + source commit per file. This script re-reads
- * those documented mappings, extracts the actual bytes at the pinned pdpp SHA, and fails if
- * either stand-in has drifted from its documented canonical source — i.e. it turns the
- * READMEs' provenance tables into an enforced contract, not prose.
+ * The README documents an exact source path + source commit per file. This script re-reads
+ * that documented mapping, extracts the actual bytes at the pinned pdpp SHA, and fails if the
+ * stand-in has drifted from its documented canonical source — i.e. it turns the README's
+ * provenance table into an enforced contract, not prose.
+ *
+ * NOTE: this script used to also byte-compare
+ * `src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts` against
+ * `reference-implementation/runtime/recovery-reason-codes.ts` in pdpp. pdpp#284 deleted
+ * `reference-implementation/` entirely, so that canonical source no longer exists at any pdpp
+ * SHA — the comparison's premise (a live canonical file to track) is gone, not merely stale.
+ * Per `src/reference-implementation-stand-in/README.md`'s own "Removal trigger" ("delete this
+ * directory once reference-implementation's own repository move lands"), that stand-in is now
+ * a permanent local copy, not a pinned mirror — removed from this script accordingly.
  *
  * Usage:
  *   node check-reference-contract-drift.mjs <pdpp-checkout> <data-connectors-checkout>
@@ -54,56 +62,11 @@ const VENDOR_TARBALL_MAPPINGS = [
   // evidence/index.ts is deliberately hand-written, not copied — excluded per vendor/README.md.
 ];
 
-const LOCAL_STAND_IN_MAPPINGS = [
-  {
-    standIn: "src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts",
-    canonical: "reference-implementation/runtime/recovery-reason-codes.ts",
-  },
-  {
-    standIn: "src/reference-implementation-stand-in/runtime/stderr-redact.ts",
-    canonical: "reference-implementation/runtime/stderr-redact.ts",
-  },
-  // connector-gap-bounding.ts is deliberately NOT in this list: it is a partial
-  // extraction (two functions plus their dependency chain), not a byte-for-byte
-  // copy of the canonical file, so a raw SHA-256 comparison against the whole
-  // upstream module would always fail. See its own header comment and this
-  // repo's src/reference-implementation-stand-in/README.md for what IS pinned
-  // (the source commit its extracted bodies were copied from).
-];
-
 function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
 }
 
 let failed = false;
-
-// --- Local stand-in (direct source-file copy) ---
-for (const { standIn, canonical } of LOCAL_STAND_IN_MAPPINGS) {
-  const standInPath = join(polyfillConnectorsDir, standIn);
-  const canonicalPath = join(pdppDir, canonical);
-
-  if (!existsSync(standInPath)) {
-    console.error(`FAIL: stand-in file missing: ${standInPath}`);
-    failed = true;
-    continue;
-  }
-  if (!existsSync(canonicalPath)) {
-    console.error(`FAIL: documented canonical source missing at pinned pdpp SHA: ${canonicalPath}`);
-    failed = true;
-    continue;
-  }
-
-  const standInHash = sha256(readFileSync(standInPath));
-  const canonicalHash = sha256(readFileSync(canonicalPath));
-  if (standInHash !== canonicalHash) {
-    console.error(`FAIL: ${standIn} has drifted from its documented canonical source ${canonical}`);
-    console.error(`  stand-in:  ${standInHash}`);
-    console.error(`  canonical: ${canonicalHash}`);
-    failed = true;
-  } else {
-    console.log(`OK: ${standIn} matches ${canonical} at the pinned pdpp SHA.`);
-  }
-}
 
 // --- Vendored tarball (extract, then compare each documented file) ---
 const tarballPath = join(polyfillConnectorsDir, "vendor/pdpp-reference-contract-0.0.1.tgz");
