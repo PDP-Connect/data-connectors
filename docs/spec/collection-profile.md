@@ -512,8 +512,8 @@ REQUIRED. Each count MUST be a non-negative integer no greater than
 `9007199254740991`. The outcomes are disjoint and their sum MUST equal
 `considered`.
 
-A connector MUST measure `considered` at the enumeration site of the child stream
-site. It MUST NOT derive the value only from emitted and gapped messages. It
+A connector MUST measure `considered` at the enumeration site of the child
+stream. It MUST NOT derive the value only from emitted and gapped messages. It
 MUST withhold the message when it did not enumerate that stream. A connector
 MAY emit at most one `STREAM_EVIDENCE` per stream per run.
 
@@ -601,8 +601,8 @@ A conforming runtime:
 2. Sends one first `START` with a non-empty, resolved scope.
 3. Enforces that scope again before durable write.
 4. Treats connector messages and state as untrusted input.
-5. Handles one pending interaction, limits its secret data, and returns an
-   error response on timeout.
+5. Handles one pending interaction, limits its secret data, and returns a
+   `timeout` response when the interaction times out.
 6. Stages and commits state only under Section 5.3 and Section 5.8.
 7. Validates checkpoint dependencies, coverage, and gaps. If it advertises
    `STREAM_EVIDENCE`, it also validates that message as defined in Section 5.7.
