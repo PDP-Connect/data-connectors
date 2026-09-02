@@ -269,9 +269,10 @@ A runtime that receives one MUST terminate the connector and fail the run. A
 connector that receives an interaction response with no matching pending
 request MUST fail.
 
-Cancellation and supervisor restart are runtime events. A cancelled run can use
-`DONE.status: "cancelled"`. After a supervisor restart, the prior run remains
-failed or abandoned and does not commit staged state.
+Cancellation and supervisor restart are runtime events. They are not
+`DONE.status` values. A run that ends for either reason has a failed terminal
+outcome and does not commit staged state. A runtime can record a more specific
+controller-lifecycle reason outside this wire protocol.
 
 ## 5. Messages
 
@@ -529,9 +530,8 @@ used to widen scope or commit a checkpoint.
 { "type": "DONE", "status": "succeeded", "records_emitted": 42 }
 ```
 
-`DONE` is the final connector message. `DONE.status` has three values:
-`succeeded`, `failed`, and `cancelled`. `records_emitted` is a REQUIRED
-non-negative integer.
+`DONE` is the final connector message. `DONE.status` has two values:
+`succeeded` and `failed`. `records_emitted` is a REQUIRED non-negative integer.
 A failed message includes `error` with a REQUIRED non-empty `message` and
 boolean `retryable`. It can also include a stable snake-case `code` and a
 `recovery_hint` as defined in Section 5.5.
