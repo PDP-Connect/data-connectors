@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "ab415be6cc1df9ad544505084f952b7a8726f29e",
+      "sha": "d250afcf6f25f1251d9b1ed8287c0d3ed25e0e9b",
       "branch": "main",
-      "note": "Merge commit of PDP-Connect/pdpp PR #238 ('fix: consolidate source collection and setup fixes') into main, merged 2026-09-02T08:20:22Z. Supersedes the prior de9e61690 pin, which tracked PR #238's pre-merge head on branch `waspflow/vendor-protocol-stream-evidence-0828` during the coordinated cutover this workflow's read-pins/pin-freshness jobs support. `branch` reverted to `main` now that #238 has landed, per that mechanism's own instruction. Verified no-op for drift job (d): packages/reference-contract/src is byte-identical between de9e61690 and this SHA (`git diff` empty) \u2014 the merge only touches isolation/scenario test sources, package.json devDependency bumps (Biome/ultracite patch versions), and the lockfile, none of which drift job (d) inspects. Not an ancestor of de9e61690 (PR #238 was amended/rebased before merge, not fast-forwarded), so this is a genuine content-verified repin, not a no-op fast-forward."
+      "note": "Head of PDP-Connect/pdpp main as of 2026-09-02 (PR #270, 'chore(vendor): resync pdpp-collector-runtime-0.0.1.tgz to data-connect main' \u2014 the pdpp-side half of this same tarball-digests fix). Supersedes the prior ab415be6c pin (PR #238's merge commit, 2026-09-02T08:20:22Z), which itself superseded de9e61690 (PR #238's pre-merge head on branch `waspflow/vendor-protocol-stream-evidence-0828` during the coordinated cutover this workflow's read-pins/pin-freshness jobs support; `branch` reverted to `main` once #238 landed). Verified no-op for drift job (d): PR #270 touches only vendor/ (`git diff` against ab415be6c shows only vendor/README.md, vendor/SHA256SUMS, vendor/pdpp-collector-runtime-0.0.1.tgz), not packages/reference-contract/src."
     }
   }
 }

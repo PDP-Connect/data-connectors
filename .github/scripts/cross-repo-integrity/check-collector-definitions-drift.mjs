@@ -24,7 +24,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const [, , dataConnectDir, dataConnectorsDir] = process.argv;
 
@@ -78,9 +78,11 @@ try {
   // (check-tarball-digest-drift.sh) already verifies is a faithful repack of the pinned
   // data-connect commit, so trusting it here does not introduce a second, unverified
   // source of truth for the package's contents.
-  const connectorProtocolTarball = join(
-    dataConnectorsDir,
-    "packages/polyfill-connectors/vendor/pdpp-connector-protocol-0.0.1.tgz",
+  // resolve() to an absolute path: npm's `file:` dependency spec resolves relative to the
+  // scratch tree's own package.json, not this process's cwd, and dataConnectorsDir arrives
+  // as a relative arg (e.g. "data-connectors") from the workflow's working directory.
+  const connectorProtocolTarball = resolve(
+    join(dataConnectorsDir, "packages/polyfill-connectors/vendor/pdpp-connector-protocol-0.0.1.tgz"),
   );
   if (!existsSync(connectorProtocolTarball)) {
     console.error(`FAIL: vendored @pdpp/connector-protocol tarball not found at ${connectorProtocolTarball}`);
