@@ -1,6 +1,6 @@
 # Connector authoring
 
-Create and maintain PDPP Collection Profile implementations in this repository under `connectors/<key>/`. Keep the connector's code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures together. Use the shared runtime in `packages/polyfill-connectors/src/`.
+Create and maintain PDPP Collection Profile implementations in this repository under `connectors/<key>/`. Keep the connector's code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures together. Use the shared runtime in `packages/polyfill-connectors/src/`. The [PDPP Collection Profile](docs/spec/collection-profile.md) is the normative manifest and wire contract. The [runtime note](packages/polyfill-connectors/docs/collection-profile-runtime.md) records current package entry points and known implementation gaps.
 
 1. Add or change the connector under `connectors/<key>/` and update its manifest version when the implementation or manifest contract changes.
 2. Follow the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) for collection, schema, coverage, and fixture evidence.
