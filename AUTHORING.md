@@ -1,6 +1,6 @@
 # Connector authoring
 
-This repository is the single home of PDPP connector content. Keep source code and the canonical Collection Profile here, under `connectors/`.
+This repository is the single home of PDPP connector content. Keep connector source and artifacts under `connectors/`. Follow the [PDPP Collection Profile](docs/spec/collection-profile.md) for the normative manifest, runtime, and wire contract. The [runtime note](packages/polyfill-connectors/docs/collection-profile-runtime.md) records current package entry points and known implementation gaps.
 
 `PDP-Connect/pdpp`'s copy of `packages/polyfill-connectors` is frozen for direct edits: it continues to run the product, but is no longer the source of truth for new connector work, and does not own the primary implementation of a new connector.
 
