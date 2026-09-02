@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "claude-code-local",
   "source_id": "claude_code",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "Claude Code",
   "company": "Anthropic",
   "description": "Exports your local Claude Code (CLI) data: usage statistics, session metadata, prompt history, and full agent traces read from ~/.claude. No login or browser required — runs against on-device files.",
