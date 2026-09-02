@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Shop app Connector (Playwright)
 // Exports order history from https://shop.app/account/order-history
 // Uses the live Apollo Client cache (via React fiber) — not the static SSR snapshot.

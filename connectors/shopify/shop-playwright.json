@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "shop-playwright",
   "source_id": "shop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Shop",
   "company": "Shopify",
   "description": "Exports your Shop app order history.",

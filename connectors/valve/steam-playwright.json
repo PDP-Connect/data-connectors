@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "steam-playwright",
   "source_id": "steam",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Steam",
   "company": "valve",
   "description": "Exports your Steam profile, game library with playtime stats, and friend list using the Steam Web API.",

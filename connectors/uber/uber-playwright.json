@@ -2,7 +2,7 @@
   "manifest_version": "1.0",
   "connector_id": "uber-playwright",
   "source_id": "uber",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Uber",
   "company": "Uber",
   "description": "Exports your Uber trip history and receipts.",
