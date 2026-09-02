@@ -78,7 +78,7 @@ assert.match(
 assert.match(README, /GitHub and ChatGPT are the current PDPP artifact examples/);
 assert.match(
   README,
-  /New connector work belongs in `PDP-Connect\/pdpp` by default/,
+  /New connector work belongs here by default, not in `PDP-Connect\/pdpp`/,
 );
 assert.match(
   README,
@@ -90,7 +90,7 @@ assert.match(
   README,
   /DataConnect v0\.7\.54.*includes both PDPP profiles/,
 );
-assert.match(rootAuthoring, /Use PDPP for new connector work by default/);
+assert.match(rootAuthoring, /This repository is the single home of PDPP connector content/);
 assert.match(rootAuthoring, /Add an `artifact\.json` descriptor/);
 assert.match(rootAuthoring, /scripts\/build-pdpp-artifact\.mjs/);
 assert.match(rootAuthoring, /requires both `network` and `browser`/);
