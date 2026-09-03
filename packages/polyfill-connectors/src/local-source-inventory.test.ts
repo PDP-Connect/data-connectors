@@ -438,8 +438,10 @@ test("buildDerivedCoverageRecord: refuses to build a record for a stream the aut
 });
 
 test("buildDerivedCoverageRecord: refuses an ambiguous stream mapped by more than one descriptor rather than silently picking one", () => {
-	// codex's `sessions` stream is deliberately declared by TWO static
-	// descriptors (`sessions` and `state_db`) -- a derived-stream caller for
+	// codex's `sessions` stream is deliberately declared by THREE static
+	// descriptors (`sessions`, `sessions_archive`, and `state_db` -- the
+	// archive root is an additional rollout source for the same `sessions`
+	// stream, see ARCHIVAL-CONTRACT.md) -- a derived-stream caller for
 	// `sessions` has no single authoritative store to select and must fail
 	// loud, not guess.
 	assert.throws(
@@ -452,7 +454,7 @@ test("buildDerivedCoverageRecord: refuses an ambiguous stream mapped by more tha
 				scanComplete: true,
 				stream: "sessions",
 			}),
-		/expected exactly one descriptor for derived stream 'sessions', found 2/,
+		/expected exactly one descriptor for derived stream 'sessions', found 3/,
 	);
 });
 
