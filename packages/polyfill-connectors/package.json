@@ -8,6 +8,7 @@
 	"files": [
 		"bin/local-device-exporter.js",
 		"connectors/**/*.js",
+		"fixtures/**/*.jsonl",
 		"manifests/",
 		"scripts/generate-static-secret-registry.js",
 		"scripts/install-patchright-browser.mjs",
@@ -49,6 +50,7 @@
 		"./static-secret-credential-capture": "./src/static-secret-credential-capture.js",
 		"./static-secret-injection": "./src/static-secret-injection.js",
 		"./static-secret-registry": "./src/generated/static-secret-registry.generated.js",
+		"./fixture-samples": "./src/fixture-samples.js",
 		"./connectors/claude_code": "./connectors/claude_code/index.js",
 		"./connectors/codex": "./connectors/codex/index.js",
 		"./connectors/imessage": "./connectors/imessage/index.js",
@@ -56,7 +58,9 @@
 		"./connectors/google_maps": "./connectors/google_maps/index.js",
 		"./connectors/google_maps_data_portability": "./connectors/google_maps_data_portability/index.js",
 		"./connectors/netflix_export": "./connectors/netflix_export/index.js",
-		"./connectors/whatsapp": "./connectors/whatsapp/index.js"
+		"./connectors/whatsapp": "./connectors/whatsapp/index.js",
+		"./connectors/github": "./connectors/github/index.js",
+		"./connectors/github/schemas": "./connectors/github/schemas.js"
 	},
 	"bin": {
 		"pdpp-local-device-exporter": "./bin/local-device-exporter.js"
