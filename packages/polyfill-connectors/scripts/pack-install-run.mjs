@@ -16,7 +16,15 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +71,50 @@ async function packPackage(cwd) {
 		`expected exactly one .tgz in ${cwd}, found ${produced.length}`,
 	);
 	return path.join(cwd, produced[0]);
+}
+
+async function typecheckEveryExport(projectDir, installedPackage) {
+	const installedPackageJson = JSON.parse(
+		await readFile(path.join(installedPackage, "package.json"), "utf8"),
+	);
+	const imports = Object.keys(installedPackageJson.exports)
+		.map((subpath) => `import "@pdpp/polyfill-connectors/${subpath.slice(2)}";`)
+		.join("\n");
+	await writeFile(path.join(projectDir, "imports.ts"), `${imports}\n`);
+
+	await Promise.all(
+		[
+			["NodeNext", { module: "NodeNext", moduleResolution: "NodeNext" }],
+			["bundler", { module: "ESNext", moduleResolution: "Bundler" }],
+		].map(async ([label, compilerOptions]) => {
+			const configPath = path.join(projectDir, `tsconfig.${label}.json`);
+			await writeFile(
+				configPath,
+				JSON.stringify(
+					{
+						compilerOptions: {
+							strict: true,
+							noEmit: true,
+							target: "ES2023",
+							skipLibCheck: true,
+							...compilerOptions,
+						},
+						files: ["imports.ts"],
+					},
+					null,
+					2,
+				),
+			);
+			await run(
+				path.join(projectDir, "node_modules", ".bin", "tsc"),
+				["--project", configPath, "--noEmit"],
+				{ cwd: projectDir },
+			);
+			log(
+				`PASS TypeScript ${label}: all ${Object.keys(installedPackageJson.exports).length} export subpaths resolve.`,
+			);
+		}),
+	);
 }
 
 async function main() {
@@ -126,6 +178,19 @@ async function main() {
 			"@pdpp",
 			"polyfill-connectors",
 		);
+		await run(
+			"npm",
+			[
+				"install",
+				"--no-audit",
+				"--no-fund",
+				"--save-dev",
+				"typescript",
+				"@types/node",
+			],
+			{ cwd: projectDir, env },
+		);
+		await typecheckEveryExport(projectDir, installedPackage);
 		const generatedRegistry = path.join(tempRoot, "static-secret-registry.ts");
 		const consumerEntrypoints = [
 			{

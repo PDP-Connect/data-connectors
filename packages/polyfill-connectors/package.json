@@ -7,60 +7,194 @@
 	"type": "module",
 	"files": [
 		"bin/local-device-exporter.js",
+		"bin/local-device-exporter.d.ts",
+		"bin/local-device-exporter.d.ts.map",
 		"connectors/**/*.js",
+		"connectors/**/*.d.ts",
+		"connectors/**/*.d.ts.map",
 		"fixtures/**/*.jsonl",
 		"manifests/",
 		"scripts/generate-static-secret-registry.js",
+		"scripts/generate-static-secret-registry.d.ts",
+		"scripts/generate-static-secret-registry.d.ts.map",
 		"scripts/install-patchright-browser.mjs",
 		"src/**/*.js",
+		"src/**/*.d.ts",
+		"src/**/*.d.ts.map",
 		"vendor/"
 	],
 	"engines": {
 		"node": ">=24.15.0 <25"
 	},
 	"exports": {
-		"./collectors": "./src/collector-registry.js",
-		"./manifests": "./src/manifest-registry.js",
-		"./reason-display-messages": "./src/reason-display-messages.js",
-		"./browser-handoff": "./src/browser-handoff.js",
-		"./browser-launch": "./src/browser-launch.js",
-		"./browser-surface-policy": "./src/browser-surface-policy.js",
-		"./connector-config-option-kind-registry": "./src/connector-config-option-kind-registry.js",
-		"./connector-conformance-roster": "./src/connector-conformance-roster.js",
-		"./connector-exit": "./src/connector-exit.js",
-		"./connector-options-schema": "./src/connector-options-schema.js",
-		"./connector-runtime": "./src/connector-runtime.js",
-		"./fingerprint-cursor": "./src/fingerprint-cursor.js",
-		"./fixture-capture": "./src/fixture-capture.js",
-		"./local-source-inventory": "./src/local-source-inventory.js",
-		"./profile-lock": "./src/profile-lock.js",
-		"./runtime-environment": "./src/runtime-environment.js",
-		"./session-establish": "./src/session-establish.js",
-		"./shutdown-hook": "./src/shutdown-hook.js",
-		"./streaming-target-registration": "./src/streaming-target-registration.js",
-		"./bounded-zip-archive": "./src/bounded-zip-archive.js",
-		"./capture-redaction": "./src/capture-redaction.js",
-		"./credential-probe": "./src/credential-probe.js",
-		"./credential-probe-transport": "./src/credential-probe-transport.js",
-		"./manual-upload-validation": "./src/manual-upload-validation.js",
-		"./ntfy": "./src/ntfy.js",
-		"./oauth2-generic-provider-auth": "./src/oauth2-generic-provider-auth.js",
-		"./provider-auth-adapter": "./src/provider-auth-adapter.js",
-		"./provider-auth-adapters": "./src/provider-auth-adapters.js",
-		"./static-secret-credential-capture": "./src/static-secret-credential-capture.js",
-		"./static-secret-injection": "./src/static-secret-injection.js",
-		"./static-secret-registry": "./src/generated/static-secret-registry.generated.js",
-		"./fixture-samples": "./src/fixture-samples.js",
-		"./connectors/claude_code": "./connectors/claude_code/index.js",
-		"./connectors/codex": "./connectors/codex/index.js",
-		"./connectors/imessage": "./connectors/imessage/index.js",
-		"./connectors/apple_health": "./connectors/apple_health/index.js",
-		"./connectors/google_maps": "./connectors/google_maps/index.js",
-		"./connectors/google_maps_data_portability": "./connectors/google_maps_data_portability/index.js",
-		"./connectors/netflix_export": "./connectors/netflix_export/index.js",
-		"./connectors/whatsapp": "./connectors/whatsapp/index.js",
-		"./connectors/github": "./connectors/github/index.js",
-		"./connectors/github/schemas": "./connectors/github/schemas.js"
+		"./collectors": {
+			"types": "./src/collector-registry.d.ts",
+			"default": "./src/collector-registry.js"
+		},
+		"./manifests": {
+			"types": "./src/manifest-registry.d.ts",
+			"default": "./src/manifest-registry.js"
+		},
+		"./reason-display-messages": {
+			"types": "./src/reason-display-messages.d.ts",
+			"default": "./src/reason-display-messages.js"
+		},
+		"./browser-handoff": {
+			"types": "./src/browser-handoff.d.ts",
+			"default": "./src/browser-handoff.js"
+		},
+		"./browser-launch": {
+			"types": "./src/browser-launch.d.ts",
+			"default": "./src/browser-launch.js"
+		},
+		"./browser-surface-policy": {
+			"types": "./src/browser-surface-policy.d.ts",
+			"default": "./src/browser-surface-policy.js"
+		},
+		"./connector-config-option-kind-registry": {
+			"types": "./src/connector-config-option-kind-registry.d.ts",
+			"default": "./src/connector-config-option-kind-registry.js"
+		},
+		"./connector-conformance-roster": {
+			"types": "./src/connector-conformance-roster.d.ts",
+			"default": "./src/connector-conformance-roster.js"
+		},
+		"./connector-exit": {
+			"types": "./src/connector-exit.d.ts",
+			"default": "./src/connector-exit.js"
+		},
+		"./connector-options-schema": {
+			"types": "./src/connector-options-schema.d.ts",
+			"default": "./src/connector-options-schema.js"
+		},
+		"./connector-runtime": {
+			"types": "./src/connector-runtime.d.ts",
+			"default": "./src/connector-runtime.js"
+		},
+		"./fingerprint-cursor": {
+			"types": "./src/fingerprint-cursor.d.ts",
+			"default": "./src/fingerprint-cursor.js"
+		},
+		"./fixture-capture": {
+			"types": "./src/fixture-capture.d.ts",
+			"default": "./src/fixture-capture.js"
+		},
+		"./local-source-inventory": {
+			"types": "./src/local-source-inventory.d.ts",
+			"default": "./src/local-source-inventory.js"
+		},
+		"./profile-lock": {
+			"types": "./src/profile-lock.d.ts",
+			"default": "./src/profile-lock.js"
+		},
+		"./runtime-environment": {
+			"types": "./src/runtime-environment.d.ts",
+			"default": "./src/runtime-environment.js"
+		},
+		"./session-establish": {
+			"types": "./src/session-establish.d.ts",
+			"default": "./src/session-establish.js"
+		},
+		"./shutdown-hook": {
+			"types": "./src/shutdown-hook.d.ts",
+			"default": "./src/shutdown-hook.js"
+		},
+		"./streaming-target-registration": {
+			"types": "./src/streaming-target-registration.d.ts",
+			"default": "./src/streaming-target-registration.js"
+		},
+		"./bounded-zip-archive": {
+			"types": "./src/bounded-zip-archive.d.ts",
+			"default": "./src/bounded-zip-archive.js"
+		},
+		"./capture-redaction": {
+			"types": "./src/capture-redaction.d.ts",
+			"default": "./src/capture-redaction.js"
+		},
+		"./credential-probe": {
+			"types": "./src/credential-probe.d.ts",
+			"default": "./src/credential-probe.js"
+		},
+		"./credential-probe-transport": {
+			"types": "./src/credential-probe-transport.d.ts",
+			"default": "./src/credential-probe-transport.js"
+		},
+		"./manual-upload-validation": {
+			"types": "./src/manual-upload-validation.d.ts",
+			"default": "./src/manual-upload-validation.js"
+		},
+		"./ntfy": {
+			"types": "./src/ntfy.d.ts",
+			"default": "./src/ntfy.js"
+		},
+		"./oauth2-generic-provider-auth": {
+			"types": "./src/oauth2-generic-provider-auth.d.ts",
+			"default": "./src/oauth2-generic-provider-auth.js"
+		},
+		"./provider-auth-adapter": {
+			"types": "./src/provider-auth-adapter.d.ts",
+			"default": "./src/provider-auth-adapter.js"
+		},
+		"./provider-auth-adapters": {
+			"types": "./src/provider-auth-adapters.d.ts",
+			"default": "./src/provider-auth-adapters.js"
+		},
+		"./static-secret-credential-capture": {
+			"types": "./src/static-secret-credential-capture.d.ts",
+			"default": "./src/static-secret-credential-capture.js"
+		},
+		"./static-secret-injection": {
+			"types": "./src/static-secret-injection.d.ts",
+			"default": "./src/static-secret-injection.js"
+		},
+		"./static-secret-registry": {
+			"types": "./src/generated/static-secret-registry.generated.d.ts",
+			"default": "./src/generated/static-secret-registry.generated.js"
+		},
+		"./fixture-samples": {
+			"types": "./src/fixture-samples.d.ts",
+			"default": "./src/fixture-samples.js"
+		},
+		"./connectors/claude_code": {
+			"types": "./connectors/claude_code/index.d.ts",
+			"default": "./connectors/claude_code/index.js"
+		},
+		"./connectors/codex": {
+			"types": "./connectors/codex/index.d.ts",
+			"default": "./connectors/codex/index.js"
+		},
+		"./connectors/imessage": {
+			"types": "./connectors/imessage/index.d.ts",
+			"default": "./connectors/imessage/index.js"
+		},
+		"./connectors/apple_health": {
+			"types": "./connectors/apple_health/index.d.ts",
+			"default": "./connectors/apple_health/index.js"
+		},
+		"./connectors/google_maps": {
+			"types": "./connectors/google_maps/index.d.ts",
+			"default": "./connectors/google_maps/index.js"
+		},
+		"./connectors/google_maps_data_portability": {
+			"types": "./connectors/google_maps_data_portability/index.d.ts",
+			"default": "./connectors/google_maps_data_portability/index.js"
+		},
+		"./connectors/netflix_export": {
+			"types": "./connectors/netflix_export/index.d.ts",
+			"default": "./connectors/netflix_export/index.js"
+		},
+		"./connectors/whatsapp": {
+			"types": "./connectors/whatsapp/index.d.ts",
+			"default": "./connectors/whatsapp/index.js"
+		},
+		"./connectors/github": {
+			"types": "./connectors/github/index.d.ts",
+			"default": "./connectors/github/index.js"
+		},
+		"./connectors/github/schemas": {
+			"types": "./connectors/github/schemas.d.ts",
+			"default": "./connectors/github/schemas.js"
+		}
 	},
 	"bin": {
 		"pdpp-local-device-exporter": "./bin/local-device-exporter.js"
