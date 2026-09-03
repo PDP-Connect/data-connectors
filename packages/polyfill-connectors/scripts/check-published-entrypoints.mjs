@@ -83,6 +83,12 @@ const packManifest = Array.isArray(packed)
 assert.ok(packManifest, "npm pack --dry-run must return one package manifest");
 const packedPaths = new Set(packManifest.files?.map((file) => file.path));
 
+assert.equal(
+	packedPaths.has("config/slackdump-api-config.toml"),
+	true,
+	"the Slack connector's runtime API config must be included in npm pack output",
+);
+
 for (const [name, entrypoint] of Object.entries(packageJson.exports ?? {})) {
 	assert.equal(
 		packedPaths.has(entrypoint.types.slice(2)),
@@ -95,6 +101,33 @@ for (const [name, entrypoint] of Object.entries(packageJson.exports ?? {})) {
 		`${name} declaration map must be included in npm pack output`,
 	);
 }
+
+const rawTypeScriptFiles = [...packedPaths].filter(
+	(file) =>
+		!file.startsWith("node_modules/") &&
+		file.endsWith(".ts") &&
+		!file.endsWith(".d.ts"),
+);
+assert.deepEqual(
+	rawTypeScriptFiles,
+	[],
+	"npm pack must not include package-authored raw TypeScript files",
+);
+
+const publishedJavaScript = [...packedPaths].filter(
+	(file) => file.endsWith(".js") && !file.startsWith("node_modules/"),
+);
+await Promise.all(
+	publishedJavaScript.map(async (file) => {
+		const source = await readFile(path.join(packageRoot, file), "utf8");
+		const executableSource = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+		assert.doesNotMatch(
+			executableSource,
+			/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)(["'])[^"'\n]+\.ts\1/,
+			`${file} must not import raw TypeScript`,
+		);
+	}),
+);
 
 await Promise.all(
 	[

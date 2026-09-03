@@ -883,6 +883,11 @@ export function runSlackdump(
 		}
 
 		child.on("exit", (code) => {
+			// A short successful dump can write its final WAL frame between the
+			// last interval tick and process exit. Observe once more before tearing
+			// down the poller so that final durable work is visible to both the
+			// stall watchdog and the owner-facing progress stream.
+			observeProgress();
 			clearTimers();
 			if (code === 0) {
 				resolve({ stdout, stderr });

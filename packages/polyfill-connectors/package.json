@@ -21,7 +21,9 @@
 		"src/**/*.js",
 		"src/**/*.d.ts",
 		"src/**/*.d.ts.map",
-		"vendor/"
+		"vendor/",
+		"config/slackdump-api-config.toml",
+		"connector-index.json"
 	],
 	"engines": {
 		"node": ">=24.15.0 <25"
@@ -194,13 +196,161 @@
 		"./connectors/github/schemas": {
 			"types": "./connectors/github/schemas.d.ts",
 			"default": "./connectors/github/schemas.js"
+		},
+		"./resolve": {
+			"types": "./src/resolve.d.ts",
+			"default": "./src/resolve.js"
+		},
+		"./connectors/amazon": {
+			"types": "./connectors/amazon/index.d.ts",
+			"default": "./connectors/amazon/index.js"
+		},
+		"./connectors/anthropic": {
+			"types": "./connectors/anthropic/index.d.ts",
+			"default": "./connectors/anthropic/index.js"
+		},
+		"./connectors/apple_contacts": {
+			"types": "./connectors/apple_contacts/index.d.ts",
+			"default": "./connectors/apple_contacts/index.js"
+		},
+		"./connectors/apple_photos": {
+			"types": "./connectors/apple_photos/index.d.ts",
+			"default": "./connectors/apple_photos/index.js"
+		},
+		"./connectors/chase": {
+			"types": "./connectors/chase/index.d.ts",
+			"default": "./connectors/chase/index.js"
+		},
+		"./connectors/chatgpt": {
+			"types": "./connectors/chatgpt/index.d.ts",
+			"default": "./connectors/chatgpt/index.js"
+		},
+		"./connectors/doordash": {
+			"types": "./connectors/doordash/index.d.ts",
+			"default": "./connectors/doordash/index.js"
+		},
+		"./connectors/gmail": {
+			"types": "./connectors/gmail/index.d.ts",
+			"default": "./connectors/gmail/index.js"
+		},
+		"./connectors/google_calendar": {
+			"types": "./connectors/google_calendar/index.d.ts",
+			"default": "./connectors/google_calendar/index.js"
+		},
+		"./connectors/google_contacts": {
+			"types": "./connectors/google_contacts/index.d.ts",
+			"default": "./connectors/google_contacts/index.js"
+		},
+		"./connectors/google_messages": {
+			"types": "./connectors/google_messages/index.d.ts",
+			"default": "./connectors/google_messages/index.js"
+		},
+		"./connectors/google_takeout": {
+			"types": "./connectors/google_takeout/index.d.ts",
+			"default": "./connectors/google_takeout/index.js"
+		},
+		"./connectors/groupme": {
+			"types": "./connectors/groupme/index.d.ts",
+			"default": "./connectors/groupme/index.js"
+		},
+		"./connectors/heb": {
+			"types": "./connectors/heb/index.d.ts",
+			"default": "./connectors/heb/index.js"
+		},
+		"./connectors/ical": {
+			"types": "./connectors/ical/index.d.ts",
+			"default": "./connectors/ical/index.js"
+		},
+		"./connectors/jellyfin": {
+			"types": "./connectors/jellyfin/index.d.ts",
+			"default": "./connectors/jellyfin/index.js"
+		},
+		"./connectors/linkedin": {
+			"types": "./connectors/linkedin/index.d.ts",
+			"default": "./connectors/linkedin/index.js"
+		},
+		"./connectors/loom": {
+			"types": "./connectors/loom/index.d.ts",
+			"default": "./connectors/loom/index.js"
+		},
+		"./connectors/meta": {
+			"types": "./connectors/meta/index.d.ts",
+			"default": "./connectors/meta/index.js"
+		},
+		"./connectors/notion": {
+			"types": "./connectors/notion/index.d.ts",
+			"default": "./connectors/notion/index.js"
+		},
+		"./connectors/oura": {
+			"types": "./connectors/oura/index.d.ts",
+			"default": "./connectors/oura/index.js"
+		},
+		"./connectors/pocket": {
+			"types": "./connectors/pocket/index.d.ts",
+			"default": "./connectors/pocket/index.js"
+		},
+		"./connectors/reddit": {
+			"types": "./connectors/reddit/index.d.ts",
+			"default": "./connectors/reddit/index.js"
+		},
+		"./connectors/shopify": {
+			"types": "./connectors/shopify/index.d.ts",
+			"default": "./connectors/shopify/index.js"
+		},
+		"./connectors/signal": {
+			"types": "./connectors/signal/index.d.ts",
+			"default": "./connectors/signal/index.js"
+		},
+		"./connectors/slack": {
+			"types": "./connectors/slack/index.d.ts",
+			"default": "./connectors/slack/index.js"
+		},
+		"./connectors/spotify": {
+			"types": "./connectors/spotify/index.d.ts",
+			"default": "./connectors/spotify/index.js"
+		},
+		"./connectors/steam": {
+			"types": "./connectors/steam/index.d.ts",
+			"default": "./connectors/steam/index.js"
+		},
+		"./connectors/strava": {
+			"types": "./connectors/strava/index.d.ts",
+			"default": "./connectors/strava/index.js"
+		},
+		"./connectors/twitter_archive": {
+			"types": "./connectors/twitter_archive/index.d.ts",
+			"default": "./connectors/twitter_archive/index.js"
+		},
+		"./connectors/uber": {
+			"types": "./connectors/uber/index.d.ts",
+			"default": "./connectors/uber/index.js"
+		},
+		"./connectors/usaa": {
+			"types": "./connectors/usaa/index.d.ts",
+			"default": "./connectors/usaa/index.js"
+		},
+		"./connectors/venmo": {
+			"types": "./connectors/venmo/index.d.ts",
+			"default": "./connectors/venmo/index.js"
+		},
+		"./connectors/wholefoods": {
+			"types": "./connectors/wholefoods/index.d.ts",
+			"default": "./connectors/wholefoods/index.js"
+		},
+		"./connectors/whoop": {
+			"types": "./connectors/whoop/index.d.ts",
+			"default": "./connectors/whoop/index.js"
+		},
+		"./connectors/ynab": {
+			"types": "./connectors/ynab/index.d.ts",
+			"default": "./connectors/ynab/index.js"
 		}
 	},
 	"bin": {
 		"pdpp-local-device-exporter": "./bin/local-device-exporter.js"
 	},
 	"scripts": {
-		"build": "tsc --project tsconfig.build.json && npm run check:published-entrypoints",
+		"build": "npm run check:connector-index && tsc --project tsconfig.build.json && npm run check:published-entrypoints",
 		"check": "node --import tsx ./scripts/check-biome.ts",
 		"check:published-entrypoints": "node ./scripts/check-published-entrypoints.mjs",
 		"hydrate-vendored-runtime": "node ./scripts/hydrate-vendored-runtime.mjs",
@@ -214,7 +364,9 @@
 		"typecheck": "tsc --noEmit",
 		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
-		"prepack": "npm run hydrate-vendored-runtime && npm run build"
+		"prepack": "npm run hydrate-vendored-runtime && npm run build",
+		"generate:connector-index": "node ./scripts/generate-connector-implementation-index.mjs",
+		"check:connector-index": "node ./scripts/generate-connector-implementation-index.mjs --check"
 	},
 	"bundledDependencies": [
 		"@pdpp/collector-runtime",
