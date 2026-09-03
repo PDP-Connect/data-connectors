@@ -23,11 +23,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const SOURCE_EXTENSION = import.meta.filename.endsWith(".js") ? "js" : "ts";
 
 process.env.PDPP_CAPTURE_FIXTURES = "1";
 
 const { createCaptureSession } = await import(
-	`file://${join(PACKAGE_ROOT, "src/fixture-capture.ts")}`
+	`file://${join(PACKAGE_ROOT, `src/fixture-capture.${SOURCE_EXTENSION}`)}`
 );
 
 const CONNECTOR = "_capture_smoke";
@@ -96,7 +97,12 @@ if (!rawDom.includes("alice@example.com")) {
 // Run the scrubber
 const res = spawnSync(
 	process.execPath,
-	["--import", "tsx", join(PACKAGE_ROOT, "bin/scrub-fixtures.ts"), CONNECTOR],
+	[
+		"--import",
+		"tsx",
+		join(PACKAGE_ROOT, `bin/scrub-fixtures.${SOURCE_EXTENSION}`),
+		CONNECTOR,
+	],
 	{
 		encoding: "utf8",
 	},

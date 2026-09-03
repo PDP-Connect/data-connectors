@@ -2254,14 +2254,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/local-device-runtime.ts",
-			line: 304,
+			line: 307,
 			column: 3,
 			category: "shared_mutable_accumulator",
 			note: "queue.enqueue(): loop body mutates a shared accumulator the next iteration reads",
 		},
 		{
 			path: "src/local-device-runtime.ts",
-			line: 394,
+			line: 397,
 			column: 16,
 			category: "shared_mutable_accumulator",
 			note: "input.queue.dequeueReady(): loop body mutates a shared accumulator the next iteration reads",

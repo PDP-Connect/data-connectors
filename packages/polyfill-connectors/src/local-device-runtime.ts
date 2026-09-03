@@ -59,6 +59,9 @@ export const DEFAULT_IMESSAGE_STREAMS = [
 ] as const;
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
+const CONNECTOR_ENTRYPOINT_EXTENSION = import.meta.filename.endsWith(".js")
+	? "js"
+	: "ts";
 
 /**
  * Per-connector wiring for the local-device exporter. The device-envelope
@@ -83,12 +86,12 @@ export const LOCAL_DEVICE_CONNECTOR_PROFILES: Readonly<
 	[CODEX_CONNECTOR_ID]: {
 		connectorId: CODEX_CONNECTOR_ID,
 		defaultStreams: DEFAULT_CODEX_STREAMS,
-		entrypoint: "connectors/codex/index.ts",
+		entrypoint: `connectors/codex/index.${CONNECTOR_ENTRYPOINT_EXTENSION}`,
 	},
 	[CLAUDE_CODE_CONNECTOR_ID]: {
 		connectorId: CLAUDE_CODE_CONNECTOR_ID,
 		defaultStreams: DEFAULT_CLAUDE_CODE_STREAMS,
-		entrypoint: "connectors/claude_code/index.ts",
+		entrypoint: `connectors/claude_code/index.${CONNECTOR_ENTRYPOINT_EXTENSION}`,
 	},
 	// Amazon is a browser-bound connector. Unlike codex/claude-code it requires a
 	// real, owner-mediated browser session (live login, possibly 2FA) to produce
@@ -104,7 +107,7 @@ export const LOCAL_DEVICE_CONNECTOR_PROFILES: Readonly<
 	[AMAZON_CONNECTOR_ID]: {
 		connectorId: AMAZON_CONNECTOR_ID,
 		defaultStreams: DEFAULT_AMAZON_STREAMS,
-		entrypoint: "connectors/amazon/index.ts",
+		entrypoint: `connectors/amazon/index.${CONNECTOR_ENTRYPOINT_EXTENSION}`,
 	},
 	// iMessage's PRIMARY operator path is `npx @pdpp/local-collector setup`
 	// (it is a registered `LOCAL_COLLECTOR_DEFINITIONS` entry — see
@@ -117,7 +120,7 @@ export const LOCAL_DEVICE_CONNECTOR_PROFILES: Readonly<
 	[IMESSAGE_CONNECTOR_ID]: {
 		connectorId: IMESSAGE_CONNECTOR_ID,
 		defaultStreams: DEFAULT_IMESSAGE_STREAMS,
-		entrypoint: "connectors/imessage/index.ts",
+		entrypoint: `connectors/imessage/index.${CONNECTOR_ENTRYPOINT_EXTENSION}`,
 	},
 };
 
