@@ -82,7 +82,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
+import { readPolyfillManifests } from "../src/manifest-registry.ts";
 import {
 	isBundledStaticSecretCredentialKind,
 	isFullyBundledStaticSecretCredentialKind,
@@ -105,11 +105,12 @@ interface ManifestLike {
 	} | null;
 }
 
-const { readPolyfillManifests } = (await import(
-	resolve(packageDir, "src/manifest-registry.ts")
-)) as {
-	readPolyfillManifests: () => { file: string; manifest: ManifestLike }[];
-};
+function toManifestLike(value: unknown): ManifestLike {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return {};
+	}
+	return value;
+}
 
 const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
 
@@ -225,7 +226,8 @@ function descriptorFromManifest(
 const polyfillManifests = readPolyfillManifests();
 
 const entries: [string, StaticSecretDescriptor][] = [];
-for (const { manifest } of polyfillManifests) {
+for (const { manifest: rawManifest } of polyfillManifests) {
+	const manifest = toManifestLike(rawManifest);
 	const key = manifestKey(manifest);
 	if (!key) {
 		continue;
@@ -354,11 +356,21 @@ writeFileSync(targetPath, output);
 // PDP-Connect/data-connect, which vendors this package as a workspace
 // dependency and has no packages/polyfill-connectors/node_modules/.bin at
 // all once npm hoists the shared dependency.
-const biomeBinPath = fileURLToPath(
-	new URL("bin/biome", import.meta.resolve("@biomejs/biome/package.json")),
-);
-execFileSync(biomeBinPath, ["format", "--write", targetPath], {
-	cwd: packageDir,
-	stdio: "pipe",
-});
+try {
+	const biomeBinPath = fileURLToPath(
+		new URL("bin/biome", import.meta.resolve("@biomejs/biome/package.json")),
+	);
+	execFileSync(biomeBinPath, ["format", "--write", targetPath], {
+		cwd: packageDir,
+		stdio: "pipe",
+	});
+} catch (error) {
+	if (
+		!(error instanceof Error) ||
+		!("code" in error) ||
+		error.code !== "ERR_MODULE_NOT_FOUND"
+	) {
+		throw error;
+	}
+}
 console.log(`wrote ${targetPath}`);

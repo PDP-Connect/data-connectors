@@ -16,7 +16,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,8 +120,78 @@ async function main() {
 			"postinstall must not crash trying to type-strip a .ts file under node_modules",
 		);
 
+		const installedPackage = path.join(
+			projectDir,
+			"node_modules",
+			"@pdpp",
+			"polyfill-connectors",
+		);
+		const generatedRegistry = path.join(tempRoot, "static-secret-registry.ts");
+		const consumerEntrypoints = [
+			{
+				args: [
+					path.join(
+						projectDir,
+						"node_modules",
+						".bin",
+						"pdpp-local-device-exporter",
+					),
+					"--help",
+				],
+				label: "pdpp-local-device-exporter",
+				output: "usage: local-device-exporter",
+			},
+			{
+				args: [
+					path.join(
+						installedPackage,
+						"scripts",
+						"generate-static-secret-registry.js",
+					),
+					generatedRegistry,
+				],
+				label: "generate-static-secret-registry",
+				output: "wrote ",
+			},
+			{
+				args: [
+					"--input-type=module",
+					"--eval",
+					'import "@pdpp/polyfill-connectors/manifests"; console.log("manifests-imported")',
+				],
+				label: "manifests export",
+				output: "manifests-imported",
+			},
+			{
+				args: [
+					"--input-type=module",
+					"--eval",
+					'import "@pdpp/polyfill-connectors/collectors"; console.log("collectors-imported")',
+				],
+				label: "collectors export",
+				output: "collectors-imported",
+			},
+		];
+
+		await Promise.all(
+			consumerEntrypoints.map(async (entrypoint) => {
+				const result = await run(process.execPath, entrypoint.args, {
+					cwd: projectDir,
+					env,
+				});
+				const output = `${result.stdout}\n${result.stderr}`;
+				assert.doesNotMatch(
+					output,
+					/ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING/,
+					`${entrypoint.label} must not execute raw TypeScript from node_modules`,
+				);
+				assert.match(output, new RegExp(entrypoint.output));
+			}),
+		);
+		assert.equal((await stat(generatedRegistry)).isFile(), true);
+
 		log(
-			"PASS pack-install-run: plain npm install succeeded with the postinstall hook enabled.",
+			"PASS pack-install-run: plain npm install and every public consumer entrypoint succeeded.",
 		);
 	} finally {
 		await rm(tarball, { force: true });

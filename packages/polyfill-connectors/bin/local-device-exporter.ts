@@ -32,7 +32,14 @@ const DEFAULT_QUEUE_PATH = join(
 );
 
 async function main(): Promise<void> {
-	const options = parseArgs(process.argv.slice(2));
+	const args = process.argv.slice(2);
+	if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+		process.stdout.write(
+			"usage: local-device-exporter <enroll|run|setup> --base-url <url> [options]\n",
+		);
+		return;
+	}
+	const options = parseArgs(args);
 	if (options.command === "enroll") {
 		if (!options.code) {
 			throw new Error("enroll requires --code <one-time-code>");

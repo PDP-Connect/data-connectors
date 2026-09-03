@@ -1,0 +1,35 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"declaration": false,
+		"rewriteRelativeImportExtensions": true
+	},
+	"include": [
+		"src/**/*.ts",
+		"connectors/amazon/**/*.ts",
+		"connectors/apple_health/**/*.ts",
+		"connectors/apple_photos/**/*.ts",
+		"connectors/claude_code/**/*.ts",
+		"connectors/codex/**/*.ts",
+		"connectors/google_maps/**/*.ts",
+		"connectors/google_maps_data_portability/**/*.ts",
+		"connectors/google_messages/**/*.ts",
+		"connectors/google_takeout/**/*.ts",
+		"connectors/imessage/**/*.ts",
+		"connectors/netflix_export/**/*.ts",
+		"connectors/whatsapp/**/*.ts",
+		"bin/local-device-exporter.ts",
+		"bin/scrub-fixtures.ts",
+		"bin/test-fixture-capture.ts",
+		"scripts/generate-static-secret-registry.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"fixtures",
+		"**/__fixtures__",
+		"**/*.test.ts",
+		"**/*.test.child.ts",
+		"src/test-fixtures"
+	]
+}
