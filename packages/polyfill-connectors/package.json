@@ -361,7 +361,8 @@
 		"fix": "ultracite fix",
 		"postinstall": "node ./scripts/install-patchright-browser.mjs",
 		"test": "node scripts/run-tests.mjs",
-		"typecheck": "tsc --noEmit",
+		"test:related": "node --import tsx scripts/related-tests/run.ts",
+		"typecheck": "node_modules/typescript-next/bin/tsc --noEmit",
 		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
 		"prepack": "npm run hydrate-vendored-runtime && npm run build",
@@ -396,8 +397,10 @@
 		"@types/better-sqlite3": "^9.6.0",
 		"@types/ws": "^8.18.1",
 		"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz",
+		"dependency-cruiser": "^18.2.0",
 		"tsx": "^4.23.11",
-		"typescript": "7.0.2",
+		"typescript": "^5.9.3",
+		"typescript-next": "npm:typescript@^7.0.2",
 		"ultracite": "7.10.5"
 	},
 	"overrides": {

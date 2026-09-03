@@ -65,9 +65,27 @@ test("development is the only non-offered lifecycle tier", () => {
 });
 
 test("recent or non-repeatable live evidence stays Preview", () => {
-	for (const name of ["apple_contacts.json", "groupme.json"]) {
+	for (const name of ["apple_contacts.json"]) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};
 		assert.equal(listing?.tier, "preview");
+	}
+});
+
+test("connectors demoted for unproven freeze-era reliability stay unlisted or Preview", () => {
+	const expected: Record<string, string> = {
+		"heb.json": "preview",
+		"usaa.json": "preview",
+		"gmail.json": "preview",
+		"groupme.json": "development",
+	};
+	for (const [name, expectedTier] of Object.entries(expected)) {
+		const { capabilities } = manifest(name);
+		const { public_listing: listing } = capabilities ?? {};
+		assert.equal(
+			listing?.tier,
+			expectedTier,
+			`${name} must stay at lifecycle tier "${expectedTier}" until its freeze condition is proven`,
+		);
 	}
 });
