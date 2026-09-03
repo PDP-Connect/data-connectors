@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
 	"version": "0.2.0",
 	"display_name": "H-E-B",
+	"brand": {
+		"icon": "icons/heb.svg",
+		"background_color": "#E4002B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

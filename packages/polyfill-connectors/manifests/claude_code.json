@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
 	"version": "0.3.0",
 	"display_name": "Claude Code",
+	"brand": {
+		"icon": "icons/claude_code.svg",
+		"background_color": "#D97757"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
 	"version": "0.1.0",
 	"display_name": "Instagram (Meta)",
+	"brand": {
+		"icon": "icons/meta.svg",
+		"background_color": "#E1306C"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
 	"version": "0.2.0",
 	"display_name": "WhatsApp (chat export)",
+	"brand": {
+		"icon": "icons/whatsapp.svg",
+		"background_color": "#25D366"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

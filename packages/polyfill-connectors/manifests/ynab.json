@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
 	"version": "0.3.0",
 	"display_name": "YNAB",
+	"brand": {
+		"icon": "icons/ynab.svg",
+		"background_color": "#3CB878"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

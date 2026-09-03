@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
 	"version": "0.1.0",
 	"display_name": "Amazon",
+	"brand": {
+		"icon": "icons/amazon.svg",
+		"background_color": "#FF9900"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

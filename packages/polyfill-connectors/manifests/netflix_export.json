@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
 	"version": "0.1.0",
 	"display_name": "Netflix Export",
+	"brand": {
+		"icon": "icons/netflix_export.svg",
+		"background_color": "#E50914"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

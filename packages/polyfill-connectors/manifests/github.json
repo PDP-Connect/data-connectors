@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
 	"version": "0.5.0",
 	"display_name": "GitHub",
+	"brand": {
+		"icon": "icons/github.svg",
+		"background_color": "#181717"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

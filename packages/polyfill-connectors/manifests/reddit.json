@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
 	"version": "0.2.0",
 	"display_name": "Reddit",
+	"brand": {
+		"icon": "icons/reddit.svg",
+		"background_color": "#FF4500"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
 	"version": "0.1.0",
 	"display_name": "Google Messages (via gmcli)",
+	"brand": {
+		"icon": "icons/google_messages.svg",
+		"background_color": "#1A73E8"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

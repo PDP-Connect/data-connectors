@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
 	"version": "0.1.0",
 	"display_name": "Calendar (iCal)",
+	"brand": {
+		"icon": "icons/ical.svg",
+		"background_color": "#FF3B30"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

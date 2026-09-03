@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
 	"version": "0.1.0",
 	"display_name": "WHOOP",
+	"brand": {
+		"icon": "icons/whoop.svg",
+		"background_color": "#151515"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": { "required": true },

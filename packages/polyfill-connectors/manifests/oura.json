@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
 	"version": "0.1.0",
 	"display_name": "Oura",
+	"brand": {
+		"icon": "icons/oura.svg",
+		"background_color": "#111111"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

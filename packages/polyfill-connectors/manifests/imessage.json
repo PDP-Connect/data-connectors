@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
 	"version": "0.1.0",
 	"display_name": "iMessage (macOS)",
+	"brand": {
+		"icon": "icons/imessage.svg",
+		"background_color": "#30D158"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

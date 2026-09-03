@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
 	"version": "0.1.0",
 	"display_name": "Notion",
+	"brand": {
+		"icon": "icons/notion.svg",
+		"background_color": "#000000"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

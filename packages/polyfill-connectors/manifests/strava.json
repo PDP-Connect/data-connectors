@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
 	"version": "0.1.0",
 	"display_name": "Strava",
+	"brand": {
+		"icon": "icons/strava.svg",
+		"background_color": "#FC4C02"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

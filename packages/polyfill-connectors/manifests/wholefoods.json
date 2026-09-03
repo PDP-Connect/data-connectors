@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
 	"version": "0.1.0",
 	"display_name": "Whole Foods",
+	"brand": {
+		"icon": "icons/wholefoods.svg",
+		"background_color": "#00674B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
