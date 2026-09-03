@@ -5,4 +5,3 @@ import { runAlpha } from "./index.ts";
 test("runAlpha includes the shared helper's output", () => {
   assert.equal(runAlpha(), "alpha-shared");
 });
-
