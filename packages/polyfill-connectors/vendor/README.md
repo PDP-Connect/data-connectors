@@ -104,10 +104,13 @@ Two of the eight tests Gate B finding B2 restored need `reference-implementation
 (`server/db.ts`, `server/records.ts`, `server/postgres-storage.ts`,
 `server/stores/connector-instance-store.ts`, and a dynamic import of `runtime/index.ts`), not a
 narrow leaf contract. Those are thousands of lines each with deep transitive dependencies into
-auth, search indexing, and storage backends — not a minimal-stand-in candidate. See
-`../src/reference-implementation-stand-in/README.md` for the full reasoning and the required
-cross-repository closure mechanism for those two files
-(`connectors/github/index.test.ts`, `bin/orchestrate.ts`).
+auth, search indexing, and storage backends — not a minimal-stand-in candidate. pdpp#284
+(2026-09-02) deleted `reference-implementation/` from `PDP-Connect/pdpp` entirely, so the
+cross-repository integration job that used to check out pdpp at a pinned SHA and run
+`connectors/github/index.test.ts`/`bin/orchestrate.ts` against that real server has been retired
+(see `.github/workflows/cross-repo-integrity.yml`'s history) — its premise, a pdpp checkout
+containing a real reference-implementation server, no longer exists. See
+`../src/reference-implementation-stand-in/README.md` for the full reasoning.
 
 ## Removal trigger
 

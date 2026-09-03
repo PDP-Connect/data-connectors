@@ -26,7 +26,7 @@ name: Cross-Repo Integrity
 # requiring workflows that can be skipped." So this workflow now has NO `pull_request.paths`
 # filter at all — it always runs on every `pull_request` to `main`. The `changes` job (always
 # run, no `if:`) computes relevance via plain `git diff` against the PR's merge-base; the
-# expensive drift-checks/integration jobs are gated with `needs: changes` + a job-level `if:`
+# expensive drift-checks job is gated with `needs: changes` + a job-level `if:`
 # on that relevance. (`read-pins` and `pin-freshness` are NOT relevance-gated — see their own
 # comments below for why.) A job skipped via job-level `if:` reports conclusion "skipped",
 # which GitHub's Actions "Status checks"
@@ -55,7 +55,7 @@ on:
       - ".github/workflows/cross-repo-integrity.yml"
   schedule:
     # Weekly. NOTE (corrects a previously-false claim in this comment, per reviewer finding
-    # B2): this schedule reruns the drift-checks/integration jobs against the PINNED SHAs —
+    # B2): this schedule reruns the drift-checks job against the PINNED SHAs —
     # it re-proves the current pin is internally consistent, but it CANNOT by itself detect
     # that a producer's canonical source (data-connect/main, pdpp/main) has moved past the
     # pin, because it clones the same immutable pinned commit every time. Producer-source
@@ -280,106 +280,34 @@ jobs:
         if: matrix.check.id == 'reference-contract'
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
 
-  integration:
-    name: Integration (Node ${{ matrix.node-version }}) — github/index.test.ts + bin/orchestrate.ts against the real RI
-    needs: [changes, read-pins]
-    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # The full integrated stack's floor is set by the LOWEST version every participating
-        # package supports: the pinned pdpp head (.github/cross-repo-pins.json) declares
-        # "engines": {"node": ">=24.15.0"}. Per
-        # PDPP-gateB-final-closure-deep-redteam-2026-08-18.md finding B3, the previous 24.11.1
-        # leg ran below pdpp's declared floor and its own CI log recorded unsupported-engine
-        # warnings (root workspace, MCP-server prep) — a green run below a dependency's
-        # declared support contract does not prove that version is a supported integrated
-        # floor. polyfill-connectors' OWN package.json engines field is now also
-        # ">=24.15.0 <25" (raised from ">=24.11.1 <25" in the same correction, so its declared
-        # floor and this matrix's floor agree) — do not lower either independently.
-        #
-        # The original 24.11.1 boundary was bisected locally against the real RI at the pinned
-        # pdpp SHA on 2026-08-18 (each boundary re-run at least 3x) to find the point after
-        # which connectors/github/index.test.ts's drainConnectorInstanceIndexWork assertion
-        # (reference-implementation/server/records.ts's fixed 5000ms deadline, a pdpp-side
-        # constant, not this repo's) reliably passes (~1s) instead of reliably timing out. That
-        # bisect is why the floor is a specific patch version and not just "24" — it is
-        # superseded here only because it landed below pdpp's own declared floor, not because
-        # it was wrong about the timeout boundary itself. Do not lower this matrix's floor
-        # without re-bisecting against a pdpp head whose engines field also permits the lower
-        # version.
-        node-version: ["24.15.0", "24.19.0"]
-    steps:
-      - name: Checkout data-connectors (this repo, current ref)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: data-connectors
-          persist-credentials: false
-
-      - name: Checkout pdpp @ pinned SHA
-        env:
-          PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
-        run: |
-          git clone https://github.com/PDP-Connect/pdpp.git pdpp
-          git -C pdpp checkout --detach "$PDPP_SHA"
-          RESOLVED="$(git -C pdpp rev-parse HEAD)"
-          if [ "$RESOLVED" != "$PDPP_SHA" ]; then
-            echo "::error::pdpp checked out to $RESOLVED, not the requested pin $PDPP_SHA" >&2
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ matrix.node-version }}
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 10
-
-      # pdpp is a large monorepo (console app, MCP server, reference-contract, and the
-      # reference-implementation server this job needs) with native builds (better-sqlite3,
-      # sqlite-vec) and workspace:* deps. This install is the expensive, cacheable part of the
-      # job; the actual drift/substitution logic below is cheap.
-      - name: Install pdpp dependencies
-        working-directory: pdpp
-        run: pnpm install --frozen-lockfile
-
-      - name: Assert pdpp install left the checkout clean
-        working-directory: pdpp
-        run: git diff --exit-code
-
-      - name: Install data-connectors' polyfill-connectors dependencies (fresh cache)
-        working-directory: data-connectors/packages/polyfill-connectors
-        env:
-          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: |
-          mkdir -p "$RUNNER_TEMP/npm-cache-fresh"
-          npm ci --cache "$RUNNER_TEMP/npm-cache-fresh" --ignore-scripts
-
-      - name: Run integration job
-        run: |
-          bash data-connectors/.github/scripts/cross-repo-integrity/run-integration-job.sh \
-            "$GITHUB_WORKSPACE/pdpp" \
-            "$GITHUB_WORKSPACE/data-connectors" \
-            "$RUNNER_TEMP/integration-scratch"
-
-      # TODO (see run-integration-job.sh's own TODO output): `bin/orchestrate.ts run
-      # <connector>` end-to-end, landing real records through the embedded RS, needs live
-      # credentials for a real provider. This job proves typecheck and the github connector's
-      # full test suite against the real RI (67/67 as of this task); it does not yet prove a
-      # live orchestrate run. Wiring that requires a deliberate decision on which connector,
-      # where its CI credential comes from, and whether that credential is safe to hold in
-      # this repository's Actions secrets — out of scope for this pass.
+  # RETIRED (pdpp#284, 2026-09-02): this job used to check out PDP-Connect/pdpp at the pinned
+  # SHA, then run connectors/github/index.test.ts and typecheck bin/orchestrate.ts against
+  # pdpp's real reference-implementation server (server/db.ts, server/records.ts,
+  # server/postgres-storage.ts) by substituting this repo's packages/polyfill-connectors as a
+  # sibling directory (see the removed run-integration-job.sh's header comment for the exact
+  # mechanism). pdpp#284 deleted reference-implementation/ from pdpp entirely — the server
+  # moved to PDP-Connect/data-connect instead — so a pdpp checkout at any SHA on or after that
+  # PR no longer contains the server this job needs, and the sibling-directory substitution
+  # trick has nothing left to substitute into.
+  #
+  # data-connect is NOT a drop-in replacement checkout for this job: unlike pdpp's pnpm
+  # monorepo (which also carried packages/reference-contract and packages/read-core that
+  # reference-implementation/server/*.ts import), data-connect is a separate Tauri desktop app
+  # using npm, without those packages — the same relative-import chain this job relied on
+  # doesn't resolve there. Repointing this job at data-connect would mean rebuilding the
+  # integration mechanism against a materially different repo layout, not swapping a checkout
+  # URL — out of scope for pdpp#284's own repin, and not attempted here. If real cross-repo
+  # integration coverage against data-connect's server is wanted, that is a deliberate,
+  # separately-scoped follow-up in this repo, not a revival of this job.
+  #
+  # `connectors/github/index.test.ts` and `bin/orchestrate.ts` still typecheck and run against
+  # this repo's own fixtures/mocks via this repo's normal test job — only the "against the
+  # real upstream server" cross-repo leg is gone.
 
   pin-freshness:
     name: Pin freshness — ${{ matrix.repo.label }}
-    # Producer-source freshness detection (Gate B finding B2): the drift-checks/integration
-    # jobs above compare the consumer tree against the PINNED commit, which proves internal
+    # Producer-source freshness detection (Gate B finding B2): the drift-checks job above
+    # compares the consumer tree against the PINNED commit, which proves internal
     # consistency but, by construction, cannot detect that the producer's OWN tracked branch
     # has since moved past that pin. This job deliberately does the opposite: it reads each
     # producer's CURRENT tracked-ref head (main normally, or the exact PR-head branch named
@@ -388,7 +316,7 @@ jobs:
     # restricted to the exact canonical paths that pin actually backs, so it fails precisely
     # when — and only when — a change relevant to this repo's drift jobs has landed on the
     # TRACKED ref without a matching repin. Runs regardless of THIS PR's own relevance
-    # (`changes.outputs.relevant` gates the drift-checks/integration jobs, not this one): a
+    # (`changes.outputs.relevant` gates the drift-checks job, not this one): a
     # stale pin is a fact about the producer repos, independent of what this PR touches. It
     # only skips if `changes` itself failed to run (`needs.changes.result == 'success'`),
     # same as every other downstream job.
@@ -430,10 +358,13 @@ jobs:
             label: pdpp
             url: https://github.com/PDP-Connect/pdpp.git
             pin-output: pdpp-sha
-            # Canonical paths that back drift job (d) reference-contract + the integration
-            # job's RI-server checkout — see .github/cross-repo-pins.json's own note on
-            # pdpp's pin.
-            paths: "packages/reference-contract reference-implementation"
+            # Canonical path that backs drift job (d) reference-contract — see
+            # .github/cross-repo-pins.json's own note on pdpp's pin. Used to also list
+            # `reference-implementation` for the (now-retired, pdpp#284) integration job's
+            # RI-server checkout; pdpp#284 deleted that directory from pdpp entirely, so it's
+            # dropped here too — a path that can never again exist at any future pdpp SHA
+            # would never contribute a real diff, just dead weight in this list.
+            paths: "packages/reference-contract"
     needs: [changes, read-pins]
     if: always() && needs.changes.result == 'success'
     steps:
@@ -489,7 +420,7 @@ jobs:
     # green, not merely pending. This job runs unconditionally (`if: always()`) and explicitly
     # inspects every other job's `result`, so it is the one context that actually distinguishes
     # "irrelevant PR, nothing needed to run" from "something that should have run did not."
-    needs: [changes, read-pins, drift-checks, integration, pin-freshness]
+    needs: [changes, read-pins, drift-checks, pin-freshness]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -498,13 +429,11 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           READ_PINS_RESULT: ${{ needs.read-pins.result }}
           DRIFT_CHECKS_RESULT: ${{ needs.drift-checks.result }}
-          INTEGRATION_RESULT: ${{ needs.integration.result }}
           PIN_FRESHNESS_RESULT: ${{ needs['pin-freshness'].result }}
         run: |
           echo "changes:       $CHANGES_RESULT"
           echo "read-pins:     $READ_PINS_RESULT"
           echo "drift-checks:  $DRIFT_CHECKS_RESULT"
-          echo "integration:   $INTEGRATION_RESULT"
           echo "pin-freshness: $PIN_FRESHNESS_RESULT"
 
           # `changes` has no `if:` — it must always actually succeed. Any other result here
@@ -522,8 +451,8 @@ jobs:
           # contains a bounded fail-open condition" (2026-08-18 final-v2 red-team): treating
           # their skip as acceptable would silently accept a future dependency/condition
           # regression that unexpectedly skips pin parsing or freshness checking — precisely
-          # the class of failure this gate exists to catch. Only drift-checks/integration may
-          # legitimately skip, gated as they are on this PR's own relevance.
+          # the class of failure this gate exists to catch. Only drift-checks may legitimately
+          # skip, gated as it is on this PR's own relevance.
           for result_name in "READ_PINS_RESULT:$READ_PINS_RESULT" "PIN_FRESHNESS_RESULT:$PIN_FRESHNESS_RESULT"; do
             name="${result_name%%:*}"
             result="${result_name#*:}"
@@ -533,14 +462,12 @@ jobs:
             fi
           done
 
-          for result in "$DRIFT_CHECKS_RESULT" "$INTEGRATION_RESULT"; do
-            case "$result" in
-              success|skipped) ;;
-              *)
-                echo "::error::a required job reported '$result' — expected 'success' or 'skipped'"
-                exit 1
-                ;;
-            esac
-          done
+          case "$DRIFT_CHECKS_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::drift-checks reported '$DRIFT_CHECKS_RESULT' — expected 'success' or 'skipped'"
+              exit 1
+              ;;
+          esac
 
-          echo "Cross-Repo Integrity Gate: all required jobs succeeded (read-pins, pin-freshness) or were correctly skipped as irrelevant (drift-checks, integration)."
+          echo "Cross-Repo Integrity Gate: all required jobs succeeded (read-pins, pin-freshness) or were correctly skipped as irrelevant (drift-checks)."

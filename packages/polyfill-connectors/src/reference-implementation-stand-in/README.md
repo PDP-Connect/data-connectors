@@ -1,9 +1,11 @@
-# `reference-implementation` stand-in (transitional, Gate B finding B2)
+# `reference-implementation` stand-in (now a permanent local copy — pdpp#284)
 
-Not the real `reference-implementation` package (that stays in `PDP-Connect/pdpp` and is out of
-scope for this move). This directory exists to satisfy two test files' imports of `reference-implementation` modules by
-monorepo-relative path, paths that no longer resolve once `polyfill-connectors` lives in its own
-repository:
+Not the real `reference-implementation` package. It USED to live in `PDP-Connect/pdpp`; pdpp#284
+(2026-09-02) deleted that directory entirely — the code moved to `PDP-Connect/data-connect`
+(pdpp#284's own PR body: "a parallel, now-canonical copy of that same server code already lives"
+there). This directory exists to satisfy two test files' imports of `reference-implementation`
+modules by monorepo-relative path, paths that no longer resolve once `polyfill-connectors` lives
+in its own repository:
 
 - `src/reason-display-messages.test.ts`'s import of `RUNTIME_GENERIC_REASON_CODES`
   (`../../../reference-implementation/runtime/recovery-reason-codes.ts`).
@@ -73,8 +75,18 @@ CI job (finding B5's cutover mechanism): check out `PDP-Connect/pdpp` (or its
 the real server they need, and record the artifact digest and test transcript. See the Gate B2
 closure report for the exact job shape.
 
-## Removal trigger
+## Removal trigger — FIRED, now a permanent local copy
 
-Delete this directory once `reference-implementation`'s own repository move lands and
-`recovery-reason-codes.ts` (or its replacement) is available to this repo as a real package
-dependency or its own pinned vendor tarball.
+The trigger this section used to describe ("once `reference-implementation`'s own repository
+move lands") fired with pdpp#284: `reference-implementation/` no longer exists at any pdpp SHA,
+so there is no live canonical source left to pin `recovery-reason-codes.ts` or
+`stderr-redact.ts` against — the drift comparison's premise (a tracked upstream file) is gone,
+not merely stale. `check-reference-contract-drift.mjs` no longer compares these two files for
+that reason (see its own header comment).
+
+These files are therefore no longer "stand-ins" tracking an external source — they are this
+repo's own permanent local implementation of this small, self-contained, dependency-free
+surface. Treat edits to them like any other local source file, not like a resync-from-upstream
+task. If `PDP-Connect/data-connect`'s copy of this code (the new home of the server that used to
+be pdpp's `reference-implementation/`) ever needs to be pulled in as a real dependency instead,
+that would be a deliberate, separate decision — not implied by this note.
