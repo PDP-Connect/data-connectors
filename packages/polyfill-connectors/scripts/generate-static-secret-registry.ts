@@ -344,9 +344,21 @@ writeFileSync(targetPath, output);
 // currently prescribes (tabs, line width, etc.) instead of hand-tracking
 // that style in this script's template-literal indentation, which drifted
 // out of sync with a package-wide format pass in the past.
-execFileSync(
-	resolve(packageDir, "node_modules", ".bin", "biome"),
-	["format", "--write", targetPath],
-	{ cwd: packageDir, stdio: "pipe" },
+//
+// Resolved via real Node module resolution (import.meta.resolve), not a
+// hardcoded `packageDir/node_modules/.bin/biome` path: this package installs
+// with its own nested node_modules/@biomejs/biome when run standalone (this
+// repo's own layout), but a hardcoded relative .bin path breaks the instant
+// a consumer vendors this package into a workspace that hoists @biomejs/biome
+// to a shared root node_modules instead — confirmed live in
+// PDP-Connect/data-connect, which vendors this package as a workspace
+// dependency and has no packages/polyfill-connectors/node_modules/.bin at
+// all once npm hoists the shared dependency.
+const biomeBinPath = fileURLToPath(
+	new URL("bin/biome", import.meta.resolve("@biomejs/biome/package.json")),
 );
+execFileSync(biomeBinPath, ["format", "--write", targetPath], {
+	cwd: packageDir,
+	stdio: "pipe",
+});
 console.log(`wrote ${targetPath}`);
