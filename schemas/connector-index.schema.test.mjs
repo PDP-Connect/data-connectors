@@ -19,6 +19,7 @@ function documentWith(entry) {
     indexVersion: "2.0",
     sourceRepo: "https://github.com/PDP-Connect/data-connectors",
     generatedAt: "2026-07-30T00:00:00.000Z",
+    brandIcons: {},
     connectors: { synthetic: [entry] },
   };
 }

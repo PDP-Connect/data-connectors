@@ -32,6 +32,8 @@ const repoRoot = join(__dirname, "..");
 const registryPath = join(repoRoot, "registry.json");
 const indexPath = join(repoRoot, "connector-index.json");
 const artifactsDir = join(repoRoot, "artifacts");
+const polyfillManifestsDir = join(repoRoot, "packages", "polyfill-connectors", "manifests");
+const sourceRepository = "PDP-Connect/data-connectors";
 const shouldEmitSignatureMetadata =
   process.env.CONNECTOR_ENABLE_SIGSTORE_METADATA === "1";
 const shouldUseReleaseAssets =
@@ -112,6 +114,53 @@ async function fetchBuffer(url) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function assertRelativeBrandAssetPath(path, manifestPath, field) {
+  if (typeof path !== "string" || path.trim() === "") {
+    throw new Error(`${manifestPath}: brand.${field} must be a non-empty relative path`);
+  }
+  const normalized = path.trim();
+  if (normalized.startsWith("/") || normalized.includes("\\") || normalized.split("/").includes("..")) {
+    throw new Error(`${manifestPath}: brand.${field} must stay inside the manifest directory`);
+  }
+  return normalized;
+}
+
+function resolvePolyfillBrandIcons(sourceCommit) {
+  const brandIcons = {};
+  for (const filename of readdirSync(polyfillManifestsDir).filter((file) => file.endsWith(".json")).sort()) {
+    const manifestPath = join(polyfillManifestsDir, filename);
+    const manifest = readJson(manifestPath);
+    const connectorId = manifest.connector_id;
+    if (typeof connectorId !== "string" || connectorId.trim() === "") {
+      throw new Error(`${manifestPath}: connector_id must be a non-empty string`);
+    }
+    if (!manifest.brand || typeof manifest.brand !== "object" || Array.isArray(manifest.brand)) {
+      throw new Error(`${manifestPath}: brand is required`);
+    }
+    const icon = assertRelativeBrandAssetPath(manifest.brand.icon, manifestPath, "icon");
+    const iconPath = join(dirname(manifestPath), icon);
+    if (!existsSync(iconPath) || !statSync(iconPath).isFile()) {
+      throw new Error(`${manifestPath}: brand.icon asset is missing: ${icon}`);
+    }
+    const iconReference = {
+      url: `https://raw.githubusercontent.com/${sourceRepository}/${sourceCommit}/packages/polyfill-connectors/manifests/${icon}`,
+    };
+    if (manifest.brand.dark_icon !== undefined) {
+      const darkIcon = assertRelativeBrandAssetPath(manifest.brand.dark_icon, manifestPath, "dark_icon");
+      const darkIconPath = join(dirname(manifestPath), darkIcon);
+      if (!existsSync(darkIconPath) || !statSync(darkIconPath).isFile()) {
+        throw new Error(`${manifestPath}: brand.dark_icon asset is missing: ${darkIcon}`);
+      }
+      iconReference.darkUrl = `https://raw.githubusercontent.com/${sourceRepository}/${sourceCommit}/packages/polyfill-connectors/manifests/${darkIcon}`;
+    }
+    if (manifest.brand.background_color !== undefined) {
+      iconReference.backgroundColor = manifest.brand.background_color;
+    }
+    brandIcons[connectorId] = iconReference;
+  }
+  return brandIcons;
 }
 
 function buildSigstoreBundleMetadata(bundlePath, bundleUrl = null) {
@@ -199,6 +248,25 @@ function resolveCommittedArtifactTag(existingIndex) {
   }
 
   return null;
+}
+
+function resolveCommittedBrandSourceCommit(existingIndex) {
+  if (!existingIndex?.brandIcons) {
+    return null;
+  }
+
+  const refs = new Set();
+  for (const brandIcon of Object.values(existingIndex.brandIcons)) {
+    if (!brandIcon || typeof brandIcon !== "object" || typeof brandIcon.url !== "string") {
+      continue;
+    }
+    const match = brandIcon.url.match(
+      /^https:\/\/raw\.githubusercontent\.com\/PDP-Connect\/data-connectors\/([0-9a-f]{40})\/packages\/polyfill-connectors\/manifests\//,
+    );
+    if (match) refs.add(match[1]);
+  }
+
+  return refs.size === 1 ? [...refs][0] : null;
 }
 
 function resolveRetainedArtifactSourceUrl(entry, repo) {
@@ -635,11 +703,16 @@ async function main() {
     process.env.CONNECTOR_SOURCE_TAG?.trim() ||
     (checkMode && resolveCommittedArtifactTag(existingIndex)) ||
     resolveSourceTag(sourceCommit);
+  const brandSourceCommit =
+    process.env.CONNECTOR_BRAND_SOURCE_COMMIT?.trim() ||
+    (checkMode && resolveCommittedBrandSourceCommit(existingIndex)) ||
+    sourceCommit;
   const releaseMetadata = resolveReleaseMetadata(sourceCommit);
   const nextIndex = {
     indexVersion: "2.0",
     sourceRepo: "https://github.com/PDP-Connect/data-connectors",
     generatedAt: registry.lastUpdated ?? new Date().toISOString(),
+    brandIcons: resolvePolyfillBrandIcons(brandSourceCommit),
     signature: buildSigstoreBundleMetadata(
       "connector-index.json.sigstore.json",
     ),

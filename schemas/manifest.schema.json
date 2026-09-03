@@ -72,7 +72,32 @@
     },
     "icon": {
       "type": "string",
-      "description": "Path to the canonical connector icon relative to the connector directory (for example \"icons/github.svg\")."
+      "description": "Legacy path to a connector icon. New manifests declare brand.icon instead."
+    },
+    "brand": {
+      "type": "object",
+      "description": "Canonical connector brand presentation. Icon paths are relative to the manifest directory.",
+      "required": ["icon"],
+      "properties": {
+        "icon": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.svg$",
+          "description": "Canonical light-surface brand icon asset path, relative to the manifest directory."
+        },
+        "dark_icon": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.svg$",
+          "description": "Optional icon asset path for dark surfaces, relative to the manifest directory."
+        },
+        "background_color": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$",
+          "description": "Optional opaque background color for rendering the icon in a rounded tile."
+        }
+      },
+      "additionalProperties": false
     },
     "scopes": {
       "type": "array",
