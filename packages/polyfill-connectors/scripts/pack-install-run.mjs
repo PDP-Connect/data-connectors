@@ -171,6 +171,34 @@ async function main() {
 				label: "collectors export",
 				output: "collectors-imported",
 			},
+			{
+				args: [
+					"--input-type=module",
+					"--eval",
+					'import { readSampleRecord } from "@pdpp/polyfill-connectors/fixture-samples"; readSampleRecord("gmail", "messages"); console.log("fixture-samples-imported")',
+				],
+				label:
+					"fixture-samples export (reads a real shipped fixture, not just imports)",
+				output: "fixture-samples-imported",
+			},
+			{
+				args: [
+					"--input-type=module",
+					"--eval",
+					'import "@pdpp/polyfill-connectors/connectors/github"; console.log("github-connector-imported")',
+				],
+				label: "connectors/github export",
+				output: "github-connector-imported",
+			},
+			{
+				args: [
+					"--input-type=module",
+					"--eval",
+					'import "@pdpp/polyfill-connectors/connectors/github/schemas"; console.log("github-schemas-imported")',
+				],
+				label: "connectors/github/schemas export",
+				output: "github-schemas-imported",
+			},
 		];
 
 		await Promise.all(
