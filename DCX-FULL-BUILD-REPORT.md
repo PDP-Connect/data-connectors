@@ -26,6 +26,12 @@ const executablePath = fileURLToPath(implementation.entry);
 - `npm run pack-install-run` passed from the packed tarball: plain `npm install`, all 79 public export subpaths under strict NodeNext and bundler TypeScript, all 45 manifest IDs resolving to existing built entries, direct import of a resolved entry, the unknown-ID error, and the Slack runtime config.
 - An independent code gate separately reviewed the final implementation and passed it.
 
+## CI follow-up
+
+PR #75 initially failed `verify + test`; the dependent `Polyfill Connectors Gate` failure correctly propagated that result. The direct cause was a Slack progress-observation race: `runSlackdump` cleared its polling interval as soon as the child exited, so a final SQLite WAL write that occurred after the last tick was never reported. The fix performs one final filesystem-only progress observation before timer cleanup. The regression test now seeds an initial archive snapshot before the child grows its WAL, so it proves an in-run advance without depending on parent/child startup scheduling. No production timeout, polling threshold, or test was skipped or weakened.
+
+Follow-up validation passed: the targeted regression 20 consecutive times, the full Slack runtime file (30 tests), `npm run verify`, `npm run pack-install-run`, and the full package suite (4,728 passed, 0 failed, 11 skipped).
+
 ## Footprint and build time
 
 | Metric | Before | After | Change |

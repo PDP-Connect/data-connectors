@@ -297,6 +297,10 @@ test("runSlackdump: emits safe archive-growth progress while child is running", 
 	const sqlitePath = join(tmpDir, "slackdump.sqlite");
 	const progressEvents: Array<{ extra: unknown; message: string }> = [];
 	const priorBin = process.env.SLACKDUMP_BIN;
+	// Seed the initial snapshot. The child then grows only the WAL, so the
+	// assertion describes a genuine in-run archive advance instead of relying
+	// on whether the parent wins its first scheduling race with the child.
+	await writeFile(sqlitePath, "initial archive", "utf8");
 
 	await writeFile(
 		fakeSlackdump,
