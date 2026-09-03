@@ -20,3 +20,5 @@ fixtures/*/scrubbed/*/
 # `npm run build` emits the publish-only JavaScript beside its TypeScript
 # source. `package.json#files` includes the selected output at pack time.
 *.js
+*.d.ts
+*.d.ts.map

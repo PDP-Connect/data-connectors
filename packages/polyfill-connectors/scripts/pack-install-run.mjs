@@ -38,6 +38,60 @@ function log(message) {
 	process.stdout.write(`${message}\n`);
 }
 
+async function resolveEveryPackedConnector(projectDir) {
+	const scriptPath = path.join(projectDir, "resolve-every-connector.mjs");
+	await writeFile(
+		scriptPath,
+		`import assert from "node:assert/strict";
+import { access, readFile, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  ConnectorImplementationNotFoundError,
+  resolveConnectorImplementation,
+} from "@pdpp/polyfill-connectors/resolve";
+
+const resolverPath = fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/resolve"));
+const packageRoot = dirname(dirname(resolverPath));
+const manifestsDirectory = join(packageRoot, "manifests");
+const manifestFiles = (await readdir(manifestsDirectory))
+  .filter((file) => file.endsWith(".json"))
+  .sort();
+
+for (const file of manifestFiles) {
+  const manifest = JSON.parse(await readFile(join(manifestsDirectory, file), "utf8"));
+  const implementation = resolveConnectorImplementation(manifest.connector_id);
+  assert.equal(implementation.manifest.connector_id, manifest.connector_id);
+  assert.match(implementation.entry, /^file:\\/\\//);
+  assert.match(implementation.brandIcon, /^file:\\/\\//);
+  await access(fileURLToPath(implementation.entry));
+  await access(fileURLToPath(implementation.brandIcon));
+}
+
+await access(join(packageRoot, "config", "slackdump-api-config.toml"));
+
+const directlyImportable = resolveConnectorImplementation(
+  "https://registry.pdpp.dev/connectors/ynab",
+);
+await import(directlyImportable.entry);
+
+assert.throws(
+  () => resolveConnectorImplementation("https://registry.pdpp.dev/connectors/missing"),
+  (error) =>
+    error instanceof ConnectorImplementationNotFoundError &&
+    error.code === "ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND",
+);
+console.log(\`PASS resolver: \${manifestFiles.length} packed manifest connector IDs resolve to built entries.\`);
+`,
+	);
+	const result = await run(process.execPath, [scriptPath], { cwd: projectDir });
+	assert.match(
+		`${result.stdout}\n${result.stderr}`,
+		/PASS resolver: 45 packed manifest connector IDs resolve to built entries\./,
+	);
+	log(result.stdout.trim());
+}
+
 async function run(command, args, options = {}) {
 	try {
 		return await execFileAsync(command, args, {
@@ -80,7 +134,19 @@ async function typecheckEveryExport(projectDir, installedPackage) {
 	const imports = Object.keys(installedPackageJson.exports)
 		.map((subpath) => `import "@pdpp/polyfill-connectors/${subpath.slice(2)}";`)
 		.join("\n");
-	await writeFile(path.join(projectDir, "imports.ts"), `${imports}\n`);
+	const resolverUse = `
+import { resolveConnectorImplementation } from "@pdpp/polyfill-connectors/resolve";
+const resolvedConnector = resolveConnectorImplementation("https://registry.pdpp.dev/connectors/ynab");
+const resolvedEntry: string = resolvedConnector.entry;
+const resolvedBrandIcon: string = resolvedConnector.brandIcon;
+const resolvedManifest: Record<string, unknown> = resolvedConnector.manifest;
+void resolvedEntry;
+void resolvedBrandIcon;
+void resolvedManifest;`;
+	await writeFile(
+		path.join(projectDir, "imports.ts"),
+		`${imports}${resolverUse}\n`,
+	);
 
 	await Promise.all(
 		[
@@ -191,6 +257,7 @@ async function main() {
 			{ cwd: projectDir, env },
 		);
 		await typecheckEveryExport(projectDir, installedPackage);
+		await resolveEveryPackedConnector(projectDir);
 		const generatedRegistry = path.join(tempRoot, "static-secret-registry.ts");
 		const consumerEntrypoints = [
 			{
