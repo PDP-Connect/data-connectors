@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
 	"version": "0.1.0",
 	"display_name": "Claude (Anthropic)",
+	"brand": {
+		"icon": "icons/anthropic.svg",
+		"background_color": "#D97757"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

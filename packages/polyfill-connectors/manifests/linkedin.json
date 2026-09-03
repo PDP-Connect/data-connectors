@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
 	"version": "0.1.0",
 	"display_name": "LinkedIn",
+	"brand": {
+		"icon": "icons/linkedin.svg",
+		"background_color": "#0A66C2"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

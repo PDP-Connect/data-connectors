@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
 	"version": "0.1.0",
 	"display_name": "Twitter/X Archive",
+	"brand": {
+		"icon": "icons/twitter_archive.svg",
+		"background_color": "#000000"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

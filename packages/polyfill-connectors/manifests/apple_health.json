@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
 	"version": "0.1.0",
 	"display_name": "Apple Health",
+	"brand": {
+		"icon": "icons/apple_health.svg",
+		"background_color": "#FF2D55"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

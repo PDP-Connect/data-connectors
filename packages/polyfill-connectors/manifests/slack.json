@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
 	"version": "0.6.0",
 	"display_name": "Slack",
+	"brand": {
+		"icon": "icons/slack.svg",
+		"background_color": "#4A154B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

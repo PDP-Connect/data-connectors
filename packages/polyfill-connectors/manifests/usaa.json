@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
 	"version": "0.1.0",
 	"display_name": "USAA",
+	"brand": {
+		"icon": "icons/usaa.svg",
+		"background_color": "#003057"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

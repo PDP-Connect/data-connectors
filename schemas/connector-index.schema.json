@@ -7,7 +7,8 @@
     "indexVersion",
     "sourceRepo",
     "generatedAt",
-    "connectors"
+    "connectors",
+    "brandIcons"
   ],
   "properties": {
     "indexVersion": {
@@ -39,9 +40,35 @@
           "$ref": "#/$defs/indexEntry"
         }
       }
+    },
+    "brandIcons": {
+      "type": "object",
+      "description": "Resolved brand assets for the shipped polyfill connector manifests, keyed by connector_id.",
+      "additionalProperties": {
+        "$ref": "#/$defs/brandIcon"
+      }
     }
   },
   "$defs": {
+    "brandIcon": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "darkUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "backgroundColor": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        }
+      }
+    },
     "sourceFiles": {
       "type": "object",
       "required": [

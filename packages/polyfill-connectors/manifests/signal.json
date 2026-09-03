@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
 	"version": "0.1.0",
 	"display_name": "Signal Desktop",
+	"brand": {
+		"icon": "icons/signal.svg",
+		"background_color": "#3A76F0"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

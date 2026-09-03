@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
 	"version": "0.1.0",
 	"display_name": "Loom",
+	"brand": {
+		"icon": "icons/loom.svg",
+		"background_color": "#625DF5"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

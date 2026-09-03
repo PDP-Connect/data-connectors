@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
 	"version": "0.1.0",
 	"display_name": "Google Contacts",
+	"brand": {
+		"icon": "icons/google_contacts.svg",
+		"background_color": "#34A853"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

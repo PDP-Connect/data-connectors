@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple_contacts",
 	"version": "0.1.0",
 	"display_name": "Apple Contacts",
+	"brand": {
+		"icon": "icons/apple_contacts.svg",
+		"background_color": "#8E8E93"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
 	"version": "0.1.0",
 	"display_name": "Uber",
+	"brand": {
+		"icon": "icons/uber.svg",
+		"background_color": "#000000"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

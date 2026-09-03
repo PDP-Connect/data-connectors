@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
 	"version": "0.1.0",
 	"display_name": "Chase",
+	"brand": {
+		"icon": "icons/chase.svg",
+		"background_color": "#117ACA"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

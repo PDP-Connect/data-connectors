@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
 	"version": "0.1.0",
 	"display_name": "DoorDash",
+	"brand": {
+		"icon": "icons/doordash.svg",
+		"background_color": "#FF3008"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

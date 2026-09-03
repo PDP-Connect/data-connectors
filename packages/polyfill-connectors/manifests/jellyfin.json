@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
 	"version": "0.1.0",
 	"display_name": "Jellyfin",
+	"brand": {
+		"icon": "icons/jellyfin.svg",
+		"background_color": "#00A4DC"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

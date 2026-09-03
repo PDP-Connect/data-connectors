@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
 	"version": "0.1.0",
 	"display_name": "ChatGPT",
+	"brand": {
+		"icon": "icons/chatgpt.svg",
+		"background_color": "#10A37F"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

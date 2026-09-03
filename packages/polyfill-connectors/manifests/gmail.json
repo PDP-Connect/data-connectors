@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
 	"version": "0.2.0",
 	"display_name": "Gmail",
+	"brand": {
+		"icon": "icons/gmail.svg",
+		"background_color": "#EA4335"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
 	"version": "0.1.0",
 	"display_name": "Google Takeout",
+	"brand": {
+		"icon": "icons/google_takeout.svg",
+		"background_color": "#FBBC05"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -23,7 +23,7 @@
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
     "connector-index:check": "node ./scripts/generate-connector-index.mjs --check",
-    "connector-index:test": "node --test ./scripts/connector-artifact-contract.test.mjs ./scripts/generate-connector-index.test.mjs",
+    "connector-index:test": "node --test ./schemas/manifest.schema.test.mjs ./scripts/brand-icon-fleet.test.mjs ./scripts/connector-artifact-contract.test.mjs ./scripts/generate-connector-index.test.mjs",
     "github-pdpp:build": "node ./scripts/build-github-pdpp-artifact.mjs",
     "pdpp:authoring:check": "node ./scripts/check-pdpp-authoring-docs.mjs && node --test ./scripts/create-connector.test.mjs",
     "github-pdpp:test": "node --test ./test/github-pdpp/github-pdpp.test.mjs",

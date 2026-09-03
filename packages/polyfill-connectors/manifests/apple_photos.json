@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
 	"version": "0.1.0",
 	"display_name": "Apple Photos",
+	"brand": {
+		"icon": "icons/apple_photos.svg",
+		"background_color": "#FA633E"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"filesystem": {

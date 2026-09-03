@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
 	"version": "0.1.0",
 	"display_name": "Spotify",
+	"brand": {
+		"icon": "icons/spotify.svg",
+		"background_color": "#1ED760"
+	},
 	"setup": {
 		"modality": "static_secret",
 		"credential_capture": {

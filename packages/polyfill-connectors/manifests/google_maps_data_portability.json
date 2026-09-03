@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
 	"version": "0.1.0",
 	"display_name": "Google Maps Data Portability",
+	"brand": {
+		"icon": "icons/google_maps_data_portability.svg",
+		"background_color": "#4285F4"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
 	"version": "0.2.0",
 	"display_name": "Venmo",
+	"brand": {
+		"icon": "icons/venmo.svg",
+		"background_color": "#3D95CE"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

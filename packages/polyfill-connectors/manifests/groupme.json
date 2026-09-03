@@ -5,6 +5,10 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
 	"version": "0.1.0",
 	"display_name": "GroupMe",
+	"brand": {
+		"icon": "icons/groupme.svg",
+		"background_color": "#00AFF0"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
