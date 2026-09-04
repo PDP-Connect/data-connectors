@@ -56,6 +56,13 @@ export type {
  * snapshot drift check. Per the Move A execution plan §3b, Signal is
  * deferred to a later, separately-gated PR once data-connect support
  * lands — not dropped, just sequenced after this catch-up.
+ *
+ * Because this registry is what makes a local collector reachable at run
+ * time, `manifests/signal.json` correspondingly does not claim
+ * `capabilities.proven.local_collector`. The PR that adds Signal here adds
+ * that claim back in the same change;
+ * `src/proven-local-collector-manifest-honesty.test.ts` pins the pair
+ * together in both directions so neither side can move alone.
  */
 export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 	Object.freeze([
