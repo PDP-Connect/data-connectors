@@ -10,8 +10,9 @@
  * This is textual, not graph-based, by design. Verified directly against
  * this package's own `src/orchestrator.ts`: `await
  * import(moduleSpecifier(REFERENCE_IMPL_DIR, "server/index.ts"))` — a
- * computed specifier — produces NO edge at all in dependency-cruiser's
- * output (not even an unresolved one; it is simply absent). A selector that
+ * computed specifier — produces NO edge at all in the import graph (not
+ * even an unresolved one; it is simply absent, because no static analysis
+ * can evaluate the call that builds it). A selector that
  * only trusted the graph would treat orchestrator.ts as a leaf with no
  * dependents-of-dynamic-import relationship, which is exactly backwards: it
  * is a file whose true reach the graph cannot see. Grepping call sites is

@@ -3,12 +3,12 @@
 
 /**
  * Proves the acceptance criteria for the related-test selector directly
- * against real fixture package trees and a real dependency-cruiser cruise —
- * not mocked graphs — because the entire point of this selector is that a
- * mocked graph cannot demonstrate what a REAL static-graph tool actually
- * sees (or fails to see). Each fixture tree under
- * `src/test-fixtures/related-tests/` is a minimal, self-contained package
- * shape built to exercise exactly one acceptance scenario.
+ * against real fixture package trees and a real graph build — not mocked
+ * graphs — because the entire point of this selector is that a mocked graph
+ * cannot demonstrate what a REAL import scan actually sees (or fails to
+ * see). Each fixture tree under `src/test-fixtures/related-tests/` is a
+ * minimal, self-contained package shape built to exercise exactly one
+ * acceptance scenario.
  */
 
 import assert from "node:assert/strict";
@@ -24,6 +24,7 @@ import {
 import {
 	assertGraphIsTrustworthy,
 	buildDependencyGraph,
+	scanImports,
 	UntrustworthyGraphError,
 } from "./graph.ts";
 import { FULL_SUITE, selectRelatedTests } from "./select.ts";
@@ -194,7 +195,7 @@ describe("selectRelatedTests: a file containing a dynamic import forces the full
 });
 
 describe("selectRelatedTests: unknown/unparseable dependency shapes force the full suite", () => {
-	test("a changed .ts file absent from the dependency graph (e.g. a syntax error dependency-cruiser could not parse) forces FULL_SUITE", () => {
+	test("a changed .ts file absent from the dependency graph (e.g. a source the scan could not read) forces FULL_SUITE", () => {
 		const packageRoot = mkdtempSync(
 			join(tmpdir(), "related-tests-unparseable-"),
 		);
@@ -323,17 +324,108 @@ describe("selectRelatedTests: deletions and renames force the full suite", () =>
 	});
 });
 
+describe("scanImports: the token scan reads real specifiers and nothing else", () => {
+	test("reads every static import/export form, and only the specifier", () => {
+		const scanned = scanImports(
+			[
+				'import { a } from "./alpha.ts";',
+				'import type { T } from "./types.ts";',
+				'export { b } from "./beta.ts";',
+				'export * from "./gamma.ts";',
+				'import "./side-effect.ts";',
+				'import def from "some-package";',
+				'const notAnImport = "./just-a-string.ts";',
+			].join("\n"),
+		);
+
+		assert.deepEqual(
+			scanned?.map((entry) => entry.specifier),
+			[
+				"./alpha.ts",
+				"./types.ts",
+				"./beta.ts",
+				"./gamma.ts",
+				"./side-effect.ts",
+				"some-package",
+			],
+			"a bare string literal in value position must never be read as a specifier",
+		);
+	});
+
+	test("only import()/require() calls produce a dynamic edge, not every one-string call", () => {
+		// The concrete false positive this pins: `new URL("../../x.json",
+		// import.meta.url)` in connectors/github/setup-scopes.test.ts resolves to
+		// a real file, so treating any `("...")` as a module load fabricated an
+		// edge that made an unrelated test look related to parsers.ts.
+		const scanned = scanImports(
+			[
+				'const dynamic = await import("./dyn.ts");',
+				'const required = require("./req.ts");',
+				'const url = new URL("../../manifests/github.json", import.meta.url);',
+				'const read = readFileSync("./data.json");',
+			].join("\n"),
+		);
+
+		assert.deepEqual(
+			scanned?.filter((entry) => entry.dynamic).map((e) => e.specifier),
+			["./dyn.ts", "./req.ts"],
+		);
+		assert.equal(
+			scanned?.some((entry) => entry.specifier.endsWith("github.json")),
+			false,
+			"new URL(...) must not be read as a module load",
+		);
+	});
+
+	test("a regex literal containing '/' and '@' does not derail the scan", () => {
+		// Verified against src/scrub-defaults.ts: without reScanSlashToken the
+		// scanner wedges inside this pattern and silently loses later imports.
+		const scanned = scanImports(
+			[
+				'import { first } from "./first.ts";',
+				"const email = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g;",
+				'import { second } from "./second.ts";',
+			].join("\n"),
+		);
+
+		assert.deepEqual(
+			scanned?.map((entry) => entry.specifier),
+			["./first.ts", "./second.ts"],
+		);
+	});
+
+	test("a template literal containing '#' does not derail the scan", () => {
+		// Verified against bin/reconcile-manifests.ts and
+		// connectors/amazon/parsers.test.ts: without reScanTemplateToken the
+		// scanner wedges on the '#' and loses every later import.
+		const scanned = scanImports(
+			[
+				'import { first } from "./first.ts";',
+				"const heading = `# ${name} — manifest`;",
+				'const html = `<span class="a-text-caps">Order #</span>`;',
+				'import { second } from "./second.ts";',
+			].join("\n"),
+		);
+
+		assert.deepEqual(
+			scanned?.map((entry) => entry.specifier),
+			["./first.ts", "./second.ts"],
+		);
+	});
+});
+
 describe("buildDependencyGraph: fails closed when the TypeScript resolution is untrustworthy", () => {
 	test("assertGraphIsTrustworthy rejects a graph whose environment reports .ts as unavailable, rather than returning a truncated graph silently", () => {
-		// This directly encodes the confirmed real-world failure: dependency-cruiser
-		// 18.2.0 silently drops from 751 modules to 5 when the only resolvable
-		// `typescript` package is 7.0.2 (its supported range is >=2.0.0 <7.0.0),
-		// with NO thrown error and NO stderr output — the only signal is
-		// result.summary.environment.extensionsFound[".ts"].available === false.
-		// buildDependencyGraph must convert that signal into a thrown error.
-		// The trustworthy path itself is exercised for real by every other
-		// describe block above, which all run a real cruise() against a real
-		// fixture tree with a working typescript resolvable.
+		// The graph must fail closed rather than return a silently truncated
+		// module set, because under-selection is invisible: the suite goes
+		// green having skipped the tests that mattered. The historical case
+		// was dependency-cruiser 18.2.0 dropping from 751 modules to 5, with
+		// no thrown error and no stderr, whenever the only resolvable
+		// `typescript` was outside its supported range. That dependency is
+		// gone, but the fail-closed contract it forced is kept: an empty scan
+		// of a non-empty package still throws. The trustworthy path is
+		// exercised for real by every other describe block above, each of
+		// which builds a real graph from a real fixture tree.
 		assert.throws(
 			() =>
 				assertGraphIsTrustworthy({

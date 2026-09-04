@@ -4,8 +4,8 @@
 /**
  * Copies a checked-in minimal package-tree fixture into a real temp
  * directory and stamps a real tsconfig.json next to it, so
- * `buildDependencyGraph` can run an unmodified, real `cruise()` call
- * against it — no graph mocking anywhere in this test suite.
+ * `buildDependencyGraph` can run an unmodified, real import scan against
+ * it — no graph mocking anywhere in this test suite.
  *
  * Checked-in fixture "test" files are stored as `*.test.ts.fixture`, not
  * `*.test.ts`: this repo's global test-accounting inventory
@@ -14,7 +14,7 @@
  * exception for a file that only exists to be copied elsewhere as fixture
  * data and is never itself executed. Restoring the real `.test.ts` name only
  * at copy time keeps the git-tracked template outside that scan while the
- * ephemeral temp-dir copy — which is what dependency-cruiser and node:test
+ * ephemeral temp-dir copy — which is what the import scan and node:test
  * actually see — has the exact real name the selector's logic depends on.
  */
 
