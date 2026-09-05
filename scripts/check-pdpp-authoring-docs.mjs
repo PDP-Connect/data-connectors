@@ -5,7 +5,7 @@
 
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,18 +16,52 @@ const rootAuthoringPath = "AUTHORING.md";
 const githubAuthoringPath = "connectors/github-pdpp/AUTHORING.md";
 const legacySkillPath = "skills/pdp-connect/SKILL.md";
 const legacyCreatePath = "skills/pdp-connect/CREATE.md";
+const collectionProfilePath = "docs/spec/collection-profile.md";
+const collectionProfileRuntimePath =
+  "packages/polyfill-connectors/docs/collection-profile-runtime.md";
 const checkedMarkdownPaths = [
   "README.md",
   rootAuthoringPath,
   githubAuthoringPath,
   legacySkillPath,
   legacyCreatePath,
+  collectionProfilePath,
+  collectionProfileRuntimePath,
 ];
 const README = read("README.md");
 const rootAuthoring = read(rootAuthoringPath);
 const githubAuthoring = read(githubAuthoringPath);
 const legacySkill = read(legacySkillPath);
 const legacyCreate = read(legacyCreatePath);
+const collectionProfile = read(collectionProfilePath);
+const standardBindings = [
+  "browser",
+  "desktop_session",
+  "filesystem",
+  "interactive",
+  "network",
+];
+const coverageStrategies = [
+  "checkpoint_window",
+  "full_inventory",
+  "parent_detail_accounting",
+  "snapshot_import_receipt",
+  "singleton_presence",
+];
+const streamSemantics = ["append_only", "mutable_state"];
+const knownLegacySemantics = [
+  "github.user_stats=append",
+  "slack.channel_stats=append",
+  "usaa.account_stats=append",
+  "usaa.credit_card_billing_stats=append",
+  "ynab.account_stats=append",
+];
+const polyfillManifestPaths = readdirSync(
+  join(root, "packages/polyfill-connectors/manifests"),
+)
+  .filter((name) => name.endsWith(".json"))
+  .map((name) => `packages/polyfill-connectors/manifests/${name}`);
+const polyfillManifests = polyfillManifestPaths.map(readJson);
 const githubManifest = readJson(
   "connectors/github-pdpp/collection-profile.json",
 );
@@ -91,6 +125,10 @@ assert.match(
   /DataConnect v0\.7\.54.*includes both PDPP profiles/,
 );
 assert.match(rootAuthoring, /This repository is the single home of PDPP connector content/);
+assert.match(
+  rootAuthoring,
+  /\[PDPP Collection Profile\]\(docs\/spec\/collection-profile\.md\)/,
+);
 assert.match(rootAuthoring, /Add an `artifact\.json` descriptor/);
 assert.match(rootAuthoring, /scripts\/build-pdpp-artifact\.mjs/);
 assert.match(rootAuthoring, /requires both `network` and `browser`/);
@@ -145,6 +183,85 @@ assert.equal(
   "pdpp-collection-profile",
 );
 assert.equal(index.connectors["github-pdpp"][0].releaseId, "unpublished");
+
+for (const binding of standardBindings) {
+  assert.match(
+    collectionProfile,
+    new RegExp("\\| `" + binding + "` \\|"),
+    `Collection Profile must define the ${binding} binding`,
+  );
+}
+for (const legacyBinding of [
+  "browser_automation",
+  "browser_profile",
+  "loopback_listen",
+]) {
+  assert.doesNotMatch(
+    collectionProfile,
+    new RegExp(`\\b${legacyBinding}\\b`),
+    `Collection Profile must not publish the rejected ${legacyBinding} binding`,
+  );
+}
+for (const strategy of coverageStrategies) {
+  assert.match(
+    collectionProfile,
+    new RegExp("\\| `" + strategy + "` \\|"),
+    `Collection Profile must define the ${strategy} coverage strategy`,
+  );
+}
+assert.match(
+  collectionProfile,
+  /`DONE\.status` has two values:\s+`succeeded` and `failed`/,
+);
+assert.doesNotMatch(
+  collectionProfile,
+  /`DONE\.status`[^\n]*(?:`cancelled`|`abandoned`)/,
+);
+assert.match(
+  collectionProfile,
+  /The response status is `success`, `cancelled`, or `timeout`/,
+);
+assert.match(
+  collectionProfile,
+  /returns a\s+`timeout` response when the interaction times out/,
+);
+for (const startField of ["run_id", "bindings", "fields"]) {
+  assert.match(
+    collectionProfile,
+    new RegExp("`" + startField + "`"),
+    `Collection Profile must define START.${startField}`,
+  );
+}
+
+assert.ok(polyfillManifests.length > 0, "polyfill manifests must be present");
+const observedLegacySemantics = [];
+for (const manifest of polyfillManifests) {
+  assert.equal(manifest.protocol_version, "0.1.0");
+  assert.match(manifest.connector_key, /^[a-z0-9][a-z0-9._-]*$/);
+  if (manifest.protocol_capabilities !== undefined) {
+    assert.ok(Array.isArray(manifest.protocol_capabilities));
+  }
+  for (const binding of Object.keys(
+    manifest.runtime_requirements?.bindings ?? {},
+  )) {
+    assert.ok(
+      standardBindings.includes(binding),
+      `${manifest.connector_key} uses non-standard binding ${binding}`,
+    );
+  }
+  for (const stream of manifest.streams) {
+    if (!streamSemantics.includes(stream.semantics)) {
+      observedLegacySemantics.push(
+        `${manifest.connector_key}.${stream.name}=${stream.semantics}`,
+      );
+    }
+    assert.ok(
+      coverageStrategies.includes(stream.coverage_strategy),
+      `${manifest.connector_key}.${stream.name} uses unknown coverage_strategy`,
+    );
+  }
+}
+assert.deepEqual(observedLegacySemantics.sort(), knownLegacySemantics.sort());
 
 const chatgptPaths = [
   "connectors/chatgpt-pdpp/artifact.json",
@@ -203,5 +320,5 @@ for (const path of [
 }
 
 console.log(
-  "PDPP authoring routes, links, fragments, bindings, and publication status are consistent.",
+  "PDPP authoring links, profile vocabularies, and known manifest exceptions are consistent.",
 );
