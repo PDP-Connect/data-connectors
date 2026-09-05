@@ -361,6 +361,7 @@
 		"fix": "ultracite fix",
 		"postinstall": "node ./scripts/install-patchright-browser.mjs",
 		"test": "node scripts/run-tests.mjs",
+		"test:related": "node --import tsx scripts/related-tests/run.ts",
 		"typecheck": "tsc --noEmit",
 		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",

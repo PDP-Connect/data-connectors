@@ -5492,7 +5492,7 @@
 						"rationale": "Gmail uses durable IMAP credentials and tolerates frequent background polling."
 					},
 					"public_listing": {
-						"tier": "supported"
+						"tier": "preview"
 					}
 				},
 				"streams": [
@@ -7729,7 +7729,7 @@
 						"rationale": "GroupMe API rate limits are undocumented; conservative pacing (10s+ between requests) keeps well below observed abuse thresholds. Static access token is reused across runs; no refresh authorization needed."
 					},
 					"public_listing": {
-						"tier": "preview"
+						"tier": "development"
 					}
 				},
 				"streams": [
@@ -8191,7 +8191,7 @@
 						"rationale": "H-E-B is fronted by Imperva Incapsula and supports passkeys plus verification codes, so first login is owner-present; the session then persists in the browser profile and scheduled refresh reuses it. Parsers are verified against real logged-in heb.com DOM (order list + order detail). assisted_after_owner_auth:true means a background run may ask the owner for bounded help when a bot challenge appears."
 					},
 					"public_listing": {
-						"tier": "supported"
+						"tier": "preview"
 					}
 				},
 				"streams": [
@@ -14318,7 +14318,7 @@
 						"rationale": "USAA requires interactive login, may request a one-time code, and uses short sessions; refresh manually so the owner is present."
 					},
 					"public_listing": {
-						"tier": "supported"
+						"tier": "preview"
 					}
 				},
 				"streams": [

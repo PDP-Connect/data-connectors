@@ -38,7 +38,6 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		codex: { testFile: "connectors/codex/integration.test.ts" },
 		github: { testFile: "connectors/github/parsers.test.ts" },
 		gmail: { testFile: "connectors/gmail/integration.test.ts" },
-		groupme: { testFile: "connectors/groupme/collection.test.ts" },
 		heb: { testFile: "connectors/heb/index.test.ts" },
 		google_maps: { testFile: "connectors/google_maps/parsers.test.ts" },
 		jellyfin: { testFile: "connectors/jellyfin/protocol-subprocess.test.ts" },
@@ -89,6 +88,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 		testFile: "connectors/google_messages/integration.test.ts",
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
+	groupme: { testFile: "connectors/groupme/collection.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
