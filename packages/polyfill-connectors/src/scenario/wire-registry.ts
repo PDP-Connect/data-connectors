@@ -2,19 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Single registry over the installed protocol plus the explicitly recognized
- * forward-compatible message kind (see ScenarioMessageType below).
+ * Single registry over `EmittedMessage["type"]` (connector-runtime-protocol.ts)
+ * — the complete, closed set of message kinds the wire protocol declares.
  * Repair wave 6 (P1-2): built once here so `bin/scenario-verify.ts`'s
  * subprocess stdout accumulator and `bin/scenario-record.ts`'s subprocess
  * stdout accumulator both reject an unrecognized `type` the SAME way, instead
  * of each re-deriving (or, as before this wave, never checking) the known-kind
  * set independently. `KNOWN_MESSAGE_TYPES` is declared `satisfies
- * Record<ScenarioMessageType, true>` — exactly like verify.ts's
+ * Record<EmittedMessage["type"], true>` — exactly like verify.ts's
  * `TRACE_POLICY` — so this file BREAKS COMPILATION the moment
  * connector-runtime-protocol.ts's `EmittedMessage` union gains a member this
  * registry doesn't account for. `isKnownMessageType` is the single predicate
  * both CLIs call; `UnknownMessageTypeError` is the single named error both
- * CLIs throw, so "the subprocess wrote an unrecognized message" reads identically whether it happened while recording or while
+ * CLIs throw, so "the subprocess wrote a message this protocol doesn't
+ * declare" reads identically whether it happened while recording or while
  * verifying.
  */
 
@@ -24,15 +25,7 @@ import type {
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 
 /**
- * The installed protocol is 0.0.1. Preserve the source oracle's recognition
- * of 0.0.2's STREAM_EVIDENCE without claiming to validate its payload:
- * TRACE_POLICY always withholds its evidence claim. Keeping the installed
- * union here still makes every future installed kind require a disposition.
- */
-export type ScenarioMessageType = EmittedMessage["type"] | "STREAM_EVIDENCE";
-
-/**
- * Every installed and explicitly forward-compatible kind — exhaustive-by-construction
+ * Every `type` literal `EmittedMessage` declares — exhaustive-by-construction
  * via the `satisfies` clause below (see this module's doc comment). Values
  * are `true`; only the key set matters.
  */
@@ -51,13 +44,14 @@ export const KNOWN_MESSAGE_TYPES = {
 	DONE: true,
 	INTERACTION: true,
 	STREAM_EVIDENCE: true,
-} satisfies Record<ScenarioMessageType, true>;
+} satisfies Record<EmittedMessage["type"], true>;
 
 /**
  * Thrown by both `bin/scenario-verify.ts`'s `StdoutProtocolAccumulator` and
  * `bin/scenario-record.ts`'s subprocess line handler when a parsed stdout
  * JSON object's `type` is not one of `KNOWN_MESSAGE_TYPES` — a connector (or
- * a bug in a harness-adjacent tool) emitting a message this scenario oracle does not recognize. Distinct from a non-JSON line (already handled by each
+ * a bug in a harness-adjacent tool) emitting a message this protocol has
+ * never declared. Distinct from a non-JSON line (already handled by each
  * caller's own "protocol-corrupt stdout" path) — this is well-formed JSON
  * with a `type` field that simply names nothing this wire protocol knows.
  */
@@ -66,7 +60,7 @@ export class UnknownMessageTypeError extends Error {
 
 	constructor(rawType: unknown) {
 		super(
-			`unrecognized protocol message type ${JSON.stringify(rawType)} — not one of the ${String(Object.keys(KNOWN_MESSAGE_TYPES).length)} kinds the scenario oracle recognizes`,
+			`unrecognized protocol message type ${JSON.stringify(rawType)} — not one of the ${String(Object.keys(KNOWN_MESSAGE_TYPES).length)} kinds EmittedMessage declares`,
 		);
 		this.name = "UnknownMessageTypeError";
 		this.rawType = rawType;
@@ -74,7 +68,9 @@ export class UnknownMessageTypeError extends Error {
 }
 
 /** True when `type` is one of `KNOWN_MESSAGE_TYPES`'s keys. */
-export function isKnownMessageType(type: unknown): type is ScenarioMessageType {
+export function isKnownMessageType(
+	type: unknown,
+): type is EmittedMessage["type"] {
 	return typeof type === "string" && Object.hasOwn(KNOWN_MESSAGE_TYPES, type);
 }
 

@@ -67,6 +67,7 @@
  */
 
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import type { EmittedMessage } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type {
 	ConnectorScenario,
@@ -76,12 +77,11 @@ import type {
 	TraceValueDigest,
 } from "./format.ts";
 import { createReplayFetch, type ReplayFetch } from "./replay.ts";
-import type { ScenarioMessageType } from "./wire-registry.ts";
 
 /**
  * Repair wave 4 (P1-2) — machine-enforced trace exhaustiveness. Every
  * `EmittedMessage["type"]` gets an explicit, named disposition here, so this
- * table (and the `satisfies Record<ScenarioMessageType, TraceDisposition>`
+ * table (and the `satisfies Record<EmittedMessage["type"], TraceDisposition>`
  * clause on `TRACE_POLICY` below) BREAKS COMPILATION the moment
  * connector-runtime-protocol.ts's `EmittedMessage` union gains a new member
  * this table doesn't account for. This replaces the previous
@@ -142,7 +142,7 @@ export const TRACE_POLICY = {
 	ASSISTANCE: "unsupported_claim_withheld",
 	ASSISTANCE_STATUS: "unsupported_claim_withheld",
 	STREAM_EVIDENCE: "unsupported_claim_withheld",
-} satisfies Record<ScenarioMessageType, TraceDisposition>;
+} satisfies Record<EmittedMessage["type"], TraceDisposition>;
 
 /** The subset of `TRACE_POLICY` keys dispositioned `"tracked"` — kept in
  *  sync with `TRACE_NORMALIZERS`' key set below by construction (both are
