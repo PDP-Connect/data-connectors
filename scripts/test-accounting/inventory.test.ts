@@ -66,8 +66,6 @@ const CANNOT_COMBINE_ALL_PATTERN = /cannot combine all/;
 const UNEXPLAINED_SKIP_PATTERN = /unexplained skip/;
 const NO_STRUCTURED_NODE_EVENTS_PATTERN = /no structured node events/;
 const OMITTED_A_SKIP_REASON_PATTERN = /omitted a skip reason/;
-const TEST_SCRIPT_NAME_PATTERN = /^test(?::|$)/;
-const AUTHORITY_OR_ADAPTER_PATTERN = /authority|adapter/;
 const FIXTURE_ENVIRONMENT_NAMES = [
 	"FIXTURE_PARENT_TOKEN",
 	"FIXTURE_PARENT_ROOT",
@@ -333,7 +331,7 @@ test("fails closed when a suite's entire include list matches no tracked file", 
 });
 test("does not fail closed when one glob in a multi-extension include list matches nothing, as long as the suite itself is not empty", () => {
 	// A multi-extension suite deliberately lists .js/.mjs/.ts variants for the
-	// not-yet-fully-migrated RI test tranche; a glob matching zero files today is expected
+	// not-yet-fully-migrated fixture files; a glob matching zero files today is expected
 	// future-proofing, not a defect, as long as the suite as a whole still selects files.
 	assert.doesNotThrow(() =>
 		checkInventory(
@@ -1099,6 +1097,7 @@ test("reviewed default profile skip baseline is explicit (host calibration pendi
 			"local USAA raw fixture directory not present": 1,
 			"requires --experimental-test-module-mocks": 1,
 			"run with --expose-gc for a reliable memory-growth comparison": 1,
+			"packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
 		},
 	);
 });
