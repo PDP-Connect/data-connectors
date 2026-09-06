@@ -94,6 +94,25 @@ test("F7-1 FIRST: replacing exact B tabs with spaces refuses before mutation", a
   }
 });
 
+for (const operator of GROUPME_OPERATORS) {
+  test(`applyOperator rejects whitespace-only preimage drift and accepts exact bytes: ${operator.id}`, async () => {
+    const content = await readRealGroupMeIndex();
+    const spacedPreimage = operator.preimage.replaceAll("\t", "  ");
+    assert.notEqual(spacedPreimage, operator.preimage);
+    assert.ok(!content.includes(spacedPreimage));
+
+    // Keep the real target and postimage transform unchanged: a normalizing
+    // outer guard would accept this stale declaration and apply the mutation.
+    assert.throws(
+      () => applyOperator({ ...operator, preimage: spacedPreimage }, content),
+      PreimageMismatchError
+    );
+    const mutated = applyOperator(operator, content);
+    assert.notEqual(mutated, content);
+    assert.equal(mutated, operator.applyPostimage(content));
+  });
+}
+
 test("applyOperator rejects duplicate exact preimages", () => {
   for (const operator of GROUPME_OPERATORS) {
     assert.throws(() => applyOperator(operator, operator.preimage + "\n" + operator.preimage), PreimageMismatchError);
