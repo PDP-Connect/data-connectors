@@ -89,7 +89,7 @@ function canBindMountOverAFile(): boolean {
 const bindMountCapable = unshareUsable && canBindMountOverAFile();
 
 test("a host that denies `unshare` but ships a working bwrap still reports isolation AVAILABLE", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const cap = isNamespaceIsolationAvailable();
 	assert.equal(
@@ -106,7 +106,7 @@ test("a host that denies `unshare` but ships a working bwrap still reports isola
 });
 
 test("an isolated child has NO outbound network — the property, not the mechanism", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, async () => {
 	const cap = isNamespaceIsolationAvailable();
 	assert.equal(cap.available, true);
@@ -160,7 +160,9 @@ test("an isolated child has NO outbound network — the property, not the mechan
 // via `withShimmedTrustedBinary` (defined below — a hoisted function
 // declaration, callable here despite the later textual position).
 test("[bwrap] the fixed probeBwrap() invokes bwrap with the SAME production argv shape bwrapArgvForFilesystemClosure builds — not a bare --dev-bind / / check", {
-	skip: !(bwrapUsable && bindMountCapable),
+	skip: !(bwrapUsable && bindMountCapable)
+		? "requires usable bwrap and unshare bind mounts"
+		: false,
 }, async () => {
 	const logDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-probe-argv-log-"));
 	const logPath = join(logDir, "invocations.log");
@@ -283,7 +285,7 @@ function bwrapShimAlwaysUnavailable(_realBwrapPath: string): string {
 }
 
 test("probe reports UNAVAILABLE (not available-then-crash) when unshare's PID-ns procfs mount is refused, with no working bwrap fallback", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	await withShimmedTrustedBinary("unshare", unshareShimRefusingProcMount, () =>
 		withShimmedTrustedBinary("bwrap", bwrapShimAlwaysUnavailable, () => {
@@ -305,7 +307,7 @@ test("probe reports UNAVAILABLE (not available-then-crash) when unshare's PID-ns
 });
 
 test("probe falls back to bwrap when unshare's procfs mount is refused but bwrap genuinely works", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	await withShimmedTrustedBinary("unshare", unshareShimRefusingProcMount, () =>
 		withShimmedTrustedBinary("bwrap", bwrapShimAlwaysAvailable, () => {
@@ -328,7 +330,7 @@ test("probe falls back to bwrap when unshare's procfs mount is refused but bwrap
 });
 
 test("a forced PID-ns procfs-mount refusal inside the real unshare-mechanism prelude fails the spawn closed, never silently proceeds", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	// Complementary to the probe-level tests above: this proves the SECOND,
 	// independent gate — filesystemClosureShellPrelude's own fail-loud check —
@@ -436,7 +438,7 @@ test("a forced PID-ns procfs-mount refusal inside the real unshare-mechanism pre
 // is never invoked by either the probe or a real isolated spawn.
 
 test("resolveTrustedLauncherPath: resolves the real trusted-location binary, ignoring a fake earlier in $PATH", {
-	skip: process.platform !== "linux",
+	skip: process.platform !== "linux" ? "requires Linux" : false,
 }, () => {
 	const fakeBinDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-launcher-path-"),
@@ -480,7 +482,7 @@ test("resolveTrustedLauncherPath: resolves the real trusted-location binary, ign
 });
 
 test("a PATH-prepended fake `unshare` is never selected by the probe or by a real isolated spawn", {
-	skip: !unshareUsable,
+	skip: !unshareUsable ? "requires usable unshare" : false,
 }, async () => {
 	const fakeBinDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-launcher-e2e-"),
@@ -574,7 +576,7 @@ test("a PATH-prepended fake `unshare` is never selected by the probe or by a rea
 // look correct.
 
 test("resolveTrustedLauncherPath('sh'): resolves the real trusted-location shell, ignoring a fake earlier in $PATH", {
-	skip: process.platform !== "linux",
+	skip: process.platform !== "linux" ? "requires Linux" : false,
 }, () => {
 	const fakeBinDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-sh-path-"),
@@ -661,7 +663,7 @@ function functioningFakeExecutionShellScript(markerPath: string): string {
 }
 
 test("a PATH-prepended FUNCTIONING fake `sh` is never invoked by the unshare capability probe", {
-	skip: !unshareUsable,
+	skip: !unshareUsable ? "requires usable unshare" : false,
 }, () => {
 	const fakeBinDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-sh-probe-"),
@@ -694,7 +696,7 @@ test("a PATH-prepended FUNCTIONING fake `sh` is never invoked by the unshare cap
 });
 
 test("a PATH-prepended FUNCTIONING fake `sh` is never invoked by a real isolated unshare spawn — the child stays genuinely network-isolated", {
-	skip: !unshareUsable,
+	skip: !unshareUsable ? "requires usable unshare" : false,
 }, async () => {
 	const fakeBinDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-sh-exec-"),
@@ -753,7 +755,7 @@ test("a PATH-prepended FUNCTIONING fake `sh` is never invoked by a real isolated
 // inside the same `rw` workspace made the exec visible). This test uses that
 // realistic vector, not an unbound scratch dir.
 test("a FUNCTIONING fake `sh` planted inside filesystemBindPath (the one rw path a caller/attacker controls) is never invoked by bwrap's inner sh -c wrapper", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, async () => {
 	const workspace = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-fake-sh-bwrap-workspace-"),
@@ -969,7 +971,7 @@ function mountShimFailingOn(
 }
 
 test("[unshare] forced staging-tmpfs-mount failure — the target command never runs", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1004,7 +1006,7 @@ test("[unshare] forced staging-tmpfs-mount failure — the target command never 
 });
 
 test("[unshare] forced required-bind failure (binding /usr into the staging tree) — the target command never runs", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1044,7 +1046,7 @@ test("[unshare] forced required-bind failure (binding /usr into the staging tree
 });
 
 test("[unshare] forced read-only-remount failure — the target command never runs (P1-1 scenario (b): a preceding bind stays writable and nothing verifies)", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1079,7 +1081,7 @@ test("[unshare] forced read-only-remount failure — the target command never ru
 });
 
 test("[unshare] forced make-rprivate failure — the target command never runs", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1114,7 +1116,7 @@ test("[unshare] forced make-rprivate failure — the target command never runs",
 });
 
 test("[unshare] forced pivot_root failure — the target command never runs (P1-1 scenario (a): the ORIGINAL false-success shape)", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1154,7 +1156,7 @@ test("[unshare] forced pivot_root failure — the target command never runs (P1-
 });
 
 test("[unshare] forced oldroot-unmount failure — the target command never runs (P1-1 scenario (c): the entire host root stays reachable under /oldroot)", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const markerPath = join(
 		tmpdir(),
@@ -1283,7 +1285,7 @@ function runPostPivotVerificationInSandbox(options: {
 }
 
 test("[bwrap sandbox] postPivotVerificationStatements PASSES a genuinely-closed filesystem (canary present, oldroot empty, ro binds actually read-only)", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const { exitCode, stderrText } = runPostPivotVerificationInSandbox({
 		binds: [{ path: "/etc", mode: "ro" }],
@@ -1301,7 +1303,7 @@ test("[bwrap sandbox] postPivotVerificationStatements PASSES a genuinely-closed 
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements establishes its own trusted PATH when called standalone", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const fakeBin = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-standalone-path-fake-bin-"),
@@ -1338,7 +1340,7 @@ test("[bwrap sandbox] postPivotVerificationStatements establishes its own truste
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS when a declared ro bind is actually writable (P1-1 scenario (b))", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const writableDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-writable-ro-probe-"),
@@ -1363,7 +1365,7 @@ test("[bwrap sandbox] postPivotVerificationStatements FAILS when a declared ro b
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS when the root-active canary is missing (P1-1 scenario (a))", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const { exitCode, stderrText } = runPostPivotVerificationInSandbox({
 		binds: [{ path: "/etc", mode: "ro" }],
@@ -1381,7 +1383,7 @@ test("[bwrap sandbox] postPivotVerificationStatements FAILS when the root-active
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS when /oldroot is non-empty (P1-1 scenario (c))", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	const { exitCode, stderrText } = runPostPivotVerificationInSandbox({
 		binds: [{ path: "/etc", mode: "ro" }],
@@ -1399,7 +1401,9 @@ test("[bwrap sandbox] postPivotVerificationStatements FAILS when /oldroot is non
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS when a NESTED submount under a genuinely-read-only ro bind is writable (P1, external review of ab415be6c)", {
-	skip: !(bwrapUsable && bindMountCapable),
+	skip: !(bwrapUsable && bindMountCapable)
+		? "requires usable bwrap and unshare bind mounts"
+		: false,
 }, () => {
 	// Unlike scenario (b) above (a bind whose OWN top mount never went
 	// read-only), this proves the EXTENDED property: the top-level bind IS
@@ -1510,7 +1514,9 @@ test("[bwrap sandbox] postPivotVerificationStatements FAILS when a NESTED submou
 // writable file submount as "confirmed read-only."
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS when a nested submount at a SPACE-containing path is writable — the fixed mountinfo decode finds it", {
-	skip: !(bwrapUsable && bindMountCapable),
+	skip: !(bwrapUsable && bindMountCapable)
+		? "requires usable bwrap and unshare bind mounts"
+		: false,
 }, () => {
 	const roDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-ro-space-parent-"));
 	const nestedSource = mkdtempSync(
@@ -1600,7 +1606,9 @@ test("[bwrap sandbox] postPivotVerificationStatements FAILS when a nested submou
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements detects a writable nested FILE submount without changing its host-backed bytes", {
-	skip: !(bwrapUsable && bindMountCapable),
+	skip: !(bwrapUsable && bindMountCapable)
+		? "requires usable bwrap and unshare bind mounts"
+		: false,
 }, () => {
 	const roDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-ro-file-parent-"));
 	const nestedSourceDir = mkdtempSync(
@@ -1700,7 +1708,9 @@ test("[bwrap sandbox] postPivotVerificationStatements detects a writable nested 
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements PASSES a genuinely read-only FILE submount (negative control — the append-mode probe isn't vacuously always failing)", {
-	skip: !(bwrapUsable && bindMountCapable),
+	skip: !(bwrapUsable && bindMountCapable)
+		? "requires usable bwrap and unshare bind mounts"
+		: false,
 }, () => {
 	const roDir = mkdtempSync(
 		join(tmpdir(), "pdpp-isolation-ro-file-clean-parent-"),
@@ -1799,7 +1809,7 @@ test("[bwrap sandbox] postPivotVerificationStatements PASSES a genuinely read-on
 });
 
 test("[unshare] a genuinely successful filesystem closure passes post-pivot verification and the target command DOES run", {
-	skip: !unshareUsable,
+	skip: !unshareUsable ? "requires usable unshare" : false,
 }, async () => {
 	// Unlike the forced-failure tests above, this positive control needs the
 	// marker write to actually succeed inside the isolated child — so the
@@ -1879,7 +1889,7 @@ function withBothLaunchersLoggingShimmed<T>(
 }
 
 test("spawnWithNetworkIsolation given an already-resolved mechanism does NOT re-probe (no unshare/bwrap probe invocation)", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const logDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-probe-log-"));
 	const logPath = join(logDir, "invocations.log");
@@ -1939,7 +1949,7 @@ test("spawnWithNetworkIsolation given an already-resolved mechanism does NOT re-
 });
 
 test("spawnWithNetworkIsolation given a bare `true` DOES re-probe (documents the boolean fallback path's cost, for contrast)", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, async () => {
 	const logDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-probe-log-"));
 	const logPath = join(logDir, "invocations.log");
@@ -2028,7 +2038,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] an isolated child sees only its own tiny PID-namespace subtree, not the host's full process list`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const hostProcessCount = readFileSync("/proc/stat", "utf8"); // sanity: /proc is readable from here at all
 		assert.ok(hostProcessCount.length > 0);
@@ -2070,7 +2080,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	});
 
 	test(`[${mechanism}] an isolated child cannot read a foreign host PID's /proc/<pid>/cmdline`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		// The foreign target must be a REAL, live host process OUTSIDE the
 		// isolated child's own PID namespace. PID 1 does not work for this: with
@@ -2160,7 +2170,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] an isolated child gets its own SysV IPC namespace, not the host's`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const { stdout, exitCode } = await runIsolatedProbe(
 			mechanism,
@@ -2200,7 +2210,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] an isolated child gets its own UTS namespace, not the host's`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const { stdout, exitCode } = await runIsolatedProbe(
 			mechanism,
@@ -2375,7 +2385,7 @@ function runUnisolatedCurlAgainstForeignSocket(
 for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 	test(`[${mechanism}] a native descendant (curl --unix-socket) cannot dial a foreign pathname UDS outside filesystemBindPath`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const foreignDir = mkdtempSync(join(tmpdir(), "pdpp-isolation-foreign-"));
 		const workspaceDir = mkdtempSync(
@@ -2407,7 +2417,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	});
 
 	test(`[${mechanism}] the isolated child's OWN bridge socket, inside filesystemBindPath, stays reachable`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const workspaceDir = mkdtempSync(
 			join(tmpdir(), "pdpp-isolation-workspace-"),
@@ -2515,7 +2525,9 @@ const REAL_SOCKET_LOCATIONS: Array<{
 
 for (const location of REAL_SOCKET_LOCATIONS) {
 	test(`[positive control] a non-isolated child CAN dial a foreign pathname UDS under ${location.name}`, {
-		skip: !location.usable,
+		skip: !location.usable
+			? `requires writable socket location: ${location.name}`
+			: false,
 	}, async () => {
 		const foreignSocketPath = join(
 			location.dir,
@@ -2544,7 +2556,7 @@ for (const location of REAL_SOCKET_LOCATIONS) {
 		const usable =
 			(mechanism === "bwrap" ? bwrapUsable : unshareUsable) && location.usable;
 		test(`[${mechanism}] a native descendant (curl --unix-socket) cannot dial a foreign pathname UDS under ${location.name}`, {
-			skip: !usable,
+			skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 		}, async () => {
 			const workspaceDir = mkdtempSync(
 				join(tmpdir(), "pdpp-isolation-workspace-"),
@@ -2577,7 +2589,7 @@ for (const location of REAL_SOCKET_LOCATIONS) {
 		});
 
 		test(`[${mechanism}] a foreign pathname UDS under ${location.name} is masked even when filesystemBindPath is NOT passed at all`, {
-			skip: !usable,
+			skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 		}, async () => {
 			const foreignSocketPath = join(
 				location.dir,
@@ -2696,7 +2708,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] an isolated child CANNOT write into REPO_ROOT (connector source is not writable)`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const probeFileName = `.pdpp-repo-root-write-probe-${String(process.pid)}-${String(Date.now())}`;
 		const probePath = join(TEST_REPO_ROOT, probeFileName);
@@ -2733,7 +2745,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	});
 
 	test(`[${mechanism}] an isolated child CANNOT write into node_modules`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const nodeModulesDir = join(TEST_REPO_ROOT, "node_modules");
 		assert.ok(
@@ -2761,7 +2773,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	});
 
 	test(`[${mechanism}] an isolated child CAN still write into filesystemBindPath (the evidence workspace stays writable)`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const workspaceDir = mkdtempSync(
 			join(tmpdir(), "pdpp-isolation-workspace-still-writable-"),
@@ -2821,7 +2833,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 		(mechanism === "bwrap" ? bwrapUsable : unshareUsable) && bindMountCapable;
 
 	test(`[${mechanism}] a nested bind mount under REPO_ROOT (a ro bind) stays read-only inside isolation — not just the parent directory`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		// A real, separate mount point INSIDE REPO_ROOT — a scratch directory
 		// bind-mounted onto ANOTHER scratch directory that itself lives under
@@ -3119,7 +3131,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] a socket planted under REPO_ROOT AFTER the host-side pre-flight scan is still caught by the in-namespace scan — the target never runs`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async (t) => {
 		// Short names (`.pt-<mech>-<pid>/t.sock`, not a descriptive
 		// `.pdpp-socket-toctou-probe-<mechanism>-<pid>/toctou.sock`) — see
@@ -3194,7 +3206,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 }
 
 test("[bwrap] a caller-planted fake find cannot hide a pre-existing socket from the in-namespace scan", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, async (t) => {
 	const nestedDir = join(TEST_REPO_ROOT, `.pf-${String(process.pid)}`);
 	const socketPath = join(nestedDir, "f.sock");
@@ -3299,7 +3311,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] a socket deleted and RECREATED at the same path is still caught (not a stale "seen clean once" verdict)`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async (t) => {
 		// Short names — see `UNIX_SOCKET_PATH_MAX_BYTES`'s doc comment.
 		const nestedDir = join(
@@ -3415,7 +3427,7 @@ for (const mechanism of ["bwrap", "unshare"] as const) {
 	const usable = mechanism === "bwrap" ? bwrapUsable : unshareUsable;
 
 	test(`[${mechanism}] the isolated child's cwd is the caller-requested path, not "/"`, {
-		skip: !usable,
+		skip: !usable ? `requires usable ${mechanism} prerequisites` : false,
 	}, async () => {
 		const requestedCwd = join(
 			TEST_REPO_ROOT,
@@ -3764,7 +3776,7 @@ const EXOTIC_SUBMOUNT_NAMES: readonly { label: string; name: string }[] = [
 
 for (const { label, name } of EXOTIC_SUBMOUNT_NAMES) {
 	test(`[unshare privileged] submount enumerator yields a ${label}-containing mount point as ONE real, existing path`, {
-		skip: !bindMountCapable,
+		skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 	}, () => {
 		const parent = mkdtempSync(join(tmpdir(), "pdpp-submount-exotic-"));
 		let cleanup: (() => void) | undefined;
@@ -3792,7 +3804,7 @@ for (const { label, name } of EXOTIC_SUBMOUNT_NAMES) {
 }
 
 test("[unshare privileged] submount enumerator decodes exactly once — a mount point named with a literal backslash-012 is NOT read as a newline", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, () => {
 	// The two cases are distinct in the RAW mountinfo field (`a\012b` for a
 	// real newline vs `lit\134012eral` for the literal text `\012`) and only
@@ -3828,7 +3840,7 @@ test("[unshare privileged] submount enumerator decodes exactly once — a mount 
 });
 
 test("[unshare privileged] submount enumerator excludes a misleading sibling whose path merely PREFIXES the parent", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, () => {
 	// `<root>/pre-fix` string-prefixes `<root>/pre` but is NOT a descendant of
 	// it. A prefix test without a path separator would wrongly remount/probe a
@@ -3888,7 +3900,7 @@ function writeMountinfoFixture(
 
 for (const kind of ["empty", "malformed", "partial"] as const) {
 	test(`[unshare privileged] submount enumeration BLOCKS on a ${kind} mountinfo instead of reporting no submounts`, {
-		skip: !bindMountCapable,
+		skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 	}, () => {
 		const fixture = writeMountinfoFixture(kind);
 		try {
@@ -3913,7 +3925,7 @@ for (const kind of ["empty", "malformed", "partial"] as const) {
 }
 
 test("[unshare privileged] submount enumeration BLOCKS on an ABSENT mountinfo", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, () => {
 	const { exitCode, stderrText, yielded } = runSubmountEnumerator({
 		mountinfoPath: "/nonexistent/pdpp-mountinfo",
@@ -3936,7 +3948,10 @@ test("submount enumeration BLOCKS on an UNREADABLE mountinfo", {
 	// needs no bind-mount capability. It is skipped as root because root
 	// bypasses the permission bit entirely, which would make the control pass
 	// vacuously rather than prove anything.
-	skip: process.platform !== "linux" || process.getuid?.() === 0,
+	skip:
+		process.platform !== "linux" || process.getuid?.() === 0
+			? "requires Linux nonroot permission checks"
+			: false,
 }, () => {
 	const fixture = writeMountinfoFixture("partial");
 	chmodSync(fixture, 0o000);
@@ -3962,7 +3977,7 @@ test("submount enumeration BLOCKS on an UNREADABLE mountinfo", {
 });
 
 test("[unshare privileged] submount enumeration BLOCKS when the PARSER ITSELF exits nonzero", {
-	skip: !bindMountCapable,
+	skip: !bindMountCapable ? "requires usable unshare bind mounts" : false,
 }, () => {
 	// A fake `awk` first on PATH stands in for any reason the real parser could
 	// fail (OOM, a kernel read error mid-file, a hostile PATH). The pre-fix
@@ -3998,7 +4013,7 @@ test("[unshare privileged] submount enumeration BLOCKS when the PARSER ITSELF ex
 });
 
 test("[bwrap sandbox] postPivotVerificationStatements FAILS CLOSED when submount enumeration cannot parse mountinfo", {
-	skip: !bwrapUsable,
+	skip: !bwrapUsable ? "requires usable bwrap" : false,
 }, () => {
 	// The end-to-end consequence of P1-2 in the verifier: a broken enumeration
 	// must fail the post-pivot check (91), not pass it. Before the fix the
