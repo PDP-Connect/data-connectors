@@ -1072,7 +1072,7 @@ test("generic environment_unset removes declared sentinels and rejects invalid d
 		["renamed-lifecycle/default"],
 	);
 });
-test("reviewed default profile skip baseline is explicit (host calibration pending)", async () => {
+test("reviewed hosted default profile skip baseline is explicit", async () => {
 	const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
 		encoding: "utf8",
 	}).trim();
@@ -1098,6 +1098,14 @@ test("reviewed default profile skip baseline is explicit (host calibration pendi
 			"requires --experimental-test-module-mocks": 1,
 			"run with --expose-gc for a reliable memory-growth comparison": 1,
 			"packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
+			"network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted — either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) — refusing to fall back to a PATH-resolved lookup": 2,
+			"requires usable bwrap": 10,
+			"requires usable bwrap and unshare bind mounts": 5,
+			"requires usable unshare bind mounts": 23,
+			"requires usable unshare": 4,
+			"requires usable bwrap prerequisites": 19,
+			"requires usable unshare prerequisites": 19,
+			"requires writable socket location: an ssh-agent-shaped path under $HOME/.ssh/agent": 1,
 		},
 	);
 });
