@@ -22,3 +22,6 @@ fixtures/*/scrubbed/*/
 *.js
 *.d.ts
 *.d.ts.map
+
+# Scenario captures contain account data and browser session state.
+/runs/
