@@ -418,3 +418,99 @@ test("failed preflight CLI retains one blocked pilot and two not-run operators b
     assert.equal(marker.admitted,false);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+// This miniature repository uses real accounting and the installed SQLite library/native bytes.
+// Its tiny tsx no-op module relies on Node24's native TS loader; its browser path is a fixture,
+// so this checks offline materialization/orchestration, not production Chromium operability.
+async function makePreparedSurvivorFixture(root: string) {
+  const {cp,readFile}=await import("node:fs/promises");
+  const {dirname}=await import("node:path");
+  const {directoryDigest,fileDigest}=await import("./workspace.ts");
+  const repoRoot=resolve(root,"source"),vendor=resolve(repoRoot,"vendor"),staging=resolve(root,"packing");
+  await mkdir(vendor,{recursive:true});
+  async function pack(name:string,write:(path:string)=>Promise<void>){
+    const folder=resolve(staging,name,"package");await mkdir(folder,{recursive:true});await write(folder);
+    execFileSync("tar",["-czf",resolve(vendor,`${name}.tgz`),"-C",dirname(folder),"package"]);
+  }
+  await pack("tsx",async folder=>{
+    await writeFile(resolve(folder,"package.json"),'{"name":"tsx","version":"0.0.0-fixture","type":"module","exports":"./index.js"}');
+    await writeFile(resolve(folder,"index.js"),"// Fixture: Node24 supplies native TS loading.\n");
+  });
+  await pack("playwright",async folder=>{
+    await writeFile(resolve(folder,"package.json"),'{"name":"playwright","version":"0.0.0-fixture","type":"module","exports":"./index.js"}');
+    await writeFile(resolve(folder,"index.js"),"export const chromium={executablePath:()=>process.env.PLAYWRIGHT_BROWSERS_PATH+'/chromium'};\n");
+  });
+  const realSqlite=resolve(import.meta.dirname,"../../packages/polyfill-connectors/node_modules/better-sqlite3");
+  const nativeModule=resolve(realSqlite,"prebuilds/linux-x64.node");
+  await pack("better-sqlite3",async folder=>{
+    await cp(resolve(realSqlite,"lib"),resolve(folder,"lib"),{recursive:true});
+    await mkdir(resolve(folder,"prebuilds"));await cp(nativeModule,resolve(folder,"prebuilds/linux-x64.node"));
+    await writeFile(resolve(folder,"package.json"),'{"name":"better-sqlite3","version":"0.0.0-fixture","main":"lib/index.js"}');
+  });
+  const packageRoot=resolve(repoRoot,"packages/polyfill-connectors");await mkdir(packageRoot,{recursive:true});
+  await writeFile(resolve(repoRoot,"package.json"),'{"name":"groupme-root-fixture","version":"1.0.0","type":"module","dependencies":{"tsx":"file:vendor/tsx.tgz"}}');
+  await writeFile(resolve(packageRoot,"package.json"),'{"name":"groupme-package-fixture","version":"1.0.0","type":"module","dependencies":{"better-sqlite3":"file:../../vendor/better-sqlite3.tgz","playwright":"file:../../vendor/playwright.tgz"}}');
+  await writeFile(resolve(repoRoot,".gitignore"),"node_modules/\n");
+  const cacheRoot=resolve(root,"prepared-cache"),browserRoot=resolve(root,"prepared-browser");
+  await mkdir(cacheRoot);await mkdir(browserRoot);await writeFile(resolve(browserRoot,"chromium"),"fixture browser path; not a real browser");
+  const npm=resolve(dirname(process.execPath),"npm");
+  for(const cwd of [repoRoot,packageRoot])execFileSync(npm,["install","--package-lock-only","--offline","--ignore-scripts","--no-audit","--no-fund"],{cwd,env:{PATH:process.env.PATH,HOME:root,npm_config_cache:cacheRoot,npm_config_userconfig:resolve(root,"npmrc"),npm_config_globalconfig:resolve(root,"global-npmrc")},stdio:"pipe"});
+  for(const name of ["authority","receipt","inventory","node-reporter"]){
+    const path=resolve(repoRoot,`scripts/test-accounting/${name}.ts`);await mkdir(dirname(path),{recursive:true});
+    await cp(resolve(import.meta.dirname,`../test-accounting/${name}.ts`),path);
+  }
+  for(const name of ["groupme-runner","groupme-operators","workspace"]){
+    const path=resolve(repoRoot,`scripts/mutation-falsification/${name}.ts`);await mkdir(dirname(path),{recursive:true});
+    await cp(resolve(import.meta.dirname,`${name}.ts`),path);
+  }
+  const target=resolve(repoRoot,GROUPME_PAGE_CEILING_V1.targetFile);await mkdir(dirname(target),{recursive:true});
+  await writeFile(target,`// Trusted fixture target: mutated loop is deliberately uncalled.\nasync function fixture(){const startAfterId='a';const progressWithSignals=async()=>{};\n${GROUPME_PAGE_CEILING_V1.preimage}\n}); break; }}\n`);
+  const focus=resolve(dirname(target),"incremental-frontier.test.ts");
+  await writeFile(focus,"import test from 'node:test';\nfor(let i=0;i<23;i++)test('focused fixture '+i,()=>{});\n");
+  await writeFile(resolve(dirname(target),"backstop.test.ts"),`import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';test('complete backstop catches the forced focused survivor',()=>assert.equal(readFileSync(new URL('./index.ts',import.meta.url),'utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES'),false));\n`);
+  git(["init","-q"],repoRoot);git(["add","-A"],repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","fixture base"],repoRoot);
+  const base=git(["rev-parse","HEAD"],repoRoot);
+  await writeFile(resolve(repoRoot,"test-accounting.manifest.json"),JSON.stringify({schema:"pdpp.test-accounting/v3",inventory_base_sha:base,suites:[{id:"polyfill-connectors",cwd:".",loader:"node-test",execution:"direct",authority_argument:null,command:["node","--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts"],include:["packages/polyfill-connectors/connectors/groupme/*.test.ts"],profiles:[{id:"default",required:true,skip_reasons:{}}]}],exclusions:[]}));
+  git(["add","-A"],repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","fixture manifest"],repoRoot);
+  return {repoRoot,focus,head:git(["rev-parse","HEAD"],repoRoot),preparation:{cacheRoot,cacheDigest:await directoryDigest(cacheRoot),browserRoot,browserDigest:await directoryDigest(browserRoot),nativeModule,nativeDigest:await fileDigest(nativeModule),rootLockDigest:await fileDigest(resolve(repoRoot,"package-lock.json")),packageLockDigest:await fileDigest(resolve(packageRoot,"package-lock.json"))}};
+}
+
+test("forced focused survivor runs complete mutant authority and rejection stays inconclusive; missing clean-focused proof stops before operators", async () => {
+  const {readFile,readdir}=await import("node:fs/promises");
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy,listQuarantinedWorkspaces}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-survivor-"));
+  try {
+    const fixture=await makePreparedSurvivorFixture(root);
+    const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+    const intentFor=(head:string)=>freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:head,operatorId:null,requestedRisk:"fixture forced survivor",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
+    const result=await runGroupMePilotBatch(policy,intentFor(fixture.head),[GROUPME_PAGE_CEILING_V1.id]);
+    assert.equal(result.cleanExecutionRawCount,1);
+    assert.equal(result.operatorOutcomes.length,1);
+    const outcome=result.operatorOutcomes[0]!;
+    assert.equal(outcome.receipt.axes.focused.status,"ok");
+    assert.equal(outcome.receipt.axes.backstop.status,"failed");
+    assert.equal(outcome.projection.projection,"inconclusive");
+    assert.notEqual(outcome.projection.selectorMiss,true);
+    const authorityArtifact=outcome.receipt.evidenceArtifacts.find(a=>a.relativePath.includes(outcome.attemptId)&&a.relativePath.endsWith('authority-process.json'))!;
+    const authority=JSON.parse(await readFile(resolve(policy.evidenceStorePolicy.evidenceRoot,authorityArtifact.relativePath),"utf8"));
+    assert.notEqual(authority.exitCode,0,"real complete authority rejected the extra backstop assertion");
+    assert.ok(outcome.receipt.evidenceArtifacts.some(a=>a.relativePath.includes('unverified-')&&a.relativePath.endsWith('.receipt.json.json')));
+    assert.ok(outcome.receipt.evidenceArtifacts.some(a=>a.relativePath.endsWith('/clean-focused.json')),"operator binds retained clean-focused bytes");
+    assert.deepEqual(await readdir(policy.workspacePolicy.workspaceRoot),[],"completed clones destroyed only after retained evidence");
+    await writeFile(fixture.focus,"import test from 'node:test';for(let i=0;i<22;i++)test('incomplete focused '+i,()=>{});");
+    git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","incomplete focused fixture"],fixture.repoRoot);
+    const changedHead=git(["rev-parse","HEAD"],fixture.repoRoot);
+    await assert.rejects(()=>runGroupMePilotBatch({...policy,evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"missing-clean-evidence")}},intentFor(changedHead),[GROUPME_PAGE_CEILING_V1.id]),/clean focused check failed/);
+    assert.equal((await listQuarantinedWorkspaces(policy.workspacePolicy.workspaceRoot)).length,1);
+    // A synchronous fixture side effect during the clean authority phase changes only the original
+    // source judge, simulating identity drift between baseline and first operator without a timing race.
+    await writeFile(fixture.focus,"import test from 'node:test';for(let i=0;i<23;i++)test('focused fixture '+i,()=>{});");
+    const backstopPath=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    await writeFile(backstopPath,`import test from 'node:test';import {writeFileSync} from 'node:fs';test('change original source judge after clean focus',()=>writeFileSync(${JSON.stringify(fixture.focus)},'// changed judge during clean authority'));`);
+    git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","judge drift fixture"],fixture.repoRoot);
+    await assert.rejects(()=>runGroupMePilotBatch({...policy,workspacePolicy:{...policy.workspacePolicy,workspaceRoot:resolve(root,"drift-workspaces")},evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"judge-drift-evidence")}},intentFor(git(["rev-parse","HEAD"],fixture.repoRoot)),[GROUPME_PAGE_CEILING_V1.id]),/clean evidence identity or reuse window changed/);
+
+  } finally {await rm(root,{recursive:true,force:true});}
+});
