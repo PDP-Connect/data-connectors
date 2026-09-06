@@ -32,3 +32,6 @@ connectors/*/fixtures/fixture_capture*/
 # (otherwise swallowed by this file's *.log rule) stay committable.
 !connectors/claude_code/fixtures/source-home/**
 !connectors/codex/fixtures/source-home/**
+
+# Retained test and mutation evidence (never package artifacts)
+.mutation-falsification-evidence/
