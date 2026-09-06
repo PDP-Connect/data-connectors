@@ -1,6 +1,6 @@
 # IMPL-263 — implementation and evidence report
 
-Status: **DRAFT / NARROW; implementation delivered, exact-head acceptance incomplete**. This is an implementation record, not a SHIP verdict. Report snapshot: 2026-09-06 14:51 UTC.
+Status: **DRAFT / NARROW; implementation delivered, exact-head acceptance incomplete**. This is an implementation record, not a SHIP verdict. Final evidence update: 2026-09-06 15:07 UTC. Validated source head: `82a88aeffc9416775caa577b134603cd7e00b9b3`. The final commit updates this report only; its new CI and exact-head review state must not be inferred from the validated parent.
 Repaired implementation head: `59be16318d1fb787be21e506861713169569939d`. The final report commit is a descendant; validation snapshots and the signed-history map below remain explicit.
 PR URL: https://github.com/PDP-Connect/data-connectors/pull/82 — draft, base `port/scenario-274`, stacked on #81; retarget to main only after #81 merges and rebaseline/review.
 Recorded full-suite implementation head: `3f9e190360fca045b6823683aa9ed5b4ae18a483`.
@@ -676,13 +676,13 @@ Re-signed contribution mapping (every listed tree unchanged by the signature/tra
 ]
 ```
 
-The signing key verified is2E2DA1F8D3D96241ADBAF15FC872885042DA5EBB. Full per-commit outputs are `identity-audit.json`; history repair output and old messages remain local evidence. Fresh required CI and independent delta alignment are requested for the repaired published head; prior approvals remain snapshot-specific.
+The signing key verified is2E2DA1F8D3D96241ADBAF15FC872885042DA5EBB. Full per-commit outputs are `identity-audit.json`; history repair output and old messages remain local evidence. Required CI, a fresh complete receipt, and independent Codex delta alignment subsequently passed at82a88aeffc9416775caa577b134603cd7e00b9b3, as recorded below. Independent Claude SHIP remains absent; prior approvals remain snapshot-specific.
 
 ## Final open items and limitations
 
 1. Require fresh required CI and a valid clean complete-package receipt on the final published head, then independent Claude red-team SHIP and Codex gpt-6-astra medium alignment at that same head. The owner routes the external Claude reviewer and owns merge. Initial independent Codex REVISE and the repairs are explicitly recorded; no Claude verdict is fabricated.
 2. The full literal §8 plan is not exhaustively demonstrated: prerequisite removals were actual isolated owning-leaf/runtime checks plus clean/mutant npm-path fixtures, not a full production clean/mutant operator batch for every missing byte. Real OS cleanup failure remains represented by injected cleanup fixtures and actual interrupted-clone quarantine, not a forced host filesystem deletion error. Not every redundant policy/validator guard has its own independent reversion. These limits are not mutation scores or upgraded tasks.
-3. The final package-byte-preserving interruption repair and signed/report commits are newer than the last full local before/after comparison. Fresh CI tests the new head; a strict identical-local-environment final-full-head baseline repetition remains an acceptance obligation if the reviewer requires the literal §7/§10 conjunction. No earlier head is silently renamed.
+3. The final package-byte-preserving interruption repair and signed/report commits are newer than the last full local before/after comparison. Fresh CI tests the new head; a strict identical-local-environment final-full-head baseline repetition remains an acceptance obligation under the literal §7/§10 conjunction (this is not a discretionary waiver). No earlier head is silently renamed.
 4. Historical qualified1.6 and unchecked2.6/2.7 remain verbatim. No destination production GroupMe operator-level batch or independent survivor triage ran. A valid ordinary/accounted suite never substitutes for those tasks.
 5. Three optional root artifact profiles remain unexecuted; seven pre-existing root leaf failures remain visible. The early candidate ordinary Slack timeout has an unproven cause despite later whole-suite passes; no unrelated fix or proven-flake claim is made.
 6. Archive local evidence and the PR’s hosted artifacts before90-day expiry, and retain for at least30 days after independent memo review. Review timing is unknown; execution-date retention alone does not guarantee that interval.
@@ -690,3 +690,219 @@ The signing key verified is2E2DA1F8D3D96241ADBAF15FC872885042DA5EBB. Full per-co
 Process deviations remain explicit: eleven initial working-tree guard reversions violated disposable-only scope and were superseded by compliant probes; strict failing-test-first was not followed for every repair; the initial candidate supplemental order was wrong and later sorted runs supersede it; the runner allowlist line amendment and exact-head CI checkout adaptation are justified against design§3/§10. Source pdpp was never modified.
 
 No merge, repository/gist creation, pdpp deletion, or #117/#337 closure. Confidence is high in source preservation and recorded deterministic failure/restoration results; full design acceptance is not claimed while these items remain open.
+
+## Final exact-source validation and remaining reporting-head gate
+
+# Final hosted receipt validation
+
+PASS for exact published HEAD `82a88aeffc9416775caa577b134603cd7e00b9b3`. GitHub run34040548909; accounted artifact9991648944; authority run `38f74e9c-5ddd-4e02-8593-8f5b3734f73b`. All workflow jobs and the Polyfill Connectors Gate succeeded.
+
+Independent full `verifyReceipts` passed with consume:false against a fresh no-hardlink clone checked out at that exact HEAD. Source and selected-tree hashes, manifest, authority/completion/transcript digests, nonce and receipt binding, complete issued file selection, timing, transcript result and exact profile skip map all validated. Included manifest SHA256 `f8a8fa9ebcd622d1fefe2c1e79b99ca36b538d854fa2bd2b9162da66f4ea4a86` agrees with effective-plan and receipt.
+
+Independent diagnostics:365 unique terminal files exactly match365 issued/planned/completed files;5168 assertions5074pass0fail94skip0cancelled0todo. Full fifteen-reason skip map exactly equals the calibrated manifest. No failing diagnostic terminal. All retained clean-cost artifact byte sizes and SHA256 digests independently pass.
+
+Clean cost 437092ms, verified=true, namespaceAvailable=false. Admission remains false with reason clean_backstop_exceeds_300_seconds: blockedPilotCount1, operatorAttempts0, interpretedTrials0; both operators explicitly not run. The successful accounting receipt supports the NARROW result and does not admit the mutation batch or resolve separate owner-review HOLD.
+
+Raw downloaded artifact: final-hosted-accounted/. Full machine-readable verification: final-hosted-receipt.json and final-hosted-protocol-validation.json. No tracked files changed during this audit.
+
+# Independent Codex final delta alignment
+
+Reviewer: independent Codex gpt-6-astra, medium effort. Timestamp: 2026-09-06 14:54:22 UTC.
+Exact reviewed HEAD: `82a88aeffc9416775caa577b134603cd7e00b9b3`.
+Baseline: `3f41ef9b18c18818745ecfb7a389657c231634a4`.
+Working tree was clean at the beginning and end of this pass. I did not author the implementation or its repairs. This report follows the frozen-86e review in `independent-astra-alignment.md`; it does not replace the independent Claude red-team review or complete historical task 1.6.
+
+**NARROW alignment: PASS. Both prior P1 findings are closed. Overall acceptance: HOLD, not SHIP.** No additional P1 was found in this bounded delta review. This is an independent Codex sign-off on the narrow scope and reviewed repairs at the exact SHA above, not certification that all conjunctive acceptance evidence exists.
+
+## P1-A closed: interruption, quarantine, and subsequent admission
+
+The backstop now carries explicit interruption and process-status observations to its callers. Both the clean and mutant paths retain interrupted observations and quarantine the clone. Mutant backstop and focused interruption leave the issued attempt incomplete instead of publishing a completed receipt. Ordinary rejected authority continues to project inconclusive without being mislabeled interruption.
+
+Batch entry refuses unresolved owned `attempt-*` or `quarantined-*` state, even if a caller changes evidence roots. It permits the driver's separate `p-*` preflight directories. A failed cleanup outcome stops the loop before another operator is issued. This addresses the originally discarded interruption state and the missing later-admission discipline without adding a shared coordinator or automatic recovery.
+
+I independently executed the following three owning tests from the reviewed checkout using `/home/tnunamak/.nvm/versions/node/v24.15.0/bin/node --import tsx --test --test-name-pattern='interrupted real clean|quarantined mutant setup|forced focused survivor' scripts/mutation-falsification/groupme-runner.test.ts`:
+
+- Forced focused survivor: complete mutant authority runs and rejection remains inconclusive; a pre-existing `p-fixture` directory is allowed and preserved.
+- Interrupted real clean, mutant, and focused children: real SIGTERM/SIGKILL observations survive, clones remain quarantined, interrupted attempts remain incomplete, no later operator is issued, and fresh evidence roots cannot bypass unresolved workspace state.
+- Actual post-clean prepared-cache drift: mutant setup fails, quarantine survives, the second operator remains unissued, and a later batch is refused.
+
+Observed result: 3 tests, 3 pass, 0 fail/skip/cancel/todo; 16.409 seconds, exit 0. The broader 58/58 and TypeScript exit-0 results are maker-side retained evidence, not tests I independently reran in this pass.
+
+Probe honesty: I first invoked the ambient `node`, which was 24.14.1. All three selected tests failed on the explicit Node 24.15.0 prerequisite. I then used the pinned executable above. The first invocation is an environment-selection error by this reviewer, not a product regression or an erased failure.
+
+I inspected both interruption probe JSON files, their mutation scripts, and representative assertion logs. Six recorded mutations return exit 1 with restored exit 0: lost backstop interruption, lost mutant propagation, removed workspace admission, removed stop-after-cleanup, overly broad preflight admission, and lost focused-incomplete handling. These are bounded sensitivity evidence. The original workspace-removal script matches the earlier unfiltered guard; it cannot be rerun unchanged against the final filtered guard. Its retained result remains valid for that earlier repair snapshot, while the final owning test and separate broad-guard mutation validate final preflight coexistence. Do not describe all six as freshly executed against this report HEAD.
+
+## P1-B closed: commit identity and truthful report
+
+I independently inspected all 19 outgoing commit objects and verified signatures with Git: each reports `G`, with Tim Nunamaker `<tnunamak@gmail.com>` as signer, author, and committer. Each has the required DCO line and `Assisted-by: AI` as its final nonempty body line. This includes the final report commit, not only the 18 commits in the earlier audit artifact.
+
+I independently resolved and compared tree objects for all nine old/new pairs in `signed-rebase-map.json`; all nine pairs are identical. The mapping therefore proves the trailer/signature rewrite preserved those trees. It does not transfer an exact-SHA receipt or CI approval to a new SHA. The updated IMPL identity claim is now true for the reviewed outgoing history.
+
+## Narrow scope and remaining evidence obligations
+
+The initial scope assessment stands: production GroupMe behavior and the existing discriminator remain unchanged; the production isolation claim remains hardcoded false; the destination has no real GroupMe operator-level batch result or independent survivor triage. No sandbox, authenticity, full selector-miss attribution, recurring mutation CI, automatic recovery, or source-issue closure claim is introduced by this repair.
+
+`IMPL-263.md` now records the accepted review findings, repairs, mutation evidence, signed-history mapping, exact validation snapshots, and unfinished acceptance requirements. Historical failed attempts and process deviations remain visible. The no-pilot and strict-§8 limitations remain essential qualifications, not optional prose.
+
+At review time, required CI for `82a88aeffc9416775caa577b134603cd7e00b9b3` had only been started according to the parent; I did not independently obtain its final outcome. Green CI at old `86e394e4` and the valid clean receipt at old `3f9e1903` remain evidence for those exact older commits. No valid clean complete-suite receipt for this report HEAD was inspected here. No independent Claude SHIP was supplied.
+
+The full literal §8 matrix is still not exhaustively demonstrated: per-prerequisite production clean/mutant removals, independent two-hour branch sensitivity behind the stricter 600-second stop, and real OS cleanup-error behavior retain the stated limits. The final repair is also newer than the last complete local before/after comparison. No reader should interpret IMPL's “if the reviewer requires” wording as a waiver of DESIGN §§7/10: the promised final baseline obligation must be fulfilled or explicitly resolved by the authorized acceptance process. My narrow alignment sign-off does not waive it.
+
+Required CI green, no introduced baseline failures/unexplained coverage loss, valid exact-head clean receipt, independent Claude SHIP, this Codex alignment, and identity audit remain conjunctive. Thus overall acceptance stays HOLD even though the two concrete P1 defects are closed. Any further code, manifest/profile, rebase, or report commit changes the reviewed HEAD and requires appropriate delta review and exact-head evidence.
+
+Only this ignored report was written; no implementation files were edited, no external messages or GitHub mutations were sent by this reviewer, and no merge was performed. Confidence is high in P1 closure, independently observed owning-test results, and commit identity verification. This bounded delta review is not an exhaustive recertification of every carried primitive or a completed end-to-end acceptance gate.
+
+# Sorted candidate baseline comparison
+
+```json
+{
+  "baseline": "3f41ef9b18c18818745ecfb7a389657c231634a4",
+  "candidate": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+  "reporter_sha256": "822114b13dc7739643de0026844be9cff4d5f4486adb82fe226b60ff6a6f604e",
+  "baseline_normal": {
+    "tests": 5162,
+    "suites": 39,
+    "pass": 5099,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 63,
+    "todo": 0,
+    "duration_ms": 389274.19567
+  },
+  "candidate_normal": {
+    "tests": 5168,
+    "suites": 39,
+    "pass": 5105,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 63,
+    "todo": 0,
+    "duration_ms": 372247.152567
+  },
+  "baseline_supplemental": {
+    "tests": 5162,
+    "suites": 39,
+    "pass": 5099,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 63,
+    "todo": 0,
+    "duration_ms": 370175.234963
+  },
+  "candidate_supplemental": {
+    "tests": 5168,
+    "suites": 39,
+    "pass": 5105,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 63,
+    "todo": 0,
+    "duration_ms": 358943.462269
+  },
+  "selected_before": 364,
+  "selected_after": 365,
+  "added_files": [
+    "scripts/run-tests-accounting.test.mjs"
+  ],
+  "removed_files": [],
+  "candidate_order_sorted": true,
+  "completed_files": 365,
+  "removed_terminals": [],
+  "failures_introduced": [],
+  "failures_resolved": [],
+  "failures_unchanged": [],
+  "ambiguous_identity_count": 0,
+  "shared_helper_note": "Source-location identities may reference shared pilot-fixture-test-helper.ts; selected-file summaries independently prove completion, no fabricated test owner.",
+  "added_test_terminals": 6,
+  "boolean_to_named_existing_skips": 52
+}
+```
+
+Ordinary and supplemental commands are separate observations. Baseline retains its original unsorted discovery; candidate follows its current sorted discovery. Both use the frozen external reporter only for the separately labelled supplemental run. The earlier ordinary Slack timeout at2dcb remains a newly observed failure with unproven cause, not erased by this passing run. Root seven-failure multiset remains visible in baseline-comparison.md.
+
+Final local commands at82a88aeffc9416775caa577b134603cd7e00b9b3:
+
+```json
+[
+  {
+    "step": "root-install",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906",
+    "exit_code": 0,
+    "wall_seconds": 0.7261034809052944
+  },
+  {
+    "step": "package-install",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906/packages/polyfill-connectors",
+    "exit_code": 0,
+    "wall_seconds": 1.4738730960525572
+  },
+  {
+    "step": "verify",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "npm",
+      "run",
+      "verify"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906/packages/polyfill-connectors",
+    "exit_code": 0,
+    "wall_seconds": 2.63897535065189
+  },
+  {
+    "step": "normal",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "npm",
+      "test"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906/packages/polyfill-connectors",
+    "exit_code": 0,
+    "wall_seconds": 372.3931625992991
+  },
+  {
+    "step": "supplemental",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "node",
+      "/home/tnunamak/code/data-connectors-waspflow-impl-263-0906/.mutation-falsification-evidence/run-supplemental.mjs",
+      "exact",
+      "--sort"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906/packages/polyfill-connectors",
+    "exit_code": 0,
+    "wall_seconds": 359.03171197138727
+  },
+  {
+    "step": "pack",
+    "head": "82a88aeffc9416775caa577b134603cd7e00b9b3",
+    "argv": [
+      "npm",
+      "run",
+      "pack-install-run"
+    ],
+    "cwd": "/home/tnunamak/.tmp/impl-263-exact-82a88-0906/packages/polyfill-connectors",
+    "exit_code": 0,
+    "wall_seconds": 11.377376336604357
+  }
+]
+```
+
+This final reporting-only commit does not change any executable, test, manifest or profile bytes. It does change the full Git SHA: its required CI and appropriate exact-head review refresh remain open at handoff. Source82a88 has independently verified green CI, its successful complete hosted receipt, Codex medium NARROW alignment,19 valid contribution signatures, and the final local observations above. The report commit itself is also signed and verified before push; the final published SHA is supplied in the PR body and handoff.
+
+Unchanged acceptance limits: independent Claude red-team SHIP has not been supplied; no GroupMe production operator batch or independent triage ran; the explicitly bounded §8 prerequisite/cleanup and redundant-guard limitations are not upgraded. The initial Slack timing failure and process deviations remain retained. Historical tasks2.6/2.7 and qualified1.6 are untouched. No merge or issue closure occurred.
