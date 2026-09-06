@@ -16,6 +16,12 @@ on:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
+      - "scripts/mutation-falsification/**"
+      - "scripts/test-accounting/**"
+      - "scripts/test-migration/**"
+      - "test-accounting.manifest.json"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/polyfill-connectors.yml"
   pull_request: {}
   workflow_dispatch: {}
@@ -46,17 +52,22 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
         run: |
           if [ -n "$BASE_SHA" ]; then
             MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
             CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            CHANGED="$(git diff --name-only "$PUSH_BEFORE" "$PUSH_AFTER")"
           else
-            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|scripts/(mutation-falsification|test-accounting|test-migration)/|test-accounting\.manifest\.json$|package(-lock)?\.json$|\.github/workflows/polyfill-connectors\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -81,7 +92,10 @@ jobs:
           # Node 24: this package's node:test usage (--test-concurrency,
           # --test-timeout) and node:fs/promises glob() need it; the rest of
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
-          node-version: "24"
+          node-version: "24.15.0"
+
+      - name: Install root evidence tooling used by runner contracts
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Install polyfill-connectors dependencies
         # Scoped to the package, not the repo root: this repo has no npm
@@ -137,31 +151,127 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npm run pack-install-run
 
+  accounted-suite:
+    name: accounted-suite
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+      - name: Verify pinned tools
+        run: |
+          test "$(node --version)" = "v24.15.0"
+          test "$(npm --version)" = "11.12.1"
+      - name: Install both dependency locks
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/polyfill-connectors ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare browser prerequisite
+        working-directory: packages/polyfill-connectors
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mutation-browsers
+        run: npx playwright install --with-deps chromium
+      - name: Measure clean accounted suite and pilot admission
+        env:
+          MUTATION_PREFLIGHT_BROWSER_SOURCE: ${{ runner.temp }}/mutation-browsers
+        run: npm run mutation:groupme-preflight
+      - name: Retain accounted-suite evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: accounted-suite-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .mutation-falsification-evidence/
+            .git/test-accounting/runs/
+            test-accounting.manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
+  evidence-tests:
+    name: evidence-tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+      - name: Verify pinned tools
+        run: |
+          test "$(node --version)" = "v24.15.0"
+          test "$(npm --version)" = "11.12.1"
+      - name: Install both dependency locks
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/polyfill-connectors ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare browser prerequisite
+        working-directory: packages/polyfill-connectors
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mutation-browsers
+        run: npx playwright install --with-deps chromium
+      - name: Check evidence tooling and contracts
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mutation-browsers
+        run: |
+          npm run typecheck:mutation-falsification
+          npm run test:mutation-falsification
+          npm run test:accounting
+          npm run test:migration-oracle
+      - name: Retain evidence-tests evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: evidence-tests-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .mutation-falsification-evidence/
+            .git/test-accounting/runs/
+            test-accounting.manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify]
+    needs: [changes, verify, accounted-suite, evidence-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Evaluate all job results
+      - name: Evaluate all required job results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          EVENT_NAME: ${{ github.event_name }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          ACCOUNTED_RESULT: ${{ needs.accounted-suite.result }}
+          EVIDENCE_RESULT: ${{ needs.evidence-tests.result }}
         run: |
-          echo "changes: $CHANGES_RESULT"
-          echo "verify:  $VERIFY_RESULT"
-
-          if [ "$CHANGES_RESULT" != "success" ]; then
-            echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
-            exit 1
+          test "$CHANGES_RESULT" = success
+          EXPECTED=success
+          if [ "$EVENT_NAME" = pull_request ] && [ "$RELEVANT" = false ]; then
+            EXPECTED=skipped
           fi
-
-          case "$VERIFY_RESULT" in
-            success|skipped) ;;
-            *)
-              echo "::error::verify reported '$VERIFY_RESULT' — expected 'success' or 'skipped'"
+          for RESULT in "$VERIFY_RESULT" "$ACCOUNTED_RESULT" "$EVIDENCE_RESULT"; do
+            if [ "$RESULT" != "$EXPECTED" ]; then
+              echo "::error::required job reported $RESULT; expected $EXPECTED"
               exit 1
-              ;;
-          esac
-
-          echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."
+            fi
+          done

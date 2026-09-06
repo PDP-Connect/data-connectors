@@ -332,7 +332,7 @@ test("fails closed when a suite's entire include list matches no tracked file", 
 	);
 });
 test("does not fail closed when one glob in a multi-extension include list matches nothing, as long as the suite itself is not empty", () => {
-	// ri-default's real manifest entry deliberately lists .js/.mjs/.ts variants for the
+	// A multi-extension suite deliberately lists .js/.mjs/.ts variants for the
 	// not-yet-fully-migrated RI test tranche; a glob matching zero files today is expected
 	// future-proofing, not a defect, as long as the suite as a whole still selects files.
 	assert.doesNotThrow(() =>
