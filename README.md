@@ -561,6 +561,9 @@ Use Node **24.15.0** and npm **11.12.1**. Install the root and package dependenc
 separately with `npm ci --ignore-scripts` and
 `npm --prefix packages/polyfill-connectors ci --ignore-scripts`. Provision Chromium
 from the package with `npx playwright install chromium` before browser tests.
+Preflight additionally requires an explicit directory containing only prepared browser
+binaries. Set `MUTATION_PREFLIGHT_BROWSER_SOURCE` to that directory; it is hashed and
+copied into private execution state. Do not point it at a browser user profile.
 
 ```sh
 npm run typecheck:mutation-falsification
@@ -573,6 +576,11 @@ npm --prefix packages/polyfill-connectors test
 npm --prefix packages/polyfill-connectors run pack-install-run
 npm run mutation:groupme-preflight
 ```
+
+The `polyfill-connectors/default` accounting profile is calibrated for stock hosted
+Ubuntu with the private preflight environment. A local host with different capabilities
+or skip reasons will fail profile verification; an ordinary passing suite does not
+make that a valid hosted receipt.
 
 The four accounted aliases route through the authority, which validates global test
 ownership, issues an exact selection and verifies the resulting receipt. The
