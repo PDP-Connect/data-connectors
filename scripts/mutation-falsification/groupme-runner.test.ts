@@ -422,7 +422,7 @@ test("failed preflight CLI retains one blocked pilot and two not-run operators b
 // This miniature repository uses real accounting and the installed SQLite library/native bytes.
 // Its tiny tsx no-op module relies on Node24's native TS loader; its browser path is a fixture,
 // so this checks offline materialization/orchestration, not production Chromium operability.
-async function makePreparedSurvivorFixture(root: string) {
+async function makePreparedSurvivorFixture(root: string, options: {omitNative?: boolean} = {}) {
   const {cp,readFile}=await import("node:fs/promises");
   const {dirname}=await import("node:path");
   const {directoryDigest,fileDigest}=await import("./workspace.ts");
@@ -444,7 +444,7 @@ async function makePreparedSurvivorFixture(root: string) {
   const nativeModule=resolve(realSqlite,"prebuilds/linux-x64.node");
   await pack("better-sqlite3",async folder=>{
     await cp(resolve(realSqlite,"lib"),resolve(folder,"lib"),{recursive:true});
-    await mkdir(resolve(folder,"prebuilds"));await cp(nativeModule,resolve(folder,"prebuilds/linux-x64.node"));
+    await mkdir(resolve(folder,"prebuilds"));if(!options.omitNative)await cp(nativeModule,resolve(folder,"prebuilds/linux-x64.node"));
     await writeFile(resolve(folder,"package.json"),'{"name":"better-sqlite3","version":"0.0.0-fixture","main":"lib/index.js"}');
   });
   const packageRoot=resolve(repoRoot,"packages/polyfill-connectors");await mkdir(packageRoot,{recursive:true});
@@ -513,4 +513,70 @@ test("forced focused survivor runs complete mutant authority and rejection stays
     await assert.rejects(()=>runGroupMePilotBatch({...policy,workspacePolicy:{...policy.workspacePolicy,workspaceRoot:resolve(root,"drift-workspaces")},evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"judge-drift-evidence")}},intentFor(git(["rev-parse","HEAD"],fixture.repoRoot)),[GROUPME_PAGE_CEILING_V1.id]),/clean evidence identity or reuse window changed/);
 
   } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test("prepared native symlink is rejected before clean execution and any operator", async () => {
+  const {symlink}=await import("node:fs/promises");
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-native-symlink-"));
+  try {
+    const fixture=await makePreparedSurvivorFixture(root,{omitNative:true});
+    const nativeLink=resolve(root,"native-symlink.node");await symlink(fixture.preparation.nativeModule,nativeLink);
+    const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:{...fixture.preparation,nativeModule:nativeLink}}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+    const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:fixture.head,operatorId:null,requestedRisk:"native symlink fixture",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
+    await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id]),/native module must be a regular file/);
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test("preflight private paths support real scenario bridge sockets and stable logical identity with retained actual paths", async () => {
+  const {cp,readFile,readdir}=await import("node:fs/promises");
+  const {homedir}=await import("node:os");
+  const root=await mkdtemp(join(tmpdir(),"groupme-driver-path-"));
+  await mkdir(resolve(homedir(),".tmp"),{recursive:true});
+  const workspaceRoot=await mkdtemp(resolve(homedir(),".tmp/p-"));
+  try {
+    const scriptDir=resolve(root,"scripts/mutation-falsification");await mkdir(scriptDir,{recursive:true});
+    for(const file of ["run-groupme-pilot.ts","canonicalize.ts"])await cp(resolve(import.meta.dirname,file),resolve(scriptDir,file));
+    await writeFile(resolve(scriptDir,"groupme-operators.ts"),'export const GROUPME_OPERATORS=[{id:"first"},{id:"second"}];');
+    await writeFile(resolve(scriptDir,"schemas.ts"),'export const freezeIntentPacket=x=>x; export const INTENT_SCHEMA="fixture";');
+    await writeFile(resolve(scriptDir,"groupme-runner.ts"),`import {mkdir,mkdtemp,writeFile} from 'node:fs/promises';import {resolve,join} from 'node:path';import {createHash} from 'node:crypto';import {createServer,createConnection} from 'node:net';
+      export const GROUPME_PILOT_ADAPTER_ID='fixture',GROUPME_PILOT_ADAPTER_VERSION='fixture',PILOT_BATCH_WALL_TIME_MS=600000;
+      export const judgeIdentityFor=()=>"fixture",aggregateOperatorAttempts=()=>null;
+      export const runGroupMePilotBatch=()=>{throw Error('operators must not run')};
+      export const retainObservation=async(policy,id,name,value)=>{const relativePath='attempts/'+id+'/'+name+'.json';await mkdir(resolve(policy.evidenceRoot,'attempts',id),{recursive:true});const bytes=JSON.stringify(value);await writeFile(resolve(policy.evidenceRoot,relativePath),bytes);return{relativePath,byteSize:Buffer.byteLength(bytes),sha256:createHash('sha256').update(bytes).digest('hex')}};
+      export const admitMeasuredBatch=async()=>({admitted:false,reason:'fixture_namespace_unavailable'});
+      export const runCompleteBackstop=async(root,policy,id,env)=>{
+        const dir=await mkdtemp(join(env.TMPDIR,'pdpp-scenario-evidence-'));const path=resolve(dir,'bridge-0.sock');
+        const server=createServer(client=>client.end('ok'));
+        await new Promise((yes,no)=>{server.once('error',no);server.listen(path,yes)});
+        const output=await new Promise((yes,no)=>{const client=createConnection(path);let text='';client.on('data',chunk=>text+=chunk);client.on('error',no);client.on('end',()=>yes(text))});
+        await new Promise(yes=>server.close(yes));
+        return {axis:{status:'ok'},runIds:['fixture-only'],artifacts:[await retainObservation(policy,id,'socket-transport',{path,output})]};
+      };`);
+    await writeFile(resolve(scriptDir,"workspace.ts"),`export const defaultWorkspacePolicy=()=>({workspaceRoot:${JSON.stringify(workspaceRoot)}});
+      export const buildIsolatedEnvironment=(root)=>({HOME:root+'/home',TMPDIR:root+'/tmp',npm_config_userconfig:root+'/npmrc',npm_config_globalconfig:root+'/global-npmrc',PLAYWRIGHT_BROWSERS_PATH:root+'/browsers',CI:process.env.CI??'0'});
+      export const directoryDigest=async()=>"fixture",fileDigest=async()=>"fixture";
+      export const runInWorkspace=async()=>({exitCode:1,signal:null});`);
+    await writeFile(resolve(root,"package.json"),'{"type":"module"}');await writeFile(resolve(root,".gitignore"),'.mutation-falsification-evidence/\nbrowser/\n');await mkdir(resolve(root,"browser"));
+    git(["init","-q"],root);git(["add","-A"],root);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","socket driver fixture"],root);
+    const preflightRoot=resolve(root,".mutation-falsification-evidence/preflight");
+    async function run(ci:string){
+      execFileSync(process.execPath,[resolve(scriptDir,"run-groupme-pilot.ts"),"--preflight"],{cwd:root,env:{...process.env,CI:ci,MUTATION_PREFLIGHT_BROWSER_SOURCE:resolve(root,"browser")},stdio:"pipe",timeout:10000});
+      return JSON.parse(await readFile(resolve(preflightRoot,"latest-clean-backstop-cost.json"),"utf8"));
+    }
+    const first=await run('0'),second=await run('0'),changed=await run('1');
+    assert.equal(first.identity,second.identity,"fresh private directories retain the same explicit logical configuration identity");
+    assert.notEqual(second.identity,changed.identity,"effective CI configuration changes identity");
+    async function actual(cost:any){const artifact=cost.artifacts.find((a:any)=>a.relativePath.endsWith('/effective-execution-plan.json'));assert.ok(artifact,"actual execution plan must be retained and digest-bound in cost");return JSON.parse(await readFile(resolve(root,".mutation-falsification-evidence",artifact.relativePath),"utf8"));}
+    const firstActual=await actual(first),secondActual=await actual(second);
+    assert.notEqual(firstActual.environment.HOME,secondActual.environment.HOME);
+    assert.ok(!firstActual.environment.HOME.includes('<private-workspace>'));
+    for(const cost of [first,second,changed]){
+      const socketArtifact=cost.artifacts.find((a:any)=>a.relativePath.endsWith('/socket-transport.json'));
+      const socket=JSON.parse(await readFile(resolve(root,".mutation-falsification-evidence",socketArtifact.relativePath),"utf8"));
+      assert.equal(socket.output,'ok');assert.ok(Buffer.byteLength(socket.path)<108);
+    }
+  } finally {await rm(root,{recursive:true,force:true});await rm(workspaceRoot,{recursive:true,force:true});}
 });

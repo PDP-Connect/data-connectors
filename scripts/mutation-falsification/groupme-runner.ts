@@ -166,8 +166,9 @@ export async function runCompleteBackstop(
     try { const result=await runAuthority({root:process.cwd(),suites:["polyfill-connectors"],profile:"default",env:process.env});
       console.log("GROUPME_AUTHORITY_RESULT "+JSON.stringify(result)); }
     catch(error){console.error(String(error));process.exitCode=1;}`;
-  const observed = await runInWorkspace([process.execPath, "--import", "tsx", "--input-type=module", "-e", code], repoRoot, env, wallTimeMs);
-  const artifacts: AttemptReceipt["evidenceArtifacts"] = [await retainObservation(evidenceStorePolicy, attemptId, "authority-process", observed)];
+  const command = [process.execPath, "--import", "tsx", "--input-type=module", "-e", code];
+  const observed = await runInWorkspace(command, repoRoot, env, wallTimeMs);
+  const artifacts: AttemptReceipt["evidenceArtifacts"] = [await retainObservation(evidenceStorePolicy, attemptId, "authority-process", { ...observed, command, cwd: repoRoot, environment: env })];
   const fresh = (await readdir(directory).catch(() => [] as string[])).filter(name => !prior.has(name));
   // Failed/incomplete bytes are retained as unverified observations, never successful receipts.
   for (const name of fresh) {
