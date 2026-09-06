@@ -616,21 +616,23 @@ test("whole batch refuses changed retained clean bytes and crossing 600 seconds 
   try {
     const fixture=await makePreparedSurvivorFixture(root);
     const backstop=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
-    for(const mode of ["changed","missing","elapsed"] as const){
+    for(const mode of ["changed","missing","elapsed","two-hours"] as const){
       const evidenceRoot=resolve(root,mode+"-evidence"),marker=resolve(root,mode+"-clock");
+      const clockAdvance=mode==="elapsed"?600001:mode==="two-hours"?7200001:0;
       // The real clean authority child runs after clean-focused.json has been retained.
       // Its fixture-only side effect provides a deterministic boundary without polling.
       await writeFile(backstop,`import test from 'node:test';import {readdirSync,writeFileSync,unlinkSync} from 'node:fs';import {resolve} from 'node:path';test('fixture clean boundary',()=>{
         const root=${JSON.stringify(evidenceRoot)};
-        ${mode==="elapsed"?`writeFileSync(${JSON.stringify(marker)},'cross 600 seconds');`:`const attempts=resolve(root,'attempts');for(const id of readdirSync(attempts)){const file=resolve(attempts,id,'clean-focused.json');try{${mode==="changed"?"writeFileSync(file,'changed retained baseline');":"unlinkSync(file);"}}catch(error){if(error.code!=='ENOENT')throw error;}}`}
+        ${clockAdvance?`writeFileSync(${JSON.stringify(marker)},'cross batch boundary');`:`const attempts=resolve(root,'attempts');for(const id of readdirSync(attempts)){const file=resolve(attempts,id,'clean-focused.json');try{${mode==="changed"?"writeFileSync(file,'changed retained baseline');":"unlinkSync(file);"}}catch(error){if(error.code!=='ENOENT')throw error;}}`}
       });`);
       git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm",mode+" clean boundary fixture"],fixture.repoRoot);
       const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,mode+"-workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot,maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
       const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:git(["rev-parse","HEAD"],fixture.repoRoot),operatorId:null,requestedRisk:"clean boundary fixture",requestedBudget:{wallTimeMs:600000,directOutputByteCap:8*1024*1024}});
       const realNow=Date.now.bind(Date);
-      const clock=mode==="elapsed"?t.mock.method(Date,"now",()=>realNow()+(existsSync(marker)?600001:0)):undefined;
+      // Crossing two hours is refused by the stricter 600-second gate; this does not isolate the reuse-window branch.
+      const clock=clockAdvance?t.mock.method(Date,"now",()=>realNow()+(existsSync(marker)?clockAdvance:0)):undefined;
       try {
-        await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id,GROUPME_NONPROGRESS_WEAKENING_V1.id]),mode==="elapsed"?/10-minute locked pilot batch window exceeded/:mode==="changed"?/clean evidence bytes changed/:/ENOENT/);
+        await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id,GROUPME_NONPROGRESS_WEAKENING_V1.id]),clockAdvance?/10-minute locked pilot batch window exceeded/:mode==="changed"?/clean evidence bytes changed/:/ENOENT/);
       } finally {clock?.mock.restore();}
       const issued=(await readdir(resolve(evidenceRoot,"markers"))).filter(name=>name.endsWith('.issued.json'));
       const completed=(await readdir(resolve(evidenceRoot,"markers"))).filter(name=>name.endsWith('.completed.json'));
