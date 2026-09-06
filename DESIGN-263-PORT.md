@@ -89,6 +89,7 @@ Paths are repository-relative. **H:path → same** and **M:path → same** mean 
 | B:`package-lock.json` → same | Regenerate only for declared root dependencies; no package-hoisting assumption. |
 | B:`.gitignore` → same | Ignore `.mutation-falsification-evidence/`; keep evidence out of source/package artifacts. Workspace root remains outside checkout. |
 | D → `scripts/mutation-falsification/tsconfig.json` | Strict no-emit check covering carried harness/accounting/migration code and tests; explicit NodeNext/TS-extension settings, no root-wide typecheck rewrite. |
+| B:`packages/polyfill-connectors/scripts/no-await-in-loops-allowlist.ts` → same | Implementation amendment: the destination runner imports move its existing sequential glob loop from line 34 to line 36. Update only that measured location; the unchanged conformance command rejected the stale row before this repair. No new exception or behavior change. |
 | B:`.github/workflows/polyfill-connectors.yml` → same | Root tooling relevance/install/check jobs, authority package execution and artifact upload; preserve existing verify/browser/pack checks and stable gate. |
 | B:`README.md` → same | Canonical commands, prerequisite branch, suite boundaries, evidence retention and NARROW limitations. |
 | H:`openspec/changes/add-mutation-falsification-evidence/{tasks.md,DECISION-MEMO.md}` → `docs/decisions/mutation-falsification/{tasks.md,DECISION-MEMO.md}` | **F6:** these two records changed in #263; preserve historical text and append destination evidence. Destination path is the F9 owner-policy default. |
