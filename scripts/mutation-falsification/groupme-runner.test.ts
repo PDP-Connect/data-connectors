@@ -714,3 +714,37 @@ test("a quarantined mutant setup failure stops the next operator and blocks a fr
     await assert.rejects(()=>runGroupMePilotBatch({...policy,evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"fresh-evidence")}},intent,[GROUPME_PAGE_CEILING_V1.id]),/blocked by unresolved workspace/);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test("dirty source is refused as focused_source_not_clean before the focused child runs", async () => {
+  const {cp,readFile,symlink}=await import("node:fs/promises");
+  const {runFocusedCheck}=await import("./groupme-runner.ts");
+  const {buildIsolatedEnvironment}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-dirty-before-focus-"));
+  try {
+    const repoRoot=resolve(root,"repo"),sentinel=resolve(root,"focused-child-ran");
+    const focusedFile=resolve(repoRoot,"packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts");
+    await mkdir(resolve(focusedFile,".."),{recursive:true});
+    await mkdir(resolve(repoRoot,"scripts/test-accounting"),{recursive:true});
+    await writeFile(resolve(repoRoot,"package.json"),'{"type":"module"}');
+    await writeFile(resolve(repoRoot,".gitignore"),"node_modules/\n");
+    await symlink(resolve(import.meta.dirname,"../../node_modules"),resolve(repoRoot,"node_modules"),"dir");
+    for(const name of ["node-reporter","receipt"])await cp(resolve(import.meta.dirname,`../test-accounting/${name}.ts`),resolve(repoRoot,`scripts/test-accounting/${name}.ts`));
+    await writeFile(focusedFile,`import test from 'node:test';import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(sentinel)},'executed');for(let i=0;i<23;i++)test('focused sentinel fixture '+i,()=>{});`);
+    git(["init","-q"],repoRoot);git(["add","-A"],repoRoot);
+    git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","dirty focused source fixture"],repoRoot);
+    const env=buildIsolatedEnvironment(resolve(root,"private"),{environmentAllowlist:[]});
+    await mkdir(env.HOME!,{recursive:true});await mkdir(env.TMPDIR!,{recursive:true});
+    const clean=await runFocusedCheck(repoRoot,env,5000);
+    assert.equal(clean.ok,true,`positive control proves the real focused child can execute: ${JSON.stringify(clean)}`);
+    assert.equal(await readFile(sentinel,"utf8"),"executed");
+    await rm(sentinel);
+    await writeFile(resolve(repoRoot,"untracked.txt"),"dirty before focused execution");
+    const dirty=await runFocusedCheck(repoRoot,env,5000);
+    assert.equal(dirty.ok,false);
+    assert.equal(dirty.failure,"focused_source_not_clean");
+    assert.match(dirty.sourceStatusBefore,/\?\? untracked\.txt/);
+    assert.equal(dirty.exitCode,null);
+    assert.equal(dirty.stdout,"");
+    await assert.rejects(()=>readFile(sentinel),{code:"ENOENT"},"dirty-source refusal must occur before the focused child writes its sentinel");
+  } finally {await rm(root,{recursive:true,force:true});}
+});
