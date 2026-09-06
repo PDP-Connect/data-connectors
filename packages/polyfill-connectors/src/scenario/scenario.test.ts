@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import type { EmittedMessage } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { ConnectorScenario, ScenarioInteraction } from "./format.ts";
 import { SCENARIO_FORMAT } from "./format.ts";
@@ -31,7 +32,6 @@ import {
 	TraceNormalizationError,
 	verifyScenario,
 } from "./verify.ts";
-import type { ScenarioMessageType } from "./wire-registry.ts";
 import {
 	assertKnownMessageType,
 	isKnownMessageType,
@@ -1910,7 +1910,7 @@ test("protocol trace menagerie: a malformed DETAIL_GAP_RECOVERED (missing gap_id
 // ─── FIX 2 (P1-2, repair wave 4): TRACE_POLICY exhaustiveness ─────────────
 //
 // `TRACE_POLICY` (verify.ts) is declared `satisfies
-// Record<ScenarioMessageType, TraceDisposition>` — that clause alone is
+// Record<EmittedMessage["type"], TraceDisposition>` — that clause alone is
 // enough to make an ADD to `EmittedMessage`'s union a compile error (tsc
 // would reject TRACE_POLICY as missing the new member's key), which is the
 // real enforcement mechanism the task asks for. This test is a runtime
@@ -1918,7 +1918,7 @@ test("protocol trace menagerie: a malformed DETAIL_GAP_RECOVERED (missing gap_id
 // TRACE_POLICY's key set or to this test's own hardcoded expectation is
 // caught in `node --test` output too, not only in a `tsc --noEmit` pass a
 // contributor might skip locally.
-test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, the installed protocol plus the recognized forward-compatible kind", () => {
+test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, exactly the fourteen kinds the protocol declares", () => {
 	const expectedKinds = [
 		"RECORD",
 		"STATE",
@@ -1935,7 +1935,7 @@ test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, the i
 		"INTERACTION",
 		// Added by @pdpp/connector-protocol 0.0.2, after this oracle was written.
 		"STREAM_EVIDENCE",
-	] satisfies ScenarioMessageType[];
+	] satisfies EmittedMessage["type"][];
 	assert.deepEqual(Object.keys(TRACE_POLICY).sort(), [...expectedKinds].sort());
 });
 
@@ -2758,7 +2758,7 @@ test("observedUnsupportedEvidenceSurface: true when a run message is ASSISTANCE_
 // FIX 3 section above uses, plus one VALID control per kind proving the
 // tightened checks don't reject a well-formed message.
 
-test("wire-registry: isKnownMessageType recognizes the installed protocol and STREAM_EVIDENCE", () => {
+test("wire-registry: isKnownMessageType is true for every one of the thirteen EmittedMessage kinds", () => {
 	for (const type of [
 		"RECORD",
 		"STATE",
@@ -2773,7 +2773,6 @@ test("wire-registry: isKnownMessageType recognizes the installed protocol and ST
 		"DETAIL_GAPS_PAGE_REQUEST",
 		"DONE",
 		"INTERACTION",
-		"STREAM_EVIDENCE",
 	]) {
 		assert.equal(
 			isKnownMessageType(type),
