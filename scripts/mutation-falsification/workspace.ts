@@ -205,6 +205,7 @@ export async function materializeDependencies(
   const packageLock = await fileDigest(resolve(packageRoot, "package-lock.json"));
   if (rootLock !== preparation.rootLockDigest || packageLock !== preparation.packageLockDigest) throw new Error("prepared lock identity mismatch");
   const verifyPrepared = async () => {
+    if (!(await lstat(preparation.nativeModule)).isFile()) throw new Error("prepared native module must be a regular file; symlinks are forbidden");
     if (await directoryDigest(preparation.cacheRoot) !== preparation.cacheDigest ||
         await directoryDigest(preparation.browserRoot) !== preparation.browserDigest ||
         await fileDigest(preparation.nativeModule) !== preparation.nativeDigest) throw new Error("prepared dependency identity mismatch");
