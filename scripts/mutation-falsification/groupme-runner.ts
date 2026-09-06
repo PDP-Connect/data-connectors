@@ -170,7 +170,7 @@ export async function retainObservation(policy: EvidenceStorePolicy, attemptId: 
 export async function runCompleteBackstop(
   repoRoot: string, evidenceStorePolicy: EvidenceStorePolicy, attemptId: string,
   env: NodeJS.ProcessEnv, wallTimeMs: number
-): Promise<{ artifacts: AttemptReceipt["evidenceArtifacts"]; axis: AttemptAxes["backstop"]; runIds: string[] }> {
+): Promise<{ artifacts: AttemptReceipt["evidenceArtifacts"]; axis: AttemptAxes["backstop"]; runIds: string[]; interrupted: boolean; attemptStatus: AttemptReceipt["attemptStatus"] }> {
   const directory = resolve(execFileSync("git", ["-C", repoRoot, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim(), "test-accounting/runs");
   const prior = new Set(await readdir(directory).catch(() => [] as string[]));
   const code = `import {runAuthority} from ${JSON.stringify(pathToFileURL(resolve(repoRoot, "scripts/test-accounting/authority.ts")).href)};
@@ -186,7 +186,9 @@ export async function runCompleteBackstop(
     if (!(await lstat(resolve(directory, name))).isFile()) continue; // The authority owns its separate verified replay ledger.
     artifacts.push(await retainObservation(evidenceStorePolicy, attemptId, `unverified-${name}`, { sourceName: name, bytes: await readFile(resolve(directory, name), "utf8") }));
   }
-  const failed = (failure: string, detail: string) => ({ artifacts, axis: { status: "failed" as const, failure, detail }, runIds: [] });
+  const interrupted = observed.deadlineFired || !!observed.signal || observed.outputLimitExceeded;
+  const attemptStatus = { exitCode: observed.exitCode, signal: observed.signal };
+  const failed = (failure: string, detail: string) => ({ artifacts, interrupted, attemptStatus, axis: { status: "failed" as const, failure, detail }, runIds: [] });
   if (observed.exitCode !== 0 || observed.signal || observed.deadlineFired || observed.outputLimitExceeded) return failed("backstop_authority_error", "authority rejected or interrupted; retained observations are unverified");
   try {
     const lines = observed.stdout.split("\n").filter(line => line.startsWith("GROUPME_AUTHORITY_RESULT "));
@@ -198,7 +200,7 @@ export async function runCompleteBackstop(
     const receipt = JSON.parse(await readFile(resolve(directory, receipts[0]!), "utf8"));
     if (receipt.suite !== "polyfill-connectors" || receipt.profile !== "default" || receipt.exit_code !== 0) throw new Error("wrong clean receipt identity");
     artifacts.push(...await copyAndRevalidateAccountingBundle(evidenceStorePolicy.evidenceRoot, attemptId, directory, receipt.run_id));
-    return { artifacts, axis: { status: "ok" }, runIds: [receipt.run_id] };
+    return { artifacts, interrupted, attemptStatus, axis: { status: "ok" }, runIds: [receipt.run_id] };
   } catch (error) { return failed("backstop_artifact_retention_failed", String(error)); }
 }
 
@@ -262,6 +264,7 @@ export async function commitMutant(repoRoot: string, operator: GroupMeOperator,
  */
 interface AttemptComputation {
   quarantineRequired?: boolean;
+  interrupted?: boolean;
   attemptStatus?: AttemptReceipt["attemptStatus"];
   evidenceArtifacts: AttemptReceipt["evidenceArtifacts"];
   mutantCommitSha: string;
@@ -291,7 +294,7 @@ async function computeOperatorAttempt(
           failure: "dependency_materialization_failed",
           detail: (error as Error).message,
         },
-        focused: { status: "failed", failure: "not_run_due_to_materialization_failure", detail: "" },
+        focused: { status: "failed", failure: "not_run_due_to_materialization_failure", detail: "focused check did not run because dependency materialization failed" },
         backstop: { status: "not_applicable" },
         reachability: { status: "unknown" },
       },
@@ -323,6 +326,7 @@ async function computeOperatorAttempt(
     return {
       mutantCommitSha,
       quarantineRequired: focused.deadlineFired || !!focused.signal || focused.outputLimitExceeded,
+      interrupted: focused.deadlineFired || !!focused.signal || focused.outputLimitExceeded,
       attemptStatus: { exitCode: focused.exitCode, signal: focused.signal },
       evidenceArtifacts: [focusedArtifact],
       referencedAccountingRunIds: [],
@@ -347,6 +351,9 @@ async function computeOperatorAttempt(
   const backstopResult = await runCompleteBackstop(workspace.repoRoot, policy.evidenceStorePolicy, attemptId, workspace.env, remainingTime(deadlineAt, PILOT_BATCH_WALL_TIME_MS));
   return {
     mutantCommitSha,
+    quarantineRequired: backstopResult.interrupted,
+    interrupted: backstopResult.interrupted,
+    attemptStatus: backstopResult.attemptStatus,
     evidenceArtifacts: [focusedArtifact, ...backstopResult.artifacts],
     referencedAccountingRunIds: backstopResult.runIds,
     nonCleanupAxes: {
@@ -416,7 +423,7 @@ async function runOperatorAttempt(
   catch (error) { await quarantineWorkspace(workspace.workspaceDir, String(error)); throw error; }
 
   const cleanupAxis: AttemptAxes["cleanup"] = computation.quarantineRequired
-    ? (await quarantineWorkspace(workspace.workspaceDir, "setup failed or focused phase interrupted"), { status: "failed", failure: "workspace_quarantined_after_interruption", detail: "manual review required" })
+    ? (await quarantineWorkspace(workspace.workspaceDir, "setup failed or test phase interrupted"), { status: "failed", failure: "workspace_quarantined_after_interruption", detail: "manual review required" })
     : await cleanupWorkspaceForReceipt(workspace.workspaceDir);
 
   const axes: AttemptAxes = { ...computation.nonCleanupAxes, cleanup: cleanupAxis };
@@ -447,6 +454,10 @@ async function runOperatorAttempt(
     axes,
     isMutationAttributableFailure: isMutationAttributable(computation.nonCleanupAxes),
   });
+  if (computation.interrupted) {
+    await retainObservation(policy.evidenceStorePolicy, attemptId, "interrupted-attempt", receipt);
+    throw new Error("mutant test phase interrupted; workspace quarantined and attempt incomplete");
+  }
   await publishCompleteReceipt(policy.evidenceStorePolicy.evidenceRoot, receipt);
   return { attemptId, operatorId, receipt, projection };
 }
@@ -457,6 +468,8 @@ export async function runGroupMePilotBatch(
   intent: IntentPacket,
   operatorIds: string[]
 ): Promise<PilotBatchResult> {
+  await mkdir(policy.workspacePolicy.workspaceRoot, { recursive: true });
+  if ((await readdir(policy.workspacePolicy.workspaceRoot)).some(name => name.startsWith("attempt-") || name.startsWith("quarantined-"))) throw new Error("groupme batch blocked by unresolved workspace; manual review required");
   const batchStartedAt = Date.now();
   const deadlineAt = batchStartedAt + Math.min(PILOT_BATCH_WALL_TIME_MS, intent.requestedBudget.wallTimeMs);
   const cleanIdentity = judgeIdentityFor(null, policy.sourceRepoRoot);
@@ -488,7 +501,7 @@ export async function runGroupMePilotBatch(
   });
 
   let cleanResult:
-    | { artifacts: AttemptReceipt["evidenceArtifacts"]; axis: AttemptAxes["backstop"]; runIds: string[] }
+    | Awaited<ReturnType<typeof runCompleteBackstop>>
     | undefined;
   let materializationError: Error | undefined;
   try {
@@ -509,6 +522,13 @@ export async function runGroupMePilotBatch(
     await retainObservation(policy.evidenceStorePolicy, cleanBackstopAttemptId, "clean-setup-failure", { error: materializationError.message });
     await quarantineWorkspace(cleanWorkspace.workspaceDir, materializationError.message);
     throw new Error(`clean setup failed before operators; workspace quarantined: ${materializationError.message}`);
+  }
+  if (cleanResult?.interrupted) {
+    await retainObservation(policy.evidenceStorePolicy, cleanBackstopAttemptId, "interrupted-clean", {
+      axis: cleanResult.axis, attemptStatus: cleanResult.attemptStatus, cleanExecutionRawCount, artifacts: cleanResult.artifacts,
+    });
+    await quarantineWorkspace(cleanWorkspace.workspaceDir, "clean backstop interrupted");
+    throw new Error("clean backstop interrupted; workspace quarantined and attempt incomplete");
   }
   const cleanupAxis = await cleanupWorkspaceForReceipt(cleanWorkspace.workspaceDir);
 
@@ -571,6 +591,7 @@ export async function runGroupMePilotBatch(
     }
     const outcome = await runOperatorAttempt(policy, intent, operatorId, intent.baseCommitSha, deadlineAt, cleanResult.artifacts);
     operatorOutcomes.push(outcome);
+    if (outcome.receipt.axes.cleanup.status !== "ok") throw new Error("groupme batch stopped after failed cleanup; no later operator may run");
   }
 
   return { operatorOutcomes, cleanExecutionRawCount };
