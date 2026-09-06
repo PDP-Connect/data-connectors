@@ -605,3 +605,41 @@ test("focused owning failure cannot kill after changing tracked judge bytes in i
     assert.ok(JSON.stringify(result.operatorOutcomes[0]!.receipt.axes.focused).includes("focused_source_changed"));
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test("whole batch refuses changed retained clean bytes and crossing 600 seconds before its first operator", async (t) => {
+  const {readFile,readdir}=await import("node:fs/promises");
+  const {existsSync}=await import("node:fs");
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-baseline-boundary-"));
+  try {
+    const fixture=await makePreparedSurvivorFixture(root);
+    const backstop=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    for(const mode of ["changed","missing","elapsed"] as const){
+      const evidenceRoot=resolve(root,mode+"-evidence"),marker=resolve(root,mode+"-clock");
+      // The real clean authority child runs after clean-focused.json has been retained.
+      // Its fixture-only side effect provides a deterministic boundary without polling.
+      await writeFile(backstop,`import test from 'node:test';import {readdirSync,writeFileSync,unlinkSync} from 'node:fs';import {resolve} from 'node:path';test('fixture clean boundary',()=>{
+        const root=${JSON.stringify(evidenceRoot)};
+        ${mode==="elapsed"?`writeFileSync(${JSON.stringify(marker)},'cross 600 seconds');`:`const attempts=resolve(root,'attempts');for(const id of readdirSync(attempts)){const file=resolve(attempts,id,'clean-focused.json');try{${mode==="changed"?"writeFileSync(file,'changed retained baseline');":"unlinkSync(file);"}}catch(error){if(error.code!=='ENOENT')throw error;}}`}
+      });`);
+      git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm",mode+" clean boundary fixture"],fixture.repoRoot);
+      const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,mode+"-workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot,maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+      const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:git(["rev-parse","HEAD"],fixture.repoRoot),operatorId:null,requestedRisk:"clean boundary fixture",requestedBudget:{wallTimeMs:600000,directOutputByteCap:8*1024*1024}});
+      const realNow=Date.now.bind(Date);
+      const clock=mode==="elapsed"?t.mock.method(Date,"now",()=>realNow()+(existsSync(marker)?600001:0)):undefined;
+      try {
+        await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id,GROUPME_NONPROGRESS_WEAKENING_V1.id]),mode==="elapsed"?/10-minute locked pilot batch window exceeded/:mode==="changed"?/clean evidence bytes changed/:/ENOENT/);
+      } finally {clock?.mock.restore();}
+      const issued=(await readdir(resolve(evidenceRoot,"markers"))).filter(name=>name.endsWith('.issued.json'));
+      const completed=(await readdir(resolve(evidenceRoot,"markers"))).filter(name=>name.endsWith('.completed.json'));
+      assert.equal(issued.length,1,"no operator attempt may be issued after the clean boundary refusal");
+      assert.equal(completed.length,1,"the only completed receipt records the actual clean execution");
+      const receipt=JSON.parse(await readFile(resolve(evidenceRoot,"markers",completed[0]!),"utf8"));
+      assert.equal(receipt.mutantIdentity,null);
+      assert.equal(receipt.axes.backstop.status,"ok");
+      assert.deepEqual(await readdir(policy.workspacePolicy.workspaceRoot),[],"clean clone was disposed before retained evidence was checked");
+    }
+  } finally {await rm(root,{recursive:true,force:true});}
+});
