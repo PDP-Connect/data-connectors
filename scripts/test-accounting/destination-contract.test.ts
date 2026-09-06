@@ -242,3 +242,14 @@ test("workflow extraction keeps job/step and whole compound command, rejecting u
   const jobs = workflowFrontDoors("fixture.yml", "jobs:\n  first:\n    steps:\n      - name: Original\n        run: node --test x.mjs\n  second:\n    name: Other job\n    steps:\n      - run: echo done\n");
   assert.equal(jobs[0]?.owner, "first/Original", "later job metadata cannot rename an earlier step");
 });
+
+// Receipts and reviewed source must identify the branch head, not GitHub's synthetic merge commit.
+test("all port workflow checkouts and artifact names bind the advertised PR head", () => {
+  const source = readFileSync(resolve(ROOT, ".github/workflows/polyfill-connectors.yml"), "utf8");
+  const checkouts = [...source.matchAll(/uses: actions\/checkout@[^\n]+\n([\s\S]*?)(?=\n      -|\n  [a-z]|$)/g)];
+  assert.equal(checkouts.length, 4);
+  for (const checkout of checkouts) assert.match(checkout[1] ?? "", /ref: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
+  for (const name of ["accounted-suite", "evidence-tests"]) {
+    assert.ok(source.includes("name: " + name + "-${{ github.event.pull_request.head.sha || github.sha }}"));
+  }
+});
