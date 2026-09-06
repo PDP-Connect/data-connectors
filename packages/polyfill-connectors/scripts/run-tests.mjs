@@ -117,7 +117,7 @@ child.on("error", (error) => {
 	process.exitCode = 1;
 });
 child.on("close", async (code, signal) => {
-	let status = interrupted ? 1 : (code ?? 1);
+	let status = interrupted || signal ? 1 : (code ?? 1);
 	if (issued && receipt) {
 		try {
 			const summary = receipt.structuredNodeSummary(stdout);
