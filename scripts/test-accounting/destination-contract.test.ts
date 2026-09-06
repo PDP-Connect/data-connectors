@@ -129,6 +129,7 @@ function localPath(cwd: string, path: string): string | undefined {
  * also refuses harmless process wrappers and requires an explicit reviewed public route. */
 function reachesRawTest(command: string, cwd: string, read: ReadSource, seen = new Set<string>()): boolean {
   if (RAW_TEST.test(command)) return true;
+  if (OPAQUE_PROCESS_WRAPPER.test(command)) return true;
   const key = JSON.stringify([cwd, command]);
   if (seen.has(key)) return false;
   seen.add(key);
@@ -218,7 +219,7 @@ test("the same canonical ratchet rejects direct, compound, alias and literal wra
   assert.deepEqual(violations([old], [old], read), []);
   assert.deepEqual(violations([], [old], read), []);
   assert.equal(violations([old, old], [old], read).length, 1, "copying a grandfathered workflow step creates a new front door");
-  for (const command of ["node --import tsx --test new.test.ts", "echo prepared && node --test x.test.mjs", "npm run hidden", "node scripts/wrapper.mjs", "node scripts/two-hop.mjs", "node scripts/computed.mjs", "node scripts/direct.test.mjs", "python scripts/direct.test.py", "npm --prefix packages/fixture test", "npm run test --prefix packages/fixture", "npm run --prefix packages/fixture test", "pnpm -C packages/fixture test", "cd packages/fixture && npm test", "node --import tsx scripts/test-accounting/authority.ts --run; node --test x.test.mjs"]) {
+  for (const command of ["node --import tsx --test new.test.ts", "echo prepared && node --test x.test.mjs", "npm run hidden", "node scripts/wrapper.mjs", "node scripts/two-hop.mjs", "node scripts/computed.mjs", 'node -e "require(\'node:child_process\').spawnSync(\'node\',[\'--\'+\'test\',\'fixture.mjs\'])"', "node scripts/direct.test.mjs", "python scripts/direct.test.py", "npm --prefix packages/fixture test", "npm run test --prefix packages/fixture", "npm run --prefix packages/fixture test", "pnpm -C packages/fixture test", "cd packages/fixture && npm test", "node --import tsx scripts/test-accounting/authority.ts --run; node --test x.test.mjs"]) {
     assert.equal(violations([{ ...old, owner: "new", command }], [old], read).length, 1, command);
   }
   for (const field of ["owner", "file", "cwd"] as const) assert.equal(violations([{ ...old, [field]: "changed" }], [old], read).length, 1);
