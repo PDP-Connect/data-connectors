@@ -1,0 +1,390 @@
+{
+  "schema": "pdpp.test-accounting/v3",
+  "inventory_base_sha": "3f41ef9b18c18818745ecfb7a389657c231634a4",
+  "suites": [
+    {
+      "id": "mutation-falsification",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/mutation-falsification/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "accounting",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/test-accounting/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "migration-oracle",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/test-migration/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "polyfill-connectors",
+      "cwd": "packages/polyfill-connectors",
+      "loader": "node-test",
+      "execution": "authority-runner",
+      "authority_argument": "--accounting-authority",
+      "command": [
+        "node",
+        "scripts/run-tests.mjs"
+      ],
+      "include": [
+        "packages/polyfill-connectors/bin/**/*.test.ts",
+        "packages/polyfill-connectors/connectors/**/*.test.ts",
+        "packages/polyfill-connectors/scripts/related-tests/*.test.ts",
+        "packages/polyfill-connectors/scripts/**/*.test.mjs",
+        "packages/polyfill-connectors/src/**/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {
+            "GROUPME_ACCESS_TOKEN unset": 2,
+            "local Amazon raw-DOM fixture directory not present": 2,
+            "local Chase raw-DOM fixture directory not present": 3,
+            "local USAA raw fixture directory not present": 1,
+            "requires --experimental-test-module-mocks": 1,
+            "run with --expose-gc for a reliable memory-growth comparison": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "root-anthropic",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/anthropic/__tests__/claude-code-trajectories.test.cjs",
+        "connectors/anthropic/__tests__/claude-export-classifier.test.cjs",
+        "connectors/anthropic/__tests__/claude-export-ingest.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-openai",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/openai/__tests__/chatgpt-classifier.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-openai-browser",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/openai/__tests__/chatgpt-resume.browser.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_BROWSER_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-installer",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "packages/connector-installer-core/index.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-runner",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "playwright-runner/result-classifier.conformance.test.cjs",
+        "playwright-runner/result-classifier.test.cjs",
+        "playwright-runner/runner-compat.test.cjs",
+        "playwright-runner/zip-reader.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-schemas",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "schemas/connector-index.schema.test.mjs",
+        "schemas/manifest.schema.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-tooling",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/brand-icon-fleet.test.mjs",
+        "scripts/connector-artifact-contract.test.mjs",
+        "scripts/create-connector.test.mjs",
+        "scripts/generate-connector-index.test.mjs",
+        "scripts/generate-scope-catalog.test.mjs",
+        "scripts/schema-artifact-kind.test.mjs",
+        "scripts/test-connectors.test.cjs",
+        "scripts/youtube-watched-at.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-chatgpt",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/chatgpt-pdpp/chatgpt-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-github",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/github-pdpp/github-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-whoop",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/whoop-pdpp/whoop-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    }
+  ],
+  "exclusions": [
+    {
+      "path": "packages/polyfill-connectors/connectors/github/index.test.ts",
+      "suite": "polyfill-connectors",
+      "profile": "default",
+      "reason": "Requires the reference implementation ingest pipeline; owned by cross-repository semantic CI, not this local package suite.",
+      "owner": "PDP-Connect maintainers",
+      "expires": "2026-12-06"
+    }
+  ]
+}
