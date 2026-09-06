@@ -25,4 +25,6 @@ fixtures/*/scrubbed/*/
 
 # connector-dev run-summary output (bin/connector-dev.ts) — local proof
 # artifacts from a developer's own runs, not reviewed/committable fixtures.
+# Scenario captures also land here and contain account data, HAR bodies, and
+# browser session state (storage-state cookies).
 runs/
