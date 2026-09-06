@@ -580,3 +580,28 @@ test("preflight private paths support real scenario bridge sockets and stable lo
     }
   } finally {await rm(root,{recursive:true,force:true});await rm(workspaceRoot,{recursive:true,force:true});}
 });
+
+test("focused owning failure cannot kill after changing tracked judge bytes in its clone", async () => {
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-focused-drift-"));
+  try {
+    const fixture=await makePreparedSurvivorFixture(root);
+    await writeFile(fixture.focus,`import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync,appendFileSync} from 'node:fs';
+      for(let i=0;i<22;i++)test('focused fixture '+i,()=>{});
+      test(">old-cap discriminator: a group's forward walk pages past 200 full pages with no truncation (mutation-killing)",()=>{
+        const mutated=readFileSync(new URL('./index.ts',import.meta.url),'utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES');
+        if(mutated)appendFileSync(new URL('./incremental-frontier.test.ts',import.meta.url),'\\n// changed judge bytes during focused execution');
+        assert.equal(mutated,false,'no cap-truncation past 200 pages');
+      });`);
+    git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","focused judge drift fixture"],fixture.repoRoot);
+    const head=git(["rev-parse","HEAD"],fixture.repoRoot);
+    const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+    const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:head,operatorId:null,requestedRisk:"focused judge drift",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
+    const result=await runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id]);
+    assert.equal(result.operatorOutcomes[0]!.projection.projection,"inconclusive");
+    assert.equal(result.operatorOutcomes[0]!.receipt.axes.focused.status,"failed");
+    assert.ok(JSON.stringify(result.operatorOutcomes[0]!.receipt.axes.focused).includes("focused_source_changed"));
+  } finally {await rm(root,{recursive:true,force:true});}
+});
