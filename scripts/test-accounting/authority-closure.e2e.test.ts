@@ -265,7 +265,7 @@ test("e2e: a suite that exits 0 but emits no structured node-test events no long
 			runAuthority({ root, suites: ["receipt-binding-fixture"] }),
 			RECEIPT_BINDING_FIXTURE_DID_NOT_PASS_PATTERN,
 		);
-		const directory = join(root, gitPath("test-accounting", root), "runs");
+		const directory = join(gitPath("test-accounting", root), "runs");
 		const receiptPath = readdirSync(directory).find((path) =>
 			path.endsWith(".receipt.json"),
 		);

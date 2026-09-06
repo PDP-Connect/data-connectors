@@ -104,7 +104,8 @@
             "local Chase raw-DOM fixture directory not present": 3,
             "local USAA raw fixture directory not present": 1,
             "requires --experimental-test-module-mocks": 1,
-            "run with --expose-gc for a reliable memory-growth comparison": 1
+            "run with --expose-gc for a reliable memory-growth comparison": 1,
+            "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1
           }
         }
       ]
