@@ -127,8 +127,19 @@ export function classifyFocusedResult(result: Awaited<ReturnType<typeof runInWor
 }
 
 export async function runFocusedCheck(repoRoot: string, env: NodeJS.ProcessEnv, wallTimeMs: number, operator: GroupMeOperator | null = null) {
-  const result = await runInWorkspace(focusedCommand(repoRoot), repoRoot, env, wallTimeMs);
-  return { ...result, ...classifyFocusedResult(result, operator) };
+  const deadlineAt = Date.now() + wallTimeMs;
+  const status = async () => (await execFileAsync("/usr/bin/git", ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"],
+    { env, timeout: remainingTime(deadlineAt), encoding: "utf8" })).stdout;
+  const sourceStatusBefore = await status();
+  if (sourceStatusBefore.trim()) return { ok: false, failure: "focused_source_not_clean", sourceStatusBefore,
+    stdout: "", stderr: "", exitCode: null, signal: null, deadlineFired: false, outputLimitExceeded: false };
+  const result = await runInWorkspace(focusedCommand(repoRoot), repoRoot, env, remainingTime(deadlineAt));
+  if (result.deadlineFired || result.signal || result.outputLimitExceeded) return { ...result, sourceStatusBefore, ...classifyFocusedResult(result, operator) };
+  let sourceStatusAfter: string;
+  try { sourceStatusAfter = await status(); }
+  catch (error) { return { ...result, sourceStatusBefore, ok: false, failure: "focused_source_validation_failed", validationError: String(error) }; }
+  return { ...result, sourceStatusBefore, sourceStatusAfter,
+    ...(sourceStatusAfter.trim() ? { ok: false, failure: "focused_source_changed" } : classifyFocusedResult(result, operator)) };
 }
 
 export async function retainObservation(policy: EvidenceStorePolicy, attemptId: string, name: string, value: unknown): Promise<AttemptReceipt["evidenceArtifacts"][number]> {
