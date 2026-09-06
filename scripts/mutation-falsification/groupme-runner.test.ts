@@ -484,6 +484,7 @@ test("forced focused survivor runs complete mutant authority and rejection stays
   try {
     const fixture=await makePreparedSurvivorFixture(root);
     const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+    await mkdir(resolve(policy.workspacePolicy.workspaceRoot,"p-fixture"),{recursive:true});
     const intentFor=(head:string)=>freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:head,operatorId:null,requestedRisk:"fixture forced survivor",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
     const result=await runGroupMePilotBatch(policy,intentFor(fixture.head),[GROUPME_PAGE_CEILING_V1.id]);
     assert.equal(result.cleanExecutionRawCount,1);
@@ -498,7 +499,7 @@ test("forced focused survivor runs complete mutant authority and rejection stays
     assert.notEqual(authority.exitCode,0,"real complete authority rejected the extra backstop assertion");
     assert.ok(outcome.receipt.evidenceArtifacts.some(a=>a.relativePath.includes('unverified-')&&a.relativePath.endsWith('.receipt.json.json')));
     assert.ok(outcome.receipt.evidenceArtifacts.some(a=>a.relativePath.endsWith('/clean-focused.json')),"operator binds retained clean-focused bytes");
-    assert.deepEqual(await readdir(policy.workspacePolicy.workspaceRoot),[],"completed clones destroyed only after retained evidence");
+    assert.deepEqual(await readdir(policy.workspacePolicy.workspaceRoot),["p-fixture"],"completed clones destroyed while separate preflight workspace remains");
     await writeFile(fixture.focus,"import test from 'node:test';for(let i=0;i<22;i++)test('incomplete focused '+i,()=>{});");
     git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","incomplete focused fixture"],fixture.repoRoot);
     const changedHead=git(["rev-parse","HEAD"],fixture.repoRoot);
@@ -643,5 +644,73 @@ test("whole batch refuses changed retained clean bytes and crossing 600 seconds 
       assert.equal(receipt.axes.backstop.status,"ok");
       assert.deepEqual(await readdir(policy.workspacePolicy.workspaceRoot),[],"clean clone was disposed before retained evidence was checked");
     }
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test("interrupted real clean and mutant authorities quarantine private clones and leave incomplete attempts", async () => {
+  const {cp,readFile,readdir}=await import("node:fs/promises");
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy,listQuarantinedWorkspaces}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-backstop-interruption-"));
+  try {
+    for(const phase of ["clean","mutant","focused"] as const){
+      const phaseRoot=resolve(root,phase);await mkdir(phaseRoot);
+      const fixture=await makePreparedSurvivorFixture(phaseRoot);
+      const authority=resolve(fixture.repoRoot,"scripts/test-accounting/authority.ts");
+      await cp(authority,resolve(fixture.repoRoot,"scripts/test-accounting/authority-fixture-original.ts"));
+      await writeFile(authority,`import {runAuthority as original} from './authority-fixture-original.ts';import {readFileSync,mkdirSync,writeFileSync} from 'node:fs';
+        export async function runAuthority(options){
+          const mutant=readFileSync('packages/polyfill-connectors/connectors/groupme/index.ts','utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES');
+          if(${JSON.stringify(phase)}==='clean'||mutant){mkdirSync('.git/test-accounting/runs',{recursive:true});writeFileSync('.git/test-accounting/runs/interrupted-fixture.partial','unfinished authority fixture');process.kill(process.pid,'SIGTERM');await new Promise(()=>{});}
+          return original(options);
+        }`);
+      if(phase==="focused")await writeFile(fixture.focus,`import test from 'node:test';import {readFileSync} from 'node:fs';if(readFileSync(new URL('./index.ts',import.meta.url),'utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES')){process.kill(process.ppid,'SIGKILL');process.exit(0);}for(let i=0;i<23;i++)test('focused fixture '+i,()=>{});`);
+      git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm",phase+" authority interruption fixture"],fixture.repoRoot);
+      const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(phaseRoot,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(phaseRoot,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+      const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:git(["rev-parse","HEAD"],fixture.repoRoot),operatorId:null,requestedRisk:"authority interruption fixture",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
+      await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id,GROUPME_NONPROGRESS_WEAKENING_V1.id]),/backstop|interrupted.*quarantined/);
+      const quarantined=await listQuarantinedWorkspaces(policy.workspacePolicy.workspaceRoot);
+      assert.equal(quarantined.length,1,"interrupted authority clone must remain quarantined");
+      const markers=await readdir(resolve(policy.evidenceStorePolicy.evidenceRoot,"markers"));
+      assert.equal(markers.filter(name=>name.endsWith('.issued.json')).length,phase==="clean"?1:2,"no later operator is issued");
+      assert.equal(markers.filter(name=>name.endsWith('.completed.json')).length,phase==="clean"?0:1,"interrupted attempt is never published complete");
+      const attemptsRoot=resolve(policy.evidenceStorePolicy.evidenceRoot,"attempts");
+      let interruptedObservation=false,partialRetained=false;
+      for(const id of await readdir(attemptsRoot)){
+        const files=await readdir(resolve(attemptsRoot,id));
+        const observationName=phase==="focused"?'focused.json':'authority-process.json';
+        if(files.includes(observationName)){
+          const processObservation=JSON.parse(await readFile(resolve(attemptsRoot,id,observationName),'utf8'));
+          if(processObservation.signal===(phase==="focused"?'SIGKILL':'SIGTERM'))interruptedObservation=true;
+        }
+        if(files.includes('unverified-interrupted-fixture.partial.json'))partialRetained=true;
+      }
+      assert.equal(interruptedObservation,true,"retain the real signal before quarantine");
+      if(phase!=="focused")assert.equal(partialRetained,true,"retain incomplete accounting bytes as unverified");
+      await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id]),/incomplete|corrupt|blocked/i,"incomplete attempt blocks a later batch");
+      await assert.rejects(()=>runGroupMePilotBatch({...policy,evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(phaseRoot,"fresh-evidence")}},intent,[GROUPME_PAGE_CEILING_V1.id]),/blocked by unresolved workspace/,"changing evidence roots cannot bypass a quarantined workspace");
+    }
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test("a quarantined mutant setup failure stops the next operator and blocks a fresh evidence root", async () => {
+  const {readdir}=await import("node:fs/promises");
+  const {runGroupMePilotBatch,GROUPME_PILOT_ADAPTER_ID,GROUPME_PILOT_ADAPTER_VERSION}=await import("./groupme-runner.ts");
+  const {freezeIntentPacket,INTENT_SCHEMA}=await import("./schemas.ts");
+  const {defaultWorkspacePolicy,listQuarantinedWorkspaces}=await import("./workspace.ts");
+  const root=await mkdtemp(join(tmpdir(),"groupme-stop-after-quarantine-"));
+  try {
+    const fixture=await makePreparedSurvivorFixture(root);
+    const backstop=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    await writeFile(backstop,`import test from 'node:test';import {writeFileSync} from 'node:fs';test('fixture changes prepared cache after clean materialization',()=>writeFileSync(${JSON.stringify(resolve(fixture.preparation.cacheRoot,"changed-after-clean"))},'changed declared preparation'));`);
+    git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","post-clean preparation drift fixture"],fixture.repoRoot);
+    const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
+    const intent=freezeIntentPacket({schema:INTENT_SCHEMA,adapterId:GROUPME_PILOT_ADAPTER_ID,adapterVersion:GROUPME_PILOT_ADAPTER_VERSION,baseCommitSha:git(["rev-parse","HEAD"],fixture.repoRoot),operatorId:null,requestedRisk:"post-clean setup failure",requestedBudget:{wallTimeMs:60000,directOutputByteCap:8*1024*1024}});
+    await assert.rejects(()=>runGroupMePilotBatch(policy,intent,[GROUPME_PAGE_CEILING_V1.id,GROUPME_NONPROGRESS_WEAKENING_V1.id]),/stopped after failed cleanup/);
+    assert.equal((await listQuarantinedWorkspaces(policy.workspacePolicy.workspaceRoot)).length,1);
+    const markers=await readdir(resolve(policy.evidenceStorePolicy.evidenceRoot,"markers"));
+    assert.equal(markers.filter(name=>name.endsWith('.issued.json')).length,2,"only clean and first mutant attempts were issued");
+    await assert.rejects(()=>runGroupMePilotBatch({...policy,evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"fresh-evidence")}},intent,[GROUPME_PAGE_CEILING_V1.id]),/blocked by unresolved workspace/);
   } finally {await rm(root,{recursive:true,force:true});}
 });
