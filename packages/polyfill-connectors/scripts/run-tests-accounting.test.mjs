@@ -14,8 +14,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const names = [
@@ -31,16 +31,18 @@ function fixture() {
 	const cwd = join(root, "packages/polyfill-connectors");
 	mkdirSync(join(cwd, "scripts"), { recursive: true });
 	mkdirSync(join(root, "scripts/test-accounting"), { recursive: true });
-	for (const name of ["receipt.ts", "node-reporter.ts"])
+	for (const name of ["receipt.ts", "node-reporter.ts"]) {
 		cpSync(
 			join(sourceRoot, "scripts/test-accounting", name),
 			join(root, "scripts/test-accounting", name),
 		);
-	for (const name of ["run-tests.mjs", "test-diagnostics-reporter.mjs"])
+	}
+	for (const name of ["run-tests.mjs", "test-diagnostics-reporter.mjs"]) {
 		cpSync(
 			join(sourceRoot, "packages/polyfill-connectors/scripts", name),
 			join(cwd, "scripts", name),
 		);
+	}
 	symlinkSync(
 		join(sourceRoot, "node_modules"),
 		join(root, "node_modules"),
@@ -88,7 +90,7 @@ function fixture() {
 				"scripts/run-tests.mjs",
 				...(normal ? [] : ["--accounting-authority", authority]),
 			],
-			{ cwd, env, encoding: "utf8", timeout: 20000 },
+			{ cwd, env, encoding: "utf8", timeout: 20_000 },
 		);
 	};
 	return { root, cwd, paths, issued, authority, run };
