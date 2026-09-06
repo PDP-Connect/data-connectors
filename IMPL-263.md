@@ -906,3 +906,424 @@ Final local commands at82a88aeffc9416775caa577b134603cd7e00b9b3:
 This final reporting-only commit does not change any executable, test, manifest or profile bytes. It does change the full Git SHA: its required CI and appropriate exact-head review refresh remain open at handoff. Source82a88 has independently verified green CI, its successful complete hosted receipt, Codex medium NARROW alignment,19 valid contribution signatures, and the final local observations above. The report commit itself is also signed and verified before push; the final published SHA is supplied in the PR body and handoff.
 
 Unchanged acceptance limits: independent Claude red-team SHIP has not been supplied; no GroupMe production operator batch or independent triage ran; the explicitly bounded §8 prerequisite/cleanup and redundant-guard limitations are not upgraded. The initial Slack timing failure and process deviations remain retained. Historical tasks2.6/2.7 and qualified1.6 are untouched. No merge or issue closure occurred.
+
+
+## Round 3 (F-4/N-1/N-2)
+
+PR: https://github.com/PDP-Connect/data-connectors/pull/82 (base `port/scenario-274`; not merged).
+
+New implementation head: `4e43f23a238bc9e74695db47f0617141e8f58561`. This section is an append to the historical report, recorded in the following report-only commit. It supersedes the earlier open F-4 and N-1 test gaps. No runtime, manifest, workflow, package, decision-record, or governing-design bytes changed in this round.
+
+Read both `/tmp/REDTEAM-82.md` and `/tmp/REDTEAM-82-R2.md` fully. The latter reviewed `4b0ae59e105475dcf99ab6184994683c554c975f`: F-1/F-2/F-3/F-5 resolved, with F-4 still unfalsifiable despite its SHIP disposition. The owner explicitly required closure of F-4; that test gap is now closed by a measured failing sabotage. The prior head's SHIP does not certify this new head.
+
+| Finding | Change and evidence | Addressing commit/action |
+| --- | --- | --- |
+| F-4 | Two tests change only each registered operator's declared preimage from tabs to spaces, preserving the real target file and original postimage transform. Each requires `PreimageMismatchError` for that whitespace-only mismatch and accepts the byte-exact operator. The reviewer's normalizing guard, with uniqueness preserved, now fails both new tests. | `4e43f23a238bc9e74695db47f0617141e8f58561` |
+| N-1 | A real clean focused child first writes a sentinel. After removing the sentinel and adding an untracked source file, the next call returns `focused_source_not_clean`, records the dirty status, has null exit code and empty stdout, and never writes the sentinel. Removing the early guard makes this test fail. | `4e43f23a238bc9e74695db47f0617141e8f58561` |
+| N-2 | Live PR body changed only `verification:365` → `verification: 365`, `and94` → `and 94`, and `Its437.092` → `Its 437.092`. Retrieved the body again and verified precisely these three substitutions, preserving all other bytes and the final standalone AI trailer. | PR #82 body edit; recorded in this report-only commit |
+
+### F-4: exact reverted-guard probe
+
+All sabotage ran in a disposable `git clone --no-hardlinks` under `~/.tmp`, never in the contribution worktree or pdpp source. The clone used the committed test bytes; after restoration, both runtime files and both test files matched the new implementation head byte-for-byte. Its root dependencies were linked for this bounded test fixture; this is not a dependency-materialization or isolation claim. Node was pinned to v24.15.0.
+
+The only runtime sabotage replaced:
+
+```ts
+if (!operator.preimage || fileContent.split(operator.preimage).length !== 2) {
+```
+
+with the exact comparison described by the reviewer (uniqueness remains `!== 2`):
+
+```ts
+const norm = (t: string) => t.replace(/[ \t]+/g, " ");
+if (!operator.preimage || norm(fileContent).split(norm(operator.preimage)).length !== 2) {
+```
+
+Unmodified control output:
+
+```text
+$ node --import tsx --test scripts/mutation-falsification/groupme-operators.test.ts
+✔ exactly 2 operators are registered (design.md permits two or three; two is enough here) (0.50041ms)
+✔ findGroupMeOperator: resolves both registered ids and rejects an unregistered one (0.149723ms)
+✔ groupme-page-ceiling-dc-v1: preimage matches the real live target file exactly once (6.419185ms)
+✔ groupme-nonprogress-weakening-dc-v1: preimage matches the real live target file exactly once (1.996436ms)
+✔ applyOperator: page-ceiling operator applies cleanly against the real file and inserts a bounded counter (0.714983ms)
+✔ applyOperator: nonprogress-weakening operator applies cleanly and always returns true (0.611451ms)
+✔ applyOperator: page-ceiling operator throws PreimageMismatchError against content where the preimage is absent (0.230054ms)
+✔ applyOperator: nonprogress-weakening operator throws PreimageMismatchError against content where the preimage is absent (0.075611ms)
+✔ applyOperator: throws PreimageMismatchError when the target function has already been altered (e.g. by a prior/different mutation) (0.098942ms)
+✔ both operators declare the same target file (packages/polyfill-connectors/connectors/groupme/index.ts) (0.104922ms)
+✔ both operators carry a non-empty risk description (0.073661ms)
+✔ F7-1 FIRST: replacing exact B tabs with spaces refuses before mutation (1.769382ms)
+✔ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-page-ceiling-dc-v1 (0.835915ms)
+✔ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-nonprogress-weakening-dc-v1 (0.790874ms)
+✔ applyOperator rejects duplicate exact preimages (0.140772ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 146.567772
+
+exit_code=0
+```
+
+Sabotaged output:
+
+```text
+$ node --import tsx --test scripts/mutation-falsification/groupme-operators.test.ts
+✔ exactly 2 operators are registered (design.md permits two or three; two is enough here) (2.638498ms)
+✔ findGroupMeOperator: resolves both registered ids and rejects an unregistered one (0.188233ms)
+✔ groupme-page-ceiling-dc-v1: preimage matches the real live target file exactly once (6.858393ms)
+✔ groupme-nonprogress-weakening-dc-v1: preimage matches the real live target file exactly once (2.177089ms)
+✔ applyOperator: page-ceiling operator applies cleanly against the real file and inserts a bounded counter (1.733501ms)
+✔ applyOperator: nonprogress-weakening operator applies cleanly and always returns true (1.380275ms)
+✔ applyOperator: page-ceiling operator throws PreimageMismatchError against content where the preimage is absent (0.250495ms)
+✔ applyOperator: nonprogress-weakening operator throws PreimageMismatchError against content where the preimage is absent (0.080322ms)
+✔ applyOperator: throws PreimageMismatchError when the target function has already been altered (e.g. by a prior/different mutation) (0.089962ms)
+✔ both operators declare the same target file (packages/polyfill-connectors/connectors/groupme/index.ts) (0.086302ms)
+✔ both operators carry a non-empty risk description (0.048411ms)
+✔ F7-1 FIRST: replacing exact B tabs with spaces refuses before mutation (3.244189ms)
+✖ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-page-ceiling-dc-v1 (2.826151ms)
+✖ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-nonprogress-weakening-dc-v1 (2.752959ms)
+✔ applyOperator rejects duplicate exact preimages (0.252165ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 13
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 152.336737
+
+✖ failing tests:
+
+test at scripts/mutation-falsification/groupme-operators.test.ts:3:955
+✖ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-page-ceiling-dc-v1 (2.826151ms)
+  AssertionError [ERR_ASSERTION]: Missing expected exception (PreimageMismatchError).
+      at TestContext.<anonymous> (/home/tnunamak/.tmp/mutation263-round3-4pzu_pi2/scripts/mutation-falsification/groupme-operators.test.ts:106:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    operator: 'throws',
+    diff: 'simple'
+  }
+
+test at scripts/mutation-falsification/groupme-operators.test.ts:3:955
+✖ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-nonprogress-weakening-dc-v1 (2.752959ms)
+  AssertionError [ERR_ASSERTION]: Missing expected exception (PreimageMismatchError).
+      at TestContext.<anonymous> (/home/tnunamak/.tmp/mutation263-round3-4pzu_pi2/scripts/mutation-falsification/groupme-operators.test.ts:106:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    operator: 'throws',
+    diff: 'simple'
+  }
+
+exit_code=1
+```
+
+Restored output:
+
+```text
+$ node --import tsx --test scripts/mutation-falsification/groupme-operators.test.ts
+✔ exactly 2 operators are registered (design.md permits two or three; two is enough here) (0.56091ms)
+✔ findGroupMeOperator: resolves both registered ids and rejects an unregistered one (0.187553ms)
+✔ groupme-page-ceiling-dc-v1: preimage matches the real live target file exactly once (6.942084ms)
+✔ groupme-nonprogress-weakening-dc-v1: preimage matches the real live target file exactly once (0.660052ms)
+✔ applyOperator: page-ceiling operator applies cleanly against the real file and inserts a bounded counter (1.978695ms)
+✔ applyOperator: nonprogress-weakening operator applies cleanly and always returns true (0.637221ms)
+✔ applyOperator: page-ceiling operator throws PreimageMismatchError against content where the preimage is absent (0.219844ms)
+✔ applyOperator: nonprogress-weakening operator throws PreimageMismatchError against content where the preimage is absent (0.069681ms)
+✔ applyOperator: throws PreimageMismatchError when the target function has already been altered (e.g. by a prior/different mutation) (0.082102ms)
+✔ both operators declare the same target file (packages/polyfill-connectors/connectors/groupme/index.ts) (0.099702ms)
+✔ both operators carry a non-empty risk description (0.073052ms)
+✔ F7-1 FIRST: replacing exact B tabs with spaces refuses before mutation (1.515327ms)
+✔ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-page-ceiling-dc-v1 (0.703553ms)
+✔ applyOperator rejects whitespace-only preimage drift and accepts exact bytes: groupme-nonprogress-weakening-dc-v1 (0.643552ms)
+✔ applyOperator rejects duplicate exact preimages (0.107652ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 107.389638
+
+exit_code=0
+```
+
+The old thirteen tests still pass under sabotage; precisely the two new assertions fail with `Missing expected exception (PreimageMismatchError)`. This reproduces and closes the reviewer's zero-detection case without weakening uniqueness or changing the target file.
+
+### N-1: dirty-source refusal
+
+Supplemental probe: replace only `if (sourceStatusBefore.trim()) return {` with `if (false) return {` in the same disposable clone. The new test then detects that execution reached the later `focused_source_changed` result instead of refusing before spawn. The restored production guard passes, including the sentinel-absence assertion.
+
+```text
+$ node --import tsx --test '--test-name-pattern=dirty source is refused as focused_source_not_clean' scripts/mutation-falsification/groupme-runner.test.ts
+✔ dirty source is refused as focused_source_not_clean before the focused child runs (221.601904ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 425.046553
+
+exit_code=0
+$ node --import tsx --test '--test-name-pattern=dirty source is refused as focused_source_not_clean' scripts/mutation-falsification/groupme-runner.test.ts
+✖ dirty source is refused as focused_source_not_clean before the focused child runs (384.528266ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 527.014421
+
+✖ failing tests:
+
+test at scripts/mutation-falsification/groupme-runner.test.ts:49:6171
+✖ dirty source is refused as focused_source_not_clean before the focused child runs (384.528266ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+
+  + 'focused_source_changed'
+  - 'focused_source_not_clean'
+                    ^
+
+      at TestContext.<anonymous> (/home/tnunamak/.tmp/mutation263-round3-4pzu_pi2/scripts/mutation-falsification/groupme-runner.test.ts:744:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'focused_source_changed',
+    expected: 'focused_source_not_clean',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+exit_code=1
+$ node --import tsx --test '--test-name-pattern=dirty source is refused as focused_source_not_clean' scripts/mutation-falsification/groupme-runner.test.ts
+✔ dirty source is refused as focused_source_not_clean before the focused child runs (212.637333ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 308.752637
+
+exit_code=0
+```
+
+### Validation and scope
+
+The three owning files (`groupme-operators.test.ts`, `groupme-runner.test.ts`, `workspace.test.ts`) reported:
+
+```text
+$ PATH=/home/tnunamak/.nvm/versions/node/v24.15.0/bin:$PATH node --import tsx --test scripts/mutation-falsification/groupme-operators.test.ts scripts/mutation-falsification/groupme-runner.test.ts scripts/mutation-falsification/workspace.test.ts
+ℹ tests 61
+ℹ suites 0
+ℹ pass 61
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 29230.965986
+exit_code=0
+```
+
+TypeScript:
+
+```text
+
+> @opendatalabs/data-connectors-tools@0.1.0 typecheck:mutation-falsification
+> tsc --noEmit -p scripts/mutation-falsification/tsconfig.json
+
+exit_code=0
+```
+
+The complete mutation-falsification suite also ran through its canonical accounting entrypoint at the new implementation head:
+
+```text
+
+> @opendatalabs/data-connectors-tools@0.1.0 test:mutation-falsification
+> node --import tsx scripts/test-accounting/authority.ts --run --suite mutation-falsification --profile default
+
+[test-accounting] 1 suite/profile runs selected
+[test-accounting] [1/1] mutation-falsification/default
+[test-accounting] mutation-falsification/default: started (9 files)
+[test-accounting] mutation-falsification/default: running 5s, 17899 bytes, quiet 1s
+[test-accounting] mutation-falsification/default: running 10s, 22619 bytes, quiet 1s
+[test-accounting] mutation-falsification/default: running 15s, 22785 bytes, quiet 3s
+[test-accounting] mutation-falsification/default: running 20s, 22968 bytes, quiet 1s
+[test-accounting] mutation-falsification/default: running 25s, 22968 bytes, quiet 6s
+[test-accounting] mutation-falsification/default: exit 0 after 30s
+{"directory":"/home/tnunamak/code/data-connectors/.git/worktrees/data-connectors-waspflow-impl-263-0906/test-accounting/runs","result":{"verified":["mutation-falsification/default"],"required":["mutation-falsification/default"]}}
+exit_code=0
+```
+
+Retained receipt summary:
+
+```json
+{
+  "run_id": "43346768-b082-428d-854b-19d8cb934d78",
+  "head_sha": "4e43f23a238bc9e74695db47f0617141e8f58561",
+  "exit_code": 0,
+  "counts": {
+    "assertions": 229,
+    "passed": 229,
+    "failed": 0,
+    "skipped": 0,
+    "skip_reasons": {},
+    "consumed_mapping_identities": [],
+    "planned_files": 9,
+    "completed_files": 9
+  }
+}
+```
+
+Independent Codex gpt-6-astra medium review read the delta review and inspected the tests and retained sabotage outputs. It independently ran the three new tests with the pinned Node: 3/3 passed; F-4/N-1/N-2 bounded review PASS, no new findings. This is a review of the test delta, not a replacement for historical missing independent triage or a new production-batch claim.
+
+The test commit's GPG signature verified as Tim Nunamaker <tnunamak@gmail.com>; author and committer match, DCO is present, and `Assisted-by: AI` is the last nonempty trailer. `git diff --check` passed. The only code diff from the round-2 head is +53 lines in the two test files.
+
+### Hosted CI and clean receipt at the new implementation head
+
+All PR checks passed (the path-filtered connector unit job was skipped). Displayed log excerpts omit trailing whitespace; retained raw logs are unchanged. The separate `accounted-suite` job took **479 seconds against its unchanged 1,200-second timeout**. Its measurement step took 433 seconds; the measured clean execution cost was 428.709 seconds. A fresh independent no-hardlink clone ran the full receipt verifier with `consume:false` and verified source/selection hashes, manifest, retained quartet, nonce/binding, transcript, terminal population, and exact reviewed skip map. Every clean-cost artifact digest and size matched.
+
+```text
+$ gh pr checks 82
+Changes	pass	4s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510972637
+Changes	pass	5s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238380/job/101510972625
+Changes	pass	4s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238381/job/101510972412
+Connectors Tree Gate	pass	2s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238380/job/101510992361
+Cross-Repo Integrity Gate	pass	3s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101511172928
+DCO	pass	1s	https://github.com/cncf/dco2
+Drift — local-collector definitions snapshot	pass	10s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510998089
+Drift — reference-contract stand-in	pass	9s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510997993
+Drift — vendored connector sources	pass	9s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510998072
+Drift — vendored tarball digests	pass	1m12s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510998103
+Pin freshness — data-connect	pass	5s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510997973
+evidence-tests	pass	1m49s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238381/job/101510989668
+connector unit tests	skipping	0	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238380/job/101510992597
+Pin freshness — pdpp	pass	6s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510997998
+Polyfill Connectors Gate	pass	3s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238381/job/101512170413
+Read pinned SHAs	pass	7s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238378/job/101510972601
+accounted-suite	pass	7m59s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238381/job/101510989680
+verify + test	pass	8m19s	https://github.com/PDP-Connect/data-connectors/actions/runs/34042238381/job/101510989683
+```
+
+Independent receipt and timing output:
+
+```json
+{
+  "status": "PASS",
+  "testedHead": "4e43f23a238bc9e74695db47f0617141e8f58561",
+  "githubRun": 34042238381,
+  "githubJob": 101510989680,
+  "authorityRunId": "6fa0dc74-946d-414b-aa49-b02379c5e638",
+  "manifestSha256": "f8a8fa9ebcd622d1fefe2c1e79b99ca36b538d854fa2bd2b9162da66f4ea4a86",
+  "protocolVerification": {
+    "clone": "/home/tnunamak/.tmp/round3-hosted-audit-jB30gK",
+    "head": "4e43f23a238bc9e74695db47f0617141e8f58561",
+    "result": {
+      "verified": [
+        "polyfill-connectors/default"
+      ],
+      "required": [
+        "polyfill-connectors/default"
+      ]
+    }
+  },
+  "counts": {
+    "assertions": 5168,
+    "passed": 5074,
+    "failed": 0,
+    "skipped": 94,
+    "skip_reasons": {
+      "network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted \u2014 either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) \u2014 refusing to fall back to a PATH-resolved lookup": 2,
+      "local Amazon raw-DOM fixture directory not present": 2,
+      "local Chase raw-DOM fixture directory not present": 3,
+      "requires --experimental-test-module-mocks": 1,
+      "GROUPME_ACCESS_TOKEN unset": 2,
+      "local USAA raw fixture directory not present": 1,
+      "run with --expose-gc for a reliable memory-growth comparison": 1,
+      "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
+      "requires usable bwrap": 10,
+      "requires usable bwrap and unshare bind mounts": 5,
+      "requires usable unshare bind mounts": 23,
+      "requires usable unshare": 4,
+      "requires usable bwrap prerequisites": 19,
+      "requires usable unshare prerequisites": 19,
+      "requires writable socket location: an ssh-agent-shaped path under $HOME/.ssh/agent": 1
+    },
+    "planned_files": 365,
+    "completed_files": 365
+  },
+  "diagnosticAggregate": {
+    "tests": 5168,
+    "failed": 0,
+    "passed": 5074,
+    "cancelled": 0,
+    "skipped": 94,
+    "todo": 0,
+    "topLevel": 5026,
+    "suites": 39
+  },
+  "uniqueTerminalFiles": 365,
+  "allCostArtifactDigestsValid": true,
+  "jobWallSeconds": 479.0,
+  "measureStepWallSeconds": 433.0,
+  "costElapsedMs": 428709,
+  "costVerified": true,
+  "namespaceAvailable": false,
+  "admission": {
+    "admitted": false,
+    "reason": "clean_backstop_exceeds_300_seconds",
+    "blockedPilotCount": 1,
+    "operatorAttempts": 0,
+    "notRunOperators": [
+      "groupme-page-ceiling-dc-v1",
+      "groupme-nonprogress-weakening-dc-v1"
+    ],
+    "interpretedTrials": 0,
+    "costPath": "/home/runner/work/data-connectors/data-connectors/.mutation-falsification-evidence/preflight/latest-clean-backstop-cost.json",
+    "identity": "5fc6bfdab1d0fb40e0278a1fbbbfe2dba93979c719fbc505041749264ba15095"
+  }
+}
+```
+
+The ordinary package suite at the same hosted head also passed:
+
+```text
+verify + test	Test	2026-09-06T15:33:03.7498382Z ℹ tests 5168
+verify + test	Test	2026-09-06T15:33:03.7498745Z ℹ suites 39
+verify + test	Test	2026-09-06T15:33:03.7499094Z ℹ pass 5074
+verify + test	Test	2026-09-06T15:33:03.7499423Z ℹ fail 0
+verify + test	Test	2026-09-06T15:33:03.7499760Z ℹ cancelled 0
+verify + test	Test	2026-09-06T15:33:03.7500115Z ℹ skipped 94
+verify + test	Test	2026-09-06T15:33:03.7500452Z ℹ todo 0
+verify + test	Test	2026-09-06T15:33:03.7500832Z ℹ duration_ms 426994.627207
+```
+
+The earlier measured merge-base failure set remains `[]`; this head's ordinary hosted failure set is `[]`, so the introduced failure set is `[]`. The hosted capability profile has 94 skips versus the local merge-base's 63; this is the existing reviewed hosted profile, unchanged in Round 3. Package selection and package bytes are unchanged from round 2; the three added tests belong to the root mutation harness.
+
+### Publication and remaining limits
+
+Round 3 uses two signed contributions: the test commit `4e43f23a238bc9e74695db47f0617141e8f58561` and this report-only child. The latter carries this append without rewriting the historical report. The final publication SHA and its post-push checks are reported in the handoff; the measured receipt above is explicitly bound to the test commit and is not relabelled as another head's receipt.
+
+F-4, N-1 and N-2 have no remaining implementation items. The PR body received only the three requested spacing fixes, so its earlier head/review paragraphs remain historical snapshots. No other product, policy, design, or PR-body changes were made. No external repository, gist, issue or unrelated artifact was created; no merge occurred.
+
+**NARROW: no destination operator-level batch evidence.** Historical unchecked tasks 2.6/2.7 and the qualified missing independent review 1.6 remain verbatim. The independent Claude SHIP supplied for `4b0ae59e1` is recorded, but is not upgraded into exact-head approval of the new commits. Retargeting after #81 merges still requires the prescribed fresh baseline and review.
