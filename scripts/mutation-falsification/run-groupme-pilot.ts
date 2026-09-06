@@ -4,7 +4,7 @@
 /** One local batch; --preflight measures clean authority only. Neither mode certifies triage. */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { arch, release, platform } from "node:os";
 import { dirname, resolve } from "node:path";
 import { digestOf } from "./canonicalize.ts";
@@ -33,7 +33,8 @@ async function main(): Promise<void> {
   const operatorIds = GROUPME_OPERATORS.map(op => op.id);
   const runId = randomUUID();
   const workspacePolicy = defaultWorkspacePolicy();
-  const privateRoot = resolve(workspacePolicy.workspaceRoot, `preflight-${runId}`);
+  await mkdir(workspacePolicy.workspaceRoot, { recursive: true });
+  const privateRoot = await mkdtemp(resolve(workspacePolicy.workspaceRoot, "p-"));
   await mkdir(resolve(privateRoot, "home"), { recursive: true });
   await mkdir(resolve(privateRoot, "tmp"), { recursive: true });
   const env = buildIsolatedEnvironment(privateRoot, { environmentAllowlist: ["CI"] });
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
     packageLock: await fileDigest(resolve(REPO_ROOT, "packages/polyfill-connectors/package-lock.json")),
     authority: { suites: ["polyfill-connectors"], profile: "default", cwd: REPO_ROOT },
     materializationCommands: [".", "packages/polyfill-connectors"].map(cwd => ({ cwd, argv: [npm, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"] })),
+    // Policy identities use declared private-path roles; execution artifacts retain actual paths.
     environmentConfiguration: Object.fromEntries(Object.entries(env).map(([name,value]) => [name,
       typeof value === "string" ? value.replaceAll(privateRoot, "<private-workspace>") : value])),
     focusedCommand: [process.execPath,"--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts","packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts"], batchWallTimeMs: PILOT_BATCH_WALL_TIME_MS,
@@ -66,6 +68,11 @@ async function main(): Promise<void> {
   const runDirectory = resolve(EVIDENCE_ROOT, "preflight", runId);
   await mkdir(runDirectory, { recursive: true });
   await writeFile(resolve(runDirectory, "effective-plan.json"), JSON.stringify(plan, null, 2) + "\n");
+  const actualPlanArtifact = await retainObservation(evidenceStorePolicy, runId, "effective-execution-plan", {
+    logicalIdentity: identity, environment: env, privateRoot, cwd: REPO_ROOT,
+    focusedCommand: plan.focusedCommand, authoritySelection: plan.authority,
+    materializationCommands: plan.materializationCommands,
+  });
   const costPath = resolve(EVIDENCE_ROOT, "preflight", "latest-clean-backstop-cost.json");
   let cost: CleanBackstopCost | undefined;
   if (args.includes("--preflight")) {
@@ -75,7 +82,7 @@ async function main(): Promise<void> {
     const namespace = await runInWorkspace(["/usr/bin/unshare", "-r", "-n", "true"], REPO_ROOT, env, 10_000);
     const capabilityArtifact = await retainObservation(evidenceStorePolicy, runId, "namespace-capability", namespace);
     cost = { schema: "data-connectors/groupme-clean-cost/v1", identity, startedAt, endedAt,
-      elapsedMs: endedAt - startedAt, artifacts: [...backstop.artifacts, capabilityArtifact],
+      elapsedMs: endedAt - startedAt, artifacts: [actualPlanArtifact, ...backstop.artifacts, capabilityArtifact],
       namespaceAvailable: namespace.exitCode === 0 && !namespace.signal, verified: backstop.axis.status === "ok" };
     await writeFile(resolve(runDirectory, "clean-backstop-cost.json"), JSON.stringify(cost, null, 2) + "\n");
     if (!cost.verified) {
