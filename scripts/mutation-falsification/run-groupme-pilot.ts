@@ -78,13 +78,18 @@ async function main(): Promise<void> {
       elapsedMs: endedAt - startedAt, artifacts: [...backstop.artifacts, capabilityArtifact],
       namespaceAvailable: namespace.exitCode === 0 && !namespace.signal, verified: backstop.axis.status === "ok" };
     await writeFile(resolve(runDirectory, "clean-backstop-cost.json"), JSON.stringify(cost, null, 2) + "\n");
-    if (!cost.verified) throw new Error(`clean authority failed; retained unverified observations at ${runDirectory}`);
+    if (!cost.verified) {
+      await writeFile(resolve(runDirectory, "admission.json"), JSON.stringify({ admitted: false,
+        reason: "clean_authority_failed", blockedPilotCount: 1, operatorAttempts: 0,
+        notRunOperators: operatorIds, interpretedTrials: 0, identity }, null, 2) + "\n");
+      throw new Error(`clean authority failed; retained unverified observations at ${runDirectory}`);
+    }
     await writeFile(costPath, JSON.stringify(cost, null, 2) + "\n");
   } else {
     try { cost = JSON.parse(await readFile(costPath, "utf8")); } catch { /* Missing measurement refuses admission below. */ }
   }
   const admission = await admitMeasuredBatch(cost, identity, EVIDENCE_ROOT);
-  const stop = { ...admission, operatorAttempts: 0, notRunOperators: operatorIds, interpretedTrials: 0, costPath, identity };
+  const stop = { ...admission, blockedPilotCount: admission.admitted ? 0 : 1, operatorAttempts: 0, notRunOperators: operatorIds, interpretedTrials: 0, costPath, identity };
   await writeFile(resolve(runDirectory, "admission.json"), JSON.stringify(stop, null, 2) + "\n");
   if (args.includes("--preflight") || !admission.admitted) {
     console.log("MUTATION_PILOT_BATCH_RESULT", JSON.stringify({ ...stop, preflightOnly: args.includes("--preflight"), recommendation: "NARROW" }));

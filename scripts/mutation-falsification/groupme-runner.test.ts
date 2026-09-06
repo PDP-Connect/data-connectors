@@ -376,3 +376,45 @@ test("judge identity binds actual raw bytes including binary files", async () =>
     assert.notEqual(judgeIdentityFor(null,root),binaryChanged);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test("failed preflight CLI retains one blocked pilot and two not-run operators before exiting nonzero", async () => {
+  const {cp,readFile,readdir}=await import("node:fs/promises");
+  const root=await mkdtemp(join(tmpdir(),"groupme-driver-failure-"));
+  try {
+    const scriptDir=resolve(root,"scripts/mutation-falsification");
+    await mkdir(scriptDir,{recursive:true});
+    await cp(resolve(import.meta.dirname,"run-groupme-pilot.ts"),resolve(scriptDir,"run-groupme-pilot.ts"));
+    await writeFile(resolve(scriptDir,"canonicalize.ts"),'export const digestOf=()=>"fixture-identity";');
+    await writeFile(resolve(scriptDir,"groupme-operators.ts"),'export const GROUPME_OPERATORS=[{id:"first"},{id:"second"}];');
+    await writeFile(resolve(scriptDir,"schemas.ts"),'export const freezeIntentPacket=x=>x; export const INTENT_SCHEMA="fixture";');
+    await writeFile(resolve(scriptDir,"groupme-runner.ts"),`export const GROUPME_PILOT_ADAPTER_ID='fixture',GROUPME_PILOT_ADAPTER_VERSION='fixture',PILOT_BATCH_WALL_TIME_MS=600000;
+      export const judgeIdentityFor=()=>"fixture";
+      export const aggregateOperatorAttempts=()=>null;
+      export const runGroupMePilotBatch=()=>{throw Error('operators must not run')};
+      export const retainObservation=async()=>({relativePath:'fixture',byteSize:0,sha256:'fixture'});
+      export const admitMeasuredBatch=async()=>({admitted:false,reason:'unverified_clean_authority'});
+      export const runCompleteBackstop=async()=>({axis:{status:'failed',failure:'backstop_authority_error',detail:'fixture failure'},artifacts:[],runIds:[]});`);
+    await writeFile(resolve(scriptDir,"workspace.ts"),`export const defaultWorkspacePolicy=()=>({workspaceRoot:${JSON.stringify(resolve(root,"workspace"))}});
+      export const buildIsolatedEnvironment=(root)=>({HOME:root+'/home',TMPDIR:root+'/tmp',npm_config_userconfig:root+'/npmrc',npm_config_globalconfig:root+'/global-npmrc',PLAYWRIGHT_BROWSERS_PATH:root+'/browsers'});
+      export const directoryDigest=async()=>"fixture";
+      export const fileDigest=async()=>"fixture";
+      export const runInWorkspace=async()=>({exitCode:1,signal:null});`);
+    await writeFile(resolve(root,"package.json"),'{"type":"module"}');
+    await writeFile(resolve(root,".gitignore"),'.mutation-falsification-evidence/\nworkspace/\nbrowser/\n');
+    await mkdir(resolve(root,"browser"));
+    git(["init","-q"],root);git(["add","-A"],root);
+    git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","driver fixture"],root);
+    let exitCode=0;
+    try { execFileSync(process.execPath,[resolve(scriptDir,"run-groupme-pilot.ts"),"--preflight"],{cwd:root,env:{...process.env,MUTATION_PREFLIGHT_BROWSER_SOURCE:resolve(root,"browser")},stdio:"pipe"}); }
+    catch(error){exitCode=(error as {status:number}).status;}
+    assert.notEqual(exitCode,0);
+    const preflightRoot=resolve(root,".mutation-falsification-evidence/preflight");
+    const runs=(await readdir(preflightRoot)).filter(name=>!name.endsWith('.json'));
+    assert.equal(runs.length,1);
+    const marker=JSON.parse(await readFile(resolve(preflightRoot,runs[0]!,"admission.json"),"utf8"));
+    assert.equal(marker.blockedPilotCount,1);
+    assert.deepEqual(marker.notRunOperators,["first","second"]);
+    assert.equal(marker.interpretedTrials,0);
+    assert.equal(marker.admitted,false);
+  } finally {await rm(root,{recursive:true,force:true});}
+});
