@@ -21,3 +21,6 @@ proxy-test/
 
 # Vendored playwright-runner's own install
 playwright-runner/node_modules/
+
+# Retained test and mutation evidence (never package artifacts)
+.mutation-falsification-evidence/
