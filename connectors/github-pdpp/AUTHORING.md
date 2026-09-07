@@ -1,6 +1,6 @@
 # GitHub PDPP maintenance
 
-This is a maintainer workflow for the checked-in `github-pdpp` artifact. Start new connector work in `PDP-Connect/pdpp`. See [Connector authoring](../../AUTHORING.md).
+This is a maintainer workflow for the checked-in `github-pdpp` artifact. Start new connector work here, in this repository. See [Connector authoring](../../AUTHORING.md).
 
 ## Current contract
 
