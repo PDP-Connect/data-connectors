@@ -1325,6 +1325,7 @@ function hasValidJsonlGaps(cursor: Record<string, unknown>): boolean {
 				Number.isSafeInteger(gap.byte_offset) &&
 				gap.byte_offset >= 0 &&
 				(gap.reason === "malformed_jsonl_line" ||
+					gap.reason === "non_object_jsonl_record" ||
 					gap.reason === "truncated_jsonl_tail"),
 		)
 	);
@@ -1426,9 +1427,9 @@ async function scanClaudeJsonl(input: {
 		onLine: async (line, byteOffset, lineNumber) => {
 			const text = line.toString("utf8");
 			if (!text.trim()) return;
-			let obj: JsonlObject;
+			let obj: unknown;
 			try {
-				obj = JSON.parse(text) as JsonlObject;
+				obj = JSON.parse(text);
 			} catch {
 				gaps.push({
 					path: input.path,
@@ -1438,7 +1439,15 @@ async function scanClaudeJsonl(input: {
 				});
 				return;
 			}
-			if (!obj) return;
+			if (!isRecord(obj)) {
+				gaps.push({
+					path: input.path,
+					line_number: lineNumber,
+					byte_offset: byteOffset,
+					reason: "non_object_jsonl_record",
+				});
+				return;
+			}
 			await input.onObject(obj);
 		},
 		onIncompleteLine: async (_line, byteOffset, lineNumber) => {
@@ -2159,7 +2168,7 @@ if (isMainModule(import.meta.url)) {
 								message:
 									gap.reason === "truncated_jsonl_tail"
 										? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
-										: "Claude Code skipped a malformed JSONL line; other source records were collected",
+										: "Claude Code skipped an invalid JSONL record; other source records were collected",
 								diagnostics: { ...gap },
 							});
 					}

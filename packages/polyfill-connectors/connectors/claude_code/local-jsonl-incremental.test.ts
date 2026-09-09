@@ -287,7 +287,7 @@ test("malformed middle line preserves later records and durable gap on rerun", a
 	const gaps = first.messages.filter(
 		(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
 	);
-	assert.equal(gaps.length, 1);
+	assert.equal(gaps.length, 5);
 	assert.ok(gaps[0]?.type === "SKIP_RESULT");
 	assert.deepEqual(gaps[0].diagnostics, {
 		path: source.top,
@@ -301,7 +301,7 @@ test("malformed middle line preserves later records and durable gap on rerun", a
 		second.messages.filter(
 			(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
 		).length,
-		1,
+		5,
 	);
 });
 
@@ -1329,5 +1329,98 @@ test("unterminated tail is disclosed until completed, without blocking other fil
 	assert.equal(
 		completed.messages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
+	);
+});
+
+test("null mid-file declares a gap and keeps UUID keys stable after source repair and replay", async () => {
+	const source = await makeSource();
+	const prefix = `${transcriptLine("top-1", "2026-07-21T00:00:00Z")}\n`;
+	const suffix = `${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`;
+	await writeFile(source.top, `${prefix}null\n${suffix}`);
+	const first = await run(source);
+	const gap = first.messages.find(
+		(message) =>
+			message.type === "SKIP_RESULT" && message.stream === "messages",
+	);
+	assert.ok(gap?.type === "SKIP_RESULT");
+	assert.deepEqual(gap.diagnostics, {
+		path: source.top,
+		line_number: 2,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "non_object_jsonl_record",
+	});
+	const firstKeys = first.records
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.deepEqual(firstKeys, [IDS["top-1"], IDS["top-2"], IDS["sub-1"]]);
+	const unchanged = await run({ ...source, state: first.states });
+	assert.equal(unchanged.records.length, 0);
+	assert.ok(
+		unchanged.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "non_object_jsonl_record",
+		),
+	);
+	await writeFile(
+		source.top,
+		`${prefix}${transcriptLine("top-3", "2026-07-21T00:01:00Z")}\n${suffix}`,
+	);
+	const repaired = await run({ ...source, state: unchanged.states });
+	assert.deepEqual(
+		repaired.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-1"], IDS["top-3"], IDS["top-2"]],
+	);
+	assert.equal(
+		repaired.messages.filter((message) => message.type === "SKIP_RESULT")
+			.length,
+		0,
+	);
+	const replay = await run(source);
+	const replayKeys = replay.records
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.deepEqual(replayKeys, [
+		IDS["top-1"],
+		IDS["top-3"],
+		IDS["top-2"],
+		IDS["sub-1"],
+	]);
+	assert.equal(new Set([...firstKeys, ...replayKeys]).size, 4);
+	const settled = await run({ ...source, state: repaired.states });
+	assert.equal(settled.records.length, 0);
+});
+
+test("truthy JSON primitives and arrays each declare a non-object gap", async () => {
+	const source = await makeSource();
+	const invalidLines = [true, 1, "value", [], [{ type: "user" }]].map((value) =>
+		JSON.stringify(value),
+	);
+	await writeFile(
+		source.top,
+		invalidLines.join("\n") +
+			"\n" +
+			transcriptLine("top-2", "2026-07-21T00:02:00Z") +
+			"\n",
+	);
+	const result = await run(source);
+	const gaps = result.messages.filter(
+		(message) =>
+			message.type === "SKIP_RESULT" && message.stream === "messages",
+	);
+	assert.equal(gaps.length, invalidLines.length);
+	assert.ok(
+		gaps.every(
+			(gap) =>
+				gap.type === "SKIP_RESULT" && gap.reason === "non_object_jsonl_record",
+		),
+	);
+	assert.deepEqual(
+		result.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-2"], IDS["sub-1"]],
 	);
 });

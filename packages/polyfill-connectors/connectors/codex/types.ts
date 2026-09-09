@@ -55,10 +55,20 @@ export interface RolloutJsonlGap {
 	path: string;
 	line_number: number;
 	byte_offset: number;
-	reason: "malformed_jsonl_line" | "truncated_jsonl_tail";
+	reason:
+		| "malformed_jsonl_line"
+		| "non_object_jsonl_record"
+		| "truncated_jsonl_tail";
+}
+
+export interface RolloutSourceGap {
+	path: string;
+	reason: "rollout_source_read_error";
+	error_code: string | null;
 }
 
 interface RolloutStreamState {
+	source_gaps?: Record<string, RolloutSourceGap>;
 	file_cursors?: Record<string, RolloutFileCursor>;
 	file_mtimes?: Record<string, number>;
 }

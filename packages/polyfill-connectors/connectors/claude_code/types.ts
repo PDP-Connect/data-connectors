@@ -65,7 +65,10 @@ export interface ClaudeJsonlGap {
 	path: string;
 	line_number: number;
 	byte_offset: number;
-	reason: "malformed_jsonl_line" | "truncated_jsonl_tail";
+	reason:
+		| "malformed_jsonl_line"
+		| "non_object_jsonl_record"
+		| "truncated_jsonl_tail";
 }
 
 export interface ClaudeChildFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
