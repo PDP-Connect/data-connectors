@@ -14,8 +14,8 @@ import { fetchResolvedArtifact, generateLock, installFromLock, loadConnectorInde
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "chatgpt-pdpp");
-const artifact = join(root, "artifacts", "chatgpt-pdpp", "chatgpt-pdpp-0.1.0.tgz");
-const expectedCommit = "76effa378dc40b269095db6f85682d6a10920f68";
+const artifact = join(root, "artifacts", "chatgpt-pdpp", "chatgpt-pdpp-0.1.1.tgz");
+const expectedCommit = "2ad6eedce1deecf8e15dcceabe0464ba81d66039";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
 const pinnedFile = (repository, path) =>
@@ -54,7 +54,7 @@ test("chatgpt-pdpp preserves the canonical browser profile and complete stream c
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.5.2", files: 94 }]);
+  })), [{ name: "zod", version: "4.5.4", files: 94 }]);
   assert.deepEqual(provenance.outputs.undeclared_external_imports, []);
   assert.equal(provenance.source_inventory.upstream_connector.length, 6);
   assert.ok(provenance.source_inventory.upstream_runtime.length > 0);
@@ -71,7 +71,7 @@ test("chatgpt-pdpp artifact installs and detects provenance tampering", async ()
   const entry = source.doc.connectors["chatgpt-pdpp"][0];
   const fetched = await fetchResolvedArtifact(source, entry);
   assert.equal(fetched.entrypointPath, "dist/collection-profile.mjs");
-  const lock = await generateLock({ dependencies: { connectors: { "chatgpt-pdpp": "0.1.0" } }, source, generatedAt: "2026-07-31T00:00:00.000Z" });
+  const lock = await generateLock({ dependencies: { connectors: { "chatgpt-pdpp": "0.1.1" } }, source, generatedAt: "2026-07-31T00:00:00.000Z" });
   const installRoot = mkdtempSync(join(tmpdir(), "chatgpt-pdpp-install-"));
   try {
     await installFromLock({ lock, source, installRoot, layout: "snapshot" });
@@ -102,14 +102,14 @@ test("chatgpt-pdpp rebuild is pinned and unaffected by dirty upstream source", {
       assert.deepEqual(
         sha256Buffer(pinnedFile(upstreamRoot, file.path)),
         file.sha256,
-        `${file.path} must equal the cc07e3a source closure`,
+        `${file.path} must equal the pinned source closure`,
       );
     }
   }
   assert.deepEqual(
     readFileSync(join(connectorRoot, "collection-profile.json")),
     pinnedFile(upstreamRoot, specification.upstream.manifest),
-    "the canonical profile must equal the cc07e3a manifest byte-for-byte",
+    "the canonical profile must equal the pinned manifest byte-for-byte",
   );
   assert.equal(
     execFileSync("git", ["status", "--porcelain"], { cwd: upstreamRoot, encoding: "utf8" }),
@@ -154,7 +154,7 @@ test("bundled zod tampering changes provenance and output, then fails the immuta
     writeFileSync(source, "\nexport const PDPP_PROVENANCE_TAMPER_CANARY = 'zod';\n", { flag: "a" });
     const provenanceCheck = spawnSync(process.execPath, ["scripts/generate-connector-index.mjs", "--check"], { cwd: root, encoding: "utf8" });
     assert.notEqual(provenanceCheck.status, 0);
-    assert.match(`${provenanceCheck.stdout}\n${provenanceCheck.stderr}`, /chatgpt-pdpp@0\.1\.0 bundled dependency changed without a version bump: zod\/v4\/core\/util\.js/);
+    assert.match(`${provenanceCheck.stdout}\n${provenanceCheck.stderr}`, /chatgpt-pdpp@0\.1\.1 bundled dependency changed without a version bump: zod\/v4\/core\/util\.js/);
     execFileSync(process.execPath, ["scripts/build-pdpp-artifact.mjs", "--artifact", "chatgpt-pdpp", "--pdpp-root", pdppSourceRoot], { cwd: root });
     const provenanceAfter = readFileSync(provenancePath);
     const entrypointAfter = readFileSync(entrypointPath);
@@ -165,7 +165,7 @@ test("bundled zod tampering changes provenance and output, then fails the immuta
     assert.notEqual(recordedZod.closure_sha256, zod.closure_sha256);
     const indexCheck = spawnSync(process.execPath, ["scripts/generate-connector-index.mjs", "--check"], { cwd: root, encoding: "utf8" });
     assert.notEqual(indexCheck.status, 0);
-    assert.match(`${indexCheck.stdout}\n${indexCheck.stderr}`, /chatgpt-pdpp@0\.1\.0 source changed without a version bump/);
+    assert.match(`${indexCheck.stdout}\n${indexCheck.stderr}`, /chatgpt-pdpp@0\.1\.1 source changed without a version bump/);
   } finally {
     writeFileSync(source, original);
     execFileSync(process.execPath, ["scripts/build-pdpp-artifact.mjs", "--artifact", "chatgpt-pdpp", "--pdpp-root", pdppSourceRoot], { cwd: root });

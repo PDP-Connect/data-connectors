@@ -32,7 +32,7 @@
     {
       "id": "chatgpt-pdpp",
       "company": "openai",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "ChatGPT (PDPP Collection Profile)",
       "status": "experimental",
       "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
@@ -40,14 +40,14 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.1.tgz",
       "releaseId": "unpublished",
-      "sourceTag": "pdpp-76effa378dc40b269095db6f85682d6a10920f68",
-      "sourceCommit": "76effa378dc40b269095db6f85682d6a10920f68",
-      "publishedAt": "2026-07-31T00:00:00Z",
+      "sourceTag": "pdpp-2ad6eedce1deecf8e15dcceabe0464ba81d66039",
+      "sourceCommit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039",
+      "publishedAt": "2026-09-09T00:00:00Z",
       "upstream": {
         "repository": "https://github.com/PDP-Connect/pdpp",
-        "commit": "76effa378dc40b269095db6f85682d6a10920f68"
+        "commit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039"
       },
       "files": {
         "manifest": "chatgpt-pdpp/collection-profile.json",
@@ -58,7 +58,7 @@
     {
       "id": "github-pdpp",
       "company": "github",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "name": "GitHub (PDPP Collection Profile)",
       "status": "experimental",
       "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
@@ -66,14 +66,14 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.1.tgz",
       "releaseId": "unpublished",
-      "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
-      "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
-      "publishedAt": "2026-07-30T00:00:00Z",
+      "sourceTag": "pdpp-6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
+      "sourceCommit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
+      "publishedAt": "2026-09-09T00:00:00Z",
       "upstream": {
         "repository": "https://github.com/PDP-Connect/pdpp",
-        "commit": "597cc012611df90d07edbed187ba3e3212dbf258"
+        "commit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128"
       },
       "files": {
         "manifest": "github-pdpp/collection-profile.json",
@@ -84,7 +84,7 @@
     {
       "id": "whoop-pdpp",
       "company": "whoop",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "WHOOP (PDPP Collection Profile)",
       "status": "experimental",
       "description": "Collects your WHOOP profile, body measurements, cycles, recoveries, sleeps, and workouts through the PDPP Collection Profile protocol.",
@@ -92,14 +92,14 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.1.tgz",
       "releaseId": "unpublished",
-      "sourceTag": "pdpp-4f50aa21c6abd9f796b51b82e408224ee75a0048",
-      "sourceCommit": "4f50aa21c6abd9f796b51b82e408224ee75a0048",
-      "publishedAt": "2026-08-13T00:00:00Z",
+      "sourceTag": "pdpp-4c785e1f5816b09b113f011ab46066f8057d9959",
+      "sourceCommit": "4c785e1f5816b09b113f011ab46066f8057d9959",
+      "publishedAt": "2026-09-09T00:00:00Z",
       "upstream": {
         "repository": "https://github.com/PDP-Connect/pdpp",
-        "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
+        "commit": "4c785e1f5816b09b113f011ab46066f8057d9959"
       },
       "files": {
         "manifest": "whoop-pdpp/collection-profile.json",

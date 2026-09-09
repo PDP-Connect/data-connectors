@@ -36,15 +36,35 @@ jobs:
       - name: Test installer artifact contracts
         run: npm run installer:test
 
+      - name: Checkout pinned PDPP source for GitHub artifact provenance
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp-github"
+          git -C "$RUNNER_TEMP/pdpp-github" checkout 6d2be0a2a1c052afcffc8ec035190e1dffc3c128
+
+      - name: Test GitHub PDPP artifact provenance
+        env:
+          PDPP_GITHUB_SOURCE_ROOT: ${{ runner.temp }}/pdpp-github
+        run: npm run github-pdpp:test
+
       - name: Checkout pinned PDPP source for ChatGPT artifact provenance
         run: |
-          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp"
-          git -C "$RUNNER_TEMP/pdpp" checkout 76effa378dc40b269095db6f85682d6a10920f68
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp-chatgpt"
+          git -C "$RUNNER_TEMP/pdpp-chatgpt" checkout 2ad6eedce1deecf8e15dcceabe0464ba81d66039
 
       - name: Test ChatGPT PDPP artifact provenance
         env:
-          PDPP_CHATGPT_SOURCE_ROOT: ${{ runner.temp }}/pdpp
+          PDPP_CHATGPT_SOURCE_ROOT: ${{ runner.temp }}/pdpp-chatgpt
         run: npm run chatgpt-pdpp:test
+
+      - name: Checkout pinned PDPP source for WHOOP artifact provenance
+        run: |
+          git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp-whoop"
+          git -C "$RUNNER_TEMP/pdpp-whoop" checkout 4c785e1f5816b09b113f011ab46066f8057d9959
+
+      - name: Test WHOOP PDPP artifact provenance
+        env:
+          PDPP_WHOOP_SOURCE_ROOT: ${{ runner.temp }}/pdpp-whoop
+        run: npm run whoop-pdpp:test
 
       - name: Check source/scope catalog generated files
         run: node scripts/generate-scope-catalog.mjs --check
