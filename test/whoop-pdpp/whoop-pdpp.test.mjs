@@ -93,7 +93,7 @@ test("whoop-pdpp artifact installs and detects provenance tampering", async () =
 test("whoop-pdpp rebuild is pinned to the reviewed PDPP commit", { skip: !pdppSourceRoot }, () => {
   const specification = JSON.parse(readFileSync(join(connectorRoot, "artifact.json"), "utf8"));
   const provenanceBefore = readFileSync(join(connectorRoot, "provenance.json"));
-  const entrypointBefore = readFileSync(join(connectorRoot, "dist", "collection-profile.mjs"));
+  const entrypointBefore = execFileSync("tar", ["-xOf", artifact, "./dist/collection-profile.mjs"]);
   const provenance = JSON.parse(provenanceBefore);
 
   for (const sourceInventory of [

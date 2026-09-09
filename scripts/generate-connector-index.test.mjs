@@ -69,7 +69,7 @@ test("same-version GitHub PDPP maintained source drift fails check mode", () => 
     assert.notEqual(result.status, 0);
     assert.match(
       `${result.stdout}\n${result.stderr}`,
-      /github-pdpp@0\.5\.0 maintained source changed without a version bump: src\/connector\/index\.ts/,
+      /github-pdpp@0\.5\.1 maintained source changed without a version bump: src\/connector\/index\.ts/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -87,7 +87,7 @@ test("same-version ChatGPT PDPP artifact configuration drift fails check mode", 
     assert.notEqual(result.status, 0);
     assert.match(
       `${result.stdout}\n${result.stderr}`,
-      /chatgpt-pdpp@0\.1\.0 maintained source changed without a version bump: artifact\.json/,
+      /chatgpt-pdpp@0\.1\.1 maintained source changed without a version bump: artifact\.json/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -110,7 +110,7 @@ test("same-version GitHub PDPP provenance drift fails check mode", () => {
     assert.notEqual(result.status, 0);
     assert.match(
       `${result.stdout}\n${result.stderr}`,
-      /github-pdpp@0\.5\.0 source changed without a version bump/,
+      /github-pdpp@0\.5\.1 source changed without a version bump/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -143,7 +143,7 @@ test("release-assets refresh preserves every PDPP artifact when generated dist i
     const pdpp = index.connectors["github-pdpp"][0];
     assert.equal(
       pdpp.artifactUrl,
-      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-release-test/github-pdpp-0.5.0.tgz",
+      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-release-test/github-pdpp-0.5.1.tgz",
     );
     assert.equal(
       pdpp.artifactSha256,
@@ -154,7 +154,7 @@ test("release-assets refresh preserves every PDPP artifact when generated dist i
     const chatgpt = index.connectors["chatgpt-pdpp"][0];
     assert.equal(
       chatgpt.artifactUrl,
-      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-release-test/chatgpt-pdpp-0.1.0.tgz",
+      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-release-test/chatgpt-pdpp-0.1.1.tgz",
     );
     assert.equal(chatgpt.artifactSignature?.type, "sigstoreBundle");
   } finally {
