@@ -149,3 +149,33 @@ test("local JSONL cursor never clean-appends after a prior-prefix rewrite plus g
 		'{"id":"three"}',
 	]);
 });
+
+test("line locations count physical blank lines and recover numbering from legacy cursors", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-"));
+	const path = join(root, "events.jsonl");
+	const prefix = '"é"\n\n';
+	await writeFile(path, prefix);
+	const first = await scan(path);
+	assert.equal(first.result.cursor.committed_line_count, 2);
+	const { committed_line_count: _count, ...legacy } = first.result.cursor;
+	await writeFile(path, `${prefix}bad\npartial`);
+	const lines: number[][] = [];
+	const tails: number[][] = [];
+	const next = await scanLocalJsonl({
+		path,
+		prior: legacy,
+		onLine: async (_line, offset, number) => {
+			lines.push([offset, number]);
+		},
+		onIncompleteLine: async (_line, offset, number) => {
+			tails.push([offset, number]);
+		},
+	});
+	assert.deepEqual(lines, [[Buffer.byteLength(prefix), 3]]);
+	assert.deepEqual(tails, [[Buffer.byteLength(`${prefix}bad\n`), 4]]);
+	assert.equal(next.cursor.committed_line_count, 3);
+	assert.equal(
+		next.cursor.committed_offset_bytes,
+		Buffer.byteLength(`${prefix}bad\n`),
+	);
+});

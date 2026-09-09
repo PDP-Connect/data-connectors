@@ -94,9 +94,6 @@ async function makeAttachmentSource(): Promise<{
 
 async function run(input: {
 	claudeHome: string;
-	/** Set when the run is expected to fail, e.g. a malformed complete JSONL
-	 * line. Every other caller keeps the default success assertion. */
-	expectFailure?: boolean;
 	projects: string;
 	state?: Record<string, unknown>;
 	streams?: string[];
@@ -119,11 +116,7 @@ async function run(input: {
 			type: "START",
 		},
 	});
-	if (input.expectFailure) {
-		assert.equal(result.code, 1, result.stderr);
-	} else {
-		assert.equal(result.code, 0, result.stderr);
-	}
+	assert.equal(result.code, 0, result.stderr);
 	const states = Object.fromEntries(
 		result.messages
 			.filter(
@@ -264,39 +257,81 @@ test("M8: an unterminated line is not committed until its LF arrives", async () 
 	]);
 });
 
-test("M9: malformed LF-terminated JSON reports a gap and does not advance its physical boundary", async () => {
+test("malformed middle line preserves later records and durable gap on rerun", async () => {
 	const source = await makeSource();
-	const first = await run(source);
+	const prefix = `${transcriptLine("top-1", "2026-07-21T00:00:00Z")}\n`;
 	await writeFile(
 		source.top,
-		`${await readFile(source.top, "utf8")}not-json\n`,
+		`${prefix}not-json\nnull\nfalse\n0\n""\n${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`,
 	);
-	const malformed = await run({
-		...source,
-		expectFailure: true,
-		state: { messages: first.states.messages, sessions: first.states.sessions },
+	const laterSession = "22222222-2222-4222-8222-222222222222";
+	await writeFile(
+		join(source.projects, "-tmp-incremental", `${laterSession}.jsonl`),
+		`${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: laterSession })}\n`,
+	);
+	const first = await run(source);
+	assert.deepEqual(
+		first.records
+			.filter((r) => r.stream === "sessions")
+			.map((r) => r.data.id)
+			.sort(),
+		[SESSION_ID, laterSession],
+	);
+	assert.deepEqual(
+		first.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id)
+			.sort(),
+		[IDS["top-1"], IDS["top-2"], IDS["top-3"], IDS["sub-1"]].sort(),
+	);
+	const gaps = first.messages.filter(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+	);
+	assert.equal(gaps.length, 1);
+	assert.ok(gaps[0]?.type === "SKIP_RESULT");
+	assert.deepEqual(gaps[0].diagnostics, {
+		path: source.top,
+		line_number: 2,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "malformed_jsonl_line",
 	});
-	// A complete malformed line is not an in-flight tail: silently consuming it
-	// would lose the record forever. The connector must fail the run, disclose
-	// the unresolved streams, and write no cursor past that line.
-	assert.equal(malformed.code, 1);
+	const second = await run({ ...source, state: first.states });
+	assert.equal(second.records.length, 0);
+	assert.equal(
+		second.messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+		).length,
+		1,
+	);
+});
+
+test("M9: malformed LF-terminated JSON reports a durable gap and advances its accounted boundary", async () => {
+	const source = await makeSource();
+	const first = await run(source);
+	const original = await readFile(source.top, "utf8");
+	await writeFile(source.top, `${original}not-json\n`);
+	const malformed = await run({ ...source, state: first.states });
 	assert.equal(malformed.records.length, 0);
 	assert.equal(
 		malformed.messages.filter((message) => message.type === "SKIP_RESULT")
 			.length,
 		2,
-		"sessions and messages both disclose the malformed source gap",
 	);
-	assert.equal(
-		malformed.states.messages,
-		undefined,
-		"no messages cursor may commit past the malformed line",
-	);
-	assert.equal(
-		malformed.states.sessions,
-		undefined,
-		"no sessions cursor may commit past the malformed line",
-	);
+	for (const stream of ["messages", "sessions"]) {
+		const cursor = malformed.states[stream] as {
+			file_cursors: Record<
+				string,
+				{ committed_offset_bytes: number; jsonl_gaps: unknown[] }
+			>;
+		};
+		const fileCursor = cursor.file_cursors[source.top];
+		assert.ok(fileCursor);
+		assert.equal(
+			fileCursor.committed_offset_bytes,
+			Buffer.byteLength(`${original}not-json\n`),
+		);
+		assert.equal(fileCursor.jsonl_gaps.length, 1);
+	}
 });
 
 test("M10: a tail without sessionId inherits saved parser continuation", async () => {
@@ -831,11 +866,7 @@ test("source mutations, partial tails, and malformed terminated lines retain phy
 		"M8: unterminated JSONL does not emit",
 	);
 
-	// M9: once the pending tail is terminated, a malformed complete line follows
-	// it. The malformed line is NOT an in-flight tail, so consuming it would lose
-	// that record forever. The run must fail and commit no cursor, which also
-	// withholds the now-complete line that precedes it -- a failed run proves
-	// nothing rather than proving a subset.
+	// Completing the pending tail emits it even when the next line is malformed.
 	const beforeMalformed = await readFile(source.top, "utf8");
 	await writeFile(
 		source.top,
@@ -843,27 +874,19 @@ test("source mutations, partial tails, and malformed terminated lines retain phy
 	);
 	const malformedTail = await run({
 		...source,
-		expectFailure: true,
 		state: {
 			messages: partial.states.messages,
 			sessions: partial.states.sessions,
 		},
 	});
-	assert.equal(
-		malformedTail.code,
-		1,
-		"M9: a malformed complete line fails the run",
+	assert.equal(malformedTail.code, 0);
+	assert.deepEqual(
+		malformedTail.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id),
+		[IDS.partial],
 	);
-	assert.equal(
-		malformedTail.records.length,
-		0,
-		"M9: a failed run emits no records",
-	);
-	assert.equal(
-		malformedTail.states.messages,
-		undefined,
-		"M9: no messages cursor may commit past the malformed line",
-	);
+	assert.ok(malformedTail.states.messages);
 
 	// M8/M9 recovery: with the malformed line repaired at the source, the
 	// previously-completed tail and the following line both emit exactly once.
@@ -1279,4 +1302,32 @@ test("M24: Claude mtime touch queues no transcript records while advancing its d
 	} finally {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
+});
+
+test("unterminated tail is disclosed until completed, without blocking other files", async () => {
+	const source = await makeSource();
+	const prefix = await readFile(source.top, "utf8");
+	const suffix = transcriptLine("top-2", "2026-07-21T00:02:00Z");
+	await writeFile(source.top, prefix + suffix.slice(0, -1));
+	const first = await run(source);
+	assert.equal(first.records.filter((r) => r.stream === "messages").length, 2);
+	const gap = first.messages.find(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+	);
+	assert.ok(gap?.type === "SKIP_RESULT");
+	assert.equal(gap.reason, "truncated_jsonl_tail");
+	const noop = await run({ ...source, state: first.states });
+	assert.equal(noop.messages.filter((m) => m.type === "SKIP_RESULT").length, 2);
+	await writeFile(source.top, `${prefix + suffix}\n`);
+	const completed = await run({ ...source, state: noop.states });
+	assert.deepEqual(
+		completed.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id),
+		[IDS["top-2"]],
+	);
+	assert.equal(
+		completed.messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
 });

@@ -61,11 +61,20 @@ export interface JsonlObservations {
 	version: string | null;
 }
 
+export interface ClaudeJsonlGap {
+	path: string;
+	line_number: number;
+	byte_offset: number;
+	reason: "malformed_jsonl_line" | "truncated_jsonl_tail";
+}
+
 export interface ClaudeChildFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
+	jsonl_gaps?: ClaudeJsonlGap[];
 	current_session_id: string | null;
 }
 
 export interface ClaudeSessionFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
+	jsonl_gaps?: ClaudeJsonlGap[];
 	observation: JsonlObservations;
 }
 

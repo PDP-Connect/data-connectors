@@ -33,6 +33,7 @@ import {
 	appendFile,
 	mkdir,
 	mkdtemp,
+	rm,
 	truncate,
 	writeFile,
 } from "node:fs/promises";
@@ -41,6 +42,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
+import type { RolloutJsonlGap } from "./types.ts";
 
 const QUIET_OFF = { PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS: "0" } as const;
 const SESSION_ID = "019d922d-c38b-7e11-ae99-9187af386148";
@@ -54,6 +56,7 @@ interface StateCursor {
 }
 
 interface RolloutFileCursorShape {
+	jsonl_gaps?: RolloutJsonlGap[];
 	function_call_count: number;
 	guard_bytes: number;
 	head_sha256: string;
@@ -167,6 +170,16 @@ function recordsFor(
 	return messages.filter(
 		(msg): msg is Extract<EmittedMessage, { type: "RECORD" }> =>
 			msg.type === "RECORD" && msg.stream === stream,
+	);
+}
+
+function gapsFor(
+	messages: EmittedMessage[],
+	reason: string,
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }>[] {
+	return messages.filter(
+		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			message.type === "SKIP_RESULT" && message.reason === reason,
 	);
 }
 
@@ -737,5 +750,196 @@ test("a trailing partial line (no final newline) is NOT committed and is parsed 
 		run2Msgs,
 		["half-written line"],
 		"the completed line is emitted once; the prefix is not re-emitted",
+	);
+});
+
+test("malformed early rollout loses only its bad line and preserves later-file order and replay keys", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-malformed-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	const prefix = jsonl([sessionMetaLine(), "", messageLine("before 🌍")]);
+	const badPath = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		`${prefix}{bad json}\n${messageLine("after")}\n`,
+	);
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const first = await runCodex({ codexHome, streams });
+	assert.equal(first.exitCode, 0);
+	const messages = recordsFor(first.messages, "messages");
+	assert.deepEqual(
+		messages.map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:4`, `${laterId}:2`],
+	);
+	const gaps = gapsFor(first.messages, "malformed_jsonl_line");
+	assert.equal(gaps.length, 1);
+	assert.deepEqual(gaps[0]?.diagnostics, {
+		path: badPath,
+		line_number: 4,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "malformed_jsonl_line",
+	});
+	const state = rolloutStateCursor(first.messages);
+	assert.deepEqual(state.file_cursors?.[SESSION_ID]?.jsonl_gaps, [
+		gaps[0]?.diagnostics,
+	]);
+	assert.equal(
+		recordsFor(first.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	await appendFile(badPath, "\n");
+	const deferred = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "86400000",
+		state: { messages: state },
+	});
+	assert.deepEqual(
+		gapsFor(deferred.messages, "malformed_jsonl_line").map(
+			(gap) => gap.diagnostics,
+		),
+		[gaps[0]?.diagnostics],
+	);
+	const next = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: state },
+	});
+	assert.equal(recordsFor(next.messages, "messages").length, 0);
+	assert.equal(
+		next.messages.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "malformed_jsonl_line",
+		).length,
+		1,
+	);
+	await appendFile(badPath, `${messageLine("appended")}\n`);
+	const appended = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(next.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(appended.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:5`],
+	);
+	const replay = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(replay.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:4`, `${SESSION_ID}:5`, `${laterId}:2`],
+	);
+});
+
+test("unterminated rollout tail is declared, does not block later files, and is recovered once completed", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-tail-gap-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	const prefix = jsonl([sessionMetaLine(), messageLine("before")]);
+	const tail = messageLine("completed later");
+	const split = Math.floor(tail.length / 2);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		prefix + tail.slice(0, split),
+	);
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const first = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${laterId}:2`],
+	);
+	const expectedGap = {
+		path,
+		line_number: 3,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "truncated_jsonl_tail",
+	};
+	const cursor = rolloutStateCursor(first.messages);
+	assert.deepEqual(cursor.file_cursors?.[SESSION_ID]?.jsonl_gaps, [
+		expectedGap,
+	]);
+	assert.equal(
+		cursor.file_cursors?.[SESSION_ID]?.offset_bytes,
+		Buffer.byteLength(prefix),
+	);
+	const second = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: cursor },
+	});
+	assert.equal(recordsFor(second.messages, "messages").length, 0);
+	assert.deepEqual(
+		gapsFor(second.messages, "truncated_jsonl_tail").map(
+			(gap) => gap.diagnostics,
+		),
+		[expectedGap],
+	);
+	await appendFile(path, `${tail.slice(split)}\n`);
+	const completed = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(second.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(completed.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:3`],
+	);
+	assert.deepEqual(
+		rolloutStateCursor(completed.messages).file_cursors?.[SESSION_ID]
+			?.jsonl_gaps,
+		[],
+	);
+	assert.equal(
+		completed.messages.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "truncated_jsonl_tail",
+		).length,
+		0,
+	);
+});
+
+test("malformed initial metadata uses filename identity for later messages and calls", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-meta-gap-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		jsonl([
+			"{damaged metadata}",
+			messageLine("retained"),
+			functionCallLine(CALL_A, "shell", "{}"),
+		]),
+	);
+	const run = await runCodex({
+		codexHome,
+		streams: ["messages", "function_calls"],
+	});
+	assert.deepEqual(
+		recordsFor(run.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`],
+	);
+	assert.equal(recordsFor(run.messages, "function_calls").length, 1);
+	assert.equal(
+		recordsFor(run.messages, "function_calls")[0]?.data.session_id,
+		SESSION_ID,
 	);
 });

@@ -118,6 +118,7 @@ import type {
 	PendingCall,
 	RolloutAggregate,
 	RolloutFileCursor,
+	RolloutJsonlGap,
 	RolloutObject,
 	RolloutPayload,
 	StartMessage,
@@ -287,6 +288,11 @@ export interface RolloutLineYield {
 	obj: RolloutObject;
 }
 
+interface RolloutReadProgress {
+	committedOffset: number;
+	lineNumber: number;
+}
+
 /**
  * Stream a rollout JSONL file from `startOffset` (bytes), yielding each
  * newline-terminated JSON object together with the byte offset just past its
@@ -298,12 +304,16 @@ export interface RolloutLineYield {
  * Byte offsets are tracked over the raw bytes (Buffer length), not decoded
  * characters, so a multi-byte UTF-8 sequence advances the offset by its true
  * byte length and the resume offset always lands on a real byte boundary.
- * A malformed complete line throws instead of being consumed, so callers
- * cannot checkpoint past an unresolved source gap.
+ * A malformed complete line throws unless the caller supplies an awaited gap
+ * reporter. The collector discloses and persists each gap before checkpointing.
  */
 export async function* iterJsonlLinesFromOffset(
 	path: string,
 	startOffset: number,
+	options?: {
+		onGap: (gap: RolloutJsonlGap) => Promise<void>;
+		progress: RolloutReadProgress;
+	},
 ): AsyncGenerator<RolloutLineYield> {
 	const stream = createReadStream(path, { start: startOffset });
 	let pending: Buffer = Buffer.alloc(0);
@@ -315,7 +325,12 @@ export async function* iterJsonlLinesFromOffset(
 		let nl = pending.indexOf(0x0a);
 		while (nl !== -1) {
 			const lineBuf = pending.subarray(0, nl);
+			const lineStart = committed;
 			committed += nl + 1; // bytes consumed up to and including the `\n`
+			if (options) {
+				options.progress.lineNumber += 1;
+				options.progress.committedOffset = committed;
+			}
 			const line = lineBuf.toString("utf8");
 			const trimmed = line.trim();
 			if (trimmed) {
@@ -323,10 +338,15 @@ export async function* iterJsonlLinesFromOffset(
 				try {
 					parsed = JSON.parse(line) as RolloutObject;
 				} catch (error) {
-					// A complete malformed line is a source gap. Throw before yielding
-					// the next record so parseRolloutFile cannot return a cursor beyond
-					// this line and the connector can disclose the unresolved stream.
-					throw new LocalJsonlMalformedLineError(committed, { cause: error });
+					if (!options) {
+						throw new LocalJsonlMalformedLineError(committed, { cause: error });
+					}
+					await options.onGap({
+						path,
+						line_number: options.progress.lineNumber,
+						byte_offset: lineStart,
+						reason: "malformed_jsonl_line",
+					});
 				}
 				if (parsed) {
 					yield { obj: parsed, committedOffset: committed };
@@ -336,8 +356,16 @@ export async function* iterJsonlLinesFromOffset(
 			nl = pending.indexOf(0x0a);
 		}
 	}
-	// Any leftover `pending` is a partial (unterminated) line — intentionally
-	// dropped without advancing `committed`, so it is re-read next run.
+	// Retain the entire unterminated tail for the next append, with explicit
+	// coverage evidence. Even valid JSON is not committed until its newline.
+	if (pending.toString("utf8").trim() && options) {
+		await options.onGap({
+			path,
+			line_number: options.progress.lineNumber + 1,
+			byte_offset: committed,
+			reason: "truncated_jsonl_tail",
+		});
+	}
 }
 
 // ─── Rollout file integrity guard ───────────────────────────────────────
@@ -1178,6 +1206,7 @@ function emitSessionsFromRows({
 // rolloutAggregates write-back.
 
 interface ParseRolloutFileArgs {
+	priorCursor: RolloutFileCursor | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
 	file: string;
 	path: string;
@@ -1191,7 +1220,9 @@ interface ParseRolloutFileArgs {
 }
 
 interface ParseRolloutFileResult {
-	/** Byte offset just past the last fully-parsed line — the new commit
+	jsonlGaps: RolloutJsonlGap[];
+	sourceLineCount: number;
+	/** Byte offset past the last parsed or explicitly gapped complete line — the commit
 	 *  boundary for this file's cursor. Equals `startOffset` when the suffix
 	 *  contained no newline-terminated line. */
 	committedOffset: number;
@@ -1207,6 +1238,33 @@ async function parseRolloutFile(
 	args: ParseRolloutFileArgs,
 ): Promise<ParseRolloutFileResult> {
 	const state = makeRolloutParseState(args.seed);
+	const jsonlGaps = (args.priorCursor?.jsonl_gaps ?? []).filter(
+		(gap) => gap.byte_offset < args.startOffset,
+	);
+	for (const gap of jsonlGaps) {
+		await reportMalformedRolloutGap(args.requested, gap);
+	}
+	const progress: RolloutReadProgress = {
+		committedOffset: args.startOffset,
+		lineNumber: args.priorCursor?.source_line_count ?? 0,
+	};
+	// Legacy cursors count parsed objects, not physical lines. Count the bounded
+	// prefix once on migration so blank lines cannot make gap locations lie.
+	if (
+		args.startOffset > 0 &&
+		args.priorCursor?.source_line_count === undefined
+	) {
+		for await (const chunk of createReadStream(args.path, {
+			end: args.startOffset - 1,
+		})) {
+			const bytes = chunk as Buffer;
+			let newline = bytes.indexOf(0x0a);
+			while (newline !== -1) {
+				progress.lineNumber += 1;
+				newline = bytes.indexOf(0x0a, newline + 1);
+			}
+		}
+	}
 	const deps: LineEmitDeps = {
 		emitRecord: args.emitRecord,
 		progress: (message: string): void => {
@@ -1214,13 +1272,29 @@ async function parseRolloutFile(
 		},
 		requested: args.requested,
 	};
-	let committedOffset = args.startOffset;
-	for await (const {
-		obj,
-		committedOffset: lineEnd,
-	} of iterJsonlLinesFromOffset(args.path, args.startOffset)) {
+	for await (const { obj } of iterJsonlLinesFromOffset(
+		args.path,
+		args.startOffset,
+		{
+			progress,
+			onGap: async (gap) => {
+				jsonlGaps.push(gap);
+				if (gap.reason === "malformed_jsonl_line") state.lineCount += 1;
+				await reportMalformedRolloutGap(args.requested, gap);
+			},
+		},
+	)) {
+		// A damaged initial session_meta must not starve its remaining messages.
+		// A valid metadata line still wins; only a preceding parse gap permits the
+		// canonical rollout filename UUID to supply otherwise missing identity.
+		if (
+			state.sessionId === null &&
+			obj.type !== "session_meta" &&
+			jsonlGaps.some((gap) => gap.reason === "malformed_jsonl_line")
+		) {
+			state.sessionId = extractRolloutUuidFromFilename(args.file);
+		}
 		processRolloutLine({ obj, state, deps, file: args.file });
-		committedOffset = lineEnd;
 		await waitForEmitDrain();
 	}
 	flushPendingCalls(state, deps);
@@ -1238,7 +1312,9 @@ async function parseRolloutFile(
 		});
 	}
 	return {
-		committedOffset,
+		committedOffset: progress.committedOffset,
+		sourceLineCount: progress.lineNumber,
+		jsonlGaps,
 		sessionId: state.sessionId,
 		lineCount: state.lineCount,
 		messageCount: state.messageCount,
@@ -1433,6 +1509,8 @@ async function buildFileCursorAfterParse(
 	}
 	return {
 		mtime_ms: mtimeMs,
+		source_line_count: result.sourceLineCount,
+		jsonl_gaps: result.jsonlGaps,
 		// Invariant: size_bytes == offset_bytes. The cursor vouches for exactly the
 		// committed prefix; everything past it is re-read on a later run.
 		size_bytes: result.committedOffset,
@@ -1570,6 +1648,7 @@ async function processRolloutEntry(
 	await waitForEmitDrain();
 
 	const result = await parseRolloutFile({
+		priorCursor: isAppend ? cursor : undefined,
 		path: entry.path,
 		file: entry.file,
 		requested: args.requested,
@@ -1685,16 +1764,22 @@ async function scanRollouts(
 					// scan) contributes nothing: its cursor was already counted at first
 					// sighting, so adding it again would double-count the file.
 					if (result === "parsed" || result === "skipped") {
+						const gaps =
+							args.newFileCursors[cursorKeyForEntry(entry)]?.jsonl_gaps ?? [];
+						if (gaps.length > 0) {
+							scanOutcome = "parse_error";
+							if (result === "skipped") {
+								for (const gap of gaps)
+									await reportMalformedRolloutGap(args.requested, gap);
+							}
+						}
 						const counts = examinedCountsFromCursor(
 							args.newFileCursors[cursorKeyForEntry(entry)],
 						);
 						messagesExamined += counts.messages;
 						functionCallsExamined += counts.functionCalls;
 					}
-				} catch (error) {
-					if (error instanceof LocalJsonlMalformedLineError) {
-						await reportMalformedRolloutGap(args.requested);
-					}
+				} catch {
 					// Any error during parsing (without code or other) makes scan incomplete
 					scanOutcome = "parse_error";
 					break outer;
@@ -1724,18 +1809,19 @@ async function scanRollouts(
 
 async function reportMalformedRolloutGap(
 	requested: Map<string, StreamScope>,
+	gap: RolloutJsonlGap,
 ): Promise<void> {
-	// The malformed line was complete, so it is a real unresolved source item
-	// rather than an in-flight tail. Do not checkpoint this file; disclose the
-	// gap on every requested rollout-derived stream.
-	for (const stream of ["messages", "function_calls"] as const) {
+	for (const stream of ["sessions", "messages", "function_calls"] as const) {
 		if (requested.has(stream)) {
 			emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "malformed_jsonl_line",
+				reason: gap.reason,
 				message:
-					"Codex contains a malformed complete JSONL line; the source cursor was not advanced past it",
+					gap.reason === "malformed_jsonl_line"
+						? "Codex skipped a malformed JSONL line and continued scanning"
+						: "Codex retained an unterminated JSONL tail for the next append and continued scanning",
+				diagnostics: { ...gap },
 			});
 		}
 	}
@@ -1867,7 +1953,38 @@ function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
 	) {
 		return null;
 	}
+	const gaps: RolloutJsonlGap[] = [];
+	if (v.jsonl_gaps !== undefined) {
+		if (!Array.isArray(v.jsonl_gaps)) return null;
+		for (const gap of v.jsonl_gaps) {
+			if (
+				!gap ||
+				typeof gap !== "object" ||
+				typeof gap.path !== "string" ||
+				!Number.isSafeInteger(gap.line_number) ||
+				gap.line_number < 1 ||
+				!Number.isSafeInteger(gap.byte_offset) ||
+				gap.byte_offset < 0 ||
+				(gap.reason !== "malformed_jsonl_line" &&
+					gap.reason !== "truncated_jsonl_tail")
+			)
+				return null;
+			gaps.push({
+				path: gap.path,
+				line_number: gap.line_number,
+				byte_offset: gap.byte_offset,
+				reason: gap.reason,
+			});
+		}
+	}
+	const sourceLines = num(v.source_line_count);
 	return {
+		...(sourceLines !== null &&
+		Number.isSafeInteger(sourceLines) &&
+		sourceLines >= 0
+			? { source_line_count: sourceLines }
+			: {}),
+		...(v.jsonl_gaps !== undefined ? { jsonl_gaps: gaps } : {}),
 		mtime_ms: mtime,
 		size_bytes: size,
 		offset_bytes: offset,

@@ -10,6 +10,7 @@ const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 export interface LocalJsonlPhysicalCursorV1 {
 	committed_offset_bytes: number;
+	committed_line_count?: number;
 	committed_prefix_sha256: string;
 	observed_mtime_ms: number;
 	observed_size_bytes: number;
@@ -33,9 +34,17 @@ export interface LocalJsonlScanResult {
 }
 
 export interface ScanLocalJsonlArgs {
-	/** The second argument is the byte boundary that would be committed if the
-	 * callback completes successfully. */
-	onLine: (line: Buffer, committedOffsetBytes: number) => Promise<void>;
+	/** Byte offset is the start of the line; line numbers are one-based. */
+	onLine: (
+		line: Buffer,
+		byteOffset: number,
+		lineNumber: number,
+	) => Promise<void>;
+	onIncompleteLine?: (
+		line: Buffer,
+		byteOffset: number,
+		lineNumber: number,
+	) => Promise<void>;
 	path: string;
 	prior: LocalJsonlPhysicalCursorV1 | undefined;
 }
@@ -70,6 +79,8 @@ export function isLocalJsonlPhysicalCursorV1(
 	}
 	return (
 		isFiniteNonNegativeInteger(value.committed_offset_bytes) &&
+		(value.committed_line_count === undefined ||
+			isFiniteNonNegativeInteger(value.committed_line_count)) &&
 		typeof value.committed_prefix_sha256 === "string" &&
 		SHA256_HEX_RE.test(value.committed_prefix_sha256) &&
 		typeof value.observed_mtime_ms === "number" &&
@@ -183,6 +194,7 @@ async function proveCommittedPrefix(input: {
  */
 export async function scanLocalJsonl({
 	onLine,
+	onIncompleteLine,
 	path,
 	prior,
 }: ScanLocalJsonlArgs): Promise<LocalJsonlScanResult> {
@@ -191,8 +203,10 @@ export async function scanLocalJsonl({
 		const snapshot = await handle.stat();
 		if (
 			prior &&
+			isLocalJsonlPhysicalCursorV1(prior) &&
 			prior.observed_size_bytes === snapshot.size &&
-			prior.observed_mtime_ms === snapshot.mtimeMs
+			prior.observed_mtime_ms === snapshot.mtimeMs &&
+			(!onIncompleteLine || prior.committed_offset_bytes === snapshot.size)
 		) {
 			return {
 				cursor: prior,
@@ -232,6 +246,27 @@ export async function scanLocalJsonl({
 			}
 		}
 
+		let lineCount = startOffset > 0 ? prior?.committed_line_count : 0;
+		if (lineCount === undefined) {
+			lineCount = 0;
+			for (let offset = 0; offset < startOffset; ) {
+				const buffer = Buffer.allocUnsafe(
+					Math.min(READ_CHUNK_BYTES, startOffset - offset),
+				);
+				const { bytesRead } = await handle.read(
+					buffer,
+					0,
+					buffer.length,
+					offset,
+				);
+				if (bytesRead !== buffer.length)
+					throw new LocalJsonlUnstableSourceError(
+						"local JSONL source ended while counting prefix lines",
+					);
+				for (const byte of buffer) if (byte === 0x0a) lineCount += 1;
+				offset += bytesRead;
+			}
+		}
 		let position = startOffset;
 		let committed = startOffset;
 		let pending = Buffer.alloc(0);
@@ -259,12 +294,17 @@ export async function scanLocalJsonl({
 				// Hash the bytes before invoking the callback: this is the exact
 				// committed prefix the callback observed, including the LF boundary.
 				deliveredPrefix.update(pending.subarray(0, lineEnd + 1));
-				await onLine(pending.subarray(0, lineEnd), committed);
+				await onLine(pending.subarray(0, lineEnd), committed, lineCount + 1);
+				lineCount += 1;
 				linesDelivered += 1;
 				committed += lineEnd + 1;
 				pending = pending.subarray(lineEnd + 1);
 				lineEnd = pending.indexOf(0x0a);
 			}
+		}
+
+		if (pending.length > 0 && onIncompleteLine) {
+			await onIncompleteLine(pending, committed, lineCount + 1);
 		}
 
 		const committedPrefix = deliveredPrefix.digest("hex");
@@ -277,6 +317,7 @@ export async function scanLocalJsonl({
 		});
 		const cursor = {
 			committed_offset_bytes: committed,
+			committed_line_count: lineCount,
 			committed_prefix_sha256: committedPrefix,
 			observed_mtime_ms: snapshot.mtimeMs,
 			observed_size_bytes: snapshot.size,

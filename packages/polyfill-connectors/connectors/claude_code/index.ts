@@ -51,7 +51,6 @@ import {
 } from "../../src/connector-runtime.ts";
 import {
 	isLocalJsonlPhysicalCursorV1,
-	LocalJsonlMalformedLineError,
 	type LocalJsonlScanResult,
 	scanLocalJsonl,
 } from "../../src/local-jsonl-cursor.ts";
@@ -87,6 +86,7 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	ClaudeChildFileCursorV1,
 	ClaudeCodeState,
+	ClaudeJsonlGap,
 	ClaudeSessionFileCursorV1,
 	JsonlObject,
 	JsonlObservations,
@@ -1310,6 +1310,26 @@ function readSessionAccumulator(
 	};
 }
 
+function hasValidJsonlGaps(cursor: Record<string, unknown>): boolean {
+	if (cursor.jsonl_gaps === undefined) return true;
+	return (
+		Array.isArray(cursor.jsonl_gaps) &&
+		cursor.jsonl_gaps.every(
+			(gap) =>
+				isRecord(gap) &&
+				typeof gap.path === "string" &&
+				typeof gap.line_number === "number" &&
+				Number.isSafeInteger(gap.line_number) &&
+				gap.line_number > 0 &&
+				typeof gap.byte_offset === "number" &&
+				Number.isSafeInteger(gap.byte_offset) &&
+				gap.byte_offset >= 0 &&
+				(gap.reason === "malformed_jsonl_line" ||
+					gap.reason === "truncated_jsonl_tail"),
+		)
+	);
+}
+
 function readChildFileCursors(
 	value: unknown,
 ): Record<string, ClaudeChildFileCursorV1> {
@@ -1321,6 +1341,7 @@ function readChildFileCursors(
 		if (
 			isRecord(cursor) &&
 			isLocalJsonlPhysicalCursorV1(cursor) &&
+			hasValidJsonlGaps(cursor) &&
 			readStringOrNull(cursor.current_session_id) !== undefined
 		) {
 			out[path] = {
@@ -1345,7 +1366,12 @@ function readSessionFileCursors(value: unknown): {
 			? readJsonlObservations(cursor.observation)
 			: undefined;
 		if (
-			!(isRecord(cursor) && isLocalJsonlPhysicalCursorV1(cursor) && observation)
+			!(
+				isRecord(cursor) &&
+				isLocalJsonlPhysicalCursorV1(cursor) &&
+				hasValidJsonlGaps(cursor) &&
+				observation
+			)
 		) {
 			return { cursors: {}, valid: false };
 		}
@@ -1382,54 +1408,62 @@ function cloneObservations(
 	};
 }
 
-function parseJsonlLine(
-	line: Buffer,
-	committedOffsetBytes: number,
-): JsonlObject | null {
-	const text = line.toString("utf8");
-	if (!text.trim()) {
-		return null;
-	}
-	try {
-		return JSON.parse(text) as JsonlObject;
-	} catch (error) {
-		// A complete malformed line is a source gap. Throwing prevents the
-		// physical cursor from being returned past this line; the collect caller
-		// reports the unresolved stream gap instead of silently consuming it.
-		throw new LocalJsonlMalformedLineError(committedOffsetBytes, {
-			cause: error,
-		});
-	}
-}
-
-async function reportMalformedJsonlGap(input: {
-	error: unknown;
-	reportStreamFailure:
-		| ((
-				stream: string,
-				message: string,
-				options?: { retryable?: boolean },
-		  ) => Promise<void>)
+async function scanClaudeJsonl(input: {
+	path: string;
+	prior:
+		| (LocalJsonlScanResult["cursor"] & { jsonl_gaps?: ClaudeJsonlGap[] })
 		| undefined;
-	requested: Map<string, StreamScope>;
-}): Promise<void> {
-	if (
-		!(
-			input.error instanceof LocalJsonlMalformedLineError &&
-			input.reportStreamFailure
-		)
-	) {
-		return;
+	onObject: (obj: JsonlObject) => Promise<void>;
+}): Promise<
+	LocalJsonlScanResult & {
+		cursor: LocalJsonlScanResult["cursor"] & { jsonl_gaps: ClaudeJsonlGap[] };
 	}
-	for (const stream of ["sessions", "messages", "attachments"] as const) {
-		if (input.requested.has(stream)) {
-			await input.reportStreamFailure(
-				stream,
-				"Claude Code contains a malformed complete JSONL line; the source cursor was not advanced past it",
-				{ retryable: false },
-			);
-		}
-	}
+> {
+	const gaps: ClaudeJsonlGap[] = [];
+	const result = await scanLocalJsonl({
+		path: input.path,
+		prior: input.prior,
+		onLine: async (line, byteOffset, lineNumber) => {
+			const text = line.toString("utf8");
+			if (!text.trim()) return;
+			let obj: JsonlObject;
+			try {
+				obj = JSON.parse(text) as JsonlObject;
+			} catch {
+				gaps.push({
+					path: input.path,
+					line_number: lineNumber,
+					byte_offset: byteOffset,
+					reason: "malformed_jsonl_line",
+				});
+				return;
+			}
+			if (!obj) return;
+			await input.onObject(obj);
+		},
+		onIncompleteLine: async (_line, byteOffset, lineNumber) => {
+			gaps.push({
+				path: input.path,
+				line_number: lineNumber,
+				byte_offset: byteOffset,
+				reason: "truncated_jsonl_tail",
+			});
+		},
+	});
+	// Rewrites recompute gaps. Appends retain only committed-prefix gaps;
+	// the pending tail is examined again and can now be complete.
+	const retained =
+		result.decision.kind === "rebuild"
+			? []
+			: (input.prior?.jsonl_gaps ?? []).filter(
+					(gap) =>
+						result.decision.kind === "fast_skip" ||
+						gap.byte_offset < (input.prior?.committed_offset_bytes ?? 0),
+				);
+	return {
+		...result,
+		cursor: { ...result.cursor, jsonl_gaps: [...retained, ...gaps] },
+	};
 }
 
 interface LocalJsonlTelemetry {
@@ -1619,14 +1653,10 @@ async function scanSessionSource(input: {
 		? cloneObservations(input.cursor.observation, input.source.forcedSessionId)
 		: makeJsonlObservations(input.source.forcedSessionId);
 	const sessionIds = new Set<string>();
-	const result = await scanLocalJsonl({
+	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
-		onLine: async (line, committedOffsetBytes) => {
-			const obj = parseJsonlLine(line, committedOffsetBytes);
-			if (!obj) {
-				return;
-			}
+		onObject: async (obj) => {
 			const before = observation.messageCount;
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
 			await processJsonlLine({
@@ -1677,14 +1707,10 @@ async function scanChildSource(input: {
 		input.cursor?.current_session_id ?? observation.sessionId;
 	let messagesExamined = 0;
 	let attachmentsExamined = 0;
-	const result = await scanLocalJsonl({
+	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
-		onLine: async (line, committedOffsetBytes) => {
-			const obj = parseJsonlLine(line, committedOffsetBytes);
-			if (!obj) {
-				return;
-			}
+		onObject: async (obj) => {
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
 			// Classify by the same dispatch rule processJsonlLine applies (a line
 			// without a pinned session id is never dispatched to either stream) so
@@ -1842,8 +1868,8 @@ async function emitCoverageDiagnosticsState(input: {
  * with Codex's identical derived-stream problem — see
  * `buildDerivedCoverageRecord` in local-source-inventory.ts. A thrown error
  * during any scan above fails the whole run before this ever gets called
- * (see `run().catch` in connector-runtime.ts), so `scanComplete: true` is
- * honest whenever this is reached.
+ * (see `run().catch` in connector-runtime.ts). JSONL parse gaps instead
+ * leave the affected transcript streams incomplete while collection continues.
  */
 function buildDerivedCoverageRecords(input: {
 	requested: Map<string, StreamScope>;
@@ -1884,7 +1910,7 @@ function buildDerivedCoverageRecords(input: {
 				emitted: input.memoryNotes.emitted,
 				examined: input.memoryNotes.examined,
 				label: "memory note",
-				scanComplete: input.scanComplete,
+				scanComplete: true,
 				stream: "memory_notes",
 			}),
 		);
@@ -2117,7 +2143,28 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "claude_code",
 		validateRecord,
-		async collect({ state, requested, emit, emitRecord, reportStreamFailure }) {
+		async collect({ state, requested, emit, emitRecord }) {
+			const reportedGaps = new Set<string>();
+			const reportGaps = async (gaps: ClaudeJsonlGap[] | undefined) => {
+				for (const gap of gaps ?? []) {
+					const key = JSON.stringify(gap);
+					if (reportedGaps.has(key)) continue;
+					reportedGaps.add(key);
+					for (const stream of ["sessions", "messages", "attachments"]) {
+						if (requested.has(stream))
+							await emit({
+								type: "SKIP_RESULT",
+								stream,
+								reason: gap.reason,
+								message:
+									gap.reason === "truncated_jsonl_tail"
+										? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
+										: "Claude Code skipped a malformed JSONL line; other source records were collected",
+								diagnostics: { ...gap },
+							});
+					}
+				}
+			};
 			const claudeHome =
 				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 			const baseDir =
@@ -2323,25 +2370,14 @@ if (isMainModule(import.meta.url)) {
 					);
 					const changedLegacySessionIds = new Set<string>();
 					for (const source of sources) {
-						let scanned: Awaited<ReturnType<typeof scanSessionSource>>;
-						try {
-							scanned = await scanSessionSource({
-								cursor: rebuildAll
-									? undefined
-									: priorSessionCursors[source.path],
-								projectDir: source.projectDir,
-								sessionAccumulators,
-								source,
-								telemetry,
-							});
-						} catch (error) {
-							await reportMalformedJsonlGap({
-								error,
-								reportStreamFailure,
-								requested,
-							});
-							throw error;
-						}
+						const scanned = await scanSessionSource({
+							cursor: rebuildAll ? undefined : priorSessionCursors[source.path],
+							projectDir: source.projectDir,
+							sessionAccumulators,
+							source,
+							telemetry,
+						});
+						await reportGaps(scanned.cursor.jsonl_gaps);
 						nextSessionCursors[source.path] = scanned.cursor;
 						newSessionFileMtimes[source.path] =
 							scanned.cursor.observed_mtime_ms;
@@ -2370,6 +2406,7 @@ if (isMainModule(import.meta.url)) {
 								source,
 								telemetry,
 							});
+							await reportGaps(scanned.cursor.jsonl_gaps);
 							nextSessionCursors[source.path] = scanned.cursor;
 							newSessionFileMtimes[source.path] =
 								scanned.cursor.observed_mtime_ms;
@@ -2462,23 +2499,14 @@ if (isMainModule(import.meta.url)) {
 							messageUsesLegacyJsonlMtimes &&
 							messageLegacyJsonlMtimes.has(source.path);
 						let scanned: Awaited<ReturnType<typeof scanChildSource>>;
-						try {
-							scanned = await scanChildSource({
-								cursor: priorChildCursors[source.path],
-								emitRecord: countingEmitRecord,
-								emitRecords: !candidateLegacyBaseline,
-								requested,
-								source,
-								telemetry,
-							});
-						} catch (error) {
-							await reportMalformedJsonlGap({
-								error,
-								reportStreamFailure,
-								requested,
-							});
-							throw error;
-						}
+						scanned = await scanChildSource({
+							cursor: priorChildCursors[source.path],
+							emitRecord: countingEmitRecord,
+							emitRecords: !candidateLegacyBaseline,
+							requested,
+							source,
+							telemetry,
+						});
 						// The scan, not a pre-scan stat, decides whether the old mtime
 						// actually describes the bytes that were cursorized. A change in
 						// the small interval before the open snapshot is replayed from
@@ -2491,23 +2519,14 @@ if (isMainModule(import.meta.url)) {
 								scanned.cursor.observed_mtime_ms,
 							)
 						) {
-							try {
-								scanned = await scanChildSource({
-									cursor: undefined,
-									emitRecord: countingEmitRecord,
-									emitRecords: true,
-									requested,
-									source,
-									telemetry,
-								});
-							} catch (error) {
-								await reportMalformedJsonlGap({
-									error,
-									reportStreamFailure,
-									requested,
-								});
-								throw error;
-							}
+							scanned = await scanChildSource({
+								cursor: undefined,
+								emitRecord: countingEmitRecord,
+								emitRecords: true,
+								requested,
+								source,
+								telemetry,
+							});
 						}
 						if (requested.has("messages")) {
 							derivedCounts.messages.examined += scanned.messagesExamined;
@@ -2515,6 +2534,7 @@ if (isMainModule(import.meta.url)) {
 						if (requested.has("attachments")) {
 							derivedCounts.attachments.examined += scanned.attachmentsExamined;
 						}
+						await reportGaps(scanned.cursor.jsonl_gaps);
 						nextChildCursors[source.path] = scanned.cursor;
 						newMessageFileMtimes[source.path] =
 							scanned.cursor.observed_mtime_ms;
@@ -2531,21 +2551,31 @@ if (isMainModule(import.meta.url)) {
 						cursor: { file_mtimes: newMemoryNoteMtimes, fetched_at: nowIso() },
 					});
 				}
-				// messages/attachments/memory_notes are parsed out of the same
-				// on-disk files as `sessions`, so they have no KnownLocalStore entry
+				// Transcript children and memory notes have no dedicated
+				// KnownLocalStore entry for their derived content streams
 				// and would otherwise never appear in coverage_diagnostics — see
 				// buildDerivedCoverageRecords. Every branch above that could touch
 				// these streams ran (or was gated by !requested.has(...)) before
-				// this point, so scanComplete: true is honest here; a thrown error
-				// anywhere above fails the whole run via run().catch before this
-				// line is ever reached.
+				// this point. Declared JSONL gaps remain incomplete coverage even
+				// though all readable records have been collected.
+				if (reportedGaps.size > 0) {
+					for (const record of inventory.coverage) {
+						if (record.stream === "sessions") {
+							record.status = "unaccounted";
+							record.reason =
+								"JSONL source gaps were declared in SKIP_RESULT events and retained in per-file cursors";
+							if (requested.has("coverage_diagnostics"))
+								await emitRecord("coverage_diagnostics", record);
+						}
+					}
+				}
 				const derivedCoverageRecords = requested.has("coverage_diagnostics")
 					? buildDerivedCoverageRecords({
 							attachments: derivedCounts.attachments,
 							memoryNotes: derivedCounts.memoryNotes,
 							messages: derivedCounts.messages,
 							requested,
-							scanComplete: true,
+							scanComplete: reportedGaps.size === 0,
 						})
 					: [];
 				await emitDerivedCoverage({
@@ -2555,8 +2585,8 @@ if (isMainModule(import.meta.url)) {
 				// Re-commit coverage STATE now that the full collection pass
 				// completed. This supersedes the early static-only snapshot written
 				// right after the inventory pass (see the top of `collect()`) with
-				// the same content — the inventory itself did not change — but keeps
-				// the STATE cursor's `fetched_at` current for a full, successful run.
+				// the final gap classifications and derived coverage, and keeps
+				// the STATE cursor's `fetched_at` current for this completed run.
 				await emitCoverageDiagnosticsState({
 					derived: derivedCoverageRecords,
 					emit,
