@@ -2,7 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, rename, truncate, utimes, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+import {
+	mkdtemp,
+	open,
+	rename,
+	rm,
+	truncate,
+	unlink,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -38,6 +48,96 @@ test("local JSONL cursor skips an mtime-only touch and tails one complete append
 	const appended = await scan(path, touched.result.cursor);
 	assert.deepEqual(appended.lines, ['{"id":"two"}']);
 	assert.equal(appended.result.decision.kind, "append");
+});
+
+test("filesystem failures identify the local JSONL path and operation", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-source-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const missing = join(root, "missing.jsonl");
+	await assert.rejects(scan(missing), {
+		name: "LocalJsonlSourceReadError",
+		path: missing,
+		operation: "open",
+	});
+	await assert.rejects(scan(root), {
+		name: "LocalJsonlSourceReadError",
+		path: root,
+		operation: "read",
+	});
+	const path = join(root, "events.jsonl");
+	await writeFile(path, "{}\n");
+	await assert.rejects(
+		scanLocalJsonl({ path, prior: undefined, onLine: () => unlink(path) }),
+		{ name: "LocalJsonlSourceReadError", path, operation: "stat" },
+	);
+});
+
+test("complete-line and tail callback failures retain identity even with filesystem-like codes", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-callback-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "events.jsonl");
+	const failure = Object.assign(new Error("output transport failed"), {
+		code: "EIO",
+	});
+	await writeFile(path, "{}\n");
+	await assert.rejects(
+		scanLocalJsonl({
+			path,
+			prior: undefined,
+			onLine: () => Promise.reject(failure),
+		}),
+		(error: unknown) => error === failure,
+	);
+	await writeFile(path, "partial");
+	await assert.rejects(
+		scanLocalJsonl({
+			path,
+			prior: undefined,
+			onLine: () => Promise.resolve(),
+			onIncompleteLine: () => Promise.reject(failure),
+		}),
+		(error: unknown) => error === failure,
+	);
+});
+
+test("cleanup failure cannot replace a callback failure with a recoverable source error", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-close-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "events.jsonl");
+	await writeFile(path, "{}\n");
+	const probe = await open(path);
+	const prototype = Object.getPrototypeOf(probe) as Pick<FileHandle, "stat">;
+	await probe.close();
+	const originalStat = prototype.stat;
+	const patched = new WeakSet<FileHandle>();
+	const cleanupFailure = Object.assign(new Error("close failed"), {
+		code: "EIO",
+	});
+	t.mock.method(prototype, "stat", function (this: FileHandle) {
+		if (!patched.has(this)) {
+			patched.add(this);
+			const close = this.close.bind(this);
+			this.close = async () => {
+				await close();
+				throw cleanupFailure;
+			};
+		}
+		return originalStat.bind(this)();
+	});
+	const callbackFailure = new Error("output transport failed");
+	await assert.rejects(
+		scanLocalJsonl({
+			path,
+			prior: undefined,
+			onLine: () => Promise.reject(callbackFailure),
+		}),
+		(error: unknown) => error === callbackFailure,
+	);
+	await assert.rejects(scan(path), {
+		name: "LocalJsonlSourceReadError",
+		operation: "close",
+		cause: cleanupFailure,
+	});
 });
 
 test("local JSONL cursor detects a changed committed byte beyond 64 KiB", async () => {

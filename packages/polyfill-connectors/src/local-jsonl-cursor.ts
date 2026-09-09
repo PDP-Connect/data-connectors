@@ -56,6 +56,36 @@ export class LocalJsonlUnstableSourceError extends Error {
 	}
 }
 
+/** Filesystem failure, distinct from callback or output-transport failure. */
+export class LocalJsonlSourceReadError extends Error {
+	readonly path: string;
+	readonly operation: "open" | "read" | "stat" | "close";
+
+	constructor(
+		path: string,
+		operation: LocalJsonlSourceReadError["operation"],
+		cause: unknown,
+	) {
+		super(`local JSONL source ${operation} failed`, { cause });
+		this.name = "LocalJsonlSourceReadError";
+		this.path = path;
+		this.operation = operation;
+	}
+}
+
+/** Wrap only the filesystem call supplied here, never a consumer callback. */
+async function sourceIo<T>(
+	path: string,
+	operation: LocalJsonlSourceReadError["operation"],
+	action: () => Promise<T>,
+): Promise<T> {
+	try {
+		return await action();
+	} catch (error) {
+		throw new LocalJsonlSourceReadError(path, operation, error);
+	}
+}
+
 /** A complete line was present but could not be parsed as JSON. */
 export class LocalJsonlMalformedLineError extends Error {
 	readonly committed_offset_bytes: number;
@@ -100,14 +130,19 @@ function sameOpenFile(
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function hashRange(handle: FileHandle, bytes: number): Promise<string> {
-	return (await hashRangeState(handle, bytes)).digest("hex");
+async function hashRange(
+	handle: FileHandle,
+	bytes: number,
+	path: string,
+): Promise<string> {
+	return (await hashRangeState(handle, bytes, path)).digest("hex");
 }
 
 /** Read a prefix once and retain its hash state for a later continuation. */
 async function hashRangeState(
 	handle: FileHandle,
 	bytes: number,
+	path: string,
 ): Promise<Hash> {
 	const hash = createHash("sha256");
 	let offset = 0;
@@ -115,7 +150,9 @@ async function hashRangeState(
 		const buffer = Buffer.allocUnsafe(
 			Math.min(READ_CHUNK_BYTES, bytes - offset),
 		);
-		const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+		const { bytesRead } = await sourceIo(path, "read", () =>
+			handle.read(buffer, 0, buffer.length, offset),
+		);
 		if (bytesRead !== buffer.length) {
 			throw new LocalJsonlUnstableSourceError(
 				"local JSONL source ended during a required prefix read",
@@ -133,8 +170,8 @@ async function verifyStablePath(
 	snapshot: { dev: number; ino: number; size: number; mtimeMs: number },
 ): Promise<void> {
 	const [afterHandle, afterPath] = await Promise.all([
-		handle.stat(),
-		stat(path),
+		sourceIo(path, "stat", () => handle.stat()),
+		sourceIo(path, "stat", () => stat(path)),
 	]);
 	if (
 		!(sameOpenFile(snapshot, afterHandle) && sameOpenFile(snapshot, afterPath))
@@ -172,9 +209,9 @@ async function proveCommittedPrefix(input: {
 	bytes: number;
 }): Promise<number> {
 	await verifyStablePath(input.path, input.handle, input.snapshot);
-	const first = await hashRange(input.handle, input.bytes);
+	const first = await hashRange(input.handle, input.bytes, input.path);
 	await verifyStablePath(input.path, input.handle, input.snapshot);
-	const second = await hashRange(input.handle, input.bytes);
+	const second = await hashRange(input.handle, input.bytes, input.path);
 	await verifyStablePath(input.path, input.handle, input.snapshot);
 	if (first !== input.expectedSha256 || second !== input.expectedSha256) {
 		throw new LocalJsonlUnstableSourceError(
@@ -198,9 +235,10 @@ export async function scanLocalJsonl({
 	path,
 	prior,
 }: ScanLocalJsonlArgs): Promise<LocalJsonlScanResult> {
-	const handle = await open(path, "r");
+	const handle = await sourceIo(path, "open", () => open(path, "r"));
+	let scanFailed = false;
 	try {
-		const snapshot = await handle.stat();
+		const snapshot = await sourceIo(path, "stat", () => handle.stat());
 		if (
 			prior &&
 			isLocalJsonlPhysicalCursorV1(prior) &&
@@ -232,6 +270,7 @@ export async function scanLocalJsonl({
 			const actualPrefix = await hashRangeState(
 				handle,
 				prior.committed_offset_bytes,
+				path,
 			);
 			prefixBytesHashed += prior.committed_offset_bytes;
 			if (actualPrefix.copy().digest("hex") === prior.committed_prefix_sha256) {
@@ -253,11 +292,8 @@ export async function scanLocalJsonl({
 				const buffer = Buffer.allocUnsafe(
 					Math.min(READ_CHUNK_BYTES, startOffset - offset),
 				);
-				const { bytesRead } = await handle.read(
-					buffer,
-					0,
-					buffer.length,
-					offset,
+				const { bytesRead } = await sourceIo(path, "read", () =>
+					handle.read(buffer, 0, buffer.length, offset),
 				);
 				if (bytesRead !== buffer.length)
 					throw new LocalJsonlUnstableSourceError(
@@ -275,11 +311,8 @@ export async function scanLocalJsonl({
 			const buffer = Buffer.allocUnsafe(
 				Math.min(READ_CHUNK_BYTES, snapshot.size - position),
 			);
-			const { bytesRead } = await handle.read(
-				buffer,
-				0,
-				buffer.length,
-				position,
+			const { bytesRead } = await sourceIo(path, "read", () =>
+				handle.read(buffer, 0, buffer.length, position),
 			);
 			if (bytesRead !== buffer.length) {
 				throw new LocalJsonlUnstableSourceError(
@@ -332,7 +365,16 @@ export async function scanLocalJsonl({
 			prefix_bytes_hashed: prefixBytesHashed,
 			tail_bytes_parsed: snapshot.size - startOffset,
 		};
+	} catch (error) {
+		scanFailed = true;
+		throw error;
 	} finally {
-		await handle.close();
+		if (scanFailed) {
+			// Preserve the original failure, particularly a transport failure that
+			// must not become a recoverable source gap because cleanup also failed.
+			await handle.close().catch(() => undefined);
+		} else {
+			await sourceIo(path, "close", () => handle.close());
+		}
 	}
 }

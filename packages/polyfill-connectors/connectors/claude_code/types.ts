@@ -77,11 +77,19 @@ export interface ClaudeChildFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
 }
 
 export interface ClaudeSessionFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
+	session_ids?: string[];
 	jsonl_gaps?: ClaudeJsonlGap[];
 	observation: JsonlObservations;
 }
 
+export interface ClaudeSourceGap {
+	path: string;
+	reason: "source_read_error";
+	error_code: string;
+}
+
 export interface ClaudeMessagesCursorV1 {
+	source_gaps?: Record<string, ClaudeSourceGap>;
 	fetched_at: string;
 	file_cursors: Record<string, ClaudeChildFileCursorV1>;
 	file_mtimes: Record<string, number>;
@@ -89,6 +97,8 @@ export interface ClaudeMessagesCursorV1 {
 }
 
 export interface ClaudeSessionsCursorV1 {
+	source_gaps?: Record<string, ClaudeSourceGap>;
+	session_rebuild_required?: boolean;
 	fetched_at: string;
 	file_cursors: Record<string, ClaudeSessionFileCursorV1>;
 	file_mtimes: Record<string, number>;
