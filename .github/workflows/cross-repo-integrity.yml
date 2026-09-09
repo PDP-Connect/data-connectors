@@ -392,6 +392,14 @@ jobs:
             exit 1
           fi
 
+          # Coordinated dependency branches may be deleted after their PR merges.
+          # Fall back to main only when the branch is absent; the source diff below
+          # still rejects an unmerged or stale pin. A remote query failure is fatal.
+          TRACKED_HEAD="$(git ls-remote --heads origin "refs/heads/$TRACK_REF")"
+          if [ -z "$TRACKED_HEAD" ] && [ "$TRACK_REF" != "main" ]; then
+            echo "Tracked branch $TRACK_REF is absent; compare the pinned source against main."
+            TRACK_REF="main"
+          fi
           git fetch --filter=blob:none origin "$TRACK_REF"
           CURRENT_HEAD="$(git rev-parse FETCH_HEAD)"
 
