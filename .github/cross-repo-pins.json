@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "82fd91f2e5a23ff750c85dd50d3837dd884786ea",
-      "branch": "dependabot/npm_and_yarn/npm-c1d4b2311d",
-      "note": "Coordinated with PDP-Connect/data-connect#63. The npm dependency updates change both runtime/protocol package manifests, so the 0.0.1 archives and their lockfile integrity records are refreshed from this SHA. Compiled files and connector sources are unchanged. Track the PR branch until it merges; the separate 1.0.0 release pin remains unchanged."
+      "sha": "187838be13f04e8ef7e7165169f750169a88cc1b",
+      "branch": "main",
+      "note": "Merge of PDP-Connect/data-connect#63 into main on 2026-09-09. The runtime/protocol packages, collector definitions, and vendored connector sources are unchanged from the prior PR-head pin, so the existing 0.0.1 archives remain valid. The separate 1.0.0 release pin remains unchanged."
     },
     "data-connect-1-0-0": {
       "owner": "PDP-Connect",
@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "2869868d6014178ee40b75f6e3c6f3836789b4c8",
-      "branch": "build/refresh-collector-runtime-archive",
-      "note": "Coordinated with PDP-Connect/data-connect#63: refresh the legacy 0.0.1 collector-runtime archive from the same producer revision as data-connectors. The active 1.0.0 release archives and reference-contract sources remain unchanged. Track the coordinated update branch until it merges; freshness checks compare main if the branch is subsequently deleted."
+      "sha": "55c00d3460007901402362ba977e686350003afa",
+      "branch": "main",
+      "note": "Head of PDP-Connect/pdpp main on 2026-09-09 after PRs #342, #348, #349, #350, and #351 merged. Refreshes the pin after dependency updates changed packages/reference-contract/package.json on the tracked path. The copied reference-contract modules and vendored archives remain unchanged."
     }
   }
 }

@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`82fd91f2e5a23ff750c85dd50d3837dd884786ea` (see `.github/cross-repo-pins.json`). This package
+`187838be13f04e8ef7e7165169f750169a88cc1b` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -26,9 +26,7 @@ rejected outright rather than treated as a partial win.
   `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-09
   for PDP-Connect/data-connect#63: dependency updates change the package manifests;
   every compiled file remains byte-identical to the previous archives. Built with
-  Node 22.23.1, npm 10.9.9, and TypeScript 7.0.2. The cross-repository pin tracks
-  the dependency-update branch during the coordinated merge; the separate 1.0.0
-  release pin remains unchanged.
+  Node 22.23.1, npm 10.9.9, and TypeScript 7.0.2. The cross-repository pin now tracks main at the merge of #63; the runtime/protocol package trees are unchanged from the archive source commit. The separate 1.0.0 release pin remains unchanged.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
