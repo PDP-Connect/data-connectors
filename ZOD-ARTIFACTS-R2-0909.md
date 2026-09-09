@@ -1,6 +1,6 @@
 # Zod 4.5.4 connector artifact recut
 
-Status: verification complete for PR #87; companion CI pending. This status will be finalized after the remaining checks finish.
+**READY TO MERGE in the merge order below.** All four PRs have successful completed checks at the revisions listed below. PR #87 is no longer a draft. No PR has been merged. Verified 2026-09-09.
 
 ## Source selection and merge order
 
@@ -66,7 +66,16 @@ Original companion attempts against PDPP main were unsuitable: GitHub’s histor
 
 ## CI and commit integrity
 
-At code commit `7f80ff67c0d70c50c1553e15dd2cd8e759aef82c`, `timeout 900 gh pr view 87 --json headRefOid,statusCheckRollup,mergeStateStatus` reported CLEAN, 13 successful checks, two skipped checks, and no failures. [Contract Guardrails](https://github.com/PDP-Connect/data-connectors/actions/runs/34353686772) passed all three pinned rebuilds and the full contract workflow. Companion CI status is pending final capture.
+At code commit `7f80ff67c0d70c50c1553e15dd2cd8e759aef82c`, `timeout 900 gh pr view 87 --json headRefOid,statusCheckRollup,mergeStateStatus` reported CLEAN, 13 successful checks, two skipped checks, and no failures. [Contract Guardrails](https://github.com/PDP-Connect/data-connectors/actions/runs/34353686772) passed all three pinned rebuilds and the full contract workflow. The later documentation commit also passed. Final pre-report CI capture:
+
+| PR | Checked commit | Result | Evidence |
+| --- | --- | --- | --- |
+| [PDP-Connect/data-connectors#87](https://github.com/PDP-Connect/data-connectors/pull/87) | `496e8ddbd2a6679cc463b09fe0779053506096c7` | 13 success, 2 skipped | [Checks](https://github.com/PDP-Connect/data-connectors/actions/runs/34354654095/job/102476153689) |
+| [PDP-Connect/pdpp#351](https://github.com/PDP-Connect/pdpp/pull/351) | `7d08b692b3ab74db19e50badce91d9c2f5620018` | 8 success, 1 skipped | [Checks](https://github.com/PDP-Connect/pdpp/actions/runs/34353833413/job/102473391319) |
+| [PDP-Connect/pdpp#349](https://github.com/PDP-Connect/pdpp/pull/349) | `4fcda2c4d32e3faf97cf7231f048a2436f035a78` | 17 success, 1 skipped | [Checks](https://github.com/PDP-Connect/pdpp/actions/runs/34353837243/job/102473496278) |
+| [PDP-Connect/pdpp#350](https://github.com/PDP-Connect/pdpp/pull/350) | `16b9d71e637e356a32f4a326b7b346768a00fb70` | 9 success, 1 skipped | [Checks](https://github.com/PDP-Connect/pdpp/actions/runs/34353838602/job/102473561462) |
+
+These results came from `timeout 900 gh pr view NUMBER --repo PDP-Connect/REPOSITORY --json headRefOid,baseRefName,isDraft,mergeStateStatus,statusCheckRollup`; complete JSON snapshots are in `~/.tmp/zod-artifacts-r2-0909/pr-{87,351,349,350}-ci.json`. `timeout 900 gh pr ready 87` marked the artifact PR ready for review. The report commits add documentation only.
 
 All project commits created here used Tim Nunamaker <tnunamak@gmail.com>, `git commit -s -S`, `commit.gpgsign=true`, and an `Assisted-by: AI` trailer. `git log --format='%H %an <%ae> %cn <%ce> %G?%n%B'` confirmed matching author/committer, good signatures (G), and both trailers. Source-version commits and later companion corrections follow the same convention.
 
