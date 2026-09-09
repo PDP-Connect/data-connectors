@@ -1638,3 +1638,205 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		);
 	});
 }
+
+for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
+	test(`permission-denied project directory retains hidden transcripts and retries (${transcriptStreams.join(" + ")})`, {
+		skip: process.getuid?.() === 0,
+	}, async (t) => {
+		const source = await makeSource();
+		const blockedProject = join(source.projects, "-tmp-incremental");
+		t.after(async () => {
+			await chmod(blockedProject, 0o700);
+			await rm(source.claudeHome, { recursive: true, force: true });
+		});
+		const healthyProject = join(source.projects, "-tmp-incremental-extra");
+		const healthySession = "22222222-2222-4222-8222-222222222222";
+		const healthyPath = join(healthyProject, `${healthySession}.jsonl`);
+		await mkdir(healthyProject);
+		const healthyInitial = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
+		await writeFile(healthyPath, healthyInitial);
+		const streams = [...transcriptStreams, "coverage_diagnostics"];
+		const initial = await run({ ...source, streams });
+		const original = await readFile(source.top, "utf8");
+		await writeFile(
+			source.top,
+			`${original}${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`,
+		);
+		const healthyAppendId = "00000000-0000-4000-8000-000000000008";
+		await writeFile(
+			healthyPath,
+			`${healthyInitial}${transcriptLine(healthyAppendId, "2026-07-21T00:04:00Z", { sessionId: healthySession })}\n`,
+		);
+		await chmod(blockedProject, 0o000);
+		const freshDenied = await run({ ...source, streams });
+		assert.deepEqual(
+			freshDenied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-3"], healthyAppendId],
+		);
+		for (const stream of transcriptStreams) {
+			assert.equal(
+				freshDenied.messages.filter(
+					(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+				).length,
+				1,
+			);
+		}
+		const denied = await run({ ...source, streams, state: initial.states });
+		const expectedGap = {
+			path: blockedProject,
+			reason: "source_directory_read_error",
+			error_code: "EACCES",
+		};
+		for (const stream of transcriptStreams) {
+			const gaps = denied.messages.filter(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+			);
+			assert.equal(
+				gaps.length,
+				1,
+				"each requested transcript stream must declare one directory gap across discovery passes",
+			);
+			assert.ok(gaps[0]?.type === "SKIP_RESULT");
+			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			assert.ok(
+				denied.messages.indexOf(gaps[0]) <
+					denied.messages.findIndex(
+						(m) => m.type === "STATE" && m.stream === stream,
+					),
+				"directory gap must precede its stream checkpoint",
+			);
+			const before = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			const after = denied.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+				source_gaps: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				after.file_cursors[source.top],
+				before.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				after.file_cursors[source.subagent],
+				before.file_cursors[source.subagent],
+			);
+			assert.equal(after.file_cursors[blockedProject], undefined);
+			assert.deepEqual(
+				after.source_gaps,
+				{},
+				"directory failures are reprobed, not persisted as file retry gaps",
+			);
+			if (stream === "sessions")
+				assert.deepEqual(
+					after.session_aggregates?.[SESSION_ID],
+					before.session_aggregates?.[SESSION_ID],
+				);
+			assert.ok(
+				denied.records.some(
+					(r) =>
+						r.stream === "coverage_diagnostics" &&
+						r.data.stream === stream &&
+						r.data.status === "unaccounted",
+				),
+			);
+		}
+		assert.deepEqual(
+			denied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[healthyAppendId],
+		);
+		if (transcriptStreams.includes("sessions"))
+			assert.equal(
+				denied.records.find(
+					(r) => r.stream === "sessions" && r.data.id === healthySession,
+				)?.data.message_count,
+				2,
+			);
+		const retried = await run({ ...source, streams, state: denied.states });
+		assert.equal(
+			retried.records.filter((r) => r.stream === "messages").length,
+			0,
+		);
+		for (const stream of transcriptStreams) {
+			const gaps = retried.messages.filter(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+			);
+			assert.equal(gaps.length, 1);
+			assert.ok(gaps[0]?.type === "SKIP_RESULT");
+			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			const cursor = retried.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			const before = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				cursor.file_cursors[source.top],
+				before.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				cursor.file_cursors[source.subagent],
+				before.file_cursors[source.subagent],
+			);
+			if (stream === "sessions")
+				assert.deepEqual(
+					cursor.session_aggregates?.[SESSION_ID],
+					before.session_aggregates?.[SESSION_ID],
+				);
+		}
+		await chmod(blockedProject, 0o700);
+		const recovered = await run({ ...source, streams, state: retried.states });
+		assert.equal(
+			recovered.records.some(
+				(r) =>
+					r.stream === "coverage_diagnostics" &&
+					transcriptStreams.includes(String(r.data.stream)) &&
+					r.data.status === "unaccounted",
+			),
+			false,
+		);
+		assert.deepEqual(
+			recovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-2"]],
+			"recovery resumes hidden files without replaying their committed prefixes",
+		);
+		assert.equal(
+			recovered.messages.filter((m) => m.type === "SKIP_RESULT").length,
+			0,
+		);
+		if (transcriptStreams.includes("sessions"))
+			assert.equal(
+				recovered.records.find(
+					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
+				)?.data.message_count,
+				3,
+			);
+		const noop = await run({ ...source, streams, state: recovered.states });
+		assert.equal(noop.records.filter((r) => r.stream === "messages").length, 0);
+		const freshRecovered = await run({
+			...source,
+			streams,
+			state: freshDenied.states,
+		});
+		assert.deepEqual(
+			freshRecovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id)
+				.sort(),
+			[IDS["top-1"], IDS["top-2"], IDS["sub-1"]].sort(),
+		);
+		assert.equal(
+			freshRecovered.messages.filter((m) => m.type === "SKIP_RESULT").length,
+			0,
+		);
+	});
+}

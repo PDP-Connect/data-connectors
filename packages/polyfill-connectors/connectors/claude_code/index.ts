@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createInterface as createFileReader } from "node:readline";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -1009,7 +1009,10 @@ async function emitProjectMemoryNotes({
 
 // ─── Projects directory scan ────────────────────────────────────────────
 
+type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
+
 export interface ScanProjectDirsArgs {
+	onDirectoryError?: DirectoryReadFailure;
 	baseDir: string;
 	/** Threaded through to parseJsonlFile/processJsonlLine so pass 1 is
 	 *  silent (accumulator-only) and pass 2 emits messages/attachments. */
@@ -1144,7 +1147,8 @@ async function scanProjectDir(
 	let entries: Dirent[];
 	try {
 		entries = await readdir(projectPath, { withFileTypes: true });
-	} catch {
+	} catch (error) {
+		await args.onDirectoryError?.(projectPath, error);
 		return;
 	}
 	if (
@@ -1587,12 +1591,14 @@ export async function discoverClaudeJsonlSources(
 	baseDir: string,
 	emit: CollectContext["emit"],
 	scope?: EnumerationScope | null,
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<ClaudeJsonlSource[] | null> {
 	const projectDirs = await listProjectDirs(baseDir, emit);
 	if (projectDirs === null) {
 		return null;
 	}
 	const sources: ClaudeJsonlSource[] = [];
+	let directoryFailed = false;
 	for (const projectDir of projectDirs) {
 		if (!projectDirMatchesSourceRoots(projectDir, scope)) {
 			continue;
@@ -1601,7 +1607,9 @@ export async function discoverClaudeJsonlSources(
 		let entries: Dirent[];
 		try {
 			entries = await readdir(projectPath, { withFileTypes: true });
-		} catch {
+		} catch (error) {
+			directoryFailed = true;
+			await onDirectoryError?.(projectPath, error);
 			continue;
 		}
 		for (const entry of entries
@@ -1635,7 +1643,11 @@ export async function discoverClaudeJsonlSources(
 	// outcome: the runtime already treats it as an unresolved attempt, so the
 	// stream cannot reach `complete`, and the owner gets an actionable message
 	// naming the expected root format.
-	if (sources.length === 0 && (scope?.source_roots?.length ?? 0) > 0) {
+	if (
+		!directoryFailed &&
+		sources.length === 0 &&
+		(scope?.source_roots?.length ?? 0) > 0
+	) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: "sessions",
@@ -1968,6 +1980,7 @@ function buildDerivedCoverageRecords(input: {
 	scanComplete: boolean;
 	attachments: DerivedStreamCounts;
 	memoryNotes: DerivedStreamCounts;
+	memoryNotesComplete: boolean;
 	messages: DerivedStreamCounts;
 }): CoverageRecord[] {
 	const records: CoverageRecord[] = [];
@@ -2002,7 +2015,7 @@ function buildDerivedCoverageRecords(input: {
 				emitted: input.memoryNotes.emitted,
 				examined: input.memoryNotes.examined,
 				label: "memory note",
-				scanComplete: true,
+				scanComplete: input.memoryNotesComplete,
 				stream: "memory_notes",
 			}),
 		);
@@ -2277,6 +2290,55 @@ if (isMainModule(import.meta.url)) {
 					}
 				}
 			};
+			const failedDirectories = new Set<string>();
+			const reportedDirectoryStreams = new Set<string>();
+			const reportDirectoryError: DirectoryReadFailure = async (
+				path,
+				error,
+			) => {
+				failedDirectories.add(path);
+				const gap = {
+					path,
+					reason: "source_directory_read_error",
+					error_code:
+						isRecord(error) && typeof error.code === "string"
+							? error.code
+							: "UNKNOWN",
+				};
+				for (const stream of [
+					"sessions",
+					"messages",
+					"attachments",
+					"memory_notes",
+				]) {
+					const key = `${path}\0${stream}`;
+					if (!requested.has(stream) || reportedDirectoryStreams.has(key))
+						continue;
+					await emit({
+						type: "SKIP_RESULT",
+						stream,
+						reason: gap.reason,
+						message:
+							"Claude Code could not enumerate a project directory; known file cursors are retained for retry",
+						diagnostics: gap,
+					});
+					reportedDirectoryStreams.add(key);
+					reportedGaps.add(JSON.stringify(gap));
+				}
+			};
+			const isUnavailablePath = (path: string): boolean =>
+				[...failedDirectories].some((directory) =>
+					path.startsWith(directory + sep),
+				);
+			const retainUnavailable = <T>(
+				prior: Record<string, T>,
+				next: Record<string, T>,
+			): void => {
+				for (const [path, value] of Object.entries(prior))
+					if (isUnavailablePath(path) && next[path] === undefined)
+						next[path] = value;
+			};
+
 			const claudeHome =
 				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 			const baseDir =
@@ -2442,19 +2504,33 @@ if (isMainModule(import.meta.url)) {
 					baseDir,
 					emit,
 					enumerationScope,
+					reportDirectoryError,
 				);
 				if (sources === null) {
 					return;
 				}
 				const sourcePaths = new Set(sources.map((source) => source.path));
+				const unavailableSessionCursors: Record<
+					string,
+					ClaudeSessionFileCursorV1
+				> = {};
+				retainUnavailable(priorSessionCursors, unavailableSessionCursors);
+				for (const path of Object.keys(unavailableSessionCursors))
+					sourcePaths.add(path);
 				const telemetry = makeLocalJsonlTelemetry();
 				// Rich cursor state is authoritative. Rebuild these compatibility maps
-				// only from files discovered in this pass so removed/rotated paths do
-				// not become a retained per-file ledger.
+				// from discovered files and known files under unreadable directories;
+				// prune paths only when their directories were successfully enumerated.
 				const newMessageFileMtimes: Record<string, number> = {};
 				const newSessionFileMtimes: Record<string, number> = {};
-				let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {};
+				retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+				retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+				retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
+				let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {
+					...unavailableSessionCursors,
+				};
 				const nextChildCursors: Record<string, ClaudeChildFileCursorV1> = {};
+				retainUnavailable(priorChildCursors, nextChildCursors);
 				let stagedSessionCursor:
 					| {
 							file_cursors: Record<string, ClaudeSessionFileCursorV1>;
@@ -2528,7 +2604,7 @@ if (isMainModule(import.meta.url)) {
 					}
 					if (rebuildAll && sessionSnapshotIsValid) {
 						sessionAccumulators = new Map();
-						nextSessionCursors = {};
+						nextSessionCursors = { ...unavailableSessionCursors };
 						for (const source of sources) {
 							const scanned = await tryScanTranscript(
 								source.path,
@@ -2558,10 +2634,17 @@ if (isMainModule(import.meta.url)) {
 					if (rebuildAll) {
 						telemetry.sessionRebuildAll += 1;
 					}
-					if (rebuildAll && Object.keys(sessionSourceGaps).length > 0) {
+					if (
+						rebuildAll &&
+						(Object.keys(sessionSourceGaps).length > 0 ||
+							Object.keys(unavailableSessionCursors).length > 0)
+					) {
 						// Preserve summaries only where an unreadable prior contributor
 						// makes the rebuilt fold incomplete. Unrelated sessions can advance.
-						for (const path of Object.keys(sessionSourceGaps)) {
+						for (const path of new Set([
+							...Object.keys(sessionSourceGaps),
+							...Object.keys(unavailableSessionCursors),
+						])) {
 							const prior = priorSessionCursors[path];
 							const ids =
 								prior?.session_ids ??
@@ -2601,7 +2684,9 @@ if (isMainModule(import.meta.url)) {
 						session_aggregates: sessionAggregates,
 						source_gaps: sessionSourceGaps,
 						session_rebuild_required:
-							rebuildAll && Object.keys(sessionSourceGaps).length > 0,
+							rebuildAll &&
+							(Object.keys(sessionSourceGaps).length > 0 ||
+								Object.keys(unavailableSessionCursors).length > 0),
 					};
 				}
 
@@ -2629,7 +2714,11 @@ if (isMainModule(import.meta.url)) {
 						requested,
 						sessionAccumulators: new Map(),
 						skipJsonl: true,
+						onDirectoryError: reportDirectoryError,
 					});
+					retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+					retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+					retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
 				};
 				if (requested.has("sessions")) {
 					await scanLegacyNonJsonl();
@@ -2752,7 +2841,7 @@ if (isMainModule(import.meta.url)) {
 						if (record.stream === "sessions") {
 							record.status = "unaccounted";
 							record.reason =
-								"Transcript source gaps were declared in SKIP_RESULT events and retained in cursor state";
+								"Source gaps were declared in SKIP_RESULT events; affected coverage remains incomplete";
 							if (requested.has("coverage_diagnostics"))
 								await emitRecord("coverage_diagnostics", record);
 						}
@@ -2762,6 +2851,7 @@ if (isMainModule(import.meta.url)) {
 					? buildDerivedCoverageRecords({
 							attachments: derivedCounts.attachments,
 							memoryNotes: derivedCounts.memoryNotes,
+							memoryNotesComplete: failedDirectories.size === 0,
 							messages: derivedCounts.messages,
 							requested,
 							scanComplete: reportedGaps.size === 0,
