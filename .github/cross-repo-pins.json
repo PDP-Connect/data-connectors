@@ -19,9 +19,9 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "005d1b4342440cf03a34f0c7fc223a62cb57ed92",
-      "branch": "main",
-      "note": "Head of PDP-Connect/pdpp main as of 2026-09-03T22:08-05:00 (merge of PR #323, 'test: walk the Supporter signing journey against a real deployment'); refreshed after the spec decision stack (#285), the prose gate (#315), and the guard removal (#320) changed tracked paths."
+      "sha": "2869868d6014178ee40b75f6e3c6f3836789b4c8",
+      "branch": "build/refresh-collector-runtime-archive",
+      "note": "Coordinated with PDP-Connect/data-connect#63: refresh the legacy 0.0.1 collector-runtime archive from the same producer revision as data-connectors. The active 1.0.0 release archives and reference-contract sources remain unchanged. Track the coordinated update branch until it merges; freshness checks compare main if the branch is subsequently deleted."
     }
   }
 }
