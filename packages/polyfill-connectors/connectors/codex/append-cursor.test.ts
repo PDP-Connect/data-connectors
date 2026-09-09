@@ -34,6 +34,7 @@ import {
 	chmod,
 	mkdir,
 	mkdtemp,
+	rename,
 	rm,
 	truncate,
 	writeFile,
@@ -1142,5 +1143,181 @@ test("rollout scanner propagates emission failures even when they have filesyste
 			sourceGaps: {},
 		}),
 		(error: unknown) => error === transportError,
+	);
+});
+
+test("directory denial retains Codex line gaps through unchanged recovery until repair", {
+	skip: process.getuid?.() === 0,
+}, async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-directory-gap-"));
+	const dayDir = join(codexHome, "sessions", OLD_DATE_DIR);
+	const rootDir = join(codexHome, "sessions");
+	const hiddenRoot = join(codexHome, "hidden-sessions");
+	t.after(async () => {
+		await rename(hiddenRoot, rootDir).catch(() => undefined);
+		await chmod(rootDir, 0o700);
+		await chmod(dayDir, 0o700);
+		await rm(codexHome, { recursive: true, force: true });
+	});
+	const prefix = jsonl([sessionMetaLine(), messageLine("before")]);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		`${prefix}{bad}\n${messageLine("after")}\n`,
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const baseline = await runCodex({ codexHome, streams });
+	const baselineState = rolloutStateCursor(baseline.messages);
+	const saved = baselineState.file_cursors?.[SESSION_ID];
+	assert.ok(saved);
+	assert.equal(saved?.jsonl_gaps?.length, 1);
+	// Production predecessors used absolute-path keys; repair must replace that
+	// evidence instead of leaving a permanently gapped alias beside the UUID.
+	baselineState.file_cursors = { [path]: saved };
+	await chmod(dayDir, 0o000);
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later")]),
+	);
+	const denied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: baselineState },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(denied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(denied.messages, "malformed_jsonl_line").length, 1);
+	assert.deepEqual(
+		gapsFor(denied.messages, "malformed_jsonl_line")[0]?.diagnostics,
+		saved?.jsonl_gaps?.[0],
+	);
+	assert.equal(
+		recordsFor(denied.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	assert.equal(gapsFor(denied.messages, "rollout_source_read_error").length, 1);
+	assert.deepEqual(
+		recordsFor(denied.messages, "messages").map((record) => record.data.id),
+		[`${laterId}:2`],
+	);
+	const deniedAgain = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(denied.messages) },
+	});
+	assert.equal(gapsFor(deniedAgain.messages, "malformed_jsonl_line").length, 1);
+	await chmod(dayDir, 0o700);
+	const restored = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(deniedAgain.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(restored.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(restored.messages, "malformed_jsonl_line").length, 1);
+	assert.deepEqual(
+		gapsFor(restored.messages, "malformed_jsonl_line")[0]?.diagnostics,
+		saved?.jsonl_gaps?.[0],
+	);
+	assert.equal(
+		recordsFor(restored.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	assert.equal(
+		gapsFor(restored.messages, "rollout_source_read_error").length,
+		0,
+	);
+	const unchanged = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(restored.messages) },
+	});
+	assert.equal(gapsFor(unchanged.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		recordsFor(unchanged.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	await rename(rootDir, hiddenRoot);
+	const missing = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(unchanged.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(missing.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(missing.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		rolloutStateCursor(missing.messages).file_cursors?.[laterId],
+		undefined,
+		"ungapped deleted cursors still prune",
+	);
+	await rename(hiddenRoot, rootDir);
+	await chmod(rootDir, 0o000);
+	const rootDenied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(missing.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(rootDenied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(rootDenied.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		gapsFor(rootDenied.messages, "rollout_source_read_error").length,
+		1,
+	);
+	await chmod(rootDir, 0o700);
+	await appendFile(path, "\n");
+	await chmod(path, 0o000);
+	const fileDenied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(rootDenied.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(fileDenied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(fileDenied.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		gapsFor(fileDenied.messages, "rollout_source_read_error").length,
+		1,
+	);
+	await chmod(path, 0o600);
+	await writeFile(
+		path,
+		`${prefix}${messageLine("repaired")}\n${messageLine("after")}\n`,
+	);
+	const repaired = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(fileDenied.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(repaired.messages).file_cursors?.[SESSION_ID]
+			?.jsonl_gaps,
+		[],
+	);
+	assert.equal(gapsFor(repaired.messages, "malformed_jsonl_line").length, 0);
+	assert.equal(
+		rolloutStateCursor(repaired.messages).file_cursors?.[path],
+		undefined,
 	);
 });

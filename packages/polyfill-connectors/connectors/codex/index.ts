@@ -58,7 +58,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -444,11 +444,29 @@ async function listIfExists(dir: string): Promise<string[] | null> {
 	}
 }
 
+type RolloutDirectoryErrorHandler = (
+	error: RolloutSourceError,
+) => Promise<void>;
+
+async function listRolloutDirectory(
+	path: string,
+	onError?: RolloutDirectoryErrorHandler,
+): Promise<string[] | null> {
+	try {
+		return await listIfExists(path);
+	} catch (error) {
+		if (!(error instanceof RolloutSourceError) || !onError) throw error;
+		await onError(error);
+		return null;
+	}
+}
+
 async function* walkDayFiles(
 	dayPath: string,
 	year: string,
 	month: string,
 	day: string,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -456,7 +474,7 @@ async function* walkDayFiles(
 	day: string;
 	file: string;
 }> {
-	const files = await listIfExists(dayPath);
+	const files = await listRolloutDirectory(dayPath, onDirectoryError);
 	if (files === null) {
 		return;
 	}
@@ -472,6 +490,7 @@ async function* walkMonthDays(
 	year: string,
 	month: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -479,7 +498,7 @@ async function* walkMonthDays(
 	day: string;
 	file: string;
 }> {
-	const days = await listIfExists(monthPath);
+	const days = await listRolloutDirectory(monthPath, onDirectoryError);
 	if (days === null) {
 		return;
 	}
@@ -492,7 +511,7 @@ async function* walkMonthDays(
 		if (!dateDirectoryInRange({ day: d, month, year }, scope)) {
 			continue;
 		}
-		yield* walkDayFiles(join(monthPath, d), year, month, d);
+		yield* walkDayFiles(join(monthPath, d), year, month, d, onDirectoryError);
 	}
 }
 
@@ -500,6 +519,7 @@ async function* walkYearMonths(
 	yearPath: string,
 	year: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -507,7 +527,7 @@ async function* walkYearMonths(
 	day: string;
 	file: string;
 }> {
-	const months = await listIfExists(yearPath);
+	const months = await listRolloutDirectory(yearPath, onDirectoryError);
 	if (months === null) {
 		return;
 	}
@@ -518,7 +538,7 @@ async function* walkYearMonths(
 		if (!dateDirectoryInRange({ month: m, year }, scope)) {
 			continue;
 		}
-		yield* walkMonthDays(join(yearPath, m), year, m, scope);
+		yield* walkMonthDays(join(yearPath, m), year, m, scope, onDirectoryError);
 	}
 }
 
@@ -526,6 +546,7 @@ async function* walkYearMonths(
 export async function* walkRollouts(
 	baseDir: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -533,7 +554,7 @@ export async function* walkRollouts(
 	day: string;
 	file: string;
 }> {
-	const years = await listIfExists(baseDir);
+	const years = await listRolloutDirectory(baseDir, onDirectoryError);
 	if (years === null) {
 		return;
 	}
@@ -544,7 +565,7 @@ export async function* walkRollouts(
 		if (!dateDirectoryInRange({ year: y }, scope)) {
 			continue;
 		}
-		yield* walkYearMonths(join(baseDir, y), y, scope);
+		yield* walkYearMonths(join(baseDir, y), y, scope, onDirectoryError);
 	}
 }
 
@@ -1711,13 +1732,16 @@ async function processRolloutEntry(
  *  error the same way `listIfExists` does. */
 async function rootExists(
 	baseDir: string,
+	onDirectoryError: RolloutDirectoryErrorHandler,
 ): Promise<{ exists: boolean; unreadable: boolean }> {
 	try {
 		return {
 			exists: (await listIfExists(baseDir)) !== null,
 			unreadable: false,
 		};
-	} catch {
+	} catch (error) {
+		if (!(error instanceof RolloutSourceError)) throw error;
+		await onDirectoryError(error);
 		return { exists: false, unreadable: true };
 	}
 }
@@ -1741,6 +1765,47 @@ async function rootExists(
 export async function scanRollouts(
 	args: ScanRolloutsArgs,
 ): Promise<ScanRolloutsResult> {
+	const reportedCursorKeys = new Set<string>();
+	const priorPaths = new Set([
+		...Object.keys(args.fileMtimes),
+		...Object.keys(args.sourceGaps),
+		...Object.entries(args.fileCursors).flatMap(([key, cursor]) => [
+			...(isAbsolute(key) ? [key] : []),
+			...(cursor.jsonl_gaps ?? []).map((gap) => gap.path),
+		]),
+	]);
+	const keyForPath = (path: string) =>
+		cursorKeyForEntry({ path, file: basename(path) });
+	const locatedKeys = new Set([...priorPaths].map(keyForPath));
+	// Disappearance does not repair a declared line gap. Keep its evidence until
+	// a successful scan of that file replaces it, including when all roots vanish.
+	for (const [key, cursor] of Object.entries(args.fileCursors)) {
+		if ((cursor.jsonl_gaps?.length ?? 0) > 0) args.newFileCursors[key] = cursor;
+	}
+	let directoryFailed = false;
+	const onDirectoryError: RolloutDirectoryErrorHandler = async (error) => {
+		directoryFailed = true;
+		for (const path of priorPaths) {
+			if (!path.startsWith(error.path + sep)) continue;
+			const key = keyForPath(path);
+			const prior = args.fileCursors[key];
+			if (prior && !args.newFileCursors[key]) args.newFileCursors[key] = prior;
+		}
+		// Older UUID-only cursors can lack every path hint. An unreadable subtree
+		// cannot establish their absence, so preserve those boundaries conservatively.
+		for (const [key, cursor] of Object.entries(args.fileCursors)) {
+			if (!locatedKeys.has(key) && !args.newFileCursors[key])
+				args.newFileCursors[key] = cursor;
+		}
+		await reportRolloutSourceGap(args.requested, buildRolloutSourceGap(error));
+	};
+	const reportRetainedGaps = async () => {
+		for (const [key, cursor] of Object.entries(args.newFileCursors)) {
+			if (reportedCursorKeys.has(key)) continue;
+			for (const gap of cursor.jsonl_gaps ?? [])
+				await reportMalformedRolloutGap(args.requested, gap);
+		}
+	};
 	// Sequential, not Promise.all: `args.roots` is a short, fixed list (today:
 	// two — the primary and archive roots), and each check is a single cheap
 	// listIfExists(). No ordering or parallelism benefit is worth the added
@@ -1751,17 +1816,25 @@ export async function scanRollouts(
 		unreadable: boolean;
 	}> = [];
 	for (const root of args.roots) {
-		rootChecks.push({ root, ...(await rootExists(root.baseDir)) });
+		rootChecks.push({
+			root,
+			...(await rootExists(root.baseDir, onDirectoryError)),
+		});
 	}
 	const existingRoots = rootChecks.filter((r) => r.exists).map((r) => r.root);
 	const anyUnreadable = rootChecks.some((r) => r.unreadable);
 
 	if (existingRoots.length === 0) {
+		await reportRetainedGaps();
 		for (const gap of Object.values(args.sourceGaps)) {
 			await reportRolloutSourceGap(args.requested, gap);
 		}
 		return await reportMissingSessionsBase(
-			anyUnreadable || Object.keys(args.sourceGaps).length > 0
+			anyUnreadable ||
+				Object.keys(args.sourceGaps).length > 0 ||
+				Object.values(args.newFileCursors).some(
+					(cursor) => (cursor.jsonl_gaps?.length ?? 0) > 0,
+				)
 				? "unreadable"
 				: null,
 		);
@@ -1791,7 +1864,11 @@ export async function scanRollouts(
 
 	for (const root of existingRoots) {
 		try {
-			for await (const entry of walkRollouts(root.baseDir, args.scope)) {
+			for await (const entry of walkRollouts(
+				root.baseDir,
+				args.scope,
+				onDirectoryError,
+			)) {
 				if (!isPathWithinSourceRoots(entry.path, args.scope)) {
 					continue;
 				}
@@ -1826,6 +1903,7 @@ export async function scanRollouts(
 						);
 						messagesExamined += counts.messages;
 						functionCallsExamined += counts.functionCalls;
+						reportedCursorKeys.add(cursorKeyForEntry(entry));
 					}
 				} catch (error) {
 					if (!(error instanceof RolloutSourceError)) throw error;
@@ -1845,12 +1923,17 @@ export async function scanRollouts(
 			scanOutcome = "unreadable";
 			// Directory failures are reprobed each run; only file retry gaps belong
 			// in the cursor ledger, since files have individual success boundaries.
-			await reportRolloutSourceGap(
-				args.requested,
-				buildRolloutSourceGap(error),
-			);
+			await onDirectoryError(error);
 		}
 	}
+	await reportRetainedGaps();
+	if (directoryFailed) scanOutcome = "unreadable";
+	else if (
+		Object.values(args.newFileCursors).some(
+			(cursor) => (cursor.jsonl_gaps?.length ?? 0) > 0,
+		)
+	)
+		scanOutcome = "parse_error";
 
 	for (const gap of Object.values(args.sourceGaps)) {
 		scanOutcome = "unreadable";
@@ -2141,7 +2224,12 @@ export function readPriorFileCursors(
 	for (const [path, value] of Object.entries(raw)) {
 		const cursor = coerceRolloutFileCursor(value);
 		if (cursor) {
-			out[path] = cursor;
+			// Earlier collectors used absolute paths. Normalize those aliases to
+			// the current UUID key so a successful reread replaces their old gaps.
+			const key = isAbsolute(path)
+				? cursorKeyForEntry({ path, file: basename(path) })
+				: path;
+			if (path === key || !out[key]) out[key] = cursor;
 		}
 	}
 	return out;
@@ -2709,10 +2797,9 @@ async function main(): Promise<void> {
 	// function_call_count even when state_5 provides the canonical metadata).
 	const rolloutAggregates = new Map<string, RolloutAggregate>();
 	const newMtimes: Record<string, number> = { ...fileMtimes };
-	// Seed the next rich-cursor map from the prior one; processRolloutEntry
-	// overwrites a file's entry when it parses/tails it and otherwise carries
-	// the prior cursor forward unchanged (so unscanned/deferred files keep
-	// their offset). Deleted files naturally drop out — they are never walked.
+	// The scan retains declared gaps and boundaries hidden by unreadable
+	// directories, then replaces successfully read entries. Ungapped deleted
+	// files drop out; disappearance alone cannot resolve a saved line gap.
 	const newFileCursors: Record<string, RolloutFileCursor> = {};
 	const sourceGaps: Record<string, RolloutSourceGap> =
 		readPriorSourceGaps(startMsg);

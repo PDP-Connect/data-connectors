@@ -1840,3 +1840,189 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		);
 	});
 }
+
+for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
+	test(`nested directory denial preserves saved line gaps and healthy siblings (${transcriptStreams.join(" + ")})`, {
+		skip: process.getuid?.() === 0,
+	}, async (t) => {
+		const source = await makeSource();
+		const subagents = join(
+			source.projects,
+			"-tmp-incremental",
+			SESSION_ID,
+			"subagents",
+		);
+		const deniedDir = join(subagents, "a-denied");
+		const siblingDir = join(subagents, "z-healthy");
+		await mkdir(deniedDir);
+		await mkdir(siblingDir);
+		const hiddenPath = join(deniedDir, "worker.jsonl");
+		await rename(source.subagent, hiddenPath);
+		t.after(async () => {
+			await chmod(source.projects, 0o700);
+			await chmod(deniedDir, 0o700).catch(() => {});
+			await rm(source.claudeHome, { recursive: true, force: true });
+		});
+		const prefix = await readFile(hiddenPath, "utf8");
+		const suffix = `${transcriptLine("sub-new", "2026-07-21T00:02:00Z")}\n`;
+		await writeFile(hiddenPath, `${prefix}not-json\n${suffix}`);
+		const siblingPath = join(siblingDir, "worker.jsonl");
+		const sibling = `${transcriptLine("sub-later", "2026-07-21T00:03:00Z")}\n`;
+		await writeFile(siblingPath, sibling);
+		const healthyProject = join(source.projects, "-tmp-z-healthy");
+		await mkdir(healthyProject);
+		const healthySession = "22222222-2222-4222-8222-222222222222";
+		const healthyPath = join(healthyProject, `${healthySession}.jsonl`);
+		const healthy = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
+		await writeFile(healthyPath, healthy);
+		const streams = [...transcriptStreams, "coverage_diagnostics"];
+		const initial = await run({ ...source, streams });
+		const lineGap = {
+			path: hiddenPath,
+			reason: "malformed_jsonl_line",
+			line_number: 2,
+			byte_offset: Buffer.byteLength(prefix),
+		};
+		const cursorFor = (
+			result: Awaited<ReturnType<typeof run>>,
+			stream: string,
+		) =>
+			(result.states[stream] as { file_cursors: Record<string, unknown> })
+				.file_cursors[hiddenPath];
+		const messageIds = (result: Awaited<ReturnType<typeof run>>) =>
+			result.records
+				.filter((record) => record.stream === "messages")
+				.map((record) => record.data.id);
+		const gapsFor = (result: Awaited<ReturnType<typeof run>>, stream: string) =>
+			result.messages.filter(
+				(
+					message,
+				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+		const assertLineGap = (result: Awaited<ReturnType<typeof run>>) => {
+			for (const stream of transcriptStreams) {
+				const gaps = gapsFor(result, stream).filter(
+					(gap) => gap.reason === "malformed_jsonl_line",
+				);
+				assert.equal(gaps.length, 1);
+				assert.deepEqual(gaps[0]?.diagnostics, lineGap);
+			}
+			assert.ok(
+				result.records.some(
+					(record) =>
+						record.stream === "coverage_diagnostics" &&
+						record.data.stream === "messages" &&
+						record.data.status === "unaccounted",
+				),
+			);
+		};
+		assertLineGap(initial);
+		const healthyAppend = "00000000-0000-4000-8000-000000000008";
+		const siblingAppend = "00000000-0000-4000-8000-000000000009";
+		await writeFile(
+			siblingPath,
+			`${sibling + transcriptLine(siblingAppend, "2026-07-21T00:04:00Z")}\n`,
+		);
+		await writeFile(
+			healthyPath,
+			`${healthy + transcriptLine(healthyAppend, "2026-07-21T00:04:00Z", { sessionId: healthySession })}\n`,
+		);
+		await chmod(deniedDir, 0o000);
+		const denied = await run({ ...source, streams, state: initial.states });
+		assert.deepEqual(messageIds(denied), [siblingAppend, healthyAppend]);
+		assertLineGap(denied);
+		for (const stream of transcriptStreams) {
+			assert.deepEqual(cursorFor(denied, stream), cursorFor(initial, stream));
+			const directoryGaps = gapsFor(denied, stream).filter(
+				(gap) => gap.reason === "source_directory_read_error",
+			);
+			assert.equal(directoryGaps.length, 1);
+			assert.deepEqual(directoryGaps[0]?.diagnostics, {
+				path: deniedDir,
+				reason: "source_directory_read_error",
+				error_code: "EACCES",
+			});
+		}
+		const repeatedDenied = await run({
+			...source,
+			streams,
+			state: denied.states,
+		});
+		assert.deepEqual(messageIds(repeatedDenied), []);
+		assertLineGap(repeatedDenied);
+		await chmod(deniedDir, 0o700);
+		const restored = await run({
+			...source,
+			streams,
+			state: repeatedDenied.states,
+		});
+		assert.deepEqual(messageIds(restored), []);
+		assertLineGap(restored);
+		assert.ok(
+			!restored.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_directory_read_error",
+			),
+		);
+		const unchanged = await run({ ...source, streams, state: restored.states });
+		assert.deepEqual(messageIds(unchanged), []);
+		assertLineGap(unchanged);
+		const absentDir = join(source.claudeHome, "temporarily-absent");
+		await rename(deniedDir, absentDir);
+		const absent = await run({ ...source, streams, state: unchanged.states });
+		assert.deepEqual(messageIds(absent), []);
+		assertLineGap(absent);
+		for (const stream of transcriptStreams)
+			assert.deepEqual(cursorFor(absent, stream), cursorFor(initial, stream));
+		await rename(absentDir, deniedDir);
+		await chmod(source.projects, 0o000);
+		const rootDenied = await run({ ...source, streams, state: absent.states });
+		assert.deepEqual(messageIds(rootDenied), []);
+		assertLineGap(rootDenied);
+		assert.ok(
+			rootDenied.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_directory_read_error" &&
+					(message.diagnostics as Record<string, unknown> | undefined)?.path ===
+						source.projects,
+			),
+		);
+		await chmod(source.projects, 0o700);
+		await chmod(hiddenPath, 0o000);
+		const fileDenied = await run({ ...source, streams, state: absent.states });
+		assertLineGap(fileDenied);
+		assert.ok(
+			fileDenied.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_read_error",
+			),
+		);
+		await chmod(hiddenPath, 0o600);
+		await writeFile(
+			hiddenPath,
+			`${prefix}${transcriptLine("partial", "2026-07-21T00:01:30Z")}\n${suffix}`,
+		);
+		const repaired = await run({
+			...source,
+			streams,
+			state: fileDenied.states,
+		});
+		assert.deepEqual(messageIds(repaired), [
+			IDS["sub-1"],
+			IDS.partial,
+			IDS["sub-new"],
+		]);
+		assert.ok(
+			!repaired.messages.some((message) => message.type === "SKIP_RESULT"),
+		);
+		const settled = await run({ ...source, streams, state: repaired.states });
+		assert.deepEqual(messageIds(settled), []);
+		assert.ok(
+			!settled.messages.some((message) => message.type === "SKIP_RESULT"),
+		);
+	});
+}

@@ -581,13 +581,21 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 async function readFilesRecursively(
 	rootDir: string,
 	predicate: (ent: Dirent) => boolean,
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<Array<{ fullPath: string; relPath: string }>> {
 	const out: Array<{ fullPath: string; relPath: string }> = [];
 	const walk = async (dir: string, prefix: string): Promise<void> => {
 		// Fail closed on an unreadable directory — see `readLocalDirOrFailClosed`.
 		// A missing directory (ENOENT) is honestly empty; an unreadable one is a
 		// source-boundary failure and must never be reported as "no files".
-		const items = await readLocalDirOrFailClosed(dir);
+		let items: Dirent[] | null;
+		try {
+			items = await readLocalDirOrFailClosed(dir);
+		} catch (error) {
+			if (!onDirectoryError) throw error;
+			await onDirectoryError(dir, error);
+			return;
+		}
 		if (items === null) {
 			return;
 		}
@@ -1094,11 +1102,15 @@ async function processTopLevelJsonl(
 	}
 }
 
-async function readSubagentFiles(subagentsDir: string): Promise<string[]> {
+async function readSubagentFiles(
+	subagentsDir: string,
+	onDirectoryError?: DirectoryReadFailure,
+): Promise<string[]> {
 	const files = await readFilesRecursively(
 		subagentsDir,
 		(ent) =>
 			(ent.isFile() || ent.isSymbolicLink()) && ent.name.endsWith(".jsonl"),
+		onDirectoryError,
 	);
 	return files.map((file) => file.relPath);
 }
@@ -1115,7 +1127,10 @@ async function processSessionDir(
 	if (!args.skipJsonl) {
 		// subagents/*.jsonl → parse as messages belonging to this session.
 		const subagentsDir = join(sessionDir, "subagents");
-		const subFiles = await readSubagentFiles(subagentsDir);
+		const subFiles = await readSubagentFiles(
+			subagentsDir,
+			args.onDirectoryError,
+		);
 		for (const f of subFiles) {
 			await processJsonlFile({
 				args,
@@ -1182,13 +1197,18 @@ async function scanProjectDir(
 async function listProjectDirs(
 	baseDir: string,
 	emit: CollectContext["emit"],
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<string[] | null> {
 	let projectDirs: string[];
 	try {
 		projectDirs = (await readdir(baseDir)).filter(
 			(name) => !name.startsWith("."),
 		);
-	} catch {
+	} catch (error) {
+		if (onDirectoryError) {
+			await onDirectoryError(baseDir, error);
+			return [];
+		}
 		await emit({
 			type: "SKIP_RESULT",
 			stream: "sessions",
@@ -1206,7 +1226,11 @@ async function listProjectDirs(
 export async function scanProjectDirs(
 	args: ScanProjectDirsArgs,
 ): Promise<void> {
-	const projectDirs = await listProjectDirs(args.baseDir, args.emit);
+	const projectDirs = await listProjectDirs(
+		args.baseDir,
+		args.emit,
+		args.onDirectoryError,
+	);
 	if (projectDirs === null) {
 		return;
 	}
@@ -1593,12 +1617,21 @@ export async function discoverClaudeJsonlSources(
 	scope?: EnumerationScope | null,
 	onDirectoryError?: DirectoryReadFailure,
 ): Promise<ClaudeJsonlSource[] | null> {
-	const projectDirs = await listProjectDirs(baseDir, emit);
-	if (projectDirs === null) {
-		return null;
-	}
-	const sources: ClaudeJsonlSource[] = [];
 	let directoryFailed = false;
+	const reportNestedDirectoryError: DirectoryReadFailure | undefined =
+		onDirectoryError
+			? async (path, error) => {
+					directoryFailed = true;
+					await onDirectoryError(path, error);
+				}
+			: undefined;
+	const projectDirs = await listProjectDirs(
+		baseDir,
+		emit,
+		reportNestedDirectoryError,
+	);
+	if (projectDirs === null) return null;
+	const sources: ClaudeJsonlSource[] = [];
 	for (const projectDir of projectDirs) {
 		if (!projectDirMatchesSourceRoots(projectDir, scope)) {
 			continue;
@@ -1627,7 +1660,10 @@ export async function discoverClaudeJsonlSources(
 			)
 			.sort((a, b) => a.name.localeCompare(b.name))) {
 			const subagentsDir = join(projectPath, entry.name, "subagents");
-			for (const relPath of await readSubagentFiles(subagentsDir)) {
+			for (const relPath of await readSubagentFiles(
+				subagentsDir,
+				reportNestedDirectoryError,
+			)) {
 				sources.push({
 					forcedSessionId: entry.name,
 					path: join(subagentsDir, relPath),
@@ -2319,7 +2355,7 @@ if (isMainModule(import.meta.url)) {
 						stream,
 						reason: gap.reason,
 						message:
-							"Claude Code could not enumerate a project directory; known file cursors are retained for retry",
+							"Claude Code could not enumerate a source directory; known file cursors are retained for retry",
 						diagnostics: gap,
 					});
 					reportedDirectoryStreams.add(key);
@@ -2385,8 +2421,33 @@ if (isMainModule(import.meta.url)) {
 					}`,
 				});
 			}
-			await assertRequestedClaudeSources({ baseDir, claudeHome, requested });
 			const typedState = state as ClaudeCodeState;
+			try {
+				await assertRequestedClaudeSources({ baseDir, claudeHome, requested });
+			} catch (error) {
+				// A failed source preflight cannot prove older parse gaps repaired.
+				await reportSourceGaps(
+					["sessions"],
+					readSourceGaps(typedState.sessions?.source_gaps),
+				);
+				await reportSourceGaps(
+					["messages", "attachments"],
+					readSourceGaps(typedState.messages?.source_gaps),
+				);
+				if (requested.has("sessions")) {
+					for (const cursor of Object.values(
+						readSessionFileCursors(typedState.sessions?.file_cursors).cursors,
+					))
+						await reportGaps(cursor.jsonl_gaps);
+				}
+				if (requested.has("messages") || requested.has("attachments")) {
+					for (const cursor of Object.values(
+						readChildFileCursors(typedState.messages?.file_cursors),
+					))
+						await reportGaps(cursor.jsonl_gaps);
+				}
+				throw error;
+			}
 			// STATE is stream-keyed per Collection Profile. JSONL child emits and
 			// session aggregation use separate cursors so sessions can backfill
 			// without re-emitting unchanged child records. Fall back to top-level
@@ -2509,12 +2570,19 @@ if (isMainModule(import.meta.url)) {
 				if (sources === null) {
 					return;
 				}
-				const sourcePaths = new Set(sources.map((source) => source.path));
+				const enumeratedPaths = new Set(sources.map((source) => source.path));
+				const sourcePaths = new Set(enumeratedPaths);
 				const unavailableSessionCursors: Record<
 					string,
 					ClaudeSessionFileCursorV1
 				> = {};
 				retainUnavailable(priorSessionCursors, unavailableSessionCursors);
+				// Absence cannot prove a saved parse gap repaired. Keep the original
+				// boundary and evidence until this file can actually be read again.
+				for (const [path, cursor] of Object.entries(priorSessionCursors)) {
+					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+						unavailableSessionCursors[path] = cursor;
+				}
 				for (const path of Object.keys(unavailableSessionCursors))
 					sourcePaths.add(path);
 				const telemetry = makeLocalJsonlTelemetry();
@@ -2531,6 +2599,10 @@ if (isMainModule(import.meta.url)) {
 				};
 				const nextChildCursors: Record<string, ClaudeChildFileCursorV1> = {};
 				retainUnavailable(priorChildCursors, nextChildCursors);
+				for (const [path, cursor] of Object.entries(priorChildCursors)) {
+					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+						nextChildCursors[path] = cursor;
+				}
 				let stagedSessionCursor:
 					| {
 							file_cursors: Record<string, ClaudeSessionFileCursorV1>;
@@ -2657,6 +2729,8 @@ if (isMainModule(import.meta.url)) {
 							}
 						}
 					}
+					for (const cursor of Object.values(nextSessionCursors))
+						await reportGaps(cursor.jsonl_gaps);
 					await reportSourceGaps(["sessions"], sessionSourceGaps);
 					await emitChangedSessions({
 						emitRecord,
@@ -2817,6 +2891,10 @@ if (isMainModule(import.meta.url)) {
 					}
 				}
 
+				if (requested.has("messages") || requested.has("attachments")) {
+					for (const cursor of Object.values(nextChildCursors))
+						await reportGaps(cursor.jsonl_gaps);
+				}
 				await reportSourceGaps(["messages", "attachments"], childSourceGaps);
 
 				if (!requested.has("sessions")) {
