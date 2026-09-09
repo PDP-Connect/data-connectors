@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`82a45176ebe654eee595f06d5fa97de0648e86ba` (see `.github/cross-repo-pins.json`). This package
+`82fd91f2e5a23ff750c85dd50d3837dd884786ea` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,17 +22,13 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@82a45176ebe654eee595f06d5fa97de0648e86ba`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Resynced 2026-09-02 (second
-  time same day): the prior `63a3792` pin was already one commit behind an unrelated dependabot
-  npm bump (#37) that touches both packages' `package.json` (devDependency/dependency version
-  bumps only — `zod ^4.4.3`→`^4.5.2`, `@biomejs/biome`, `@types/node`, `ultracite`), and
-  data-connect#41 (the connector-source-drift fix this pin move otherwise carries) was based on
-  top of that bump. Verified locally: a fresh repack from `63a3792` still matched the
-  then-committed tarballs, but a fresh repack from `82a45176e` does not match them (only
-  `package.json`'s bytes differ — the `dist/` files are unaffected), so this re-vendor was
-  required to keep the tarball-digests drift check green once the pin moved for the connector
-  fix. Supersedes the prior `63a3792` pin (2026-09-02, same day).
+  `PDP-Connect/data-connect@82fd91f2e5a23ff750c85dd50d3837dd884786ea`, workspace packages
+  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-09
+  for PDP-Connect/data-connect#63: dependency updates change the package manifests;
+  every compiled file remains byte-identical to the previous archives. Built with
+  Node 22.23.1, npm 10.9.9, and TypeScript 7.0.2. The cross-repository pin tracks
+  the dependency-update branch during the coordinated merge; the separate 1.0.0
+  release pin remains unchanged.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
@@ -84,8 +80,8 @@ rejected outright rather than treated as a partial win.
   `package-lock.json` once installed):
 
   ```
-  b26854640fb4acf93f4f394a282a2c8d947e634c76d28b1488cba99a77229072  pdpp-collector-runtime-0.0.1.tgz
-  2a0aab13f97ea1ed6ec8173edd22470f78469a898ee66d980ec87d4b3372dbcf  pdpp-connector-protocol-0.0.1.tgz
+  e274fb459cce011f3c290ab92a0d83252fa91af671d33e37e3809edea06fafbf  pdpp-collector-runtime-0.0.1.tgz
+  2d683a30179ab9d557fe52f9a7f565232aaa82a2ae69a2e7f09b7ee92fd25da1  pdpp-connector-protocol-0.0.1.tgz
   8271e75949f85e57de8ca4ed557e73b6706e3680c9ad7a986bd290d94797e8d6  pdpp-reference-contract-0.0.1.tgz
   ```
 

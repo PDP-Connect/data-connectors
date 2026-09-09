@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "a72cb53a8b3164f9a3e06756aa693a6ac1bd0236",
-      "branch": "main",
-      "note": "Head of PDP-Connect/data-connect main as of 2026-09-02 (merge of data-connect#49, 'fix(polyfill-connectors): sync codex from canonical (sessions-archive/ scan)' \u2014 re-vendors codex/{index.ts,parsers.ts,ARCHIVAL-CONTRACT.md} and their test files, which had drifted from this repo's canonical copies after data-connectors#63 landed the codex sessions-archive/ scan there). Supersedes the prior 82a45176 pin (2026-09-02, this same day): pin-freshness \u2014 data-connect had gone red on packages/polyfill-connectors/connectors/codex (this repo's own connector-source drift check agreed \u2014 see check-connector-source-drift.mjs's job, which failed on data-connectors#63 for exactly this reason). No re-vendor of packages/polyfill-connectors/vendor/pdpp-collector-runtime-0.0.1.tgz or vendor/pdpp-connector-protocol-0.0.1.tgz was needed: `git diff 82a45176..a72cb53a -- packages/collector-runtime packages/connector-protocol` is empty (data-connect#49 touched only packages/polyfill-connectors), confirmed via a fresh repack from this SHA that both tarballs still match the committed vendor/SHA256SUMS digests byte-for-byte. This is a SHA-reference-only update, same as the data-connect-1-0-0 pin's own precedent for an unrelated-diff move. Source of truth for drift jobs (a) collector-definitions snapshot, (b) vendored connector sources, and the 0.0.1 half of (c) tarball digests \u2014 re-ran all three locally against this SHA before moving the pin: all three report OK."
+      "sha": "82fd91f2e5a23ff750c85dd50d3837dd884786ea",
+      "branch": "dependabot/npm_and_yarn/npm-c1d4b2311d",
+      "note": "Coordinated with PDP-Connect/data-connect#63. The npm dependency updates change both runtime/protocol package manifests, so the 0.0.1 archives and their lockfile integrity records are refreshed from this SHA. Compiled files and connector sources are unchanged. Track the PR branch until it merges; the separate 1.0.0 release pin remains unchanged."
     },
     "data-connect-1-0-0": {
       "owner": "PDP-Connect",

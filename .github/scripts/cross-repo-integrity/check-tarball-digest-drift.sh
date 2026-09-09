@@ -55,11 +55,11 @@ mkdir -p "$FRESH_CACHE"
 echo "== Installing typescript into an isolated scratch dir (data-connect's own root devDependency) =="
 TSC_SHIM="$WORKDIR/tsc-shim"
 mkdir -p "$TSC_SHIM"
-TSC_VERSION="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_DIR")"
+TSC_VERSION="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies["@typescript/native"] ?? require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_DIR")"
 (
   cd "$TSC_SHIM"
   npm init -y > /dev/null
-  npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@$TSC_VERSION"
+  npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@${TSC_VERSION#npm:typescript@}"
 )
 if [[ ! -x "$TSC_SHIM/node_modules/.bin/tsc" ]]; then
   echo "FAIL: typescript shim install did not produce an executable tsc at $TSC_SHIM/node_modules/.bin/tsc" >&2
@@ -114,17 +114,18 @@ echo "== Restoring package.json (undoing the prepare neutralization) =="
 REPACK_OUT="$WORKDIR/repack-out"
 mkdir -p "$REPACK_OUT"
 
-# Copy the shimmed typescript straight into each package's OWN node_modules instead of
+# Link the shimmed compiler into each package's OWN node_modules instead of
 # relying on PATH: npx's local-node_modules/.bin lookup is unconditional (checked first,
 # every time), whereas PATH-based resolution proved unreliable in this exact job on the
 # hosted GitHub Actions runner even though every element of it (the shim itself, the
 # PATH export, the inline PATH= prefix on `npm run build`) reproduced correctly across
 # multiple fresh local clones under the identical npm 10.9.8 — never narrowed down beyond
 # "works locally, not on the runner". Not committed anywhere; each package's node_modules
-# lives only in this ephemeral $WORKDIR-adjacent checkout.
+# lives only in this ephemeral $WORKDIR-adjacent checkout. The link preserves native
+# TypeScript's resolution of its platform-specific optional dependency in the shim.
 for pkg in connector-protocol collector-runtime; do
   mkdir -p "$DATA_CONNECT_DIR/packages/$pkg/node_modules/.bin"
-  cp -r "$TSC_SHIM/node_modules/typescript" "$DATA_CONNECT_DIR/packages/$pkg/node_modules/typescript"
+  ln -sfn "$TSC_SHIM/node_modules/typescript" "$DATA_CONNECT_DIR/packages/$pkg/node_modules/typescript"
   ln -sf ../typescript/bin/tsc "$DATA_CONNECT_DIR/packages/$pkg/node_modules/.bin/tsc"
 done
 
@@ -161,11 +162,11 @@ if [[ -n "$DATA_CONNECT_1_0_0_DIR" ]]; then
     echo "== Installing typescript into an isolated scratch dir (data-connect-1-0-0's own root devDependency) =="
     TSC_SHIM_1_0_0="$WORKDIR/tsc-shim-1-0-0"
     mkdir -p "$TSC_SHIM_1_0_0"
-    TSC_VERSION_1_0_0="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_1_0_0_DIR")"
+    TSC_VERSION_1_0_0="$(node -p 'require(require("path").resolve(process.argv[1], "package.json")).devDependencies["@typescript/native"] ?? require(require("path").resolve(process.argv[1], "package.json")).devDependencies.typescript' "$DATA_CONNECT_1_0_0_DIR")"
     (
       cd "$TSC_SHIM_1_0_0"
       npm init -y > /dev/null
-      npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@$TSC_VERSION_1_0_0"
+      npm install --cache "$FRESH_CACHE" --no-audit --no-fund --no-save "typescript@${TSC_VERSION_1_0_0#npm:typescript@}"
     )
 
     echo "== Temporarily neutralizing prepare scripts (npm 10.x --ignore-scripts gap for -w installs) =="
@@ -200,7 +201,7 @@ if [[ -n "$DATA_CONNECT_1_0_0_DIR" ]]; then
 
     for pkg in connector-protocol collector-runtime; do
       mkdir -p "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/.bin"
-      cp -r "$TSC_SHIM_1_0_0/node_modules/typescript" "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/typescript"
+      ln -sfn "$TSC_SHIM_1_0_0/node_modules/typescript" "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/typescript"
       ln -sf ../typescript/bin/tsc "$DATA_CONNECT_1_0_0_DIR/packages/$pkg/node_modules/.bin/tsc"
     done
 
