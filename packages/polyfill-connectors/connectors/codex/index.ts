@@ -127,6 +127,13 @@ import type {
 	ThreadRow,
 } from "./types.ts";
 
+// Literal values keep every emitted reason visible to the completeness scan.
+const JSONL_GAP_SKIP_REASON: Record<RolloutJsonlGap["reason"], string> = {
+	malformed_jsonl_line: "malformed_jsonl_line",
+	non_object_jsonl_record: "non_object_jsonl_record",
+	truncated_jsonl_tail: "truncated_jsonl_tail",
+};
+
 const DEFAULT_ACTIVE_ROLLOUT_QUIET_MS = 120_000;
 const ACTIVE_ROLLOUT_QUIET_MS_ENV = "PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS";
 
@@ -1973,7 +1980,7 @@ async function reportRolloutSourceGap(
 			emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: gap.reason,
+				reason: "rollout_source_read_error",
 				message:
 					"Codex could not read a rollout source; it will retry while other files continue",
 				diagnostics: { ...gap },
@@ -1991,7 +1998,7 @@ async function reportMalformedRolloutGap(
 			emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: gap.reason,
+				reason: JSONL_GAP_SKIP_REASON[gap.reason],
 				message:
 					gap.reason !== "truncated_jsonl_tail"
 						? "Codex skipped an invalid JSONL record and continued scanning"

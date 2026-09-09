@@ -98,6 +98,13 @@ import type {
 
 export type { JsonlObservations } from "./types.ts";
 
+// Literal values keep every emitted reason visible to the completeness scan.
+const JSONL_GAP_SKIP_REASON: Record<ClaudeJsonlGap["reason"], string> = {
+	malformed_jsonl_line: "malformed_jsonl_line",
+	non_object_jsonl_record: "non_object_jsonl_record",
+	truncated_jsonl_tail: "truncated_jsonl_tail",
+};
+
 const nowIso = (): string => new Date().toISOString();
 const MD_FILE_RE = /\.md$/i;
 
@@ -2296,7 +2303,7 @@ if (isMainModule(import.meta.url)) {
 							await emit({
 								type: "SKIP_RESULT",
 								stream,
-								reason: gap.reason,
+								reason: JSONL_GAP_SKIP_REASON[gap.reason],
 								message:
 									gap.reason === "truncated_jsonl_tail"
 										? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
@@ -2318,7 +2325,7 @@ if (isMainModule(import.meta.url)) {
 							await emit({
 								type: "SKIP_RESULT",
 								stream,
-								reason: gap.reason,
+								reason: "source_read_error",
 								message:
 									"Claude Code could not read a transcript; its prior cursor is retained for retry",
 								diagnostics: { ...gap },
@@ -2353,7 +2360,7 @@ if (isMainModule(import.meta.url)) {
 					await emit({
 						type: "SKIP_RESULT",
 						stream,
-						reason: gap.reason,
+						reason: "source_directory_read_error",
 						message:
 							"Claude Code could not enumerate a source directory; known file cursors are retained for retry",
 						diagnostics: gap,

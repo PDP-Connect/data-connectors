@@ -848,8 +848,13 @@
 	],
 	"reason_display_messages": {
 		"claude_dir_not_found": "We couldn't find your Claude Code data folder",
+		"malformed_jsonl_line": "A line in this Claude Code session log contains invalid JSON and was skipped",
+		"non_object_jsonl_record": "A line in this Claude Code session log has an unexpected format and was skipped",
 		"scope_matched_no_sources": "None of your configured project folders matched any Claude Code projects",
-		"source_unreadable": "We couldn't read this folder, so we don't know what's in it"
+		"source_directory_read_error": "We couldn't read this Claude Code folder. It will be checked again on the next run",
+		"source_read_error": "This Claude Code session log could not be collected and will be retried on the next run",
+		"source_unreadable": "We couldn't read this folder, so we don't know what's in it",
+		"truncated_jsonl_tail": "The last line of this Claude Code session log is incomplete and will be checked again on the next run"
 	},
 	"options_schema": {
 		"type": "object",
