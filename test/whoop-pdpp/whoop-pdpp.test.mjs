@@ -20,8 +20,8 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "whoop-pdpp");
-const artifact = join(root, "artifacts", "whoop-pdpp", "whoop-pdpp-0.1.0.tgz");
-const expectedCommit = "4f50aa21c6abd9f796b51b82e408224ee75a0048";
+const artifact = join(root, "artifacts", "whoop-pdpp", "whoop-pdpp-0.1.1.tgz");
+const expectedCommit = "4c785e1f5816b09b113f011ab46066f8057d9959";
 const pdppSourceRoot = process.env.PDPP_WHOOP_SOURCE_ROOT;
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
@@ -52,6 +52,11 @@ test("whoop-pdpp preserves the browser-session profile and six-stream contract",
   assert.deepEqual(provenance.external_runtime_packages, [
     { name: "patchright", version: "^1.61.1" },
   ]);
+  assert.deepEqual(provenance.source_inventory.bundled_dependencies.map((dependency) => ({
+    name: dependency.name,
+    version: dependency.version,
+    files: dependency.files.length,
+  })), [{ name: "zod", version: "4.5.4", files: 94 }]);
   assert.deepEqual(provenance.outputs.undeclared_external_imports, []);
   assert.equal(entry.manifestSha256, sha256(join(connectorRoot, "collection-profile.json")));
   assert.equal(entry.entrypointSha256, sha256Buffer(entrypoint));
@@ -66,7 +71,7 @@ test("whoop-pdpp artifact installs and detects provenance tampering", async () =
   const fetched = await fetchResolvedArtifact(source, entry);
   assert.equal(fetched.entrypointPath, "dist/collection-profile.mjs");
   const lock = await generateLock({
-    dependencies: { connectors: { "whoop-pdpp": "0.1.0" } },
+    dependencies: { connectors: { "whoop-pdpp": "0.1.1" } },
     source,
     generatedAt: "2026-08-13T00:00:00.000Z",
   });

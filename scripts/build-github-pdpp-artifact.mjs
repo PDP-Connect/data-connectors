@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import * as esbuild from "esbuild";
 import { inventoryBundledDependencies } from "./pdpp-bundled-dependencies.mjs";
 
-const EXPECTED_COMMIT = "597cc012611df90d07edbed187ba3e3212dbf258";
+const EXPECTED_COMMIT = "6d2be0a2a1c052afcffc8ec035190e1dffc3c128";
 const UPSTREAM_REPOSITORY = "https://github.com/PDP-Connect/pdpp";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const connectorRoot = join(repoRoot, "connectors", "github-pdpp");

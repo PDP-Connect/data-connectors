@@ -17,8 +17,8 @@ const connectorRoot = join(root, "connectors", "github-pdpp");
 const secret = "github-pdpp-test-secret";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
-const artifact = join(root, "artifacts", "github-pdpp", "github-pdpp-0.5.0.tgz");
-const expectedCommit = "597cc012611df90d07edbed187ba3e3212dbf258";
+const artifact = join(root, "artifacts", "github-pdpp", "github-pdpp-0.5.1.tgz");
+const expectedCommit = "6d2be0a2a1c052afcffc8ec035190e1dffc3c128";
 const artifactEntrypoint = execFileSync("tar", ["-xOf", artifact, "./dist/collection-profile.mjs"]);
 const smokeDirectory = mkdtempSync(join(tmpdir(), "github-pdpp-smoke-"));
 const entrypoint = join(smokeDirectory, "collection-profile.mjs");
@@ -42,7 +42,7 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
   assert.equal(entry.provenanceSha256, sha256(join(connectorRoot, "provenance.json")));
   assert.equal(provenance.outputs["profile/collection-profile.json"], entry.manifestSha256);
   assert.equal(provenance.outputs["dist/collection-profile.mjs"], entry.entrypointSha256);
-  assert.equal(provenance.upstream.commit, "597cc012611df90d07edbed187ba3e3212dbf258");
+  assert.equal(provenance.upstream.commit, "6d2be0a2a1c052afcffc8ec035190e1dffc3c128");
   assert.equal(provenance.build.options.target, "node22");
   assert.deepEqual(provenance.outputs.unresolved_non_node_imports, []);
   assert.equal(provenance.source_inventory.upstream_connector.length, 5);
@@ -51,7 +51,7 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.5.2", files: 94 }]);
+  })), [{ name: "zod", version: "4.5.4", files: 94 }]);
   assert.match(readFileSync(entrypoint, "utf8"), /Browser runtime is unavailable/);
   assert.doesNotMatch(execFileSync("tar", ["-xOf", artifact, "./provenance.json"], { encoding: "utf8" }), new RegExp(secret));
   assert.deepEqual(execFileSync("tar", ["-xOf", artifact, "./provenance.json"]), readFileSync(join(connectorRoot, "provenance.json")));
@@ -155,7 +155,7 @@ test("PDPP artifact packaging leaves every legacy artifact and index entry byte-
       }
     }
   }
-  assert.deepEqual(currentIndex, beforeIndex);
+  assert.deepEqual(currentIndex.connectors, beforeIndex.connectors);
   const pdppArtifactPaths = new Set(
     Object.values(JSON.parse(readFileSync(join(root, "connector-index.json"), "utf8")).connectors)
       .flatMap((versions) => versions)
@@ -196,7 +196,7 @@ test("github-pdpp artifact fetches, verifies, and locks through installer-core w
   const fetched = await fetchResolvedArtifact(source, indexEntry);
   assert.equal(fetched.entrypointPath, "dist/collection-profile.mjs");
   assert.equal(fetched.scriptBuffer, undefined);
-  const lock = await generateLock({ dependencies: { connectors: { "github-pdpp": "0.5.0" } }, source, generatedAt: "2026-07-30T00:00:00.000Z" });
+  const lock = await generateLock({ dependencies: { connectors: { "github-pdpp": "0.5.1" } }, source, generatedAt: "2026-07-30T00:00:00.000Z" });
   assert.equal(lock.connectors[0].provenanceSha256, indexEntry.provenanceSha256);
   const installRoot = mkdtempSync(join(tmpdir(), "github-pdpp-install-"));
   test.after(() => rmSync(installRoot, { recursive: true, force: true }));

@@ -4,13 +4,13 @@
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",
-    "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
+    "commit": "4c785e1f5816b09b113f011ab46066f8057d9959"
   },
   "source_inventory": {
     "upstream_connector": [
       {
         "path": "packages/polyfill-connectors/manifests/whoop.json",
-        "sha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e"
+        "sha256": "sha256:dbad6fdc93578c57ff64da98d0783afccd5b0cf445cce62c67234302e2c5c999"
       },
       {
         "path": "packages/polyfill-connectors/connectors/whoop/index.ts",
@@ -94,9 +94,9 @@
     "bundled_dependencies": [
       {
         "name": "zod",
-        "version": "4.5.2",
+        "version": "4.5.4",
         "package_path": "node_modules/zod",
-        "package_json_sha256": "sha256:bf8409c9c2b90652cad4a02a2478ac618cc731318fc378ca4c3536ec502d8482",
+        "package_json_sha256": "sha256:5a1983857f982cc7d69336f32053ac7e38780de313d9e18ca3f7b9b7f2f94298",
         "files": [
           {
             "path": "index.js",
@@ -180,7 +180,7 @@
           },
           {
             "path": "v4/core/json-schema-processors.js",
-            "sha256": "sha256:e824a776cc7246e628692ef12c4383ae598af67dcaa63152ae16640bbe58fa5f"
+            "sha256": "sha256:de52da8e4c33d4c54b44c1515e702a3fac2663b4772d4a343b4891ac2d46af03"
           },
           {
             "path": "v4/core/json-schema.js",
@@ -188,7 +188,7 @@
           },
           {
             "path": "v4/core/memoizer.js",
-            "sha256": "sha256:211c0d9ed83cc953146a3b06fe649bb56efdee77f5a6e18f07411448c711af19"
+            "sha256": "sha256:c0f46352b24c7457bd5b89df4d3847aced732d6d74a11f2d44502b8c035a7821"
           },
           {
             "path": "v4/core/parse.js",
@@ -208,7 +208,7 @@
           },
           {
             "path": "v4/core/to-json-schema.js",
-            "sha256": "sha256:6c0e118503cd80d5a850cd6070dabdcb237c6f41fda8f9e3648df9618eb488db"
+            "sha256": "sha256:16cb6032d2810d664102af0dca07d50af7a6a808b5036e33415b38492fc00564"
           },
           {
             "path": "v4/core/util.js",
@@ -216,7 +216,7 @@
           },
           {
             "path": "v4/core/versions.js",
-            "sha256": "sha256:a5c2f406d590106e84e57986280585913106e22e0614d46b718d07a0b6c3295d"
+            "sha256": "sha256:0040e7f6554f6d3d1569388cde7dbd66c017ad1d3dfcfd731f9e810c429b4811"
           },
           {
             "path": "v4/core/visit.js",
@@ -475,13 +475,13 @@
             "sha256": "sha256:b9bbf30d36a4d6bbd32e1ada333baf45fff3ad5b0f13a2caf3ae580c041bb5d8"
           }
         ],
-        "closure_sha256": "sha256:be1f28bc7eb1713e9601267f3d85934b142dd614ba813de3144ffe2d7486da66"
+        "closure_sha256": "sha256:131768ac97d6feb809c91e452cc8672130ac1ec1e676dfdba64196edda36a6d9"
       }
     ],
     "maintained_local": [
       {
         "path": "artifact.json",
-        "sha256": "sha256:5544d853a62ea63727b162a58be66c850ee3f056ade0db788431a53b0c9eb1a1"
+        "sha256": "sha256:3938ce8edd0700dfd911d2f479872370d2b34e2a8a1d9200991e606fff8215c2"
       }
     ]
   },
@@ -512,8 +512,8 @@
     }
   ],
   "outputs": {
-    "profile/collection-profile.json": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
-    "dist/collection-profile.mjs": "sha256:76495c0ad7a580b322c5291d701f0b57b0674a7ada8226d4d4f51b8f5635594f",
+    "profile/collection-profile.json": "sha256:dbad6fdc93578c57ff64da98d0783afccd5b0cf445cce62c67234302e2c5c999",
+    "dist/collection-profile.mjs": "sha256:56454ba88d70f462dabce336a118dcd4aa948cb92df72d422e2ec2965db63545",
     "undeclared_external_imports": []
   }
 }

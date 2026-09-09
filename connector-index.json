@@ -4,183 +4,183 @@
   "generatedAt": "2026-08-13T00:00:00Z",
   "brandIcons": {
     "https://registry.pdpp.dev/connectors/amazon": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/amazon.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/amazon.svg",
       "backgroundColor": "#FF9900"
     },
     "https://registry.pdpp.dev/connectors/anthropic": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/anthropic.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/anthropic.svg",
       "backgroundColor": "#D97757"
     },
     "https://registry.pdpp.dev/connectors/apple_contacts": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/apple_contacts.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/apple_contacts.svg",
       "backgroundColor": "#8E8E93"
     },
     "https://registry.pdpp.dev/connectors/apple-health": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/apple_health.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/apple_health.svg",
       "backgroundColor": "#FF2D55"
     },
     "https://registry.pdpp.dev/connectors/apple-photos": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/apple_photos.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/apple_photos.svg",
       "backgroundColor": "#FA633E"
     },
     "https://registry.pdpp.dev/connectors/chase": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/chase.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/chase.svg",
       "backgroundColor": "#117ACA"
     },
     "https://registry.pdpp.dev/connectors/chatgpt": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/chatgpt.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/chatgpt.svg",
       "backgroundColor": "#10A37F"
     },
     "https://registry.pdpp.dev/connectors/claude-code": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/claude_code.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/claude_code.svg",
       "backgroundColor": "#D97757"
     },
     "https://registry.pdpp.dev/connectors/codex": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/codex.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/codex.svg",
       "backgroundColor": "#10A37F"
     },
     "https://registry.pdpp.dev/connectors/doordash": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/doordash.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/doordash.svg",
       "backgroundColor": "#FF3008"
     },
     "https://registry.pdpp.dev/connectors/github": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/github.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/github.svg",
       "backgroundColor": "#181717"
     },
     "https://registry.pdpp.dev/connectors/gmail": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/gmail.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/gmail.svg",
       "backgroundColor": "#EA4335"
     },
     "https://registry.pdpp.dev/connectors/google-calendar": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_calendar.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_calendar.svg",
       "backgroundColor": "#4285F4"
     },
     "https://registry.pdpp.dev/connectors/google-contacts": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_contacts.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_contacts.svg",
       "backgroundColor": "#34A853"
     },
     "google-maps": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_maps.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_maps.svg",
       "backgroundColor": "#4285F4"
     },
     "https://registry.pdpp.dev/connectors/google-maps-data-portability": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_maps_data_portability.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_maps_data_portability.svg",
       "backgroundColor": "#4285F4"
     },
     "https://registry.pdpp.dev/connectors/google-messages": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_messages.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_messages.svg",
       "backgroundColor": "#1A73E8"
     },
     "https://registry.pdpp.dev/connectors/google-takeout": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/google_takeout.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/google_takeout.svg",
       "backgroundColor": "#FBBC05"
     },
     "https://registry.pdpp.dev/connectors/groupme": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/groupme.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/groupme.svg",
       "backgroundColor": "#00AFF0"
     },
     "https://registry.pdpp.dev/connectors/heb": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/heb.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/heb.svg",
       "backgroundColor": "#E4002B"
     },
     "https://registry.pdpp.dev/connectors/ical": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/ical.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/ical.svg",
       "backgroundColor": "#FF3B30"
     },
     "https://registry.pdpp.dev/connectors/imessage": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/imessage.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/imessage.svg",
       "backgroundColor": "#30D158"
     },
     "https://registry.pdpp.dev/connectors/jellyfin": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/jellyfin.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/jellyfin.svg",
       "backgroundColor": "#00A4DC"
     },
     "https://registry.pdpp.dev/connectors/linkedin": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/linkedin.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/linkedin.svg",
       "backgroundColor": "#0A66C2"
     },
     "https://registry.pdpp.dev/connectors/loom": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/loom.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/loom.svg",
       "backgroundColor": "#625DF5"
     },
     "https://registry.pdpp.dev/connectors/meta": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/meta.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/meta.svg",
       "backgroundColor": "#E1306C"
     },
     "https://registry.pdpp.dev/connectors/netflix-export": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/netflix_export.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/netflix_export.svg",
       "backgroundColor": "#E50914"
     },
     "https://registry.pdpp.dev/connectors/notion": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/notion.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/notion.svg",
       "backgroundColor": "#000000"
     },
     "https://registry.pdpp.dev/connectors/oura": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/oura.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/oura.svg",
       "backgroundColor": "#111111"
     },
     "https://registry.pdpp.dev/connectors/pocket": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/pocket.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/pocket.svg",
       "backgroundColor": "#EF4056"
     },
     "https://registry.pdpp.dev/connectors/reddit": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/reddit.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/reddit.svg",
       "backgroundColor": "#FF4500"
     },
     "https://registry.pdpp.dev/connectors/shopify": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/shopify.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/shopify.svg",
       "backgroundColor": "#95BF47"
     },
     "https://registry.pdpp.dev/connectors/signal": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/signal.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/signal.svg",
       "backgroundColor": "#3A76F0"
     },
     "https://registry.pdpp.dev/connectors/slack": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/slack.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/slack.svg",
       "backgroundColor": "#4A154B"
     },
     "https://registry.pdpp.dev/connectors/spotify": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/spotify.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/spotify.svg",
       "backgroundColor": "#1ED760"
     },
     "https://registry.pdpp.dev/connectors/steam": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/steam.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/steam.svg",
       "backgroundColor": "#1B2838"
     },
     "https://registry.pdpp.dev/connectors/strava": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/strava.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/strava.svg",
       "backgroundColor": "#FC4C02"
     },
     "https://registry.pdpp.dev/connectors/twitter-archive": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/twitter_archive.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/twitter_archive.svg",
       "backgroundColor": "#000000"
     },
     "https://registry.pdpp.dev/connectors/uber": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/uber.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/uber.svg",
       "backgroundColor": "#000000"
     },
     "https://registry.pdpp.dev/connectors/usaa": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/usaa.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/usaa.svg",
       "backgroundColor": "#003057"
     },
     "https://registry.pdpp.dev/connectors/venmo": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/venmo.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/venmo.svg",
       "backgroundColor": "#3D95CE"
     },
     "https://registry.pdpp.dev/connectors/whatsapp": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/whatsapp.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/whatsapp.svg",
       "backgroundColor": "#25D366"
     },
     "https://registry.pdpp.dev/connectors/wholefoods": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/wholefoods.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/wholefoods.svg",
       "backgroundColor": "#00674B"
     },
     "https://registry.pdpp.dev/connectors/whoop": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/whoop.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/whoop.svg",
       "backgroundColor": "#151515"
     },
     "https://registry.pdpp.dev/connectors/ynab": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/97536ad49467fba512ad300e0051df04215181bd/packages/polyfill-connectors/manifests/icons/ynab.svg",
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cfb0e19414636cb8f1c99a5c36068ff4e055009b/packages/polyfill-connectors/manifests/icons/ynab.svg",
       "backgroundColor": "#3CB878"
     }
   },
@@ -246,7 +246,7 @@
       {
         "connectorId": "chatgpt-pdpp",
         "company": "openai",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "name": "ChatGPT (PDPP Collection Profile)",
         "status": "experimental",
         "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
@@ -254,19 +254,19 @@
         "manifestPath": "profile/collection-profile.json",
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:a4379e3c69e3ceffab3fca4dd55650934f8ba98b5b15db1f12dc676336020347",
-        "entrypointSha256": "sha256:a5e88ec438517be63a9e435cc9835f03ff0caae64db644802ab94ab57df9634b",
-        "provenanceSha256": "sha256:31686bbf334927a08edea6392578f2c723997e0bcd61a2b9c48f81f46481f0dc",
-        "artifactSha256": "sha256:9d2964ff2559c71852a0655ad57556515b197aca2b1af40114e672802e738cab",
-        "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.0.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.0.tgz",
-        "publishedAt": "2026-07-31T00:00:00Z",
-        "sourceTag": "pdpp-76effa378dc40b269095db6f85682d6a10920f68",
-        "sourceCommit": "76effa378dc40b269095db6f85682d6a10920f68",
+        "manifestSha256": "sha256:02c1625a6bc721fb93b97654bec8fe0da6481459f07db04792df0eac0a2a7fa0",
+        "entrypointSha256": "sha256:b4f0f6aed03d91ceef3e2867421fad2dde561f9170300becd2253270e33537be",
+        "provenanceSha256": "sha256:796ee2e9682bb5fb48b43a1871400a4748c3a408c8f12013f62642a92791975b",
+        "artifactSha256": "sha256:715ff5ad3d23afcb0de6bacacd1e9179640cfdfca21616b8746bf437eb1dc770",
+        "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.1.tgz",
+        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.1.tgz",
+        "publishedAt": "2026-09-09T00:00:00Z",
+        "sourceTag": "pdpp-2ad6eedce1deecf8e15dcceabe0464ba81d66039",
+        "sourceCommit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039",
         "releaseId": "unpublished",
         "upstream": {
           "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "76effa378dc40b269095db6f85682d6a10920f68"
+          "commit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039"
         },
         "scopes": [
           "conversations",
@@ -667,7 +667,7 @@
       {
         "connectorId": "github-pdpp",
         "company": "github",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "name": "GitHub (PDPP Collection Profile)",
         "status": "experimental",
         "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
@@ -675,19 +675,19 @@
         "manifestPath": "profile/collection-profile.json",
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
-        "entrypointSha256": "sha256:960b0eca244295398f909d05d840f36627b306eacb34f49ae313edbbaf727dbb",
-        "provenanceSha256": "sha256:05a442313a9e4a95a5e0412b5ffa6632fbc7c96ee9a1d1c5005144c1433ec6cd",
-        "artifactSha256": "sha256:c79e3b1dd15f0cee2a1eb3d058dcfd8872db13ac8629c0ce753ab19922b27464",
-        "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.0.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.0.tgz",
-        "publishedAt": "2026-07-30T00:00:00Z",
-        "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
-        "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
+        "manifestSha256": "sha256:15551cc59058729b6309a2bf851145eb58141ecb34c3ab6476746def8064950e",
+        "entrypointSha256": "sha256:eccb2e15feb322d2786bbb857d29a0ed4e24db96240886706b500cfd2c3e7438",
+        "provenanceSha256": "sha256:afe97246d8770aa34655c5c15b21662558c5a92ba3e9175bff3a60d6382f02bb",
+        "artifactSha256": "sha256:80ad449bc67780d67b7a9723ecff6f224ea8f5177d524fb1274673e28010ba65",
+        "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.1.tgz",
+        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.1.tgz",
+        "publishedAt": "2026-09-09T00:00:00Z",
+        "sourceTag": "pdpp-6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
+        "sourceCommit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
         "releaseId": "unpublished",
         "upstream": {
           "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "597cc012611df90d07edbed187ba3e3212dbf258"
+          "commit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128"
         },
         "scopes": [
           "user",
@@ -2000,7 +2000,7 @@
       {
         "connectorId": "whoop-pdpp",
         "company": "whoop",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "name": "WHOOP (PDPP Collection Profile)",
         "status": "experimental",
         "description": "Collects your WHOOP profile, body measurements, cycles, recoveries, sleeps, and workouts through the PDPP Collection Profile protocol.",
@@ -2008,19 +2008,19 @@
         "manifestPath": "profile/collection-profile.json",
         "entrypointPath": "dist/collection-profile.mjs",
         "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:60a6a75363b539c0da4a2e7878e058e3d271a24756a37e24f24a485dcdc25b5e",
-        "entrypointSha256": "sha256:76495c0ad7a580b322c5291d701f0b57b0674a7ada8226d4d4f51b8f5635594f",
-        "provenanceSha256": "sha256:6f6285abb990fa81254acf227a5de72b4553b63ee6717d0ae7236e05c78f62bd",
-        "artifactSha256": "sha256:3ac7420ae523a199c3b978953a06e7a7541a0a7674aed7eefcef8abc2198b032",
-        "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.0.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.0.tgz",
-        "publishedAt": "2026-08-13T00:00:00Z",
-        "sourceTag": "pdpp-4f50aa21c6abd9f796b51b82e408224ee75a0048",
-        "sourceCommit": "4f50aa21c6abd9f796b51b82e408224ee75a0048",
+        "manifestSha256": "sha256:dbad6fdc93578c57ff64da98d0783afccd5b0cf445cce62c67234302e2c5c999",
+        "entrypointSha256": "sha256:56454ba88d70f462dabce336a118dcd4aa948cb92df72d422e2ec2965db63545",
+        "provenanceSha256": "sha256:5e886e5822f852ce2c179b88c3a04f1d8cb63705c3c3d779cb54d9195cf06b67",
+        "artifactSha256": "sha256:7594fb2ce0f704b256453739c93bbdf5a7e3e469862b3a9dd24ea1e1b0459dba",
+        "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.1.tgz",
+        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.1.tgz",
+        "publishedAt": "2026-09-09T00:00:00Z",
+        "sourceTag": "pdpp-4c785e1f5816b09b113f011ab46066f8057d9959",
+        "sourceCommit": "4c785e1f5816b09b113f011ab46066f8057d9959",
         "releaseId": "unpublished",
         "upstream": {
           "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "4f50aa21c6abd9f796b51b82e408224ee75a0048"
+          "commit": "4c785e1f5816b09b113f011ab46066f8057d9959"
         },
         "scopes": [
           "profile",
