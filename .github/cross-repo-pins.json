@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "27fe8086d4ac355b71887635cc97d49c0933f307",
-      "branch": "chore/revendor-connectors-92",
-      "note": "Coordinated with data-connect#89: this PR head vendors the malformed-line isolation and Claude/Codex symlink disclosure sources from data-connectors#92, including the regenerated package index. Track the unmerged branch so source drift and pin freshness compare the paired trees. After data-connect#89 merges, replace this SHA with its actual merge commit and restore branch main. Runtime/protocol packages and collector definitions are unchanged; the separate 1.0.0 release pin remains unchanged. This pin also backs drift job (e) local-collector packaging manifest: it supplies packages/local-collector/tsconfig.build.json, the compile list that job compares against this repo's connector registry."
+      "sha": "1577a34e5c9f5934c83ed41e0b5aa735744eb119",
+      "branch": "main",
+      "note": "Merge commit of data-connect#89 into PDP-Connect/data-connect main (merged 2026-09-10T20:23:23Z), verified via `gh api repos/PDP-Connect/data-connect/branches/main` at pin time. Supersedes the temporary 27fe8086d pin, which tracked the unmerged branch chore/revendor-connectors-92 so the paired trees could be compared before #89 landed. A pin on an unmerged branch cannot stay valid: data-connect's consumer-drift-signal workflow requires the pinned commit to exist in its own checkout, and a pull-request merge ref cannot reach a commit that lives only on an unrelated branch. When #89 was rebased, 27fe8086d stopped being reachable from any ref, so every data-connect pull request touching a guarded path failed on the pin lookup regardless of what it changed. Pinning a merged main commit removes that failure mode. data-connect#89 vendors the malformed-line isolation and Claude/Codex symlink disclosure sources from data-connectors#92, so drift jobs (a) collector-definitions and (b) connector-sources both pass at this SHA. Runtime/protocol packages and collector definitions are unchanged; the separate 1.0.0 release pin remains unchanged. This pin also backs drift job (e) local-collector packaging manifest: it supplies packages/local-collector/tsconfig.build.json, the compile list that job compares against this repo's connector registry."
     },
     "data-connect-1-0-0": {
       "owner": "PDP-Connect",
