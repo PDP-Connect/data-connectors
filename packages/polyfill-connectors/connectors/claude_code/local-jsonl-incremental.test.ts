@@ -3,18 +3,20 @@
 
 import assert from "node:assert/strict";
 import {
+	chmod,
 	mkdir,
 	mkdtemp,
 	readFile,
 	rename,
 	rm,
+	symlink,
 	truncate,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
@@ -94,9 +96,6 @@ async function makeAttachmentSource(): Promise<{
 
 async function run(input: {
 	claudeHome: string;
-	/** Set when the run is expected to fail, e.g. a malformed complete JSONL
-	 * line. Every other caller keeps the default success assertion. */
-	expectFailure?: boolean;
 	projects: string;
 	state?: Record<string, unknown>;
 	streams?: string[];
@@ -119,11 +118,7 @@ async function run(input: {
 			type: "START",
 		},
 	});
-	if (input.expectFailure) {
-		assert.equal(result.code, 1, result.stderr);
-	} else {
-		assert.equal(result.code, 0, result.stderr);
-	}
+	assert.equal(result.code, 0, result.stderr);
 	const states = Object.fromEntries(
 		result.messages
 			.filter(
@@ -264,39 +259,81 @@ test("M8: an unterminated line is not committed until its LF arrives", async () 
 	]);
 });
 
-test("M9: malformed LF-terminated JSON reports a gap and does not advance its physical boundary", async () => {
+test("malformed middle line preserves later records and durable gap on rerun", async () => {
 	const source = await makeSource();
-	const first = await run(source);
+	const prefix = `${transcriptLine("top-1", "2026-07-21T00:00:00Z")}\n`;
 	await writeFile(
 		source.top,
-		`${await readFile(source.top, "utf8")}not-json\n`,
+		`${prefix}not-json\nnull\nfalse\n0\n""\n${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`,
 	);
-	const malformed = await run({
-		...source,
-		expectFailure: true,
-		state: { messages: first.states.messages, sessions: first.states.sessions },
+	const laterSession = "22222222-2222-4222-8222-222222222222";
+	await writeFile(
+		join(source.projects, "-tmp-incremental", `${laterSession}.jsonl`),
+		`${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: laterSession })}\n`,
+	);
+	const first = await run(source);
+	assert.deepEqual(
+		first.records
+			.filter((r) => r.stream === "sessions")
+			.map((r) => r.data.id)
+			.sort(),
+		[SESSION_ID, laterSession],
+	);
+	assert.deepEqual(
+		first.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id)
+			.sort(),
+		[IDS["top-1"], IDS["top-2"], IDS["top-3"], IDS["sub-1"]].sort(),
+	);
+	const gaps = first.messages.filter(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+	);
+	assert.equal(gaps.length, 5);
+	assert.ok(gaps[0]?.type === "SKIP_RESULT");
+	assert.deepEqual(gaps[0].diagnostics, {
+		path: source.top,
+		line_number: 2,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "malformed_jsonl_line",
 	});
-	// A complete malformed line is not an in-flight tail: silently consuming it
-	// would lose the record forever. The connector must fail the run, disclose
-	// the unresolved streams, and write no cursor past that line.
-	assert.equal(malformed.code, 1);
+	const second = await run({ ...source, state: first.states });
+	assert.equal(second.records.length, 0);
+	assert.equal(
+		second.messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+		).length,
+		5,
+	);
+});
+
+test("M9: malformed LF-terminated JSON reports a durable gap and advances its accounted boundary", async () => {
+	const source = await makeSource();
+	const first = await run(source);
+	const original = await readFile(source.top, "utf8");
+	await writeFile(source.top, `${original}not-json\n`);
+	const malformed = await run({ ...source, state: first.states });
 	assert.equal(malformed.records.length, 0);
 	assert.equal(
 		malformed.messages.filter((message) => message.type === "SKIP_RESULT")
 			.length,
 		2,
-		"sessions and messages both disclose the malformed source gap",
 	);
-	assert.equal(
-		malformed.states.messages,
-		undefined,
-		"no messages cursor may commit past the malformed line",
-	);
-	assert.equal(
-		malformed.states.sessions,
-		undefined,
-		"no sessions cursor may commit past the malformed line",
-	);
+	for (const stream of ["messages", "sessions"]) {
+		const cursor = malformed.states[stream] as {
+			file_cursors: Record<
+				string,
+				{ committed_offset_bytes: number; jsonl_gaps: unknown[] }
+			>;
+		};
+		const fileCursor = cursor.file_cursors[source.top];
+		assert.ok(fileCursor);
+		assert.equal(
+			fileCursor.committed_offset_bytes,
+			Buffer.byteLength(`${original}not-json\n`),
+		);
+		assert.equal(fileCursor.jsonl_gaps.length, 1);
+	}
 });
 
 test("M10: a tail without sessionId inherits saved parser continuation", async () => {
@@ -831,11 +868,7 @@ test("source mutations, partial tails, and malformed terminated lines retain phy
 		"M8: unterminated JSONL does not emit",
 	);
 
-	// M9: once the pending tail is terminated, a malformed complete line follows
-	// it. The malformed line is NOT an in-flight tail, so consuming it would lose
-	// that record forever. The run must fail and commit no cursor, which also
-	// withholds the now-complete line that precedes it -- a failed run proves
-	// nothing rather than proving a subset.
+	// Completing the pending tail emits it even when the next line is malformed.
 	const beforeMalformed = await readFile(source.top, "utf8");
 	await writeFile(
 		source.top,
@@ -843,27 +876,19 @@ test("source mutations, partial tails, and malformed terminated lines retain phy
 	);
 	const malformedTail = await run({
 		...source,
-		expectFailure: true,
 		state: {
 			messages: partial.states.messages,
 			sessions: partial.states.sessions,
 		},
 	});
-	assert.equal(
-		malformedTail.code,
-		1,
-		"M9: a malformed complete line fails the run",
+	assert.equal(malformedTail.code, 0);
+	assert.deepEqual(
+		malformedTail.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id),
+		[IDS.partial],
 	);
-	assert.equal(
-		malformedTail.records.length,
-		0,
-		"M9: a failed run emits no records",
-	);
-	assert.equal(
-		malformedTail.states.messages,
-		undefined,
-		"M9: no messages cursor may commit past the malformed line",
-	);
+	assert.ok(malformedTail.states.messages);
 
 	// M8/M9 recovery: with the malformed line repaired at the source, the
 	// previously-completed tail and the following line both emit exactly once.
@@ -1279,4 +1304,951 @@ test("M24: Claude mtime touch queues no transcript records while advancing its d
 	} finally {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
+});
+
+test("unterminated tail is disclosed until completed, without blocking other files", async () => {
+	const source = await makeSource();
+	const prefix = await readFile(source.top, "utf8");
+	const suffix = transcriptLine("top-2", "2026-07-21T00:02:00Z");
+	await writeFile(source.top, prefix + suffix.slice(0, -1));
+	const first = await run(source);
+	assert.equal(first.records.filter((r) => r.stream === "messages").length, 2);
+	const gap = first.messages.find(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "messages",
+	);
+	assert.ok(gap?.type === "SKIP_RESULT");
+	assert.equal(gap.reason, "truncated_jsonl_tail");
+	const noop = await run({ ...source, state: first.states });
+	assert.equal(noop.messages.filter((m) => m.type === "SKIP_RESULT").length, 2);
+	await writeFile(source.top, `${prefix + suffix}\n`);
+	const completed = await run({ ...source, state: noop.states });
+	assert.deepEqual(
+		completed.records
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.id),
+		[IDS["top-2"]],
+	);
+	assert.equal(
+		completed.messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("null mid-file declares a gap and keeps UUID keys stable after source repair and replay", async () => {
+	const source = await makeSource();
+	const prefix = `${transcriptLine("top-1", "2026-07-21T00:00:00Z")}\n`;
+	const suffix = `${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`;
+	await writeFile(source.top, `${prefix}null\n${suffix}`);
+	const first = await run(source);
+	const gap = first.messages.find(
+		(message) =>
+			message.type === "SKIP_RESULT" && message.stream === "messages",
+	);
+	assert.ok(gap?.type === "SKIP_RESULT");
+	assert.deepEqual(gap.diagnostics, {
+		path: source.top,
+		line_number: 2,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "non_object_jsonl_record",
+	});
+	const firstKeys = first.records
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.deepEqual(firstKeys, [IDS["top-1"], IDS["top-2"], IDS["sub-1"]]);
+	const unchanged = await run({ ...source, state: first.states });
+	assert.equal(unchanged.records.length, 0);
+	assert.ok(
+		unchanged.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "non_object_jsonl_record",
+		),
+	);
+	await writeFile(
+		source.top,
+		`${prefix}${transcriptLine("top-3", "2026-07-21T00:01:00Z")}\n${suffix}`,
+	);
+	const repaired = await run({ ...source, state: unchanged.states });
+	assert.deepEqual(
+		repaired.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-1"], IDS["top-3"], IDS["top-2"]],
+	);
+	assert.equal(
+		repaired.messages.filter((message) => message.type === "SKIP_RESULT")
+			.length,
+		0,
+	);
+	const replay = await run(source);
+	const replayKeys = replay.records
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.deepEqual(replayKeys, [
+		IDS["top-1"],
+		IDS["top-3"],
+		IDS["top-2"],
+		IDS["sub-1"],
+	]);
+	assert.equal(new Set([...firstKeys, ...replayKeys]).size, 4);
+	const settled = await run({ ...source, state: repaired.states });
+	assert.equal(settled.records.length, 0);
+});
+
+test("truthy JSON primitives and arrays each declare a non-object gap", async () => {
+	const source = await makeSource();
+	const invalidLines = [true, 1, "value", [], [{ type: "user" }]].map((value) =>
+		JSON.stringify(value),
+	);
+	await writeFile(
+		source.top,
+		invalidLines.join("\n") +
+			"\n" +
+			transcriptLine("top-2", "2026-07-21T00:02:00Z") +
+			"\n",
+	);
+	const result = await run(source);
+	const gaps = result.messages.filter(
+		(message) =>
+			message.type === "SKIP_RESULT" && message.stream === "messages",
+	);
+	assert.equal(gaps.length, invalidLines.length);
+	assert.ok(
+		gaps.every(
+			(gap) =>
+				gap.type === "SKIP_RESULT" && gap.reason === "non_object_jsonl_record",
+		),
+	);
+	assert.deepEqual(
+		result.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-2"], IDS["sub-1"]],
+	);
+});
+
+for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
+	test(`permission-denied earlier transcript preserves retry and later records (${transcriptStreams.join(" + ")})`, {
+		skip: process.getuid?.() === 0,
+	}, async (t) => {
+		const source = await makeSource();
+		t.after(async () => {
+			await chmod(source.top, 0o600);
+			await rm(source.claudeHome, { recursive: true, force: true });
+		});
+		const streams = [...transcriptStreams, "coverage_diagnostics"];
+		const initial = await run({ ...source, streams });
+		const original = await readFile(source.top, "utf8");
+		await writeFile(
+			source.top,
+			`${original}${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`,
+		);
+		await chmod(source.top, 0o000);
+		const laterSession = "22222222-2222-4222-8222-222222222222";
+		await writeFile(
+			join(source.projects, "-tmp-incremental", `${laterSession}.jsonl`),
+			`${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: laterSession })}\n`,
+		);
+		const freshDenied = await run({ ...source, streams });
+		assert.deepEqual(
+			freshDenied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id)
+				.sort(),
+			[IDS["sub-1"], IDS["top-3"]].sort(),
+		);
+		const denied = await run({ ...source, streams, state: initial.states });
+		assert.deepEqual(
+			denied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-3"]],
+		);
+		if (transcriptStreams.includes("sessions")) {
+			assert.ok(
+				denied.records.some(
+					(r) => r.stream === "sessions" && r.data.id === laterSession,
+				),
+			);
+		}
+		const expectedGap = {
+			path: source.top,
+			reason: "source_read_error",
+			error_code: "EACCES",
+		};
+		for (const stream of transcriptStreams) {
+			const gaps = denied.messages.filter(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+			);
+			assert.equal(
+				gaps.length,
+				1,
+				"the sessions and children passes must report one file gap per stream",
+			);
+			assert.ok(gaps[0]?.type === "SKIP_RESULT");
+			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			const before = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+			};
+			const after = denied.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				file_mtimes?: Record<string, number>;
+				source_gaps: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				after.file_cursors[source.top],
+				before.file_cursors[source.top],
+			);
+			assert.equal(after.file_mtimes?.[source.top], undefined);
+			assert.deepEqual(after.source_gaps[source.top], expectedGap);
+			assert.ok(
+				denied.records.some(
+					(r) =>
+						r.stream === "coverage_diagnostics" &&
+						r.data.stream === stream &&
+						r.data.status === "unaccounted",
+				),
+			);
+		}
+		const healthyAppendId = "00000000-0000-4000-8000-000000000008";
+		const healthyPath = join(
+			source.projects,
+			"-tmp-incremental",
+			`${laterSession}.jsonl`,
+		);
+		await writeFile(
+			healthyPath,
+			`${await readFile(healthyPath, "utf8")}${transcriptLine(healthyAppendId, "2026-07-21T00:04:00Z", { sessionId: laterSession })}\n`,
+		);
+		const retried = await run({ ...source, streams, state: denied.states });
+		assert.deepEqual(
+			retried.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[healthyAppendId],
+		);
+		if (transcriptStreams.includes("sessions")) {
+			assert.equal(
+				retried.records.find(
+					(r) => r.stream === "sessions" && r.data.id === laterSession,
+				)?.data.message_count,
+				2,
+				"an unrelated denied transcript must not freeze a healthy existing session summary",
+			);
+		}
+		for (const stream of transcriptStreams) {
+			assert.equal(
+				retried.messages.filter(
+					(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+				).length,
+				1,
+			);
+		}
+		if (transcriptStreams.includes("sessions")) {
+			for (const result of [denied, retried]) {
+				const cursor = result.states.sessions as {
+					session_aggregates: Record<string, { message_count: number }>;
+				};
+				assert.equal(cursor.session_aggregates[SESSION_ID]?.message_count, 2);
+			}
+		}
+		await chmod(source.top, 0o600);
+		const recovered = await run({ ...source, streams, state: retried.states });
+		assert.deepEqual(
+			recovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-2"]],
+		);
+		if (transcriptStreams.includes("sessions")) {
+			assert.equal(
+				recovered.records.find(
+					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
+				)?.data.message_count,
+				3,
+			);
+		}
+		assert.equal(
+			recovered.messages.filter((m) => m.type === "SKIP_RESULT").length,
+			0,
+		);
+		for (const stream of transcriptStreams) {
+			assert.deepEqual(
+				(recovered.states[stream] as { source_gaps: unknown }).source_gaps,
+				{},
+			);
+		}
+		if (transcriptStreams.includes("sessions")) {
+			const sessionsOnly = await run({
+				...source,
+				streams: ["sessions", "coverage_diagnostics"],
+				state: {
+					sessions: recovered.states.sessions,
+					messages: denied.states.messages,
+				},
+			});
+			assert.equal(
+				sessionsOnly.messages.filter((m) => m.type === "SKIP_RESULT").length,
+				0,
+			);
+			assert.equal(
+				sessionsOnly.records.some(
+					(r) =>
+						r.stream === "coverage_diagnostics" &&
+						r.data.stream === "sessions" &&
+						r.data.status === "unaccounted",
+				),
+				false,
+				"a stale unrequested child-stream gap must not taint healed sessions coverage",
+			);
+		}
+		const noop = await run({ ...source, streams, state: recovered.states });
+		assert.equal(noop.records.filter((r) => r.stream === "messages").length, 0);
+		const freshRecovered = await run({
+			...source,
+			streams,
+			state: freshDenied.states,
+		});
+		assert.deepEqual(
+			freshRecovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-1"], IDS["top-2"], healthyAppendId],
+		);
+		if (transcriptStreams.includes("sessions")) {
+			assert.equal(
+				freshRecovered.records.find(
+					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
+				)?.data.message_count,
+				3,
+			);
+		}
+		const replay = await run({ ...source, streams });
+		assert.deepEqual(
+			replay.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id)
+				.sort(),
+			[
+				IDS["top-1"],
+				IDS["top-2"],
+				IDS["sub-1"],
+				IDS["top-3"],
+				healthyAppendId,
+			].sort(),
+		);
+	});
+}
+
+for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
+	test(`permission-denied project directory retains hidden transcripts and retries (${transcriptStreams.join(" + ")})`, {
+		skip: process.getuid?.() === 0,
+	}, async (t) => {
+		const source = await makeSource();
+		const blockedProject = join(source.projects, "-tmp-incremental");
+		t.after(async () => {
+			await chmod(blockedProject, 0o700);
+			await rm(source.claudeHome, { recursive: true, force: true });
+		});
+		const healthyProject = join(source.projects, "-tmp-incremental-extra");
+		const healthySession = "22222222-2222-4222-8222-222222222222";
+		const healthyPath = join(healthyProject, `${healthySession}.jsonl`);
+		await mkdir(healthyProject);
+		const healthyInitial = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
+		await writeFile(healthyPath, healthyInitial);
+		const streams = [...transcriptStreams, "coverage_diagnostics"];
+		const initial = await run({ ...source, streams });
+		const original = await readFile(source.top, "utf8");
+		await writeFile(
+			source.top,
+			`${original}${transcriptLine("top-2", "2026-07-21T00:02:00Z")}\n`,
+		);
+		const healthyAppendId = "00000000-0000-4000-8000-000000000008";
+		await writeFile(
+			healthyPath,
+			`${healthyInitial}${transcriptLine(healthyAppendId, "2026-07-21T00:04:00Z", { sessionId: healthySession })}\n`,
+		);
+		await chmod(blockedProject, 0o000);
+		const freshDenied = await run({ ...source, streams });
+		assert.deepEqual(
+			freshDenied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-3"], healthyAppendId],
+		);
+		for (const stream of transcriptStreams) {
+			assert.equal(
+				freshDenied.messages.filter(
+					(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+				).length,
+				1,
+			);
+		}
+		const denied = await run({ ...source, streams, state: initial.states });
+		const expectedGap = {
+			path: blockedProject,
+			reason: "source_directory_read_error",
+			error_code: "EACCES",
+		};
+		for (const stream of transcriptStreams) {
+			const gaps = denied.messages.filter(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+			);
+			assert.equal(
+				gaps.length,
+				1,
+				"each requested transcript stream must declare one directory gap across discovery passes",
+			);
+			assert.ok(gaps[0]?.type === "SKIP_RESULT");
+			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			assert.ok(
+				denied.messages.indexOf(gaps[0]) <
+					denied.messages.findIndex(
+						(m) => m.type === "STATE" && m.stream === stream,
+					),
+				"directory gap must precede its stream checkpoint",
+			);
+			const before = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			const after = denied.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+				source_gaps: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				after.file_cursors[source.top],
+				before.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				after.file_cursors[source.subagent],
+				before.file_cursors[source.subagent],
+			);
+			assert.equal(after.file_cursors[blockedProject], undefined);
+			assert.deepEqual(
+				after.source_gaps,
+				{},
+				"directory failures are reprobed, not persisted as file retry gaps",
+			);
+			if (stream === "sessions")
+				assert.deepEqual(
+					after.session_aggregates?.[SESSION_ID],
+					before.session_aggregates?.[SESSION_ID],
+				);
+			assert.ok(
+				denied.records.some(
+					(r) =>
+						r.stream === "coverage_diagnostics" &&
+						r.data.stream === stream &&
+						r.data.status === "unaccounted",
+				),
+			);
+		}
+		assert.deepEqual(
+			denied.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[healthyAppendId],
+		);
+		if (transcriptStreams.includes("sessions"))
+			assert.equal(
+				denied.records.find(
+					(r) => r.stream === "sessions" && r.data.id === healthySession,
+				)?.data.message_count,
+				2,
+			);
+		const retried = await run({ ...source, streams, state: denied.states });
+		assert.equal(
+			retried.records.filter((r) => r.stream === "messages").length,
+			0,
+		);
+		for (const stream of transcriptStreams) {
+			const gaps = retried.messages.filter(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+			);
+			assert.equal(gaps.length, 1);
+			assert.ok(gaps[0]?.type === "SKIP_RESULT");
+			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			const cursor = retried.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			const before = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+				session_aggregates?: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				cursor.file_cursors[source.top],
+				before.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				cursor.file_cursors[source.subagent],
+				before.file_cursors[source.subagent],
+			);
+			if (stream === "sessions")
+				assert.deepEqual(
+					cursor.session_aggregates?.[SESSION_ID],
+					before.session_aggregates?.[SESSION_ID],
+				);
+		}
+		await chmod(blockedProject, 0o700);
+		const recovered = await run({ ...source, streams, state: retried.states });
+		assert.equal(
+			recovered.records.some(
+				(r) =>
+					r.stream === "coverage_diagnostics" &&
+					transcriptStreams.includes(String(r.data.stream)) &&
+					r.data.status === "unaccounted",
+			),
+			false,
+		);
+		assert.deepEqual(
+			recovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			[IDS["top-2"]],
+			"recovery resumes hidden files without replaying their committed prefixes",
+		);
+		assert.equal(
+			recovered.messages.filter((m) => m.type === "SKIP_RESULT").length,
+			0,
+		);
+		if (transcriptStreams.includes("sessions"))
+			assert.equal(
+				recovered.records.find(
+					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
+				)?.data.message_count,
+				3,
+			);
+		const noop = await run({ ...source, streams, state: recovered.states });
+		assert.equal(noop.records.filter((r) => r.stream === "messages").length, 0);
+		const freshRecovered = await run({
+			...source,
+			streams,
+			state: freshDenied.states,
+		});
+		assert.deepEqual(
+			freshRecovered.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id)
+				.sort(),
+			[IDS["top-1"], IDS["top-2"], IDS["sub-1"]].sort(),
+		);
+		assert.equal(
+			freshRecovered.messages.filter((m) => m.type === "SKIP_RESULT").length,
+			0,
+		);
+	});
+}
+
+for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
+	test(`nested directory denial preserves saved line gaps and healthy siblings (${transcriptStreams.join(" + ")})`, {
+		skip: process.getuid?.() === 0,
+	}, async (t) => {
+		const source = await makeSource();
+		const subagents = join(
+			source.projects,
+			"-tmp-incremental",
+			SESSION_ID,
+			"subagents",
+		);
+		const deniedDir = join(subagents, "a-denied");
+		const siblingDir = join(subagents, "z-healthy");
+		await mkdir(deniedDir);
+		await mkdir(siblingDir);
+		const hiddenPath = join(deniedDir, "worker.jsonl");
+		await rename(source.subagent, hiddenPath);
+		t.after(async () => {
+			await chmod(source.projects, 0o700);
+			await chmod(deniedDir, 0o700).catch(() => {});
+			await rm(source.claudeHome, { recursive: true, force: true });
+		});
+		const prefix = await readFile(hiddenPath, "utf8");
+		const suffix = `${transcriptLine("sub-new", "2026-07-21T00:02:00Z")}\n`;
+		await writeFile(hiddenPath, `${prefix}not-json\n${suffix}`);
+		const siblingPath = join(siblingDir, "worker.jsonl");
+		const sibling = `${transcriptLine("sub-later", "2026-07-21T00:03:00Z")}\n`;
+		await writeFile(siblingPath, sibling);
+		const healthyProject = join(source.projects, "-tmp-z-healthy");
+		await mkdir(healthyProject);
+		const healthySession = "22222222-2222-4222-8222-222222222222";
+		const healthyPath = join(healthyProject, `${healthySession}.jsonl`);
+		const healthy = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
+		await writeFile(healthyPath, healthy);
+		const streams = [...transcriptStreams, "coverage_diagnostics"];
+		const initial = await run({ ...source, streams });
+		const lineGap = {
+			path: hiddenPath,
+			reason: "malformed_jsonl_line",
+			line_number: 2,
+			byte_offset: Buffer.byteLength(prefix),
+		};
+		const cursorFor = (
+			result: Awaited<ReturnType<typeof run>>,
+			stream: string,
+		) =>
+			(result.states[stream] as { file_cursors: Record<string, unknown> })
+				.file_cursors[hiddenPath];
+		const messageIds = (result: Awaited<ReturnType<typeof run>>) =>
+			result.records
+				.filter((record) => record.stream === "messages")
+				.map((record) => record.data.id);
+		const gapsFor = (result: Awaited<ReturnType<typeof run>>, stream: string) =>
+			result.messages.filter(
+				(
+					message,
+				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+		const assertLineGap = (result: Awaited<ReturnType<typeof run>>) => {
+			for (const stream of transcriptStreams) {
+				const gaps = gapsFor(result, stream).filter(
+					(gap) => gap.reason === "malformed_jsonl_line",
+				);
+				assert.equal(gaps.length, 1);
+				assert.deepEqual(gaps[0]?.diagnostics, lineGap);
+			}
+			assert.ok(
+				result.records.some(
+					(record) =>
+						record.stream === "coverage_diagnostics" &&
+						record.data.stream === "messages" &&
+						record.data.status === "unaccounted",
+				),
+			);
+		};
+		assertLineGap(initial);
+		const healthyAppend = "00000000-0000-4000-8000-000000000008";
+		const siblingAppend = "00000000-0000-4000-8000-000000000009";
+		await writeFile(
+			siblingPath,
+			`${sibling + transcriptLine(siblingAppend, "2026-07-21T00:04:00Z")}\n`,
+		);
+		await writeFile(
+			healthyPath,
+			`${healthy + transcriptLine(healthyAppend, "2026-07-21T00:04:00Z", { sessionId: healthySession })}\n`,
+		);
+		await chmod(deniedDir, 0o000);
+		const denied = await run({ ...source, streams, state: initial.states });
+		assert.deepEqual(messageIds(denied), [siblingAppend, healthyAppend]);
+		assertLineGap(denied);
+		for (const stream of transcriptStreams) {
+			assert.deepEqual(cursorFor(denied, stream), cursorFor(initial, stream));
+			const directoryGaps = gapsFor(denied, stream).filter(
+				(gap) => gap.reason === "source_directory_read_error",
+			);
+			assert.equal(directoryGaps.length, 1);
+			assert.deepEqual(directoryGaps[0]?.diagnostics, {
+				path: deniedDir,
+				reason: "source_directory_read_error",
+				error_code: "EACCES",
+			});
+		}
+		const repeatedDenied = await run({
+			...source,
+			streams,
+			state: denied.states,
+		});
+		assert.deepEqual(messageIds(repeatedDenied), []);
+		assertLineGap(repeatedDenied);
+		await chmod(deniedDir, 0o700);
+		const restored = await run({
+			...source,
+			streams,
+			state: repeatedDenied.states,
+		});
+		assert.deepEqual(messageIds(restored), []);
+		assertLineGap(restored);
+		assert.ok(
+			!restored.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_directory_read_error",
+			),
+		);
+		const unchanged = await run({ ...source, streams, state: restored.states });
+		assert.deepEqual(messageIds(unchanged), []);
+		assertLineGap(unchanged);
+		const absentDir = join(source.claudeHome, "temporarily-absent");
+		await rename(deniedDir, absentDir);
+		const absent = await run({ ...source, streams, state: unchanged.states });
+		assert.deepEqual(messageIds(absent), []);
+		assertLineGap(absent);
+		for (const stream of transcriptStreams)
+			assert.deepEqual(cursorFor(absent, stream), cursorFor(initial, stream));
+		await rename(absentDir, deniedDir);
+		await chmod(source.projects, 0o000);
+		const rootDenied = await run({ ...source, streams, state: absent.states });
+		assert.deepEqual(messageIds(rootDenied), []);
+		assertLineGap(rootDenied);
+		assert.ok(
+			rootDenied.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_directory_read_error" &&
+					(message.diagnostics as Record<string, unknown> | undefined)?.path ===
+						source.projects,
+			),
+		);
+		await chmod(source.projects, 0o700);
+		await chmod(hiddenPath, 0o000);
+		const fileDenied = await run({ ...source, streams, state: absent.states });
+		assertLineGap(fileDenied);
+		assert.ok(
+			fileDenied.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "source_read_error",
+			),
+		);
+		await chmod(hiddenPath, 0o600);
+		await writeFile(
+			hiddenPath,
+			`${prefix}${transcriptLine("partial", "2026-07-21T00:01:30Z")}\n${suffix}`,
+		);
+		const repaired = await run({
+			...source,
+			streams,
+			state: fileDenied.states,
+		});
+		assert.deepEqual(messageIds(repaired), [
+			IDS["sub-1"],
+			IDS.partial,
+			IDS["sub-new"],
+		]);
+		assert.ok(
+			!repaired.messages.some((message) => message.type === "SKIP_RESULT"),
+		);
+		const settled = await run({ ...source, streams, state: repaired.states });
+		assert.deepEqual(messageIds(settled), []);
+		assert.ok(
+			!settled.messages.some((message) => message.type === "SKIP_RESULT"),
+		);
+	});
+}
+
+test("transcript symlinks report targets without following outside sources and retain prior gaps", async (t) => {
+	const source = await makeSource();
+	const external = await mkdtemp(join(tmpdir(), "pdpp-claude-link-target-"));
+	t.after(async () => {
+		await rm(source.claudeHome, { recursive: true, force: true });
+		await rm(external, { recursive: true, force: true });
+	});
+	const outsideId = "00000000-0000-4000-8000-000000000099";
+	const outsidePath = join(external, "outside.jsonl");
+	await writeFile(
+		outsidePath,
+		`${transcriptLine(outsideId, "2026-07-21T00:09:00Z")}\n`,
+	);
+	await writeFile(
+		source.subagent,
+		`${await readFile(source.subagent, "utf8")}not-json\n`,
+	);
+	const streams = ["sessions", "messages", "coverage_diagnostics"];
+	const initial = await run({ ...source, streams });
+	await rename(source.top, join(source.claudeHome, "saved-top.jsonl"));
+	await rename(
+		source.subagent,
+		join(source.claudeHome, "saved-subagent.jsonl"),
+	);
+	await symlink(outsidePath, source.top);
+	await symlink(
+		relative(dirname(source.subagent), outsidePath),
+		source.subagent,
+	);
+	const linkedProject = join(source.projects, "-tmp-linked-project");
+	await symlink(external, linkedProject);
+	const healthyProject = join(source.projects, "-tmp-z-healthy");
+	await mkdir(healthyProject);
+	const healthySession = "22222222-2222-4222-8222-222222222222";
+	await writeFile(
+		join(healthyProject, `${healthySession}.jsonl`),
+		`${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`,
+	);
+	const linked = await run({ ...source, streams, state: initial.states });
+	assert.deepEqual(
+		linked.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-3"]],
+	);
+	const assertLinks = (
+		result: Awaited<ReturnType<typeof run>>,
+		expected: [string, string][],
+	) => {
+		const gaps = result.messages.filter(
+			(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "messages" &&
+				message.reason === "symlink_skipped",
+		);
+		assert.equal(gaps.length, expected.length);
+		for (const [path, target_path] of expected)
+			assert.ok(
+				gaps.some(
+					(gap) =>
+						JSON.stringify(gap.diagnostics) ===
+						JSON.stringify({ path, target_path }),
+				),
+			);
+		assert.ok(
+			result.records.some(
+				(record) =>
+					record.stream === "coverage_diagnostics" &&
+					record.data.stream === "messages" &&
+					record.data.status === "unaccounted",
+			),
+		);
+		assert.ok(
+			result.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "malformed_jsonl_line",
+			),
+		);
+		for (const stream of ["sessions", "messages"]) {
+			const current = result.states[stream] as {
+				file_cursors: Record<string, unknown>;
+			};
+			const prior = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				current.file_cursors[source.top],
+				prior.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				current.file_cursors[source.subagent],
+				prior.file_cursors[source.subagent],
+			);
+		}
+	};
+	assertLinks(linked, [
+		[source.top, outsidePath],
+		[source.subagent, outsidePath],
+		[linkedProject, external],
+	]);
+	const unchanged = await run({ ...source, streams, state: linked.states });
+	assert.deepEqual(
+		unchanged.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertLinks(unchanged, [
+		[source.top, outsidePath],
+		[source.subagent, outsidePath],
+		[linkedProject, external],
+	]);
+	const subagents = dirname(source.subagent);
+	await rename(subagents, join(source.claudeHome, "saved-subagents"));
+	await symlink(external, subagents);
+	const rootLinked = await run({ ...source, streams, state: unchanged.states });
+	assert.deepEqual(
+		rootLinked.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertLinks(rootLinked, [
+		[source.top, outsidePath],
+		[subagents, external],
+		[linkedProject, external],
+	]);
+	const scopedStreams = [
+		{ name: "messages", source_roots: ["/tmp/z-healthy"] },
+	];
+	const scoped = await runConnectorProtocolSubprocess({
+		cwd: join(import.meta.dirname, "../.."),
+		entrypoint: "connectors/claude_code/index.ts",
+		env: {
+			CLAUDE_CODE_HOME: source.claudeHome,
+			CLAUDE_CODE_PROJECTS_DIR: source.projects,
+		},
+		start: {
+			type: "START",
+			scope: {
+				streams: scopedStreams,
+			},
+		},
+	});
+	assert.equal(scoped.code, 0, scoped.stderr);
+	assert.deepEqual(
+		scoped.messages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	assert.deepEqual(
+		scoped.messages
+			.filter(
+				(message) => message.type === "RECORD" && message.stream === "messages",
+			)
+			.map((message) => (message.type === "RECORD" ? message.data.id : null)),
+		[IDS["top-3"]],
+	);
+});
+
+test("dangling transcript and session-directory symlinks report gaps on every run", async (t) => {
+	const source = await makeSource();
+	const external = await mkdtemp(
+		join(tmpdir(), "pdpp-claude-dangling-target-"),
+	);
+	t.after(async () => {
+		await rm(source.claudeHome, { recursive: true, force: true });
+		await rm(external, { recursive: true, force: true });
+	});
+	const project = dirname(source.top);
+	const danglingTranscript = join(
+		project,
+		"22222222-2222-4222-8222-222222222222.jsonl",
+	);
+	const danglingSession = join(project, "33333333-3333-4333-8333-333333333333");
+	const missingTranscript = join(external, "missing.jsonl");
+	const missingSession = join(external, "missing-session");
+	await symlink(missingTranscript, danglingTranscript);
+	await symlink(relative(project, missingSession), danglingSession);
+	const streams = ["sessions", "messages", "coverage_diagnostics"];
+	const assertGaps = (result: Awaited<ReturnType<typeof run>>) => {
+		for (const stream of ["sessions", "messages"]) {
+			const gaps = result.messages.filter(
+				(
+					message,
+				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+			assert.equal(gaps.length, 2);
+			for (const [path, target_path] of [
+				[danglingTranscript, missingTranscript],
+				[danglingSession, missingSession],
+			]) {
+				const gap = gaps.find(
+					(message) =>
+						(message.diagnostics as Record<string, unknown> | undefined)
+							?.path === path,
+				);
+				assert.ok(gap);
+				assert.equal(gap.reason, "symlink_skipped");
+				assert.deepEqual(gap.diagnostics, { path, target_path });
+			}
+			assert.ok(
+				result.records.some(
+					(record) =>
+						record.stream === "coverage_diagnostics" &&
+						record.data.stream === stream &&
+						record.data.status === "unaccounted",
+				),
+			);
+		}
+	};
+	const initial = await run({ ...source, streams });
+	assert.deepEqual(
+		initial.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id)
+			.sort(),
+		[IDS["top-1"], IDS["sub-1"]].sort(),
+	);
+	assertGaps(initial);
+	const rerun = await run({ ...source, streams, state: initial.states });
+	assert.deepEqual(
+		rerun.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertGaps(rerun);
 });
