@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,6 +10,7 @@ import {
 	type IngestBatchRequest,
 	LocalDeviceQueue,
 } from "@pdpp/collector-runtime";
+import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
 import {
 	AMAZON_CONNECTOR_ID,
 	buildCodexStartMessage,
@@ -216,6 +217,116 @@ test("resolveLocalDeviceConnectorProfile still rejects an unknown connector", ()
 		/unsupported local-device connector/,
 	);
 });
+
+// ─── Default streams come from the collector definitions ──────────────────
+// The exporter must request exactly the stream set each connector's own
+// definition declares. A hand-copied second list drifts silently, and an
+// exporter run missing `coverage_diagnostics` leaves the drained collector
+// stuck on `coverage_unknown`.
+
+/** Exporter profile id → the `connector_id` its definition is filed under. */
+const DEFINITION_BACKED_PROFILES: ReadonlyArray<
+	readonly [profileId: string, definitionConnectorId: string]
+> = [
+	[CODEX_CONNECTOR_ID, "codex"],
+	[CLAUDE_CODE_CONNECTOR_ID, "claude_code"],
+	[IMESSAGE_CONNECTOR_ID, "imessage"],
+];
+
+for (const [profileId, definitionConnectorId] of DEFINITION_BACKED_PROFILES) {
+	test(`${profileId} exporter profile requests exactly its collector definition's streams`, () => {
+		const definition = LOCAL_COLLECTOR_DEFINITIONS.find(
+			(candidate) => candidate.connector_id === definitionConnectorId,
+		);
+		assert.ok(
+			definition,
+			`no collector definition for "${definitionConnectorId}"`,
+		);
+		assert.deepEqual(
+			[...resolveLocalDeviceConnectorProfile(profileId).defaultStreams],
+			[...definition.streams],
+		);
+	});
+}
+
+test("codex and claude-code exporter profiles request coverage_diagnostics", () => {
+	for (const profileId of [CODEX_CONNECTOR_ID, CLAUDE_CODE_CONNECTOR_ID]) {
+		assert.ok(
+			resolveLocalDeviceConnectorProfile(profileId).defaultStreams.includes(
+				"coverage_diagnostics",
+			),
+			`${profileId} must request coverage_diagnostics or a drained collector stays on coverage_unknown`,
+		);
+	}
+});
+
+test("the amazon profile stays declared locally — it is browser-bound and has no collector definition", () => {
+	assert.equal(
+		LOCAL_COLLECTOR_DEFINITIONS.some(
+			(candidate) => candidate.connector_id === AMAZON_CONNECTOR_ID,
+		),
+		false,
+	);
+	assert.deepEqual([...DEFAULT_AMAZON_STREAMS], ["orders", "order_items"]);
+});
+
+for (const profileId of [CODEX_CONNECTOR_ID, CLAUDE_CODE_CONNECTOR_ID]) {
+	test(`runLocalDeviceExporter sends ${profileId} a START scope including coverage_diagnostics`, async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pdpp-local-device-runtime-"));
+		const startCapturePath = join(dir, "start.json");
+		const fakeConnectorPath = join(dir, "fake-connector.mjs");
+		// A stand-in connector that records the START message the exporter
+		// actually wrote to its stdin, then completes with no records. This is
+		// the real spawn path — `config.streams ?? profile.defaultStreams`
+		// through `buildLocalDeviceStartMessage` to the child.
+		await writeFile(
+			fakeConnectorPath,
+			`
+    import { writeFileSync } from "node:fs";
+    let stdin = "";
+    process.stdin.on("data", (chunk) => { stdin += chunk; });
+    process.stdin.on("end", () => {
+      writeFileSync(${JSON.stringify(startCapturePath)}, stdin);
+      process.stdout.write(JSON.stringify({ type: "DONE", status: "ok", records_emitted: 0 }) + "\\n");
+      process.exit(0);
+    });
+    `,
+		);
+
+		const originalFetch = global.fetch;
+		global.fetch = (() =>
+			Promise.resolve(
+				new Response(JSON.stringify({ ok: true }), { status: 200 }),
+			)) as typeof fetch;
+
+		try {
+			await runLocalDeviceExporter({
+				baseUrl: "http://127.0.0.1:1",
+				connectorArgs: [fakeConnectorPath],
+				connectorCommand: process.execPath,
+				connectorId: profileId,
+				deviceId: "device-1",
+				deviceToken: "token-1",
+				queuePath: join(dir, "queue.json"),
+				sourceInstanceId: "source-1",
+			});
+		} finally {
+			global.fetch = originalFetch;
+		}
+
+		const start = JSON.parse(await readFile(startCapturePath, "utf8")) as {
+			scope: { streams: { name: string }[] };
+		};
+		const requested = start.scope.streams.map((stream) => stream.name);
+		assert.ok(
+			requested.includes("coverage_diagnostics"),
+			`the START the exporter spawned ${profileId} with requested ${requested.join(", ")}`,
+		);
+		assert.deepEqual(requested, [
+			...resolveLocalDeviceConnectorProfile(profileId).defaultStreams,
+		]);
+	});
+}
 
 test("runLocalDeviceExporter truncates queued records to sampleLimit but reports the true recordsSeen count", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-local-device-runtime-"));
