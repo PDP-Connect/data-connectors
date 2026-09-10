@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "58e28591312cde5fae3462a7bb3bcb693eb66e58",
+      "sha": "bbfa71edef081862d79e5e59c5a4c16469f96f06",
       "branch": "chore/revendor-connectors-92",
-      "note": "Coordinated with data-connect#89: this PR head vendors the malformed-line isolation sources from data-connectors#92. Track the unmerged branch so source drift and pin freshness compare the paired trees. After data-connect#89 merges, replace this SHA with its actual merge commit and restore branch main. Runtime/protocol packages and collector definitions are unchanged; the separate 1.0.0 release pin remains unchanged."
+      "note": "Coordinated with data-connect#89: this PR head vendors the malformed-line isolation and symlink disclosure sources from data-connectors#92, including the regenerated package index. Track the unmerged branch so source drift and pin freshness compare the paired trees. After data-connect#89 merges, replace this SHA with its actual merge commit and restore branch main. Runtime/protocol packages and collector definitions are unchanged; the separate 1.0.0 release pin remains unchanged."
     },
     "data-connect-1-0-0": {
       "owner": "PDP-Connect",
