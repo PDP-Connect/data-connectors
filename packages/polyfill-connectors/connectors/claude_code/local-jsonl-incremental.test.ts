@@ -2183,3 +2183,72 @@ test("transcript symlinks report targets without following outside sources and r
 		[IDS["top-3"]],
 	);
 });
+
+test("dangling transcript and session-directory symlinks report gaps on every run", async (t) => {
+	const source = await makeSource();
+	const external = await mkdtemp(
+		join(tmpdir(), "pdpp-claude-dangling-target-"),
+	);
+	t.after(async () => {
+		await rm(source.claudeHome, { recursive: true, force: true });
+		await rm(external, { recursive: true, force: true });
+	});
+	const project = dirname(source.top);
+	const danglingTranscript = join(
+		project,
+		"22222222-2222-4222-8222-222222222222.jsonl",
+	);
+	const danglingSession = join(project, "33333333-3333-4333-8333-333333333333");
+	const missingTranscript = join(external, "missing.jsonl");
+	const missingSession = join(external, "missing-session");
+	await symlink(missingTranscript, danglingTranscript);
+	await symlink(relative(project, missingSession), danglingSession);
+	const streams = ["sessions", "messages", "coverage_diagnostics"];
+	const assertGaps = (result: Awaited<ReturnType<typeof run>>) => {
+		for (const stream of ["sessions", "messages"]) {
+			const gaps = result.messages.filter(
+				(
+					message,
+				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+			assert.equal(gaps.length, 2);
+			for (const [path, target_path] of [
+				[danglingTranscript, missingTranscript],
+				[danglingSession, missingSession],
+			]) {
+				const gap = gaps.find(
+					(message) =>
+						(message.diagnostics as Record<string, unknown> | undefined)
+							?.path === path,
+				);
+				assert.ok(gap);
+				assert.equal(gap.reason, "symlink_skipped");
+				assert.deepEqual(gap.diagnostics, { path, target_path });
+			}
+			assert.ok(
+				result.records.some(
+					(record) =>
+						record.stream === "coverage_diagnostics" &&
+						record.data.stream === stream &&
+						record.data.status === "unaccounted",
+				),
+			);
+		}
+	};
+	const initial = await run({ ...source, streams });
+	assert.deepEqual(
+		initial.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id)
+			.sort(),
+		[IDS["top-1"], IDS["sub-1"]].sort(),
+	);
+	assertGaps(initial);
+	const rerun = await run({ ...source, streams, state: initial.states });
+	assert.deepEqual(
+		rerun.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertGaps(rerun);
+});

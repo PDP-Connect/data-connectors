@@ -36,6 +36,7 @@ import {
 	mkdtemp,
 	rename,
 	rm,
+	symlink,
 	truncate,
 	writeFile,
 } from "node:fs/promises";
@@ -140,6 +141,7 @@ async function runCodex(input: {
 	streams: readonly string[];
 	state?: Record<string, unknown>;
 	quietMs?: string;
+	sourceRoots?: string[];
 }): Promise<{
 	exitCode: number | null;
 	messages: EmittedMessage[];
@@ -155,7 +157,12 @@ async function runCodex(input: {
 				input.quietMs ?? QUIET_OFF.PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS,
 		},
 		start: {
-			scope: { streams: input.streams.map((name) => ({ name })) },
+			scope: {
+				streams: input.streams.map((name) => ({
+					name,
+					...(input.sourceRoots ? { source_roots: input.sourceRoots } : {}),
+				})),
+			},
 			...(input.state ? { state: input.state } : {}),
 			type: "START",
 		},
@@ -1306,4 +1313,145 @@ test("directory denial retains Codex line gaps through unchanged recovery until 
 		rolloutStateCursor(repaired.messages).file_cursors?.[path],
 		undefined,
 	);
+});
+
+test("Codex skips external and dangling rollout links and retains prior gaps", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-links-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const file = `rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`;
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		file,
+		jsonl([sessionMetaLine(), "{bad}", messageLine("prior")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const baseline = await runCodex({ codexHome, streams });
+	const saved = rolloutStateCursor(baseline.messages).file_cursors?.[
+		SESSION_ID
+	];
+	const external = join(codexHome, "external.jsonl");
+	await writeFile(
+		external,
+		jsonl([sessionMetaLine(), messageLine("EXTERNAL_SENTINEL")]),
+	);
+	await rm(path);
+	await symlink(external, path);
+	const dangling = join(
+		codexHome,
+		"sessions",
+		OLD_DATE_DIR,
+		"rollout-dangling.jsonl",
+	);
+	await symlink("missing.jsonl", dangling);
+	const externalDay = join(codexHome, "external-day");
+	await mkdir(externalDay);
+	await writeFile(
+		join(externalDay, file),
+		jsonl([sessionMetaLine(), messageLine("DIRECTORY_SENTINEL")]),
+	);
+	const linkedDay = join(codexHome, "sessions", "2026", "04", "16");
+	await symlink(externalDay, linkedDay);
+	const healthyId = "019d922d-c38b-7e11-ae99-9187af386149";
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "17"),
+		`rollout-${healthyId}.jsonl`,
+		jsonl([sessionMetaLine(healthyId), messageLine("healthy")]),
+	);
+	const first = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(baseline.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${healthyId}:2`],
+	);
+	const check = (messages: EmittedMessage[]) => {
+		const links = gapsFor(messages, "symlink_skipped");
+		assert.equal(links.length, 3);
+		assert.deepEqual(
+			links
+				.map((gap) => gap.diagnostics)
+				.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+			[
+				{ path, target_path: external },
+				{
+					path: dangling,
+					target_path: join(
+						codexHome,
+						"sessions",
+						OLD_DATE_DIR,
+						"missing.jsonl",
+					),
+				},
+				{ path: linkedDay, target_path: externalDay },
+			].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+		);
+		assert.deepEqual(
+			rolloutStateCursor(messages).file_cursors?.[SESSION_ID],
+			saved,
+		);
+		assert.equal(gapsFor(messages, "malformed_jsonl_line").length, 1);
+		assert.equal(
+			recordsFor(messages, "coverage_diagnostics").find(
+				(record) => record.data.store === "derived_messages",
+			)?.data.status,
+			"unaccounted",
+		);
+	};
+	check(first.messages);
+	const repeated = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(first.messages) },
+	});
+	check(repeated.messages);
+	assert.equal(recordsFor(repeated.messages, "messages").length, 0);
+	const scoped = await runCodex({
+		codexHome,
+		streams,
+		sourceRoots: [join(codexHome, "sessions", "2026", "04", "17")],
+	});
+	assert.equal(gapsFor(scoped.messages, "symlink_skipped").length, 0);
+	assert.deepEqual(
+		recordsFor(scoped.messages, "messages").map((record) => record.data.id),
+		[`${healthyId}:2`],
+	);
+	const root = join(codexHome, "sessions");
+	await rename(root, join(codexHome, "saved-sessions"));
+	await symlink(join(codexHome, "saved-sessions"), root);
+	const rootLinked = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(repeated.messages) },
+	});
+	assert.equal(recordsFor(rootLinked.messages, "messages").length, 0);
+	assert.deepEqual(
+		gapsFor(rootLinked.messages, "symlink_skipped").map(
+			(gap) => gap.diagnostics,
+		),
+		[{ path: root, target_path: join(codexHome, "saved-sessions") }],
+	);
+	assert.deepEqual(
+		rolloutStateCursor(rootLinked.messages).file_cursors,
+		rolloutStateCursor(repeated.messages).file_cursors,
+	);
+	assert.equal(gapsFor(rootLinked.messages, "malformed_jsonl_line").length, 1);
+	await rm(root);
+	await symlink(external, root);
+	const fileRoot = await runCodex({ codexHome, streams });
+	assert.equal(gapsFor(fileRoot.messages, "symlink_skipped").length, 1);
+	assert.equal(recordsFor(fileRoot.messages, "messages").length, 0);
+	await rm(root);
+	await symlink("missing-root", root);
+	const danglingRoot = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		gapsFor(danglingRoot.messages, "symlink_skipped").map(
+			(gap) => gap.diagnostics,
+		),
+		[{ path: root, target_path: join(codexHome, "missing-root") }],
+	);
+	assert.equal(recordsFor(danglingRoot.messages, "messages").length, 0);
 });
