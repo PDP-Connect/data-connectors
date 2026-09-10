@@ -20,11 +20,17 @@ jobs:
         with:
           node-version: "20"
 
+      # continue-on-error lets the comment steps below run even when the check
+      # fails, so a failing PR still gets the findings comment. The real exit
+      # code is recorded here and re-raised by the final step.
       - name: Run schema health check
         id: check
         run: |
+          set +e
           node scripts/schema-health-check.mjs --json --base-ref origin/${{ github.base_ref }} > report.json 2> summary.txt
-          echo "exit_code=0" >> "$GITHUB_OUTPUT"
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
         continue-on-error: true
 
       - name: Format PR comment
@@ -95,7 +101,7 @@ jobs:
           message: ${{ steps.comment.outputs.body }}
 
       - name: Fail if issues found
-        if: steps.check.outcome == 'failure'
+        if: always() && steps.check.outputs.exit_code != '0'
         run: |
           cat summary.txt
           exit 1
