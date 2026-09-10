@@ -200,6 +200,23 @@ jobs:
             label: vendored tarball digests
           - id: reference-contract
             label: reference-contract stand-in
+          # The leg below reinstates the still-unreplaced guard from data-connect's
+          # packages/local-collector/test/runner.test.ts:161, `test.skip`'d there because it
+          # reads Move A content that lives in THIS repository. Its own skip comment names
+          # Phase 0 evidence row A25's cross-repo-CI mechanism — this matrix — as where it is
+          # reinstated. It is NOT covered by the collector-definitions leg above: that leg
+          # byte-compares the registry against data-connect's committed generated snapshot and
+          # never reads tsconfig.build.json, so the registry and the snapshot can agree
+          # perfectly while both disagree with the packaging manifest.
+          #
+          # runner.test.ts:200 and :236 (default streams vs the connectors' own manifests) are
+          # deliberately NOT reinstated here. Both files those cases compare live in THIS
+          # repository, so they need no cross-repo mechanism at all, and
+          # packages/polyfill-connectors/src/collector-registry.test.ts already asserts both
+          # invariants — declaration soundness and coverage-diagnostics completeness — over the
+          # same registry and the same manifests, on the required polyfill-connectors workflow.
+          - id: collector-packaging-manifest
+            label: local-collector packaging manifest
     steps:
       - name: Checkout data-connectors (this repo, current ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -280,6 +297,21 @@ jobs:
         if: matrix.check.id == 'reference-contract'
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-reference-contract-drift.mjs pdpp data-connectors
 
+      # Cross-repo form of runner.test.ts:161 — the registry (here) vs the packaging manifest
+      # (data-connect's local-collector tsconfig.build.json).
+      - name: Run drift check — collector-packaging-manifest
+        if: matrix.check.id == 'collector-packaging-manifest'
+        run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-collector-packaging-manifest-drift.mjs data-connect data-connectors
+
+      # Negative control for the step above: proves the drift script actually detects drift,
+      # rather than trivially passing (e.g. an accidental early `process.exit(0)`, a regex that
+      # stopped matching, or a future edit that silently no-ops the comparison). Builds a
+      # throwaway `packages/local-collector/tsconfig.build.json` copied from the real pinned
+      # checkout with one bundled connector glob renamed, then asserts the SAME script now
+      # exits non-zero and names the renamed connector. No network access (the real
+      # data-connect checkout above is reused, just copied+edited into a temp dir) and no
+      # mutation of that checkout, so this cannot affect the real check's result above or any
+      # later step.
   # RETIRED (pdpp#284, 2026-09-02): this job used to check out PDP-Connect/pdpp at the pinned
   # SHA, then run connectors/github/index.test.ts and typecheck bin/orchestrate.ts against
   # pdpp's real reference-implementation server (server/db.ts, server/records.ts,
@@ -333,13 +365,17 @@ jobs:
             url: https://github.com/PDP-Connect/data-connect.git
             pin-output: data-connect-sha
             # Canonical paths that back drift jobs (a) collector-definitions, (b)
-            # connector-sources, (c) tarball-digests — see .github/cross-repo-pins.json's
-            # own note on data-connect's pin. Per reviewer finding "freshness coverage omits
+            # connector-sources, (c) tarball-digests, (e) collector-packaging-manifest — see
+            # .github/cross-repo-pins.json's own note on data-connect's pin. Per reviewer
+            # finding "freshness coverage omits
             # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
-            # data-connect path those three jobs actually compare, not just the
+            # data-connect path those jobs actually compare, not just the
             # runtime/protocol tarball-digest source: the definitions-snapshot generator +
-            # its committed output back job (a), and the six vendored connector directories
-            # back job (b). Keep this list and check-connector-source-drift.mjs's
+            # its committed output back job (a), the six vendored connector directories
+            # back job (b), and local-collector/tsconfig.build.json backs job (e) — without
+            # that last entry the pin could report fresh while job (e) validates a packaging
+            # manifest data-connect's tracked ref has already changed.
+            # Keep this list and check-connector-source-drift.mjs's
             # registry-derived connector-ID set in sync — that script now asserts its
             # comparison set against the canonical registry, but this workflow's path list is
             # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
@@ -348,6 +384,7 @@ jobs:
               packages/connector-protocol
               packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
               packages/local-collector/src/generated/collector-definitions.generated.ts
+              packages/local-collector/tsconfig.build.json
               packages/polyfill-connectors/connectors/claude_code
               packages/polyfill-connectors/connectors/codex
               packages/polyfill-connectors/connectors/google_takeout

@@ -7,7 +7,7 @@
       "repo": "data-connect",
       "sha": "187838be13f04e8ef7e7165169f750169a88cc1b",
       "branch": "main",
-      "note": "Merge of PDP-Connect/data-connect#63 into main on 2026-09-09. The runtime/protocol packages, collector definitions, and vendored connector sources are unchanged from the prior PR-head pin, so the existing 0.0.1 archives remain valid. The separate 1.0.0 release pin remains unchanged."
+      "note": "Merge of PDP-Connect/data-connect#63 into main on 2026-09-09. The runtime/protocol packages, collector definitions, and vendored connector sources are unchanged from the prior PR-head pin, so the existing 0.0.1 archives remain valid. The separate 1.0.0 release pin remains unchanged. This pin also backs drift job (e) local-collector packaging manifest: it supplies packages/local-collector/tsconfig.build.json, the compile list that job compares against this repo's connector registry."
     },
     "data-connect-1-0-0": {
       "owner": "PDP-Connect",
