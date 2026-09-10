@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { buildCollectorStartMessage } from "@pdpp/collector-runtime";
+import { definitionStreams } from "../src/collector-registry.ts";
 import {
 	buildConnectorSpec,
 	parseArgs,
@@ -270,3 +271,33 @@ test("default collector queue path is scoped by connection id", () => {
 		"/tmp/custom.json",
 	);
 });
+
+// ─── Default streams come from the collector definitions ──────────────────
+// The CLI's bundled per-connector defaults must be the stream set each
+// connector's own definition declares. A hand-copied table drifts silently,
+// and a run missing `coverage_diagnostics` leaves the drained collector on
+// `coverage_unknown`.
+for (const connector of ["codex", "claude_code"]) {
+	test(`CLI run --connector ${connector} defaults to its collector definition's streams`, () => {
+		const spec = buildConnectorSpec(
+			parseArgs([
+				"run",
+				"--base-url",
+				"http://127.0.0.1:7662",
+				"--connector",
+				connector,
+				"--device-id",
+				"dev",
+				"--device-token",
+				"tok",
+				"--source-instance-id",
+				"src",
+			]),
+		);
+		assert.deepEqual(spec.streams, [...definitionStreams(connector)]);
+		assert.ok(
+			spec.streams.includes("coverage_diagnostics"),
+			`${connector} must request coverage_diagnostics or a drained collector stays on coverage_unknown`,
+		);
+	});
+}

@@ -21,6 +21,7 @@ import type {
 	StartMessage,
 	StreamScope,
 } from "@pdpp/connector-protocol";
+import { definitionStreams } from "./collector-registry.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
 
 /**
@@ -35,28 +36,23 @@ export const CODEX_CONNECTOR_ID = "codex";
 export const CLAUDE_CODE_CONNECTOR_ID = "claude-code";
 export const AMAZON_CONNECTOR_ID = "amazon";
 export const IMESSAGE_CONNECTOR_ID = "imessage";
-export const DEFAULT_CODEX_STREAMS = [
-	"sessions",
-	"messages",
-	"function_calls",
-	"rules",
-	"prompts",
-	"skills",
-] as const;
-export const DEFAULT_CLAUDE_CODE_STREAMS = [
-	"sessions",
-	"messages",
-	"attachments",
-	"memory_notes",
-	"skills",
-	"slash_commands",
-] as const;
+
+// Each connector's own definition is the single source of truth for the
+// stream set an unscoped run requests; this runtime reads it rather than
+// restating it. The dependency only runs in this direction: definition
+// modules stay pure data with no Node built-ins so the publishable collector
+// build can re-export them, and this runtime already spawns child processes.
+export const DEFAULT_CODEX_STREAMS = definitionStreams("codex");
+export const DEFAULT_CLAUDE_CODE_STREAMS = definitionStreams("claude_code");
+export const DEFAULT_IMESSAGE_STREAMS = definitionStreams("imessage");
+
+/**
+ * Amazon is browser-bound, so it has no local-collector definition to derive
+ * from — the published collector bundle stays filesystem-class only (see
+ * `collector-registry.ts`). This list is declared here because this exporter
+ * is its only consumer, not because it duplicates one.
+ */
 export const DEFAULT_AMAZON_STREAMS = ["orders", "order_items"] as const;
-export const DEFAULT_IMESSAGE_STREAMS = [
-	"messages",
-	"participants",
-	"attachments",
-] as const;
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 const CONNECTOR_ENTRYPOINT_EXTENSION = import.meta.filename.endsWith(".js")
@@ -68,6 +64,10 @@ const CONNECTOR_ENTRYPOINT_EXTENSION = import.meta.filename.endsWith(".js")
  * export path (enroll → spawn connector → wrap RECORDs in
  * {device_id, source_instance_id, record_key} envelopes → ingest) is
  * connector-agnostic; this table is the only connector-specific part.
+ *
+ * `defaultStreams` is not restated here — each collector-backed profile takes
+ * the stream set its connector's own definition declares, so the exporter
+ * cannot request a narrower surface than the collector advertises.
  *
  * The default child command is `tsx <entrypoint>`; the connector itself owns
  * its source-home resolution from env (CODEX_HOME, CLAUDE_CODE_HOME, …), so
