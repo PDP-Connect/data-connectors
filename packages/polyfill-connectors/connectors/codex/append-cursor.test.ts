@@ -819,14 +819,7 @@ test("malformed early rollout loses only its bad line and preserves later-file o
 		state: { messages: state },
 	});
 	assert.equal(recordsFor(next.messages, "messages").length, 0);
-	assert.equal(
-		next.messages.filter(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "malformed_jsonl_line",
-		).length,
-		1,
-	);
+	assert.equal(gapsFor(next.messages, "malformed_jsonl_line").length, 1);
 	await appendFile(badPath, `${messageLine("appended")}\n`);
 	const appended = await runCodex({
 		codexHome,
@@ -910,14 +903,7 @@ test("unterminated rollout tail is declared, does not block later files, and is 
 			?.jsonl_gaps,
 		[],
 	);
-	assert.equal(
-		completed.messages.filter(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "truncated_jsonl_tail",
-		).length,
-		0,
-	);
+	assert.equal(gapsFor(completed.messages, "truncated_jsonl_tail").length, 0);
 });
 
 test("malformed initial metadata uses filename identity for later messages and calls", async (t) => {

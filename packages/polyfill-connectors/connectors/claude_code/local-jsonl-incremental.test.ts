@@ -9,13 +9,14 @@ import {
 	readFile,
 	rename,
 	rm,
+	symlink,
 	truncate,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
@@ -2026,3 +2027,159 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		);
 	});
 }
+
+test("transcript symlinks report targets without following outside sources and retain prior gaps", async (t) => {
+	const source = await makeSource();
+	const external = await mkdtemp(join(tmpdir(), "pdpp-claude-link-target-"));
+	t.after(async () => {
+		await rm(source.claudeHome, { recursive: true, force: true });
+		await rm(external, { recursive: true, force: true });
+	});
+	const outsideId = "00000000-0000-4000-8000-000000000099";
+	const outsidePath = join(external, "outside.jsonl");
+	await writeFile(
+		outsidePath,
+		`${transcriptLine(outsideId, "2026-07-21T00:09:00Z")}\n`,
+	);
+	await writeFile(
+		source.subagent,
+		`${await readFile(source.subagent, "utf8")}not-json\n`,
+	);
+	const streams = ["sessions", "messages", "coverage_diagnostics"];
+	const initial = await run({ ...source, streams });
+	await rename(source.top, join(source.claudeHome, "saved-top.jsonl"));
+	await rename(
+		source.subagent,
+		join(source.claudeHome, "saved-subagent.jsonl"),
+	);
+	await symlink(outsidePath, source.top);
+	await symlink(
+		relative(dirname(source.subagent), outsidePath),
+		source.subagent,
+	);
+	const linkedProject = join(source.projects, "-tmp-linked-project");
+	await symlink(external, linkedProject);
+	const healthyProject = join(source.projects, "-tmp-z-healthy");
+	await mkdir(healthyProject);
+	const healthySession = "22222222-2222-4222-8222-222222222222";
+	await writeFile(
+		join(healthyProject, `${healthySession}.jsonl`),
+		`${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`,
+	);
+	const linked = await run({ ...source, streams, state: initial.states });
+	assert.deepEqual(
+		linked.records
+			.filter((record) => record.stream === "messages")
+			.map((record) => record.data.id),
+		[IDS["top-3"]],
+	);
+	const assertLinks = (
+		result: Awaited<ReturnType<typeof run>>,
+		expected: [string, string][],
+	) => {
+		const gaps = result.messages.filter(
+			(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "messages" &&
+				message.reason === "symlink_skipped",
+		);
+		assert.equal(gaps.length, expected.length);
+		for (const [path, target_path] of expected)
+			assert.ok(
+				gaps.some(
+					(gap) =>
+						JSON.stringify(gap.diagnostics) ===
+						JSON.stringify({ path, target_path }),
+				),
+			);
+		assert.ok(
+			result.records.some(
+				(record) =>
+					record.stream === "coverage_diagnostics" &&
+					record.data.stream === "messages" &&
+					record.data.status === "unaccounted",
+			),
+		);
+		assert.ok(
+			result.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "malformed_jsonl_line",
+			),
+		);
+		for (const stream of ["sessions", "messages"]) {
+			const current = result.states[stream] as {
+				file_cursors: Record<string, unknown>;
+			};
+			const prior = initial.states[stream] as {
+				file_cursors: Record<string, unknown>;
+			};
+			assert.deepEqual(
+				current.file_cursors[source.top],
+				prior.file_cursors[source.top],
+			);
+			assert.deepEqual(
+				current.file_cursors[source.subagent],
+				prior.file_cursors[source.subagent],
+			);
+		}
+	};
+	assertLinks(linked, [
+		[source.top, outsidePath],
+		[source.subagent, outsidePath],
+		[linkedProject, external],
+	]);
+	const unchanged = await run({ ...source, streams, state: linked.states });
+	assert.deepEqual(
+		unchanged.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertLinks(unchanged, [
+		[source.top, outsidePath],
+		[source.subagent, outsidePath],
+		[linkedProject, external],
+	]);
+	const subagents = dirname(source.subagent);
+	await rename(subagents, join(source.claudeHome, "saved-subagents"));
+	await symlink(external, subagents);
+	const rootLinked = await run({ ...source, streams, state: unchanged.states });
+	assert.deepEqual(
+		rootLinked.records.filter((record) => record.stream === "messages"),
+		[],
+	);
+	assertLinks(rootLinked, [
+		[source.top, outsidePath],
+		[subagents, external],
+		[linkedProject, external],
+	]);
+	const scopedStreams = [
+		{ name: "messages", source_roots: ["/tmp/z-healthy"] },
+	];
+	const scoped = await runConnectorProtocolSubprocess({
+		cwd: join(import.meta.dirname, "../.."),
+		entrypoint: "connectors/claude_code/index.ts",
+		env: {
+			CLAUDE_CODE_HOME: source.claudeHome,
+			CLAUDE_CODE_PROJECTS_DIR: source.projects,
+		},
+		start: {
+			type: "START",
+			scope: {
+				streams: scopedStreams,
+			},
+		},
+	});
+	assert.equal(scoped.code, 0, scoped.stderr);
+	assert.deepEqual(
+		scoped.messages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	assert.deepEqual(
+		scoped.messages
+			.filter(
+				(message) => message.type === "RECORD" && message.stream === "messages",
+			)
+			.map((message) => (message.type === "RECORD" ? message.data.id : null)),
+		[IDS["top-3"]],
+	);
+});

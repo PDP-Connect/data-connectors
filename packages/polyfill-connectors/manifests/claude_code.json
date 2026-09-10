@@ -854,6 +854,7 @@
 		"source_directory_read_error": "We couldn't read this Claude Code folder. It will be checked again on the next run",
 		"source_read_error": "This Claude Code session log could not be collected and will be retried on the next run",
 		"source_unreadable": "We couldn't read this folder, so we don't know what's in it",
+		"symlink_skipped": "A symbolic link was skipped without reading its target. The skipped path is listed in the source diagnostics",
 		"truncated_jsonl_tail": "The last line of this Claude Code session log is incomplete and will be checked again on the next run"
 	},
 	"options_schema": {
