@@ -1,0 +1,297 @@
+name: Publish Polyfill Connectors
+
+# Publishes each Collection Profile connector as an INDIVIDUALLY VERSIONED OCI ARTIFACT
+# to GitHub Container Registry, signed with Cosign.
+#
+# This is the path settled in CONNECTOR-DISTRIBUTION-DECISION-0911.md: connector bytes
+# have exactly one source of truth, and it is not npm. npm carries the connector manager
+# — the thin client that fetches, verifies and pins these artifacts — and never connector
+# content. An earlier revision of this file published the connector library as an npm
+# package; that created the second source of truth the decision rules out, so it is
+# replaced rather than kept alongside.
+#
+# WHAT IS PUBLISHED. One repository per connector, derived from its `connector_key`:
+#
+#   ghcr.io/pdp-connect/connector/oura:0.1.0
+#
+# The artifact carries a config blob plus profile, code, assets, licence and provenance
+# layers, per OCI-ARTIFACT-DESIGN-0911.md §1. The layer bytes are produced by
+# scripts/build-connector-oci-artifact.mjs, which is a script rather than inline YAML for
+# the same reason the ref gate is: a build that cannot be run locally cannot be tested,
+# and the digest a consumer pins is decided by exactly those bytes.
+#
+# CREDENTIALS. There are none. `packages: write` on the job's GITHUB_TOKEN authenticates
+# the ORAS push, and Cosign signs keylessly against Sigstore using the Actions OIDC token
+# (`id-token: write`) — the signing identity is this repository and this workflow, and no
+# private key exists to leak or rotate. This is strictly simpler than the npm path it
+# replaces: npm trusted publishing cannot be configured on a package that does not yet
+# exist (npm/cli#8544), so that path needed one manual credentialed publish to bootstrap.
+# GHCR has no such hazard — `packages: write` works on run one, and the first push creates
+# the repository.
+#
+# REF RESTRICTION. `packages: write` plus a tag on any commit would otherwise mint a
+# release under the org's identity, signed by an identity naming this repository, from a
+# commit nobody reviewed. Tags carry no branch protection here and `workflow_dispatch`
+# runs from any branch, so both triggers are reachable from an unreviewed ref. The
+# `assert-publish-ref` step is the enforcement: it refuses unless the commit is contained
+# in `main`, and it runs FIRST, for every trigger, including dry runs. The threat is the
+# same shape as the npm one — if anything sharper, because a Sigstore signature is a
+# stronger claim than an npm tarball — so the guard carries over unchanged. It lives in
+# scripts/assert-publish-ref.mjs so it can be executed and tested;
+# scripts/publish-ref-gate.test.mjs runs it both ways and asserts this file still calls it
+# before any push or sign step.
+#
+# SCOPE. The matrix below names the connectors this path has actually been proven for,
+# rather than globbing all 46 of packages/polyfill-connectors/manifests/. Two reasons.
+# A connector that declares `external_tools` needs a per-platform binary layer that
+# scripts/build-connector-oci-artifact.mjs does not implement and will refuse to guess at
+# — Slack is the case, and it needs its own change. And a first publish is the wrong
+# moment to discover that some connector's bundle does not resolve; each entry added here
+# should be one whose artifact was built and imported first.
+
+on:
+  push:
+    tags:
+      - "connector-*-v*"
+  workflow_dispatch:
+    inputs:
+      connector:
+        description: "Connector key to publish (must appear in the matrix below)"
+        type: string
+        required: true
+      dry-run:
+        description: "Build and verify without pushing or signing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-polyfill-connectors-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.connector }} to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Push the artifact to GHCR under the org's identity.
+      packages: write
+      # Cosign keyless signing: the OIDC token is what Fulcio binds the
+      # certificate to, so the signature names this workflow rather than a key.
+      id-token: write
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Proven end to end. Grow this list one connector at a time.
+        connector:
+          - oura
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history so the ref gate below can test ancestry against main.
+          # A shallow clone has no merge base to reason about.
+          fetch-depth: 0
+
+      - name: Refuse to publish from a ref that is not main
+        # FIRST step after checkout, and deliberately not gated on the event or
+        # on dry-run: every path through this workflow passes through here. See
+        # the REF RESTRICTION note at the top of this file.
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # Refuse rather than fall back if the context did not populate this.
+          # An empty value would otherwise build the refspec "+refs/heads/:..."
+          # and the guard would silently compare against a branch nobody named.
+          if [ -z "${DEFAULT_BRANCH:-}" ]; then
+            echo "::error::github.event.repository.default_branch is empty — refusing to publish"
+            exit 1
+          fi
+
+          # A tag push checks out the tag, so origin/main is not present until
+          # fetched; fetch-depth: 0 gives us the objects, this gives us the ref.
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          node scripts/assert-publish-ref.mjs
+
+      - name: Select the connector and version this run publishes
+        # A tag names both: `connector-oura-v0.1.0`. Parsing it here, once, keeps
+        # every later step reading two plain outputs instead of re-deriving the
+        # split from github.ref. On workflow_dispatch the connector comes from
+        # the input and the version from the manifest.
+        id: target
+        env:
+          GIT_REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CONNECTOR: ${{ inputs.connector }}
+          MATRIX_CONNECTOR: ${{ matrix.connector }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            REST="${GIT_REF_NAME#connector-}"
+            CONNECTOR="${REST%-v*}"
+            VERSION="${REST##*-v}"
+          else
+            CONNECTOR="$INPUT_CONNECTOR"
+            VERSION="$(node -p "require('./packages/polyfill-connectors/manifests/${CONNECTOR}.json').version")"
+          fi
+
+          # The matrix is the allowlist of proven connectors. A tag or an input
+          # naming something outside it must not silently publish a connector
+          # whose artifact nobody has built — skip this matrix leg instead.
+          if [ "$CONNECTOR" != "$MATRIX_CONNECTOR" ]; then
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            echo "Run targets '$CONNECTOR'; this leg is '$MATRIX_CONNECTOR' — skipping."
+            exit 0
+          fi
+
+          # A tag that disagrees with the manifest is the mistake that cannot be
+          # undone after the fact: an OCI tag can technically be overwritten, but
+          # a digest that consumers have already pinned and verified cannot be
+          # recalled. Catch it before anything is pushed.
+          MANIFEST_VERSION="$(node -p "require('./packages/polyfill-connectors/manifests/${CONNECTOR}.json').version")"
+          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::tag implies ${CONNECTOR} version '$VERSION' but the manifest declares '$MANIFEST_VERSION'"
+            exit 1
+          fi
+
+          echo "selected=true" >> "$GITHUB_OUTPUT"
+          echo "connector=$CONNECTOR" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "repository=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/connector/${CONNECTOR}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.target.outputs.selected == 'true'
+        with:
+          # Matches the `engines.node` floor in packages/polyfill-connectors/package.json,
+          # so the bundle is produced by the toolchain CI proved green.
+          node-version: "24"
+
+      - name: Install dependencies
+        # `npm ci` from the committed lockfile: the artifact must be built from
+        # the exact dependency tree CI verified, not whatever the ranges resolve
+        # to today. --ignore-scripts skips patchright's browser download, which
+        # the bundle does not need.
+        if: steps.target.outputs.selected == 'true'
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Build the artifact layers
+        if: steps.target.outputs.selected == 'true'
+        run: |
+          node scripts/build-connector-oci-artifact.mjs \
+            --connector "${{ steps.target.outputs.connector }}" \
+            --version "${{ steps.target.outputs.version }}" \
+            --out "${RUNNER_TEMP}/artifact"
+
+      - name: Prove the built bundle imports before publishing it
+        # The gate that matters. The bundle is a single file with its in-tree
+        # graph already resolved, so the failure this catches is the one the
+        # source workspace cannot show: an external the bundler left dangling,
+        # or a top-level side effect that throws on load. Publishing without
+        # this ships exactly that failure to every host that installs.
+        if: steps.target.outputs.selected == 'true'
+        run: node scripts/verify-connector-oci-artifact.mjs --artifact "${RUNNER_TEMP}/artifact"
+
+      - name: Install ORAS
+        if: steps.target.outputs.selected == 'true'
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          version: "1.2.3"
+
+      - name: Install Cosign
+        if: steps.target.outputs.selected == 'true'
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: "v2.4.3"
+
+      - name: Push and sign
+        # Dry runs stop before this step: everything above is verification and
+        # runs identically either way, so a dry run exercises the whole build
+        # and proves the bundle loads without creating a release.
+        if: ${{ steps.target.outputs.selected == 'true' && (github.event_name == 'push' || !inputs.dry-run) }}
+        env:
+          # GITHUB_TOKEN is the credential. Nothing long-lived is stored here.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ steps.target.outputs.repository }}
+          VERSION: ${{ steps.target.outputs.version }}
+          CONNECTOR: ${{ steps.target.outputs.connector }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/artifact"
+
+          echo "$GH_TOKEN" | oras login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+          # The media types live in layers.json beside the bytes they describe,
+          # written by the build script, so they are not restated in YAML where
+          # they could drift from what was actually built.
+          mapfile -t LAYER_ARGS < <(node -e '
+            const spec = require("./layers.json");
+            for (const layer of spec.layers) console.log(`${layer.file}:${layer.mediaType}`);
+          ')
+
+          oras push "${REPOSITORY}:${VERSION}" \
+            --artifact-type application/vnd.pdpp.connector.v1+json \
+            --config config.json:application/vnd.pdpp.connector.config.v1+json \
+            --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "org.opencontainers.image.version=${VERSION}" \
+            --annotation "org.opencontainers.image.licenses=Apache-2.0" \
+            --annotation "dev.pdpp.connector.key=${CONNECTOR}" \
+            "${LAYER_ARGS[@]}"
+
+          # Sign the DIGEST, never the tag. A tag is mutable; signing it would
+          # produce a signature that keeps verifying after the bytes beneath it
+          # change, which is the exact assurance a signature is supposed to give.
+          DIGEST="$(oras resolve "${REPOSITORY}:${VERSION}")"
+          echo "published ${REPOSITORY}@${DIGEST}"
+
+          # Keyless. Fulcio issues a short-lived certificate bound to the OIDC
+          # token's identity — this repository and this workflow file — and the
+          # signature is logged to Rekor. There is no private key in this repo.
+          cosign sign --yes "${REPOSITORY}@${DIGEST}"
+
+          {
+            echo "### Published \`${CONNECTOR}\` ${VERSION}"
+            echo
+            echo "\`\`\`"
+            echo "${REPOSITORY}@${DIGEST}"
+            echo "\`\`\`"
+            echo
+            echo "Verify:"
+            echo "\`\`\`"
+            echo "cosign verify ${REPOSITORY}@${DIGEST} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish-polyfill-connectors\\.yml@' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the published signature
+        # Verifying from the same job that signed does not prove much about
+        # Sigstore, but it does prove the identity the certificate carries is
+        # the one a consumer will be told to expect — which is the part that is
+        # easy to get wrong and invisible until someone tries to verify.
+        if: ${{ steps.target.outputs.selected == 'true' && (github.event_name == 'push' || !inputs.dry-run) }}
+        env:
+          REPOSITORY: ${{ steps.target.outputs.repository }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(oras resolve "${REPOSITORY}:${VERSION}")"
+          cosign verify "${REPOSITORY}@${DIGEST}" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/publish-polyfill-connectors\.yml@" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
