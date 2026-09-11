@@ -39,6 +39,9 @@ jobs:
       - name: Test installer artifact contracts
         run: npm run installer:test
 
+      - name: Test publish ref gate
+        run: node --test scripts/publish-ref-gate.test.mjs
+
       - name: Checkout pinned PDPP source for GitHub artifact provenance
         run: |
           git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp-github"
