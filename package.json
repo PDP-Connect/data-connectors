@@ -4,6 +4,9 @@
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/connector-installer-core"
+  ],
   "files": [
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-cli/index.mjs",
@@ -18,7 +21,7 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "sigstore": "^5.0.0"
+    "@pdpp/connector-manager": "*"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",

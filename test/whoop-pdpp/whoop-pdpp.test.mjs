@@ -16,7 +16,7 @@ import {
   installFromLock,
   loadConnectorIndex,
   verifyInstalled,
-} from "../../packages/connector-installer-core/index.mjs";
+} from "@pdpp/connector-manager";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "whoop-pdpp");
