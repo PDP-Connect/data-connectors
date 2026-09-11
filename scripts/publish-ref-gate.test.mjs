@@ -358,6 +358,151 @@ test("the workflow installs packages/polyfill-connectors before it builds", () =
   );
 });
 
+test("signing is restricted to refs/heads/main, and the advertised identity says so", () => {
+  // P1-2. Two halves of one claim, asserted together because a mismatch between
+  // them IS the defect: the old expression ended at `@` and constrained nothing
+  // after it, so this same workflow file running on any unreviewed branch or
+  // arbitrary tag satisfied the policy consumers were handed.
+  //
+  // This is the layer that does not live in the editable checkout. The ancestry
+  // gate above is kept as an additional check, but an actor who can push a
+  // branch can edit that gate on their branch; they cannot change what OIDC
+  // claims about the ref their run is on.
+  const steps = parsePublishSteps();
+  const signing = steps.filter((step) =>
+    ["Push and sign", "Verify the published signature"].includes(step.keys.name || ""),
+  );
+  assert.equal(signing.length, 2, "expected the push/sign and verify steps");
+
+  for (const step of signing) {
+    const condition = step.keys.if || "";
+    assert.match(
+      condition,
+      /github\.ref\s*==\s*'refs\/heads\/main'/,
+      `'${step.keys.name}' must only run on refs/heads/main, got: ${condition}`,
+    );
+  }
+
+  // The identity must be EXACT and pinned to the same ref. A regexp ending at
+  // `@`, or any expression not naming refs/heads/main, re-opens the hole.
+  const workflow = readFileSync(workflowPath, "utf8");
+  const isComment = (line) => /^\s*#/.test(line);
+  const identityLines = workflow
+    .split("\n")
+    .filter((line) => !isComment(line) && /--certificate-identity/.test(line));
+  assert.ok(identityLines.length >= 2, "expected a consumer instruction and a verify invocation");
+
+  for (const line of identityLines) {
+    assert.doesNotMatch(
+      line,
+      /--certificate-identity-regexp/,
+      `identity must be exact, not a regexp that stops constraining: ${line.trim()}`,
+    );
+    assert.match(
+      line,
+      /publish-polyfill-connectors\.yml@refs\/heads\/main/,
+      `identity must pin the trusted workflow ref: ${line.trim()}`,
+    );
+  }
+});
+
+test("the signed digest comes from the push, and the tag is never re-resolved", () => {
+  // P1-3. The reproduced failure was `oras resolve` after the push: with the tag
+  // repointed in between, the workflow pushed A, signed B, verified B and exited
+  // 0. The fix is one value — read from the push's own structured output and
+  // carried through signing, verification and the receipt.
+  //
+  // NOTE, because the PR's earlier prose had this backwards: moving a tag does
+  // NOT invalidate a Cosign signature. Cosign checks the digest it signed. The
+  // defect was choosing the wrong content to sign, not signatures losing their
+  // binding.
+  const workflow = readFileSync(workflowPath, "utf8").split("\n");
+  const isComment = (line) => /^\s*#/.test(line);
+
+  const resolves = workflow.filter((line) => !isComment(line) && /\boras resolve\b/.test(line));
+  assert.deepEqual(
+    resolves,
+    [],
+    `the workflow must not re-resolve the mutable tag — that is how it came to sign content it never pushed: ${resolves.join(" | ")}`,
+  );
+
+  assert.ok(
+    workflow.some((line) => !isComment(line) && /oras push\b/.test(line)) &&
+      workflow.some((line) => !isComment(line) && /--format json/.test(line)),
+    "the push must request structured output so its digest can be captured",
+  );
+
+  // The verify step must consume the push step's output rather than deriving a
+  // digest of its own.
+  const steps = parsePublishSteps();
+  const verify = steps.find((step) => (step.keys.name || "") === "Verify the published signature");
+  assert.ok(verify, "expected a verify step");
+  assert.ok(
+    verify.lines.some((line) => /steps\.publish\.outputs\.digest/.test(line)),
+    "the verify step must verify the digest the push reported",
+  );
+});
+
+test("republishing different bytes under an existing version is refused", () => {
+  // P1-3, second half. An identical-byte retry must still succeed — re-running a
+  // release after a transient failure is legitimate — so the check compares
+  // digests rather than merely testing whether the tag exists.
+  const workflow = readFileSync(workflowPath, "utf8");
+  assert.match(
+    workflow,
+    /oras manifest fetch --descriptor/,
+    "the publish must look up the existing digest for this version before pushing",
+  );
+  assert.match(
+    workflow,
+    /LOCAL_DIGEST" \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
+    "the publish must refuse only when the existing digest DIFFERS — an identical retry is allowed",
+  );
+});
+
+test("the concurrency group serializes tag runs against main dispatches", () => {
+  // Keying on github.ref put a tag-triggered run and a main-branch dispatch in
+  // different groups, so the two paths that reach the same connector repository
+  // were never serialized against each other.
+  const workflow = readFileSync(workflowPath, "utf8").split("\n");
+  const group = workflow.find((line) => /^\s*group:/.test(line));
+  assert.ok(group, "expected a concurrency group");
+  assert.doesNotMatch(
+    group,
+    /github\.ref/,
+    `the concurrency group must not be keyed on the ref — a tag run and a main dispatch would not serialize: ${group.trim()}`,
+  );
+});
+
+test("the selection step passes its input as data, never as JavaScript source", () => {
+  // P1-1. The reproduced hole was `node -p "require('…/${CONNECTOR}.json')…"`:
+  // the dispatch input became part of a program, and the allowlist compared it
+  // only afterward, so a rejected name had already executed. The step now runs a
+  // fixed script that receives the name through the environment.
+  const steps = parsePublishSteps();
+  const select = steps.find((step) =>
+    (step.keys.name || "").startsWith("Select the connector"),
+  );
+  assert.ok(select, "expected the selection step");
+
+  const body = select.lines.filter((line) => !/^\s*#/.test(line)).join("\n");
+  assert.doesNotMatch(
+    body,
+    /node\s+-p\b/,
+    "the selection step must not build a program — pass the connector as data",
+  );
+  assert.doesNotMatch(
+    body,
+    /\$\{?CONNECTOR\}?[^\n]*\.json/,
+    "the selection step must not interpolate the connector name into a path or program",
+  );
+  assert.match(
+    body,
+    /node scripts\/select-publish-target\.mjs/,
+    "the selection step must run the validated selection script",
+  );
+});
+
 test("the publish workflow runs the gate before every step that can publish", () => {
   // The script being correct is worth nothing if the workflow stops calling it.
   // Compare line positions rather than parsing YAML: the ordering claim is

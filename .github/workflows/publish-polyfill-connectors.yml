@@ -29,17 +29,36 @@ name: Publish Polyfill Connectors
 # GHCR has no such hazard — `packages: write` works on run one, and the first push creates
 # the repository.
 #
-# REF RESTRICTION. `packages: write` plus a tag on any commit would otherwise mint a
-# release under the org's identity, signed by an identity naming this repository, from a
-# commit nobody reviewed. Tags carry no branch protection here and `workflow_dispatch`
-# runs from any branch, so both triggers are reachable from an unreviewed ref. The
-# `assert-publish-ref` step is the enforcement: it refuses unless the commit is contained
-# in `main`, and it runs FIRST, for every trigger, including dry runs. The threat is the
-# same shape as the npm one — if anything sharper, because a Sigstore signature is a
-# stronger claim than an npm tarball — so the guard carries over unchanged. It lives in
-# scripts/assert-publish-ref.mjs so it can be executed and tested;
+# REF RESTRICTION — TWO INDEPENDENT LAYERS. `packages: write` plus a tag on any commit
+# would otherwise mint a release under the org's identity, signed by an identity naming
+# this repository, from a commit nobody reviewed. Tags carry no branch protection here and
+# `workflow_dispatch` runs from any branch, so both triggers are reachable from an
+# unreviewed ref.
+#
+#   Layer 1 — WORKFLOW REF (the trust boundary). Signing only ever happens when this
+#   workflow itself runs from `refs/heads/main`, and consumers are told to require exactly
+#   that in the certificate identity. This is the layer that does not live inside the
+#   checkout it protects: an actor who pushes an unreviewed branch gets a certificate
+#   naming `…/publish-polyfill-connectors.yml@refs/heads/<their-branch>`, which the
+#   consumer policy below rejects — no matter what they edited in their branch's copy of
+#   the guard, because they cannot change what OIDC claims about their own ref. The
+#   previous identity expression stopped constraining at `@` and so accepted the workflow
+#   on any branch or tag; that made the advertised policy part of the defect rather than a
+#   check on it. Release tags therefore no longer publish; a tag push builds and verifies
+#   but cannot sign, and the release itself is dispatched from main.
+#
+#   Layer 2 — SOURCE COMMIT ANCESTRY (an additional check, not the boundary). The
+#   `assert-publish-ref` step refuses unless the commit is contained in `main`, and it runs
+#   FIRST, for every trigger, including dry runs. It is kept because it is a genuinely
+#   different question from layer 1 — layer 1 constrains which workflow file executes,
+#   layer 2 constrains which source tree it publishes — but it is explicitly NOT relied on
+#   alone: it lives in the editable checkout, so on an unreviewed branch it could be
+#   weakened or its invocation removed. That is precisely why layer 1 exists.
+#
+# The guard lives in scripts/assert-publish-ref.mjs so it can be executed and tested;
 # scripts/publish-ref-gate.test.mjs runs it both ways and asserts this file still calls it
-# before any push or sign step.
+# before any push or sign step, and that the signing ref condition and the consumer
+# identity expression agree with each other.
 #
 # SCOPE. The matrix below names the connectors this path has actually been proven for,
 # rather than globbing all 46 of packages/polyfill-connectors/manifests/. Two reasons.
@@ -50,6 +69,10 @@ name: Publish Polyfill Connectors
 # should be one whose artifact was built and imported first.
 
 on:
+  # A release tag still triggers a BUILD AND VERIFY — useful, and it keeps the tag as the
+  # thing that marks a release — but it can no longer push or sign. See REF RESTRICTION
+  # layer 1: only a run whose own ref is refs/heads/main mints a certificate consumers
+  # accept, and tags carry no branch protection here, so a tag is not an authorization.
   push:
     tags:
       - "connector-*-v*"
@@ -60,7 +83,7 @@ on:
         type: string
         required: true
       dry-run:
-        description: "Build and verify without pushing or signing"
+        description: "Build and verify without pushing or signing. Uncheck, from main, to release."
         type: boolean
         default: true
 
@@ -68,7 +91,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-polyfill-connectors-${{ github.ref }}
+  # Deliberately NOT keyed on github.ref. Keying on the ref put a tag-triggered run and a
+  # main-branch dispatch in different groups, so the two paths that publish the same
+  # connector repository were never serialized against each other — which is the only
+  # overlap that matters, because it is the one that can interleave two pushes to one
+  # `repository:version`. One group for the whole workflow is coarser than necessary and
+  # that is the point: correctness here is worth more than parallelism across connectors
+  # that publish once per release.
+  group: publish-polyfill-connectors
   cancel-in-progress: false
 
 jobs:
@@ -125,51 +155,26 @@ jobs:
           node scripts/assert-publish-ref.mjs
 
       - name: Select the connector and version this run publishes
-        # A tag names both: `connector-oura-v0.1.0`. Parsing it here, once, keeps
-        # every later step reading two plain outputs instead of re-deriving the
-        # split from github.ref. On workflow_dispatch the connector comes from
-        # the input and the version from the manifest.
+        # A tag names both: `connector-oura-v0.1.0`. On workflow_dispatch the
+        # connector comes from the input and the version from the manifest.
+        #
+        # The inputs reach a SCRIPT as environment data and are never pasted into
+        # a program. The previous inline version interpolated the dispatch input
+        # into `node -p` source and only compared it against the matrix
+        # allowlist AFTERWARD, so a rejected name had already executed its
+        # payload — inside this job, which holds `packages: write` and
+        # `id-token: write`, on dry runs too. scripts/select-publish-target.mjs
+        # validates syntax and membership BEFORE it constructs any path, and
+        # reads the manifest with readFile/JSON.parse rather than `require` of a
+        # name-derived path. scripts/select-publish-target.test.mjs executes both
+        # halves of that ordering.
         id: target
         env:
           GIT_REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_CONNECTOR: ${{ inputs.connector }}
           MATRIX_CONNECTOR: ${{ matrix.connector }}
-        run: |
-          set -euo pipefail
-
-          if [ "$EVENT_NAME" = "push" ]; then
-            REST="${GIT_REF_NAME#connector-}"
-            CONNECTOR="${REST%-v*}"
-            VERSION="${REST##*-v}"
-          else
-            CONNECTOR="$INPUT_CONNECTOR"
-            VERSION="$(node -p "require('./packages/polyfill-connectors/manifests/${CONNECTOR}.json').version")"
-          fi
-
-          # The matrix is the allowlist of proven connectors. A tag or an input
-          # naming something outside it must not silently publish a connector
-          # whose artifact nobody has built — skip this matrix leg instead.
-          if [ "$CONNECTOR" != "$MATRIX_CONNECTOR" ]; then
-            echo "selected=false" >> "$GITHUB_OUTPUT"
-            echo "Run targets '$CONNECTOR'; this leg is '$MATRIX_CONNECTOR' — skipping."
-            exit 0
-          fi
-
-          # A tag that disagrees with the manifest is the mistake that cannot be
-          # undone after the fact: an OCI tag can technically be overwritten, but
-          # a digest that consumers have already pinned and verified cannot be
-          # recalled. Catch it before anything is pushed.
-          MANIFEST_VERSION="$(node -p "require('./packages/polyfill-connectors/manifests/${CONNECTOR}.json').version")"
-          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
-            echo "::error::tag implies ${CONNECTOR} version '$VERSION' but the manifest declares '$MANIFEST_VERSION'"
-            exit 1
-          fi
-
-          echo "selected=true" >> "$GITHUB_OUTPUT"
-          echo "connector=$CONNECTOR" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "repository=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/connector/${CONNECTOR}" >> "$GITHUB_OUTPUT"
+        run: node scripts/select-publish-target.mjs
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: steps.target.outputs.selected == 'true'
@@ -237,7 +242,16 @@ jobs:
         # Dry runs stop before this step: everything above is verification and
         # runs identically either way, so a dry run exercises the whole build
         # and proves the bundle loads without creating a release.
-        if: ${{ steps.target.outputs.selected == 'true' && (github.event_name == 'push' || !inputs.dry-run) }}
+        #
+        # `github.ref == 'refs/heads/main'` is layer 1 of the ref restriction and
+        # is NOT redundant with the ancestry gate. The gate lives in this
+        # checkout and an unreviewed branch can edit it; this condition decides
+        # whether the OIDC identity Fulcio binds says `@refs/heads/main`, which
+        # is what consumers are told to require and what a branch cannot forge.
+        # It is why a release tag no longer signs: a tag run builds and verifies,
+        # and the signing publish is dispatched from main.
+        if: ${{ steps.target.outputs.selected == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
+        id: publish
         env:
           # GITHUB_TOKEN is the credential. Nothing long-lived is stored here.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -259,6 +273,18 @@ jobs:
             for (const layer of spec.layers) console.log(`${layer.file}:${layer.mediaType}`);
           ')
 
+          # REPUBLICATION CHECK, before the push. A version identifier that has
+          # already been published must keep meaning the same bytes. If the tag
+          # exists and resolves to a DIFFERENT digest than the one we are about
+          # to push, refuse — that is a version being quietly redefined.
+          # Identical-byte retries are allowed and are the reason this compares
+          # digests rather than merely testing existence: re-running a release
+          # after a transient failure is legitimate and must not need a version
+          # bump. Installed digest pins stay safe either way, but a reused
+          # version identifier that names different content is dishonest.
+          LOCAL_DIGEST="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).digest)}catch{}})' || true)"
+
           oras push "${REPOSITORY}:${VERSION}" \
             --artifact-type application/vnd.pdpp.connector.v1+json \
             --config config.json:application/vnd.pdpp.connector.config.v1+json \
@@ -267,17 +293,41 @@ jobs:
             --annotation "org.opencontainers.image.version=${VERSION}" \
             --annotation "org.opencontainers.image.licenses=Apache-2.0" \
             --annotation "dev.pdpp.connector.key=${CONNECTOR}" \
-            "${LAYER_ARGS[@]}"
+            --format json "${LAYER_ARGS[@]}" > push-result.json
 
-          # Sign the DIGEST, never the tag. A tag is mutable; signing it would
-          # produce a signature that keeps verifying after the bytes beneath it
-          # change, which is the exact assurance a signature is supposed to give.
-          DIGEST="$(oras resolve "${REPOSITORY}:${VERSION}")"
+          # THE digest. Read from the completed push's own structured output —
+          # ORAS 1.2's `--format json` reports the descriptor it just wrote — and
+          # carried unchanged through signing, verification, the receipt and the
+          # consumer instructions below.
+          #
+          # The previous revision instead RE-RESOLVED the mutable tag here, and
+          # again in the verify step. That let the workflow sign and verify
+          # content it had not pushed: with the tag repointed between push and
+          # resolve, it pushed A, signed B, verified B and exited 0. Note what
+          # the defect is and is not — moving a tag does not make an old Cosign
+          # signature valid for different bytes, because Cosign checks the signed
+          # digest. The defect was this workflow SELECTING the wrong content to
+          # sign. One value, captured once, is the whole fix.
+          DIGEST="$(node -e 'console.log(JSON.parse(require("fs").readFileSync("push-result.json","utf8")).digest)')"
+
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::push did not report a sha256 digest (got '${DIGEST}')"; exit 1 ;;
+          esac
+
+          if [ -n "$LOCAL_DIGEST" ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
+            echo "::error::${REPOSITORY}:${VERSION} already published as ${LOCAL_DIGEST}; refusing to redefine it as ${DIGEST}. Publish a new version instead."
+            exit 1
+          fi
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "published ${REPOSITORY}@${DIGEST}"
 
-          # Keyless. Fulcio issues a short-lived certificate bound to the OIDC
-          # token's identity — this repository and this workflow file — and the
-          # signature is logged to Rekor. There is no private key in this repo.
+          # Sign the DIGEST captured above, never the tag and never a re-resolve.
+          # Keyless: Fulcio issues a short-lived certificate bound to the OIDC
+          # token's identity — this repository, this workflow file, and (layer 1
+          # of the ref restriction) refs/heads/main — and the signature is logged
+          # to Rekor. There is no private key in this repo.
           cosign sign --yes "${REPOSITORY}@${DIGEST}"
 
           {
@@ -290,9 +340,13 @@ jobs:
             echo "Verify:"
             echo "\`\`\`"
             echo "cosign verify ${REPOSITORY}@${DIGEST} \\"
-            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish-polyfill-connectors\\.yml@' \\"
+            echo "  --certificate-identity 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main' \\"
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
             echo "\`\`\`"
+            echo
+            echo "Pin the digest above, not the tag. The identity is EXACT, not a prefix:"
+            echo "it names refs/heads/main, so a certificate minted by this same workflow"
+            echo "file running on any other branch or tag does not satisfy it."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the published signature
@@ -300,13 +354,34 @@ jobs:
         # Sigstore, but it does prove the identity the certificate carries is
         # the one a consumer will be told to expect — which is the part that is
         # easy to get wrong and invisible until someone tries to verify.
-        if: ${{ steps.target.outputs.selected == 'true' && (github.event_name == 'push' || !inputs.dry-run) }}
+        #
+        # Verifies THE digest the push reported, taken from the publish step's
+        # output. It does not re-resolve the tag: re-resolving is how the
+        # previous revision came to verify content it had never pushed.
+        #
+        # `--certificate-identity` (exact), not `--certificate-identity-regexp`
+        # with a trailing `@`. The old expression stopped constraining at the
+        # `@`, so it accepted this workflow file running on an unreviewed branch
+        # or an arbitrary tag — an actor who could push a branch could edit the
+        # in-checkout guard there and still satisfy the advertised policy. An
+        # instruction that accepts any ref is part of the defect, so this string
+        # and the consumer instruction above are the same string.
+        if: ${{ steps.target.outputs.selected == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
         env:
           REPOSITORY: ${{ steps.target.outputs.repository }}
-          VERSION: ${{ steps.target.outputs.version }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          DIGEST="$(oras resolve "${REPOSITORY}:${VERSION}")"
+
+          # The digest must have come from the push. An empty value here would
+          # otherwise make `cosign verify` run against a malformed reference and
+          # the failure would look like a signing problem rather than a broken
+          # hand-off between steps.
+          if [ -z "${DIGEST:-}" ]; then
+            echo "::error::no digest was carried from the push step — refusing to verify"
+            exit 1
+          fi
+
           cosign verify "${REPOSITORY}@${DIGEST}" \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/publish-polyfill-connectors\.yml@" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
