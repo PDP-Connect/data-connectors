@@ -1,17 +1,22 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Guards the npm publish ref restriction. npm's trusted-publisher record binds
-// a repository and a workflow filename but cannot restrict which ref publishes,
-// so the workflow itself has to refuse anything that is not on main. Two things
-// must hold, and both are checked here by execution rather than by reading:
+// Guards the publish ref restriction. `packages: write` plus Sigstore keyless
+// signing let any reachable ref mint a release under the org's identity, and
+// neither tags nor workflow_dispatch are restricted to main here, so the
+// workflow itself has to refuse anything that is not on main. Two things must
+// hold, and both are checked here by execution rather than by reading:
 //
 //   1. scripts/assert-publish-ref.mjs admits a commit contained in main and
 //      refuses one that is not — exercised against real throwaway git repos,
 //      for a tag push, a branch dispatch, and the degenerate inputs.
 //   2. .github/workflows/publish-polyfill-connectors.yml actually calls it,
-//      before every step that can reach `npm publish`. A correct script that
-//      nothing invokes is the regression this half exists to catch.
+//      before every step that can reach `oras push` or `cosign sign`. A correct
+//      script that nothing invokes is the regression this half exists to catch.
+//
+// One non-security assertion rides along: that the workflow installs
+// packages/polyfill-connectors before building. This is the only suite that
+// reads that workflow, and no PR-time CI executes it.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -305,6 +310,51 @@ test("a dry run cannot reach the push-and-sign step", () => {
     condition,
     /!inputs\.dry-run/,
     `the push step must not run on a dry run, got: ${condition}`,
+  );
+});
+
+test("the workflow installs packages/polyfill-connectors before it builds", () => {
+  // Not a security claim like the rest of this file — a can-it-run-at-all one,
+  // kept here because this is the only suite that reads the publish workflow.
+  //
+  // The root `workspaces` list is `packages/connector-installer-core` alone and
+  // the root manifest never names packages/polyfill-connectors, so a root
+  // `npm ci` leaves that package with no node_modules.
+  // scripts/verify-connector-oci-artifact.mjs resolves the built bundle's
+  // externals against exactly that tree and refuses when it is absent, so
+  // installing only the root makes the workflow fail its own verify step on
+  // every trigger, dry runs included — the build exits 0 and the gate exits 1.
+  // No PR-time CI runs this workflow, so nothing else would catch its removal.
+  const steps = parsePublishSteps();
+
+  const installIndex = steps.findIndex((step) =>
+    step.lines.some((line) =>
+      /npm ci\b.*--prefix packages\/polyfill-connectors/.test(line),
+    ),
+  );
+  assert.notEqual(
+    installIndex,
+    -1,
+    "the publish workflow must run `npm ci` for packages/polyfill-connectors — the verify step resolves the bundle's externals against that tree and refuses without it",
+  );
+
+  const buildIndex = steps.findIndex((step) =>
+    step.lines.some((line) => /build-connector-oci-artifact\.mjs/.test(line)),
+  );
+  assert.notEqual(buildIndex, -1, "expected a step that builds the artifact layers");
+  assert.ok(
+    installIndex < buildIndex,
+    "the polyfill-connectors install must precede the artifact build",
+  );
+
+  // --ignore-scripts on this install too, for the reason the root one carries
+  // it: patchright's postinstall downloads a browser the bundle never uses.
+  const installStep = steps[installIndex];
+  assert.ok(
+    installStep.lines.some((line) =>
+      /npm ci\b.*--ignore-scripts.*--prefix packages\/polyfill-connectors/.test(line),
+    ),
+    "the polyfill-connectors install must pass --ignore-scripts, as the root install does",
   );
 });
 

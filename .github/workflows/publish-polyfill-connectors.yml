@@ -183,11 +183,26 @@ jobs:
         # the exact dependency tree CI verified, not whatever the ranges resolve
         # to today. --ignore-scripts skips patchright's browser download, which
         # the bundle does not need.
+        #
+        # BOTH trees are installed, because they are separate installs and the
+        # verify step needs the second one. The root `workspaces` list is
+        # `packages/connector-installer-core` alone and the root manifest never
+        # names packages/polyfill-connectors, so a root `npm ci` does not create
+        # that package's node_modules. scripts/verify-connector-oci-artifact.mjs
+        # resolves the built bundle's externals against exactly that tree — on
+        # purpose, so the import check runs against the versions the lockfile
+        # pins — and refuses when it is absent. Installing only the root here
+        # made the workflow fail its own gate on every trigger, dry runs
+        # included: build exits 0, verify exits 1. scripts/publish-ref-gate.test.mjs
+        # asserts this step is still here and still precedes the build.
         if: steps.target.outputs.selected == 'true'
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix packages/polyfill-connectors
 
       - name: Build the artifact layers
         if: steps.target.outputs.selected == 'true'
