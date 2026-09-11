@@ -11,7 +11,7 @@ import {
   readJson,
   verifyInstalled,
   checkForUpdates,
-} from "../connector-installer-core/index.mjs";
+} from "@pdpp/connector-manager";
 
 function usage() {
   console.error(`Usage:
