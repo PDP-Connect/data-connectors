@@ -33,6 +33,9 @@ jobs:
       - name: Test catalog and connector artifact contracts
         run: node --test scripts/connector-artifact-contract.test.mjs scripts/generate-scope-catalog.test.mjs
 
+      - name: Test schema health check gate
+        run: node --test scripts/schema-health-gate.test.mjs
+
       - name: Test installer artifact contracts
         run: npm run installer:test
 
