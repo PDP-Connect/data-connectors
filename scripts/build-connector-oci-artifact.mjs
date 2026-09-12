@@ -86,15 +86,17 @@ function declaredDependencies() {
  * carry.
  *
  * The obvious check — `if (profile.external_tools)` — does not work, and
- * believing it did would be the expensive mistake here. NONE of the 46
- * manifests declares `external_tools`; the field does not exist in the tree.
- * Slack nonetheless shells out to a `slackdump` binary it expects on `PATH`,
- * and its bundle builds and imports perfectly cleanly, because a missing
- * subprocess is a RUN-time failure, not a load-time one. Trusting the absent
- * field would therefore have published a Slack artifact that verifies, signs,
- * installs, and then fails on the first collection against a host that happens
- * not to have slackdump installed — the precise failure this distribution path
- * exists to eliminate.
+ * believing it did would be the expensive mistake here. That key is empty on
+ * every one of the 45 manifests: the three that declare external tools
+ * (`google_messages`, `signal`, `slack`) spell it `runtime_requirements
+ * .external_tools`, so the top-level read is `undefined` for all 45 and the
+ * check silently passes everything. Slack shells out to a `slackdump` binary it
+ * expects on `PATH`, and its bundle builds and imports perfectly cleanly,
+ * because a missing subprocess is a RUN-time failure, not a load-time one.
+ * Trusting that read would therefore have published a Slack artifact that
+ * verifies, signs, installs, and then fails on the first collection against a
+ * host that happens not to have slackdump installed — the precise failure this
+ * distribution path exists to eliminate.
  *
  * So the check is positive: look at what the code actually reaches for.
  *
@@ -224,7 +226,7 @@ function filesUnder(root, prefix = "") {
 async function main() {
 	// `--connector` names the on-disk directory and manifest FILE, which is
 	// snake_case throughout the tree. It is not necessarily the connector's
-	// identity: 11 of the 46 manifests spell `connector_key` in kebab-case
+	// identity: 11 of the 45 manifests spell `connector_key` in kebab-case
 	// (`apple_health.json` declares `apple-health`), and `connector_id`
 	// consistently follows `connector_key` rather than the filename.
 	//
@@ -370,7 +372,7 @@ async function main() {
 	//   import-safe: guards its startup with `isMainModule`, so importing it is
 	//     side-effect free and its exports ARE its interface. Oura is one.
 	//   executable:  no guard. Importing it starts collection, which then exits
-	//     because stdin carries no START message. 18 of the 46 are like this,
+	//     because stdin carries no START message. 18 of the 45 are like this,
 	//     and they legitimately export nothing.
 	//
 	// The kind is derived from the source, not assumed, and recorded in the
@@ -398,7 +400,7 @@ async function main() {
 
 	// ---- assets layer -----------------------------------------------------
 	// Optional per the design doc's layer cardinality table. The brand icon is
-	// the only asset any of the 46 manifests declares today.
+	// the only asset any of the 45 manifests declares today.
 	let assetsTarball = null;
 	const iconRelative = profile.brand?.icon;
 	if (iconRelative) {

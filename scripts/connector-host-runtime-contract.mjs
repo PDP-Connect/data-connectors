@@ -26,13 +26,20 @@
  * the build, because it would make module loading depend on bytes the artifact
  * does not carry. That is precisely the failure this contract exists to stop.
  *
- * Why these packages, and only these: they drive a real browser. Bundling
- * patchright's JavaScript would not help, because the thing it needs is a
- * downloaded Chromium install and a matching host OS — bytes an artifact cannot
- * carry in any useful sense (the design explicitly does not bundle an OS).
- * better-sqlite3 is a compiled native addon for the host's ABI. Shipping the
- * per-platform tool layer is tracked as separate work; until it lands, a
- * connector that STATICALLY needs any of these fails the build by name.
+ * Why these packages. Most are here because they are genuinely host-coupled:
+ * bundling patchright's JavaScript would not help, because the thing it needs
+ * is a downloaded Chromium install and a matching host OS — bytes an artifact
+ * cannot carry in any useful sense (the design explicitly does not bundle an
+ * OS) — and better-sqlite3 is a compiled native addon for the host's ABI.
+ * Shipping the per-platform tool layer is tracked as separate work.
+ *
+ * imapflow is the exception and is labelled as one below, because an entry
+ * whose stated reason is false is worse than no entry: it stops anyone
+ * rechecking. It is bundleable, it is listed only until the bundler grows a
+ * createRequire banner, and the reason recorded against it says so.
+ *
+ * Until an entry is removed, a connector that STATICALLY needs any of these
+ * fails the build by name.
  */
 
 import { builtinModules } from "node:module";
@@ -64,7 +71,7 @@ export const HOST_PROVIDED = new Map([
 	],
 	[
 		"imapflow",
-		"CommonJS IMAP client whose dependency tree (pino, thread-stream, sonic-boom) resolves modules through runtime require() and worker threads. Bundling it to ESM produces a module that throws 'Dynamic require is not supported' on load, so its bytes cannot travel usefully; the host installs it.",
+		"CommonJS IMAP client, listed here pending the bundler change that would remove it. NOT a native or host-coupled dependency: the earlier reason recorded here — that its pino/thread-stream/sonic-boom tree resolves modules through runtime require() and worker threads — was wrong, and execution contradicts it. The 'Dynamic require is not supported' failure is an esbuild ESM-output artifact over the Node builtin `tls`, not a property of imapflow. Bundling it and adding the standard createRequire banner produces a bundle that loads on a host with no node_modules and drives imapflow for real (default pino logger emits, connect() reaches a clean ECONNREFUSED); thread-stream never spawns a worker because imapflow calls bare pino() with no transport. Adopting the banner affects every connector, so it is its own change; until it lands, gmail is refused by name rather than published broken.",
 	],
 	[
 		"canvas",
