@@ -50,6 +50,13 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	classifyExternals,
+	HOST_PROVIDED,
+	HOST_RUNTIME_CONTRACT_VERSION,
+	hostNodeRange,
+	packageNameOf,
+} from "./connector-host-runtime-contract.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
@@ -58,15 +65,16 @@ const sha256 = (value) =>
 	`sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 /**
- * Every npm package a Collection Profile connector is allowed to leave
- * external, taken from packages/polyfill-connectors/package.json dependencies.
+ * The connector package's declared dependencies, used for provenance only.
  *
- * This list is an allowlist, not a description. A bundle that reaches for
- * something absent here fails the build rather than becoming an artifact that
- * installs and then throws at collection time on a host that happens not to
- * have it. That is the same invariant build-pdpp-artifact.mjs:87-91 enforces.
+ * This used to be the bundler's `external` list, which is what made the
+ * artifact unable to stand on its own: every dependency was left out of the
+ * bytes, and provenance recorded version RANGES and repository-relative
+ * `file:./vendor/*.tgz` paths in their place. Neither is an installable set for
+ * anyone who is not standing in this checkout. What travels in the artifact is
+ * now decided by the host-runtime contract, not by this list.
  */
-function runtimeDependencyAllowlist() {
+function declaredDependencies() {
 	const manifest = JSON.parse(
 		readFileSync(join(packageRoot, "package.json"), "utf8"),
 	);
@@ -271,9 +279,21 @@ async function main() {
 
 	assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory);
 
+	// `--version` exists so CI can assert the tag it is publishing under, not so
+	// it can relabel the artifact. The profile layer is copied byte-for-byte, so
+	// an override that disagrees with it would ship a config saying 9.9.9 beside
+	// a profile saying 0.1.0 — two answers to "which version is this?" inside
+	// one immutable digest. The override may only CONFIRM the canonical value.
 	const version = argument("--version", profile.version);
 	if (!/^\d+\.\d+\.\d+/.test(version)) {
 		throw new Error(`Version must be semver, got ${version}`);
+	}
+	if (version !== profile.version) {
+		throw new Error(
+			`--version ${version} contradicts the Collection Profile's version ${profile.version}. ` +
+				"The profile layer ships unchanged, so the override may only restate the canonical version; " +
+				`to publish ${version}, change ${relative(repoRoot, manifestPath)} first.`,
+		);
 	}
 
 	const revision = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -290,10 +310,13 @@ async function main() {
 	const esbuild = await import(
 		esbuildPath === "esbuild" ? "esbuild" : `file://${esbuildPath}`
 	);
-	const allowlist = runtimeDependencyAllowlist();
+	const declared = declaredDependencies();
 	const codeStaging = join(staging, "code");
 	mkdirSync(codeStaging, { recursive: true });
 
+	// Only the host-runtime contract's packages stay external. Everything else
+	// the entrypoint can reach is bundled, so the code layer carries the bytes
+	// it needs instead of expecting to find them in the publisher's node_modules.
 	const build = await esbuild.build({
 		absWorkingDir: packageRoot,
 		banner: {
@@ -301,7 +324,7 @@ async function main() {
 		},
 		bundle: true,
 		entryPoints: [entrySource],
-		external: [...allowlist.keys()],
+		external: [...HOST_PROVIDED.keys()],
 		format: "esm",
 		metafile: true,
 		minifyWhitespace: true,
@@ -311,30 +334,57 @@ async function main() {
 		target: "node24",
 	});
 
-	const externalImports = [
+	// Classify what the finished bundle still references against the contract.
+	//
+	// The metafile's INPUT graph is what carries the import kind, and the kind
+	// decides the verdict: a static import of a host-provided package makes
+	// loading impossible without bytes the artifact lacks, while a dynamic one
+	// cannot run before the host has already provisioned the capability. Reading
+	// only the output imports would lose that distinction.
+	const externalEdges = Object.values(build.metafile.inputs)
+		.flatMap((input) => input.imports ?? [])
+		.filter((entry) => entry.external);
+
+	const { violations, hostProvided } = classifyExternals(externalEdges);
+	if (violations.length) {
+		throw new Error(
+			`${connectorKey} violates the host-runtime contract (scripts/connector-host-runtime-contract.mjs):\n  - ${violations.join("\n  - ")}`,
+		);
+	}
+
+	// The entrypoint's declared interface, taken from what esbuild actually
+	// emitted rather than from a name this script knows in advance. Hardcoding
+	// `collectOura` would make a shared builder accumulate one provider-specific
+	// export name per connector; deriving it means the artifact carries its own
+	// answer and the verifier can check any connector without being taught about it.
+	const expectedExports = [
 		...new Set(
 			Object.values(build.metafile.outputs)
-				.flatMap((output) => output.imports)
-				.filter(
-					(entry) => entry.external && !entry.path.startsWith("node:"),
-				)
-				.map((entry) => entry.path),
+				.flatMap((output) => output.exports ?? []),
 		),
 	].sort();
 
-	// A subpath import like "@pdpp/connector-protocol/auth" is satisfied by the
-	// "@pdpp/connector-protocol" dependency, so the allowlist check compares
-	// package names, not specifiers.
-	const packageNameOf = (specifier) =>
-		specifier.startsWith("@")
-			? specifier.split("/").slice(0, 2).join("/")
-			: specifier.split("/")[0];
-	const undeclared = externalImports.filter(
-		(specifier) => !allowlist.has(packageNameOf(specifier)),
-	);
-	if (undeclared.length) {
+	// Connectors come in two shapes, and conflating them is how a verifier ends
+	// up either rejecting healthy artifacts or accepting broken ones.
+	//
+	//   import-safe: guards its startup with `isMainModule`, so importing it is
+	//     side-effect free and its exports ARE its interface. Oura is one.
+	//   executable:  no guard. Importing it starts collection, which then exits
+	//     because stdin carries no START message. 18 of the 46 are like this,
+	//     and they legitimately export nothing.
+	//
+	// The kind is derived from the source, not assumed, and recorded in the
+	// artifact so the verifier knows which contract to hold the entrypoint to.
+	const entrypointKind = readFileSync(entrySource, "utf8").includes(
+		"isMainModule",
+	)
+		? "import-safe"
+		: "executable";
+
+	if (entrypointKind === "import-safe" && !expectedExports.length) {
 		throw new Error(
-			`Undeclared external imports remain: ${undeclared.join(", ")}`,
+			`${connectorKey} guards its startup with isMainModule but its bundle exports nothing, so importing it ` +
+				"does nothing and exposes no interface. There would be no way to tell a working artifact from an empty one.",
 		);
 	}
 
@@ -426,11 +476,36 @@ async function main() {
 			},
 		},
 		runtime_requirements: profile.runtime_requirements ?? null,
-		external_runtime_packages: externalImports.map((specifier) => ({
-			specifier,
-			package: packageNameOf(specifier),
-			version: allowlist.get(packageNameOf(specifier)),
-		})),
+		// What the artifact does NOT carry, and what the host must therefore
+		// provide. This replaces the old `external_runtime_packages`, which
+		// listed every declared dependency against a version range or a
+		// `file:./vendor/*.tgz` path — values that describe this repository's
+		// checkout rather than anything a consumer could install.
+		host_runtime_contract: {
+			version: HOST_RUNTIME_CONTRACT_VERSION,
+			node: hostNodeRange(
+				JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")),
+			),
+			// Empty for a connector like Oura, which is fully self-contained.
+			packages: hostProvided.map((entry) => ({
+				specifier: entry.specifier,
+				package: entry.package,
+				declared_version: declared.get(entry.package) ?? null,
+				reason: HOST_PROVIDED.get(entry.package),
+				loaded: entry.kind,
+			})),
+		},
+		bundled_dependencies: [
+			...new Set(
+				Object.keys(build.metafile.inputs)
+					.filter((input) => input.includes("node_modules"))
+					.map((input) =>
+						packageNameOf(
+							input.slice(input.lastIndexOf("node_modules/") + 13),
+						),
+					),
+			),
+		].sort(),
 		outputs: {
 			"collection-profile.json": sha256(profileBytes),
 			"code.tar.gz": sha256(codeTarball),
@@ -463,7 +538,19 @@ async function main() {
 			node: JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"))
 				.engines?.node,
 			bindings: Object.keys(profile.runtime_requirements?.bindings ?? {}).sort(),
+			// The contract a consumer must satisfy, carried in the blob the
+			// manager reads BEFORE it pulls, so an unsupportable artifact can be
+			// declined rather than installed and discovered at collection time.
+			host_runtime_contract: {
+				version: HOST_RUNTIME_CONTRACT_VERSION,
+				packages: hostProvided.map((entry) => entry.package).sort(),
+			},
 		},
+		// How the entrypoint must be driven, and what it must expose. The verifier
+		// derives its expectation from THESE, rather than hardcoding `collectOura`
+		// and growing a per-provider list in a shared script.
+		entrypoint_kind: entrypointKind,
+		exports: expectedExports,
 		bundled_tools: [],
 		licenses: "Apache-2.0",
 		source: {
