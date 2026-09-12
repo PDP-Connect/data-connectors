@@ -11,13 +11,22 @@
 
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { LocalDeviceBlobSpool, LocalDeviceOutbox } from "@pdpp/collector-runtime";
+import {
+	LocalDeviceBlobSpool,
+	LocalDeviceOutbox,
+} from "@pdpp/collector-runtime";
 
 import type { ArtifactCaptureContext } from "./artifact-capture.ts";
 import { emitToolResultFile } from "./index.ts";
@@ -104,10 +113,19 @@ describe("claude_code artifact capture", () => {
 		const record = await emitFile(h, "big-output.txt", body);
 
 		assert.equal(record.artifact_capture, "captured");
-		assert.equal(record.artifact_sha256, createHash("sha256").update(body).digest("hex"));
+		assert.equal(
+			record.artifact_sha256,
+			createHash("sha256").update(body).digest("hex"),
+		);
 		// The whole body is durably held, not just the prefix.
-		assert.deepEqual(await readFile(h.spool.pathFor(record.artifact_sha256 as string)), body);
-		assert.equal(h.spool.sizeOf(record.artifact_sha256 as string), body.byteLength);
+		assert.deepEqual(
+			await readFile(h.spool.pathFor(record.artifact_sha256 as string)),
+			body,
+		);
+		assert.equal(
+			h.spool.sizeOf(record.artifact_sha256 as string),
+			body.byteLength,
+		);
 		h.outbox.close();
 	});
 
