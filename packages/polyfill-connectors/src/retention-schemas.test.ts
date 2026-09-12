@@ -195,13 +195,18 @@ test("required root and chunk keys cannot be dropped or padded with unknown keys
 			`chunk blob_ref must require ${key}`,
 		);
 	}
-	for (const key of [
-		"start_offset",
-		"end_offset",
-		"byte_count",
-		"sha256",
-		"blob_ref",
-	]) {
+	// Derived from the fixtures rather than listed, so this covers EVERY required
+	// key instead of a chosen subset. The round-trip test above proves each
+	// fixture parses back to itself with no defaults applied, so its own key set
+	// is exactly the schema's required set. A key added to either schema arrives
+	// here with the fixture that has to carry it.
+	const chunkKeys = Object.keys(chunk);
+	assert.equal(
+		chunkKeys.length,
+		15,
+		"chunk fixture must carry every required chunk key",
+	);
+	for (const key of chunkKeys) {
 		const { [key]: _dropped, ...rest } = chunk as Record<string, unknown>;
 		assert.equal(
 			retentionChunkSchema.safeParse(rest).success,
@@ -209,21 +214,13 @@ test("required root and chunk keys cannot be dropped or padded with unknown keys
 			`chunk must require ${key}`,
 		);
 	}
-	for (const key of [
-		"session_id",
-		"parent_session_id",
-		"identity_basis",
-		"capture_id",
-		"source_relative_path",
-		"source_view",
-		"start_offset",
-		"end_offset",
-		"byte_count",
-		"sha256",
-		"previous_capture_id",
-		"manifest_pages",
-		"pages_sha256",
-	]) {
+	const rootKeys = Object.keys(root);
+	assert.equal(
+		rootKeys.length,
+		23,
+		"root fixture must carry every required root key",
+	);
+	for (const key of rootKeys) {
 		const { [key]: _dropped, ...rest } = root as Record<string, unknown>;
 		assert.equal(
 			retentionManifestRootSchema.safeParse(rest).success,
