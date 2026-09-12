@@ -34,6 +34,14 @@ const githubAuthoring = read(githubAuthoringPath);
 const legacySkill = read(legacySkillPath);
 const legacyCreate = read(legacyCreatePath);
 const collectionProfile = read(collectionProfilePath);
+// Binding names have NO upstream closed-set validator anywhere in this repo or
+// in the vendored PDPP contract: the binding-name set is closed by prose in
+// docs/spec/collection-profile.md section 3.3, not by an executable validator.
+// This array is therefore the only executable source for the set. It is not
+// derived, so it is held honest from both sides instead: the manifest sweep
+// below asserts every manifest-declared binding is in this array (code -> set),
+// and the exact-set table comparison asserts the published spec table lists
+// exactly this set and nothing more (set -> doc).
 const standardBindings = [
   "browser",
   "desktop_session",
@@ -41,6 +49,14 @@ const standardBindings = [
   "interactive",
   "network",
 ];
+// Mirrors the `CoverageProofStrategy` union in the vendored reference contract
+// (@pdpp/reference-contract/evidence, evidence/coherence.ts:38). That union is
+// a TYPE, so it erases at runtime and this plain-JS script cannot import it.
+// Drift against that union is caught by the typed pin in
+// packages/polyfill-connectors/connectors/_conformance/coverage-strategy-vocabulary.ts,
+// which declares this same list as `CoverageProofStrategy[]` and so fails to
+// COMPILE if the upstream union gains or loses a member. Keep the two in sync;
+// drift between that pin and the spec table fails the exact-set check below.
 const coverageStrategies = [
   "checkpoint_window",
   "full_inventory",
@@ -83,6 +99,21 @@ function headingFragments(content) {
     counts.set(base, count + 1);
   }
   return fragments;
+}
+
+/**
+ * Collects the leading code-span cell of every body row of the FIRST markdown
+ * table under `heading`. This reads the published vocabulary out of the doc so
+ * it can be compared as an exact set: an existence check alone only proves
+ * doc superset-of code, which lets an invented extra row pass unnoticed.
+ */
+function tableRowKeys(content, heading) {
+  const section = content.split(new RegExp(`^${heading}$`, "m"))[1] ?? "";
+  const table = section.match(
+    /\n\| *[A-Za-z`][^\n]*\|\n\| *-[^\n]*\|\n((?:\|[^\n]*\|\n)+)/,
+  );
+  assert.ok(table, `Collection Profile section ${heading} must have a table`);
+  return [...table[1].matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]);
 }
 
 function assertLocalMarkdownLinksResolve(path) {
@@ -208,13 +239,16 @@ assert.equal(
 );
 assert.equal(index.connectors["github-pdpp"][0].releaseId, "unpublished");
 
-for (const binding of standardBindings) {
-  assert.match(
-    collectionProfile,
-    new RegExp("\\| `" + binding + "` \\|"),
-    `Collection Profile must define the ${binding} binding`,
-  );
-}
+// Exact-set comparisons, not existence checks. These fail both on a missing
+// row (doc lost a real member) and on an invented row (doc published a member
+// no manifest or validator recognizes).
+assert.deepEqual(
+  tableRowKeys(collectionProfile, "### 3.3 Standard bindings").sort(),
+  [...standardBindings].sort(),
+  "Collection Profile binding table must match the standard binding set exactly",
+);
+// The rejected legacy binding names must not reappear anywhere in the spec,
+// including in prose outside the table that the exact-set check cannot see.
 for (const legacyBinding of [
   "browser_automation",
   "browser_profile",
@@ -226,13 +260,14 @@ for (const legacyBinding of [
     `Collection Profile must not publish the rejected ${legacyBinding} binding`,
   );
 }
-for (const strategy of coverageStrategies) {
-  assert.match(
+assert.deepEqual(
+  tableRowKeys(
     collectionProfile,
-    new RegExp("\\| `" + strategy + "` \\|"),
-    `Collection Profile must define the ${strategy} coverage strategy`,
-  );
-}
+    "### 3.5 Coverage and freshness strategies",
+  ).sort(),
+  [...coverageStrategies].sort(),
+  "Collection Profile coverage_strategy table must match the coverage strategy set exactly",
+);
 assert.match(
   collectionProfile,
   /`DONE\.status` has two values:\s+`succeeded` and `failed`/,
