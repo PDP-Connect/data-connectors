@@ -1,0 +1,400 @@
+{
+  "schema": "pdpp.test-accounting/v3",
+  "inventory_base_sha": "abc720e9bec812d9321349b931a40a9bcf8378cd",
+  "suites": [
+    {
+      "id": "mutation-falsification",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/mutation-falsification/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "accounting",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/test-accounting/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "migration-oracle",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/test-migration/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "polyfill-connectors",
+      "cwd": "packages/polyfill-connectors",
+      "loader": "node-test",
+      "execution": "authority-runner",
+      "authority_argument": "--accounting-authority",
+      "command": [
+        "node",
+        "scripts/run-tests.mjs"
+      ],
+      "include": [
+        "packages/polyfill-connectors/bin/**/*.test.ts",
+        "packages/polyfill-connectors/connectors/**/*.test.ts",
+        "packages/polyfill-connectors/scripts/related-tests/*.test.ts",
+        "packages/polyfill-connectors/scripts/**/*.test.mjs",
+        "packages/polyfill-connectors/src/**/*.test.ts"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {
+            "GROUPME_ACCESS_TOKEN unset": 2,
+            "local Amazon raw-DOM fixture directory not present": 2,
+            "local Chase raw-DOM fixture directory not present": 3,
+            "local USAA raw fixture directory not present": 1,
+            "requires --experimental-test-module-mocks": 1,
+            "run with --expose-gc for a reliable memory-growth comparison": 1,
+            "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
+            "network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted — either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) — refusing to fall back to a PATH-resolved lookup": 2,
+            "requires usable bwrap": 10,
+            "requires usable bwrap and unshare bind mounts": 5,
+            "requires usable unshare bind mounts": 23,
+            "requires usable unshare": 4,
+            "requires usable bwrap prerequisites": 19,
+            "requires usable unshare prerequisites": 19,
+            "requires writable socket location: an ssh-agent-shaped path under $HOME/.ssh/agent": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "root-anthropic",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/anthropic/__tests__/claude-code-trajectories.test.cjs",
+        "connectors/anthropic/__tests__/claude-export-classifier.test.cjs",
+        "connectors/anthropic/__tests__/claude-export-ingest.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-openai",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/openai/__tests__/chatgpt-classifier.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-openai-browser",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "connectors/openai/__tests__/chatgpt-resume.browser.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_BROWSER_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-installer",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "packages/connector-installer-core/index.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-runner",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "playwright-runner/result-classifier.conformance.test.cjs",
+        "playwright-runner/result-classifier.test.cjs",
+        "playwright-runner/runner-compat.test.cjs",
+        "playwright-runner/zip-reader.test.cjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-schemas",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "schemas/connector-index.schema.test.mjs",
+        "schemas/manifest.schema.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-tooling",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "scripts/brand-icon-fleet.test.mjs",
+        "scripts/connector-artifact-contract.test.mjs",
+        "scripts/create-connector.test.mjs",
+        "scripts/generate-connector-index.test.mjs",
+        "scripts/generate-scope-catalog.test.mjs",
+        "scripts/schema-artifact-kind.test.mjs",
+        "scripts/schema-health-gate.test.mjs",
+        "scripts/test-connectors.test.cjs",
+        "scripts/youtube-watched-at.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-chatgpt",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/chatgpt-pdpp/chatgpt-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-github",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/github-pdpp/github-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    },
+    {
+      "id": "root-artifact-whoop",
+      "cwd": ".",
+      "loader": "node-test",
+      "execution": "direct",
+      "authority_argument": null,
+      "command": [
+        "node",
+        "--test",
+        "--import",
+        "tsx",
+        "--test-reporter",
+        "scripts/test-accounting/node-reporter.ts"
+      ],
+      "include": [
+        "test/whoop-pdpp/whoop-pdpp.test.mjs"
+      ],
+      "profiles": [
+        {
+          "id": "provisioned",
+          "required": false,
+          "skip_reasons": {},
+          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+        }
+      ]
+    }
+  ],
+  "exclusions": [
+    {
+      "path": "packages/polyfill-connectors/connectors/github/index.test.ts",
+      "suite": "polyfill-connectors",
+      "profile": "default",
+      "reason": "Requires the reference implementation ingest pipeline; owned by cross-repository semantic CI, not this local package suite.",
+      "owner": "PDP-Connect maintainers",
+      "expires": "2026-12-06"
+    }
+  ]
+}

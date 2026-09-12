@@ -38,11 +38,23 @@
     "scope-catalog:generate": "node ./scripts/generate-scope-catalog.mjs",
     "scope-catalog:check": "node ./scripts/generate-scope-catalog.mjs --check",
     "scope-catalog:test": "node --test ./scripts/generate-scope-catalog.test.mjs",
-    "release:sign": "node ./scripts/sign-release-assets.mjs"
+    "release:sign": "node ./scripts/sign-release-assets.mjs",
+    "test:mutation-falsification": "node --import tsx scripts/test-accounting/authority.ts --run --suite mutation-falsification --profile default",
+    "test:accounting": "node --import tsx scripts/test-accounting/authority.ts --run --suite accounting --profile default",
+    "test:migration-oracle": "node --import tsx scripts/test-accounting/authority.ts --run --suite migration-oracle --profile default",
+    "test:polyfill-accounted": "node --import tsx scripts/test-accounting/authority.ts --run --suite polyfill-connectors --profile default",
+    "typecheck:mutation-falsification": "tsc --noEmit -p scripts/mutation-falsification/tsconfig.json",
+    "mutation:groupme-pilot": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts",
+    "mutation:groupme-preflight": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts --preflight"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
     "esbuild": "0.28.2",
-    "zod": "4.5.4"
-  }
+    "zod": "4.5.4",
+    "@babel/parser": "8.0.4",
+    "@types/node": "26.4.0",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "npm@11.12.1"
 }
