@@ -46,15 +46,19 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npm ci
 
-      - name: Build the real Oura artifact
+      # Builds the PILOT connector, which is the one the publish workflow's
+      # matrix ships (`ynab`). Keeping the two in step is the point: the gate
+      # should fail on the bytes that are about to be published, not on a
+      # different connector's.
+      - name: Build the real pilot artifact
         run: |
           node scripts/build-connector-oci-artifact.mjs \
-            --connector oura \
-            --out "$RUNNER_TEMP/oura" \
+            --connector ynab \
+            --out "$RUNNER_TEMP/pilot" \
             --esbuild "$PWD/packages/polyfill-connectors/node_modules/esbuild/lib/main.js"
 
       - name: Verify it
-        run: node scripts/verify-connector-oci-artifact.mjs --artifact "$RUNNER_TEMP/oura"
+        run: node scripts/verify-connector-oci-artifact.mjs --artifact "$RUNNER_TEMP/pilot"
 
       # The standing acceptance criterion, run as a separate step so a failure
       # names the thing that actually broke: the shipped bytes must load with no
@@ -63,11 +67,11 @@ jobs:
         run: |
           set -euo pipefail
           host="$(mktemp -d)"
-          tar -xzf "$RUNNER_TEMP/oura/code.tar.gz" -C "$host"
+          tar -xzf "$RUNNER_TEMP/pilot/code.tar.gz" -C "$host"
           test ! -e "$host/node_modules"
           # The expected interface comes from the artifact's own config blob, so
           # this step needs no knowledge of any connector's export names.
-          CLEAN_HOST="$host" ARTIFACT="$RUNNER_TEMP/oura" node --input-type=module --eval '
+          CLEAN_HOST="$host" ARTIFACT="$RUNNER_TEMP/pilot" node --input-type=module --eval '
             import { readFileSync } from "node:fs";
             const host = process.env.CLEAN_HOST;
             const config = JSON.parse(readFileSync(process.env.ARTIFACT + "/config.json", "utf8"));

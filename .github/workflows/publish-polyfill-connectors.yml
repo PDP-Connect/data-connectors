@@ -12,7 +12,7 @@ name: Publish Polyfill Connectors
 #
 # WHAT IS PUBLISHED. One repository per connector, derived from its `connector_key`:
 #
-#   ghcr.io/pdp-connect/connector/oura:0.1.0
+#   ghcr.io/pdp-connect/connector/ynab:0.3.0
 #
 # The artifact carries a config blob plus profile, code, assets, licence and provenance
 # layers, per OCI-ARTIFACT-DESIGN-0911.md §1. The layer bytes are produced by
@@ -118,8 +118,23 @@ jobs:
       fail-fast: false
       matrix:
         # Proven end to end. Grow this list one connector at a time.
+        #
+        # The pilot is `ynab`, not `oura`. Oura is registered on the owner's
+        # instance but collects nothing (freshness unknown, zero records), so
+        # publishing it proves the build and the transport and then stops short
+        # of the link that matters: an artifact a consumer installs and actually
+        # collects with. YNAB has 11 streams currently collecting, authenticates
+        # with a personal access token rather than browser automation or a
+        # native helper, and the owner holds the credential — so a published
+        # artifact can be taken all the way to real records.
+        #
+        # It also satisfies the self-sufficiency rule in
+        # scripts/connector-host-runtime-contract.mjs by construction: its only
+        # external imports are @pdpp/connector-protocol and zod, both pure ESM
+        # and both bundled. Contrast `gmail`, which the builder refuses by name
+        # because it statically imports imapflow's CommonJS tree.
         connector:
-          - oura
+          - ynab
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
