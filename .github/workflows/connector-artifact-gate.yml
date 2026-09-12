@@ -1,0 +1,87 @@
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Exercise the OCI build-and-verify path on every pull request, WITHOUT any
+# ability to publish.
+#
+# The reviewer's finding on #97: five PR-triggered workflows were green at the
+# reviewed head, and not one of them ran the builder or the verifier. The
+# publish workflow is the only thing that executes this path, and it does not
+# run on pull requests — so the artifact contract had no PR-time coverage at
+# all, and both P1-4 and P1-5 reached review behind green checks.
+#
+# This job is deliberately powerless. `permissions: contents: read`, no
+# `packages: write`, no `id-token: write`, no registry login, no cosign. It
+# builds real bytes, verifies them against an independently constructed host,
+# and runs the negative controls. It cannot sign or push anything.
+
+name: Connector artifact gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connector-artifact-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  artifact-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: packages/polyfill-connectors/package.json
+
+      # The builder needs esbuild and the connector sources; the VERIFIER
+      # deliberately does not use this tree, which is the point of P1-4.
+      - name: Install connector package
+        working-directory: packages/polyfill-connectors
+        run: npm ci
+
+      - name: Build the real Oura artifact
+        run: |
+          node scripts/build-connector-oci-artifact.mjs \
+            --connector oura \
+            --out "$RUNNER_TEMP/oura" \
+            --esbuild "$PWD/packages/polyfill-connectors/node_modules/esbuild/lib/main.js"
+
+      - name: Verify it
+        run: node scripts/verify-connector-oci-artifact.mjs --artifact "$RUNNER_TEMP/oura"
+
+      # The standing acceptance criterion, run as a separate step so a failure
+      # names the thing that actually broke: the shipped bytes must load with no
+      # node_modules, no npm install, and no access to the build checkout.
+      - name: Load the artifact on an independently constructed host
+        run: |
+          set -euo pipefail
+          host="$(mktemp -d)"
+          tar -xzf "$RUNNER_TEMP/oura/code.tar.gz" -C "$host"
+          test ! -e "$host/node_modules"
+          # The expected interface comes from the artifact's own config blob, so
+          # this step needs no knowledge of any connector's export names.
+          CLEAN_HOST="$host" ARTIFACT="$RUNNER_TEMP/oura" node --input-type=module --eval '
+            import { readFileSync } from "node:fs";
+            const host = process.env.CLEAN_HOST;
+            const config = JSON.parse(readFileSync(process.env.ARTIFACT + "/config.json", "utf8"));
+            const mod = await import("file://" + host + "/collection-profile.mjs");
+            const missing = config.exports.filter((name) => !(name in mod));
+            if (missing.length) {
+              console.error("missing exports on a clean host: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log("clean host loaded the artifact; exports: " + Object.keys(mod).sort().join(","));
+          '
+
+      - name: Artifact contract tests, including the negative controls
+        run: node --test scripts/connector-oci-artifact.test.mjs
+
+      - name: Publish-ref gate tests
+        run: node --test scripts/publish-ref-gate.test.mjs
