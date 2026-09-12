@@ -12,7 +12,7 @@
  * manifest, lockfile, receipt validator) is immutable and digest-bound —
  * see `groupme-runner.ts`'s forbidden-path enforcement.
  *
- * Both preimages are quoted here as they existed at commit `3f41ef9b18c18818745ecfb7a389657c231634a4`
+ * Both preimages are quoted here as they existed at commit `abc720e9bec812d9321349b931a40a9bcf8378cd`
  * (this branch's HEAD when this file was authored) in
  * `packages/polyfill-connectors/connectors/groupme/index.ts`.
  */
@@ -42,7 +42,7 @@ export interface GroupMeOperator {
 //
 // Preimage: `collectGroupMessagesForwardFromCursor`'s `usedCursors`
 // declaration immediately followed by its unbounded `for (;;) { ... }` loop
-// opener (index.ts lines ~1345-1349, as of 3f41ef9b18c18818745ecfb7a389657c231634a4). The identical
+// opener (index.ts lines ~1345-1349, as of abc720e9bec812d9321349b931a40a9bcf8378cd). The identical
 // `for (;;) {` loop-opener text also appears, byte-for-byte, at the start
 // of the SEPARATE backward-walk function later in this same file — the
 // `usedCursors` line is included specifically to make this preimage match
@@ -95,7 +95,7 @@ export const GROUPME_PAGE_CEILING_V1: GroupMeOperator = {
 // ── Operator 2: groupme-nonprogress-weakening-dc-v1 ───────────────────────────
 //
 // Preimage: `isAscendingByCreatedAt`'s complete function body (index.ts
-// lines 1306-1315, as of 3f41ef9b18c18818745ecfb7a389657c231634a4) — the per-page ordering check that
+// lines 1306-1315, as of abc720e9bec812d9321349b931a40a9bcf8378cd) — the per-page ordering check that
 // `collectGroupMessagesForwardFromCursor` (its sole call site, line ~1399)
 // uses to decide whether to trust a forward page's cursor at all. Postimage:
 // the function unconditionally returns `true`, i.e. it never detects a

@@ -1,6 +1,6 @@
 {
   "schema": "pdpp.test-accounting/v3",
-  "inventory_base_sha": "3f41ef9b18c18818745ecfb7a389657c231634a4",
+  "inventory_base_sha": "abc720e9bec812d9321349b931a40a9bcf8378cd",
   "suites": [
     {
       "id": "mutation-falsification",
@@ -296,6 +296,7 @@
         "scripts/generate-connector-index.test.mjs",
         "scripts/generate-scope-catalog.test.mjs",
         "scripts/schema-artifact-kind.test.mjs",
+        "scripts/schema-health-gate.test.mjs",
         "scripts/test-connectors.test.cjs",
         "scripts/youtube-watched-at.test.mjs"
       ],
