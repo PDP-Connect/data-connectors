@@ -1,7 +1,7 @@
 {
   "name": "@pdpp/connector-manager",
   "version": "0.1.0",
-  "description": "Registry-neutral connector manager: resolves, verifies, pins and installs signed connector artifacts.",
+  "description": "Resolves, verifies, pins and installs signed connector artifacts from a signed index. Does not consume OCI registry artifacts yet.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./index.mjs",
@@ -16,7 +16,7 @@
     "NOTICE"
   ],
   "engines": {
-    "node": ">=20.11"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "repository": {
     "type": "git",
