@@ -61,7 +61,7 @@ name: Publish Polyfill Connectors
 # identity expression agree with each other.
 #
 # SCOPE. The matrix below names the connectors this path has actually been proven for,
-# rather than globbing all 46 of packages/polyfill-connectors/manifests/. Two reasons.
+# rather than globbing all 45 of packages/polyfill-connectors/manifests/. Two reasons.
 # A connector that declares `external_tools` needs a per-platform binary layer that
 # scripts/build-connector-oci-artifact.mjs does not implement and will refuse to guess at
 # — Slack is the case, and it needs its own change. And a first publish is the wrong
@@ -205,15 +205,17 @@ jobs:
         # the bundle does not need.
         #
         # BOTH trees are installed, because they are separate installs and the
-        # verify step needs the second one. The root `workspaces` list is
+        # BUILD step needs the second one. The root `workspaces` list is
         # `packages/connector-installer-core` alone and the root manifest never
         # names packages/polyfill-connectors, so a root `npm ci` does not create
-        # that package's node_modules. scripts/verify-connector-oci-artifact.mjs
-        # resolves the built bundle's externals against exactly that tree — on
-        # purpose, so the import check runs against the versions the lockfile
-        # pins — and refuses when it is absent. Installing only the root here
-        # made the workflow fail its own gate on every trigger, dry runs
-        # included: build exits 0, verify exits 1. scripts/publish-ref-gate.test.mjs
+        # that package's node_modules. scripts/build-connector-oci-artifact.mjs
+        # needs that tree because esbuild resolves the connector's dependencies
+        # from it in order to bundle their bytes into the artifact.
+        #
+        # The VERIFY step deliberately does NOT use it. It builds an empty host
+        # with no node_modules and no path back into this checkout, because an
+        # artifact that only loads against the publisher's installed tree is an
+        # artifact that fails on every consumer. scripts/publish-ref-gate.test.mjs
         # asserts this step is still here and still precedes the build.
         if: steps.target.outputs.selected == 'true'
         env:
