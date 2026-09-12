@@ -1,5 +1,16 @@
 # Vendored dependency pins (transitional)
 
+> **`pdpp-collector-runtime-0.0.1.tgz` is currently packed from an UNMERGED
+> data-connect branch** (`waspflow/blob-upload-outbox-0911`), which adds the
+> byte-carrying artifact spool (`LocalDeviceBlobSpool`, `captureBlobArtifact`,
+> and the `blob_upload` drain) that this repo's `claude_code` artifact capture
+> depends on. The cross-repo pin below still names a merged `main` commit that
+> does NOT contain those modules, so drift job (c) tarball-digests will fail
+> until the data-connect PR merges and this tarball is repacked from the
+> resulting merge commit. That is a known, temporary inconsistency, not a
+> silent-wrong-version hazard: the digest above is recorded so the mismatch is
+> explicit rather than discovered later.
+
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
 `e5916d3a6265495ec3e7f324b29e0403958c52fe` (see `.github/cross-repo-pins.json`). This package
@@ -27,9 +38,12 @@ rejected outright rather than treated as a partial win.
   for PDP-Connect/data-connect#94, which rewrote `packages/connector-protocol/src/auth.ts` —
   a packed input, so the compiled `dist/auth.js` and `dist/auth.d.ts` change and the archive
   digest moves with them. Every other file in `pdpp-connector-protocol-0.0.1.tgz` is
-  byte-identical to the previous archive. `pdpp-collector-runtime-0.0.1.tgz` is NOT re-vendored:
-  #94 left its packed inputs alone and a fresh repack at this commit reproduces the committed
-  `e274fb45...` digest exactly. The new connector-protocol digest matches data-connect's own
+  byte-identical to the previous archive. `pdpp-collector-runtime-0.0.1.tgz` IS re-vendored on
+  this branch — not by #94, which left its packed inputs alone, but by the unmerged
+  `waspflow/blob-upload-outbox-0911` branch described in the note at the top of this file. Its
+  digest therefore moves from `e274fb45...` to `8179983f...` and will move again when that branch
+  merges and the tarball is repacked from the merge commit.
+  The new connector-protocol digest matches data-connect's own
   `packages/connector-protocol/artifact.json` `artifact_sha256` at this commit. Built with
   Node 22.23.2, npm 10.9.8, and TypeScript 7.0.2. The separate 1.0.0 release pin remains
   unchanged.
@@ -84,7 +98,7 @@ rejected outright rather than treated as a partial win.
   `package-lock.json` once installed):
 
   ```
-  e274fb459cce011f3c290ab92a0d83252fa91af671d33e37e3809edea06fafbf  pdpp-collector-runtime-0.0.1.tgz
+  8179983ff6a1cf2c643a3faf007bada571eb8717790e17f1596c39cbc4f4c90d  pdpp-collector-runtime-0.0.1.tgz
   7a937c137af0b3208635aad1bd73f56a584de73ce8903255a6b2c6e1b9d0831d  pdpp-connector-protocol-0.0.1.tgz
   8271e75949f85e57de8ca4ed557e73b6706e3680c9ad7a986bd290d94797e8d6  pdpp-reference-contract-0.0.1.tgz
   ```
