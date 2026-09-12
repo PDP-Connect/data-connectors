@@ -166,6 +166,167 @@ test("v1 root, page, chunk and receipt fixtures round-trip without defaults", ()
 	);
 });
 
+test("required root and chunk keys cannot be dropped or padded with unknown keys", () => {
+	const chunk = {
+		...provenance,
+		start_offset: 0,
+		end_offset: 1,
+		byte_count: 1,
+		sha256: digest,
+		blob_ref: {
+			blob_id: `blob_sha256_${digest}`,
+			sha256: digest,
+			size_bytes: 1,
+			mime_type: "application/octet-stream",
+		},
+	};
+	assert.equal(retentionChunkSchema.safeParse(chunk).success, true);
+	assert.equal(retentionManifestRootSchema.safeParse(root).success, true);
+
+	// Presence is load-bearing: an absent key must never be treated as "unconstrained".
+	for (const key of ["blob_id", "sha256", "size_bytes", "mime_type"]) {
+		const { [key]: _dropped, ...blob_ref } = chunk.blob_ref as Record<
+			string,
+			unknown
+		>;
+		assert.equal(
+			retentionChunkSchema.safeParse({ ...chunk, blob_ref }).success,
+			false,
+			`chunk blob_ref must require ${key}`,
+		);
+	}
+	for (const key of [
+		"start_offset",
+		"end_offset",
+		"byte_count",
+		"sha256",
+		"blob_ref",
+	]) {
+		const { [key]: _dropped, ...rest } = chunk as Record<string, unknown>;
+		assert.equal(
+			retentionChunkSchema.safeParse(rest).success,
+			false,
+			`chunk must require ${key}`,
+		);
+	}
+	for (const key of [
+		"session_id",
+		"parent_session_id",
+		"identity_basis",
+		"capture_id",
+		"source_relative_path",
+		"source_view",
+		"start_offset",
+		"end_offset",
+		"byte_count",
+		"sha256",
+		"previous_capture_id",
+		"manifest_pages",
+		"pages_sha256",
+	]) {
+		const { [key]: _dropped, ...rest } = root as Record<string, unknown>;
+		assert.equal(
+			retentionManifestRootSchema.safeParse(rest).success,
+			false,
+			`root must require ${key}`,
+		);
+	}
+
+	// Strictness is load-bearing: unknown keys change a record's digest, so they must
+	// never ride along silently inside an identity-bearing structure.
+	assert.equal(
+		retentionChunkSchema.safeParse({ ...chunk, smuggled: "x" }).success,
+		false,
+		"chunk must reject unknown keys",
+	);
+	assert.equal(
+		retentionChunkSchema.safeParse({
+			...chunk,
+			blob_ref: { ...chunk.blob_ref, smuggled: "x" },
+		}).success,
+		false,
+		"chunk blob_ref must reject unknown keys",
+	);
+	assert.equal(
+		retentionManifestRootSchema.safeParse({ ...root, smuggled: "x" }).success,
+		false,
+		"root must reject unknown keys",
+	);
+	assert.equal(
+		retentionManifestRootSchema.safeParse({
+			...root,
+			source_relative_path: { ...root.source_relative_path, smuggled: "x" },
+		}).success,
+		false,
+		"root source_relative_path must reject unknown keys",
+	);
+	assert.equal(
+		retentionManifestRootSchema.safeParse({
+			...root,
+			manifest_pages: [{ key: "page-0", sha256: digest, smuggled: "x" }],
+		}).success,
+		false,
+		"root manifest_pages entries must reject unknown keys",
+	);
+	assert.equal(
+		retentionPolicySchema.safeParse({
+			...DEFAULT_RETENTION_POLICY,
+			smuggled: "x",
+		}).success,
+		false,
+		"policy must reject unknown keys",
+	);
+	assert.equal(
+		retentionObservationSchema.safeParse({
+			format_version: 1,
+			capture_id: "capture",
+			observed_at: "2026-09-09T00:00:00.000Z",
+			source_relative_path: { encoding: "utf8", value: "session.jsonl" },
+			identity_certainty: "uncertain",
+			identity_basis: "unresolved",
+			session_id: null,
+			parent_session_id: null,
+			smuggled: "x",
+		}).success,
+		false,
+		"observation must reject unknown keys",
+	);
+});
+
+test("null session identity is a stated value, not an omitted key", () => {
+	// `session_id: null` means "no session established"; a missing key would let a
+	// manifest claim nothing at all about identity while still validating.
+	for (const key of ["session_id", "parent_session_id", "identity_basis"]) {
+		const { [key]: dropped, ...rest } = root as Record<string, unknown>;
+		assert.notEqual(
+			dropped,
+			undefined,
+			`${key} must be present in the fixture`,
+		);
+		const parsedWithKey = retentionManifestRootSchema.safeParse(root);
+		assert.equal(parsedWithKey.success, true);
+		assert.equal(
+			retentionManifestRootSchema.safeParse(rest).success,
+			false,
+			`root must require ${key} to be stated explicitly`,
+		);
+		assert.equal(
+			retentionManifestRootSchema.safeParse({ ...rest, [key]: undefined })
+				.success,
+			false,
+			`root must reject an undefined ${key}`,
+		);
+	}
+	// The root fixture's identity digest must change when identity fields change,
+	// which is only meaningful while those fields are required.
+	assert.notEqual(
+		retentionDigest(retentionManifestRootSchema.parse(root)),
+		retentionDigest(
+			retentionManifestRootSchema.parse({ ...root, session_id: "session" }),
+		),
+	);
+});
+
 test("coverage preserves unknown failure extent and rejects reversed or inconsistent spans", () => {
 	const failure = {
 		kind: "failed",

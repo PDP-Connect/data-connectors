@@ -119,6 +119,60 @@ function replacePage(input: ReturnType<typeof fixture>, page: unknown): void {
 	input.root.pages_sha256 = retentionDigest(input.root.manifest_pages);
 }
 
+/** Builds a `complete_with_exclusions` capture: the second span is omitted under an
+ * owner policy, so the whole-source `source_digest_mismatch` backstop is disabled and
+ * chunk-level blob integrity is the only thing standing between corrupt bytes and
+ * acceptance. */
+function exclusionFixture(): {
+	input: ReturnType<typeof fixture>;
+	policy: unknown;
+	policySha: string;
+	retainedBlobId: string;
+} {
+	const input = fixture();
+	const policy = { ...input.policy, rules: { "claude.tool_result": "omit" } };
+	const policySha = retentionDigest(policy);
+	const [first, second] = input.page.coverage_entries;
+	assert.ok(first && second);
+	const chunk = input.chunks.get(chunkKey(input, 0));
+	assert.ok(chunk && typeof chunk === "object");
+	const updatedChunk = retentionChunkSchema.parse({
+		...chunk,
+		policy_sha256: policySha,
+	});
+	const updatedKey = retentionChunkKey(updatedChunk);
+	input.chunks.set(updatedKey, updatedChunk);
+	input.root.policy_sha256 = policySha;
+	replacePage(input, {
+		...input.page,
+		chunk_keys: [updatedKey],
+		coverage_entries: [
+			{ ...first, chunk_key: updatedKey },
+			{
+				kind: "omitted",
+				start_offset: second.start_offset,
+				end_offset: second.end_offset,
+				byte_count: second.byte_count,
+				sha256: second.sha256,
+				artifact_classes: ["claude.tool_result"],
+				matched_rule: "claude.tool_result",
+				reason: "owner_policy",
+				locator: "event:1",
+				event_type: "tool_result",
+				policy_version: 1,
+				policy_sha256: policySha,
+				classifier_version: "v1",
+			},
+		],
+	});
+	return {
+		input,
+		policy,
+		policySha,
+		retainedBlobId: updatedChunk.blob_ref.blob_id,
+	};
+}
+
 test("raw bytes round-trip independently of malformed interpretation", () => {
 	const result = verifyRetentionCapture(fixture());
 	assert.deepEqual(result.issues, []);
@@ -429,4 +483,133 @@ test("lone surrogate identifiers report incomplete instead of throwing during ke
 	});
 	assert.equal(rootResult.retention_state, "incomplete");
 	assert.ok(rootResult.issues.includes("invalid_root_or_policy"));
+});
+
+test("records carrying smuggled unknown keys never verify", () => {
+	// Unknown keys are not inert: they travel inside the durable record and feed the
+	// canonical digest, so a verifier that tolerated them would accept a record that
+	// is not the one whose key was derived.
+	const chunkInput = fixture();
+	const key = chunkKey(chunkInput, 0);
+	const chunk = chunkInput.chunks.get(key);
+	assert.ok(chunk && typeof chunk === "object");
+	chunkInput.chunks.set(key, { ...chunk, smuggled: "payload" });
+	const chunkResult = verifyRetentionCapture(chunkInput);
+	assert.equal(chunkResult.accepted, false);
+	assert.ok(
+		chunkResult.issues.includes(`missing_or_invalid_chunk:${key}`),
+		`expected missing_or_invalid_chunk, got ${JSON.stringify(chunkResult.issues)}`,
+	);
+
+	const rootInput = fixture();
+	const rootResult = verifyRetentionCapture({
+		...rootInput,
+		root: { ...rootInput.root, smuggled: "payload" },
+	});
+	assert.equal(rootResult.accepted, false);
+	assert.ok(
+		rootResult.issues.includes("invalid_root_or_policy"),
+		`expected invalid_root_or_policy, got ${JSON.stringify(rootResult.issues)}`,
+	);
+
+	const pageInput = fixture();
+	replacePage(pageInput, { ...pageInput.page, smuggled: "payload" });
+	const pageResult = verifyRetentionCapture(pageInput);
+	assert.equal(pageResult.accepted, false);
+	assert.ok(
+		pageResult.issues.includes("missing_or_invalid_page:page-0"),
+		`expected missing_or_invalid_page, got ${JSON.stringify(pageResult.issues)}`,
+	);
+});
+
+test("roots omitting session identity keys never verify", () => {
+	for (const key of ["session_id", "parent_session_id", "identity_basis"]) {
+		const input = fixture();
+		const { [key]: _dropped, ...root } = input.root as Record<string, unknown>;
+		const result = verifyRetentionCapture({ ...input, root });
+		assert.equal(result.accepted, false, `root without ${key} must not verify`);
+		assert.ok(
+			result.issues.includes("invalid_root_or_policy"),
+			`expected invalid_root_or_policy for missing ${key}, got ${JSON.stringify(result.issues)}`,
+		);
+	}
+});
+
+test("durable readback of an exclusion capture rejects corrupt retained blob bytes", () => {
+	const { input, policy, policySha, retainedBlobId } = exclusionFixture();
+	const { sourceBytes: _source, ...withoutSource } = input;
+	const clean = verifyRetentionCapture({
+		...withoutSource,
+		policy,
+		acceptPolicySha256: policySha,
+	});
+	assert.deepEqual(clean.issues, []);
+	assert.equal(clean.retention_state, "complete_with_exclusions");
+	assert.equal(clean.accepted, true);
+	assert.ok(clean.omitted_bytes > 0);
+
+	const original = withoutSource.blobs.get(retainedBlobId);
+	assert.ok(original);
+	const corrupt = Uint8Array.from(original);
+	const firstByte = corrupt[0];
+	assert.ok(firstByte !== undefined);
+	corrupt[0] = firstByte ^ 0xff;
+	withoutSource.blobs.set(retainedBlobId, corrupt);
+	const flipped = verifyRetentionCapture({
+		...withoutSource,
+		policy,
+		acceptPolicySha256: policySha,
+	});
+	assert.equal(
+		flipped.accepted,
+		false,
+		"same-length corrupt blob bytes must not be accepted",
+	);
+	assert.equal(flipped.retention_state, "incomplete");
+	assert.ok(
+		flipped.issues.some((issue) =>
+			issue.startsWith("blob_integrity_mismatch:"),
+		),
+		`expected blob_integrity_mismatch, got ${JSON.stringify(flipped.issues)}`,
+	);
+
+	withoutSource.blobs.set(retainedBlobId, Uint8Array.from([...original, 0]));
+	const lengthened = verifyRetentionCapture({
+		...withoutSource,
+		policy,
+		acceptPolicySha256: policySha,
+	});
+	assert.equal(
+		lengthened.accepted,
+		false,
+		"blob bytes of the wrong length must not be accepted",
+	);
+	assert.ok(
+		lengthened.issues.some((issue) =>
+			issue.startsWith("blob_integrity_mismatch:"),
+		),
+		`expected blob_integrity_mismatch, got ${JSON.stringify(lengthened.issues)}`,
+	);
+});
+
+test("exclusion captures verified against frozen bytes also reject corrupt blobs", () => {
+	const { input, policy, policySha, retainedBlobId } = exclusionFixture();
+	const original = input.blobs.get(retainedBlobId);
+	assert.ok(original);
+	const corrupt = Uint8Array.from(original);
+	const firstByte = corrupt[0];
+	assert.ok(firstByte !== undefined);
+	corrupt[0] = firstByte ^ 0xff;
+	input.blobs.set(retainedBlobId, corrupt);
+	const result = verifyRetentionCapture({
+		...input,
+		policy,
+		acceptPolicySha256: policySha,
+	});
+	assert.equal(result.accepted, false);
+	assert.equal(result.source_verified, false);
+	assert.ok(
+		result.issues.some((issue) => issue.startsWith("blob_integrity_mismatch:")),
+		`expected blob_integrity_mismatch, got ${JSON.stringify(result.issues)}`,
+	);
 });
