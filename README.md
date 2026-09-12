@@ -151,8 +151,14 @@ any one consumer.
   The checked-in index marks this artifact as unpublished.
 - `artifacts/**/*.tgz.sigstore.json` is the detached Sigstore bundle for each
   immutable artifact.
-- `@opendatalabs/data-connectors-tools/installer-core` exposes the supported
-  install/update contract used by consumer repos.
+- `@pdpp/connector-manager` (`packages/connector-installer-core/`) exposes the
+  supported install/update contract used by consumer repos. It verifies Sigstore
+  bundles and digests and carries no connector content. It installs the
+  `artifacts/**` tarballs described above; it does not consume the OCI registry
+  artifacts the publish workflow builds.
+- `@opendatalabs/data-connectors-tools/installer-core` remains as an alias of
+  that same module for existing consumers. Prefer the package name in new code;
+  the alias is retired once consumers have switched.
 - `connector-installer` is the supported CLI wrapper for lock generation,
   installation, verification, and update checks.
 

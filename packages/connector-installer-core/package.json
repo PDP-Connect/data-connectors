@@ -1,0 +1,36 @@
+{
+  "name": "@pdpp/connector-manager",
+  "version": "0.1.0",
+  "description": "Resolves, verifies, pins and installs signed connector artifacts from a signed index. Does not consume OCI registry artifacts yet.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PDP-Connect/data-connectors.git",
+    "directory": "packages/connector-installer-core"
+  },
+  "homepage": "https://github.com/PDP-Connect/data-connectors/tree/main/packages/connector-installer-core#readme",
+  "bugs": {
+    "url": "https://github.com/PDP-Connect/data-connectors/issues"
+  },
+  "dependencies": {
+    "sigstore": "^5.0.0"
+  },
+  "scripts": {
+    "test": "node --test ./index.test.mjs"
+  }
+}
