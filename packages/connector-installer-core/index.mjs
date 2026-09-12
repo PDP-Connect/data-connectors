@@ -35,6 +35,10 @@ export function defaultArtifactCertificateIdentityResolver() {
   return DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY;
 }
 
+export function defaultIndexCertificateIdentityResolver() {
+  return DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY;
+}
+
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -251,6 +255,24 @@ async function resolveArtifactCertificateIdentity({
   if (typeof certificateIdentityURI !== "string" || certificateIdentityURI.length === 0) {
     throw new Error(
       `No trusted Sigstore certificate identity configured for connector artifact ${entry.connectorId}@${entry.version}`
+    );
+  }
+  return certificateIdentityURI;
+}
+
+async function resolveIndexCertificateIdentity({
+  indexCertificateIdentityResolver = defaultIndexCertificateIdentityResolver,
+  indexUrl,
+}) {
+  const certificateIdentityURI = await indexCertificateIdentityResolver({
+    indexUrl,
+  });
+  if (
+    typeof certificateIdentityURI !== "string" ||
+    certificateIdentityURI.length === 0
+  ) {
+    throw new Error(
+      `No trusted Sigstore certificate identity configured for connector index ${indexUrl}`
     );
   }
   return certificateIdentityURI;
@@ -476,6 +498,8 @@ export async function loadConnectorIndex({
   defaultIndexUrl = DEFAULT_CONNECTOR_INDEX_URL,
   preferDefaultLocal = false,
   allowUnsignedRemote = false,
+  indexCertificateIdentityResolver = defaultIndexCertificateIdentityResolver,
+  sigstoreVerifier = undefined,
 }) {
   const resolvedLocal = fromLocal
     ? resolvePath(fromLocal)
@@ -509,12 +533,18 @@ export async function loadConnectorIndex({
 
   const indexBuffer = Buffer.from(await response.arrayBuffer());
   const doc = JSON.parse(indexBuffer.toString("utf8"));
+  const certificateIdentityURI = await resolveIndexCertificateIdentity({
+    indexCertificateIdentityResolver,
+    indexUrl: url,
+  });
   const signatureVerified = await verifyRemoteSignature({
     payloadBuffer: indexBuffer,
     subjectLabel: "Connector index",
     subjectUrl: url,
     signature: doc.signature,
     allowUnsignedRemote,
+    certificateIdentityURI,
+    ...(sigstoreVerifier ? { sigstoreVerifier } : {}),
   });
 
   return {

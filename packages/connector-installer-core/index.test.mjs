@@ -21,6 +21,7 @@ import test from "node:test";
 import {
   DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
   defaultArtifactCertificateIdentityResolver,
+  defaultIndexCertificateIdentityResolver,
   fetchResolvedArtifact,
   generateLock,
   installFromLock,
@@ -517,4 +518,161 @@ test("PDPP collection profiles install, verify, and report tampering without a l
   const sourceRoot = join(fixture.root, "source-install");
   await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
   assert.equal((await verifyInstalled({ lock, source, installRoot: sourceRoot, layout: "source" })).ok, true);
+});
+
+// --- Connector index signer identity -------------------------------------
+//
+// The index and the artifacts it names are two separate signatures. A third
+// party publishing its own index needs to nominate the signer for BOTH; an
+// artifact resolver alone leaves the index pinned to the PDP-Connect default.
+//
+// These use a fake fetch and a fake Sigstore verifier. They exercise which
+// identity the module enforces — policy plumbing — not real certificate
+// validation. No Fulcio or Rekor interaction occurs.
+
+const THIRD_PARTY_INDEX_IDENTITY =
+  "https://github.com/example-org/their-connectors/.github/workflows/release.yml@refs/heads/main";
+
+function remoteIndexFixture(indexUrl) {
+  const doc = {
+    connectors: {},
+    signature: { type: "sigstoreBundle", bundleUrl: `${indexUrl}.sigstore.json` },
+  };
+  return { doc, bytes: Buffer.from(JSON.stringify(doc)) };
+}
+
+// Records the identity the module asked to enforce, and accepts only `expected`.
+function recordingIndexVerifier(expected, log) {
+  return async (_bundle, _payloadBuffer, options) => {
+    log.push(options.certificateIdentityURI);
+    if (options.certificateIdentityURI !== expected) {
+      throw new Error("certificate identity mismatch");
+    }
+  };
+}
+
+async function loadRemoteIndexWithIdentity({ indexUrl, accepts, log, ...options }) {
+  const { bytes } = remoteIndexFixture(indexUrl);
+  return withRemoteArtifactFetch(
+    {
+      [indexUrl]: bytes,
+      [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
+    },
+    () =>
+      loadConnectorIndex({
+        indexUrl,
+        sigstoreVerifier: recordingIndexVerifier(accepts, log),
+        ...options,
+      }),
+  );
+}
+
+test("remote index verification defaults to the PDP workflow identity", async () => {
+  const indexUrl = "https://example.invalid/default/connector-index.json";
+  const log = [];
+  const source = await loadRemoteIndexWithIdentity({
+    indexUrl,
+    accepts: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+    log,
+  });
+  assert.equal(source.signatureVerified, true);
+  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
+  assert.equal(defaultIndexCertificateIdentityResolver(), DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
+});
+
+test("remote index verification accepts a caller-selected third-party signer", async () => {
+  const indexUrl = "https://example.invalid/third-party/connector-index.json";
+  const log = [];
+  const source = await loadRemoteIndexWithIdentity({
+    indexUrl,
+    accepts: THIRD_PARTY_INDEX_IDENTITY,
+    log,
+    indexCertificateIdentityResolver: ({ indexUrl: url }) => {
+      assert.equal(url, indexUrl);
+      return THIRD_PARTY_INDEX_IDENTITY;
+    },
+  });
+  assert.equal(source.signatureVerified, true);
+  assert.deepEqual(log, [THIRD_PARTY_INDEX_IDENTITY]);
+});
+
+test("remote index verification rejects a caller-selected wrong signer", async () => {
+  const indexUrl = "https://example.invalid/wrong/connector-index.json";
+  const log = [];
+  await assert.rejects(
+    loadRemoteIndexWithIdentity({
+      indexUrl,
+      accepts: THIRD_PARTY_INDEX_IDENTITY,
+      log,
+      indexCertificateIdentityResolver: () =>
+        "https://github.com/someone-else/repo/.github/workflows/release.yml@refs/heads/main",
+    }),
+    /signature verification failed/,
+  );
+});
+
+test("the artifact resolver alone does not redirect index trust", async () => {
+  // The C1 defect: supplying only artifactCertificateIdentityResolver left the
+  // index pinned to the PDP-Connect identity, so a third-party index could not
+  // be loaded at all.
+  const indexUrl = "https://example.invalid/artifact-only/connector-index.json";
+  const log = [];
+  await assert.rejects(
+    loadRemoteIndexWithIdentity({
+      indexUrl,
+      accepts: THIRD_PARTY_INDEX_IDENTITY,
+      log,
+      artifactCertificateIdentityResolver: () => THIRD_PARTY_INDEX_IDENTITY,
+    }),
+    /signature verification failed/,
+  );
+  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
+});
+
+test("index identity resolution fails closed before any signature is checked", async () => {
+  const indexUrl = "https://example.invalid/fail-closed/connector-index.json";
+  for (const empty of [null, "", undefined]) {
+    const log = [];
+    await assert.rejects(
+      loadRemoteIndexWithIdentity({
+        indexUrl,
+        // A verifier that would accept anything, to prove it is never reached.
+        accepts: undefined,
+        log,
+        indexCertificateIdentityResolver: () => empty,
+      }),
+      /No trusted Sigstore certificate identity configured for connector index/,
+    );
+    assert.deepEqual(log, [], "verification must not run without a trusted identity");
+  }
+});
+
+test("index identity metadata supplied by the index itself is ignored", async () => {
+  const indexUrl = "https://example.invalid/self-nominated/connector-index.json";
+  const log = [];
+  const doc = {
+    connectors: {},
+    // An attacker-controlled index nominating its own signer.
+    certificateIdentityURI: THIRD_PARTY_INDEX_IDENTITY,
+    signature: {
+      type: "sigstoreBundle",
+      bundleUrl: `${indexUrl}.sigstore.json`,
+      certificateIdentityURI: THIRD_PARTY_INDEX_IDENTITY,
+    },
+  };
+  await assert.rejects(
+    withRemoteArtifactFetch(
+      {
+        [indexUrl]: Buffer.from(JSON.stringify(doc)),
+        [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
+      },
+      () =>
+        loadConnectorIndex({
+          indexUrl,
+          sigstoreVerifier: recordingIndexVerifier(THIRD_PARTY_INDEX_IDENTITY, log),
+        }),
+    ),
+    /signature verification failed/,
+  );
+  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
 });

@@ -34,7 +34,7 @@
     "chatgpt-pdpp:test": "node --test ./test/chatgpt-pdpp/chatgpt-pdpp.test.mjs",
     "whoop-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact whoop-pdpp",
     "whoop-pdpp:test": "node --test ./test/whoop-pdpp/whoop-pdpp.test.mjs",
-    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./schemas/connector-index.schema.test.mjs",
+    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
     "fixtures:validate": "node ./scripts/generate-fixture-index.mjs --validate-only",
