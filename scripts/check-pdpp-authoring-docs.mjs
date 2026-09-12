@@ -52,11 +52,14 @@ const standardBindings = [
 // Mirrors the `CoverageProofStrategy` union in the vendored reference contract
 // (@pdpp/reference-contract/evidence, evidence/coherence.ts:38). That union is
 // a TYPE, so it erases at runtime and this plain-JS script cannot import it.
-// Drift against that union is caught by the typed pin in
-// packages/polyfill-connectors/connectors/_conformance/coverage-strategy-vocabulary.ts,
-// which declares this same list as `CoverageProofStrategy[]` and so fails to
-// COMPILE if the upstream union gains or loses a member. Keep the two in sync;
-// drift between that pin and the spec table fails the exact-set check below.
+// The typed pin in
+// packages/polyfill-connectors/connectors/_conformance/coverage-strategy-vocabulary.ts
+// declares the same list as `CoverageProofStrategy[]`, so a member added to or
+// removed from the upstream union fails to COMPILE there.
+// This array is a SEPARATE manual copy. Nothing compares it to that pin or to
+// the union, so the exact-set check below only proves the spec table matches
+// THIS array. Update all three together; a member added upstream would fail the
+// typed pin while this check kept passing against a stale list.
 const coverageStrategies = [
   "checkpoint_window",
   "full_inventory",
@@ -106,6 +109,12 @@ function headingFragments(content) {
  * table under `heading`. This reads the published vocabulary out of the doc so
  * it can be compared as an exact set: an existence check alone only proves
  * doc superset-of code, which lets an invented extra row pass unnoticed.
+ *
+ * Every body row is enumerated, and a row whose leading cell is not exactly one
+ * code span is REJECTED rather than skipped. A parser that only matched its own
+ * preferred spacing silently dropped rows that Markdown renders identically
+ * (`|  \`name\`  |`, or a name with no backticks at all), which hid an invented
+ * published row from the exact-set comparison below.
  */
 function tableRowKeys(content, heading) {
   const section = content.split(new RegExp(`^${heading}$`, "m"))[1] ?? "";
@@ -113,7 +122,18 @@ function tableRowKeys(content, heading) {
     /\n\| *[A-Za-z`][^\n]*\|\n\| *-[^\n]*\|\n((?:\|[^\n]*\|\n)+)/,
   );
   assert.ok(table, `Collection Profile section ${heading} must have a table`);
-  return [...table[1].matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]);
+  return table[1]
+    .split("\n")
+    .filter((row) => row.trim().length > 0)
+    .map((row) => {
+      const firstCell = row.replace(/^\s*\|/, "").split("|")[0].trim();
+      const key = firstCell.match(/^`([^`]+)`$/);
+      assert.ok(
+        key,
+        `${heading} row must name its value in a single code span, got ${JSON.stringify(firstCell)}`,
+      );
+      return key[1];
+    });
 }
 
 function assertLocalMarkdownLinksResolve(path) {

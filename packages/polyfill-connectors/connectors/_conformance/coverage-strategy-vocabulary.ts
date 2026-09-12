@@ -18,12 +18,16 @@
  * added to or removed from the upstream union that this array does not mirror
  * is a COMPILE error here, not silent drift.
  *
- * Scope of the guarantee, stated honestly: this pin proves the list below
- * still matches the upstream union. It does NOT by itself prove the doc check's
- * copy matches — the two lists are kept in sync by the comment reference in
- * `scripts/check-pdpp-authoring-docs.mjs`, which cites this file. Drift between
- * the union and this file fails to compile; drift between this file and the doc
- * fails the doc check's exact-set comparison.
+ * Scope of the guarantee, stated honestly: this pin proves ONLY that the list
+ * below still matches the upstream union. Drift between the union and this file
+ * fails to compile.
+ *
+ * What is NOT checked anywhere: the doc check keeps its own `coverageStrategies`
+ * array and compares that array to the spec table. It never compares either one
+ * to this file. So this file and that array can drift apart without any check
+ * failing, and keeping the three in agreement is a manual obligation. A member
+ * added upstream fails to compile here, but the doc check would keep passing
+ * against its own stale copy.
  */
 
 import type { CoverageProofStrategy } from "@pdpp/reference-contract/evidence";
