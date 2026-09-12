@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // The manager's advertised engine range must be supported by its COMPLETE
 // production dependency closure, not just by the manager's own code.
 //
