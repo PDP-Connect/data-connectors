@@ -28,12 +28,12 @@
  * strength of an upload that might yet fail.
  */
 
+import { createReadStream } from "node:fs";
+import { join } from "node:path";
 import {
 	captureBlobArtifact,
 	LocalDeviceBlobSpool,
 } from "@pdpp/collector-runtime";
-import { createReadStream } from "node:fs";
-import { join } from "node:path";
 
 /** Blob reference recorded alongside the preserved inline preview. */
 export interface ArtifactBlobRef {
