@@ -67,7 +67,9 @@ import {
 } from "../../src/local-source-inventory.ts";
 import {
 	type ArtifactCaptureContext,
+	ArtifactCaptureLedger,
 	captureFileArtifact,
+	openArtifactCapture,
 } from "./artifact-capture.ts";
 import {
 	ATTACHMENT_PREVIEW_CHARS,
@@ -449,6 +451,7 @@ export async function emitSessionsFromAccumulators({
 
 interface WalkToolResultsArgs {
 	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
@@ -461,6 +464,8 @@ interface WalkToolResultsArgs {
 
 export interface EmitToolResultFileArgs {
 	captureContext?: ArtifactCaptureContext | null;
+	/** Records which bodies remain owed, so their mtime is not checkpointed. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	full: string;
 	projectDir: string;
@@ -497,6 +502,9 @@ export async function emitToolResultFile(
 		recordKey,
 		stream: "attachments",
 	});
+	// A body that is not durably held is still owed. The ledger keeps that
+	// obligation off the file-mtime checkpoint so the next run retries it.
+	args.captureLedger?.record(args.full, captured.status);
 	await args.emitRecord("attachments", {
 		id: recordKey,
 		session_id: args.sessionId,
@@ -516,6 +524,7 @@ export async function emitToolResultFile(
 
 interface ProcessToolResultArgs {
 	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
 	full: string;
@@ -540,16 +549,26 @@ async function processToolResultEntry(
 		return;
 	}
 	const mtime = st.mtimeMs;
-	if (args.fileMtimes[args.full] === mtime) {
+	// An unchanged file is normally settled work. It is NOT settled when its
+	// body is still owed: the prior run enumerated the preview but did not
+	// durably hold the bytes, so skipping on mtime alone would bury the retry
+	// behind a checkpoint that only a source rewrite could lift. Re-examining
+	// it is also what backfills files recorded `unavailable` before capture
+	// was configured.
+	const owed = args.captureLedger?.isOutstanding(args.full) ?? false;
+	if (args.fileMtimes[args.full] === mtime && !owed) {
 		args.newMtimes[args.full] = mtime;
 		return;
 	}
-	args.newMtimes[args.full] = mtime;
 	if (!args.requested.has("attachments")) {
+		// Nothing will attempt capture on this pass, so the mtime is an honest
+		// record of the enumeration that did happen.
+		args.newMtimes[args.full] = mtime;
 		return;
 	}
 	await emitToolResultFile({
 		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		emitRecord: args.emitRecord,
 		full: args.full,
 		toolResultsDir: args.toolResultsDir,
@@ -557,6 +576,12 @@ async function processToolResultEntry(
 		sessionId: args.sessionId,
 		st,
 	});
+	// Checkpoint the mtime only once the body is no longer owed. Withholding it
+	// for an outstanding artifact is what makes the next run retry this file
+	// while every captured sibling stays settled.
+	if (!(args.captureLedger?.isOutstanding(args.full) ?? false)) {
+		args.newMtimes[args.full] = mtime;
+	}
 }
 
 async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
@@ -590,6 +615,7 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 			}
 			await processToolResultEntry(ent, {
 				captureContext: args.captureContext ?? null,
+				captureLedger: args.captureLedger ?? null,
 				full,
 				toolResultsDir,
 				projectDir,
@@ -1064,6 +1090,8 @@ type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
 export interface ScanProjectDirsArgs {
 	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
 	captureContext?: ArtifactCaptureContext | null;
+	/** Bodies still owed, kept off the file-mtime checkpoint so they retry. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	scope?: EnumerationScope | null;
 	onSymlink?: SymlinkSkipped;
 	onDirectoryError?: DirectoryReadFailure;
@@ -1192,6 +1220,7 @@ async function processSessionDir(
 	// tool-results/*.txt → attachments with event_type=tool_result_file.
 	await walkToolResults({
 		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		sessionDir,
 		sessionId,
 		projectDir,
@@ -2504,6 +2533,16 @@ if (isMainModule(import.meta.url)) {
 						next[path] = value;
 			};
 
+			// The artifact stores live with the collector runner that spawned this
+			// process; `bin/collector-runner.ts` hands their locations over in the
+			// child env. Null means this run has none (a fixture, or a caller that
+			// has not opted in) and every body is honestly recorded `unavailable`.
+			const openedCapture = openArtifactCapture({ connectorId: "claude_code" });
+			const captureContext = openedCapture?.context ?? null;
+			const captureLedger = new ArtifactCaptureLedger({
+				enabled: captureContext !== null,
+			});
+
 			const claudeHome =
 				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 			const baseDir =
@@ -2906,6 +2945,8 @@ if (isMainModule(import.meta.url)) {
 					await scanProjectDirs({
 						baseDir,
 						buildOnly: requested.has("memory_notes"),
+						captureContext,
+						captureLedger,
 						emit,
 						emitRecord: countingEmitRecord,
 						fileMtimes: nonJsonlMtimeGate,
@@ -3100,7 +3141,20 @@ if (isMainModule(import.meta.url)) {
 				}
 				await emitLocalJsonlTelemetry(emit, telemetry);
 			};
-			await collectProjectStreams();
+			try {
+				await collectProjectStreams();
+				if (captureLedger.size > 0) {
+					// Visible, and retried: these files' mtimes were withheld above, so
+					// the next run re-examines exactly them.
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_outstanding=${captureLedger.size}`,
+					});
+				}
+			} finally {
+				// Releasing the outbox handle must not mask a collection failure.
+				openedCapture?.close();
+			}
 		},
 	});
 }

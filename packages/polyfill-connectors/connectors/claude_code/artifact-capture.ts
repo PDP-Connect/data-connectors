@@ -29,11 +29,12 @@
  */
 
 import { createReadStream } from "node:fs";
-import { join } from "node:path";
 import {
 	captureBlobArtifact,
 	LocalDeviceBlobSpool,
+	LocalDeviceOutbox,
 } from "@pdpp/collector-runtime";
+import { resolveArtifactCaptureEnv } from "../../src/artifact-capture-env.ts";
 
 /** Blob reference recorded alongside the preserved inline preview. */
 export interface ArtifactBlobRef {
@@ -148,9 +149,98 @@ export async function captureInlineArtifact(input: {
 	}
 }
 
-/** Default on-disk location of the artifact spool for a collector run. */
-export function defaultSpoolRoot(executionRoot: string): string {
-	return join(executionRoot, "blob-spool");
+/** A capture context plus the handles that must be closed after the run. */
+export interface OpenedArtifactCapture {
+	close: () => void;
+	context: ArtifactCaptureContext;
 }
 
-export { LocalDeviceBlobSpool };
+/**
+ * Open the run's artifact stores from the environment the collector runner
+ * supplied, or return null when this run has none.
+ *
+ * Null is the honest capability answer for a fixture or a caller that has not
+ * opted in — capture then records `unavailable` rather than failing the run.
+ * A store that is configured but unopenable is a different thing: that throws,
+ * because silently downgrading to `unavailable` would hide a broken device.
+ */
+export function openArtifactCapture(input: {
+	connectorId: string;
+	env?: NodeJS.ProcessEnv;
+}): OpenedArtifactCapture | null {
+	const resolved = resolveArtifactCaptureEnv(input.env);
+	if (!resolved) {
+		return null;
+	}
+	const outbox = new LocalDeviceOutbox({ path: resolved.outboxPath });
+	try {
+		const spool = new LocalDeviceBlobSpool({ root: resolved.spoolRoot });
+		return {
+			close: () => outbox.close(),
+			context: {
+				connectorId: input.connectorId,
+				connectorInstanceId: null,
+				outbox,
+				sourceInstanceId: resolved.sourceInstanceId,
+				spool,
+			},
+		};
+	} catch (error) {
+		outbox.close();
+		throw error;
+	}
+}
+
+/**
+ * The bodies this run still owes, tracked SEPARATELY from the file mtimes that
+ * gate enumeration.
+ *
+ * The two obligations are genuinely different and were braided together
+ * before: an mtime records "this file's previews were enumerated", while a
+ * capture records "this file's bytes are durably held". Capture failure is
+ * reported rather than thrown, so a run could checkpoint the mtime, skip the
+ * unchanged file on the next run, and never retry the body — a visible gap
+ * that repaired itself only if the source happened to be rewritten. Turning
+ * capture on later had the same problem: files already recorded `unavailable`
+ * were never revisited.
+ *
+ * Recording the outstanding paths lets the next run withhold exactly those
+ * files' mtimes, so they are re-examined while every successfully captured
+ * file stays checkpointed. One failed artifact still does not abort a session.
+ *
+ * A run with no capture configured at all owes nothing: `enabled` is false and
+ * the ledger stays empty, so enumeration checkpoints exactly as it did before
+ * artifact capture existed. Only a run that was ASKED to capture can be behind
+ * on it.
+ */
+export class ArtifactCaptureLedger {
+	readonly #enabled: boolean;
+	readonly #outstanding = new Set<string>();
+
+	constructor(options: { enabled: boolean }) {
+		this.#enabled = options.enabled;
+	}
+
+	/** Note the outcome for one source file. */
+	record(path: string, status: ArtifactCaptureStatus): void {
+		if (!this.#enabled) {
+			return;
+		}
+		if (status === "captured") {
+			this.#outstanding.delete(path);
+			return;
+		}
+		this.#outstanding.add(path);
+	}
+
+	/** True when this file's body is still owed. */
+	isOutstanding(path: string): boolean {
+		return this.#outstanding.has(path);
+	}
+
+	get size(): number {
+		return this.#outstanding.size;
+	}
+}
+
+export { LocalDeviceBlobSpool, LocalDeviceOutbox };
