@@ -89,3 +89,6 @@ jobs:
 
       - name: Publish-ref gate tests
         run: node --test scripts/publish-ref-gate.test.mjs
+
+      - name: Publish tag-guard behavioral tests
+        run: node --test scripts/publish-tag-guard.test.mjs
