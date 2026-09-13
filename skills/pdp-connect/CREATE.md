@@ -2,7 +2,7 @@
 
 Use this guide only after a maintainer approves a legacy Playwright exception.
 
-New connector work belongs in `PDP-Connect/pdpp` by default. Follow [Connector authoring](../../AUTHORING.md). This guide creates only the legacy `*-playwright.js` and `*-playwright.json` format.
+New connector work belongs here by default, not in `PDP-Connect/pdpp`. Follow [Connector authoring](../../AUTHORING.md). This guide creates only the legacy `*-playwright.js` and `*-playwright.json` format.
 
 ## Prerequisites
 

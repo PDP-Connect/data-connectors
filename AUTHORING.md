@@ -2,7 +2,7 @@
 
 This repository is the single home of PDPP connector content. Keep source code and the canonical Collection Profile here, under `connectors/`.
 
-`PDP-Connect/pdpp`'s copy of `packages/polyfill-connectors` is frozen for direct edits: it continues to run the product, but is no longer the source of truth for new connector work, and does not own the primary implementation of a new connector.
+`PDP-Connect/pdpp` keeps a copy of `packages/polyfill-connectors`, but production does not build from it. DataConnect builds the production package from this repository, and pdpp's copy does not own the primary implementation of a new connector.
 
 ## Default workflow
 

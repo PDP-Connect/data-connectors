@@ -2,7 +2,7 @@
 
 This repository contains two different connector artifact families. They do not share a runtime or authoring workflow.
 
-- For new connector work, start with [Connector authoring](AUTHORING.md). This repository is the single home of PDPP connector content: begin the connector here, not in `PDP-Connect/pdpp`. `PDP-Connect/pdpp`'s copy of `packages/polyfill-connectors` is frozen for direct edits: it still runs the product, but is no longer the source of truth for new connector work.
+- For new connector work, start with [Connector authoring](AUTHORING.md). This repository is the single home of PDPP connector content: begin the connector here, not in `PDP-Connect/pdpp`. `PDP-Connect/pdpp` keeps a copy of `packages/polyfill-connectors`, but production does not build from it. DataConnect builds the production package from this repository.
 - For existing `*-playwright` maintenance, use [Legacy Playwright connector maintenance](#legacy-playwright-connector-maintenance). A new legacy connector requires an explicit exception.
 
 The existing Playwright connectors use browser automation for local desktop collection. The bundled `playwright-runner/` runs that legacy format. It does not run PDPP Collection Profiles.

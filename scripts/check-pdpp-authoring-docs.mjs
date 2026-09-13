@@ -91,6 +91,11 @@ assert.match(
   /DataConnect v0\.7\.54.*includes both PDPP profiles/,
 );
 assert.match(rootAuthoring, /This repository is the single home of PDPP connector content/);
+assert.match(rootAuthoring, /production does not build from it/);
+assert.doesNotMatch(
+  `${README}\n${rootAuthoring}`,
+  /runs the product/,
+);
 assert.match(rootAuthoring, /Add an `artifact\.json` descriptor/);
 assert.match(rootAuthoring, /scripts\/build-pdpp-artifact\.mjs/);
 assert.match(rootAuthoring, /requires both `network` and `browser`/);
@@ -101,12 +106,31 @@ assert.match(
 assert.match(rootAuthoring, /checked-in index entry intentionally has `releaseId: "unpublished"`/);
 assert.match(rootAuthoring, /connectors-48440fead534/);
 assert.match(rootAuthoring, /connectors-latest/);
+assert.match(
+  githubAuthoring,
+  /Start new connector work here, in this repository/,
+);
 assert.match(githubAuthoring, /requires only the `network` binding/);
 assert.match(githubAuthoring, /releaseId: "unpublished"/);
 assert.match(githubAuthoring, /source-tree placeholder metadata/);
 assert.match(githubAuthoring, /connectors-48440fead534/);
 assert.match(githubAuthoring, /connectors-latest/);
-assert.match(legacySkill, /New connector requests route to PDP-Connect\/pdpp/);
+assert.match(
+  legacySkill,
+  /New connector requests route to this repository/,
+);
+assert.match(
+  legacySkill,
+  /start the work here, in this repository/,
+);
+assert.match(
+  legacyCreate,
+  /New connector work belongs here by default, not in `PDP-Connect\/pdpp`/,
+);
+assert.match(
+  read("skills/pdp-connect/scripts/scaffold.cjs"),
+  /Start new connector work here, in this repository/,
+);
 assert.match(
   legacySkill,
   /Do not create a legacy Playwright connector unless a maintainer approves an explicit exception/,

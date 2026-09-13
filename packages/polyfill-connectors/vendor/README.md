@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`187838be13f04e8ef7e7165169f750169a88cc1b` (see `.github/cross-repo-pins.json`). This package
+`e5916d3a6265495ec3e7f324b29e0403958c52fe` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,11 +22,17 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@82fd91f2e5a23ff750c85dd50d3837dd884786ea`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-09
-  for PDP-Connect/data-connect#63: dependency updates change the package manifests;
-  every compiled file remains byte-identical to the previous archives. Built with
-  Node 22.23.1, npm 10.9.9, and TypeScript 7.0.2. The cross-repository pin now tracks main at the merge of #63; the runtime/protocol package trees are unchanged from the archive source commit. The separate 1.0.0 release pin remains unchanged.
+  `PDP-Connect/data-connect@e5916d3a6265495ec3e7f324b29e0403958c52fe`, workspace packages
+  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-11
+  for PDP-Connect/data-connect#94, which rewrote `packages/connector-protocol/src/auth.ts` —
+  a packed input, so the compiled `dist/auth.js` and `dist/auth.d.ts` change and the archive
+  digest moves with them. Every other file in `pdpp-connector-protocol-0.0.1.tgz` is
+  byte-identical to the previous archive. `pdpp-collector-runtime-0.0.1.tgz` is NOT re-vendored:
+  #94 left its packed inputs alone and a fresh repack at this commit reproduces the committed
+  `e274fb45...` digest exactly. The new connector-protocol digest matches data-connect's own
+  `packages/connector-protocol/artifact.json` `artifact_sha256` at this commit. Built with
+  Node 22.23.2, npm 10.9.8, and TypeScript 7.0.2. The separate 1.0.0 release pin remains
+  unchanged.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
@@ -79,7 +85,7 @@ rejected outright rather than treated as a partial win.
 
   ```
   e274fb459cce011f3c290ab92a0d83252fa91af671d33e37e3809edea06fafbf  pdpp-collector-runtime-0.0.1.tgz
-  2d683a30179ab9d557fe52f9a7f565232aaa82a2ae69a2e7f09b7ee92fd25da1  pdpp-connector-protocol-0.0.1.tgz
+  7a937c137af0b3208635aad1bd73f56a584de73ce8903255a6b2c6e1b9d0831d  pdpp-connector-protocol-0.0.1.tgz
   8271e75949f85e57de8ca4ed557e73b6706e3680c9ad7a986bd290d94797e8d6  pdpp-reference-contract-0.0.1.tgz
   ```
 

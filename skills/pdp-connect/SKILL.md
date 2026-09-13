@@ -5,7 +5,7 @@ description: >
   Use when: (1) user wants to connect a data source like ChatGPT, Instagram,
   Spotify, or any platform, (2) user says "connect my [platform]",
   (3) user wants to generate or update their profile from connected data.
-  New connector requests route to PDP-Connect/pdpp instead of this legacy skill.
+  New connector requests route to this repository instead of this legacy skill.
 ---
 
 # Connect with legacy Playwright
@@ -38,7 +38,7 @@ or inspect `registry.json` / the `connectors/` directory directly for the source
 
 If the requested platform is present, use the run flow below.
 
-**If no connector exists for the platform,** start the work in `PDP-Connect/pdpp`. Follow [Connector authoring](../../AUTHORING.md). Do not create a legacy Playwright connector unless a maintainer approves an explicit exception.
+**If no connector exists for the platform,** start the work here, in this repository. Follow [Connector authoring](../../AUTHORING.md). Do not create a legacy Playwright connector unless a maintainer approves an explicit exception.
 
 If the user is building or testing an app and needs sample data, prefer the
 public fixture flow over pasting large JSON into the agent:

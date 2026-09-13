@@ -31,8 +31,12 @@
 import assert from "node:assert/strict";
 import {
 	appendFile,
+	chmod,
 	mkdir,
 	mkdtemp,
+	rename,
+	rm,
+	symlink,
 	truncate,
 	writeFile,
 } from "node:fs/promises";
@@ -41,6 +45,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
+import { scanRollouts } from "./index.ts";
+import type { RolloutJsonlGap, RolloutSourceGap } from "./types.ts";
 
 const QUIET_OFF = { PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS: "0" } as const;
 const SESSION_ID = "019d922d-c38b-7e11-ae99-9187af386148";
@@ -49,11 +55,13 @@ const SESSION_ID = "019d922d-c38b-7e11-ae99-9187af386148";
 const OLD_DATE_DIR = join("2026", "04", "15");
 
 interface StateCursor {
+	source_gaps?: Record<string, RolloutSourceGap>;
 	file_cursors?: Record<string, RolloutFileCursorShape>;
 	file_mtimes?: Record<string, number>;
 }
 
 interface RolloutFileCursorShape {
+	jsonl_gaps?: RolloutJsonlGap[];
 	function_call_count: number;
 	guard_bytes: number;
 	head_sha256: string;
@@ -133,6 +141,7 @@ async function runCodex(input: {
 	streams: readonly string[];
 	state?: Record<string, unknown>;
 	quietMs?: string;
+	sourceRoots?: string[];
 }): Promise<{
 	exitCode: number | null;
 	messages: EmittedMessage[];
@@ -148,7 +157,12 @@ async function runCodex(input: {
 				input.quietMs ?? QUIET_OFF.PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS,
 		},
 		start: {
-			scope: { streams: input.streams.map((name) => ({ name })) },
+			scope: {
+				streams: input.streams.map((name) => ({
+					name,
+					...(input.sourceRoots ? { source_roots: input.sourceRoots } : {}),
+				})),
+			},
 			...(input.state ? { state: input.state } : {}),
 			type: "START",
 		},
@@ -167,6 +181,16 @@ function recordsFor(
 	return messages.filter(
 		(msg): msg is Extract<EmittedMessage, { type: "RECORD" }> =>
 			msg.type === "RECORD" && msg.stream === stream,
+	);
+}
+
+function gapsFor(
+	messages: EmittedMessage[],
+	reason: string,
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }>[] {
+	return messages.filter(
+		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			message.type === "SKIP_RESULT" && message.reason === reason,
 	);
 }
 
@@ -738,4 +762,696 @@ test("a trailing partial line (no final newline) is NOT committed and is parsed 
 		["half-written line"],
 		"the completed line is emitted once; the prefix is not re-emitted",
 	);
+});
+
+test("malformed early rollout loses only its bad line and preserves later-file order and replay keys", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-malformed-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	const prefix = jsonl([sessionMetaLine(), "", messageLine("before 🌍")]);
+	const badPath = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		`${prefix}{bad json}\n${messageLine("after")}\n`,
+	);
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const first = await runCodex({ codexHome, streams });
+	assert.equal(first.exitCode, 0);
+	const messages = recordsFor(first.messages, "messages");
+	assert.deepEqual(
+		messages.map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:4`, `${laterId}:2`],
+	);
+	const gaps = gapsFor(first.messages, "malformed_jsonl_line");
+	assert.equal(gaps.length, 1);
+	assert.deepEqual(gaps[0]?.diagnostics, {
+		path: badPath,
+		line_number: 4,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "malformed_jsonl_line",
+	});
+	const state = rolloutStateCursor(first.messages);
+	assert.deepEqual(state.file_cursors?.[SESSION_ID]?.jsonl_gaps, [
+		gaps[0]?.diagnostics,
+	]);
+	assert.equal(
+		recordsFor(first.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	await appendFile(badPath, "\n");
+	const deferred = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "86400000",
+		state: { messages: state },
+	});
+	assert.deepEqual(
+		gapsFor(deferred.messages, "malformed_jsonl_line").map(
+			(gap) => gap.diagnostics,
+		),
+		[gaps[0]?.diagnostics],
+	);
+	const next = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: state },
+	});
+	assert.equal(recordsFor(next.messages, "messages").length, 0);
+	assert.equal(gapsFor(next.messages, "malformed_jsonl_line").length, 1);
+	await appendFile(badPath, `${messageLine("appended")}\n`);
+	const appended = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(next.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(appended.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:5`],
+	);
+	const replay = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(replay.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:4`, `${SESSION_ID}:5`, `${laterId}:2`],
+	);
+});
+
+test("unterminated rollout tail is declared, does not block later files, and is recovered once completed", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-tail-gap-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	const prefix = jsonl([sessionMetaLine(), messageLine("before")]);
+	const tail = messageLine("completed later");
+	const split = Math.floor(tail.length / 2);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		prefix + tail.slice(0, split),
+	);
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const first = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${laterId}:2`],
+	);
+	const expectedGap = {
+		path,
+		line_number: 3,
+		byte_offset: Buffer.byteLength(prefix),
+		reason: "truncated_jsonl_tail",
+	};
+	const cursor = rolloutStateCursor(first.messages);
+	assert.deepEqual(cursor.file_cursors?.[SESSION_ID]?.jsonl_gaps, [
+		expectedGap,
+	]);
+	assert.equal(
+		cursor.file_cursors?.[SESSION_ID]?.offset_bytes,
+		Buffer.byteLength(prefix),
+	);
+	const second = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: cursor },
+	});
+	assert.equal(recordsFor(second.messages, "messages").length, 0);
+	assert.deepEqual(
+		gapsFor(second.messages, "truncated_jsonl_tail").map(
+			(gap) => gap.diagnostics,
+		),
+		[expectedGap],
+	);
+	await appendFile(path, `${tail.slice(split)}\n`);
+	const completed = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(second.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(completed.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:3`],
+	);
+	assert.deepEqual(
+		rolloutStateCursor(completed.messages).file_cursors?.[SESSION_ID]
+			?.jsonl_gaps,
+		[],
+	);
+	assert.equal(gapsFor(completed.messages, "truncated_jsonl_tail").length, 0);
+});
+
+test("malformed initial metadata uses filename identity for later messages and calls", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-meta-gap-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		jsonl([
+			"{damaged metadata}",
+			messageLine("retained"),
+			functionCallLine(CALL_A, "shell", "{}"),
+		]),
+	);
+	const run = await runCodex({
+		codexHome,
+		streams: ["messages", "function_calls"],
+	});
+	assert.deepEqual(
+		recordsFor(run.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`],
+	);
+	assert.equal(recordsFor(run.messages, "function_calls").length, 1);
+	assert.equal(
+		recordsFor(run.messages, "function_calls")[0]?.data.session_id,
+		SESSION_ID,
+	);
+});
+
+test("non-object JSONL records declare gaps and reserve stable keys through repair", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-non-object-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const prefix = jsonl([sessionMetaLine(), messageLine("before")]);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		`${prefix}null\n${messageLine("after")}\nfalse\n0\n""\n42\n"text"\n[]\n`,
+	);
+	const streams = ["messages"];
+	const first = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:4`],
+	);
+	assert.equal(gapsFor(first.messages, "non_object_jsonl_record").length, 7);
+	assert.deepEqual(
+		gapsFor(first.messages, "non_object_jsonl_record")[0]?.diagnostics,
+		{
+			path,
+			line_number: 3,
+			byte_offset: Buffer.byteLength(prefix),
+			reason: "non_object_jsonl_record",
+		},
+	);
+	const state = rolloutStateCursor(first.messages);
+	assert.equal(state.file_cursors?.[SESSION_ID]?.jsonl_gaps?.length, 7);
+	await writeFile(
+		path,
+		`${prefix}${messageLine("repaired")}\n${messageLine("after")}\n`,
+	);
+	const repaired = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: state },
+	});
+	assert.deepEqual(
+		recordsFor(repaired.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`, `${SESSION_ID}:3`, `${SESSION_ID}:4`],
+	);
+	const replay = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(repaired.messages) },
+	});
+	assert.equal(recordsFor(replay.messages, "messages").length, 0);
+});
+
+test("unreadable rollout reports a durable file gap and retries while later files continue", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-read-gap-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	const path = join(
+		codexHome,
+		"sessions",
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+	);
+	await mkdir(path, { recursive: true });
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later")]),
+	);
+	const streams = ["messages"];
+	const first = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${laterId}:2`],
+	);
+	const gaps = gapsFor(first.messages, "rollout_source_read_error");
+	assert.equal(gaps.length, 1);
+	const state = rolloutStateCursor(first.messages);
+	assert.equal(state.file_cursors?.[SESSION_ID], undefined);
+	assert.deepEqual(state.source_gaps?.[path], gaps[0]?.diagnostics);
+	await rm(path, { recursive: true });
+	await writeFile(path, jsonl([sessionMetaLine(), messageLine("recovered")]));
+	const recovered = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: state },
+	});
+	assert.deepEqual(
+		recordsFor(recovered.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:2`],
+	);
+	assert.deepEqual(rolloutStateCursor(recovered.messages).source_gaps, {});
+});
+
+test("permission-denied rollout retains its cursor and gap through retries and quiet deferral", {
+	skip: process.getuid?.() === 0,
+}, async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-permission-gap-"));
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		jsonl([sessionMetaLine(), messageLine("before")]),
+	);
+	t.after(async () => {
+		await chmod(path, 0o600);
+		await rm(codexHome, { recursive: true, force: true });
+	});
+	const streams = ["messages"];
+	const first = await runCodex({ codexHome, streams });
+	const initial = rolloutStateCursor(first.messages);
+	await appendFile(path, `${messageLine("appended")}\n`);
+	await chmod(path, 0o000);
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later")]),
+	);
+	const denied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: initial },
+	});
+	assert.deepEqual(
+		recordsFor(denied.messages, "messages").map((record) => record.data.id),
+		[`${laterId}:2`],
+	);
+	const deniedState = rolloutStateCursor(denied.messages);
+	assert.deepEqual(
+		deniedState.file_cursors?.[SESSION_ID],
+		initial.file_cursors?.[SESSION_ID],
+	);
+	assert.equal(deniedState.file_mtimes?.[path], undefined);
+	assert.deepEqual(
+		gapsFor(denied.messages, "rollout_source_read_error")[0]?.diagnostics,
+		{ path, reason: "rollout_source_read_error", error_code: "EACCES" },
+	);
+	const retry = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: deniedState },
+	});
+	assert.equal(gapsFor(retry.messages, "rollout_source_read_error").length, 1);
+	await chmod(path, 0o600);
+	const deferred = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "86400000",
+		state: { messages: rolloutStateCursor(retry.messages) },
+	});
+	assert.equal(
+		gapsFor(deferred.messages, "rollout_source_read_error").length,
+		1,
+	);
+	const recovered = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(deferred.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(recovered.messages, "messages").map((record) => record.data.id),
+		[`${SESSION_ID}:3`],
+	);
+	assert.deepEqual(rolloutStateCursor(recovered.messages).source_gaps, {});
+});
+
+test("rollout scanner propagates emission failures even when they have filesystem-like codes", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-transport-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		jsonl([sessionMetaLine(), messageLine("before")]),
+	);
+	const transportError = Object.assign(new Error("transport failed"), {
+		code: "EIO",
+	});
+	await assert.rejects(
+		scanRollouts({
+			activeQuietMs: 0,
+			emitRecord: () => {
+				throw transportError;
+			},
+			fileCursors: {},
+			fileMtimes: {},
+			newFileCursors: {},
+			newMtimes: {},
+			requested: new Map([["messages", { name: "messages" }]]),
+			roots: [{ baseDir: join(codexHome, "sessions"), label: "sessions" }],
+			rolloutAggregates: new Map(),
+			scanStartedAtMs: Date.now(),
+			seenCursorKeysThisScan: new Set(),
+			sourceGaps: {},
+		}),
+		(error: unknown) => error === transportError,
+	);
+});
+
+test("directory denial retains Codex line gaps through unchanged recovery until repair", {
+	skip: process.getuid?.() === 0,
+}, async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-directory-gap-"));
+	const dayDir = join(codexHome, "sessions", OLD_DATE_DIR);
+	const rootDir = join(codexHome, "sessions");
+	const hiddenRoot = join(codexHome, "hidden-sessions");
+	t.after(async () => {
+		await rename(hiddenRoot, rootDir).catch(() => undefined);
+		await chmod(rootDir, 0o700);
+		await chmod(dayDir, 0o700);
+		await rm(codexHome, { recursive: true, force: true });
+	});
+	const prefix = jsonl([sessionMetaLine(), messageLine("before")]);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
+		`${prefix}{bad}\n${messageLine("after")}\n`,
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const baseline = await runCodex({ codexHome, streams });
+	const baselineState = rolloutStateCursor(baseline.messages);
+	const saved = baselineState.file_cursors?.[SESSION_ID];
+	assert.ok(saved);
+	assert.equal(saved?.jsonl_gaps?.length, 1);
+	// Production predecessors used absolute-path keys; repair must replace that
+	// evidence instead of leaving a permanently gapped alias beside the UUID.
+	baselineState.file_cursors = { [path]: saved };
+	await chmod(dayDir, 0o000);
+	const laterId = "019d922d-c38b-7e11-ae99-9187af386149";
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "16"),
+		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
+		jsonl([sessionMetaLine(laterId), messageLine("later")]),
+	);
+	const denied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: baselineState },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(denied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(denied.messages, "malformed_jsonl_line").length, 1);
+	assert.deepEqual(
+		gapsFor(denied.messages, "malformed_jsonl_line")[0]?.diagnostics,
+		saved?.jsonl_gaps?.[0],
+	);
+	assert.equal(
+		recordsFor(denied.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	assert.equal(gapsFor(denied.messages, "rollout_source_read_error").length, 1);
+	assert.deepEqual(
+		recordsFor(denied.messages, "messages").map((record) => record.data.id),
+		[`${laterId}:2`],
+	);
+	const deniedAgain = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(denied.messages) },
+	});
+	assert.equal(gapsFor(deniedAgain.messages, "malformed_jsonl_line").length, 1);
+	await chmod(dayDir, 0o700);
+	const restored = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(deniedAgain.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(restored.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(restored.messages, "malformed_jsonl_line").length, 1);
+	assert.deepEqual(
+		gapsFor(restored.messages, "malformed_jsonl_line")[0]?.diagnostics,
+		saved?.jsonl_gaps?.[0],
+	);
+	assert.equal(
+		recordsFor(restored.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	assert.equal(
+		gapsFor(restored.messages, "rollout_source_read_error").length,
+		0,
+	);
+	const unchanged = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(restored.messages) },
+	});
+	assert.equal(gapsFor(unchanged.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		recordsFor(unchanged.messages, "coverage_diagnostics").find(
+			(record) => record.data.store === "derived_messages",
+		)?.data.status,
+		"unaccounted",
+	);
+	await rename(rootDir, hiddenRoot);
+	const missing = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(unchanged.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(missing.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(missing.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		rolloutStateCursor(missing.messages).file_cursors?.[laterId],
+		undefined,
+		"ungapped deleted cursors still prune",
+	);
+	await rename(hiddenRoot, rootDir);
+	await chmod(rootDir, 0o000);
+	const rootDenied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(missing.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(rootDenied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(rootDenied.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		gapsFor(rootDenied.messages, "rollout_source_read_error").length,
+		1,
+	);
+	await chmod(rootDir, 0o700);
+	await appendFile(path, "\n");
+	await chmod(path, 0o000);
+	const fileDenied = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(rootDenied.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(fileDenied.messages).file_cursors?.[SESSION_ID],
+		saved,
+	);
+	assert.equal(gapsFor(fileDenied.messages, "malformed_jsonl_line").length, 1);
+	assert.equal(
+		gapsFor(fileDenied.messages, "rollout_source_read_error").length,
+		1,
+	);
+	await chmod(path, 0o600);
+	await writeFile(
+		path,
+		`${prefix}${messageLine("repaired")}\n${messageLine("after")}\n`,
+	);
+	const repaired = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(fileDenied.messages) },
+	});
+	assert.deepEqual(
+		rolloutStateCursor(repaired.messages).file_cursors?.[SESSION_ID]
+			?.jsonl_gaps,
+		[],
+	);
+	assert.equal(gapsFor(repaired.messages, "malformed_jsonl_line").length, 0);
+	assert.equal(
+		rolloutStateCursor(repaired.messages).file_cursors?.[path],
+		undefined,
+	);
+});
+
+test("Codex skips external and dangling rollout links and retains prior gaps", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-links-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const file = `rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`;
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		file,
+		jsonl([sessionMetaLine(), "{bad}", messageLine("prior")]),
+	);
+	const streams = ["messages", "coverage_diagnostics"];
+	const baseline = await runCodex({ codexHome, streams });
+	const saved = rolloutStateCursor(baseline.messages).file_cursors?.[
+		SESSION_ID
+	];
+	const external = join(codexHome, "external.jsonl");
+	await writeFile(
+		external,
+		jsonl([sessionMetaLine(), messageLine("EXTERNAL_SENTINEL")]),
+	);
+	await rm(path);
+	await symlink(external, path);
+	const dangling = join(
+		codexHome,
+		"sessions",
+		OLD_DATE_DIR,
+		"rollout-dangling.jsonl",
+	);
+	await symlink("missing.jsonl", dangling);
+	const externalDay = join(codexHome, "external-day");
+	await mkdir(externalDay);
+	await writeFile(
+		join(externalDay, file),
+		jsonl([sessionMetaLine(), messageLine("DIRECTORY_SENTINEL")]),
+	);
+	const linkedDay = join(codexHome, "sessions", "2026", "04", "16");
+	await symlink(externalDay, linkedDay);
+	const healthyId = "019d922d-c38b-7e11-ae99-9187af386149";
+	await writeRollout(
+		codexHome,
+		join("2026", "04", "17"),
+		`rollout-${healthyId}.jsonl`,
+		jsonl([sessionMetaLine(healthyId), messageLine("healthy")]),
+	);
+	const first = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(baseline.messages) },
+	});
+	assert.deepEqual(
+		recordsFor(first.messages, "messages").map((record) => record.data.id),
+		[`${healthyId}:2`],
+	);
+	const check = (messages: EmittedMessage[]) => {
+		const links = gapsFor(messages, "symlink_skipped");
+		assert.equal(links.length, 3);
+		assert.deepEqual(
+			links
+				.map((gap) => gap.diagnostics)
+				.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+			[
+				{ path, target_path: external },
+				{
+					path: dangling,
+					target_path: join(
+						codexHome,
+						"sessions",
+						OLD_DATE_DIR,
+						"missing.jsonl",
+					),
+				},
+				{ path: linkedDay, target_path: externalDay },
+			].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+		);
+		assert.deepEqual(
+			rolloutStateCursor(messages).file_cursors?.[SESSION_ID],
+			saved,
+		);
+		assert.equal(gapsFor(messages, "malformed_jsonl_line").length, 1);
+		assert.equal(
+			recordsFor(messages, "coverage_diagnostics").find(
+				(record) => record.data.store === "derived_messages",
+			)?.data.status,
+			"unaccounted",
+		);
+	};
+	check(first.messages);
+	const repeated = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(first.messages) },
+	});
+	check(repeated.messages);
+	assert.equal(recordsFor(repeated.messages, "messages").length, 0);
+	const scoped = await runCodex({
+		codexHome,
+		streams,
+		sourceRoots: [join(codexHome, "sessions", "2026", "04", "17")],
+	});
+	assert.equal(gapsFor(scoped.messages, "symlink_skipped").length, 0);
+	assert.deepEqual(
+		recordsFor(scoped.messages, "messages").map((record) => record.data.id),
+		[`${healthyId}:2`],
+	);
+	const root = join(codexHome, "sessions");
+	await rename(root, join(codexHome, "saved-sessions"));
+	await symlink(join(codexHome, "saved-sessions"), root);
+	const rootLinked = await runCodex({
+		codexHome,
+		streams,
+		state: { messages: rolloutStateCursor(repeated.messages) },
+	});
+	assert.equal(recordsFor(rootLinked.messages, "messages").length, 0);
+	assert.deepEqual(
+		gapsFor(rootLinked.messages, "symlink_skipped").map(
+			(gap) => gap.diagnostics,
+		),
+		[{ path: root, target_path: join(codexHome, "saved-sessions") }],
+	);
+	assert.deepEqual(
+		rolloutStateCursor(rootLinked.messages).file_cursors,
+		rolloutStateCursor(repeated.messages).file_cursors,
+	);
+	assert.equal(gapsFor(rootLinked.messages, "malformed_jsonl_line").length, 1);
+	await rm(root);
+	await symlink(external, root);
+	const fileRoot = await runCodex({ codexHome, streams });
+	assert.equal(gapsFor(fileRoot.messages, "symlink_skipped").length, 1);
+	assert.equal(recordsFor(fileRoot.messages, "messages").length, 0);
+	await rm(root);
+	await symlink("missing-root", root);
+	const danglingRoot = await runCodex({ codexHome, streams });
+	assert.deepEqual(
+		gapsFor(danglingRoot.messages, "symlink_skipped").map(
+			(gap) => gap.diagnostics,
+		),
+		[{ path: root, target_path: join(codexHome, "missing-root") }],
+	);
+	assert.equal(recordsFor(danglingRoot.messages, "messages").length, 0);
 });

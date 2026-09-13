@@ -73,3 +73,36 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 		applePhotosCollectorDefinition,
 		googleMessagesCollectorDefinition,
 	]);
+
+/**
+ * The default stream set connector `connectorId` declares, for runners that
+ * would otherwise restate it.
+ *
+ * A connector's definition is the single source of truth for what an
+ * unscoped run requests, so every runner in this package reads it from here
+ * rather than keeping a table of its own: a hand-copied list drifts
+ * silently, and a run that omits `coverage_diagnostics` leaves the drained
+ * collector on `coverage_unknown`.
+ *
+ * Throws for an unknown id rather than returning an empty scope — a runner
+ * asking for a connector this registry does not carry is a wiring bug, and
+ * an empty stream list would surface as a silently empty collection.
+ *
+ * Connectors with no definition here (browser- or network-bound ones, which
+ * the published collector bundle deliberately excludes) declare their own
+ * defaults at their only call site.
+ */
+export function definitionStreams(connectorId: string): readonly string[] {
+	const definition = LOCAL_COLLECTOR_DEFINITIONS.find(
+		(candidate) => candidate.connector_id === connectorId,
+	);
+	if (!definition) {
+		const known = LOCAL_COLLECTOR_DEFINITIONS.map(
+			(candidate) => candidate.connector_id,
+		).join(", ");
+		throw new Error(
+			`no local-collector definition for "${connectorId}" (known: ${known})`,
+		);
+	}
+	return definition.streams;
+}

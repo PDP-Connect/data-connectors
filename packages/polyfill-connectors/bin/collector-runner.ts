@@ -72,6 +72,7 @@ import {
 	enrollCollector,
 	runCollectorConnector,
 } from "@pdpp/collector-runtime";
+import { definitionStreams } from "../src/collector-registry.ts";
 import { resolveExecutionRoot } from "../src/execution-root.ts";
 
 const DEFAULT_QUEUE_PATH = join(
@@ -116,40 +117,17 @@ const KNOWN_CONNECTOR_DEFAULTS: Record<
 	codex: {
 		command: "tsx",
 		args: ["connectors/codex/index.ts"],
-		streams: [
-			"sessions",
-			"messages",
-			"function_calls",
-			"rules",
-			"prompts",
-			"skills",
-			"history",
-			"session_index",
-			"shell_snapshots",
-			"config_inventory",
-			"cache_inventory",
-			"coverage_diagnostics",
-		],
+		streams: [...definitionStreams("codex")],
 		bindings: { filesystem: { required: true } },
 	},
 	claude_code: {
 		command: "tsx",
 		args: ["connectors/claude_code/index.ts"],
-		streams: [
-			"sessions",
-			"messages",
-			"attachments",
-			"memory_notes",
-			"skills",
-			"slash_commands",
-			"file_history",
-			"cache_inventory",
-			"coverage_diagnostics",
-			"backup_inventory",
-			"config_inventory",
-		],
+		streams: [...definitionStreams("claude_code")],
 		bindings: { filesystem: { required: true } },
 	},
+	// Gmail is network-bound and has no local-collector definition to derive
+	// from, so its default stream set is declared here.
 	gmail: {
 		command: "tsx",
 		args: ["connectors/gmail/index.ts"],

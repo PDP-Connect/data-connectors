@@ -17,7 +17,7 @@ const path = require('path');
 const legacyException = process.argv[2] === '--legacy-exception';
 if (!legacyException) {
   console.error('Refusing to scaffold a new legacy Playwright connector without --legacy-exception.');
-  console.error('Start new connector work in PDP-Connect/pdpp, then package its pinned artifact here.');
+  console.error('Start new connector work here, in this repository, then package its pinned artifact.');
   process.exit(2);
 }
 
