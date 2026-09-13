@@ -290,21 +290,37 @@ jobs:
             for (const layer of spec.layers) console.log(`${layer.file}:${layer.mediaType}`);
           ')
 
-          # REPUBLICATION CHECK, before the push. A version identifier that has
-          # already been published must keep meaning the same bytes. If the tag
-          # exists and resolves to a DIFFERENT digest than the one we are about
-          # to push, refuse — that is a version being quietly redefined.
-          # Identical-byte retries are allowed and are the reason this compares
-          # digests rather than merely testing existence: re-running a release
-          # after a transient failure is legitimate and must not need a version
-          # bump. Installed digest pins stay safe either way, but a reused
-          # version identifier that names different content is dishonest.
-          LOCAL_DIGEST="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>/dev/null \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).digest)}catch{}})' || true)"
+          # Step 1 of the publish: write the BYTES, and no tag. An untagged push
+          # is content-addressed — the registry stores the manifest under its own
+          # digest and creates no reference anyone resolves by name. That is what
+          # lets the guard below run BEFORE anything mutable moves.
+          #
+          # This ordering is the whole point. The previous revision pushed
+          # straight to "${REPOSITORY}:${VERSION}" and only compared digests
+          # afterwards, so a conflicting republication overwrote the released
+          # version tag and THEN exited 1 claiming it had refused. That refusal
+          # was honest about its intent and wrong about its effect: the tag had
+          # already been redefined to different, unsigned bytes. Splitting the
+          # push from the tag is what turns the intent into a real precondition.
+          #
+          # `org.opencontainers.image.created` is set EXPLICITLY, and that is
+          # load-bearing rather than cosmetic. Left alone, ORAS stamps the
+          # current wall-clock time into the manifest, so pushing byte-identical
+          # inputs twice yields two different manifest digests — and the
+          # republication guard, which exists to let an identical retry through,
+          # would refuse every retry as a redefinition. Deriving the value from
+          # the source commit makes the manifest a function of its inputs, which
+          # is what "same bytes, same digest" has to mean for the guard below to
+          # be able to say yes to anything.
+          #
+          # `-C` the workspace because this step has already cd'd into the
+          # artifact directory, which is not a git checkout.
+          CREATED="$(git -C "${GITHUB_WORKSPACE}" show -s --format=%cI "${GITHUB_SHA}")"
 
-          oras push "${REPOSITORY}:${VERSION}" \
+          oras push "${REPOSITORY}" \
             --artifact-type application/vnd.pdpp.connector.v1+json \
             --config config.json:application/vnd.pdpp.connector.config.v1+json \
+            --annotation "org.opencontainers.image.created=${CREATED}" \
             --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --annotation "org.opencontainers.image.version=${VERSION}" \
@@ -314,10 +330,10 @@ jobs:
 
           # THE digest. Read from the completed push's own structured output —
           # ORAS 1.2's `--format json` reports the descriptor it just wrote — and
-          # carried unchanged through signing, verification, the receipt and the
-          # consumer instructions below.
+          # carried unchanged through the guard, the tag, signing, verification,
+          # the receipt and the consumer instructions below.
           #
-          # The previous revision instead RE-RESOLVED the mutable tag here, and
+          # An earlier revision instead RE-RESOLVED the mutable tag here, and
           # again in the verify step. That let the workflow sign and verify
           # content it had not pushed: with the tag repointed between push and
           # resolve, it pushed A, signed B, verified B and exited 0. Note what
@@ -332,10 +348,34 @@ jobs:
             *) echo "::error::push did not report a sha256 digest (got '${DIGEST}')"; exit 1 ;;
           esac
 
+          # REPUBLICATION CHECK, and it now precedes every mutable write. A
+          # version identifier that has already been published must keep meaning
+          # the same bytes. If the tag exists and resolves to a DIFFERENT digest
+          # than the one just pushed, refuse — that is a version being quietly
+          # redefined — and refuse while the tag STILL POINTS AT the published
+          # digest, because a refusal that has already moved the tag is not a
+          # refusal. Identical-byte retries are allowed and are the reason this
+          # compares digests rather than merely testing existence: re-running a
+          # release after a transient failure is legitimate and must not need a
+          # version bump. Installed digest pins stay safe either way, but a
+          # reused version identifier that names different content is dishonest.
+          #
+          # The untagged bytes above stay in the registry when this refuses.
+          # Nothing resolves to them by name, nothing is signed, and a registry
+          # garbage-collects unreferenced manifests — that is the cost side of
+          # the trade that buys the guard its correct position.
+          LOCAL_DIGEST="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).digest)}catch{}})' || true)"
+
           if [ -n "$LOCAL_DIGEST" ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
             echo "::error::${REPOSITORY}:${VERSION} already published as ${LOCAL_DIGEST}; refusing to redefine it as ${DIGEST}. Publish a new version instead."
             exit 1
           fi
+
+          # Step 2: only now does the version identifier move, and it moves to
+          # the digest the guard just cleared. Tagging BY DIGEST — never by
+          # re-resolving a name — keeps this the same single captured value.
+          oras tag "${REPOSITORY}@${DIGEST}" "${VERSION}"
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "published ${REPOSITORY}@${DIGEST}"

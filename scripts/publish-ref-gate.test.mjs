@@ -443,18 +443,47 @@ test("the signed digest comes from the push, and the tag is never re-resolved", 
   );
 });
 
-test("republishing different bytes under an existing version is refused", () => {
-  // P1-3, second half. An identical-byte retry must still succeed — re-running a
-  // release after a transient failure is legitimate — so the check compares
-  // digests rather than merely testing whether the tag exists.
-  const workflow = readFileSync(workflowPath, "utf8");
-  assert.match(
-    workflow,
-    /oras manifest fetch --descriptor/,
-    "the publish must look up the existing digest for this version before pushing",
+test("the republication guard is reached before the mutable version tag moves", () => {
+  // P1-3, second half. This assertion used to read the workflow for an
+  // `oras manifest fetch --descriptor` and a digest comparison, and said the
+  // lookup happened "before pushing". Both strings were present and the claim
+  // was false: the lookup ran, then the push overwrote `:VERSION`, then the
+  // comparison failed the job. The workflow announced a refusal it had already
+  // failed to perform, and this test stayed green through all of it — a claim
+  // about which strings appear in a file cannot see an ordering defect.
+  //
+  // The real check now lives in scripts/publish-tag-guard.test.mjs, which runs
+  // this step's shell against a substitute registry and reads the tag back
+  // afterwards. What remains here is the ordering premise that suite depends on,
+  // kept in this file because this is the suite that reads the workflow's shape:
+  // the refusal must sit between the lookup and the tag write. If someone moves
+  // the guard back after the write, this fails and so do three checks there.
+  const shell = readFileSync(workflowPath, "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line));
+
+  const at = (pattern) => shell.findIndex((line) => pattern.test(line));
+  const lookup = at(/oras manifest fetch --descriptor/);
+  const refusal = at(/refusing to redefine it/);
+  const tagWrite = at(/^\s*oras tag\b/);
+
+  assert.notEqual(lookup, -1, "the publish must look up the existing digest for this version");
+  assert.notEqual(refusal, -1, "the publish must refuse a differing existing digest");
+  assert.notEqual(
+    tagWrite,
+    -1,
+    "the version tag must move in its own step, after the guard — a push straight to " +
+      "`:VERSION` puts the write ahead of every check that could prevent it",
   );
+
+  assert.ok(
+    lookup < refusal && refusal < tagWrite,
+    `the lookup and the refusal must both precede the tag write ` +
+      `(lookup line ${lookup + 1}, refusal line ${refusal + 1}, tag write line ${tagWrite + 1})`,
+  );
+
   assert.match(
-    workflow,
+    readFileSync(workflowPath, "utf8"),
     /LOCAL_DIGEST" \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
     "the publish must refuse only when the existing digest DIFFERS — an identical retry is allowed",
   );
