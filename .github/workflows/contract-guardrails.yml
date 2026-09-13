@@ -98,3 +98,6 @@ jobs:
 
       - name: Check SPDX license headers
         run: node scripts/check-spdx-headers.mjs
+
+      - name: Check PDPP authoring docs and profile vocabularies
+        run: npm run pdpp:authoring:check
