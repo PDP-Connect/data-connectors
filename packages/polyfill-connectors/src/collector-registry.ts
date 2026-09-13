@@ -18,8 +18,14 @@
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
 import { applePhotosCollectorDefinition } from "../connectors/apple_photos/collector-definition.ts";
-import { claudeCodeCollectorDefinition } from "../connectors/claude_code/collector-definition.ts";
-import { codexCollectorDefinition } from "../connectors/codex/collector-definition.ts";
+import {
+	CLAUDE_CODE_RETENTION_ARTIFACT_CLASSES,
+	claudeCodeCollectorDefinition,
+} from "../connectors/claude_code/collector-definition.ts";
+import {
+	CODEX_RETENTION_ARTIFACT_CLASSES,
+	codexCollectorDefinition,
+} from "../connectors/codex/collector-definition.ts";
 import { googleMessagesCollectorDefinition } from "../connectors/google_messages/collector-definition.ts";
 import { googleTakeoutCollectorDefinition } from "../connectors/google_takeout/collector-definition.ts";
 import { imessageCollectorDefinition } from "../connectors/imessage/collector-definition.ts";
@@ -106,3 +112,28 @@ export function definitionStreams(connectorId: string): readonly string[] {
 	}
 	return definition.streams;
 }
+
+/**
+ * Every connector-specific retention artifact class, contributed by the
+ * connector that can produce it.
+ *
+ * `retention-schemas.ts` closes its artifact-class enum over this list plus
+ * the connector-agnostic `RETENTION_BASE_ARTIFACT_CLASSES`. The taxonomy is
+ * assembled here for the same reason {@link definitionStreams} exists: a
+ * connector's own file is the single place its declarations are written, so
+ * adding a connector means touching that connector and this registration
+ * list — never a shared schema, and never a second copy of the taxonomy.
+ *
+ * The enum stays closed on purpose. A free-form class string would let an
+ * omission cite a rule no owner policy could have granted, which is exactly
+ * what the verifier's `omission_policy_mismatch` check exists to catch;
+ * closing the enum over declared classes keeps that check meaningful while
+ * still letting each connector own its own entries.
+ *
+ * Connectors that declare no classes of their own simply do not appear here —
+ * they are fully described by the shared base.
+ */
+export const CONNECTOR_RETENTION_ARTIFACT_CLASSES = Object.freeze([
+	...CLAUDE_CODE_RETENTION_ARTIFACT_CLASSES,
+	...CODEX_RETENTION_ARTIFACT_CLASSES,
+] as const);

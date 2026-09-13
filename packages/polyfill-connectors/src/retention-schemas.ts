@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { CONNECTOR_RETENTION_ARTIFACT_CLASSES } from "./collector-registry.ts";
 
 export const RETENTION_FORMAT_VERSION = 1;
 export const RETENTION_MAX_RECORD_BYTES = 262_144;
@@ -26,21 +27,50 @@ const encodedPath = z.discriminatedUnion("encoding", [
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const bytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const version = z.literal(1);
-export const retentionArtifactClassSchema = z.enum([
-	"claude.tool_result",
-	"claude.tool_use.input",
+/**
+ * Artifact classes that mean the same thing for every connector: a payload
+ * shape any session format can carry, plus the two uncertainty sentinels.
+ *
+ * This base is deliberately closed and connector-agnostic. Classes specific
+ * to one connector's session format are declared by that connector, in its
+ * own `collector-definition.ts`, and assembled by the collector registry —
+ * so adding a connector does not mean editing this file. That follows
+ * `b076a2d4`, which made each definition the single place its default stream
+ * set is written.
+ *
+ * `unknown` and `unclassified` are the sentinels an omission may never cite;
+ * every schema below excludes them from rule and omission positions.
+ */
+export const RETENTION_BASE_ARTIFACT_CLASSES = [
 	"images",
-	"claude.thinking",
-	"codex.reasoning",
-	"codex.custom_tool_output",
-	"codex.function_output",
-	"shell_snapshots",
-	"tool_result_sidecars",
 	"documents",
-	"codex.custom_tool_input",
-	"codex.function_arguments",
 	"unknown",
 	"unclassified",
+] as const;
+
+/**
+ * The full closed artifact-class taxonomy: the shared base plus whatever the
+ * installed connectors declare.
+ *
+ * Closed, not free-form, and that is load-bearing. A free-form class string
+ * would let an omission entry name a rule the owner's policy could never have
+ * contained, defeating the verifier's `omission_policy_mismatch` check. Every
+ * admissible class still has to be declared somewhere before it can be cited
+ * — the change is only *where* it is declared, not *whether* it is.
+ */
+const retentionArtifactClasses = [
+	...RETENTION_BASE_ARTIFACT_CLASSES,
+	...CONNECTOR_RETENTION_ARTIFACT_CLASSES,
+] as const;
+
+export const retentionArtifactClassSchema = z.enum(retentionArtifactClasses);
+
+/** Sentinels an omission may never cite as its matched rule. */
+const RETENTION_UNCERTAINTY_CLASSES = ["unknown", "unclassified"] as const;
+
+/** The classes an owner policy may carry a rule for, and an omission may cite. */
+const retentionOmittableClassSchema = retentionArtifactClassSchema.exclude([
+	...RETENTION_UNCERTAINTY_CLASSES,
 ]);
 // Threshold and strict uncertainty policies are deferred.
 export const retentionPolicySchema = z.strictObject({
@@ -48,7 +78,7 @@ export const retentionPolicySchema = z.strictObject({
 	policy_version: z.literal(1),
 	default: z.literal("keep"),
 	rules: z.partialRecord(
-		retentionArtifactClassSchema.exclude(["unknown", "unclassified"]),
+		retentionOmittableClassSchema,
 		z.enum(["keep", "omit"]),
 	),
 	unclassified: z.literal("keep"),
@@ -118,13 +148,8 @@ const omittedCoverage = z
 	.strictObject({
 		kind: z.literal("omitted"),
 		...span,
-		artifact_classes: z
-			.array(retentionArtifactClassSchema.exclude(["unknown", "unclassified"]))
-			.min(1),
-		matched_rule: retentionArtifactClassSchema.exclude([
-			"unknown",
-			"unclassified",
-		]),
+		artifact_classes: z.array(retentionOmittableClassSchema).min(1),
+		matched_rule: retentionOmittableClassSchema,
 		reason: z.literal("owner_policy"),
 		locator: id,
 		event_type: id.nullable(),

@@ -3,10 +3,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { CLAUDE_CODE_RETENTION_ARTIFACT_CLASSES } from "../connectors/claude_code/collector-definition.ts";
+import { CODEX_RETENTION_ARTIFACT_CLASSES } from "../connectors/codex/collector-definition.ts";
+import {
+	CONNECTOR_RETENTION_ARTIFACT_CLASSES,
+	LOCAL_COLLECTOR_DEFINITIONS,
+} from "./collector-registry.ts";
 import {
 	assertRetentionRecordSize,
 	canonicalJson,
 	DEFAULT_RETENTION_POLICY,
+	RETENTION_BASE_ARTIFACT_CLASSES,
 	RETENTION_MAX_RECORD_BYTES,
 	retentionChunkKey,
 	retentionChunkSchema,
@@ -441,5 +448,119 @@ test("encoded paths preserve binary bytes and reject malformed base64", () => {
 			source_relative_path: { encoding: "hex", value: "ff" },
 		}).success,
 		false,
+	);
+});
+
+// ─── The artifact taxonomy is assembled, not hardcoded ────────────────────
+// Each connector declares its own classes in its own `collector-definition.ts`
+// and the registry assembles them, so adding a connector never edits this
+// schema file. This follows `b076a2d4`, which made each definition the single
+// place its default stream set is written. These tests pin the three
+// properties that make the move real rather than a relocation: the shared base
+// carries nothing connector-specific, every declared class is admissible, and
+// the enum stays closed so `omission_policy_mismatch` keeps its teeth.
+
+test("the shared base declares no connector-specific classes", () => {
+	// A connector-specific class in the base is the defect this change fixes:
+	// it would mean a connector's taxonomy lives in a shared file again.
+	for (const artifactClass of RETENTION_BASE_ARTIFACT_CLASSES) {
+		assert.ok(
+			!artifactClass.includes("."),
+			`base class "${artifactClass}" is connector-prefixed and belongs in that connector's collector-definition.ts`,
+		);
+	}
+	assert.deepEqual(
+		[...RETENTION_BASE_ARTIFACT_CLASSES],
+		["images", "documents", "unknown", "unclassified"],
+	);
+});
+
+test("every connector-declared class is prefixed with a registered connector id", () => {
+	// The prefix is what keeps two connectors from colliding on a bare class
+	// name and silently sharing one owner rule. An unprefixed declaration would
+	// reintroduce exactly the ambiguity `shell_snapshots` and
+	// `tool_result_sidecars` had before they moved to their owners.
+	const connectorIds = LOCAL_COLLECTOR_DEFINITIONS.map(
+		(definition) => definition.connector_id,
+	);
+	assert.ok(CONNECTOR_RETENTION_ARTIFACT_CLASSES.length > 0);
+	for (const artifactClass of CONNECTOR_RETENTION_ARTIFACT_CLASSES) {
+		const separator = artifactClass.indexOf(".");
+		assert.ok(
+			separator > 0,
+			`class "${artifactClass}" carries no connector prefix`,
+		);
+		const prefix = artifactClass.slice(0, separator);
+		assert.ok(
+			connectorIds.some((id) => id === prefix || id.startsWith(prefix)),
+			`class "${artifactClass}" is not prefixed with a registered connector id (${connectorIds.join(", ")})`,
+		);
+	}
+});
+
+test("declared connector classes are admissible and the taxonomy stays closed", () => {
+	// Admissible: a connector that declares a class can actually cite it in an
+	// omission and carry a policy rule for it.
+	for (const artifactClass of CONNECTOR_RETENTION_ARTIFACT_CLASSES) {
+		assert.equal(
+			retentionPolicySchema.safeParse({
+				...DEFAULT_RETENTION_POLICY,
+				rules: { [artifactClass]: "omit" },
+			}).success,
+			true,
+			`policy must accept a rule for declared class "${artifactClass}"`,
+		);
+	}
+	// Closed: an undeclared class is rejected. A free-form string here would let
+	// an omission cite a rule no policy could have granted, which is what the
+	// verifier's `omission_policy_mismatch` check exists to catch.
+	for (const undeclared of [
+		"claude.not_a_real_class",
+		"newconnector.tool_result",
+		"arbitrary",
+	]) {
+		assert.equal(
+			retentionPolicySchema.safeParse({
+				...DEFAULT_RETENTION_POLICY,
+				rules: { [undeclared]: "omit" },
+			}).success,
+			false,
+			`taxonomy must stay closed against undeclared class "${undeclared}"`,
+		);
+	}
+	// The uncertainty sentinels stay unciteable regardless of assembly.
+	for (const sentinel of ["unknown", "unclassified"]) {
+		assert.equal(
+			retentionPolicySchema.safeParse({
+				...DEFAULT_RETENTION_POLICY,
+				rules: { [sentinel]: "omit" },
+			}).success,
+			false,
+		);
+	}
+});
+
+test("both retention-targeted connectors contribute their own classes", () => {
+	// `claude_code` and `codex` are the two connectors this contract is written
+	// for, so each must be the source of its own entries.
+	for (const prefix of ["claude.", "codex."]) {
+		assert.ok(
+			CONNECTOR_RETENTION_ARTIFACT_CLASSES.some((artifactClass) =>
+				artifactClass.startsWith(prefix),
+			),
+			`no connector contributed a "${prefix}" class`,
+		);
+	}
+	assert.deepEqual(
+		CONNECTOR_RETENTION_ARTIFACT_CLASSES.filter((artifactClass) =>
+			artifactClass.startsWith("claude."),
+		),
+		[...CLAUDE_CODE_RETENTION_ARTIFACT_CLASSES],
+	);
+	assert.deepEqual(
+		CONNECTOR_RETENTION_ARTIFACT_CLASSES.filter((artifactClass) =>
+			artifactClass.startsWith("codex."),
+		),
+		[...CODEX_RETENTION_ARTIFACT_CLASSES],
 	);
 });

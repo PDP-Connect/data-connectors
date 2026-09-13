@@ -46,6 +46,33 @@ export const CODEX_DEFAULT_STREAMS = [
 ] as const;
 
 /**
+ * Retention artifact classes this connector's own session format can produce,
+ * over and above the connector-agnostic base every connector shares
+ * (`RETENTION_BASE_ARTIFACT_CLASSES` in `src/retention-schemas.ts`).
+ *
+ * These name Codex rollout-line payload shapes, so this connector is the only
+ * thing that knows them and the only place they are written. The retention
+ * taxonomy is assembled from these declarations rather than restated in a
+ * shared enum, the same way `streams` above is the single source of truth for
+ * an unscoped run's scope.
+ *
+ * Each entry must stay prefixed with this connector's id, which
+ * `src/retention-schemas.test.ts` pins: the prefix is what keeps two
+ * connectors from colliding on a bare class name and silently sharing an
+ * owner's omission rule.
+ */
+export const CODEX_RETENTION_ARTIFACT_CLASSES = [
+	"codex.reasoning",
+	"codex.custom_tool_output",
+	"codex.function_output",
+	"codex.custom_tool_input",
+	"codex.function_arguments",
+	// `shell_snapshots` is a Codex stream (`connectors/codex/index.ts:234`), not
+	// a shared one, so its class moves here under this connector's prefix.
+	"codex.shell_snapshots",
+] as const;
+
+/**
  * Streams an owner-declared `since` can be proven against — exactly those the
  * `codex` manifest gives a `consent_time_field` (`sessions.started_at`,
  * `messages.timestamp`, `function_calls.timestamp`).

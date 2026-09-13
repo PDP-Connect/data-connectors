@@ -11,7 +11,22 @@ import {
 	retentionReceiptSchema,
 } from "./retention-schemas.ts";
 
-/** Dormant declarations. Installing this package does not enable these streams. */
+/**
+ * Dormant declarations. Installing this package does not enable these streams.
+ *
+ * Unlike the artifact-class taxonomy, this table is deliberately *not*
+ * per-connector, and is not the same kind of hardcoding `b076a2d4` removed.
+ * These six names are the retention wire format's own streams, each bound to
+ * the schema that validates it. They are identical for every connector:
+ * adding a connector adds artifact classes, never a retention stream, so
+ * there is no per-connector copy here that could drift. A connector that
+ * captures bytes uses exactly these streams or it is not speaking this
+ * format.
+ *
+ * The per-connector part of retention — which classes a connector's session
+ * format can produce — lives in each connector's own `collector-definition.ts`
+ * and is assembled by `CONNECTOR_RETENTION_ARTIFACT_CLASSES`.
+ */
 export const RETENTION_STREAMS = {
 	raw_chunks: retentionChunkSchema,
 	retention_manifests: retentionManifestRootSchema,
