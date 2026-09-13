@@ -3193,6 +3193,16 @@ if (isMainModule(import.meta.url)) {
 						message: `Claude Code artifact_bodies_outstanding=${captureLedger.size}`,
 					});
 				}
+				if (captureLedger.pendingUpload > 0) {
+					// Bodies that ARE durably spooled but have not been delivered
+					// upstream, because no upload transport is wired yet. Reported so
+					// the partial state is legible rather than passing as complete:
+					// local retention is done, remote delivery is still owed.
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+					});
+				}
 			} finally {
 				// Releasing the outbox handle must not mask a collection failure.
 				openedCapture?.close();

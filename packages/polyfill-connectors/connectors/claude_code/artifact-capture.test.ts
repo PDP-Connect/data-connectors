@@ -186,11 +186,16 @@ describe("claude_code artifact capture", () => {
 		const sha = record.artifact_sha256 as string;
 		assert.deepEqual(await readFile(h.spool.pathFor(sha)), body);
 
-		// And the upload is durable work, not a one-shot call that died with the
-		// source.
-		const pending = h.outbox.peekReady({ sourceInstanceId: "src-claude-1" });
-		assert.ok(pending, "an upload is queued");
-		assert.equal(pending.kind, "blob_upload");
+		// Durability is the SPOOL's, not an outbox row's. No upload obligation is
+		// enqueued while no upload transport is wired: such a row can never be
+		// drained, is dead-lettered terminally on its first attempt, and then
+		// blocks scan admission for every later run — one captured body used to
+		// stop the connector outright. The bytes above are already safe without it.
+		assert.equal(
+			h.outbox.peekReady({ sourceInstanceId: "src-claude-1" }),
+			null,
+			"no undrainable upload obligation is enqueued",
+		);
 		h.outbox.close();
 	});
 

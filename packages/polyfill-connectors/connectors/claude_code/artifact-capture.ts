@@ -21,11 +21,14 @@
  * coverage, especially for file reads. The blob is the authoritative content;
  * the preview is what makes a record findable without fetching it.
  *
- * **Capture is durable or it is not claimed.** `captureBlobArtifact` returns
- * only once the bytes are committed to the local content-addressed spool AND
- * admitted to the durable outbox. A record therefore carries a `blob_ref` only
- * when the complete bytes are already safe; it is never written on the
- * strength of an upload that might yet fail.
+ * **Capture is durable or it is not claimed.** A capture returns only once the
+ * complete bytes are committed to the local content-addressed spool. A record
+ * therefore carries a `blob_ref` only when those bytes are already safe; it is
+ * never written on the strength of an upload that might yet fail.
+ *
+ * Delivery upstream is a SEPARATE obligation, and while no transport exists it
+ * is deliberately not enqueued — see `hasUploadTransport`. It is reported
+ * instead, so a spooled-but-undelivered body is visible rather than implied.
  */
 
 import { createHash } from "node:crypto";
@@ -36,6 +39,35 @@ import {
 	LocalDeviceOutbox,
 } from "@pdpp/collector-runtime";
 import { resolveArtifactCaptureEnv } from "../../src/artifact-capture-env.ts";
+
+/**
+ * Whether this run can actually deliver a spooled body upstream.
+ *
+ * WHY this gate exists: `captureBlobArtifact` does two things at once — it
+ * commits bytes to the spool AND enqueues a `blob_upload` outbox row. The
+ * second is an obligation against a transport. No transport is wired today
+ * (`runCollectorConnector` accepts an optional `blobUpload`, and
+ * `bin/collector-runner.ts` never supplies one), so the drain reaches
+ * `sendBlobUploadItem`, throws `OutboxPayloadShapeError`, and that class is
+ * classified TERMINAL — the row is dead-lettered on its first attempt with no
+ * retry, and dead letters are never revisited or auto-pruned.
+ *
+ * That dead letter then halts the connector. The runtime's scan-admission
+ * predicate treats any non-succeeded row outside `gap` / `terminal_run_commit`
+ * as backlog, so every later run returns `skippedScanForBacklog` and scans
+ * nothing: unchanged files, modified files and brand-new sessions alike. One
+ * captured body was enough to stop collection permanently.
+ *
+ * Enqueuing an obligation against a transport that does not exist is what
+ * manufactures that dead letter, so the repair is to not enqueue it. The bytes
+ * are still committed to the spool exactly as before — durability is unchanged
+ * — and the obligation is reported rather than discarded (see
+ * `ArtifactCaptureLedger.pendingUpload`). When a transport is wired, this
+ * predicate becomes true and the outbox row is enqueued as it is today.
+ */
+function hasUploadTransport(): boolean {
+	return false;
+}
 
 /** Blob reference recorded alongside the preserved inline preview. */
 export interface ArtifactBlobRef {
@@ -99,19 +131,51 @@ export async function captureFileArtifact(
 	if (!input.context) {
 		return { sha256: null, status: "unavailable" };
 	}
+	return await spoolArtifact({
+		content: () => createReadStream(input.path),
+		context: input.context,
+		mimeType: input.mimeType,
+		recordKey: input.recordKey,
+		stream: input.stream,
+	});
+}
+
+/**
+ * Commit one artifact's bytes to the spool, enqueuing the upload obligation
+ * only when a transport exists to discharge it.
+ *
+ * Shared by the file and inline paths because the durability rule is the same
+ * for both: the caller may claim a capture only once the complete bytes are in
+ * the content-addressed spool. `spool.put` is the operation that makes that
+ * true, and it is the same call `captureBlobArtifact` makes first.
+ *
+ * Failures are reported, never thrown: one unreadable or unspoolable artifact
+ * must not abort a whole session's collection.
+ */
+async function spoolArtifact(input: {
+	content: () => Parameters<LocalDeviceBlobSpool["put"]>[0];
+	context: ArtifactCaptureContext;
+	mimeType: string;
+	recordKey: string;
+	stream: string;
+}): Promise<ArtifactCaptureResult> {
 	try {
-		const captured = await captureBlobArtifact({
-			connectorId: input.context.connectorId,
-			connectorInstanceId: input.context.connectorInstanceId ?? null,
-			content: createReadStream(input.path),
-			mimeType: input.mimeType,
-			outbox: input.context.outbox,
-			recordKey: input.recordKey,
-			sourceInstanceId: input.context.sourceInstanceId,
-			spool: input.context.spool,
-			stream: input.stream,
-		});
-		return { sha256: captured.sha256, status: "captured" };
+		if (hasUploadTransport()) {
+			const captured = await captureBlobArtifact({
+				connectorId: input.context.connectorId,
+				connectorInstanceId: input.context.connectorInstanceId ?? null,
+				content: input.content(),
+				mimeType: input.mimeType,
+				outbox: input.context.outbox,
+				recordKey: input.recordKey,
+				sourceInstanceId: input.context.sourceInstanceId,
+				spool: input.context.spool,
+				stream: input.stream,
+			});
+			return { sha256: captured.sha256, status: "captured" };
+		}
+		const entry = await input.context.spool.put(input.content());
+		return { sha256: entry.sha256, status: "captured" };
 	} catch {
 		// The body is not durably held, so the record must not claim it is.
 		return { sha256: null, status: "failed" };
@@ -132,22 +196,13 @@ export async function captureInlineArtifact(input: {
 	if (!input.context) {
 		return { sha256: null, status: "unavailable" };
 	}
-	try {
-		const captured = await captureBlobArtifact({
-			connectorId: input.context.connectorId,
-			connectorInstanceId: input.context.connectorInstanceId ?? null,
-			content: [Buffer.from(input.content, "utf8")],
-			mimeType: input.mimeType,
-			outbox: input.context.outbox,
-			recordKey: input.recordKey,
-			sourceInstanceId: input.context.sourceInstanceId,
-			spool: input.context.spool,
-			stream: input.stream,
-		});
-		return { sha256: captured.sha256, status: "captured" };
-	} catch {
-		return { sha256: null, status: "failed" };
-	}
+	return await spoolArtifact({
+		content: () => [Buffer.from(input.content, "utf8")],
+		context: input.context,
+		mimeType: input.mimeType,
+		recordKey: input.recordKey,
+		stream: input.stream,
+	});
 }
 
 /** A capture context plus the handles that must be closed after the run. */
@@ -259,6 +314,7 @@ export function capturedBodyCheckpoint(mtimeMs: number): number {
 export class ArtifactCaptureLedger {
 	readonly #enabled: boolean;
 	readonly #outstanding = new Set<string>();
+	#pendingUpload = 0;
 
 	constructor(options: { enabled: boolean }) {
 		this.#enabled = options.enabled;
@@ -269,6 +325,21 @@ export class ArtifactCaptureLedger {
 		return this.#enabled;
 	}
 
+	/**
+	 * Bodies spooled this run whose upload is still owed.
+	 *
+	 * While no upload transport is wired, a captured body is durable locally but
+	 * has not been delivered. That obligation used to be represented by a
+	 * `blob_upload` outbox row, which halted the connector (see
+	 * `hasUploadTransport`). Counting it here keeps the obligation VISIBLE in
+	 * terminal reporting instead of making it disappear: a captured body without
+	 * an upload is an honest partial state, and reporting it as complete would
+	 * be the dishonest repair.
+	 */
+	get pendingUpload(): number {
+		return this.#pendingUpload;
+	}
+
 	/** Note the outcome for one source file. */
 	record(path: string, status: ArtifactCaptureStatus): void {
 		if (!this.#enabled) {
@@ -276,6 +347,9 @@ export class ArtifactCaptureLedger {
 		}
 		if (status === "captured") {
 			this.#outstanding.delete(path);
+			if (!hasUploadTransport()) {
+				this.#pendingUpload += 1;
+			}
 			return;
 		}
 		this.#outstanding.add(path);

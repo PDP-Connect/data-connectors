@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
+	type CollectorRunResult,
 	LocalDeviceBlobSpool,
 	runCollectorConnector,
 } from "@pdpp/collector-runtime";
@@ -50,6 +51,7 @@ after(async () => {
 interface Source {
 	body: Buffer;
 	claudeHome: string;
+	project: string;
 	projects: string;
 	queuePath: string;
 	spoolRoot: string;
@@ -85,6 +87,7 @@ async function makeSource(): Promise<Source> {
 	return {
 		body,
 		claudeHome,
+		project,
 		projects,
 		queuePath: join(claudeHome, "queue.sqlite"),
 		spoolRoot: join(claudeHome, "blob-spool"),
@@ -104,7 +107,9 @@ interface RunOptions {
 
 interface Harness {
 	ingested: Array<Record<string, unknown>>;
-	run: (options?: RunOptions) => Promise<void>;
+	/** The progress lines the connector emitted, as an operator would read them. */
+	progress: string[];
+	run: (options?: RunOptions) => Promise<CollectorRunResult>;
 	/** The cursor the reference server has persisted, as the next run will read it. */
 	state: () => Record<string, unknown>;
 	server: Server;
@@ -162,7 +167,9 @@ async function makeHarness(source: Source): Promise<Harness> {
 	assert.ok(address && typeof address === "object");
 	const baseUrl = `http://127.0.0.1:${address.port}`;
 
-	const run = async (options?: RunOptions): Promise<void> => {
+	const progress: string[] = [];
+
+	const run = async (options?: RunOptions): Promise<CollectorRunResult> => {
 		// `buildConnectorSpec` is the production spec builder from the CLI, so
 		// this exercises the same env threading a real `run` uses.
 		const spec = buildConnectorSpec(
@@ -180,7 +187,7 @@ async function makeHarness(source: Source): Promise<Harness> {
 					}
 				: undefined,
 		);
-		await runCollectorConnector({
+		return await runCollectorConnector({
 			baseUrl,
 			connector: {
 				...spec,
@@ -193,11 +200,19 @@ async function makeHarness(source: Source): Promise<Harness> {
 			deviceId: "device-production",
 			deviceToken: "test-token",
 			executionRoot: resolveExecutionRoot(spec),
+			onMessage: (message) => {
+				if (
+					message.type === "PROGRESS" &&
+					typeof message.message === "string"
+				) {
+					progress.push(message.message);
+				}
+			},
 			queuePath: source.queuePath,
 			sourceInstanceId: "claude-production",
 		});
 	};
-	return { ingested, run, server, state: () => persistedState };
+	return { ingested, progress, run, server, state: () => persistedState };
 }
 
 function attachmentRecords(
@@ -409,6 +424,79 @@ test("a captured body's checkpoint is distinguishable from a bare mtime", async 
 		stored,
 		statSync(source.toolResult).mtimeMs,
 		"a held body is checkpointed distinguishably",
+	);
+});
+
+test("collection continues across runs once a body has been captured", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	const first = await harness.run({ capture: true });
+	assert.equal(
+		toolResultFiles(harness.ingested)[0]?.artifact_capture,
+		"captured",
+		"the first run captured the body",
+	);
+	assert.equal(
+		first.outboxSummary.deadLetter,
+		0,
+		"capturing a body dead-letters nothing",
+	);
+
+	// A brand-new session appears. A healthy connector must collect it.
+	const NEXT_SESSION = "33333333-3333-4333-8333-333333333333";
+	await mkdir(join(source.project, NEXT_SESSION, "tool-results"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(source.project, `${NEXT_SESSION}.jsonl`),
+		`${JSON.stringify({
+			isSidechain: false,
+			message: { content: "brand new" },
+			sessionId: NEXT_SESSION,
+			timestamp: "2026-09-02T00:00:00.000Z",
+			type: "user",
+			uuid: "00000000-0000-4000-8000-000000000002",
+		})}\n`,
+	);
+
+	harness.ingested.length = 0;
+	const second = await harness.run({ capture: true });
+
+	// The defect this guards: capture enqueued a `blob_upload` obligation against
+	// an upload transport that is not wired. Its drain failed terminally, the row
+	// was dead-lettered on the first attempt, and the runtime's scan-admission
+	// predicate treats any non-succeeded row outside `gap` / `terminal_run_commit`
+	// as backlog. Every later run skipped the scan entirely, so ONE captured body
+	// permanently stopped the connector — unchanged files, modified files and new
+	// sessions alike.
+	assert.equal(
+		second.skippedScanForBacklog,
+		false,
+		"the run after a capture actually scans rather than skipping for backlog",
+	);
+	assert.ok(
+		harness.ingested.some((record) =>
+			JSON.stringify(record).includes(NEXT_SESSION),
+		),
+		"a session created after the first capture is still collected",
+	);
+});
+
+test("a captured body's pending upload stays visible in reporting", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	await harness.run({ capture: true });
+
+	// Not enqueuing the upload row must not become "pretend nothing is owed".
+	// Local retention is complete; remote delivery is not, and an operator has to
+	// be able to see that.
+	assert.ok(
+		harness.progress.some((line) =>
+			line.includes("artifact_bodies_awaiting_upload=1"),
+		),
+		"the undelivered body is reported, not silently dropped",
 	);
 });
 
