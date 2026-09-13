@@ -474,9 +474,19 @@ export interface EmitToolResultFileArgs {
 	toolResultsDir: string;
 }
 
+/**
+ * Emit one tool-result attachment record, capturing its body when configured.
+ *
+ * Returns false when the source could not be read at all, so the caller can
+ * withhold the checkpoint and let the next run retry. That signal is NOT the
+ * same as the capture ledger: an unreadable file owes a retry even on a run
+ * with no artifact stores wired, because not even the preview record was
+ * emitted. Capture state alone cannot carry that, since the ledger is inert
+ * when capture is disabled.
+ */
 export async function emitToolResultFile(
 	args: EmitToolResultFileArgs,
-): Promise<void> {
+): Promise<boolean> {
 	// The bounded head prefix below is unchanged: it remains the record's
 	// SEARCH PROJECTION, read without materialising a file that can be hundreds
 	// of MB. What changes is that it is no longer the only copy — the complete
@@ -484,7 +494,17 @@ export async function emitToolResultFile(
 	// record is reconstructable rather than merely findable.
 	const bounded = await readBoundedFilePreview(args.full);
 	if (bounded === null) {
-		return;
+		// The file could not be read at all, so there is no preview to emit and no
+		// capture to attempt. Returning silently here used to let the caller
+		// checkpoint the file as enumerated, and a later readable run then skipped
+		// it forever — the bytes were lost to a transient EACCES/EIO.
+		//
+		// Record the obligation explicitly instead. `unavailable` is the honest
+		// status: nothing is durably held. The caller reads the ledger, withholds
+		// this file's checkpoint, and the next run re-examines it. One unreadable
+		// file still does not abort the session.
+		args.captureLedger?.record(args.full, "unavailable");
+		return false;
 	}
 	const rel = args.full.slice(args.toolResultsDir.length + 1);
 	const previewResult = safeTextPreview(
@@ -520,6 +540,7 @@ export async function emitToolResultFile(
 		artifact_capture: captured.status,
 		artifact_sha256: captured.sha256,
 	});
+	return true;
 }
 
 interface ProcessToolResultArgs {
@@ -552,21 +573,30 @@ async function processToolResultEntry(
 	// An unchanged file is normally settled work. It is NOT settled when its
 	// body is still owed: the prior run enumerated the preview but did not
 	// durably hold the bytes, so skipping on mtime alone would bury the retry
-	// behind a checkpoint that only a source rewrite could lift. Re-examining
-	// it is also what backfills files recorded `unavailable` before capture
-	// was configured.
-	const owed = args.captureLedger?.isOutstanding(args.full) ?? false;
-	if (args.fileMtimes[args.full] === mtime && !owed) {
-		args.newMtimes[args.full] = mtime;
+	// behind a checkpoint that only a source rewrite could lift.
+	//
+	// The checkpoint VALUE, not its mere presence, is what answers this across
+	// runs. The ledger is per-run, so a run that follows a failure starts with an
+	// empty outstanding set; only a checkpoint that encodes "body durably held"
+	// can prove the file is settled. A plain mtime — written by a run that had no
+	// stores wired, or before this encoding existed — means the body state is
+	// unknown, so the file is revisited ONCE and backfilled. See
+	// `ArtifactCaptureLedger.isSettled`.
+	const settled = args.captureLedger
+		? args.captureLedger.isSettled(args.full, args.fileMtimes[args.full], mtime)
+		: args.fileMtimes[args.full] === mtime;
+	if (settled) {
+		args.newMtimes[args.full] = args.fileMtimes[args.full] ?? mtime;
 		return;
 	}
 	if (!args.requested.has("attachments")) {
-		// Nothing will attempt capture on this pass, so the mtime is an honest
-		// record of the enumeration that did happen.
+		// Nothing will attempt capture on this pass, so the plain mtime is an
+		// honest record of the enumeration that did happen — and, because it does
+		// not claim a captured body, a later capture-enabled run still revisits it.
 		args.newMtimes[args.full] = mtime;
 		return;
 	}
-	await emitToolResultFile({
+	const emitted = await emitToolResultFile({
 		captureContext: args.captureContext ?? null,
 		captureLedger: args.captureLedger ?? null,
 		emitRecord: args.emitRecord,
@@ -576,11 +606,23 @@ async function processToolResultEntry(
 		sessionId: args.sessionId,
 		st,
 	});
-	// Checkpoint the mtime only once the body is no longer owed. Withholding it
-	// for an outstanding artifact is what makes the next run retry this file
-	// while every captured sibling stays settled.
+	if (!emitted) {
+		// The source was unreadable, so nothing was enumerated and nothing was
+		// captured. Leave NO checkpoint: the absent entry is the retry obligation,
+		// and it survives a run with capture disabled, where the ledger is inert.
+		return;
+	}
+	// Checkpoint only once the body is no longer owed. Withholding the value for
+	// an outstanding artifact is what makes the next run retry this file while
+	// every captured sibling stays settled.
+	//
+	// The value written must be the one `isSettled` accepts: a captured body gets
+	// the stronger encoding, so the NEXT run recognises it and skips the file.
+	// Writing the plain mtime here instead would make every successfully captured
+	// file read as "body state unknown" forever, re-reading it on every run.
 	if (!(args.captureLedger?.isOutstanding(args.full) ?? false)) {
-		args.newMtimes[args.full] = mtime;
+		args.newMtimes[args.full] =
+			args.captureLedger?.checkpointValue(args.full, mtime) ?? mtime;
 	}
 }
 

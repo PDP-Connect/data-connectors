@@ -28,6 +28,7 @@
  * strength of an upload that might yet fail.
  */
 
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
 	captureBlobArtifact,
@@ -192,6 +193,47 @@ export function openArtifactCapture(input: {
 }
 
 /**
+ * Marker mixed into a checkpoint value to mean "the body behind this mtime is
+ * durably held".
+ *
+ * The string is opaque and carries no provider or status vocabulary: it exists
+ * only to make the captured encoding of an mtime differ from the raw mtime.
+ */
+const CAPTURED_BODY_MARKER = "pdpp.artifact.body.v1";
+
+/**
+ * Encode "this file was enumerated at `mtimeMs` AND its body is durably held".
+ *
+ * WHY the stored value is not the bare mtime: a bare mtime answers only "were
+ * the previews enumerated", which is a strictly weaker fact than "are the bytes
+ * safe". A run that captured nothing wrote the same value as a run that
+ * captured everything, so the two were indistinguishable on the next run — the
+ * reason enabling capture never backfilled. Folding the capture fact into the
+ * value makes the checkpoint answer the question the skip gate actually asks.
+ *
+ * A 52-bit SHA-256 prefix is used rather than arithmetic tagging because
+ * `mtimeMs` is FRACTIONAL on ext4 (measured: 1789331218360.598), so parity or
+ * multiply-by-two tags are not total over the real input domain. 52 bits is the
+ * widest integer a JS double holds exactly, and the value stays a `number`, so
+ * the persisted `file_mtimes` cursor shape is untouched — this is the same
+ * technique and the same reasoning as `contentGateValue` for the markdown
+ * streams.
+ *
+ * A cursor written before this encoding existed holds the raw mtime, which
+ * cannot equal the digest. Such a file therefore mismatches ONCE, is revisited,
+ * captures, and is then checkpointed in the new encoding — a one-time re-read
+ * per file, never a repeated one. That is the migration: it needs no version
+ * flag, no new user setting and no status enum in shared state.
+ */
+export function capturedBodyCheckpoint(mtimeMs: number): number {
+	const digest = createHash("sha256")
+		.update(`${CAPTURED_BODY_MARKER}:${mtimeMs}`, "utf8")
+		.digest();
+	// Divide rather than shift to drop the low 12 bits (Biome bans bitwise here).
+	return Number(digest.readBigUInt64BE(0) / 4096n);
+}
+
+/**
  * The bodies this run still owes, tracked SEPARATELY from the file mtimes that
  * gate enumeration.
  *
@@ -200,18 +242,19 @@ export function openArtifactCapture(input: {
  * capture records "this file's bytes are durably held". Capture failure is
  * reported rather than thrown, so a run could checkpoint the mtime, skip the
  * unchanged file on the next run, and never retry the body — a visible gap
- * that repaired itself only if the source happened to be rewritten. Turning
- * capture on later had the same problem: files already recorded `unavailable`
- * were never revisited.
+ * that repaired itself only if the source happened to be rewritten.
  *
- * Recording the outstanding paths lets the next run withhold exactly those
- * files' mtimes, so they are re-examined while every successfully captured
- * file stays checkpointed. One failed artifact still does not abort a session.
+ * Within a run, the outstanding set withholds exactly those files' checkpoints
+ * so the next run re-examines them. ACROSS runs the ledger is empty again, so
+ * the outstanding set alone cannot carry an obligation forward; the persisted
+ * checkpoint value does that, via `capturedBodyCheckpoint`. Both are needed:
+ * the set handles a failure seen this run, the encoding handles every run after.
  *
- * A run with no capture configured at all owes nothing: `enabled` is false and
- * the ledger stays empty, so enumeration checkpoints exactly as it did before
- * artifact capture existed. Only a run that was ASKED to capture can be behind
- * on it.
+ * A run with no capture configured owes nothing it could act on: `enabled` is
+ * false, the ledger stays empty, and enumeration checkpoints the plain mtime
+ * exactly as it did before artifact capture existed. That plain value is also
+ * what a later capture-enabled run recognises as "body state unknown", which is
+ * what makes enabling capture backfill.
  */
 export class ArtifactCaptureLedger {
 	readonly #enabled: boolean;
@@ -219,6 +262,11 @@ export class ArtifactCaptureLedger {
 
 	constructor(options: { enabled: boolean }) {
 		this.#enabled = options.enabled;
+	}
+
+	/** True when this run was asked to capture bodies at all. */
+	get enabled(): boolean {
+		return this.#enabled;
 	}
 
 	/** Note the outcome for one source file. */
@@ -236,6 +284,43 @@ export class ArtifactCaptureLedger {
 	/** True when this file's body is still owed. */
 	isOutstanding(path: string): boolean {
 		return this.#outstanding.has(path);
+	}
+
+	/**
+	 * The value to checkpoint for a file enumerated at `mtimeMs`.
+	 *
+	 * Captured bodies get the stronger encoding; a run that cannot capture at all
+	 * keeps writing the plain mtime, so it neither claims a capture it did not
+	 * make nor churns the cursor of a run that was never asked to capture.
+	 */
+	checkpointValue(path: string, mtimeMs: number): number {
+		if (!this.#enabled || this.isOutstanding(path)) {
+			return mtimeMs;
+		}
+		return capturedBodyCheckpoint(mtimeMs);
+	}
+
+	/**
+	 * Whether an unchanged file is settled, given what the last run checkpointed.
+	 *
+	 * When capture is enabled, only the captured encoding settles a file. A plain
+	 * mtime means the body state is unknown — an old preview-only checkpoint, or
+	 * a run that had no stores — so the file is revisited once to backfill.
+	 * When capture is not enabled this collapses to the original mtime equality,
+	 * so a run that cannot capture does not re-read files it cannot help.
+	 */
+	isSettled(
+		path: string,
+		stored: number | undefined,
+		mtimeMs: number,
+	): boolean {
+		if (stored === undefined || this.isOutstanding(path)) {
+			return false;
+		}
+		if (!this.#enabled) {
+			return stored === mtimeMs || stored === capturedBodyCheckpoint(mtimeMs);
+		}
+		return stored === capturedBodyCheckpoint(mtimeMs);
 	}
 
 	get size(): number {

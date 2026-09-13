@@ -23,7 +23,7 @@
  * content-addressed objects by writing a pid-scoped temp file and renaming it.
  */
 
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /** Absolute path of the durable outbox the child should enqueue into. */
 export const ARTIFACT_OUTBOX_PATH_ENV = "PDPP_ARTIFACT_OUTBOX_PATH";
@@ -48,15 +48,30 @@ export function defaultArtifactSpoolRoot(outboxPath: string): string {
 	return join(dirname(outboxPath), "blob-spool");
 }
 
-/** Build the child env that enables artifact capture for this run. */
+/**
+ * Build the child env that enables artifact capture for this run.
+ *
+ * Both paths are resolved against the HOST's working directory before they are
+ * forwarded. The contract above promises absolute paths, but a caller may hold
+ * a relative one — `--queue-path .pdpp/queue.sqlite` is ordinary CLI usage. A
+ * relative path forwarded verbatim is interpreted against the CHILD's working
+ * directory, which need not match the parent's, so the child would open a
+ * DIFFERENT outbox and spool: capture would silently write bytes nobody later
+ * reads, or fail on a directory that does not exist there.
+ *
+ * Resolving here, once, at the boundary that knows the intended base, keeps the
+ * promise the env var names make. An already-absolute path is unchanged.
+ */
 export function buildArtifactCaptureEnv(
 	input: ArtifactCaptureEnvInput,
 ): Record<string, string> {
+	const outboxPath = resolve(input.outboxPath);
 	return {
-		[ARTIFACT_OUTBOX_PATH_ENV]: input.outboxPath,
+		[ARTIFACT_OUTBOX_PATH_ENV]: outboxPath,
 		[ARTIFACT_SOURCE_INSTANCE_ENV]: input.sourceInstanceId,
-		[ARTIFACT_SPOOL_ROOT_ENV]:
-			input.spoolRoot ?? defaultArtifactSpoolRoot(input.outboxPath),
+		[ARTIFACT_SPOOL_ROOT_ENV]: input.spoolRoot
+			? resolve(input.spoolRoot)
+			: defaultArtifactSpoolRoot(outboxPath),
 	};
 }
 

@@ -92,9 +92,21 @@ async function makeSource(): Promise<Source> {
 	};
 }
 
+interface RunOptions {
+	/**
+	 * False models a run the operator has NOT wired artifact stores for: the
+	 * child gets no capture env, so every body is honestly `unavailable`. This is
+	 * what every run looked like before capture was configurable, which is why
+	 * enabling it later has to backfill.
+	 */
+	capture?: boolean;
+}
+
 interface Harness {
 	ingested: Array<Record<string, unknown>>;
-	run: () => Promise<void>;
+	run: (options?: RunOptions) => Promise<void>;
+	/** The cursor the reference server has persisted, as the next run will read it. */
+	state: () => Record<string, unknown>;
 	server: Server;
 }
 
@@ -150,7 +162,7 @@ async function makeHarness(source: Source): Promise<Harness> {
 	assert.ok(address && typeof address === "object");
 	const baseUrl = `http://127.0.0.1:${address.port}`;
 
-	const run = async (): Promise<void> => {
+	const run = async (options?: RunOptions): Promise<void> => {
 		// `buildConnectorSpec` is the production spec builder from the CLI, so
 		// this exercises the same env threading a real `run` uses.
 		const spec = buildConnectorSpec(
@@ -161,10 +173,12 @@ async function makeHarness(source: Source): Promise<Harness> {
 				queuePath: source.queuePath,
 				streams: ["sessions", "messages", "attachments"],
 			},
-			{
-				outboxPath: source.queuePath,
-				sourceInstanceId: "claude-production",
-			},
+			(options?.capture ?? true)
+				? {
+						outboxPath: source.queuePath,
+						sourceInstanceId: "claude-production",
+					}
+				: undefined,
 		);
 		await runCollectorConnector({
 			baseUrl,
@@ -183,7 +197,7 @@ async function makeHarness(source: Source): Promise<Harness> {
 			sourceInstanceId: "claude-production",
 		});
 	};
-	return { ingested, run, server };
+	return { ingested, run, server, state: () => persistedState };
 }
 
 function attachmentRecords(
@@ -324,5 +338,104 @@ test("a captured file IS skipped on the next run while unchanged", async () => {
 		),
 		[],
 		"an unchanged file whose body is already held is not re-collected",
+	);
+});
+
+/** The tool-result checkpoints, as the next run will read them back. */
+function storedCheckpoint(harness: Harness, path: string): number | undefined {
+	const state = harness.state() as {
+		sessions?: { file_mtimes?: Record<string, number> };
+	};
+	return state.sessions?.file_mtimes?.[path];
+}
+
+function toolResultFiles(
+	ingested: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	return attachmentRecords(ingested).filter(
+		(record) => record.event_type === "tool_result_file",
+	);
+}
+
+test("enabling capture backfills a body recorded before any store was wired", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	// A run with no artifact stores: honest, but it holds no bytes.
+	await harness.run({ capture: false });
+	assert.equal(
+		toolResultFiles(harness.ingested)[0]?.artifact_capture,
+		"unavailable",
+		"the first run had nowhere to put the body",
+	);
+
+	// The operator wires the stores. The file has NOT changed, so a checkpoint
+	// compared on mtime alone would skip it and the old body would stay lost.
+	harness.ingested.length = 0;
+	await harness.run({ capture: true });
+	const backfilled = toolResultFiles(harness.ingested);
+	assert.equal(backfilled.length, 1, "the unchanged file was revisited");
+	assert.equal(
+		backfilled[0]?.artifact_capture,
+		"captured",
+		"enabling capture backfilled the previously-unavailable body",
+	);
+
+	// Backfill must happen ONCE, not on every subsequent run. The checkpoint now
+	// records that the body is held, which is what stops the re-read.
+	assert.notEqual(
+		storedCheckpoint(harness, source.toolResult),
+		statSync(source.toolResult).mtimeMs,
+		"the checkpoint records a held body, not the bare mtime",
+	);
+});
+
+test("a captured body's checkpoint is distinguishable from a bare mtime", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	await harness.run({ capture: true });
+	assert.equal(
+		toolResultFiles(harness.ingested)[0]?.artifact_capture,
+		"captured",
+	);
+
+	// This is the fact that makes backfill terminate. If the captured file were
+	// checkpointed with its bare mtime, a capture-enabled run could not tell it
+	// apart from a preview-only checkpoint, and would re-read it forever.
+	const stored = storedCheckpoint(harness, source.toolResult);
+	assert.ok(stored !== undefined, "the captured file was checkpointed");
+	assert.notEqual(
+		stored,
+		statSync(source.toolResult).mtimeMs,
+		"a held body is checkpointed distinguishably",
+	);
+});
+
+test("an unreadable tool-result is retried on a later run, capture off", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	// `readBoundedFilePreview` returns null here, the failure path that precedes
+	// any capture attempt. With capture off the ledger is inert, so the retry
+	// obligation cannot live there — it has to be the absent checkpoint.
+	await chmod(source.toolResult, 0o000);
+	try {
+		await harness.run({ capture: false });
+	} finally {
+		await chmod(source.toolResult, 0o600);
+	}
+	assert.equal(
+		storedCheckpoint(harness, source.toolResult),
+		undefined,
+		"an unreadable file leaves no checkpoint to skip behind",
+	);
+
+	harness.ingested.length = 0;
+	await harness.run({ capture: false });
+	assert.equal(
+		toolResultFiles(harness.ingested).length,
+		1,
+		"the now-readable file was re-examined rather than skipped forever",
 	);
 });
