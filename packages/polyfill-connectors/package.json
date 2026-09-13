@@ -29,6 +29,18 @@
 		"node": ">=24.15.0 <25"
 	},
 	"exports": {
+		"./retention-schemas": {
+			"types": "./src/retention-schemas.d.ts",
+			"default": "./src/retention-schemas.js"
+		},
+		"./retention-runtime": {
+			"types": "./src/retention-runtime.d.ts",
+			"default": "./src/retention-runtime.js"
+		},
+		"./retention-verifier": {
+			"types": "./src/retention-verifier.d.ts",
+			"default": "./src/retention-verifier.js"
+		},
 		"./collectors": {
 			"types": "./src/collector-registry.d.ts",
 			"default": "./src/collector-registry.js"
