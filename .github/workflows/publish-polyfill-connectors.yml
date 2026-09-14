@@ -377,79 +377,80 @@ jobs:
           # from "I could not find out" is not a precondition; it fails open,
           # and it fails open precisely when the registry is unhealthy.
           #
-          # So the status and the body are captured separately and classified:
+          # So the lookup is a TYPED, three-outcome question about one reference:
           #
-          #   FOUND            — exit 0, a parseable sha256 descriptor. Compare.
-          #   CONFIRMED-ABSENT — a definite "no such manifest" from the registry.
-          #                      Publish; this is a first release.
-          #   UNKNOWN          — anything else: a non-zero status that is not a
-          #                      definite absence, or output that does not parse
-          #                      as a descriptor. REFUSE, before the tag moves.
+          #   present  — the manifest endpoint answered 200 for this exact
+          #              reference and named a digest. Compare.
+          #   absent   — the manifest endpoint answered 404 for this exact
+          #              reference WITH a MANIFEST_UNKNOWN/NAME_UNKNOWN
+          #              distribution error. Publish; this is a first release.
+          #   unknown  — anything else at all. REFUSE, before the tag moves.
           #
           # UNKNOWN refusing is the whole repair. It costs a retry on a flaky
           # registry; the alternative cost is an unreviewed, signed overwrite of
           # a released version, which no retry undoes.
-          set +e
-          LOOKUP_OUT="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>"${RUNNER_TEMP}/lookup-err")"
-          LOOKUP_STATUS=$?
-          set -e
-          LOOKUP_ERR="$(cat "${RUNNER_TEMP}/lookup-err")"
+          #
+          # WHY A DEDICATED LOOKUP RATHER THAN THE CLIENT'S STDERR. A previous
+          # revision ran `oras manifest fetch` and read absence out of its error
+          # text (`not found|NAME_UNKNOWN|MANIFEST_UNKNOWN`). Stderr prose has no
+          # provenance: the pinned client renders a failure from ANY leg of the
+          # exchange through one formatter, so a 404 from the TOKEN endpoint
+          # printed `response status code 404: Not Found` and matched, as did a
+          # 403 or a 500 whose registry-supplied message happened to contain
+          # "not found". Each of those authorised moving a released version tag
+          # onto different bytes and signing them, with no stolen credential and
+          # no broken cryptography — just an ordinary failure in a DIFFERENT
+          # request being read as an answer about this manifest.
+          #
+          # scripts/lookup-manifest.mjs asks the manifest endpoint itself and
+          # classifies from THAT response's status and parsed error code. A
+          # token failure is caught where the token is requested and can never
+          # be attributed to the manifest, which makes the counterexample
+          # structurally impossible instead of merely blocklisted. Blocklisting
+          # those three strings would have left the next unlucky sentence open.
+          LOOKUP_USERNAME="${{ github.actor }}" \
+          LOOKUP_PASSWORD="${GH_TOKEN}" \
+          node "${GITHUB_WORKSPACE}/scripts/lookup-manifest.mjs" \
+            --reference "${REPOSITORY}:${VERSION}" > "${RUNNER_TEMP}/lookup.json"
 
-          if [ "$LOOKUP_STATUS" -eq 0 ]; then
-            # Exit 0 promises a descriptor. If the body is not one, the client
-            # and this step disagree about what just happened, and that is
-            # UNKNOWN — not an absence. `node -e` exits non-zero on a parse
-            # failure rather than printing nothing, so the failure is visible
-            # here instead of being laundered into the empty string.
-            set +e
-            LOCAL_DIGEST="$(printf '%s' "$LOOKUP_OUT" | node -e '
-              let s = "";
-              process.stdin.on("data", (d) => (s += d)).on("end", () => {
-                let descriptor;
-                try { descriptor = JSON.parse(s); } catch { process.exit(3); }
-                const digest = descriptor && descriptor.digest;
-                if (typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) process.exit(3);
-                console.log(digest);
-              });
-            ')"
-            PARSE_STATUS=$?
-            set -e
-            if [ "$PARSE_STATUS" -ne 0 ]; then
-              echo "::error::${REPOSITORY}:${VERSION} lookup succeeded but returned no usable sha256 descriptor; refusing to publish. The existing state of this version is UNKNOWN and it must not be redefined on a guess. Output was: ${LOOKUP_OUT}"
-              exit 1
-            fi
-            LOOKUP_OUTCOME=found
-          elif printf '%s' "$LOOKUP_ERR" | grep -qiE 'not found|NAME_UNKNOWN|MANIFEST_UNKNOWN'; then
-            # The registry answered, and the answer was "no such manifest".
-            # That is a real answer, and it is the one that permits a first
-            # publish. It is matched on the error the client actually emits,
-            # rather than being inferred from the absence of output.
-            LOOKUP_OUTCOME=absent
-            LOCAL_DIGEST=""
-          else
-            echo "::error::${REPOSITORY}:${VERSION} could not be resolved (oras manifest fetch exited ${LOOKUP_STATUS}) and the failure is not a definite absence; refusing to publish. Whether this version is already released is UNKNOWN, and tagging on an unknown would redefine it. Retry once the registry is reachable. Client error was: ${LOOKUP_ERR}"
+          LOOKUP_OUTCOME="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).outcome)' "${RUNNER_TEMP}/lookup.json")"
+          LOCAL_DIGEST="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).digest ?? "")' "${RUNNER_TEMP}/lookup.json")"
+
+          if [ "$LOOKUP_OUTCOME" != present ] && [ "$LOOKUP_OUTCOME" != absent ]; then
+            echo "::error::${REPOSITORY}:${VERSION} could not be resolved: the manifest lookup returned '${LOOKUP_OUTCOME}' rather than a definite present/absent answer for this exact reference; refusing to publish. Whether this version is already released is UNKNOWN, and tagging on an unknown would redefine it. An authentication failure, a 5xx, a transport error or an unattributable 404 all land here by design. Retry once the registry answers for this reference."
             exit 1
           fi
 
-          if [ "$LOOKUP_OUTCOME" = found ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
+          if [ "$LOOKUP_OUTCOME" = present ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
             echo "::error::${REPOSITORY}:${VERSION} already published as ${LOCAL_DIGEST}; refusing to redefine it as ${DIGEST}. Publish a new version instead."
             exit 1
           fi
 
-          # Step 2: only now does the version identifier move, and it moves to
-          # the digest the guard just cleared. Tagging BY DIGEST — never by
-          # re-resolving a name — keeps this the same single captured value.
-          oras tag "${REPOSITORY}@${DIGEST}" "${VERSION}"
-
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "published ${REPOSITORY}@${DIGEST}"
-
+          # Step 2: SIGN, and only then expose the version identifier.
+          #
+          # This order is deliberate and it is the cheaper half of a previously
+          # disclosed limit. Both commands operate on the same captured DIGEST
+          # and the guard has already cleared it, so swapping them changes no
+          # precondition — but it closes the window in which an interrupted run
+          # left `:VERSION` resolvable on bytes that were never signed. Signing
+          # first means the failure mode of an interruption is an unreferenced
+          # signed manifest, which nothing resolves by name, instead of a
+          # visible version a consumer can install and cannot verify.
+          #
           # Sign the DIGEST captured above, never the tag and never a re-resolve.
           # Keyless: Fulcio issues a short-lived certificate bound to the OIDC
           # token's identity — this repository, this workflow file, and (layer 1
           # of the ref restriction) refs/heads/main — and the signature is logged
           # to Rekor. There is no private key in this repo.
           cosign sign --yes "${REPOSITORY}@${DIGEST}"
+
+          # Step 3: the version identifier moves, to the digest the guard
+          # cleared and the signature now covers. Tagging BY DIGEST — never by
+          # re-resolving a name — keeps this the same single captured value.
+          oras tag "${REPOSITORY}@${DIGEST}" "${VERSION}"
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "published ${REPOSITORY}@${DIGEST}"
 
           {
             echo "### Published \`${CONNECTOR}\` ${VERSION}"

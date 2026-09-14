@@ -463,7 +463,7 @@ test("the republication guard is reached before the mutable version tag moves", 
     .filter((line) => !/^\s*#/.test(line));
 
   const at = (pattern) => shell.findIndex((line) => pattern.test(line));
-  const lookup = at(/oras manifest fetch --descriptor/);
+  const lookup = at(/lookup-manifest\.mjs/);
   const refusal = at(/refusing to redefine it/);
   const tagWrite = at(/^\s*oras tag\b/);
 
@@ -488,12 +488,15 @@ test("the republication guard is reached before the mutable version tag moves", 
   // a lookup that failed from being read as an absence. An earlier revision had
   // only `[ -n "$LOCAL_DIGEST" ]` here, which conflated a genuinely unpublished
   // version with a timed-out, denied or unparseable lookup and published over a
-  // release. The three outcomes are executed against a substitute registry in
+  // release. A later revision told them apart by grepping the client's stderr,
+  // which let an error from the TOKEN request — or any message containing "not
+  // found" — authorise a republication; absence now comes from the typed lookup
+  // and nothing else. The outcomes are executed against a loopback registry in
   // scripts/publish-tag-guard.test.mjs; this pins the shape they rely on.
   assert.match(
     readFileSync(workflowPath, "utf8"),
-    /\[ "\$LOOKUP_OUTCOME" = found \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
-    "the publish must refuse only when an existing digest was FOUND and DIFFERS — an " +
+    /\[ "\$LOOKUP_OUTCOME" = present \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
+    "the publish must refuse only when an existing digest was PRESENT and DIFFERS — an " +
       "identical retry is allowed, and an unknown lookup is not an absence",
   );
 });

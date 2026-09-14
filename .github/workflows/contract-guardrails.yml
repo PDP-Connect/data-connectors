@@ -45,6 +45,9 @@ jobs:
       - name: Test publish tag guard
         run: node --test scripts/publish-tag-guard.test.mjs
 
+      - name: Test manifest lookup classifier
+        run: node --test scripts/lookup-manifest.test.mjs
+
       - name: Checkout pinned PDPP source for GitHub artifact provenance
         run: |
           git clone --filter=blob:none https://github.com/PDP-Connect/pdpp.git "$RUNNER_TEMP/pdpp-github"

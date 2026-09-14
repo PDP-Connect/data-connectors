@@ -92,3 +92,6 @@ jobs:
 
       - name: Publish tag-guard behavioral tests
         run: node --test scripts/publish-tag-guard.test.mjs
+
+      - name: Manifest lookup classifier tests
+        run: node --test scripts/lookup-manifest.test.mjs
