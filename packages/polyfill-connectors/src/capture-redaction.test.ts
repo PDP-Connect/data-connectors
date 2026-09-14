@@ -14,7 +14,9 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { Page } from "playwright";
@@ -42,17 +44,41 @@ const ARIA_WITH_FILLED_PASSWORD = [
 	"  - text: Sign in to continue",
 ].join("\n");
 
-function withCaptureEnv<T>(body: () => T): T {
+/**
+ * Enables capture mode AND points it at a scratch root this test owns.
+ *
+ * Without `PDPP_CAPTURE_ROOT_DIR`, `createCaptureSession` writes under the
+ * package's own `fixtures/` tree and — capture mode means "always retain" —
+ * leaves it there. Those files are gitignored, so `git status` stays clean and
+ * the litter is invisible, but `scripts/check-biome.ts` re-includes
+ * `fixtures/**\/*.json` (it only re-applies biome.jsonc's `.html` exception),
+ * so every `npm test` made the NEXT `npm run verify` fail on capture JSON that
+ * is not source at all. CI never saw it because it verifies before it tests.
+ *
+ * A scratch root removed on the way out fixes that at the cause: the capture
+ * path, its retention rule and these assertions are all unchanged — only the
+ * directory they land in moves off the tree Biome reads.
+ */
+async function withCaptureEnv<T>(body: () => T | Promise<T>): Promise<T> {
 	const previous = process.env.PDPP_CAPTURE_FIXTURES;
+	const previousRoot = process.env.PDPP_CAPTURE_ROOT_DIR;
+	const scratchRoot = mkdtempSync(join(tmpdir(), "pdpp-capture-redaction-"));
 	process.env.PDPP_CAPTURE_FIXTURES = "1";
+	process.env.PDPP_CAPTURE_ROOT_DIR = scratchRoot;
 	try {
-		return body();
+		return await body();
 	} finally {
 		if (previous === undefined) {
 			delete process.env.PDPP_CAPTURE_FIXTURES;
 		} else {
 			process.env.PDPP_CAPTURE_FIXTURES = previous;
 		}
+		if (previousRoot === undefined) {
+			delete process.env.PDPP_CAPTURE_ROOT_DIR;
+		} else {
+			process.env.PDPP_CAPTURE_ROOT_DIR = previousRoot;
+		}
+		rmSync(scratchRoot, { recursive: true, force: true });
 	}
 }
 
