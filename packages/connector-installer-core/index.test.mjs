@@ -21,6 +21,7 @@ import test from "node:test";
 import {
   DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
   defaultArtifactCertificateIdentityResolver,
+  fetchBinary,
   fetchResolvedArtifact,
   generateLock,
   installFromLock,
@@ -517,4 +518,65 @@ test("PDPP collection profiles install, verify, and report tampering without a l
   const sourceRoot = join(fixture.root, "source-install");
   await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
   assert.equal((await verifyInstalled({ lock, source, installRoot: sourceRoot, layout: "source" })).ok, true);
+});
+
+test("retries a transient 5xx artifact fetch and returns the eventual bytes", async () => {
+  const payload = Buffer.from("connector-tarball-bytes");
+  const calls = [];
+  const responses = [
+    { ok: false, status: 504, statusText: "Gateway Time-out" },
+    {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      arrayBuffer: async () => payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength),
+    },
+  ];
+  const fetchImpl = async url => {
+    calls.push(url);
+    return responses[calls.length - 1];
+  };
+
+  const bytes = await fetchBinary("https://example.invalid/connector.tgz", {
+    fetchImpl,
+    baseDelayMs: 0,
+  });
+
+  assert.deepEqual(bytes, payload);
+  assert.equal(calls.length, 2, "the 504 must be retried, not surfaced");
+});
+
+test("retries a network error and gives up loudly after the bounded attempts", async () => {
+  const calls = [];
+  const fetchImpl = async url => {
+    calls.push(url);
+    throw new Error("ECONNRESET");
+  };
+
+  await assert.rejects(
+    fetchBinary("https://example.invalid/connector.tgz", {
+      fetchImpl,
+      attempts: 3,
+      baseDelayMs: 0,
+    }),
+    /ECONNRESET/
+  );
+  assert.equal(calls.length, 3, "a network error is retried up to the bound");
+});
+
+test("does not retry a 404, which no later attempt can fix", async () => {
+  const calls = [];
+  const fetchImpl = async url => {
+    calls.push(url);
+    return { ok: false, status: 404, statusText: "Not Found" };
+  };
+
+  await assert.rejects(
+    fetchBinary("https://example.invalid/missing.tgz", {
+      fetchImpl,
+      baseDelayMs: 0,
+    }),
+    /404 Not Found/
+  );
+  assert.equal(calls.length, 1, "a 4xx must fail on the first attempt");
 });
