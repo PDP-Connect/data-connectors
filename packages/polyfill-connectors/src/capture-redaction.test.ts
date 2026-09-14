@@ -166,7 +166,10 @@ test("capture-time ARIA writes redact a known value in an unlabelled field", asy
 			`${capture.baseDir}/aria/profile.aria.yml`,
 			"utf8",
 		);
-		assert.ok(!written.includes(SECRET), "known secret leaked into aria capture");
+		assert.ok(
+			!written.includes(SECRET),
+			"known secret leaked into aria capture",
+		);
 		assert.match(written, /textbox "Nickname" \[ref=e8\]: \[REDACTED\]/);
 	});
 });

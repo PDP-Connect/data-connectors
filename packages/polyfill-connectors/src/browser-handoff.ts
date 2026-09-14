@@ -770,7 +770,9 @@ export async function manualBrowserLogin<Result>({
 			owner_action: "operate_attachment",
 			progress_posture: "blocked",
 			response_contract: "none",
-			...(timeoutSeconds === undefined ? {} : { timeout_seconds: timeoutSeconds }),
+			...(timeoutSeconds === undefined
+				? {}
+				: { timeout_seconds: timeoutSeconds }),
 		});
 		const readinessWindowMs =
 			autoProbeWindowMs ??
@@ -804,7 +806,8 @@ export async function manualBrowserLogin<Result>({
 			return autoResolved;
 		}
 		await completeAssistance(assistanceRequestId, "escalated", {
-			message: "Browser sign-in did not become ready before the handoff timed out.",
+			message:
+				"Browser sign-in did not become ready before the handoff timed out.",
 		});
 		throw new Error("browser_handoff_readiness_timed_out");
 	}

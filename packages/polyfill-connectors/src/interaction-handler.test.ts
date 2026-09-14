@@ -155,7 +155,10 @@ describe("secret field classification", () => {
 			"passphrase",
 			"pin",
 		]) {
-			assert.ok(SECRET_FIELD_RE.test(key), `${key} should be treated as secret`);
+			assert.ok(
+				SECRET_FIELD_RE.test(key),
+				`${key} should be treated as secret`,
+			);
 		}
 	});
 
@@ -170,7 +173,9 @@ describe("handleInteraction operator instructions", () => {
 	function captureStderr(body: () => Promise<void>): Promise<string> {
 		const chunks: string[] = [];
 		const original = process.stderr.write.bind(process.stderr);
-		(process.stderr as { write: unknown }).write = (chunk: unknown): boolean => {
+		(process.stderr as { write: unknown }).write = (
+			chunk: unknown,
+		): boolean => {
 			chunks.push(String(chunk));
 			return true;
 		};
