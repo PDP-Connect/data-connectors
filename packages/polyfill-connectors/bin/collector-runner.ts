@@ -72,6 +72,10 @@ import {
 	enrollCollector,
 	runCollectorConnector,
 } from "@pdpp/collector-runtime";
+import {
+	type ArtifactCaptureEnvInput,
+	buildArtifactCaptureEnv,
+} from "../src/artifact-capture-env.ts";
 import { definitionStreams } from "../src/collector-registry.ts";
 import { resolveExecutionRoot } from "../src/execution-root.ts";
 
@@ -175,26 +179,41 @@ async function main(): Promise<void> {
 		throw new Error("run requires --connector <connector-id>");
 	}
 
-	const spec = buildConnectorSpec(options);
+	const queuePath = scopedDefaultQueuePath(
+		options.queuePath,
+		DEFAULT_QUEUE_PATH,
+		options.sourceInstanceId,
+	);
+	const spec = buildConnectorSpec(options, {
+		outboxPath: queuePath,
+		sourceInstanceId: options.sourceInstanceId,
+	});
 	const result = await runCollectorConnector({
 		baseUrl: options.baseUrl,
 		connector: spec,
 		deviceId: options.deviceId,
 		deviceToken: options.deviceToken,
 		executionRoot: resolveExecutionRoot(spec),
-		queuePath: scopedDefaultQueuePath(
-			options.queuePath,
-			DEFAULT_QUEUE_PATH,
-			options.sourceInstanceId,
-		),
+		queuePath,
 		...(options.runId ? { runId: options.runId } : {}),
 		sourceInstanceId: options.sourceInstanceId,
 	});
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
+/**
+ * Build the spec `runCollectorConnector` spawns the connector from.
+ *
+ * `artifactCapture` is what lets the child capture artifact bodies. The
+ * connector runs as a separate process and the runtime forwards it only a
+ * device token, base URL and run id, so without these variables a connector
+ * cannot reach the outbox or spool and records every body `unavailable`.
+ * Building them here rather than at the call site means a runnable spec always
+ * carries them — see src/artifact-capture-env.ts.
+ */
 export function buildConnectorSpec(
 	options: CliOptions,
+	artifactCapture?: ArtifactCaptureEnvInput,
 ): CollectorConnectorSpec {
 	if (!options.connector) {
 		throw new Error("connector required");
@@ -211,6 +230,9 @@ export function buildConnectorSpec(
 	}
 	return {
 		connector_id: options.connector,
+		...(artifactCapture
+			? { env: buildArtifactCaptureEnv(artifactCapture) }
+			: {}),
 		streams,
 		...(options.streamsToBackfill
 			? { streamsToBackfill: options.streamsToBackfill }
