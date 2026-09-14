@@ -26,16 +26,20 @@ import {
 } from "./capture-redaction.ts";
 import { createCaptureSession } from "./fixture-capture.ts";
 
-/** The credential shape that actually leaked. */
-const SECRET = "BG54aFvx";
+/** Obviously fake credential used to prove capture-time redaction. */
+const SECRET = "hunter2-not-real";
 
 const ARIA_WITH_FILLED_PASSWORD = [
 	"- generic [ref=e2]:",
 	"  - text: Username",
 	'  - textbox "Username" [ref=e3]: tim@example.com',
-	'  - textbox "Password" [ref=e25]: BG54aFvx',
+	'  - textbox "Password" [ref=e25]:',
+	"    - /placeholder: ",
+	`    - text: ${SECRET}`,
 	'  - textbox "One-time code" [active] [ref=e5]: "123456"',
 	'  - textbox "Password" [ref=e9]:',
+	'  - button "Submit" [disabled] [ref=e10]',
+	"  - text: Sign in to continue",
 ].join("\n");
 
 function withCaptureEnv<T>(body: () => T): T {
@@ -76,12 +80,14 @@ test("aria snapshot never writes a filled password value to disk", async () => {
 			"utf8",
 		);
 
-		// The defect: this substring was present on the production volume.
 		assert.ok(
 			!written.includes(SECRET),
 			`password value leaked into aria capture:\n${written}`,
 		);
-		assert.match(written, /textbox "Password" \[ref=e25\]: \[REDACTED\]/);
+		assert.match(
+			written,
+			/textbox "Password" \[ref=e25\]:\n {4}- \/placeholder: \n {4}- text: \[REDACTED\]/,
+		);
 	});
 });
 
@@ -89,7 +95,10 @@ test("redaction preserves that a field existed and whether it was filled", () =>
 	const out = redactAriaSnapshot(ARIA_WITH_FILLED_PASSWORD);
 
 	// Structure survives: role, accessible name and ref are all still readable.
-	assert.match(out, /textbox "Password" \[ref=e25\]: \[REDACTED\]/);
+	assert.match(
+		out,
+		/textbox "Password" \[ref=e25\]:\n {4}- \/placeholder: \n {4}- text: \[REDACTED\]/,
+	);
 	// A filled field is still distinguishable from an empty one — the exact
 	// distinction that diagnosed the real login failure.
 	assert.match(out, /textbox "Password" \[ref=e9\]:$/m);
@@ -101,11 +110,13 @@ test("redaction preserves that a field existed and whether it was filled", () =>
 	assert.match(out, /^- generic \[ref=e2\]:$/m);
 });
 
-test("a non-sensitive field value is not redacted", () => {
+test("ordinary page copy, element names, and button labels are not redacted", () => {
 	const out = redactAriaSnapshot(ARIA_WITH_FILLED_PASSWORD);
 
 	assert.match(out, /textbox "Username" \[ref=e3\]: tim@example\.com/);
 	assert.match(out, /- text: Username/);
+	assert.match(out, /- text: Sign in to continue/);
+	assert.match(out, /button "Submit" \[disabled\] \[ref=e10\]/);
 });
 
 test("an otp field value is redacted and keeps its quoting", () => {
@@ -130,10 +141,73 @@ test("a known credential is redacted even in a field nobody labelled secret", ()
 	assert.ok(redactAriaSnapshot(snapshot, []).includes(SECRET));
 });
 
+test("capture-time ARIA writes redact a known value in an unlabelled field", async () => {
+	await withCaptureEnv(async () => {
+		const capture = createCaptureSession(
+			`redact_known_aria_${process.pid}_${Date.now()}`,
+		);
+		assert.ok(capture);
+		capture.registerSecrets([SECRET]);
+
+		const page: Pick<
+			Page,
+			"ariaSnapshot" | "content" | "screenshot" | "title" | "url"
+		> = {
+			ariaSnapshot: () =>
+				Promise.resolve(`  - textbox "Nickname" [ref=e8]: ${SECRET}`),
+			content: () => Promise.resolve("<html><body></body></html>"),
+			screenshot: () => Promise.resolve(Buffer.from("png")),
+			title: () => Promise.resolve("Profile"),
+			url: () => "https://example.test/profile",
+		};
+
+		await capture.captureDom(page as Page, "profile");
+		const written = readFileSync(
+			`${capture.baseDir}/aria/profile.aria.yml`,
+			"utf8",
+		);
+		assert.ok(!written.includes(SECRET), "known secret leaked into aria capture");
+		assert.match(written, /textbox "Nickname" \[ref=e8\]: \[REDACTED\]/);
+	});
+});
+
 test("a colon inside an accessible name is not mistaken for a value separator", () => {
 	const snapshot = '  - textbox "Time: HH:MM" [ref=e7]: 09:30';
 
 	assert.equal(redactAriaSnapshot(snapshot), snapshot);
+});
+
+test("a nested text: value under a secret textbox is redacted without registration", () => {
+	// The production ARIA shape: an empty-looking secret textbox whose value
+	// lives in a nested `text:` child. The identity rule cannot see it (no
+	// secret is registered), so this pins the structural rule on its own —
+	// the per-line rule this replaced left the value in the clear.
+	const snapshot = [
+		'  - textbox "Password" [ref=e25]:',
+		"    - /placeholder: ",
+		"    - text: unregistered-value-xyz",
+	].join("\n");
+
+	const out = redactAriaSnapshot(snapshot, []);
+
+	assert.ok(
+		!out.includes("unregistered-value-xyz"),
+		`nested password value leaked:\n${out}`,
+	);
+	assert.match(out, /- text: \[REDACTED\]/);
+	// The textbox node itself keeps its role, name and ref.
+	assert.match(out, /textbox "Password" \[ref=e25\]:/);
+});
+
+test("a 1-3 character known secret is not value-redacted across ordinary page copy", () => {
+	const snapshot = [
+		"- document:",
+		'  - heading "On sale" [level=1]',
+		'  - button "Continue" [ref=e1]',
+		"  - text: Turn on notifications",
+	].join("\n");
+
+	assert.equal(redactAriaSnapshot(snapshot, ["on"]), snapshot);
 });
 
 test("dom capture never writes a password value attribute to disk", async () => {
