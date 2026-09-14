@@ -147,7 +147,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "bin/replay-pilot-fixtures.ts",
-			line: 162,
+			line: 166,
 			column: 13,
 			category: "dependent_pagination",
 			note: "replayConnector(): next request depends on the prior page's cursor/offset/response",
@@ -973,7 +973,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/gmail/integration.test.ts",
-			line: 2655,
+			line: 2722,
 			column: 13,
 			category: "test_assertion_sequencing",
 			note: "run(): each run feeds the prior run's committed cursor into the next; the walk is the assertion",
@@ -1218,7 +1218,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/groupme/index.ts",
-			line: 2561,
+			line: 2569,
 			column: 25,
 			category: "shared_mutable_accumulator",
 			note: "collectGroupMessages(): loop body mutates shared considered/nextCursors accumulators the next iteration reads",
@@ -2310,7 +2310,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime-session-watchdog.test.ts",
-			line: 159,
+			line: 161,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "watchdog.checkpoint(): test drives/asserts an ordered per-case side effect",
@@ -2408,7 +2408,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/scheduler-runner.ts",
-			line: 287,
+			line: 288,
 			column: 4,
 			category: "devtool_sequential_output",
 			note: "registerManifest(): manual dev-tool script printing ordered per-item console output",

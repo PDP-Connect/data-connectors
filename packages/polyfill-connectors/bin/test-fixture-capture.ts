@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SOURCE_EXTENSION = import.meta.filename.endsWith(".js") ? "js" : "ts";
@@ -28,7 +28,8 @@ const SOURCE_EXTENSION = import.meta.filename.endsWith(".js") ? "js" : "ts";
 process.env.PDPP_CAPTURE_FIXTURES = "1";
 
 const { createCaptureSession } = await import(
-	`file://${join(PACKAGE_ROOT, `src/fixture-capture.${SOURCE_EXTENSION}`)}`
+	pathToFileURL(join(PACKAGE_ROOT, `src/fixture-capture.${SOURCE_EXTENSION}`))
+		.href
 );
 
 const CONNECTOR = "_capture_smoke";
