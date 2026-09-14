@@ -69,6 +69,11 @@ import {
 	type StreamScope,
 	stringifyForJsonl,
 } from "@pdpp/connector-protocol";
+import {
+	type ArtifactCaptureContext,
+	captureFileArtifact,
+	openArtifactCapture,
+} from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
 import {
 	dateDirectoryInRange,
@@ -94,6 +99,7 @@ import {
 	listDirectoryInventory,
 	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
+import { CodexArtifactLedger } from "./artifact-ledger.ts";
 import {
 	buildPromptRecord,
 	buildRolloutOnlySessionRecord,
@@ -148,6 +154,13 @@ const GUARD_PREFIX_BYTES = 64 * 1024;
 // guard. Both paths force a parse from byte offset 0, so keep unmatched
 // function-call state bounded across full replay.
 const MAX_PENDING_FUNCTION_CALLS = 1024;
+
+// Validates a persisted `captured_sha256` before it is trusted as proof that a
+// body is already held (Biome useTopLevelRegex).
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** MIME type recorded for a captured rollout file. */
+const ROLLOUT_MIME_TYPE = "application/jsonl";
 
 let stdoutDrainPromise: Promise<void> | null = null;
 
@@ -1500,6 +1513,10 @@ interface RolloutRoot {
 interface ScanRolloutsArgs {
 	sourceGaps: Record<string, RolloutSourceGap>;
 	activeQuietMs: number;
+	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
+	captureContext?: ArtifactCaptureContext | null;
+	/** Bodies still owed, kept off the committed cursor so they retry. */
+	captureLedger?: CodexArtifactLedger | null;
 	emitRecord: (stream: string, data: RecordData) => void;
 	fileCursors: Record<string, RolloutFileCursor>;
 	fileMtimes: Record<string, number>;
@@ -1721,6 +1738,26 @@ async function processRolloutEntry(
 	if (args.sourceGaps[entry.path] && action.kind === "skip")
 		action = { kind: "full" };
 	if (action.kind === "skip") {
+		// An unchanged file is normally settled work. It is NOT settled when its
+		// body is still owed: the prior run parsed the lines but did not durably
+		// hold the bytes, so skipping on the offset alone would bury the retry
+		// behind a cursor that only a source append could lift. Capturing here —
+		// WITHOUT reparsing, since no new lines exist — is also what backfills
+		// files whose cursors predate capture being configured.
+		if (
+			args.captureLedger?.enabled &&
+			!args.captureLedger.isSettled(cursorKey, cursor?.captured_sha256)
+		) {
+			const captured = await captureRolloutBody(args, entry.path, cursorKey);
+			if (cursor) {
+				args.newFileCursors[cursorKey] = {
+					...cursor,
+					...(captured !== undefined ? { captured_sha256: captured } : {}),
+				};
+				args.newMtimes[entry.path] = mtime;
+				return "skipped";
+			}
+		}
 		carryFileCursorForward(args, entry, mtime);
 		return "skipped";
 	}
@@ -1770,13 +1807,67 @@ async function processRolloutEntry(
 		seed: action.kind === "append" ? action.seed : undefined,
 	});
 
-	args.newFileCursors[cursorKey] = await buildFileCursorAfterParse(
+	const builtCursor = await buildFileCursorAfterParse(entry.path, result);
+	// Capture AFTER the parse commits its offset, so the digest covers a file
+	// that already has a committed boundary, and BEFORE the cursor is written,
+	// so a failed capture leaves no marker and the next run retries.
+	const captured = await captureRolloutBody(
+		args,
 		entry.path,
-		result,
+		cursorKey,
+		result.sessionId,
 	);
+	const marker = args.captureLedger?.capturedMarker(
+		cursorKey,
+		captured ?? cursor?.captured_sha256,
+	);
+	args.newFileCursors[cursorKey] = {
+		...builtCursor,
+		...(marker !== undefined ? { captured_sha256: marker } : {}),
+	};
 	args.newMtimes[entry.path] = mtime;
 	delete args.sourceGaps[entry.path];
 	return "parsed";
+}
+
+/**
+ * Capture one rollout file's complete bytes, recording the outcome on the
+ * ledger so an unheld body is retried rather than buried under a cursor.
+ *
+ * Returns the digest when the bytes are durably held, undefined otherwise.
+ * Failures are reported, never thrown: one unreadable rollout must not abort a
+ * whole scan, and the ledger keeps the obligation visible.
+ */
+async function captureRolloutBody(
+	args: ScanRolloutsArgs,
+	path: string,
+	cursorKey: string,
+	sessionId?: string | null,
+): Promise<string | undefined> {
+	if (!args.captureLedger?.enabled) {
+		return undefined;
+	}
+	const result = await captureFileArtifact({
+		context: args.captureContext ?? null,
+		mimeType: ROLLOUT_MIME_TYPE,
+		path,
+		recordKey: cursorKey,
+		stream: "sessions",
+	});
+	args.captureLedger.record(cursorKey, result.status, result.sha256);
+	// Surface the outcome on the session record. The aggregate is written during
+	// the parse, which runs before capture, so this is the point at which the
+	// answer exists.
+	const aggregate = sessionId
+		? args.rolloutAggregates.get(sessionId)
+		: undefined;
+	if (aggregate) {
+		aggregate.artifactCapture = result.status;
+		aggregate.artifactSha256 = result.sha256;
+	}
+	return result.status === "captured" && result.sha256
+		? result.sha256
+		: undefined;
 }
 
 /** Whether a root directory exists, distinguishing ENOENT from a real I/O
@@ -2263,12 +2354,23 @@ function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
 		}
 	}
 	const sourceLines = num(v.source_line_count);
+	// Absent (a pre-capture cursor, or a run with no spool) is a legitimate
+	// state meaning "body state unknown", not corruption: unlike the six fields
+	// above it is never load-bearing for the tail/skip decision, so a missing
+	// or malformed value costs one backfill pass rather than dropping the
+	// cursor and forcing a full reparse.
+	const capturedSha =
+		typeof v.captured_sha256 === "string" &&
+		SHA256_HEX_RE.test(v.captured_sha256)
+			? v.captured_sha256
+			: null;
 	return {
 		...(sourceLines !== null &&
 		Number.isSafeInteger(sourceLines) &&
 		sourceLines >= 0
 			? { source_line_count: sourceLines }
 			: {}),
+		...(capturedSha !== null ? { captured_sha256: capturedSha } : {}),
 		...(v.jsonl_gaps !== undefined ? { jsonl_gaps: gaps } : {}),
 		mtime_ms: mtime,
 		size_bytes: size,
@@ -2863,6 +2965,15 @@ async function main(): Promise<void> {
 	}
 
 	const resFilters = buildResourceFilters(requested);
+	// The artifact stores live with the collector runner that spawned this
+	// process; `bin/collector-runner.ts` hands their locations over in the child
+	// env. Null means this run has none (a fixture, or a caller that has not
+	// opted in) and every body is honestly recorded `unavailable`.
+	const openedCapture = openArtifactCapture({ connectorId: "codex" });
+	const captureContext = openedCapture?.context ?? null;
+	const captureLedger = new CodexArtifactLedger({
+		enabled: captureContext !== null,
+	});
 	const dirs = resolveCodexDirs();
 	const fileMtimes = readFileMtimes(startMsg);
 	const fileCursors = readPriorFileCursors(startMsg);
@@ -2966,6 +3077,8 @@ async function main(): Promise<void> {
 		rolloutScan = await scanRollouts({
 			sourceGaps,
 			activeQuietMs: resolveActiveRolloutQuietMs(),
+			captureContext,
+			captureLedger,
 			roots: [
 				{ baseDir: dirs.baseDir, label: "sessions" },
 				{ baseDir: dirs.archiveBaseDir, label: "sessions_archive" },
@@ -3029,6 +3142,27 @@ async function main(): Promise<void> {
 			rolloutScan,
 		});
 	}
+
+	// Both obligations are reported before DONE, and neither is implied by the
+	// other: `outstanding` are bodies this run could not hold (their markers were
+	// withheld, so the next run retries exactly them), while `awaiting_upload`
+	// are bodies that ARE held locally but not yet delivered upstream — counted
+	// at capture time, since no transport exists to discharge them
+	// (see `hasUploadTransport` in src/artifact-capture.ts).
+	if (captureLedger.size > 0) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex artifact_bodies_outstanding=${captureLedger.size}`,
+		});
+	}
+	if (captureLedger.pendingUpload > 0) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+		});
+	}
+	await waitForEmitDrain();
+	openedCapture?.close();
 
 	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
 	flushAndExit(0);

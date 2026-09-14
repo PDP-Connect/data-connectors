@@ -5,6 +5,7 @@
 // parsers in parsers.ts can import them without pulling in the runtime
 // entry point.
 
+import type { ArtifactCaptureStatus } from "../../src/artifact-capture.ts";
 import type { RecordData, StreamScope } from "../../src/connector-runtime.ts";
 
 /**
@@ -37,6 +38,18 @@ export interface ThreadFingerprint {
 export interface RolloutFileCursor {
 	/** Physical newline count, separate from the historical record-key counter. */
 	source_line_count?: number;
+	/**
+	 * sha256 of the rollout file's complete bytes as of `size_bytes`, present
+	 * only once those bytes are durably held in the artifact spool.
+	 *
+	 * This is the persisted half of the capture obligation, and it is a separate
+	 * fact from the byte offset beside it: `offset_bytes` says "these lines were
+	 * parsed into records", while this says "these bytes are recoverable". A
+	 * cursor written before capture existed, or by a run with no spool, has no
+	 * value here — which is exactly what a later capture-enabled run reads as
+	 * "body state unknown" and backfills once.
+	 */
+	captured_sha256?: string;
 	jsonl_gaps?: RolloutJsonlGap[];
 	first_ts: string | null;
 	function_call_count: number;
@@ -147,6 +160,14 @@ export interface ThreadRow {
 }
 
 export interface RolloutAggregate {
+	/**
+	 * Outcome of capturing this session's rollout file, so an uncaptured body is
+	 * VISIBLE on the session record rather than indistinguishable from a session
+	 * that never had one. Absent when this run did not reach the capture path.
+	 */
+	artifactCapture?: ArtifactCaptureStatus;
+	/** sha256 of the complete rollout bytes, set only once they are held. */
+	artifactSha256?: string | null;
 	firstTs: string | null;
 	functionCallCount: number;
 	lastTs: string | null;

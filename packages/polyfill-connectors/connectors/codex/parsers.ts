@@ -180,6 +180,27 @@ export function buildThreadSessionRecord(
 		sandbox_policy: t.sandbox_policy || null,
 		approval_mode: t.approval_mode || null,
 		rollout_path: t.rollout_path || agg?.rolloutPath || null,
+		...artifactCaptureFields(agg),
+	};
+}
+
+/**
+ * The capture fields a session record carries, when this run reached the
+ * capture path for its rollout file.
+ *
+ * Omitted entirely (rather than written as nulls) when the aggregate carries no
+ * capture outcome — a run that never examined the file must not assert anything
+ * about its body, and the schema's `.optional()` is what makes that legal.
+ */
+function artifactCaptureFields(
+	agg: RolloutAggregate | undefined,
+): Record<string, unknown> {
+	if (!agg?.artifactCapture) {
+		return {};
+	}
+	return {
+		artifact_capture: agg.artifactCapture,
+		artifact_sha256: agg.artifactSha256 ?? null,
 	};
 }
 
@@ -208,6 +229,7 @@ export function buildRolloutOnlySessionRecord(
 		sandbox_policy: null,
 		approval_mode: null,
 		rollout_path: agg.rolloutPath || null,
+		...artifactCaptureFields(agg),
 	};
 }
 
