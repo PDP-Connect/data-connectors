@@ -123,7 +123,6 @@ jobs:
       contents: read
     outputs:
       data-connect-sha: ${{ steps.pins.outputs.data-connect-sha }}
-      data-connect-1-0-0-sha: ${{ steps.pins.outputs.data-connect-1-0-0-sha }}
       pdpp-sha: ${{ steps.pins.outputs.pdpp-sha }}
       data-connect-track-ref: ${{ steps.pins.outputs.data-connect-track-ref }}
       pdpp-track-ref: ${{ steps.pins.outputs.pdpp-track-ref }}
@@ -138,7 +137,6 @@ jobs:
         id: pins
         run: |
           DATA_CONNECT_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect"].sha')"
-          DATA_CONNECT_1_0_0_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["data-connect-1-0-0"].sha')"
           PDPP_SHA="$(node -p 'require("./.github/cross-repo-pins.json").repos["pdpp"].sha')"
           # During a coordinated cutover, a pin can deliberately track an unmerged PR-head
           # branch rather than the producer's main (see cross-repo-pins.json's own "branch"
@@ -153,7 +151,7 @@ jobs:
           # downstream jobs. Reject anything that isn't exactly 40 lowercase hex characters
           # before it ever reaches a shell — no symbolic refs, no option-like strings (e.g.
           # "--upload-pack=..."), no whitespace, no other JSON type coerced to a string.
-          for name_sha in "data-connect:$DATA_CONNECT_SHA" "data-connect-1-0-0:$DATA_CONNECT_1_0_0_SHA" "pdpp:$PDPP_SHA"; do
+          for name_sha in "data-connect:$DATA_CONNECT_SHA" "pdpp:$PDPP_SHA"; do
             name="${name_sha%%:*}"
             sha="${name_sha#*:}"
             if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
@@ -175,7 +173,6 @@ jobs:
           done
 
           echo "data-connect-sha=$DATA_CONNECT_SHA" >> "$GITHUB_OUTPUT"
-          echo "data-connect-1-0-0-sha=$DATA_CONNECT_1_0_0_SHA" >> "$GITHUB_OUTPUT"
           echo "data-connect-track-ref=$DATA_CONNECT_TRACK_REF" >> "$GITHUB_OUTPUT"
           echo "pdpp-track-ref=$PDPP_TRACK_REF" >> "$GITHUB_OUTPUT"
           echo "pdpp-sha=$PDPP_SHA" >> "$GITHUB_OUTPUT"
@@ -196,8 +193,6 @@ jobs:
             label: local-collector definitions snapshot
           - id: connector-sources
             label: vendored connector sources
-          - id: tarball-digests
-            label: vendored tarball digests
           - id: reference-contract
             label: reference-contract stand-in
           # The leg below reinstates the still-unreplaced guard from data-connect's
@@ -241,26 +236,8 @@ jobs:
             exit 1
           fi
 
-      # A SEPARATE, later data-connect SHA from the one above — see cross-repo-pins.json's
-      # "data-connect-1-0-0" entry for why the tarball-digests job needs two different
-      # data-connect checkouts: pdpp's vendor/SHA256SUMS records 1.0.0 tarballs packed from a
-      # later commit than the 0.0.1 tarballs this repo's own vendor/SHA256SUMS and jobs
-      # (a)/(b) compare against.
-      - name: Checkout data-connect @ pinned 1.0.0-release SHA
-        if: matrix.check.id == 'tarball-digests'
-        env:
-          DATA_CONNECT_1_0_0_SHA: ${{ needs.read-pins.outputs.data-connect-1-0-0-sha }}
-        run: |
-          git clone --filter=blob:none https://github.com/PDP-Connect/data-connect.git data-connect-1-0-0
-          git -C data-connect-1-0-0 checkout --detach "$DATA_CONNECT_1_0_0_SHA"
-          RESOLVED="$(git -C data-connect-1-0-0 rev-parse HEAD)"
-          if [ "$RESOLVED" != "$DATA_CONNECT_1_0_0_SHA" ]; then
-            echo "::error::data-connect-1-0-0 checked out to $RESOLVED, not the requested pin $DATA_CONNECT_1_0_0_SHA" >&2
-            exit 1
-          fi
-
       - name: Checkout pdpp @ pinned SHA
-        if: matrix.check.id == 'tarball-digests' || matrix.check.id == 'reference-contract'
+        if: matrix.check.id == 'reference-contract'
         env:
           PDPP_SHA: ${{ needs.read-pins.outputs.pdpp-sha }}
         run: |
@@ -272,15 +249,6 @@ jobs:
             exit 1
           fi
 
-      # data-connect's own engines field and .nvmrc pin Node 22, not the 24 the rest of this
-      # job runs (used only for data-connectors' own scripts). Re-pointing setup-node here,
-      # scoped to the one leg that installs/builds inside a data-connect checkout, avoids the
-      # EBADENGINE mismatch instead of just tolerating its warning.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: matrix.check.id == 'tarball-digests'
-        with:
-          node-version-file: data-connect/.nvmrc
-
       - name: Run drift check — collector-definitions
         if: matrix.check.id == 'collector-definitions'
         run: node data-connectors/.github/scripts/cross-repo-integrity/check-collector-definitions-drift.mjs data-connect data-connectors
@@ -288,10 +256,6 @@ jobs:
       - name: Run drift check — connector-sources
         if: matrix.check.id == 'connector-sources'
         run: node --experimental-strip-types data-connectors/.github/scripts/cross-repo-integrity/check-connector-source-drift.mjs data-connect data-connectors
-
-      - name: Run drift check — tarball-digests
-        if: matrix.check.id == 'tarball-digests'
-        run: bash data-connectors/.github/scripts/cross-repo-integrity/check-tarball-digest-drift.sh data-connect data-connectors pdpp data-connect-1-0-0
 
       - name: Run drift check — reference-contract
         if: matrix.check.id == 'reference-contract'
@@ -402,23 +366,27 @@ jobs:
             url: https://github.com/PDP-Connect/data-connect.git
             pin-output: data-connect-sha
             # Canonical paths that back drift jobs (a) collector-definitions, (b)
-            # connector-sources, (c) tarball-digests, (e) collector-packaging-manifest — see
+            # connector-sources, (e) collector-packaging-manifest — see
             # .github/cross-repo-pins.json's own note on data-connect's pin. Per reviewer
             # finding "freshness coverage omits
             # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
-            # data-connect path those jobs actually compare, not just the
-            # runtime/protocol tarball-digest source: the definitions-snapshot generator +
-            # its committed output back job (a), the six vendored connector directories
-            # back job (b), and local-collector/tsconfig.build.json backs job (e) — without
-            # that last entry the pin could report fresh while job (e) validates a packaging
-            # manifest data-connect's tracked ref has already changed.
+            # data-connect path those jobs actually compare: the definitions-snapshot
+            # generator + its committed output back job (a), the six vendored connector
+            # directories back job (b), and local-collector/tsconfig.build.json backs job
+            # (e) — without that last entry the pin could report fresh while job (e)
+            # validates a packaging manifest data-connect's tracked ref has already changed.
+            #
+            # packages/collector-runtime and packages/connector-protocol are deliberately NOT
+            # listed: they backed the retired tarball-digests job, whose premise was that this
+            # repo vendors a hand-packed copy of them. Both now install from the registry at a
+            # pinned exact version, so npm — not a pin-freshness diff — is what detects their
+            # movement, and listing them here would fail this job on every upstream release
+            # that this repo is not obliged to track.
             # Keep this list and check-connector-source-drift.mjs's
             # registry-derived connector-ID set in sync — that script now asserts its
             # comparison set against the canonical registry, but this workflow's path list is
             # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
             paths: >-
-              packages/collector-runtime
-              packages/connector-protocol
               packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
               packages/local-collector/src/generated/collector-definitions.generated.ts
               packages/local-collector/tsconfig.build.json
