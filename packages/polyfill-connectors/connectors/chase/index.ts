@@ -3053,13 +3053,21 @@ if (isMainModule(import.meta.url)) {
 		browser: { profileName: "chase" },
 		timeRangeField: chaseTimeRangeField,
 		async ensureSession({
+			assist,
+			completeAssistance,
 			context,
 			credentials,
 			onCredentialSubmit,
 			page,
 			sendInteraction,
 		}): Promise<void> {
+			// Forwarding `assist`/`completeAssistance` lets the no-credentials
+			// manual handoff self-resolve (see `ensureChaseSession`'s
+			// `manualBrowserLogin` call) instead of always requiring the owner's
+			// manual "Continue collection" click.
 			await ensureChaseSession({
+				assist,
+				completeAssistance,
 				context,
 				credentials,
 				onCredentialSubmit,

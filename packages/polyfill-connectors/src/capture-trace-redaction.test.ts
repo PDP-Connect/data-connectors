@@ -46,8 +46,8 @@ import {
 	createCaptureSession,
 } from "./fixture-capture.ts";
 
-/** The credential shape that actually leaked, kept distinct enough to grep for. */
-const SECRET = "BG54aFvxSENTINEL";
+/** Obviously fake credential, kept distinct enough to grep for. */
+const SECRET = "hunter2-not-real-trace-sentinel";
 
 const LOGIN_PAGE_HTML =
 	'<html><body><label for="p">Password</label>' +

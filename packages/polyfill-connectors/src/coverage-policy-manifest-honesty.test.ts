@@ -250,8 +250,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["anthropic.conversations", "30ae75cafa437b1a"],
 	["anthropic.messages", "20d62f1a0c2f2052"],
 	["anthropic.projects", "415dccf66dc5c874"],
-	["apple_health.records", "5e0be530965e99b7"],
-	["apple_health.workouts", "5041f6c6a2dd23a1"],
 	["chase.accounts", "71bcf4e2f00dc245"],
 	["chase.transactions", "dea21991c632f625"],
 	["chase.current_activity", "8b8b57d39d026288"],
@@ -335,8 +333,14 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["slack.channel_memberships", "049cf3d633da5661"],
 	["slack.users", "1cae0a8da39124f9"],
 	["slack.messages", "38f98de17c65338e"],
-	["slack.message_attachments", "cf872f751aac2ce3"],
-	["slack.reactions", "58b42c686049edf8"],
+	// slack.message_attachments and slack.reactions left this map by declaring
+	// `required: false` explicitly (the encouraged shrink path). Both are
+	// additive per-message detail (link-preview/rich-attachment unfurls and
+	// emoji reactions): the connector's own emitMessagesPass documents that
+	// "a message with no reactions / no attachments still emits its messages
+	// record; enrichment is additive, not gating" (connectors/slack/index.ts),
+	// matching GroupMe's `attachments` (also parent_detail_accounting,
+	// required: false) rather than a load-bearing parent-detail stream.
 	["slack.files", "c571b539ff895d86"],
 	["slack.canvases", "58ebea2c21b732bd"],
 	["spotify.playlists", "a9d3a81ca9e29ba5"],

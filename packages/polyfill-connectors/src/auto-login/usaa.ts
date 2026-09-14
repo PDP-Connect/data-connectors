@@ -13,6 +13,10 @@
  * Returns true on success; throws on hard failure.
  */
 
+import type {
+	AssistanceCompletionStatus,
+	AssistanceRequest,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { BrowserContext, Locator, Page } from "playwright";
 import { manualBrowserLogin } from "../browser-handoff.ts";
 import type {
@@ -61,7 +65,7 @@ const MAX_OTP_ATTEMPTS = 3;
 const MANUAL_LOGIN_MESSAGE =
 	"USAA could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-	"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser, then respond success.";
+	"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser. PDPP continues automatically when the session is ready.";
 const MANUAL_LOGIN_MESSAGE_CHOICE_MISSING =
 	"USAA asked for a security code but PDPP could not find the control that sends it, so it did not request one. Choose how to receive your code in the secure browser and finish sign-in. PDPP resumes when sign-in succeeds.";
 // `classifyUsaaLoginStepFailure` returning `source_unavailable` proves only
@@ -77,7 +81,24 @@ const MANUAL_LOGIN_MESSAGE_SOURCE_UNAVAILABLE_SUFFIX =
 const STACK_TRACE_LOCATION_SUFFIX_RE = /\s+at\s+https?:\/\/\S+$/i;
 
 interface EnsureUsaaSessionArgs {
+	/**
+	 * Runtime's `assist`/`completeAssistance` hooks (see `BaseCollectContext`
+	 * in `connector-runtime.ts`). When both are present, the manual-login
+	 * handoffs below self-resolve the moment the connector's own probe
+	 * (`verifyLoggedIn`) proves the session is live — mirroring `chatgpt.ts`'s
+	 * no-click browser-login flow — instead of always waiting on the owner's
+	 * manual "Continue collection" click. Optional so the many internal/test
+	 * callers that predate this keep compiling and keep the prior
+	 * click-first behavior.
+	 */
+	assist?: (req: AssistanceRequest) => Promise<string>;
 	capture?: CaptureSession | null;
+	/** Paired with `assist` — see `ManualBrowserLoginArgs.completeAssistance`. */
+	completeAssistance?: (
+		assistanceRequestId: string,
+		status: AssistanceCompletionStatus,
+		extra?: { message?: string },
+	) => Promise<void>;
 	context: BrowserContext;
 	credentials?: Readonly<Record<string, string>>;
 	onCredentialSubmit?: () => void;
@@ -285,7 +306,13 @@ async function verifyLoggedIn(
 }
 
 async function requestManualLoginRecovery(
-	{ context, page, sendInteraction }: EnsureUsaaSessionArgs,
+	{
+		assist,
+		completeAssistance,
+		context,
+		page,
+		sendInteraction,
+	}: EnsureUsaaSessionArgs,
 	message: string = MANUAL_LOGIN_MESSAGE,
 ): Promise<boolean> {
 	// Re-probe the session after the manual step rather than trusting the
@@ -295,9 +322,13 @@ async function requestManualLoginRecovery(
 	// Mirrors the chatgpt and reddit fallbacks: completing the manual step is a
 	// signal to re-check ground truth, not an instruction to end the run.
 	return await manualBrowserLogin({
+		...(assist ? { assist } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
+		isProbeSuccessful: (isLive: boolean) => isLive,
 		message,
 		page,
 		probe: () => verifyLoggedIn(context, page),
+		readinessProbe: (probePage) => verifyLoggedIn(context, probePage),
 		sendInteraction,
 		timeoutSeconds: 1800,
 	});
@@ -422,7 +453,7 @@ async function completeOtpChallenge({
 async function dispatchTextCodeAndComplete(
 	args: EnsureUsaaSessionArgs,
 ): Promise<boolean> {
-	const { context, page, sendInteraction } = args;
+	const { assist, completeAssistance, context, page, sendInteraction } = args;
 	const textCodeChoice = findUsaaTextCodeChoice(page);
 	if (!(await locatorIsUsable(textCodeChoice))) {
 		// Previously this fell back to clicking a hardcoded positional element
@@ -432,7 +463,13 @@ async function dispatchTextCodeAndComplete(
 		// locate the control for, so hand the browser to the owner instead.
 		if (
 			await requestManualLoginRecovery(
-				{ context, page, sendInteraction },
+				{
+					...(assist ? { assist } : {}),
+					...(completeAssistance ? { completeAssistance } : {}),
+					context,
+					page,
+					sendInteraction,
+				},
 				MANUAL_LOGIN_MESSAGE_CHOICE_MISSING,
 			)
 		) {
@@ -475,7 +512,14 @@ async function submitMemberId(page: Page, username: string): Promise<boolean> {
 }
 
 async function handlePasswordFieldStall(
-	{ capture, context, page, sendInteraction }: EnsureUsaaSessionArgs,
+	{
+		assist,
+		capture,
+		completeAssistance,
+		context,
+		page,
+		sendInteraction,
+	}: EnsureUsaaSessionArgs,
 	username: string,
 ): Promise<"logged_in" | "password_ready"> {
 	const initialBody = await page
@@ -539,7 +583,13 @@ async function handlePasswordFieldStall(
 		: "";
 	if (
 		await requestManualLoginRecovery(
-			{ context, page, sendInteraction },
+			{
+				...(assist ? { assist } : {}),
+				...(completeAssistance ? { completeAssistance } : {}),
+				context,
+				page,
+				sendInteraction,
+			},
 			`${manualLoginMessage}${recoveryDiagnostic}`,
 		)
 	) {
@@ -550,14 +600,31 @@ async function handlePasswordFieldStall(
 	);
 }
 
+/** Bundles the assist/completeAssistance forwarding once so call sites spread one object instead of two separate conditionals each. */
+function usaaAssistHooks({
+	assist,
+	completeAssistance,
+}: {
+	assist: EnsureUsaaSessionArgs["assist"];
+	completeAssistance: EnsureUsaaSessionArgs["completeAssistance"];
+}): Pick<EnsureUsaaSessionArgs, "assist" | "completeAssistance"> {
+	return {
+		...(assist ? { assist } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
+	};
+}
+
 export async function ensureUsaaSession({
+	assist,
 	capture,
+	completeAssistance,
 	context,
 	credentials,
 	onCredentialSubmit,
 	page,
 	sendInteraction,
 }: EnsureUsaaSessionArgs): Promise<boolean> {
+	const assistHooks = usaaAssistHooks({ assist, completeAssistance });
 	// Probe first — no need to re-login if session is alive.
 	if (await verifyLoggedIn(context, page)) {
 		return true;
@@ -576,9 +643,12 @@ export async function ensureUsaaSession({
 			.catch((): undefined => undefined);
 		if (
 			await manualBrowserLogin({
+				...assistHooks,
+				isProbeSuccessful: (isLive: boolean) => isLive,
 				message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
 				page,
 				probe: () => verifyLoggedIn(context, page),
+				readinessProbe: (probePage) => verifyLoggedIn(context, probePage),
 				sendInteraction,
 				timeoutSeconds: 1800,
 			})
@@ -601,7 +671,12 @@ export async function ensureUsaaSession({
 				"",
 			);
 			if (
-				await requestManualLoginRecovery({ context, page, sendInteraction })
+				await requestManualLoginRecovery({
+					...assistHooks,
+					context,
+					page,
+					sendInteraction,
+				})
 			) {
 				return true;
 			}
@@ -617,7 +692,13 @@ export async function ensureUsaaSession({
 	if (
 		!(await submitMemberId(page, username)) &&
 		(await handlePasswordFieldStall(
-			{ capture: capture ?? null, context, page, sendInteraction },
+			{
+				...assistHooks,
+				capture: capture ?? null,
+				context,
+				page,
+				sendInteraction,
+			},
 			username,
 		)) === "logged_in"
 	) {
@@ -636,7 +717,12 @@ export async function ensureUsaaSession({
 
 	if (
 		TEXT_CODE_PROMPT.test(bodyText) &&
-		(await dispatchTextCodeAndComplete({ context, page, sendInteraction }))
+		(await dispatchTextCodeAndComplete({
+			...assistHooks,
+			context,
+			page,
+			sendInteraction,
+		}))
 	) {
 		return true;
 	}

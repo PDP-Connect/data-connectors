@@ -13,7 +13,7 @@
  */
 
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	type InboxItemNotice,
 	notifyInboxItem,
@@ -223,7 +223,7 @@ export function scheduleNightlySummary(
 
 export async function loadDefaultSchedulerPersistenceStore(): Promise<SchedulerPersistenceStore> {
 	const { initPostgresStorage, resolveStorageBackend } = (await import(
-		join(REFERENCE_IMPL_DIR, "server/postgres-storage.js")
+		pathToFileURL(join(REFERENCE_IMPL_DIR, "server/postgres-storage.js")).href
 	)) as {
 		initPostgresStorage: (config: unknown) => Promise<unknown>;
 		resolveStorageBackend: () => unknown;
@@ -231,7 +231,8 @@ export async function loadDefaultSchedulerPersistenceStore(): Promise<SchedulerP
 	await initPostgresStorage(resolveStorageBackend());
 
 	const { getDefaultSchedulerStore } = (await import(
-		join(REFERENCE_IMPL_DIR, "server/stores/scheduler-store.js")
+		pathToFileURL(join(REFERENCE_IMPL_DIR, "server/stores/scheduler-store.js"))
+			.href
 	)) as {
 		getDefaultSchedulerStore: () => SchedulerPersistenceStore;
 	};
@@ -261,12 +262,12 @@ export async function startPolyfillScheduler({
 	schedulerStore: schedulerStoreOption,
 }: StartPolyfillSchedulerOptions): Promise<PolyfillSchedulerHandle> {
 	const { createScheduler } = (await import(
-		join(REFERENCE_IMPL_DIR, "runtime/scheduler.js")
+		pathToFileURL(join(REFERENCE_IMPL_DIR, "runtime/scheduler.js")).href
 	)) as {
 		createScheduler: (args: CreateSchedulerArgs) => Scheduler;
 	};
 	const { loadSyncState } = (await import(
-		join(REFERENCE_IMPL_DIR, "runtime/index.ts")
+		pathToFileURL(join(REFERENCE_IMPL_DIR, "runtime/index.ts")).href
 	)) as {
 		loadSyncState: (args: {
 			connectorId: string;

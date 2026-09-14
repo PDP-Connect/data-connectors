@@ -11,7 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dirname, "..");
@@ -21,6 +21,19 @@ const REFERENCE_IMPL_DIR = join(
 	"..",
 	"reference-implementation",
 );
+
+/**
+ * Absolute path to a specifier `import()` accepts on every platform.
+ *
+ * A bare absolute path works on POSIX by accident: it happens to look like a
+ * root-relative URL. On Windows it does not, because "D:\..." parses as a URL
+ * with scheme "d:", and Node's ESM loader rejects it with
+ * ERR_UNSUPPORTED_ESM_URL_SCHEME. Matches the `pathToFileURL` form already
+ * used in src/scrubber.ts and bin/scrub-fixtures.ts.
+ */
+function moduleSpecifier(...segments: string[]): string {
+	return pathToFileURL(join(...segments)).href;
+}
 
 export const DEFAULT_AS_URL = process.env.AS_URL || "http://localhost:7662";
 export const DEFAULT_RS_URL = process.env.RS_URL || "http://localhost:7663";
@@ -281,7 +294,7 @@ export async function startEmbeddedServer({
 	dbPath = join(PACKAGE_ROOT, ".pdpp-data/pdpp.sqlite"),
 }: StartEmbeddedServerOptions = {}): Promise<unknown> {
 	const { startServer } = (await import(
-		join(REFERENCE_IMPL_DIR, "server/index.ts")
+		moduleSpecifier(REFERENCE_IMPL_DIR, "server/index.ts")
 	)) as {
 		startServer: (opts: Record<string, unknown>) => Promise<unknown>;
 	};
@@ -312,7 +325,7 @@ export async function loadPriorState(
 	connectorId: string,
 ): Promise<Record<string, unknown> | null> {
 	const { loadSyncState } = (await import(
-		join(REFERENCE_IMPL_DIR, "runtime/index.ts")
+		moduleSpecifier(REFERENCE_IMPL_DIR, "runtime/index.ts")
 	)) as {
 		loadSyncState: (args: {
 			connectorId: string;
@@ -359,7 +372,7 @@ export async function runOne(
 		state && Object.keys(state).length ? "incremental" : "full_refresh";
 
 	const { runConnector } = (await import(
-		join(REFERENCE_IMPL_DIR, "runtime/index.ts")
+		moduleSpecifier(REFERENCE_IMPL_DIR, "runtime/index.ts")
 	)) as {
 		runConnector: (args: Record<string, unknown>) => Promise<unknown>;
 	};
