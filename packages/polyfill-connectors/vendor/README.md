@@ -2,7 +2,7 @@
 
 `@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
 [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`e5916d3a6265495ec3e7f324b29e0403958c52fe` (see `.github/cross-repo-pins.json`). This package
+`ed0dbaca5a3845200e9e0fc230900620e5f69b07` (see `.github/cross-repo-pins.json`). This package
 needs them at build/test time, but they are not published to any registry yet.
 
 ## Why a checked-in `.tgz`, not a git dependency
@@ -22,17 +22,38 @@ rejected outright rather than treated as a partial win.
 
 - `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
   `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@e5916d3a6265495ec3e7f324b29e0403958c52fe`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-11
-  for PDP-Connect/data-connect#94, which rewrote `packages/connector-protocol/src/auth.ts` —
-  a packed input, so the compiled `dist/auth.js` and `dist/auth.d.ts` change and the archive
-  digest moves with them. Every other file in `pdpp-connector-protocol-0.0.1.tgz` is
-  byte-identical to the previous archive. `pdpp-collector-runtime-0.0.1.tgz` is NOT re-vendored:
-  #94 left its packed inputs alone and a fresh repack at this commit reproduces the committed
-  `e274fb45...` digest exactly. The new connector-protocol digest matches data-connect's own
-  `packages/connector-protocol/artifact.json` `artifact_sha256` at this commit. Built with
-  Node 22.23.2, npm 10.9.8, and TypeScript 7.0.2. The separate 1.0.0 release pin remains
-  unchanged.
+  `PDP-Connect/data-connect@ed0dbaca5a3845200e9e0fc230900620e5f69b07`, workspace packages
+  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-14;
+  **both** archives are re-vendored this time. `pdpp-collector-runtime-0.0.1.tgz` moves because
+  data-connect#106 rewrote the durable outbox to carry artifact bytes through to upload — a
+  packed input, so `dist/` gains `collector-runner`, `local-device-blob-capture` and
+  `local-device-blob-spool`, and `local-device-outbox` changes. That retires the previous note's
+  claim that this archive is NOT re-vendored and that a repack reproduces `e274fb45...`: both
+  were true at the #94 pin and are false here. `pdpp-connector-protocol-0.0.1.tgz` moves off
+  #94's `7a937c13...` because data-connect#113 moved declared dependencies to their latest
+  releases, changing the packed inputs of both packages — a repack prepared before #113 would
+  not have covered it.
+
+  Both digests match data-connect's own `artifact.json` `artifact_sha256` at this commit —
+  `d01bbbe0c1...` for connector-protocol and `c8794cfa26...` for collector-runtime — so each
+  reproduces upstream's generator rather than merely agreeing with itself. Getting that
+  confirmation for **both** packages is why the pin is `ed0dbaca5` rather than #113's
+  `e10a79ba2`: at `e10a79ba2` both receipts were stale (#113 changed packed inputs without
+  regenerating them, so `artifact:verify` failed for both, and collector-runtime's
+  `artifact:generate` refused to run at all because it reads connector-protocol's committed
+  receipt and saw the drift), which left collector-runtime's digest backed only by repack
+  determinism. data-connect#116 regenerated both receipts and changed nothing else — the diff
+  `e10a79ba2..ed0dbaca5` is exactly those two `artifact.json` files, and neither is packed,
+  since both packages declare `files: ["dist/"]`. The archives below are therefore byte-identical
+  to the ones packed at `e10a79ba2`; moving the pin to `ed0dbaca5` adds the missing provenance
+  without changing a vendored byte. A fresh repack at `ed0dbaca5` reproduces both, verified by
+  running drift job (c)'s own script, and each repack is deterministic across two independent
+  `npm pack` runs.
+
+  `package-lock.json` records a sha512 integrity hash for each of these path-referenced
+  tarballs, so both entries are updated in the same commit; omitting them fails `npm ci` with
+  EINTEGRITY. Built with Node 24.21.0 (data-connect's `.nvmrc` as of #96), npm 11.19.0, and
+  TypeScript 7.0.2. The separate 1.0.0 release pin remains unchanged.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
@@ -84,8 +105,8 @@ rejected outright rather than treated as a partial win.
   `package-lock.json` once installed):
 
   ```
-  e274fb459cce011f3c290ab92a0d83252fa91af671d33e37e3809edea06fafbf  pdpp-collector-runtime-0.0.1.tgz
-  7a937c137af0b3208635aad1bd73f56a584de73ce8903255a6b2c6e1b9d0831d  pdpp-connector-protocol-0.0.1.tgz
+  c8794cfa263d76d0487c2fa20aace62aef94b71f9bc667d9f476a5c8c8164ff1  pdpp-collector-runtime-0.0.1.tgz
+  d01bbbe0c177ba06bb4b0d9738d83dce193d566051c1493c40a8bf28cd95e4c2  pdpp-connector-protocol-0.0.1.tgz
   8271e75949f85e57de8ca4ed557e73b6706e3680c9ad7a986bd290d94797e8d6  pdpp-reference-contract-0.0.1.tgz
   ```
 
