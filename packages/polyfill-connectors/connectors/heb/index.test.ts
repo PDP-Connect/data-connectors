@@ -2069,6 +2069,146 @@ test("priorOrdersEvidenceFromState: the checkpoint date is carried, not just its
 	});
 });
 
+test("runForwardScan: the real aged-out page completes the run instead of failing it", async () => {
+	// Integration half, driven by the SAME real capture the escalating test
+	// uses. Same markup, opposite verdict — the only difference is the
+	// checkpoint age.
+	const ordersCoverage = newOrdersCoverage();
+	const { deps, emitted, protocolMessages } = makeRecordingDeps({
+		ordersCoverage,
+		wantsItems: false,
+		wantsOrders: true,
+	});
+	const html = readFileSync(
+		join(FIXTURES_DIR, "orders-list-no-past-orders.html"),
+		"utf8",
+	);
+	const page = makePageStub({
+		content: html,
+		url: "https://www.heb.com/my-account/your-orders?page=1",
+	});
+
+	// Must NOT throw: this is the whole defect. Before the fix this rejected
+	// with heb_empty_list_page_heb_empty_history_after_prior_orders.
+	const result = await runForwardScan(page, deps, makeRunFlags(), null, {
+		hasPriorOrders: true,
+		newestPriorOrderDate: AGED_OUT_CHECKPOINT,
+	});
+	assert.equal(
+		result.truncated,
+		false,
+		"a retention-terminal walk is a finished walk, not a truncated one",
+	);
+
+	// No SKIP_RESULT on `orders`: a skip marks the stream as an unresolved
+	// attempt and would permanently veto the considered:0 enumeration-boundary
+	// proof, which is exactly what keeps this source amber on /sources.
+	const skips = protocolMessages.filter((m) => m.type === "SKIP_RESULT");
+	assert.deepEqual(
+		skips,
+		[],
+		"a proven retention result must not emit a stream skip",
+	);
+
+	// Stored data is untouched: no records written, and the run wrote no
+	// cursor of its own here (collect() owns the STATE emit).
+	assert.equal(emitted.length, 0, "an aged-out history writes no records");
+
+	// Zero considered / zero covered is the measured enumeration boundary
+	// that makes this run provably-empty rather than unknown.
+	assert.equal(ordersCoverage.considered.length, 0);
+	assert.equal(ordersCoverage.covered.length, 0);
+});
+
+test("runForwardScan: the aged-out run states the retention reason in owner-readable progress", async () => {
+	// The owner must still be told WHY zero orders came back, without the run
+	// being marked failed. Progress is the channel that survives a successful
+	// run.
+	const progressMessages: string[] = [];
+	const { deps } = makeRecordingDeps({
+		progress: (message: string): Promise<void> => {
+			progressMessages.push(message);
+			return Promise.resolve();
+		},
+		wantsItems: false,
+		wantsOrders: true,
+	});
+	const html = readFileSync(
+		join(FIXTURES_DIR, "orders-list-no-past-orders.html"),
+		"utf8",
+	);
+	const page = makePageStub({
+		content: html,
+		url: "https://www.heb.com/my-account/your-orders?page=1",
+	});
+
+	await runForwardScan(page, deps, makeRunFlags(), null, {
+		hasPriorOrders: true,
+		newestPriorOrderDate: AGED_OUT_CHECKPOINT,
+	});
+
+	const retentionNote = progressMessages.find((m) =>
+		m.includes("retention window"),
+	);
+	assert.ok(retentionNote, "the run must say why the history came back empty");
+	assert.match(
+		retentionNote,
+		/retained and untouched/,
+		"the owner must be told stored orders are safe",
+	);
+	assert.doesNotMatch(
+		retentionNote,
+		/selector|drift/i,
+		"selector drift is not established and must not be blamed",
+	);
+	assert.doesNotMatch(
+		retentionNote,
+		/block|bot|captcha/i,
+		"a bot block is not established and must not be blamed",
+	);
+});
+
+test("runForwardScan: a first-ever empty account is still proven-empty, not a retention claim", async () => {
+	// NEGATIVE CASE. A brand-new account with no orders and no checkpoint must
+	// keep reporting the plain `source_reported_empty` terminal it already
+	// had — the retention exception must not swallow it, and it must not be
+	// forced into a false success by some other path.
+	const ordersCoverage = newOrdersCoverage();
+	const progressMessages: string[] = [];
+	const { deps, emitted } = makeRecordingDeps({
+		ordersCoverage,
+		progress: (message: string): Promise<void> => {
+			progressMessages.push(message);
+			return Promise.resolve();
+		},
+		wantsItems: false,
+		wantsOrders: true,
+	});
+	const html = readFileSync(
+		join(FIXTURES_DIR, "orders-list-no-past-orders.html"),
+		"utf8",
+	);
+	const page = makePageStub({
+		content: html,
+		url: "https://www.heb.com/my-account/your-orders?page=1",
+	});
+
+	const result = await runForwardScan(page, deps, makeRunFlags(), null, {
+		hasPriorOrders: false,
+	});
+
+	assert.equal(result.truncated, false);
+	assert.equal(emitted.length, 0);
+	assert.equal(ordersCoverage.considered.length, 0);
+	// It is empty because H-E-B said so, NOT because anything aged out: this
+	// account never had an order to age out.
+	assert.equal(
+		progressMessages.find((m) => m.includes("retention window")),
+		undefined,
+		"a never-collected account must not be told its orders aged out",
+	);
+});
+
 test("runForwardScan: H-E-B's real 'No past orders' page aborts when this connection already collected orders", async () => {
 	// Integration half, through the same live 2026-08-21 capture the
 	// proven-empty test uses. Same page, same markup, opposite verdict — the
