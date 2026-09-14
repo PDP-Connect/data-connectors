@@ -1313,8 +1313,6 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"slack.workspace",
 	"slack.users",
 	"slack.messages",
-	"slack.message_attachments",
-	"slack.reactions",
 	"slack.files",
 	"slack.canvases",
 	"spotify.playlists",
