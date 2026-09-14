@@ -41,6 +41,7 @@ import {
 	HEB_HYDRATION_WAIT_MAX_MS,
 	HEB_HYDRATION_WAIT_MIN_MS,
 	MAX_LIST_PAGES as HEB_MAX_LIST_PAGES,
+	HEB_ORDER_RETENTION_FLOOR_DAYS,
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
 	hebAllowsInteractiveAuthRepair,
@@ -48,6 +49,7 @@ import {
 	newOrdersCoverage,
 	type OrderItemsCoverage,
 	type OrdersCoverage,
+	priorOrdersAreBeyondRetention,
 	priorOrdersEvidenceFromState,
 	processListOrder,
 	type RepairDeps,
@@ -1770,11 +1772,194 @@ test("priorOrdersEvidenceFromState: a committed orders checkpoint is what arms t
 	// the guard for every connection while every other test still passed.
 	assert.deepEqual(priorOrdersEvidenceFromState({ checkpoint: "2026-08-17" }), {
 		hasPriorOrders: true,
+		// The checkpoint date rides along so the retention exception can ask how
+		// OLD the prior evidence is, not merely whether it exists.
+		newestPriorOrderDate: "2026-08-17",
 	});
 	// A never-collected connection stores no checkpoint at all. `exactOptional
 	// PropertyTypes` makes an explicitly-undefined checkpoint unrepresentable,
 	// so the absent-property case is the only "no prior orders" shape there is.
-	assert.deepEqual(priorOrdersEvidenceFromState({}), { hasPriorOrders: false });
+	assert.deepEqual(priorOrdersEvidenceFromState({}), {
+		hasPriorOrders: false,
+		newestPriorOrderDate: undefined,
+	});
+});
+
+// ─── Retention-window exception ───────────────────────────────────────────
+//
+// The live defect (connection cin_c875ca…4288, failing every run since
+// 2026-08-22 with `heb_empty_list_page_heb_empty_history_after_prior_orders`).
+//
+// Evidence from the retained production captures, which these tests encode:
+//   - the account's ONLY two stored orders are dated 2023-08-09 / 2023-08-19,
+//     and the `orders` checkpoint is 2023-08-19 — three years stale;
+//   - every failing run's retained frame renders H-E-B's own empty state
+//     (`orderResults` > `Empty_box`/`OrderEmpty_`, `any_card: 4`,
+//     `order_cards: 0`) on `/my-account/your-orders?page=1`, with H-E-B's own
+//     structured payload reporting `"orders":[]`;
+//   - the session is healthy on those frames: no password form, no Incapsula
+//     interstitial, signed in, same URL and same store as the last good run;
+//   - the page offers NO archive view, year filter, or date picker — the whole
+//     main region is a breadcrumb, the empty-state component, and a "Start
+//     shopping" link.
+//
+// So the orders aged out of H-E-B's retention window. That is not the anomaly
+// the prior-orders guard was built for, and reporting it as a hard failure asks
+// the owner to repair something that is neither broken nor repairable.
+
+/** The live connection's real `orders` checkpoint (connector_state). */
+const AGED_OUT_CHECKPOINT = "2023-08-19";
+const RETENTION_NOW = new Date("2026-08-27T05:01:30.919Z");
+
+test("classifyEmptyListPage: prior orders older than the retention floor read as a proven-empty retention result", () => {
+	// The live defect, at the unit boundary. Same page, same prior-orders
+	// evidence as the escalating case below — only the checkpoint's AGE differs.
+	assert.deepEqual(
+		classifyEmptyListPage(
+			EMPTY_STATE_DIAG,
+			1,
+			RESOLVED_MAX_PAGE,
+			{
+				hasPriorOrders: true,
+				newestPriorOrderDate: AGED_OUT_CHECKPOINT,
+			},
+			RETENTION_NOW,
+		),
+		{ action: "terminal", reason: "source_reported_empty_after_retention" },
+	);
+});
+
+test("classifyEmptyListPage: prior orders INSIDE the retention window still escalate", () => {
+	// The negative case that keeps the prior-orders guard alive. A recent
+	// checkpoint means H-E-B should still be listing these orders, so an empty
+	// page is a genuine contradiction — a purge or a degraded session — and must
+	// NOT be laundered into a proven-empty result by the retention exception.
+	assert.deepEqual(
+		classifyEmptyListPage(
+			EMPTY_STATE_DIAG,
+			1,
+			RESOLVED_MAX_PAGE,
+			{
+				hasPriorOrders: true,
+				newestPriorOrderDate: "2026-08-01",
+			},
+			RETENTION_NOW,
+		),
+		{ action: "abort", reason: "heb_empty_history_after_prior_orders" },
+	);
+});
+
+test("classifyEmptyListPage: the retention exception needs a parseable date, never an assumption", () => {
+	// Age-unknown must fall through to the escalating branch in BOTH of its
+	// shapes. Defaulting either one to "old enough" would silently disarm the
+	// guard for every connection whose checkpoint the connector cannot read.
+	for (const evidence of [
+		{ hasPriorOrders: true },
+		{ hasPriorOrders: true, newestPriorOrderDate: undefined },
+		{ hasPriorOrders: true, newestPriorOrderDate: "" },
+		{ hasPriorOrders: true, newestPriorOrderDate: "not-a-date" },
+	]) {
+		assert.deepEqual(
+			classifyEmptyListPage(
+				EMPTY_STATE_DIAG,
+				1,
+				RESOLVED_MAX_PAGE,
+				evidence,
+				RETENTION_NOW,
+			),
+			{ action: "abort", reason: "heb_empty_history_after_prior_orders" },
+			`age-unknown evidence must escalate: ${JSON.stringify(evidence)}`,
+		);
+	}
+});
+
+test("classifyEmptyListPage: a block outranks the retention exception", () => {
+	// Ordering guard. An established challenge is the more specific diagnosis and
+	// must not be relabelled as a benign retention result — that would turn a
+	// real bot block into a green "nothing to do here".
+	for (const overlay of [{ incapsula_block: true }, { password_form: true }]) {
+		assert.deepEqual(
+			classifyEmptyListPage(
+				{ ...EMPTY_STATE_DIAG, ...overlay },
+				1,
+				RESOLVED_MAX_PAGE,
+				{ hasPriorOrders: true, newestPriorOrderDate: AGED_OUT_CHECKPOINT },
+				RETENTION_NOW,
+			),
+			{ action: "abort", reason: "source_auth_or_challenge" },
+		);
+	}
+});
+
+test("classifyEmptyListPage: the retention exception is gated on the source's own empty state", () => {
+	// An aged-out checkpoint must not excuse selector drift. Without `empty_state`
+	// H-E-B never claimed the history was empty, so a zero-card page is still an
+	// unexplained parse failure no matter how old the checkpoint is.
+	assert.deepEqual(
+		classifyEmptyListPage(
+			{ ...EMPTY_STATE_DIAG, empty_state: false },
+			1,
+			RESOLVED_MAX_PAGE,
+			{ hasPriorOrders: true, newestPriorOrderDate: AGED_OUT_CHECKPOINT },
+			RETENTION_NOW,
+		),
+		{ action: "abort", reason: "selector_drift" },
+	);
+});
+
+test("priorOrdersAreBeyondRetention: the floor is a strict boundary measured in real days", () => {
+	const now = new Date("2026-08-27T00:00:00.000Z");
+	const daysBefore = (days: number): string =>
+		new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
+
+	// Just inside the window -> still escalates.
+	assert.equal(
+		priorOrdersAreBeyondRetention(
+			{
+				hasPriorOrders: true,
+				newestPriorOrderDate: daysBefore(HEB_ORDER_RETENTION_FLOOR_DAYS - 5),
+			},
+			now,
+		),
+		false,
+	);
+	// Comfortably past it -> retention result.
+	assert.equal(
+		priorOrdersAreBeyondRetention(
+			{
+				hasPriorOrders: true,
+				newestPriorOrderDate: daysBefore(HEB_ORDER_RETENTION_FLOOR_DAYS + 5),
+			},
+			now,
+		),
+		true,
+	);
+	// A connection with no prior orders is never a retention case: it is the
+	// first-run genuinely-empty account, which `source_reported_empty` covers.
+	assert.equal(
+		priorOrdersAreBeyondRetention(
+			{ hasPriorOrders: false, newestPriorOrderDate: "2000-01-01" },
+			now,
+		),
+		false,
+	);
+});
+
+test("priorOrdersEvidenceFromState: the checkpoint date is carried, not just its existence", () => {
+	// The retention exception is only reachable if the checkpoint DATE survives
+	// the state->evidence hop. A mutation dropping the date here would disarm the
+	// exception for every connection while the pure classifier tests still passed.
+	assert.deepEqual(
+		priorOrdersEvidenceFromState({ checkpoint: AGED_OUT_CHECKPOINT }),
+		{
+			hasPriorOrders: true,
+			newestPriorOrderDate: AGED_OUT_CHECKPOINT,
+		},
+	);
+	assert.deepEqual(priorOrdersEvidenceFromState({}), {
+		hasPriorOrders: false,
+		newestPriorOrderDate: undefined,
+	});
 });
 
 test("runForwardScan: H-E-B's real 'No past orders' page aborts when this connection already collected orders", async () => {

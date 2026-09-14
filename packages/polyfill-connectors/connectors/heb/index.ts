@@ -81,6 +81,20 @@ const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
 // (design doc "Collector plan" §4).
 const CHECKPOINT_OVERLAP_DAYS = 60;
 const MS_PER_DAY = 86_400_000;
+// H-E-B's order history is not an archive: the site lists only orders inside a
+// rolling retention window, and drops older ones from `/my-account/your-orders`
+// entirely. There is no archive view, year filter, or date picker to reach them
+// — the empty page carries a breadcrumb, the empty-state component, and a
+// "Start shopping" link, nothing more (verified against the retained capture of
+// the 2026-08-27 failing run).
+//
+// H-E-B does not publish the window's length, so this is a deliberately
+// CONSERVATIVE floor rather than a measured constant: two years is comfortably
+// longer than any window H-E-B has been observed to keep, so a checkpoint older
+// than this is aged-out under every plausible reading. Being conservative is the
+// safe direction — it can only ever make the connector escalate a case it could
+// have explained, never explain away a case it should escalate.
+export const HEB_ORDER_RETENTION_FLOOR_DAYS = 730;
 // Bounded polite delay after a successful mid-run repair re-probe, before
 // retrying the one affected detail (design.md Decision 4). Reuses the same
 // jitter shape as hydrationWait rather than inventing a second constant pair.
@@ -346,7 +360,55 @@ interface EmptyListPageClassification {
  */
 export interface PriorOrdersEvidence {
 	hasPriorOrders: boolean;
+	/**
+	 * The `orders` checkpoint date (`YYYY-MM-DD`) behind `hasPriorOrders`, when
+	 * there is one — the newest order date this connection ever recorded.
+	 *
+	 * Carried so the classifier can ask HOW OLD the prior evidence is, not merely
+	 * whether it exists. Absent/unparseable is treated as "age unknown", which
+	 * keeps the escalating branch.
+	 */
+	newestPriorOrderDate?: string | undefined;
 }
+
+/**
+ * Whether every order this connection ever recorded predates H-E-B's retention
+ * window, making an empty order-history page the expected render rather than a
+ * contradiction.
+ *
+ * Pure, and deliberately strict in the safe direction — it answers "yes" only on
+ * positive proof of age:
+ *   - no checkpoint date, or one that does not parse -> NO (age unknown)
+ *   - a checkpoint newer than the floor              -> NO (still in-window)
+ * Both fall through to the escalating branch. The only way to reach `true` is a
+ * parseable date strictly older than the floor.
+ */
+export function priorOrdersAreBeyondRetention(
+	evidence: PriorOrdersEvidence,
+	now: Date,
+): boolean {
+	if (!evidence.hasPriorOrders) {
+		return false;
+	}
+	const checkpoint = evidence.newestPriorOrderDate;
+	if (!checkpoint) {
+		return false;
+	}
+	const checkpointMs = Date.parse(checkpoint);
+	if (Number.isNaN(checkpointMs)) {
+		return false;
+	}
+	const ageDays = (now.getTime() - checkpointMs) / MS_PER_DAY;
+	return ageDays > HEB_ORDER_RETENTION_FLOOR_DAYS;
+}
+
+/** Owner-facing copy for the retention case. It states what was observed and
+ *  what it means, and explicitly does NOT ask the owner to do anything: there
+ *  is no action available, and inventing one would be a false alarm. */
+export const HEB_EMPTY_AFTER_RETENTION_MESSAGE =
+	"H-E-B's order history no longer lists this account's orders, which are all older than H-E-B's " +
+	"retention window. Your previously collected orders are retained and untouched. This is expected " +
+	"and needs no action; new orders will be collected normally.";
 
 /** Owner-facing message for the one classification whose whole point is to be
  *  read by a person. Says exactly what was observed and what was NOT concluded:
@@ -379,6 +441,7 @@ export function classifyEmptyListPage(
 	pageNum: number,
 	maxPageResolution: MaxPageResolution,
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
+	now: Date = new Date(),
 ): EmptyListPageClassification {
 	if (diag.incapsula_block || diag.password_form) {
 		return { action: "abort", reason: "source_auth_or_challenge" };
@@ -401,6 +464,24 @@ export function classifyEmptyListPage(
 	// specific diagnosis and keeps its own reason), and ABOVE the empty_state
 	// branch, so a source-authored empty state cannot short-circuit past it.
 	if (diag.empty_state && priorOrdersEvidence.hasPriorOrders) {
+		// ...unless every order this connection ever recorded is old enough that
+		// H-E-B's retention window no longer covers it. Then the empty page is not
+		// a contradiction at all: it is precisely what a healthy account looks like
+		// once its last order ages out, and escalating it asks the owner to fix
+		// something that is not broken and cannot be fixed.
+		//
+		// This is a NARROW exception, and its narrowness is the whole safety
+		// argument. It requires a parseable checkpoint date strictly older than a
+		// conservative retention floor. A recent checkpoint — the case the guard was
+		// written for, where orders that H-E-B should still be listing have vanished
+		// — keeps escalating, because that genuinely cannot be told apart from a
+		// purge or a degraded session.
+		if (priorOrdersAreBeyondRetention(priorOrdersEvidence, now)) {
+			return {
+				action: "terminal",
+				reason: "source_reported_empty_after_retention",
+			};
+		}
 		return { action: "abort", reason: "heb_empty_history_after_prior_orders" };
 	}
 	// H-E-B's own empty-state component, rendered inside the order-results
@@ -444,6 +525,7 @@ async function reportEmptyPageDiagnostics(
 	page: Page,
 	pageNum: number,
 	emit: BrowserCollectContext["emit"],
+	progress: BrowserCollectContext["progress"],
 	priorOrdersEvidence: PriorOrdersEvidence,
 ): Promise<EmptyListPageClassification> {
 	const html = await page.content().catch((): string => "");
@@ -456,6 +538,15 @@ async function reportEmptyPageDiagnostics(
 		priorOrdersEvidence,
 	);
 	if (classification.action === "terminal") {
+		// A terminal classification must NOT emit a SKIP_RESULT: a skip marks the
+		// stream as an unresolved attempt, which permanently vetoes the
+		// `considered: 0` enumeration-boundary proof this run is entitled to
+		// (reference-contract `evaluateStreamCoherence` rule 1). The retention case
+		// still deserves to be legible, so it goes out as run progress — visible in
+		// the run log, with no effect on the coverage axis.
+		if (classification.reason === "source_reported_empty_after_retention") {
+			await progress(HEB_EMPTY_AFTER_RETENTION_MESSAGE, { stream: "orders" });
+		}
 		return classification;
 	}
 	await emit({
@@ -1109,6 +1200,7 @@ export async function runForwardScan(
 				page,
 				pageNum,
 				deps.emit,
+				deps.progress,
 				priorOrdersEvidence,
 				deps.waitForHydration,
 			);
@@ -1270,6 +1362,7 @@ async function loadListPage(
 	page: Page,
 	pageNum: number,
 	emit: BrowserCollectContext["emit"],
+	progress: BrowserCollectContext["progress"],
 	priorOrdersEvidence: PriorOrdersEvidence,
 	waitForHydration?: () => Promise<void>,
 ): Promise<LoadedListPage | "terminal"> {
@@ -1324,6 +1417,7 @@ async function loadListPage(
 		page,
 		pageNum,
 		emit,
+		progress,
 		priorOrdersEvidence,
 	);
 	if (classification.action === "terminal") {
@@ -1426,7 +1520,13 @@ export interface OrdersStateShape {
 export function priorOrdersEvidenceFromState(ordersState: {
 	checkpoint?: string;
 }): PriorOrdersEvidence {
-	return { hasPriorOrders: Boolean(ordersState.checkpoint) };
+	return {
+		hasPriorOrders: Boolean(ordersState.checkpoint),
+		// The checkpoint IS the newest order date this connection ever recorded
+		// (`buildOrdersStateCursor` advances it to `newestOrderDate`), so it is the
+		// right age to test the retention window against.
+		newestPriorOrderDate: ordersState.checkpoint,
+	};
 }
 
 /**
