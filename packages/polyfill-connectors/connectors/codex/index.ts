@@ -1817,9 +1817,24 @@ async function processRolloutEntry(
 		cursorKey,
 		result.sessionId,
 	);
+	// The prior digest may be carried forward ONLY when the bytes it vouches for
+	// are still the bytes this cursor describes. `captured_sha256` is defined as
+	// "sha256 of the rollout file's complete bytes as of `size_bytes`", so a
+	// parse that moved the committed boundary invalidates it: on a capture-less
+	// run `capturedMarker` returns `priorCaptured` unchanged, which would stamp
+	// the OLD digest at the NEW size and make `isSettled` treat the appended
+	// bytes as already held — they would never be captured. Size equality is the
+	// exact condition under which the prior digest remains true: it holds for a
+	// `sourceGaps`-forced full reparse of an unchanged file (where dropping the
+	// marker would force a needless re-capture) and fails for every append or
+	// growth, which is where the stale-digest defect lived.
+	const priorStillDescribesFile =
+		cursor !== undefined && builtCursor.size_bytes === cursor.size_bytes
+			? cursor.captured_sha256
+			: undefined;
 	const marker = args.captureLedger?.capturedMarker(
 		cursorKey,
-		captured ?? cursor?.captured_sha256,
+		captured ?? priorStillDescribesFile,
 	);
 	args.newFileCursors[cursorKey] = {
 		...builtCursor,

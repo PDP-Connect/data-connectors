@@ -460,6 +460,71 @@ test("a genuine dead-lettered backlog row still blocks scanning", async () => {
 	);
 });
 
+test("a capture-less run over an APPENDED file does not strand the new bytes", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	// Run 1 captures the body as it stands, so a real `captured_sha256` is on the
+	// cursor. This digest describes 205 KB of file and nothing more.
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		firstDigest,
+		"run 1 marked the body it actually captured",
+	);
+
+	// Codex appends to the same rollout: the session kept going. The file is now
+	// strictly larger, and the run-1 digest no longer describes it.
+	const appended = `${messageLine("y".repeat(100 * 1024), "2026-04-15T17:35:00.000Z")}\n`;
+	await writeFile(source.rolloutPath, appended, { flag: "a" });
+	const grown = await readFile(source.rolloutPath);
+	assert.ok(
+		grown.length > source.body.length,
+		"the fixture really grew, so this run takes the parse path, not the skip path",
+	);
+	const grownDigest = createHash("sha256").update(grown).digest("hex");
+
+	// Run 2 has no artifact stores — the operator has not wired capture for this
+	// run. It still PARSES the appended lines and commits a new, larger
+	// `size_bytes`. The defect: `capturedMarker` returns the prior digest
+	// unchanged when the ledger is disabled, stamping run 1's digest onto a
+	// cursor that now vouches for the grown file. `captured_sha256` is defined as
+	// the digest "as of `size_bytes`", so that marker is a false claim.
+	harness.ingested.length = 0;
+	await harness.run({ capture: false });
+
+	const afterCaptureless = cursorFor(harness.state());
+	assert.notEqual(
+		afterCaptureless?.captured_sha256,
+		firstDigest,
+		"a capture-less run must not carry the old digest onto the grown file's cursor",
+	);
+
+	// Run 3 re-enables capture with the file untouched. Because run 2 left no
+	// marker, `isSettled` is false and the appended bytes are captured. With the
+	// stale marker present this run captured NOTHING and the bytes were lost once
+	// Codex aged the session out.
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(
+		spool.has(grownDigest),
+		"the appended bytes were captured once capture was re-enabled",
+	);
+	assert.equal(
+		spool.sizeOf(grownDigest),
+		grown.length,
+		"the captured body is the whole grown file",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		grownDigest,
+		"the cursor now vouches for the bytes actually held",
+	);
+});
+
 test("enabling capture backfills a previously-unavailable body exactly once", async () => {
 	const source = await makeSource();
 	const harness = await makeHarness(source);
