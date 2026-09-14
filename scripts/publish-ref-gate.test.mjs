@@ -482,10 +482,19 @@ test("the republication guard is reached before the mutable version tag moves", 
       `(lookup line ${lookup + 1}, refusal line ${refusal + 1}, tag write line ${tagWrite + 1})`,
   );
 
+  // The refusal is conditioned on having actually FOUND an existing digest, and
+  // on that digest differing. Both halves matter and they are different claims:
+  // "differs" is what lets an identical retry through, and "found" is what stops
+  // a lookup that failed from being read as an absence. An earlier revision had
+  // only `[ -n "$LOCAL_DIGEST" ]` here, which conflated a genuinely unpublished
+  // version with a timed-out, denied or unparseable lookup and published over a
+  // release. The three outcomes are executed against a substitute registry in
+  // scripts/publish-tag-guard.test.mjs; this pins the shape they rely on.
   assert.match(
     readFileSync(workflowPath, "utf8"),
-    /LOCAL_DIGEST" \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
-    "the publish must refuse only when the existing digest DIFFERS — an identical retry is allowed",
+    /\[ "\$LOOKUP_OUTCOME" = found \] && \[ "\$LOCAL_DIGEST" != "\$DIGEST" \]/,
+    "the publish must refuse only when an existing digest was FOUND and DIFFERS — an " +
+      "identical retry is allowed, and an unknown lookup is not an absence",
   );
 });
 

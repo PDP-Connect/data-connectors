@@ -235,11 +235,41 @@ if (verb === "tag") {
 }
 
 if (verb === "manifest" && argv[1] === "fetch") {
+  // FAULT INJECTION. The lookup is the one call this suite needs to fail in
+  // specific, distinguishable ways, because the outcome classification under
+  // test is a function of exactly two things: the exit status and the bytes.
+  // Everything else about the substitute stays the behaviour it models.
+  const fault = process.env.LOOKUP_FAULT;
+  if (fault === "timeout") {
+    // What a registry that never answers looks like to the client: non-zero,
+    // and an error that is emphatically NOT an absence.
+    process.stderr.write("Error: failed to resolve \"" + argv[argv.length - 1] + "\": context deadline exceeded\n");
+    process.exit(1);
+  }
+  if (fault === "denied") {
+    process.stderr.write("Error: DENIED: denied: requested access to the resource is denied\n");
+    process.exit(1);
+  }
+  if (fault === "malformed") {
+    // The nastiest of the three, and the one a status check alone misses: the
+    // client reports SUCCESS and the body is not a descriptor — an intercepting
+    // proxy's error page where JSON was promised.
+    process.stdout.write("<html><head><title>503 Service Unavailable</title></head></html>\n");
+    process.exit(0);
+  }
+
   const { name, ref } = split(argv[argv.length - 1]);
   const digest = ref.startsWith("sha256:")
     ? ref
     : (existsSync(tagFile(name, ref)) ? readFileSync(tagFile(name, ref), "utf8").trim() : null);
-  if (!digest || !existsSync(manifestFile(digest))) process.exit(1);
+  if (!digest || !existsSync(manifestFile(digest))) {
+    // A genuine absence is an ANSWER, and the client says so on stderr. The
+    // substitute has to reproduce that, because "confirmed absent" is now
+    // recognised by what the registry said rather than by silence — which is
+    // the entire distinction the defect collapsed.
+    process.stderr.write("Error: " + argv[argv.length - 1] + ": not found\n");
+    process.exit(1);
+  }
   const body = readFileSync(manifestFile(digest));
   if (argv.includes("--descriptor")) {
     process.stdout.write(JSON.stringify({
@@ -275,7 +305,7 @@ process.exit(0);
  * Returns the exit status, the recorded argv, and — separately — what the
  * registry holds afterwards.
  */
-function runPublish({ registry, dir, name, code }) {
+function runPublish({ registry, dir, name, code, lookupFault }) {
   const scratch = mkdtempSync(join(dir, "run-"));
   const artifact = join(scratch, "artifact");
   mkdirSync(artifact, { recursive: true });
@@ -321,6 +351,9 @@ function runPublish({ registry, dir, name, code }) {
     CONNECTOR: "ynab",
     GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
     GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+    // Absent unless a check is injecting one, so the ordinary paths run against
+    // an unfaulted client.
+    ...(lookupFault ? { LOOKUP_FAULT: lookupFault } : {}),
   };
   writeFileSync(argvLog, "");
 
@@ -459,6 +492,149 @@ test("a first publish of a new version tags and signs the digest it pushed", () 
       `cosign must sign the published digest by digest, not by tag: ${signed[0].join(" ")}`,
     );
   });
+});
+
+// THE UNKNOWN LOOKUP. Three checks, one per way the lookup can fail to produce
+// an answer, and they are separate tests rather than a loop because each models
+// a different real failure and each must be able to fail on its own.
+//
+// The property is the same in all three, and it is a REGISTRY-STATE property,
+// not an exit-code one: a released version A must still be A afterwards. A
+// revision that exits 1 after tagging satisfies a status assertion and destroys
+// the release — that is the shape of the defect this whole file exists for, and
+// the reason the tag read below is the first assertion and not an afterthought.
+//
+// Each runs a real first publish to establish A, then a DIFFERENT candidate B
+// under the fault. Different bytes matter: if the guard fails open, B replaces
+// A and the tag read shows it. With identical bytes an overwrite would be
+// invisible, and the check would pass for the wrong reason.
+for (const { fault, label, expected } of [
+  {
+    fault: "timeout",
+    label: "a lookup that times out",
+    // Must name the outcome, not just fail. An operator reading the log has to
+    // be able to tell "the registry says this version is taken" from "the
+    // registry did not answer", because the two need different responses.
+    expected: /UNKNOWN/,
+  },
+  {
+    fault: "denied",
+    label: "a lookup the registry denies",
+    expected: /UNKNOWN/,
+  },
+  {
+    fault: "malformed",
+    label: "a lookup that succeeds with output that is not a descriptor",
+    expected: /no usable sha256 descriptor/,
+  },
+]) {
+  test(`${label} refuses before the version tag moves`, () => {
+    withRegistry(({ registry, dir }) => {
+      const name = "connector/ynab";
+
+      const released = runPublish({ registry, dir, name, code: "CODE-A-RELEASED" });
+      assert.equal(released.status, 0, `the first publish should succeed\n${released.output}`);
+      const digestA = registry.resolveTag(name, "0.3.0");
+      assert.ok(digestA, "the first publish must leave the version tag resolvable");
+
+      const unknown = runPublish({
+        registry, dir, name, code: "CODE-B-DIFFERENT", lookupFault: fault,
+      });
+
+      // FIRST, and deliberately: what does the registry hold? Before the defect
+      // was repaired this read returned B's digest — the released version had
+      // been redefined, by a run that reported success.
+      assert.equal(
+        registry.resolveTag(name, "0.3.0"),
+        digestA,
+        `an unknown lookup (${fault}) must leave the released version tag on its published ` +
+          `digest — mapping "I could not find out" to "nothing is there" republishes over a release`,
+      );
+
+      assert.equal(
+        unknown.status,
+        1,
+        `an unknown lookup (${fault}) must exit non-zero\n${unknown.output}`,
+      );
+      assert.match(
+        unknown.output,
+        expected,
+        `the refusal must say the existing state is unknown rather than reporting a conflict it did not observe\n${unknown.output}`,
+      );
+
+      // No mutable write by any route, and nothing signed. A signature over
+      // bytes the workflow was not entitled to publish is the durable half of
+      // this defect: the tag can be repointed, a Rekor entry cannot be unlogged.
+      assert.deepEqual(
+        unknown.calls.filter((call) => call[0] === "tag"),
+        [],
+        `an unknown lookup (${fault}) must not reach the tag write`,
+      );
+      assert.deepEqual(
+        unknown.calls.filter((call) => call[0] === "cosign"),
+        [],
+        `an unknown lookup (${fault}) must not sign`,
+      );
+    });
+  });
+}
+
+test("a confirmed-absent lookup still publishes, and is observed as absent rather than as silence", () => {
+  // The other side of the repair, and the one that keeps it from being "refuse
+  // everything". A first release has to go out, and the ONLY thing separating
+  // it from the three refusals above is that the registry gave a definite "not
+  // found" — so this pins that the classification reads the answer rather than
+  // treating any unproductive lookup as permission.
+  withRegistry(({ registry, dir }) => {
+    const name = "connector/ynab";
+    const result = runPublish({ registry, dir, name, code: "CODE-FIRST" });
+
+    assert.equal(result.status, 0, `a confirmed-absent version must publish\n${result.output}`);
+
+    const lookups = result.calls.filter((call) => call[0] === "manifest" && call[1] === "fetch");
+    assert.equal(lookups.length, 1, "the guard must consult the registry exactly once");
+
+    const tagged = registry.resolveTag(name, "0.3.0");
+    assert.ok(tagged, "a confirmed-absent publish must create the version tag");
+    assert.ok(
+      result.calls.some((call) => call[0] === "cosign" && call.some((a) => a.endsWith(`@${tagged}`))),
+      "a confirmed-absent publish signs the digest it tagged",
+    );
+  });
+});
+
+test("the lookup's failure is classified, not discarded", () => {
+  // A shape check, kept deliberately narrow. The three registry-state checks
+  // above are the real evidence; this one exists because the defect's mechanism
+  // was a SHELL IDIOM — `|| true` and a swallowing `catch` — that silently
+  // maps every failure onto the success-with-no-result value. Those idioms can
+  // be reintroduced in a way that still passes the fault cases the substitute
+  // happens to model, so the idiom itself is pinned out of the lookup.
+  const shell = extractPushAndSign();
+  const lines = shell.split("\n").filter((line) => !/^\s*#/.test(line));
+
+  const lookupLine = lines.findIndex((line) => /oras manifest fetch --descriptor/.test(line));
+  assert.notEqual(lookupLine, -1, "expected the existing-digest lookup");
+
+  assert.doesNotMatch(
+    lines[lookupLine],
+    /\|\|\s*true/,
+    "the lookup must not discard its exit status with `|| true` — that is what mapped " +
+      "a timed-out or denied lookup onto the same empty result as a genuinely absent version",
+  );
+  assert.doesNotMatch(
+    lines[lookupLine],
+    /2>\s*\/dev\/null/,
+    "the lookup must not discard its stderr — a confirmed absence is now told apart from " +
+      "an unreachable registry by what the client reported",
+  );
+  // Against the comment-stripped lines, because the note explaining this
+  // defect necessarily quotes the idiom it is warning about.
+  assert.doesNotMatch(
+    lines.join("\n"),
+    /catch\s*\{\s*\}/,
+    "an empty catch around the descriptor parse turns malformed output into an absent version",
+  );
 });
 
 test("the push that precedes the guard writes no tag", () => {

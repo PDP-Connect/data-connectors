@@ -364,10 +364,74 @@ jobs:
           # Nothing resolves to them by name, nothing is signed, and a registry
           # garbage-collects unreferenced manifests — that is the cost side of
           # the trade that buys the guard its correct position.
-          LOCAL_DIGEST="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>/dev/null \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).digest)}catch{}})' || true)"
+          #
+          # THE LOOKUP HAS THREE OUTCOMES, NOT TWO. This is the correction to a
+          # revision that had only two. It ran the lookup as one pipeline ending
+          # in `2>/dev/null … || true`, with a `try{}catch{}` swallowing a parse
+          # failure, and assigned the result to a single string. Every way the
+          # lookup could fail — a timed-out registry, a denied read, a proxy
+          # error page where JSON was expected — produced the SAME empty string
+          # that a genuinely unpublished version produces. Empty then read as
+          # "nothing is there, go ahead", so the step tagged and SIGNED over a
+          # released version and exited 0. A guard that cannot tell "absent"
+          # from "I could not find out" is not a precondition; it fails open,
+          # and it fails open precisely when the registry is unhealthy.
+          #
+          # So the status and the body are captured separately and classified:
+          #
+          #   FOUND            — exit 0, a parseable sha256 descriptor. Compare.
+          #   CONFIRMED-ABSENT — a definite "no such manifest" from the registry.
+          #                      Publish; this is a first release.
+          #   UNKNOWN          — anything else: a non-zero status that is not a
+          #                      definite absence, or output that does not parse
+          #                      as a descriptor. REFUSE, before the tag moves.
+          #
+          # UNKNOWN refusing is the whole repair. It costs a retry on a flaky
+          # registry; the alternative cost is an unreviewed, signed overwrite of
+          # a released version, which no retry undoes.
+          set +e
+          LOOKUP_OUT="$(oras manifest fetch --descriptor "${REPOSITORY}:${VERSION}" 2>"${RUNNER_TEMP}/lookup-err")"
+          LOOKUP_STATUS=$?
+          set -e
+          LOOKUP_ERR="$(cat "${RUNNER_TEMP}/lookup-err")"
 
-          if [ -n "$LOCAL_DIGEST" ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
+          if [ "$LOOKUP_STATUS" -eq 0 ]; then
+            # Exit 0 promises a descriptor. If the body is not one, the client
+            # and this step disagree about what just happened, and that is
+            # UNKNOWN — not an absence. `node -e` exits non-zero on a parse
+            # failure rather than printing nothing, so the failure is visible
+            # here instead of being laundered into the empty string.
+            set +e
+            LOCAL_DIGEST="$(printf '%s' "$LOOKUP_OUT" | node -e '
+              let s = "";
+              process.stdin.on("data", (d) => (s += d)).on("end", () => {
+                let descriptor;
+                try { descriptor = JSON.parse(s); } catch { process.exit(3); }
+                const digest = descriptor && descriptor.digest;
+                if (typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) process.exit(3);
+                console.log(digest);
+              });
+            ')"
+            PARSE_STATUS=$?
+            set -e
+            if [ "$PARSE_STATUS" -ne 0 ]; then
+              echo "::error::${REPOSITORY}:${VERSION} lookup succeeded but returned no usable sha256 descriptor; refusing to publish. The existing state of this version is UNKNOWN and it must not be redefined on a guess. Output was: ${LOOKUP_OUT}"
+              exit 1
+            fi
+            LOOKUP_OUTCOME=found
+          elif printf '%s' "$LOOKUP_ERR" | grep -qiE 'not found|NAME_UNKNOWN|MANIFEST_UNKNOWN'; then
+            # The registry answered, and the answer was "no such manifest".
+            # That is a real answer, and it is the one that permits a first
+            # publish. It is matched on the error the client actually emits,
+            # rather than being inferred from the absence of output.
+            LOOKUP_OUTCOME=absent
+            LOCAL_DIGEST=""
+          else
+            echo "::error::${REPOSITORY}:${VERSION} could not be resolved (oras manifest fetch exited ${LOOKUP_STATUS}) and the failure is not a definite absence; refusing to publish. Whether this version is already released is UNKNOWN, and tagging on an unknown would redefine it. Retry once the registry is reachable. Client error was: ${LOOKUP_ERR}"
+            exit 1
+          fi
+
+          if [ "$LOOKUP_OUTCOME" = found ] && [ "$LOCAL_DIGEST" != "$DIGEST" ]; then
             echo "::error::${REPOSITORY}:${VERSION} already published as ${LOCAL_DIGEST}; refusing to redefine it as ${DIGEST}. Publish a new version instead."
             exit 1
           fi
