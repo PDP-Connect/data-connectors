@@ -22,3 +22,7 @@ fixtures/*/scrubbed/*/
 *.js
 *.d.ts
 *.d.ts.map
+
+# connector-dev run-summary output (bin/connector-dev.ts) — local proof
+# artifacts from a developer's own runs, not reviewed/committable fixtures.
+runs/

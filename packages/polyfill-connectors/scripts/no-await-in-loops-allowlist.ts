@@ -2386,6 +2386,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "registerManifest(): manual dev-tool script printing ordered per-item console output",
 		},
 		{
+			path: "src/test-fixtures/connector-dev-scope-state-fixture.ts",
+			line: 71,
+			column: 4,
+			category: "ordered_protocol_emission",
+			note: "collect(): each stream's RECORD must be emitted before its own STATE cursor line, and stream order must match the requested-streams PROGRESS line this fixture asserts on",
+		},
+		{
 			path: "connectors/claude_code/index.ts",
 			line: 2660,
 			column: 8,
