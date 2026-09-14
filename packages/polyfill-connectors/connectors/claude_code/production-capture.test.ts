@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import {
 	chmod,
 	mkdir,
@@ -103,6 +103,19 @@ interface RunOptions {
 	 * enabling it later has to backfill.
 	 */
 	capture?: boolean;
+	/**
+	 * Overrides the projects directory the child scans. A path that does not
+	 * exist makes the requested-source preflight reject, which is how the N4
+	 * control fails an awaited setup step after the stores are already open.
+	 */
+	projectsDir?: string;
+	/**
+	 * Gives the CHILD its own artifact outbox, separate from the queue the
+	 * parent runtime opens and closes. The two default to one file, and the
+	 * parent's own clean close checkpoints away the SQLite sidecars — which
+	 * would mask whether the child released its handle.
+	 */
+	artifactOutboxPath?: string;
 }
 
 interface Harness {
@@ -182,7 +195,7 @@ async function makeHarness(source: Source): Promise<Harness> {
 			},
 			(options?.capture ?? true)
 				? {
-						outboxPath: source.queuePath,
+						outboxPath: options?.artifactOutboxPath ?? source.queuePath,
 						sourceInstanceId: "claude-production",
 					}
 				: undefined,
@@ -194,7 +207,7 @@ async function makeHarness(source: Source): Promise<Harness> {
 				env: {
 					...spec.env,
 					CLAUDE_CODE_HOME: source.claudeHome,
-					CLAUDE_CODE_PROJECTS_DIR: source.projects,
+					CLAUDE_CODE_PROJECTS_DIR: options?.projectsDir ?? source.projects,
 				},
 			},
 			deviceId: "device-production",
@@ -526,4 +539,53 @@ test("an unreadable tool-result is retried on a later run, capture off", async (
 		1,
 		"the now-readable file was re-examined rather than skipped forever",
 	);
+});
+
+test("a setup failure after the stores open still releases them", async () => {
+	// N4 control. The artifact stores are acquired BEFORE several awaited setup
+	// steps (the source inventory, the coverage emissions, the requested-source
+	// preflight) and long before the collection call. When the release guard sat
+	// around the collection call alone, any of those earlier steps rejecting
+	// skipped the finalizer entirely and leaked the outbox handle.
+	//
+	// Pointing the projects dir at a path that does not exist makes
+	// `assertRequestedClaudeSources` reject inside exactly that window: after
+	// acquisition, before collection. The run must still fail — this asserts the
+	// handle is released on the way out, not that the failure is swallowed.
+	//
+	// The open handle is observed through SQLite's own sidecar files: a live
+	// LocalDeviceOutbox holds `-wal`/`-shm` next to its database, and closing it
+	// removes them. They survive the child's exit, so they are a direct witness
+	// of whether `close()` ran, readable from the parent after the run.
+	//
+	// The child's outbox is deliberately a DIFFERENT file from the queue the
+	// parent runtime opens. Pointed at one shared file, the parent's own clean
+	// close checkpoints the sidecars away whatever the child did, and this
+	// assertion would pass under either guard placement — proving nothing.
+	// With the guard back around the collection call alone, this test fails on
+	// the residue assertion below.
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+	const childOutbox = join(source.claudeHome, "child-artifacts.sqlite");
+	const missingProjects = join(source.claudeHome, "no-such-projects");
+
+	await assert.rejects(
+		harness.run({
+			artifactOutboxPath: childOutbox,
+			projectsDir: missingProjects,
+		}),
+		"a missing requested source must still fail the run",
+	);
+
+	assert.ok(
+		existsSync(childOutbox),
+		"the child must have opened its artifact store before the setup step failed",
+	);
+	for (const sidecar of [`${childOutbox}-wal`, `${childOutbox}-shm`]) {
+		assert.equal(
+			existsSync(sidecar),
+			false,
+			`${sidecar} remains, so the artifact store was never closed after the setup failure`,
+		);
+	}
 });
