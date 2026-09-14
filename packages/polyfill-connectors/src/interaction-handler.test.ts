@@ -12,7 +12,19 @@ import {
 	type InteractionMessage,
 } from "./interaction-handler.ts";
 
-const { buildClickUrl, normalizeStatus } = __testing;
+const { buildClickUrl, normalizeStatus, SECRET_FIELD_RE } = __testing;
+
+// Drop a synthetic response file before invoking the handler so waitForFile
+// resolves on the first poll.
+function dropResponse(requestId: string, body: object): void {
+	const path = join(tmpdir(), `pdpp-interaction-${requestId}.response.json`);
+	writeFileSync(path, JSON.stringify(body), "utf8");
+}
+
+// Each test uses a unique request_id so the tmp-file probe doesn't collide.
+function withFreshRequestId(label: string): string {
+	return `${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+}
 
 const ENV_KEYS = ["PDPP_WEB_BASE_URL", "PDPP_REFERENCE_ORIGIN"] as const;
 
@@ -132,20 +144,120 @@ describe("normalizeStatus", () => {
 	});
 });
 
+describe("secret field classification", () => {
+	test("secret-named credential fields are masked", () => {
+		for (const key of [
+			"password",
+			"Password",
+			"totp_secret",
+			"api_key",
+			"access_token",
+			"passphrase",
+			"pin",
+		]) {
+			assert.ok(SECRET_FIELD_RE.test(key), `${key} should be treated as secret`);
+		}
+	});
+
+	test("identifying fields stay visible so the operator can see what they typed", () => {
+		for (const key of ["username", "email", "account_id", "shipping"]) {
+			assert.ok(!SECRET_FIELD_RE.test(key), `${key} should not be masked`);
+		}
+	});
+});
+
+describe("handleInteraction operator instructions", () => {
+	function captureStderr(body: () => Promise<void>): Promise<string> {
+		const chunks: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		(process.stderr as { write: unknown }).write = (chunk: unknown): boolean => {
+			chunks.push(String(chunk));
+			return true;
+		};
+		return body()
+			.catch((): undefined => undefined)
+			.then(() => {
+				(process.stderr as { write: unknown }).write = original;
+				return chunks.join("");
+			});
+	}
+
+	// `handleInteraction` reads `process.stdin.isTTY` asynchronously, so the
+	// override has to outlive the await — restoring it synchronously in a
+	// `finally` would put it back before the handler ever looks.
+	async function withIsTTY<T>(
+		value: boolean | undefined,
+		body: () => Promise<T>,
+	): Promise<T> {
+		const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+		Object.defineProperty(process.stdin, "isTTY", {
+			configurable: true,
+			value,
+		});
+		try {
+			return await body();
+		} finally {
+			if (descriptor) {
+				Object.defineProperty(process.stdin, "isTTY", descriptor);
+			} else {
+				delete (process.stdin as { isTTY?: boolean }).isTTY;
+			}
+		}
+	}
+
+	test("a non-TTY run keeps the full file-drop instructions — it is the only way in", async () => {
+		const request_id = withFreshRequestId("notty");
+		dropResponse(request_id, { status: "cancelled" });
+		const out = await withIsTTY(undefined, () =>
+			captureStderr(async () => {
+				await handleInteraction(
+					{
+						kind: "manual_action",
+						message: "Test",
+						request_id,
+						timeout_seconds: 60,
+					},
+					{ connectorName: "test" },
+				);
+			}),
+		);
+
+		assert.match(out, /request written to /);
+		assert.match(out, /write response JSON to /);
+		assert.match(out, /example: echo /);
+	});
+
+	test("an interactive run drops the echo example that competed with the live prompt", async () => {
+		const request_id = withFreshRequestId("tty");
+		dropResponse(request_id, { status: "cancelled" });
+		const out = await withIsTTY(true, () =>
+			captureStderr(async () => {
+				await handleInteraction(
+					{
+						kind: "manual_action",
+						message: "Test",
+						request_id,
+						timeout_seconds: 60,
+					},
+					{ connectorName: "test" },
+				);
+			}),
+		);
+
+		// The defect: this line printed directly above a live prompt.
+		assert.ok(
+			!out.includes("example: echo "),
+			`echo example still printed on a TTY:\n${out}`,
+		);
+		assert.ok(!out.includes("write response JSON to "));
+		// The file-drop channel is still reachable, just as one pointer line.
+		assert.match(out, /answer below, or drop a response file at /);
+	});
+});
+
 describe("handleInteraction envelope shape", () => {
 	// Force the file-drop path (no TTY) and a tight timeout so the test runs
-	// quickly. Drop a synthetic response file before invoking the handler so
-	// waitForFile resolves on the first poll.
-	function dropResponse(requestId: string, body: object): void {
-		const path = join(tmpdir(), `pdpp-interaction-${requestId}.response.json`);
-		writeFileSync(path, JSON.stringify(body), "utf8");
-	}
-
-	// Each test uses a unique request_id so the tmp-file probe doesn't collide.
-	function withFreshRequestId(label: string): string {
-		return `${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-	}
-
+	// quickly.
 	test("returns runtime-valid envelope with exact request_id when status is success", async () => {
 		const request_id = withFreshRequestId("ok");
 		dropResponse(request_id, { status: "success", data: { code: "123456" } });
