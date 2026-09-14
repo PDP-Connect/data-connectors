@@ -1,11 +1,19 @@
-# Vendored dependency pins (transitional)
+# Vendored dependency stand-in (transitional)
 
-`@pdpp/collector-runtime` and `@pdpp/connector-protocol` live in
-[PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), pinned at commit
-`ed0dbaca5a3845200e9e0fc230900620e5f69b07` (see `.github/cross-repo-pins.json`). This package
-needs them at build/test time, but they are not published to any registry yet.
+This directory holds ONE archive: `pdpp-reference-contract-0.0.1.tgz`, a minimal private
+stand-in for `@pdpp/reference-contract`, which is not published to any registry.
+
+`@pdpp/collector-runtime` and `@pdpp/connector-protocol` used to be vendored here too, packed by
+hand from a pinned `PDP-Connect/data-connect` commit. They are now published, and
+`package.json` installs both from the npm registry at an exact version. Their provenance is the
+registry's immutable published artifact plus the integrity hash in `package-lock.json`, so the
+hand-maintained digest list and the CI job that reconciled it (drift job (c) tarball-digests)
+are both retired.
 
 ## Why a checked-in `.tgz`, not a git dependency
+
+This section is retained because it explains why the stand-in below is a packed archive rather
+than a git reference, and why a future vendored dependency should not reach for one either.
 
 npm's git-dependency syntax has no equivalent of pnpm's `#commit&path:subdir`. Confirmed by
 experiment (2026-08-17): a spec like
@@ -20,40 +28,6 @@ rejected outright rather than treated as a partial win.
 
 ## What's checked in
 
-- `pdpp-collector-runtime-0.0.1.tgz` / `pdpp-connector-protocol-0.0.1.tgz`: built with
-  `npm run build` then packed with `npm pack` from a clean checkout of
-  `PDP-Connect/data-connect@ed0dbaca5a3845200e9e0fc230900620e5f69b07`, workspace packages
-  `packages/collector-runtime` and `packages/connector-protocol`. Refreshed 2026-09-14;
-  **both** archives are re-vendored this time. `pdpp-collector-runtime-0.0.1.tgz` moves because
-  data-connect#106 rewrote the durable outbox to carry artifact bytes through to upload — a
-  packed input, so `dist/` gains `collector-runner`, `local-device-blob-capture` and
-  `local-device-blob-spool`, and `local-device-outbox` changes. That retires the previous note's
-  claim that this archive is NOT re-vendored and that a repack reproduces `e274fb45...`: both
-  were true at the #94 pin and are false here. `pdpp-connector-protocol-0.0.1.tgz` moves off
-  #94's `7a937c13...` because data-connect#113 moved declared dependencies to their latest
-  releases, changing the packed inputs of both packages — a repack prepared before #113 would
-  not have covered it.
-
-  Both digests match data-connect's own `artifact.json` `artifact_sha256` at this commit —
-  `d01bbbe0c1...` for connector-protocol and `c8794cfa26...` for collector-runtime — so each
-  reproduces upstream's generator rather than merely agreeing with itself. Getting that
-  confirmation for **both** packages is why the pin is `ed0dbaca5` rather than #113's
-  `e10a79ba2`: at `e10a79ba2` both receipts were stale (#113 changed packed inputs without
-  regenerating them, so `artifact:verify` failed for both, and collector-runtime's
-  `artifact:generate` refused to run at all because it reads connector-protocol's committed
-  receipt and saw the drift), which left collector-runtime's digest backed only by repack
-  determinism. data-connect#116 regenerated both receipts and changed nothing else — the diff
-  `e10a79ba2..ed0dbaca5` is exactly those two `artifact.json` files, and neither is packed,
-  since both packages declare `files: ["dist/"]`. The archives below are therefore byte-identical
-  to the ones packed at `e10a79ba2`; moving the pin to `ed0dbaca5` adds the missing provenance
-  without changing a vendored byte. A fresh repack at `ed0dbaca5` reproduces both, verified by
-  running drift job (c)'s own script, and each repack is deterministic across two independent
-  `npm pack` runs.
-
-  `package-lock.json` records a sha512 integrity hash for each of these path-referenced
-  tarballs, so both entries are updated in the same commit; omitting them fails `npm ci` with
-  EINTEGRITY. Built with Node 24.21.0 (data-connect's `.nvmrc` as of #96), npm 11.19.0, and
-  TypeScript 7.0.2. The separate 1.0.0 release pin remains unchanged.
 - `pdpp-reference-contract-0.0.1.tgz`: **not** the real `@pdpp/reference-contract` package.
   `@pdpp/collector-runtime`'s own `package.json` (inherited from the pnpm monorepo) declares
   `@pdpp/connector-protocol` and `@pdpp/reference-contract` as dependencies at bare `"*"`, which
@@ -93,9 +67,11 @@ rejected outright rather than treated as a partial win.
   This tarball remains a minimal private stand-in, not an independent contract implementation.
   Delete it once the real `@pdpp/reference-contract` is available to this repo.
 - Because `@pdpp/collector-runtime`'s dependency declarations point at the public registry
-  (`"*"`), not at these vendor files, `package.json`'s `overrides` field is what actually forces
-  npm to substitute the local tarballs for `@pdpp/connector-protocol` and `@pdpp/reference-contract`
-  wherever `@pdpp/collector-runtime` depends on them. `polyfill-connectors` ALSO depends on
+  (`"*"`), not at this vendor file, `package.json`'s `overrides` field is what actually forces
+  npm to substitute the local tarball for `@pdpp/reference-contract`
+  wherever `@pdpp/collector-runtime` depends on it. (`@pdpp/connector-protocol` no longer needs
+  an override: it is published, so `collector-runtime`'s own declared dependency on it now
+  resolves against the registry on its own.) `polyfill-connectors` ALSO depends on
   `@pdpp/reference-contract` directly (`dependencies`, not just `overrides`) since its own
   restored tests import `@pdpp/reference-contract/evidence` and `/common` by package name, not
   only transitively through `collector-runtime`. A plain nested `file:` dependency in
@@ -105,8 +81,6 @@ rejected outright rather than treated as a partial win.
   `package-lock.json` once installed):
 
   ```
-  c8794cfa263d76d0487c2fa20aace62aef94b71f9bc667d9f476a5c8c8164ff1  pdpp-collector-runtime-0.0.1.tgz
-  d01bbbe0c177ba06bb4b0d9738d83dce193d566051c1493c40a8bf28cd95e4c2  pdpp-connector-protocol-0.0.1.tgz
   8271e75949f85e57de8ca4ed557e73b6706e3680c9ad7a986bd290d94797e8d6  pdpp-reference-contract-0.0.1.tgz
   ```
 
@@ -114,10 +88,10 @@ rejected outright rather than treated as a partial win.
   `evidence/` subpath was added for Gate B finding B2; `package-lock.json` was regenerated in the
   same change — see the closure report for the exact before/after.)
 
-`package.json` references the two Move A packages plus `@pdpp/reference-contract` directly via
-`file:./vendor/<name>.tgz` dependencies, npm's supported local-tarball dependency form, and the
-transitive `@pdpp/connector-protocol` / `@pdpp/reference-contract` pins for
-`@pdpp/collector-runtime` via `overrides`.
+`package.json` references `@pdpp/reference-contract` directly via a
+`file:./vendor/<name>.tgz` dependency, npm's supported local-tarball dependency form, and pins it
+transitively for `@pdpp/collector-runtime` via `overrides`. `@pdpp/collector-runtime` and
+`@pdpp/connector-protocol` are ordinary registry dependencies and are not referenced here.
 
 ## What this vendor tree does NOT cover
 
@@ -135,9 +109,12 @@ containing a real reference-implementation server, no longer exists. See
 
 ## Removal trigger
 
-This is transitional. Once `@pdpp/collector-runtime` and `@pdpp/connector-protocol` publish
-(from `PDP-Connect/data-connect`, to whatever registry that repo settles on) and the real
-`@pdpp/reference-contract` becomes consumable by this repo, delete this directory and switch
-`package.json` back to normal semver-range registry dependencies. Until then, drift between
-these tarballs and the pinned commit is bounded only by re-running the pack step by hand — there
-is no automated freshness check.
+This is transitional. The `@pdpp/collector-runtime` / `@pdpp/connector-protocol` half of that
+trigger has fired: both publish from `PDP-Connect/data-connect` and install from the registry.
+
+What remains is `@pdpp/reference-contract`. Once the real package becomes consumable by this
+repo, delete this directory entirely, drop the `overrides` block from `package.json`, and retire
+drift job (d) reference-contract along with the `pdpp` entry in `.github/cross-repo-pins.json` —
+that pin exists only to give job (d) a pdpp checkout to compare the copied modules against.
+Until then, drift between this stand-in and pdpp's real contract modules is caught by job (d),
+which is why that job and its pin both stay.

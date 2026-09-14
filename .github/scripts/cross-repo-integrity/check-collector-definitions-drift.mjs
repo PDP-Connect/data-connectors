@@ -73,26 +73,32 @@ try {
   // `@pdpp/connector-protocol` as a runtime value (data-connect PR #36 added the
   // protocol_capabilities validation loop below), not just as a type — so unlike the
   // LocalCollectorDefinition/LocalCollectorBinding type-only imports elsewhere in this
-  // scratch tree, this one DOES need a real, resolvable package. Install it from
-  // data-connectors' own vendored tarball: the same artifact drift job (c)
-  // (check-tarball-digest-drift.sh) already verifies is a faithful repack of the pinned
-  // data-connect commit, so trusting it here does not introduce a second, unverified
-  // source of truth for the package's contents.
-  // resolve() to an absolute path: npm's `file:` dependency spec resolves relative to the
-  // scratch tree's own package.json, not this process's cwd, and dataConnectorsDir arrives
-  // as a relative arg (e.g. "data-connectors") from the workflow's working directory.
-  const connectorProtocolTarball = resolve(
-    join(dataConnectorsDir, "packages/polyfill-connectors/vendor/pdpp-connector-protocol-0.0.1.tgz"),
+  // scratch tree, this one DOES need a real, resolvable package. Install it from the
+  // registry at the EXACT version polyfill-connectors itself declares, read from that
+  // package.json rather than hardcoded here: this job must validate the generator against
+  // the same protocol build the package actually consumes, and a second hardcoded version
+  // would be free to drift from it silently. This replaces the former vendored-tarball
+  // source, retired with drift job (c) when both packages moved to the registry.
+  const polyfillConnectorsPackageJsonPath = resolve(
+    join(dataConnectorsDir, "packages/polyfill-connectors/package.json"),
   );
-  if (!existsSync(connectorProtocolTarball)) {
-    console.error(`FAIL: vendored @pdpp/connector-protocol tarball not found at ${connectorProtocolTarball}`);
+  if (!existsSync(polyfillConnectorsPackageJsonPath)) {
+    console.error(`FAIL: polyfill-connectors package.json not found at ${polyfillConnectorsPackageJsonPath}`);
+    process.exit(1);
+  }
+  const connectorProtocolVersion = JSON.parse(readFileSync(polyfillConnectorsPackageJsonPath, "utf8"))
+    ?.dependencies?.["@pdpp/connector-protocol"];
+  if (!connectorProtocolVersion) {
+    console.error(
+      `FAIL: ${polyfillConnectorsPackageJsonPath} declares no @pdpp/connector-protocol dependency to install`,
+    );
     process.exit(1);
   }
   writeFileSync(
     join(scratchRoot, "package.json"),
     JSON.stringify({
       type: "module",
-      dependencies: { "@pdpp/connector-protocol": `file:${connectorProtocolTarball}` },
+      dependencies: { "@pdpp/connector-protocol": connectorProtocolVersion },
     }),
   );
   execFileSync("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"], {

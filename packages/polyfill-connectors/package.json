@@ -353,7 +353,6 @@
 		"build": "npm run check:connector-index && tsc --project tsconfig.build.json && npm run check:published-entrypoints",
 		"check": "node --import tsx ./scripts/check-biome.ts",
 		"check:published-entrypoints": "node ./scripts/check-published-entrypoints.mjs",
-		"hydrate-vendored-runtime": "node ./scripts/hydrate-vendored-runtime.mjs",
 		"check:noAwaitInLoops-conformance": "node --import tsx ./scripts/check-no-await-in-loops-conformance.ts",
 		"check:noDirectCredentialEnv": "node --import tsx ./scripts/check-no-direct-credential-env.ts",
 		"check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
@@ -365,17 +364,13 @@
 		"typecheck": "tsc --noEmit",
 		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
-		"prepack": "npm run hydrate-vendored-runtime && npm run build",
+		"prepack": "npm run build",
 		"generate:connector-index": "node ./scripts/generate-connector-implementation-index.mjs",
 		"check:connector-index": "node ./scripts/generate-connector-implementation-index.mjs --check"
 	},
-	"bundledDependencies": [
-		"@pdpp/collector-runtime",
-		"@pdpp/connector-protocol"
-	],
 	"dependencies": {
-		"@pdpp/collector-runtime": "file:./vendor/pdpp-collector-runtime-0.0.1.tgz",
-		"@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
+		"@pdpp/collector-runtime": "2.3.0",
+		"@pdpp/connector-protocol": "2.3.0",
 		"@streamparser/json": "^0.0.26",
 		"better-sqlite3": "^13.0.3",
 		"dotenv": "^17.4.2",
@@ -403,7 +398,6 @@
 	},
 	"overrides": {
 		"@pdpp/collector-runtime": {
-			"@pdpp/connector-protocol": "file:./vendor/pdpp-connector-protocol-0.0.1.tgz",
 			"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz"
 		}
 	}
