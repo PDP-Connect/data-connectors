@@ -166,12 +166,68 @@ function enrichRemoteEntry(indexSource, entry) {
   };
 }
 
-async function fetchBinary(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+export const ARTIFACT_FETCH_ATTEMPTS = 4;
+export const ARTIFACT_FETCH_BASE_DELAY_MS = 500;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Downloads a release asset, retrying transient failures.
+ *
+ * GitHub's release-asset CDN intermittently answers a valid, immutable URL with
+ * a 5xx that succeeds seconds later. A single attempt turns that blip into a
+ * failed `npm ci` for every consumer, so 5xx responses and network errors are
+ * retried with exponential backoff.
+ *
+ * Retries cover only failures a later attempt can plausibly fix. A 4xx is a
+ * statement about the request itself — a wrong or withdrawn URL — and repeating
+ * it just delays the same error, so it fails immediately. Digest and signature
+ * mismatches are likewise never retried: they are verification failures raised
+ * by the caller, and bytes that fail a hash check are not made trustworthy by
+ * downloading them again.
+ */
+export async function fetchBinary(
+  url,
+  {
+    fetchImpl = fetch,
+    attempts = ARTIFACT_FETCH_ATTEMPTS,
+    baseDelayMs = ARTIFACT_FETCH_BASE_DELAY_MS,
+  } = {}
+) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetchImpl(url);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      console.warn(
+        `[connector-installer] fetch ${url} failed (${error instanceof Error ? error.message : String(error)}); retrying (attempt ${attempt + 1}/${attempts})`
+      );
+      await sleep(baseDelayMs * 2 ** (attempt - 1));
+      continue;
+    }
+
+    if (response.ok) {
+      return Buffer.from(await response.arrayBuffer());
+    }
+
+    const failure = new Error(
+      `Failed to fetch ${url}: ${response.status} ${response.statusText}`
+    );
+    if (response.status < 500) throw failure;
+
+    lastError = failure;
+    if (attempt === attempts) break;
+    console.warn(
+      `[connector-installer] fetch ${url} returned ${response.status}; retrying (attempt ${attempt + 1}/${attempts})`
+    );
+    await sleep(baseDelayMs * 2 ** (attempt - 1));
   }
-  return Buffer.from(await response.arrayBuffer());
+
+  throw lastError;
 }
 
 function normalizeSignature(signature) {
