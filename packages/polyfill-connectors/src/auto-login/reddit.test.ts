@@ -919,6 +919,61 @@ test("ensureRedditSession self-resolves the Cloudflare-blocked handoff via assis
 });
 
 /**
+ * The WIRING, not the mechanism. The test above drives `ensureRedditSession`
+ * directly and so passes whether or not production ever supplies the hooks —
+ * which is exactly how the self-resolve above shipped inert: the connector's
+ * own `redditEnsureSession` entry destructured `EnsureSessionArgs` without
+ * `assist`/`completeAssistance`, so every run took the "ask the owner to click
+ * Continue collection" path no matter what `ensureRedditSession` could do.
+ *
+ * This drives the PRODUCTION entry (`connectors/reddit/index.ts`'s
+ * `redditEnsureSession`, the function the runtime actually calls) with the
+ * same already-live blocked page. If the forwarding is dropped from that
+ * entry, `assist` is never called, the handoff falls through to
+ * `sendInteraction`, and this fails.
+ */
+test("redditEnsureSession forwards assist/completeAssistance to ensureRedditSession — the self-resolve is reachable in production, not just from a test", async () => {
+	await withRedditCredentials(async () => {
+		const assistCalls: unknown[] = [];
+		const completions: { id: string; status: string }[] = [];
+
+		await redditEnsureSession({
+			assist: (req) => {
+				assistCalls.push(req);
+				return Promise.resolve("assist_req_reddit_wiring");
+			},
+			capture: null,
+			checkpoint: () => Promise.resolve(),
+			completeAssistance: (id, status) => {
+				completions.push({ id, status });
+				return Promise.resolve();
+			},
+			context: makeContext(),
+			credentials: {},
+			onCredentialSubmit: () => Promise.resolve(),
+			page: makePageBlockedButAlreadyLive(),
+			progress: () => Promise.resolve(),
+			sendInteraction(): Promise<InteractionResponse> {
+				throw new Error(
+					"sendInteraction must not be called: an unforwarded assist hook is the production defect this pins",
+				);
+			},
+		});
+
+		assert.equal(
+			assistCalls.length,
+			1,
+			"redditEnsureSession must forward `assist` — without it the owner is asked to click Continue collection on a session that is already live",
+		);
+		assert.deepEqual(
+			completions,
+			[{ id: "assist_req_reddit_wiring", status: "resolved" }],
+			"redditEnsureSession must forward `completeAssistance` so the self-resolved handoff is closed out",
+		);
+	});
+});
+
+/**
  * Models the credential-less `isSessionLive` DOM fallback (goto + `/logout`
  * link count) becoming live only after `liveAfterProbeCall` probes have run —
  * i.e. the owner's session settles a beat after they click "continue" on the
