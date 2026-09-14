@@ -1498,8 +1498,16 @@ export function decideRolloutAction(input: {
 			},
 		};
 	}
-	// Same size, different mtime, prefix intact: content is byte-identical up to
-	// the boundary and the file did not grow. A touch with no new data — skip.
+	// Same size, different mtime, prefix intact: a touch with no new data.
+	//
+	// Unreachable from the production caller, which only recomputes the prefix
+	// guard when the file GREW (`resolveRolloutAction`); a same-size file
+	// therefore arrives with `guardMatches: false` and resolves to `unsafe_full`
+	// above, reparsing in full. Kept because the guard is an input, not a fact
+	// this function can establish: a caller that has verified the prefix by
+	// other means gets the cheaper answer, and the unit test above pins that
+	// contract. Do not read this branch as a description of what a touch does
+	// in production — there, a touch reparses.
 	return { kind: "skip" };
 }
 
@@ -1823,13 +1831,26 @@ async function processRolloutEntry(
 	// parse that moved the committed boundary invalidates it: on a capture-less
 	// run `capturedMarker` returns `priorCaptured` unchanged, which would stamp
 	// the OLD digest at the NEW size and make `isSettled` treat the appended
-	// bytes as already held — they would never be captured. Size equality is the
-	// exact condition under which the prior digest remains true: it holds for a
-	// `sourceGaps`-forced full reparse of an unchanged file (where dropping the
-	// marker would force a needless re-capture) and fails for every append or
-	// growth, which is where the stale-digest defect lived.
+	// bytes as already held — they would never be captured.
+	//
+	// The condition is the skip path's own criterion — size AND mtime both equal
+	// — so the only file we vouch for is one `decideRolloutAction` would itself
+	// have called unchanged. Size equality alone is not enough: a same-length
+	// in-place rewrite keeps `size_bytes` and changes the bytes, and on a
+	// capture-less run that would carry a digest of content the file no longer
+	// holds (the next enabled run then matches size and mtime, skips, and the
+	// rewritten bytes are never captured).
+	//
+	// This still keeps the marker for the case it exists for — a
+	// `sourceGaps`-forced full reparse of an untouched file, where size and
+	// mtime both hold and dropping the marker would force a needless re-capture.
+	// It gives up the marker on a bare `utimes` touch, which re-captures once,
+	// idempotently, on the next enabled run: the right trade, since a touch is
+	// indistinguishable from a rewrite by stat alone.
 	const priorStillDescribesFile =
-		cursor !== undefined && builtCursor.size_bytes === cursor.size_bytes
+		cursor !== undefined &&
+		builtCursor.size_bytes === cursor.size_bytes &&
+		builtCursor.mtime_ms === cursor.mtime_ms
 			? cursor.captured_sha256
 			: undefined;
 	const marker = args.captureLedger?.capturedMarker(

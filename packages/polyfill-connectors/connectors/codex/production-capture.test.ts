@@ -17,6 +17,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { statSync, utimesSync } from "node:fs";
 import {
 	chmod,
 	mkdir,
@@ -521,6 +522,75 @@ test("a capture-less run over an APPENDED file does not strand the new bytes", a
 	assert.equal(
 		cursorFor(harness.state())?.captured_sha256,
 		grownDigest,
+		"the cursor now vouches for the bytes actually held",
+	);
+});
+
+test("a capture-less run over a SAME-SIZE rewritten file does not strand the new bytes", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	// Run 1 captures the body as it stands and marks the cursor with its digest.
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		firstDigest,
+		"run 1 marked the body it actually captured",
+	);
+
+	// The file is rewritten in place at exactly its old length — every `z` in the
+	// message body becomes a `w` — and the mtime moves. Size equality alone
+	// cannot tell this apart from an untouched file, which is why the carry
+	// forward has to test the mtime too.
+	const rewritten = Buffer.from(
+		source.body.toString("utf8").replaceAll("z", "w"),
+		"utf8",
+	);
+	assert.equal(
+		rewritten.length,
+		source.body.length,
+		"the rewrite really is the same length, so size equality still holds",
+	);
+	assert.ok(!rewritten.equals(source.body), "and the bytes really did change");
+	await writeFile(source.rolloutPath, rewritten);
+	const bumped = statSync(source.rolloutPath).mtimeMs + 5_000;
+	utimesSync(source.rolloutPath, bumped / 1000, bumped / 1000);
+	const rewrittenDigest = createHash("sha256").update(rewritten).digest("hex");
+
+	// Run 2 has no artifact stores. It reparses (same size + moved mtime with no
+	// growth resolves to `unsafe_full`) and commits a cursor describing the NEW
+	// bytes. Carrying run 1's digest here would be a false claim about content
+	// the file no longer holds.
+	harness.ingested.length = 0;
+	await harness.run({ capture: false });
+
+	assert.notEqual(
+		cursorFor(harness.state())?.captured_sha256,
+		firstDigest,
+		"a capture-less run must not carry the old digest onto the rewritten file's cursor",
+	);
+
+	// Run 3 re-enables capture with the file untouched since run 2. Only the
+	// absent marker can make it revisit the file: size and mtime now both match
+	// run 2's cursor, so a surviving marker would send it down the skip path and
+	// the rewritten bytes would never reach the spool.
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(
+		spool.has(rewrittenDigest),
+		"the rewritten bytes were captured once capture was re-enabled",
+	);
+	assert.equal(
+		spool.sizeOf(rewrittenDigest),
+		rewritten.length,
+		"the captured body is the whole rewritten file",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		rewrittenDigest,
 		"the cursor now vouches for the bytes actually held",
 	);
 });
