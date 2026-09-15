@@ -382,22 +382,30 @@ export async function verifyOciSignature({
       continue;
     }
 
-    // Verified against the digest that named it, like any other blob.
-    const payloadBytes = await fetchBlob({
-      registry,
-      repository,
-      digest: candidate.payloadDigest,
-      scheme,
-      timeoutMs,
-      fetchImpl,
-    });
-
-    // Checked BEFORE the cryptographic verification, so a signature lifted from
-    // another artifact is refused as misidentified rather than reported as a
-    // verification failure.
-    assertPayloadNamesDigest(payloadBytes, digest);
-
+    // The WHOLE evaluation of this candidate is fallible, not just the
+    // cryptographic call. Fetching the payload and checking which digest it
+    // names can both throw, and with only the verifier guarded those throws
+    // left the loop — so one candidate whose payload blob is missing or names
+    // another artifact aborted the search before a later, valid signature was
+    // ever examined. An object can carry several signature layers, so a
+    // candidate that cannot be evaluated is this candidate's failure and the
+    // next one is still tried; the refusal at the end reports them all.
     try {
+      // Verified against the digest that named it, like any other blob.
+      const payloadBytes = await fetchBlob({
+        registry,
+        repository,
+        digest: candidate.payloadDigest,
+        scheme,
+        timeoutMs,
+        fetchImpl,
+      });
+
+      // Checked BEFORE the cryptographic verification, so a signature lifted
+      // from another artifact is refused as misidentified rather than reported
+      // as a verification failure.
+      assertPayloadNamesDigest(payloadBytes, digest);
+
       await sigstoreVerifier(
         assembleBundle({
           payloadBytes,
