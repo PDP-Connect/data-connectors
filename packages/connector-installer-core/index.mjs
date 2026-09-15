@@ -831,9 +831,24 @@ async function fetchOciArtifact(entry, options = {}) {
     fetchImpl: options.fetchImpl,
   };
 
-  // A pinned digest is used as-is. Re-resolving a tag that the lock already
-  // pinned is how a consumer installs something other than what it recorded,
-  // so resolution happens only on a first pin (C2.3).
+  // A pinned digest is used as-is, and an unpinned entry is REFUSED rather
+  // than resolved — unless the caller is the first-pin entrypoint and says so.
+  //
+  // Resolving a tag at install time is the defect C1.2 and C2.3 name: a tag is
+  // a mutable name, so an entry carrying only a version installs whatever that
+  // name points at today, and the lock records nothing that would detect the
+  // change. This was previously only a comment; `fetchOciArtifact` serves both
+  // the lock-driven path and the CLI's first pin, so the comment described an
+  // intent the code did not enforce and every digest-less lock entry silently
+  // re-resolved. `allowTagResolution` is set by the first-pin path alone, which
+  // is the one operation whose whole purpose is to turn a tag into a digest.
+  if (!reference.digest && !options.allowTagResolution) {
+    throw new OciRegistryError(
+      `OCI entry for ${entry.connectorId} carries no digest; ` +
+        `a lock entry must be pinned by digest and is never resolved from its version at install time`,
+      "invalid-reference"
+    );
+  }
   const digest = reference.digest ?? (await resolveVersionToDigest({ ...transport, version: entry.version }));
 
   const { manifest } = await fetchManifestByDigest({ ...transport, digest });
@@ -1510,6 +1525,19 @@ export async function installFromLock({
     connectorCount: resolved.length,
     filesWritten: writes.length,
     expectedPaths,
+    // What was actually installed, by digest. A first pin resolves a tag, and
+    // the digest it resolved to is the thing the caller needs in order to write
+    // a lock entry that will not re-resolve (C1.2); printing it is how a
+    // one-off `--oci ref:version` pull becomes a pinned one.
+    pinned: resolved
+      .filter((artifact) => artifact.oci)
+      .map((artifact) => ({
+        connectorId: artifact.connectorId,
+        version: artifact.version,
+        registry: artifact.oci.registry,
+        repository: artifact.oci.repository,
+        digest: artifact.oci.digest,
+      })),
   };
 }
 

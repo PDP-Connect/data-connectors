@@ -416,23 +416,133 @@ async function fetchOnce(
   return { status: response.status, headers: headerObject, buffer, body: buffer.toString("utf8") };
 }
 
+// The token realms this consumer will talk to, keyed by registry origin. Moved
+// from the publisher's `lookup-manifest.mjs` (#97) rather than rewritten, so
+// both sides of the same handshake apply the same policy.
+//
+// The unit is the ORIGIN — scheme, host AND port — because a hostname is not a
+// service. `https://ghcr.io:9443/token` is a different listener from the
+// registry at `ghcr.io`, and a registry on port 5000 challenging to a realm on
+// 6000 is naming whatever else is bound on that machine. Origins are compared
+// as WHATWG `URL` renders them, which is what makes the comparison total: it
+// defaults the port per scheme (`https://ghcr.io:443` IS `https://ghcr.io`),
+// lowercases the host, and brackets and compresses IPv6 literals identically on
+// both sides (`[0:0:0:0:0:0:0:1]` IS `[::1]`), so no spelling of an authority
+// slips past by differing from the registry's.
+//
+// GHCR is the split this repository pulls from: ghcr.io challenges with a realm
+// on ghcr.io itself. Docker Hub is kept because the same helper resolves any
+// `<registry>/<name>:<tag>`. Both sides are https origins, because a documented
+// auth service is a public one reached over TLS on the default port —
+// `ghcr.io:9443` is not the GHCR this table describes and does not inherit its
+// realms. Widening this is a deliberate edit, not an accident of a challenge.
+const TOKEN_ORIGINS = new Map([
+  ["https://ghcr.io", ["https://ghcr.io"]],
+  ["https://registry-1.docker.io", ["https://auth.docker.io"]],
+  ["https://docker.io", ["https://auth.docker.io"]],
+  ["https://index.docker.io", ["https://auth.docker.io"]],
+]);
+
+/**
+ * The registry authority read as an origin under a given scheme.
+ *
+ * Both sides of the destination check go through `URL` so they are normalised
+ * the same way; returns null when the authority is not one `URL` can read,
+ * which the caller turns into a refusal rather than a comparison against a
+ * string it had to build by hand.
+ */
+function originOf(scheme, authority) {
+  try {
+    const url = new URL(`${scheme}//${authority}`);
+    return url.origin === "null" ? null : url.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * May this consumer make the token request to this realm?
+ *
+ * Returns null when it may, or a diagnostic sentence when it may not. Callers
+ * turn a refusal into `unknown`: the manifest question is unanswered, and an
+ * unanswered question must never read as absence.
+ *
+ * The publisher checks this to protect a credential. This consumer sends none —
+ * the pull is anonymous — so what the check is worth here is smaller and worth
+ * stating exactly: the realm comes from the PEER, in its own 401, so without
+ * the check a registry chooses an arbitrary origin this process will then issue
+ * a GET to, including a port on the machine running the install. That is a
+ * request forgery with the registry as the author, not a credential leak. It is
+ * a narrow exposure, and it costs one comparison to close.
+ *
+ * `allowInsecureLoopback` is the tests' hook and nothing else — off unless the
+ * caller passes it, so the fixture registry's plaintext realm is reachable in a
+ * test and no loopback carve-out exists in production. What it waives is the
+ * TRANSPORT requirement, for a loopback host only; the destination check still
+ * runs, so a test registry cannot be talked into a different loopback port than
+ * the one it is published on.
+ */
+export function checkTokenRealm(realmUrl, registry, { allowInsecureLoopback = false } = {}) {
+  const registryAuthority = registry.split("/")[0].toLowerCase();
+  // `URL` keeps the brackets on an IPv6 literal, so the loopback test is
+  // written against the bracketed spelling rather than the bare address.
+  const realmHost = realmUrl.hostname.toLowerCase();
+  const loopback = realmHost === "127.0.0.1" || realmHost === "[::1]" || realmHost === "localhost";
+
+  if (realmUrl.protocol !== "https:") {
+    // The hook waives the TRANSPORT requirement for loopback and nothing more.
+    // Deliberately not an early `return null`: the origin check below still
+    // runs.
+    const waived = allowInsecureLoopback && realmUrl.protocol === "http:" && loopback;
+    if (!waived) {
+      return (
+        `the 401 challenge points at a non-HTTPS token realm ` +
+        `(${realmUrl.protocol}//${realmUrl.host})`
+      );
+    }
+  }
+
+  // The registry is read under the REALM'S scheme, so the comparison is between
+  // two origins of the same kind. Under the hook that scheme is http, which is
+  // the only way a plaintext loopback realm can match at all; on the ordinary
+  // path it is https, so a registry written without a port compares equal to a
+  // realm written with `:443` and to nothing else.
+  const registryOrigin = originOf(realmUrl.protocol, registryAuthority);
+  const refusal =
+    `the 401 challenge points at ${realmUrl.origin}, which is neither the registry ` +
+    `origin (${registryOrigin ?? registryAuthority}) nor a token origin documented for it`;
+
+  if (registryOrigin === null) return refusal;
+  if (realmUrl.origin === registryOrigin) return null;
+
+  // The documented split-auth table is keyed by the registry's https origin, so
+  // it is consulted with that origin whatever scheme the realm proposed.
+  const documented = TOKEN_ORIGINS.get(originOf("https:", registryAuthority)) ?? [];
+  if (documented.includes(realmUrl.origin)) return null;
+
+  return refusal;
+}
+
 /**
  * Anonymous pull of a public GHCR repository still requires a token exchange.
  *
  * C2.4: a failure ANYWHERE in this handshake is the caller's `unknown`, and it
  * is reported as a token failure so it can never be mistaken for the manifest
- * endpoint's answer. No credential is sent — this consumer pulls public
- * artifacts only, so there is nothing here to misdirect.
+ * endpoint's answer.
  */
-async function requestToken(challenge, { repository, timeoutMs, fetchImpl }) {
+async function requestToken(
+  challenge,
+  { registry, repository, timeoutMs, fetchImpl, allowInsecureLoopback = false }
+) {
   let tokenUrl;
   try {
     tokenUrl = new URL(challenge.realm);
   } catch (error) {
     return { error: `the 401 challenge names an unparseable token realm (${error.message})` };
   }
-  if (tokenUrl.protocol !== "https:" && tokenUrl.hostname !== "127.0.0.1" && tokenUrl.hostname !== "localhost") {
-    return { error: `the 401 challenge points at a non-HTTPS token realm (${tokenUrl.origin})` };
+  const refusal = checkTokenRealm(tokenUrl, registry, { allowInsecureLoopback });
+  if (refusal) {
+    return { error: refusal };
   }
 
   if (challenge.service) tokenUrl.searchParams.set("service", challenge.service);
@@ -472,7 +582,17 @@ async function requestToken(challenge, { repository, timeoutMs, fetchImpl }) {
  * them as what they are.
  */
 async function registryGet(
-  { registry, repository, path, accept, scheme = "https", timeoutMs = 30000, maxBytes, fetchImpl = fetch }
+  {
+    registry,
+    repository,
+    path,
+    accept,
+    scheme = "https",
+    timeoutMs = 30000,
+    maxBytes,
+    fetchImpl = fetch,
+    allowInsecureLoopback = false,
+  }
 ) {
   const url = `${scheme}://${registry}/v2/${repository}/${path}`;
   const headers = accept ? { accept } : {};
@@ -484,7 +604,20 @@ async function registryGet(
   if (!challenge) {
     return { tokenFailure: "the registry returned 401 without a usable Bearer challenge" };
   }
-  const { token, error } = await requestToken(challenge, { repository, timeoutMs, fetchImpl });
+  const { token, error } = await requestToken(challenge, {
+    registry,
+    repository,
+    timeoutMs,
+    fetchImpl,
+    // `scheme` is ALREADY the explicit, caller-supplied hook this module uses to
+    // reach a test registry: production never sets it, so it is `https` on every
+    // real path and a plaintext realm is refused there whatever this resolves
+    // to. Deriving the waiver from it keeps one hook instead of two that must be
+    // set together, and no artifact, lock entry or registry challenge can reach
+    // it. The destination check still runs either way, so even under `http` the
+    // realm must be the test registry's own origin, port included.
+    allowInsecureLoopback: allowInsecureLoopback || scheme === "http",
+  });
   if (error) return { tokenFailure: error };
 
   response = await fetchOnce(url, {

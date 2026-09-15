@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  checkTokenRealm,
   classifyManifestResponse,
   cosignSignatureTag,
   isValidConnectorKey,
@@ -175,5 +176,118 @@ test("a reference is split on @digest before :tag", () => {
   assert.throws(
     () => parseConnectorOciReference("ghcr.io/pdp-connect/connector/ynab@sha256:short"),
     (error) => error.reason === "invalid-reference"
+  );
+});
+
+// The token-realm destination policy, moved from the publisher's
+// `lookup-manifest.test.mjs` with the function it tests. The publisher checks
+// this to protect a credential; this consumer sends none, so what it protects
+// against is narrower — a registry naming an arbitrary origin, including a
+// local port, that this process then issues a GET to on the peer's say-so.
+// The policy is the same either way, and so are the cases.
+
+test("the token-realm policy admits the registry's own origin and the documented GHCR realm", () => {
+  // The control that stops "refuse every realm" from passing the checks below.
+  // The documented GHCR shape — the one this repository actually pulls from —
+  // must keep working, or the strictness below is just an outage.
+  assert.equal(checkTokenRealm(new URL("https://ghcr.io/token"), "ghcr.io", {}), null);
+  assert.equal(checkTokenRealm(new URL("https://registry.example/token"), "registry.example", {}), null);
+  assert.equal(checkTokenRealm(new URL("https://auth.docker.io/token"), "registry-1.docker.io", {}), null);
+  // The default port is not a different origin from no port: `URL` normalises
+  // both sides, so the policy is about the authority and not its spelling.
+  assert.equal(checkTokenRealm(new URL("https://ghcr.io:443/token"), "ghcr.io", {}), null);
+  assert.equal(
+    checkTokenRealm(new URL("https://registry.example:5000/token"), "registry.example:5000", {}),
+    null,
+  );
+
+  // And the refusals, each for its own reason.
+  assert.match(
+    checkTokenRealm(new URL("http://ghcr.io/token"), "ghcr.io", {}),
+    /non-HTTPS/,
+    "plaintext is refused even on the right host",
+  );
+  assert.match(
+    checkTokenRealm(new URL("https://evil.invalid/token"), "ghcr.io", {}),
+    /neither the registry origin/,
+  );
+  // A subdomain of the registry is NOT the registry. Widening to one is an edit
+  // to the policy, not something a peer can arrange with a challenge.
+  assert.match(
+    checkTokenRealm(new URL("https://auth.ghcr.io/token"), "ghcr.io", {}),
+    /neither the registry origin/,
+  );
+
+  // The test hook widens the policy to loopback plaintext and no further.
+  assert.equal(
+    checkTokenRealm(new URL("http://127.0.0.1:5000/token"), "127.0.0.1:5000", {
+      allowInsecureLoopback: true,
+    }),
+    null,
+  );
+  assert.match(
+    checkTokenRealm(new URL("http://registry.example/token"), "registry.example", {
+      allowInsecureLoopback: true,
+    }),
+    /non-HTTPS/,
+    "the hook must not permit plaintext to a routable host",
+  );
+  // On loopback the PORT is part of the authority. Two ports on 127.0.0.1 are
+  // two different servers, so the hook must not turn "it's loopback" into
+  // "reach anything on this machine".
+  assert.match(
+    checkTokenRealm(new URL("http://127.0.0.1:6001/token"), "127.0.0.1:5000", {
+      allowInsecureLoopback: true,
+    }),
+    /neither the registry origin/,
+    "the hook must not redirect the request to a different loopback port",
+  );
+});
+
+test("a token realm on the registry's host but a different PORT is a different service", () => {
+  // The port is part of the authority everywhere, not only on loopback. A
+  // hostname is not a service: whatever is listening on ghcr.io:9443 is not the
+  // registry, and a registry published on :5000 challenging to :6000 is naming
+  // whatever else happens to be bound on that host. Comparing hostnames — which
+  // is what this module did before the policy was carried over — accepted both.
+  assert.match(
+    checkTokenRealm(new URL("https://ghcr.io:9443/token"), "ghcr.io", {}),
+    /neither the registry origin/,
+    "a non-default port on the registry's own host is a different origin",
+  );
+  assert.match(
+    checkTokenRealm(new URL("https://registry.example:6000/token"), "registry.example:5000", {}),
+    /neither the registry origin/,
+    "a registry on :5000 must not accept a realm on :6000",
+  );
+  // And the other direction of the same mistake: a registry addressed WITH a
+  // port must not accept a realm that drops it.
+  assert.match(
+    checkTokenRealm(new URL("https://registry.example/token"), "registry.example:5000", {}),
+    /neither the registry origin/,
+    "a registry on :5000 must not accept a realm on the default port",
+  );
+});
+
+test("an IPv6 loopback realm is compared as the URL parser spelled it", () => {
+  // `URL` brackets and compresses IPv6 literals on both sides, so the two
+  // spellings of the same address compare equal and a different port does not.
+  assert.equal(
+    checkTokenRealm(new URL("http://[::1]:5000/token"), "[::1]:5000", {
+      allowInsecureLoopback: true,
+    }),
+    null,
+  );
+  assert.equal(
+    checkTokenRealm(new URL("http://[0:0:0:0:0:0:0:1]:5000/token"), "[::1]:5000", {
+      allowInsecureLoopback: true,
+    }),
+    null,
+  );
+  assert.match(
+    checkTokenRealm(new URL("http://[::1]:6001/token"), "[::1]:5000", {
+      allowInsecureLoopback: true,
+    }),
+    /neither the registry origin/,
   );
 });

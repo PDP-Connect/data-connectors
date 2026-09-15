@@ -182,11 +182,14 @@ export function createFixtureVerifier(signers) {
  * path, which is how the present/absent/unknown table is driven.
  */
 export class FixtureRegistry {
-  constructor({ challenge = false } = {}) {
+  constructor({ challenge = false, realm = null } = {}) {
     this.blobs = new Map();
     this.manifests = new Map();
     this.tags = new Map();
     this.challenge = challenge;
+    // Points the Bearer challenge somewhere other than this server, which is
+    // how a test drives the token-realm destination policy.
+    this.realm = realm;
     this.faults = new Map();
     this.requests = [];
     this.server = null;
@@ -224,7 +227,7 @@ export class FixtureRegistry {
 
       if (this.challenge && !req.headers.authorization) {
         res.writeHead(401, {
-          "www-authenticate": `Bearer realm="http://127.0.0.1:${this.port}/token",service="fixture"`,
+          "www-authenticate": `Bearer realm="${this.realm ?? `http://127.0.0.1:${this.port}/token`}",service="fixture"`,
           "content-type": "application/json",
         });
         res.end(JSON.stringify({ errors: [{ code: "UNAUTHORIZED", message: "auth required" }] }));
