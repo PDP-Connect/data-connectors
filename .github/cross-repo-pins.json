@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "590b9a1e86e6a6fa248249c176b07da70cb0f979",
+      "sha": "666b324e385219ff3466097a6eaaa98210919790",
       "branch": "main",
-      "note": "Head of PDP-Connect/data-connect main after data-connect#124 merged, confirmed an ancestor of main. Supersedes e9110014e (data-connect#120). This pin backs drift jobs (a) collector-definitions, (b) connector-sources, and (e) collector-packaging-manifest."
+      "note": "Head of PDP-Connect/data-connect main after data-connect#130 merged (test temp-dir cleanup) and #126 (client mutation runner); supersedes 590b9a1e8. Backs drift jobs (a) collector-definitions, (b) connector-sources, (e) collector-packaging-manifest; pin-only, no vendored bytes change."
     },
     "pdpp": {
       "owner": "PDP-Connect",
