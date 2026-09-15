@@ -17,7 +17,7 @@ const connectorRoot = join(root, "connectors", "github-pdpp");
 const secret = "github-pdpp-test-secret";
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 const sha256Buffer = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
-const artifact = join(root, "artifacts", "github-pdpp", "github-pdpp-0.5.1.tgz");
+const artifact = join(root, "artifacts", "github-pdpp", "github-pdpp-0.5.2.tgz");
 const expectedCommit = "6d2be0a2a1c052afcffc8ec035190e1dffc3c128";
 const artifactEntrypoint = execFileSync("tar", ["-xOf", artifact, "./dist/collection-profile.mjs"]);
 const smokeDirectory = mkdtempSync(join(tmpdir(), "github-pdpp-smoke-"));
@@ -51,7 +51,7 @@ test("github-pdpp has canonical manifest, complete provenance, and Node-only bun
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.5.4", files: 94 }]);
+  })), [{ name: "zod", version: "4.6.5", files: 95 }]);
   assert.match(readFileSync(entrypoint, "utf8"), /Browser runtime is unavailable/);
   assert.doesNotMatch(execFileSync("tar", ["-xOf", artifact, "./provenance.json"], { encoding: "utf8" }), new RegExp(secret));
   assert.deepEqual(execFileSync("tar", ["-xOf", artifact, "./provenance.json"]), readFileSync(join(connectorRoot, "provenance.json")));
@@ -71,7 +71,11 @@ test("github-pdpp optionally verifies a dirty upstream worktree cannot affect th
   const upstream = "packages/polyfill-connectors";
   assert.deepEqual(
     JSON.parse(readFileSync(join(connectorRoot, "collection-profile.json"), "utf8")),
-    JSON.parse(pinnedFile(upstreamRoot, `${upstream}/manifests/github.json`).toString("utf8")),
+    {
+      ...JSON.parse(pinnedFile(upstreamRoot, `${upstream}/manifests/github.json`).toString("utf8")),
+      version: "0.5.2",
+    },
+    "only the artifact version may differ from the pinned manifest",
   );
   for (const file of ["parsers.ts", "types.ts"]) {
     assert.deepEqual(
@@ -126,6 +130,31 @@ test("github-pdpp optionally verifies a dirty upstream worktree cannot affect th
   } finally {
     spawnSync("git", ["worktree", "remove", "--force", dirtyWorktree], { cwd: upstreamRoot });
     rmSync(dirtyWorktree, { recursive: true, force: true });
+  }
+});
+
+test("github-pdpp rebuild rejects invalid versions and non-version manifest drift", { skip: !process.env.PDPP_GITHUB_SOURCE_ROOT }, () => {
+  const manifestPath = join(connectorRoot, "collection-profile.json");
+  const original = readFileSync(manifestPath);
+  const manifest = JSON.parse(original);
+  const provenanceBefore = readFileSync(join(connectorRoot, "provenance.json"));
+  try {
+    for (const [changed, expectedError] of [
+      [{ ...manifest, version: "invalid" }, /version must be a major.minor.patch version/],
+      [{ ...manifest, version: "01.2.3" }, /version must be a major.minor.patch version/],
+      [{ ...manifest, version: "1.2.3-." }, /version must be a major.minor.patch version/],
+      [{ ...manifest, version: "1.2.3-.." }, /version must be a major.minor.patch version/],
+      [{ ...manifest, version: "1.2.3-01" }, /version must be a major.minor.patch version/],
+      [{ ...manifest, display_name: "Changed contract" }, /differs from the pinned canonical PDPP manifest outside version/],
+    ]) {
+      writeFileSync(manifestPath, JSON.stringify(changed));
+      const result = spawnSync(process.execPath, ["scripts/build-github-pdpp-artifact.mjs", "--pdpp-root", process.env.PDPP_GITHUB_SOURCE_ROOT], { cwd: root, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.match(`${result.stdout}\n${result.stderr}`, expectedError);
+      assert.deepEqual(readFileSync(join(connectorRoot, "provenance.json")), provenanceBefore);
+    }
+  } finally {
+    writeFileSync(manifestPath, original);
   }
 });
 
@@ -196,7 +225,7 @@ test("github-pdpp artifact fetches, verifies, and locks through installer-core w
   const fetched = await fetchResolvedArtifact(source, indexEntry);
   assert.equal(fetched.entrypointPath, "dist/collection-profile.mjs");
   assert.equal(fetched.scriptBuffer, undefined);
-  const lock = await generateLock({ dependencies: { connectors: { "github-pdpp": "0.5.1" } }, source, generatedAt: "2026-07-30T00:00:00.000Z" });
+  const lock = await generateLock({ dependencies: { connectors: { "github-pdpp": "0.5.2" } }, source, generatedAt: "2026-07-30T00:00:00.000Z" });
   assert.equal(lock.connectors[0].provenanceSha256, indexEntry.provenanceSha256);
   const installRoot = mkdtempSync(join(tmpdir(), "github-pdpp-install-"));
   test.after(() => rmSync(installRoot, { recursive: true, force: true }));

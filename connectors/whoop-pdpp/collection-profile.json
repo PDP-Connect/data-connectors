@@ -3,16 +3,22 @@
   "connector_id": "https://registry.pdpp.dev/connectors/whoop",
   "connector_key": "whoop",
   "manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "display_name": "WHOOP",
   "runtime_requirements": {
     "bindings": {
-      "network": { "required": true },
-      "browser": { "required": true }
+      "network": {
+        "required": true
+      },
+      "browser": {
+        "required": true
+      }
     }
   },
   "capabilities": {
-    "human_interaction": ["manual_action"],
+    "human_interaction": [
+      "manual_action"
+    ],
     "refresh_policy": {
       "recommended_mode": "manual",
       "minimum_interval_seconds": 7200,
@@ -43,24 +49,81 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "user_id": { "type": "integer" },
-          "username": { "type": "string", "x_pdpp_role": "primary-title" },
-          "email": { "type": "string" },
-          "account_type": { "type": "string" },
-          "first_name": { "type": "string" },
-          "last_name": { "type": "string" },
-          "country": { "type": ["string", "null"] },
-          "city": { "type": ["string", "null"] },
-          "gender": { "type": ["string", "null"] },
-          "unit_system": { "type": ["string", "null"] },
-          "fitness_level": { "type": ["string", "null"] },
-          "birthday": { "type": ["string", "null"] },
-          "timezone_offset": { "type": ["string", "null"] },
-          "membership_status": { "type": "string" },
-          "membership_in_effect": { "type": "boolean" },
+          "id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "integer"
+          },
+          "username": {
+            "type": "string",
+            "x_pdpp_role": "primary-title"
+          },
+          "email": {
+            "type": "string"
+          },
+          "account_type": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_system": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fitness_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "birthday": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timezone_offset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "membership_status": {
+            "type": "string"
+          },
+          "membership_in_effect": {
+            "type": "boolean"
+          },
           "observed_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "x_pdpp_role": "event-time"
           }
@@ -74,9 +137,14 @@
           "last_name"
         ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "observed_at",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "search": {
@@ -105,31 +173,83 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "user_id": { "type": "integer" },
-          "height_m": { "type": ["number", "null"] },
-          "weight_kg": { "type": ["number", "null"] },
-          "max_heart_rate": { "type": ["number", "null"] },
-          "min_heart_rate": { "type": ["number", "null"] },
-          "resting_heart_rate": { "type": ["number", "null"] },
+          "id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "integer"
+          },
+          "height_m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "weight_kg": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "min_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "resting_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "observed_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "x_pdpp_role": "event-time"
           }
         },
-        "required": ["id", "user_id"]
+        "required": [
+          "id",
+          "user_id"
+        ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "observed_at",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "range_filters": {
-          "height_m": ["gte", "gt", "lte", "lt"],
-          "weight_kg": ["gte", "gt", "lte", "lt"]
+          "height_m": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "weight_kg": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ]
         },
-        "aggregations": { "count": true }
+        "aggregations": {
+          "count": true
+        }
       },
       "coverage_strategy": "full_inventory",
       "freshness_strategy": "manual_as_of"
@@ -146,34 +266,100 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "cycle_id": { "type": "integer" },
-          "days": { "type": ["string", "null"] },
+          "id": {
+            "type": "string"
+          },
+          "cycle_id": {
+            "type": "integer"
+          },
+          "days": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "start_date": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date",
             "x_pdpp_role": "event-time"
           },
-          "end_date": { "type": ["string", "null"], "format": "date" },
-          "scaled_strain": { "type": ["number", "null"] },
-          "day_kilojoules": { "type": ["number", "null"] },
-          "day_avg_heart_rate": { "type": ["number", "null"] },
-          "day_max_heart_rate": { "type": ["number", "null"] }
+          "end_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "scaled_strain": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "day_kilojoules": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "day_avg_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "day_max_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
         },
-        "required": ["id", "cycle_id"]
+        "required": [
+          "id",
+          "cycle_id"
+        ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "start_date",
       "consent_time_field": "start_date",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "range_filters": {
-          "start_date": ["gte", "gt", "lte", "lt"],
-          "end_date": ["gte", "gt", "lte", "lt"],
-          "scaled_strain": ["gte", "gt", "lte", "lt"]
+          "start_date": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "end_date": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "scaled_strain": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ]
         },
-        "aggregations": { "count": true, "group_by_time": ["start_date"] }
+        "aggregations": {
+          "count": true,
+          "group_by_time": [
+            "start_date"
+          ]
+        }
       },
       "coverage_strategy": "checkpoint_window",
       "freshness_strategy": "manual_as_of"
@@ -190,18 +376,41 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "cycle_id": { "type": "integer" },
+          "id": {
+            "type": "string"
+          },
+          "cycle_id": {
+            "type": "integer"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
             "x_pdpp_role": "event-time"
           },
-          "hrv_rmssd": { "type": "number" },
-          "recovery_score": { "type": "number" },
-          "resting_heart_rate": { "type": ["number", "null"] },
-          "spo2": { "type": ["number", "null"] },
-          "skin_temp_celsius": { "type": ["number", "null"] }
+          "hrv_rmssd": {
+            "type": "number"
+          },
+          "recovery_score": {
+            "type": "number"
+          },
+          "resting_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "spo2": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "skin_temp_celsius": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
         },
         "required": [
           "id",
@@ -211,17 +420,37 @@
           "recovery_score"
         ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "created_at",
       "consent_time_field": "created_at",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "range_filters": {
-          "created_at": ["gte", "gt", "lte", "lt"],
-          "recovery_score": ["gte", "gt", "lte", "lt"]
+          "created_at": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "recovery_score": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ]
         },
-        "aggregations": { "count": true, "group_by_time": ["created_at"] }
+        "aggregations": {
+          "count": true,
+          "group_by_time": [
+            "created_at"
+          ]
+        }
       },
       "coverage_strategy": "checkpoint_window",
       "freshness_strategy": "manual_as_of"
@@ -238,37 +467,101 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "cycle_id": { "type": "integer" },
-          "during": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
+          "cycle_id": {
+            "type": "integer"
+          },
+          "during": {
+            "type": "string"
+          },
           "start_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "x_pdpp_role": "event-time"
           },
-          "end_at": { "type": ["string", "null"], "format": "date-time" },
-          "time_in_bed": { "type": "number" },
-          "light_sleep_duration": { "type": "number" },
-          "slow_wave_sleep_duration": { "type": "number" },
-          "rem_sleep_duration": { "type": "number" },
-          "wake_duration": { "type": "number" },
-          "respiratory_rate": { "type": ["number", "null"] },
-          "score": { "type": ["number", "null"] }
+          "end_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "time_in_bed": {
+            "type": "number"
+          },
+          "light_sleep_duration": {
+            "type": "number"
+          },
+          "slow_wave_sleep_duration": {
+            "type": "number"
+          },
+          "rem_sleep_duration": {
+            "type": "number"
+          },
+          "wake_duration": {
+            "type": "number"
+          },
+          "respiratory_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
         },
-        "required": ["id", "cycle_id", "during"]
+        "required": [
+          "id",
+          "cycle_id",
+          "during"
+        ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "start_at",
       "consent_time_field": "start_at",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "range_filters": {
-          "start_at": ["gte", "gt", "lte", "lt"],
-          "end_at": ["gte", "gt", "lte", "lt"],
-          "score": ["gte", "gt", "lte", "lt"]
+          "start_at": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "end_at": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "score": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ]
         },
-        "aggregations": { "count": true, "group_by_time": ["start_at"] }
+        "aggregations": {
+          "count": true,
+          "group_by_time": [
+            "start_at"
+          ]
+        }
       },
       "coverage_strategy": "checkpoint_window",
       "freshness_strategy": "manual_as_of"
@@ -285,38 +578,108 @@
       "schema": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "cycle_id": { "type": "integer" },
-          "during": { "type": ["string", "null"] },
+          "id": {
+            "type": "string"
+          },
+          "cycle_id": {
+            "type": "integer"
+          },
+          "during": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "start_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "x_pdpp_role": "event-time"
           },
-          "end_at": { "type": ["string", "null"], "format": "date-time" },
-          "timezone_offset": { "type": ["string", "null"] },
-          "sport_id": { "type": ["number", "null"] },
-          "kilojoules": { "type": ["number", "null"] },
-          "average_heart_rate": { "type": ["number", "null"] },
-          "max_heart_rate": { "type": ["number", "null"] }
+          "end_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "timezone_offset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sport_id": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "kilojoules": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "average_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_heart_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
         },
-        "required": ["id", "cycle_id"]
+        "required": [
+          "id",
+          "cycle_id"
+        ]
       },
-      "primary_key": ["id"],
+      "primary_key": [
+        "id"
+      ],
       "cursor_field": "start_at",
       "consent_time_field": "start_at",
-      "selection": { "fields": true, "resources": true },
+      "selection": {
+        "fields": true,
+        "resources": true
+      },
       "incremental": true,
       "query": {
         "range_filters": {
-          "start_at": ["gte", "gt", "lte", "lt"],
-          "end_at": ["gte", "gt", "lte", "lt"],
-          "kilojoules": ["gte", "gt", "lte", "lt"]
+          "start_at": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "end_at": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ],
+          "kilojoules": [
+            "gte",
+            "gt",
+            "lte",
+            "lt"
+          ]
         },
         "aggregations": {
           "count": true,
-          "group_by_time": ["start_at"],
-          "group_by": ["sport_id"]
+          "group_by_time": [
+            "start_at"
+          ],
+          "group_by": [
+            "sport_id"
+          ]
         }
       },
       "coverage_strategy": "checkpoint_window",

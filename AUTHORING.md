@@ -26,6 +26,8 @@ The ChatGPT artifact uses the generic descriptor and builder. Do not copy the Gi
 
 `artifact.json` records packaging facts. It identifies the artifact, pinned PDPP commit, manifest, entrypoint, connector files, runtime root, build target, and external packages.
 
+For a dependency-only rebuild, set `artifact_version` to the new `major.minor.patch` version and update the matching registry entry. The builder sets the generated profile's `version` to this value while preserving all other profile fields. Without `artifact_version`, it copies the pinned manifest byte-for-byte. Provenance keeps the original upstream manifest hash and records the descriptor hash, so both the source and version override remain verifiable.
+
 The generic builder archives the pinned commit. Dirty and untracked files in the PDPP worktree do not become build inputs. The builder generates these files:
 
 ```text

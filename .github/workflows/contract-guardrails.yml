@@ -31,7 +31,7 @@ jobs:
         run: node scripts/validate-scope-schemas.mjs
 
       - name: Test catalog and connector artifact contracts
-        run: node --test scripts/connector-artifact-contract.test.mjs scripts/generate-scope-catalog.test.mjs
+        run: node --test scripts/connector-artifact-contract.test.mjs scripts/generate-scope-catalog.test.mjs scripts/build-pdpp-artifact.test.mjs
 
       - name: Test schema health check gate
         run: node --test scripts/schema-health-gate.test.mjs
