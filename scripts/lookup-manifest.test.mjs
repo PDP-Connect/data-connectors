@@ -249,21 +249,35 @@ async function withLoopback(handler, body) {
 
 // FINDING 1a: the deadline must bound the WHOLE request, not inactivity.
 test("a peer that trickles bytes past the deadline is unknown, not an answer", async () => {
-  // The distinction this pins: the peer is never idle. It sends a byte every
-  // 40ms forever, so an inactivity timer is reset before it can ever fire and
-  // the request runs until the peer stops — which it never does. Under an
-  // overall deadline the request is cut off and classified.
+  // The distinction this pins: the peer is NEVER idle. It writes one byte every
+  // 40ms until the client disconnects — it never stops on its own and never
+  // exhausts a payload — so an inactivity timer is reset before it can ever fire
+  // and the request would run forever. Only a deadline on elapsed time cuts it
+  // off. That is why the assertions below bound the CLOCK and not just the
+  // reason string: a test that only matched /deadline/ would also pass with the
+  // deadline disabled (the peer would eventually go quiet) or with the timer
+  // converted to inactivity semantics.
   //
-  // The body it is dribbling would be a perfectly good MANIFEST_UNKNOWN if it
-  // ever arrived, which is what makes this the dangerous shape: the outcome
-  // that hangs forever is the one that authorises republication.
+  // The bytes it dribbles are a perfectly good MANIFEST_UNKNOWN, which is what
+  // makes this the dangerous shape: the outcome that hangs forever is the one
+  // that authorises republication. At 40ms/byte the ~62-byte body would take
+  // ~2.5s to arrive, so an answer inside `deadlineTolerance` cannot be the
+  // peer's body — it can only be the deadline.
+  const timeoutMs = 120;
+  const deadlineTolerance = 400;
+  const payload = JSON.stringify({ errors: [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }] });
+  const bodyWouldTake = payload.length * 40; // ~2.5s — far past the tolerance above
+  assert.ok(bodyWouldTake > deadlineTolerance * 4, "the peer's body must be far slower than the deadline");
+
+  const started = process.hrtime.bigint();
   const result = await withLoopback(
     (req, res) => {
       res.writeHead(404, { "content-type": "application/json" });
-      const payload = JSON.stringify({ errors: [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }] });
       let i = 0;
+      // Cycles through the payload forever: there is no exhaustion point at
+      // which this peer falls silent.
       const timer = setInterval(() => {
-        if (i < payload.length) res.write(payload[i++]);
+        res.write(payload[i++ % payload.length]);
       }, 40);
       res.on("close", () => clearInterval(timer));
     },
@@ -273,12 +287,17 @@ test("a peer that trickles bytes past the deadline is unknown, not an answer", a
         name: "connector/ynab",
         tag: "0.3.0",
         scheme: "http",
-        timeoutMs: 300,
+        timeoutMs,
       }),
   );
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
 
   assert.equal(result.outcome, "unknown", `a peer that never finishes must not answer: ${JSON.stringify(result)}`);
   assert.match(result.reason, /deadline/);
+  assert.ok(
+    elapsedMs < deadlineTolerance,
+    `the ${timeoutMs}ms deadline must bound the whole exchange, but it took ${elapsedMs.toFixed(0)}ms`,
+  );
 });
 
 // FINDING 1b: the accumulated body needs a ceiling.
