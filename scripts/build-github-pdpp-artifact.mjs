@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -30,6 +31,7 @@ const localSourceFiles = [
   "src/connector/types.ts", "collection-profile.json",
 ];
 const sha256 = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
+const CONNECTOR_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 function requiredArgument(name) {
   const index = process.argv.indexOf(name);
@@ -81,9 +83,16 @@ async function main() {
 
     const upstreamManifest = join(pinnedRoot, upstreamConnectorFiles[0]);
     const localManifest = join(connectorRoot, "collection-profile.json");
-    if (!readFileSync(upstreamManifest).equals(readFileSync(localManifest))) {
-      throw new Error("collection-profile.json differs from the pinned canonical PDPP manifest");
+    const upstreamManifestJson = JSON.parse(readFileSync(upstreamManifest, "utf8"));
+    const localManifestJson = JSON.parse(readFileSync(localManifest, "utf8"));
+    if (typeof localManifestJson.version !== "string" || !CONNECTOR_VERSION_PATTERN.test(localManifestJson.version)) {
+      throw new Error("collection-profile.json version must be a major.minor.patch version");
     }
+    assert.deepEqual(
+      localManifestJson,
+      { ...upstreamManifestJson, version: localManifestJson.version },
+      "collection-profile.json differs from the pinned canonical PDPP manifest outside version",
+    );
     const distDir = join(connectorRoot, "dist");
     mkdirSync(distDir, { recursive: true });
     const output = join(distDir, "collection-profile.mjs");

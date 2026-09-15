@@ -20,7 +20,7 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "whoop-pdpp");
-const artifact = join(root, "artifacts", "whoop-pdpp", "whoop-pdpp-0.1.1.tgz");
+const artifact = join(root, "artifacts", "whoop-pdpp", "whoop-pdpp-0.1.2.tgz");
 const expectedCommit = "4c785e1f5816b09b113f011ab46066f8057d9959";
 const pdppSourceRoot = process.env.PDPP_WHOOP_SOURCE_ROOT;
 const sha256 = (file) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
@@ -56,7 +56,7 @@ test("whoop-pdpp preserves the browser-session profile and six-stream contract",
     name: dependency.name,
     version: dependency.version,
     files: dependency.files.length,
-  })), [{ name: "zod", version: "4.5.4", files: 94 }]);
+  })), [{ name: "zod", version: "4.6.5", files: 95 }]);
   assert.deepEqual(provenance.outputs.undeclared_external_imports, []);
   assert.equal(entry.manifestSha256, sha256(join(connectorRoot, "collection-profile.json")));
   assert.equal(entry.entrypointSha256, sha256Buffer(entrypoint));
@@ -71,7 +71,7 @@ test("whoop-pdpp artifact installs and detects provenance tampering", async () =
   const fetched = await fetchResolvedArtifact(source, entry);
   assert.equal(fetched.entrypointPath, "dist/collection-profile.mjs");
   const lock = await generateLock({
-    dependencies: { connectors: { "whoop-pdpp": "0.1.1" } },
+    dependencies: { connectors: { "whoop-pdpp": "0.1.2" } },
     source,
     generatedAt: "2026-08-13T00:00:00.000Z",
   });
@@ -105,8 +105,8 @@ test("whoop-pdpp rebuild is pinned to the reviewed PDPP commit", { skip: !pdppSo
     }
   }
   assert.deepEqual(
-    readFileSync(join(connectorRoot, "collection-profile.json")),
-    pinnedFile(pdppSourceRoot, specification.upstream.manifest),
+    JSON.parse(readFileSync(join(connectorRoot, "collection-profile.json"))),
+    { ...JSON.parse(pinnedFile(pdppSourceRoot, specification.upstream.manifest)), version: "0.1.2" },
   );
   execFileSync(
     process.execPath,
