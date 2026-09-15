@@ -35,17 +35,19 @@
 //
 //   present  — HTTP 200 from the manifest endpoint, with a usable sha256 digest
 //   absent   — HTTP 404 from the manifest endpoint, AND a distribution-spec
-//              error body carrying at least one error code, EVERY one of which
-//              is MANIFEST_UNKNOWN or NAME_UNKNOWN
+//              error body whose `errors` array is non-empty and EVERY one of
+//              whose entries carries a string code, every one of which is
+//              MANIFEST_UNKNOWN or NAME_UNKNOWN
 //   unknown  — EVERYTHING else, with no exceptions worth carving out:
 //              401/403 (auth), 5xx, any token-endpoint failure, transport
 //              errors, HTML, unparseable JSON, a 404 whose body does not carry
-//              one of those two codes or which mixes one with a code that says
-//              something else, a 200 without a usable digest, a request that
+//              one of those two codes, which mixes one with a code that says
+//              something else, or whose array holds any entry without a
+//              readable code, a 200 without a usable digest, a request that
 //              outruns its deadline or whose body outruns the size a manifest
 //              descriptor can be, and a 401 whose challenge names an
-//              unparseable token realm or one this script will not send the
-//              registry credential to.
+//              unparseable token realm or one whose ORIGIN this script will not
+//              send the registry credential to.
 //
 // A token-endpoint 404 cannot reach `absent` here for a structural reason
 // rather than a textual one: the token request is a DIFFERENT request, its
@@ -93,21 +95,55 @@ const MAX_BODY_BYTES = 1024 * 1024;
 // therefore checked against policy rather than trusted:
 //
 //   - the scheme must be https, so the token is not sent in clear text;
-//   - the host must either BE the registry host, or be one of the token hosts
-//     documented below for a registry whose auth service is a separate name.
+//   - the realm's ORIGIN — scheme, host AND port — must either be the
+//     registry's own origin, or one of the token origins documented below for
+//     a registry whose auth service is a separate name.
 //
-// GHCR is the one such split this repository publishes to: ghcr.io challenges
-// with a realm on ghcr.io itself, and Docker Hub — kept here because the same
-// helper resolves any `<registry>/<name>:<tag>` — uses auth.docker.io. Any
-// other host, including a subdomain of the registry, gets no credential and the
-// lookup returns `unknown`; widening this is a deliberate edit, not an accident
-// of a peer's challenge.
-const TOKEN_HOSTS = new Map([
-  ["ghcr.io", ["ghcr.io"]],
-  ["registry-1.docker.io", ["auth.docker.io"]],
-  ["docker.io", ["auth.docker.io"]],
-  ["index.docker.io", ["auth.docker.io"]],
+// The unit is the origin, not the hostname, because a hostname is not a
+// service. `https://ghcr.io:9443/token` is a different listener from the
+// registry at `ghcr.io`, and a registry published on port 5000 challenging to
+// a realm on 6000 is pointing the credential at whatever else is bound on this
+// machine. Neither is the peer the credential was issued for, so neither gets
+// it. Origins are compared as WHATWG `URL` renders them, which is what makes
+// the comparison total: it defaults the port per scheme (`https://ghcr.io:443`
+// IS `https://ghcr.io`), lowercases the host, and brackets and compresses IPv6
+// literals on both sides identically (`[0:0:0:0:0:0:0:1]` IS `[::1]`), so no
+// spelling of an authority slips past by being written differently from the
+// registry's.
+//
+// GHCR is the one split this repository publishes to: ghcr.io challenges with
+// a realm on ghcr.io itself, and Docker Hub — kept here because the same helper
+// resolves any `<registry>/<name>:<tag>` — uses auth.docker.io. BOTH sides of
+// this table are origins and both are https, because a documented auth service
+// is a public one reached over TLS on the default port, and the registry it is
+// documented for is likewise the public one: `ghcr.io:9443` is not the GHCR
+// this table describes and does not inherit its realms. Any other origin,
+// including a subdomain of the registry and the registry's own host on another
+// port, gets no credential and the lookup returns `unknown`; widening this is a
+// deliberate edit, not an accident of a peer's challenge.
+const TOKEN_ORIGINS = new Map([
+  ["https://ghcr.io", ["https://ghcr.io"]],
+  ["https://registry-1.docker.io", ["https://auth.docker.io"]],
+  ["https://docker.io", ["https://auth.docker.io"]],
+  ["https://index.docker.io", ["https://auth.docker.io"]],
 ]);
+
+/**
+ * The registry authority read as an origin under a given scheme.
+ *
+ * Both sides of the destination check go through `URL` so they are normalised
+ * the same way; returns null when the authority is not one `URL` can read,
+ * which the caller turns into a refusal rather than a comparison against a
+ * string it had to build by hand.
+ */
+function originOf(scheme, authority) {
+  try {
+    const url = new URL(`${scheme}//${authority}`);
+    return url.origin === "null" ? null : url.origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * May the Basic credential be sent to this token realm?
@@ -120,21 +156,22 @@ const TOKEN_HOSTS = new Map([
  * is off unless the caller passes it, and the entrypoint only sets it from
  * LOOKUP_ALLOW_INSECURE_TOKEN_REALM. What it waives is the TRANSPORT
  * requirement, for a loopback host only; the destination check still runs, so
- * under the hook the realm must still be the registry's own authority, port
+ * under the hook the realm must still be the registry's own origin, port
  * included. A plaintext realm on a routable address stays refused, because a
  * test needing one would be a test of something this script must not do.
  */
 export function checkTokenRealm(realmUrl, registry, { allowInsecureLoopback = false } = {}) {
   const registryAuthority = registry.split("/")[0].toLowerCase();
-  const registryHostname = registryAuthority.split(":")[0];
+  // `URL` keeps the brackets on an IPv6 literal, so the loopback test is
+  // written against the bracketed spelling rather than the bare address.
   const realmHost = realmUrl.hostname.toLowerCase();
-  const loopback = realmHost === "127.0.0.1" || realmHost === "::1" || realmHost === "localhost";
+  const loopback = realmHost === "127.0.0.1" || realmHost === "[::1]" || realmHost === "localhost";
 
   if (realmUrl.protocol !== "https:") {
     // The hook waives the TRANSPORT requirement for loopback and nothing more.
-    // It is deliberately not an early `return null`: the host check below still
-    // runs, so a test registry cannot be talked into forwarding its credential
-    // to a different loopback port than the one it is published to.
+    // It is deliberately not an early `return null`: the origin check below
+    // still runs, so a test registry cannot be talked into forwarding its
+    // credential to a different loopback port than the one it is published to.
     const waived = allowInsecureLoopback && realmUrl.protocol === "http:" && loopback;
     if (!waived) {
       return (
@@ -144,27 +181,26 @@ export function checkTokenRealm(realmUrl, registry, { allowInsecureLoopback = fa
     }
   }
 
-  // On loopback the PORT is part of the authority — two ports on 127.0.0.1 are
-  // two different servers, which is exactly the case the tests exercise.
-  // Elsewhere the port is ignored: a registry addressed as `host:5000`
-  // challenging to a realm on `host` is the same authority.
-  if (loopback) {
-    if (realmUrl.host.toLowerCase() === registryAuthority) return null;
-    return (
-      `the 401 challenge points the credential at ${realmUrl.host}, which is neither the registry ` +
-      `host (${registryAuthority}) nor a token host documented for it; the credential is not forwarded there`
-    );
-  }
+  // The registry is read under the REALM'S scheme, so the comparison is
+  // between two origins of the same kind. Under the hook that scheme is http,
+  // which is the only way a plaintext loopback realm can match at all; on the
+  // ordinary path it is https, so a registry written without a port compares
+  // equal to a realm written with `:443` and to nothing else.
+  const registryOrigin = originOf(realmUrl.protocol, registryAuthority);
+  const refusal =
+    `the 401 challenge points the credential at ${realmUrl.origin}, which is neither the registry ` +
+    `origin (${registryOrigin ?? registryAuthority}) nor a token origin documented for it; ` +
+    `the credential is not forwarded there`;
 
-  if (realmHost === registryHostname) return null;
+  if (registryOrigin === null) return refusal;
+  if (realmUrl.origin === registryOrigin) return null;
 
-  const documented = TOKEN_HOSTS.get(registryHostname) ?? [];
-  if (documented.includes(realmHost)) return null;
+  // The documented split-auth table is keyed by the registry's https origin, so
+  // it is consulted with that origin whatever scheme the realm proposed.
+  const documented = TOKEN_ORIGINS.get(originOf("https:", registryAuthority)) ?? [];
+  if (documented.includes(realmUrl.origin)) return null;
 
-  return (
-    `the 401 challenge points the credential at ${realmHost}, which is neither the registry ` +
-    `host (${registryHostname}) nor a token host documented for it; the credential is not forwarded there`
-  );
+  return refusal;
 }
 
 /**
@@ -295,6 +331,15 @@ function registryMessage(body) {
  * `message`, which is where the previous revision's defect lived. Returns an
  * empty array for HTML, for empty bodies, and for JSON of any other shape, all
  * of which therefore fail to establish absence.
+ *
+ * An entry WITHOUT a string `code` is not skipped, it poisons the whole array.
+ * Dropping it silently was a real hole: `[{"code":"MANIFEST_UNKNOWN"},{}]` then
+ * reduced to a single clean absence code and read as absence, even though the
+ * registry sent a second error this script could not read at all. An error it
+ * cannot read may be the one that says the request was not allowed to ask, so
+ * the array as a whole has not established absence. `null` is that verdict —
+ * distinct from `[]`, which says the body carried no error structure — and both
+ * land on `unknown`.
  */
 export function parseDistributionErrorCodes(body) {
   let parsed;
@@ -304,9 +349,12 @@ export function parseDistributionErrorCodes(body) {
     return [];
   }
   if (!parsed || !Array.isArray(parsed.errors)) return [];
-  return parsed.errors
-    .map((entry) => (entry && typeof entry.code === "string" ? entry.code.toUpperCase() : null))
-    .filter(Boolean);
+  const codes = [];
+  for (const entry of parsed.errors) {
+    if (!entry || typeof entry.code !== "string") return null;
+    codes.push(entry.code.toUpperCase());
+  }
+  return codes;
 }
 
 /**
@@ -337,6 +385,22 @@ export function classifyManifestResponse(response) {
 
   if (status === 404) {
     const codes = parseDistributionErrorCodes(body);
+    const said = registryMessage(body);
+
+    // `null` means the array held an entry this script could not read. It is
+    // reported separately from "no absence code", because the operator's next
+    // question is different: the registry did answer in the right shape, and
+    // one of the things it said was unreadable.
+    if (codes === null) {
+      return {
+        outcome: "unknown",
+        reason:
+          `the manifest endpoint returned 404 with an errors array carrying an entry that has no ` +
+          `string code, so the reply cannot be read as absence and only absence` +
+          `${said ? ` (registry said: ${said})` : ""}`,
+      };
+    }
+
     // EVERY code must be an absence code, and there must be at least one.
     //
     // `some()` was wrong in a way that matters: a body carrying both
@@ -344,16 +408,15 @@ export function classifyManifestResponse(response) {
     // says the request was not allowed to ask. A reply that contradicts itself
     // has not established that this manifest is missing — it has established
     // that this registry's answer cannot be read — and `absent` is the outcome
-    // that authorises moving a released version tag. An empty or malformed
-    // array falls out of the same test, since `every()` over nothing is
-    // vacuously true and the length check is what rejects it.
+    // that authorises moving a released version tag. An empty array falls out
+    // of the same test, since `every()` over nothing is vacuously true and the
+    // length check is what rejects it.
     if (codes.length > 0 && codes.every((code) => ABSENCE_CODES.has(code))) {
       return { outcome: "absent" };
     }
     // A 404 alone is NOT an absence. An intercepting proxy, a wrong path, a
     // misrouted request and a token-service failure can all produce one, and
     // none of them has looked at this manifest.
-    const said = registryMessage(body);
     const contradictory = codes.some((code) => ABSENCE_CODES.has(code));
     return {
       outcome: "unknown",

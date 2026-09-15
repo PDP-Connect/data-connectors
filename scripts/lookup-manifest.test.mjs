@@ -206,6 +206,19 @@ test("error codes are read from the structure, never from free text", () => {
   assert.deepEqual(parseDistributionErrorCodes(""), []);
   assert.deepEqual(parseDistributionErrorCodes('{"message":"MANIFEST_UNKNOWN"}'), []);
   assert.deepEqual(parseDistributionErrorCodes('{"errors":"MANIFEST_UNKNOWN"}'), []);
+  // An entry without a readable code poisons the array rather than being
+  // dropped from it: `null` is "this array cannot be read", which is a
+  // different thing from `[]`'s "this body carried no error structure", and
+  // the difference is the one the caller needs to refuse absence.
+  assert.equal(parseDistributionErrorCodes('{"errors":[{"code":"MANIFEST_UNKNOWN"},{}]}'), null);
+  assert.equal(parseDistributionErrorCodes('{"errors":[{"code":"MANIFEST_UNKNOWN"},{"code":404}]}'), null);
+  assert.equal(parseDistributionErrorCodes('{"errors":[{"code":"MANIFEST_UNKNOWN"},null]}'), null);
+  // The control: a well-formed companion entry is still read, so the rule
+  // above is about READABILITY and not about arrays longer than one.
+  assert.deepEqual(
+    parseDistributionErrorCodes('{"errors":[{"code":"MANIFEST_UNKNOWN"},{"code":"NAME_UNKNOWN"}]}'),
+    ["MANIFEST_UNKNOWN", "NAME_UNKNOWN"],
+  );
 });
 
 test("only a Bearer challenge starts a token exchange", () => {
@@ -382,20 +395,24 @@ test("the Basic credential is never sent to a token realm off the registry's aut
       `the publishing credential must never reach a realm off the registry's authority: ${collectorSawCredential.join(", ")}`,
     );
     assert.equal(result.outcome, "unknown");
-    assert.match(result.reason, /neither the registry host/);
+    assert.match(result.reason, /neither the registry origin/);
   } finally {
     collector.closeAllConnections?.();
     await new Promise((resolve) => collector.close(resolve));
   }
 });
 
-test("the credential-destination policy admits the registry's own host and the documented GHCR realm", () => {
+test("the credential-destination policy admits the registry's own origin and the documented GHCR realm", () => {
   // The control that stops "refuse every realm" from passing the check above.
+  // The documented GHCR shape — the one this repository actually publishes
+  // through — must keep working, or the strictness below is just an outage.
   assert.equal(checkTokenRealm(new URL("https://ghcr.io/token"), "ghcr.io", {}), null);
   assert.equal(checkTokenRealm(new URL("https://registry.example/token"), "registry.example", {}), null);
-  // A registry addressed with a port is the same authority as its realm.
-  assert.equal(checkTokenRealm(new URL("https://registry.example/token"), "registry.example:5000", {}), null);
   assert.equal(checkTokenRealm(new URL("https://auth.docker.io/token"), "registry-1.docker.io", {}), null);
+  // The default port is not a different origin from no port: `URL` normalises
+  // both sides, so the policy is about the authority and not its spelling.
+  assert.equal(checkTokenRealm(new URL("https://ghcr.io:443/token"), "ghcr.io", {}), null);
+  assert.equal(checkTokenRealm(new URL("https://registry.example:5000/token"), "registry.example:5000", {}), null);
 
   // And the refusals, each for its own reason.
   assert.match(
@@ -405,13 +422,13 @@ test("the credential-destination policy admits the registry's own host and the d
   );
   assert.match(
     checkTokenRealm(new URL("https://evil.invalid/token"), "ghcr.io", {}),
-    /neither the registry host/,
+    /neither the registry origin/,
   );
   // A subdomain of the registry is NOT the registry. Widening to one is an
   // edit to the policy, not something a peer can arrange with a challenge.
   assert.match(
     checkTokenRealm(new URL("https://auth.ghcr.io/token"), "ghcr.io", {}),
-    /neither the registry host/,
+    /neither the registry origin/,
   );
 
   // The test hook widens the policy to loopback plaintext and no further.
@@ -426,9 +443,167 @@ test("the credential-destination policy admits the registry's own host and the d
   // "send the credential anywhere on this machine".
   assert.match(
     checkTokenRealm(new URL("http://127.0.0.1:6001/token"), "127.0.0.1:5000", { allowInsecureLoopback: true }),
-    /neither the registry host/,
+    /neither the registry origin/,
     "the hook must not forward the credential to a different loopback port",
   );
+});
+
+test("a token realm on the registry's host but a different PORT is a different service", () => {
+  // The port is part of the authority everywhere, not only on loopback. A
+  // hostname is not a service: whatever is listening on ghcr.io:9443 is not
+  // the registry the publishing credential was issued for, and a registry
+  // published on :5000 challenging to :6000 is pointing the credential at
+  // whatever else happens to be bound on that host. Comparing hostnames
+  // accepted both.
+  assert.match(
+    checkTokenRealm(new URL("https://ghcr.io:9443/token"), "ghcr.io", {}),
+    /neither the registry origin/,
+    "a non-default port on the registry's own host is a different origin",
+  );
+  assert.match(
+    checkTokenRealm(new URL("https://registry.example:6000/token"), "registry.example:5000", {}),
+    /neither the registry origin/,
+    "a registry on :5000 must not accept a realm on :6000",
+  );
+  // And the other direction of the same mistake: a registry addressed WITH a
+  // port must not accept a realm that drops it.
+  assert.match(
+    checkTokenRealm(new URL("https://registry.example/token"), "registry.example:5000", {}),
+    /neither the registry origin/,
+    "a registry on :5000 must not accept a realm on the default port",
+  );
+});
+
+test("the publishing credential never reaches a realm on the registry's host but another port", async () => {
+  // The end-to-end form of the case above, because the unit assertion alone
+  // cannot show that a refusal actually stops the request. Two loopback
+  // servers on the SAME host and different ports: the registry, and a
+  // collector. Comparing hostnames, this pair was same-host and the collector
+  // would have been handed the Basic credential.
+  const collectorSawCredential = [];
+  const collector = createServer((req, res) => {
+    collectorSawCredential.push(req.headers.authorization ?? "(none)");
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ token: "t" }));
+  });
+  await new Promise((resolve) => collector.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const result = await withLoopback(
+      (req, res) => {
+        res.writeHead(401, {
+          "www-authenticate": `Bearer realm="http://127.0.0.1:${collector.address().port}/token",service="registry"`,
+          "content-type": "application/json",
+        });
+        res.end(JSON.stringify({ errors: [{ code: "UNAUTHORIZED", message: "authentication required" }] }));
+      },
+      (registry) =>
+        lookupManifest({
+          registry,
+          name: "connector/ynab",
+          tag: "0.3.0",
+          credential: Buffer.from("user:publishing-token").toString("base64"),
+          scheme: "http",
+          timeoutMs: 5000,
+          allowInsecureLoopback: true,
+        }),
+    );
+
+    assert.deepEqual(
+      collectorSawCredential,
+      [],
+      `the publishing credential must never reach another port on the registry's host: ${collectorSawCredential.join(", ")}`,
+    );
+    assert.equal(result.outcome, "unknown");
+    assert.match(result.reason, /neither the registry origin/);
+  } finally {
+    collector.closeAllConnections?.();
+    await new Promise((resolve) => collector.close(resolve));
+  }
+});
+
+test("an IPv6 loopback realm is compared as the URL parser spells it", async () => {
+  // `new URL("http://[::1]:5000/").hostname` is `[::1]`, brackets retained.
+  // The policy compared that against a bare `::1` and against an authority it
+  // had split on `:`, so the registry's OWN realm was refused: the documented
+  // loopback exception did not actually cover IPv6. Both sides now go through
+  // `URL`, so the two spellings meet.
+  //
+  // The accepted direction is proved against a real IPv6 loopback server, not
+  // just the policy function: the credential must reach the registry's own
+  // token endpoint and the handshake must complete.
+  const seen = { authorization: null, manifestRequests: 0 };
+  const server = createServer((req, res) => {
+    if (req.url.startsWith("/token")) {
+      seen.authorization = req.headers.authorization ?? "(none)";
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ token: "t" }));
+      return;
+    }
+    seen.manifestRequests += 1;
+    if (!req.headers.authorization) {
+      res.writeHead(401, {
+        "www-authenticate": `Bearer realm="http://[::1]:${server.address().port}/token",service="registry"`,
+        "content-type": "application/json",
+      });
+      res.end(JSON.stringify({ errors: [{ code: "UNAUTHORIZED", message: "authentication required" }] }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ errors: [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }] }));
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "::1", resolve);
+    });
+  } catch (error) {
+    // A host with no IPv6 loopback cannot run this fixture. Skipping is
+    // honest; silently passing would not be.
+    server.close();
+    assert.fail(`this host has no IPv6 loopback to bind: ${error.message}`);
+  }
+
+  try {
+    const registry = `[::1]:${server.address().port}`;
+    const result = await lookupManifest({
+      registry,
+      name: "connector/ynab",
+      tag: "0.3.0",
+      credential: Buffer.from("user:publishing-token").toString("base64"),
+      scheme: "http",
+      timeoutMs: 5000,
+      allowInsecureLoopback: true,
+    });
+
+    assert.equal(
+      seen.authorization,
+      `Basic ${Buffer.from("user:publishing-token").toString("base64")}`,
+      "the registry's own IPv6 token endpoint must receive the credential",
+    );
+    assert.equal(seen.manifestRequests, 2, "the handshake must retry the manifest with the token");
+    assert.equal(result.outcome, "absent", `the completed handshake must classify: ${JSON.stringify(result)}`);
+
+    // The refused direction, on the same host: another port on `[::1]` is
+    // another server, exactly as it is on 127.0.0.1.
+    assert.match(
+      checkTokenRealm(new URL(`http://[::1]:${server.address().port + 1}/token`), registry, {
+        allowInsecureLoopback: true,
+      }),
+      /neither the registry origin/,
+      "a different port on [::1] must not receive the credential",
+    );
+    // And a compressed spelling of the same address is the same origin, so
+    // the comparison is about the address and not about how it was written.
+    assert.equal(
+      checkTokenRealm(new URL(`http://[0:0:0:0:0:0:0:1]:${server.address().port}/token`), registry, {
+        allowInsecureLoopback: true,
+      }),
+      null,
+    );
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 // FINDING 3: a reply that says two things has not established absence.
@@ -460,14 +635,57 @@ test("a 404 whose errors array is empty establishes nothing", () => {
 });
 
 test("a 404 whose error entries carry no usable code establishes nothing", () => {
-  // Entries are present but shapeless: `parseDistributionErrorCodes` drops
-  // them, which must land on unknown rather than on an empty-set absence.
+  // Entries are present but shapeless: no entry yields a code at all, which
+  // must land on unknown rather than on an empty-set absence.
   const result = classifyManifestResponse({
     status: 404,
     headers: {},
     body: JSON.stringify({ errors: [{ message: "manifest unknown" }, { code: 404 }] }),
   });
   assert.equal(result.outcome, "unknown");
+});
+
+test("a 404 mixing a clean absence code with an unreadable entry is unknown, not absent", () => {
+  // The partially-malformed shape. The array says MANIFEST_UNKNOWN AND says
+  // something else this script cannot read — and an error it cannot read may
+  // be the one that says the request was never allowed to ask. Filtering the
+  // unreadable entry away left a single clean absence code behind and read as
+  // absence, which is the outcome that authorises moving a released version
+  // tag onto new bytes. Both spellings of unreadable are pinned: a companion
+  // with no `code` key at all, and one whose `code` is not a string.
+  for (const errors of [
+    [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }, {}],
+    [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }, { code: 404, message: "not found" }],
+  ]) {
+    const result = classifyManifestResponse({
+      status: 404,
+      headers: {},
+      body: JSON.stringify({ errors }),
+    });
+    assert.equal(
+      result.outcome,
+      "unknown",
+      `an errors array this script cannot fully read must not authorise republication: ${JSON.stringify(result)}`,
+    );
+    assert.match(result.reason, /entry that has no string code/);
+  }
+});
+
+test("a 404 whose errors array is wholly readable and wholly absence is still absent", () => {
+  // The control for the rule above: strictness about unreadable COMPANIONS
+  // must not have turned every multi-entry array into unknown. Two readable
+  // absence codes still agree, and agreement is absence.
+  const result = classifyManifestResponse({
+    status: 404,
+    headers: {},
+    body: JSON.stringify({
+      errors: [
+        { code: "MANIFEST_UNKNOWN", message: "manifest unknown" },
+        { code: "NAME_UNKNOWN", message: "repository name not known to registry" },
+      ],
+    }),
+  });
+  assert.equal(result.outcome, "absent");
 });
 
 // FINDING 4: a realm that is not a URL is an outcome, not an exception.
