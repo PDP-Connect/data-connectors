@@ -98,6 +98,107 @@ test("A-T1 resolves a version tag to a digest and refuses to re-resolve once pin
   });
 });
 
+// A-T1 proves a PINNED entry is not re-resolved. These two prove the other
+// half: an UNPINNED entry is refused rather than resolved, and the one path
+// whose purpose is to turn a tag into a digest still works and reports what it
+// pinned (C1.2, C2.3).
+test("A-T1b refuses a lock entry that carries no digest, without contacting the registry", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    publishArtifact(registry, { signer });
+
+    registry.requests.length = 0;
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(
+          null,
+          ociLockEntry(registry, null),
+          fixtureOptions(registry, signer)
+        ),
+      (error) => {
+        assert.equal(error.reason, "invalid-reference");
+        assert.match(error.message, /carries no digest/);
+        return true;
+      }
+    );
+
+    assert.deepEqual(
+      registry.requests,
+      [],
+      "an unpinned entry must be refused before any request, not resolved and then installed"
+    );
+  });
+});
+
+test("A-T1c resolves a tag only for an explicit first pin, and reports the digest", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-firstpin-"));
+
+    try {
+      const result = await installFromLock({
+        lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, null)] },
+        source: null,
+        installRoot,
+        layout: "snapshot",
+        ...fixtureOptions(registry, signer),
+        allowTagResolution: true,
+      });
+
+      assert.equal(result.connectorCount, 1);
+      assert.deepEqual(result.pinned, [
+        {
+          connectorId: "ynab-pdpp",
+          version: "0.3.0",
+          registry: registry.registry,
+          repository: "pdp-connect/connector/ynab",
+          digest,
+        },
+      ]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// D4: the realm in a Bearer challenge is chosen by the PEER. Without a
+// destination check the installer issues a GET wherever the registry points,
+// including at another port on the machine running the install.
+test("a Bearer challenge naming a realm off the registry's origin is refused", async () => {
+  // A second loopback server, on a different port from the registry. The
+  // registry challenges to it; nothing may be sent there.
+  const decoy = await new FixtureRegistry({}).start();
+  try {
+    await withRegistry(
+      { challenge: true, realm: `http://127.0.0.1:${decoy.port}/token` },
+      async (registry) => {
+        const signer = createSigner();
+        const { digest } = publishArtifact(registry, { signer });
+
+        decoy.requests.length = 0;
+        await assert.rejects(
+          () =>
+            fetchResolvedArtifact(
+              null,
+              ociLockEntry(registry, digest),
+              fixtureOptions(registry, signer)
+            ),
+          /neither the registry origin/
+        );
+
+        assert.deepEqual(
+          decoy.requests,
+          [],
+          "the installer must not contact a realm the registry chose off its own origin"
+        );
+      }
+    );
+  } finally {
+    await decoy.stop();
+  }
+});
+
 test("A-T2 classifies present/absent/unknown and refuses on unknown", async () => {
   // The decision table, driven directly. `unknown` must never read as absence,
   // because absence is what a caller acts on (C2.2, C6.4).

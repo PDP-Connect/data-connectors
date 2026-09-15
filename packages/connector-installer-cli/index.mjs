@@ -134,6 +134,10 @@ async function main() {
       installRoot: options.installRoot,
       layout: options.layout,
       prune: Boolean(options.prune),
+      // Only a reference typed on the command line may have its tag resolved,
+      // and only because that is what a first pin IS. A lock entry is refused
+      // unless it already carries a digest (C1.2, C2.3).
+      allowTagResolution: Boolean(options.oci),
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
@@ -147,6 +151,10 @@ async function main() {
 
     const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
     const source = options.oci ? null : await loadIndexSource(options);
+    // `verify` deliberately does NOT opt into tag resolution, even for a
+    // command-line reference. Verifying is a question about what is installed;
+    // answering it by resolving a tag would compare the tree against whatever
+    // that tag means now rather than against what was pinned.
     const result = await verifyInstalled({
       lock,
       source,
