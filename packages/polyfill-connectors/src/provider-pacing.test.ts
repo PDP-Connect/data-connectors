@@ -52,7 +52,11 @@ test("ProviderPacing: inverted initial/min configuration cold-starts at the decl
 	);
 
 	await pacing.admit();
-	assert.deepEqual(spy.calls, [], "the first admission does not delay collection");
+	assert.deepEqual(
+		spy.calls,
+		[],
+		"the first admission does not delay collection",
+	);
 
 	await pacing.admit();
 
@@ -128,7 +132,11 @@ test("ProviderPacing: unset initialIntervalMs uses a conservative default", asyn
 	await pacing.admit();
 	await pacing.admit();
 
-	assert.deepEqual(spy.calls, [1000], "the second admission starts conservatively");
+	assert.deepEqual(
+		spy.calls,
+		[1000],
+		"the second admission starts conservatively",
+	);
 });
 
 test("ProviderPacing: additive increase reduces currentIntervalMs toward minIntervalMs", () => {
