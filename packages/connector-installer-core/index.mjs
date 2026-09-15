@@ -24,6 +24,8 @@ import {
 } from "node:path";
 import { verify as verifySigstoreBundle } from "sigstore";
 
+import { readTarGzEntries } from "./tar-stream.mjs";
+
 import {
   DEFAULT_OCI_REGISTRY as DEFAULT_OCI_REGISTRY_NAME,
   OciRegistryError,
@@ -768,65 +770,41 @@ function normalizeLockEntry(entry) {
 }
 
 /**
- * Unpack one `.tar.gz` layer into a temp dir, refusing unsafe members first.
+ * Read one `.tar.gz` layer, refusing unsafe members and oversized content.
  *
- * Reuses `assertSafeArchive` — the same predicate the tarball path applies,
- * checking member TYPE via `tar -tvzf` as well as name, so a symlink, hardlink
- * or FIFO is refused before extraction rather than after (C4.5). The temp root
- * is removed in a `finally`, so a refusal leaves nothing behind (C6.1).
+ * Member type and path are checked from the archive's own headers, so a
+ * symlink, hardlink or FIFO is refused as it is read rather than after a tree
+ * exists (C4.5). Nothing is written to a temp directory at all, so a refusal
+ * has nothing to clean up (C6.1).
  *
- * The size ceiling is enforced TWICE, because the two checks catch different
- * things. `MAX_BLOB_BYTES` bounds the compressed blob, and gzip's ratio means
- * that bounds nothing useful about what lands on disk: a 190 KB layer expands
- * to 200 MB of zeros, comfortably inside the 64 MiB blob cap, and on a host
- * whose /tmp is RAM-backed that is memory rather than disk. So the member sizes
- * the archive DECLARES are totalled first and refused before extraction starts,
- * which is the cheap check; then the bytes actually written are measured, which
- * is the one that holds when the declared sizes are a lie. Only the second is a
- * guarantee — the header is written by whoever built the archive.
+ * `MAX_BLOB_BYTES` bounds the COMPRESSED blob, and gzip's ratio means that
+ * bounds nothing useful about what the layer expands to: a 190 KB layer expands
+ * to 200 MB of zeros, comfortably inside the 64 MiB blob cap. The ceiling here
+ * is what bounds the expansion, and it is applied to the sizes the archive's
+ * headers declare, accumulated DURING a streaming gunzip — so crossing it
+ * abandons the read (that 200 MB bomb stops after about 2 MB) rather than
+ * discovering the overflow once the bytes already exist.
+ *
+ * The bytes actually received are then measured too, because a header is
+ * written by whoever built the archive: the declared total is what makes the
+ * refusal cheap, and the measured total is what makes it a guarantee.
  */
 export const MAX_LAYER_UNPACKED_BYTES = 64 * 1024 * 1024;
 
-function assertDeclaredSizeWithinCeiling(tarPath, ceiling) {
-  const listing = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" })
-    .split("\n")
-    .filter(Boolean);
-  let declared = 0;
-  for (const member of listing) {
-    // `-rw-rw-r-- owner/group <size> <date> <time> <name>`
-    const size = Number(member.trim().split(/\s+/)[2]);
-    if (!Number.isFinite(size) || size < 0) {
-      throw new Error("archive declares an unreadable member size");
-    }
-    declared += size;
-    if (declared > ceiling) {
-      throw new Error(
-        `archive declares ${declared} bytes of members, over the ${ceiling}-byte ceiling`
-      );
-    }
-  }
-}
-
-function readLayerArchive(buffer, label, { maxUnpackedBytes = MAX_LAYER_UNPACKED_BYTES } = {}) {
-  const tempRoot = mkdtempSync(join(tmpdir(), "connector-oci-layer-"));
-  const tarPath = join(tempRoot, "layer.tar.gz");
-  const unpackDir = join(tempRoot, "unpacked");
-
+async function readLayerArchive(
+  buffer,
+  label,
+  { maxUnpackedBytes = MAX_LAYER_UNPACKED_BYTES } = {}
+) {
   try {
-    mkdirSync(unpackDir, { recursive: true });
-    writeFileSync(tarPath, buffer);
-    assertSafeArchive(tarPath);
-    assertDeclaredSizeWithinCeiling(tarPath, maxUnpackedBytes);
-    execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
+    const entries = await readTarGzEntries(buffer, {
+      maxUnpackedBytes,
+      validateMemberPath: validateArchiveMemberPath,
+    });
 
-    // Refuses symlinks that survived the listing check, post-extraction.
-    const files = walkArtifactFiles(unpackDir);
     let unpacked = 0;
-    for (const file of files) {
-      // `lstatSync`, not `statSync`: `walkArtifactFiles` has already refused
-      // every symlink, so these are regular files and following one is not a
-      // thing that can happen here.
-      unpacked += lstatSync(file.path).size;
+    for (const entry of entries) {
+      unpacked += entry.buffer.length;
       if (unpacked > maxUnpackedBytes) {
         throw new Error(
           `archive unpacked to more than the ${maxUnpackedBytes}-byte ceiling`
@@ -834,18 +812,15 @@ function readLayerArchive(buffer, label, { maxUnpackedBytes = MAX_LAYER_UNPACKED
       }
     }
 
-    return files.map((file) => ({
-      path: file.relativePath,
-      buffer: readFileSync(file.path),
+    return entries.map((entry) => ({
+      path: toPortableArtifactPath(entry.path.replace(/^\.\//, ""), "/"),
+      buffer: entry.buffer,
     }));
   } catch (error) {
     throw new OciRegistryError(
       `Refusing ${label}: ${error instanceof Error ? error.message : String(error)}`,
       "unsafe-archive"
     );
-  } finally {
-    // Runs on the overflow path too, so a bomb's bytes do not outlive the refusal.
-    rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 
@@ -986,7 +961,7 @@ async function fetchOciArtifact(entry, options = {}) {
     );
   }
 
-  const codeFiles = readLayerArchive(codeBytes, `${reference.repository} code layer`);
+  const codeFiles = await readLayerArchive(codeBytes, `${reference.repository} code layer`);
   const entrypointInArtifact = config.entrypoint;
   const entrypointFile = codeFiles.find((file) => file.path === entrypointInArtifact);
   // C4.6: the entrypoint the config declares must actually be in the code layer.
@@ -998,9 +973,12 @@ async function fetchOciArtifact(entry, options = {}) {
     );
   }
 
-  const licenseFiles = readLayerArchive(licensesBytes, `${reference.repository} licenses layer`);
+  const licenseFiles = await readLayerArchive(
+    licensesBytes,
+    `${reference.repository} licenses layer`
+  );
   const assetFiles = assetsBytes
-    ? readLayerArchive(assetsBytes, `${reference.repository} assets layer`)
+    ? await readLayerArchive(assetsBytes, `${reference.repository} assets layer`)
     : [];
 
   // Translated into the layout the installed tree already has (C5.1): the
