@@ -2,7 +2,7 @@
   "name": "@pdpp/connector-manager",
   "version": "0.1.0",
   "private": true,
-  "description": "Resolves, verifies, pins and installs signed connector artifacts from a signed index. Does not consume OCI registry artifacts yet.",
+  "description": "Resolves, verifies, pins and installs signed connector artifacts from a signed index or OCI registry, and fetches signed discovery catalogs.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./index.mjs",
@@ -17,7 +17,10 @@
     "tar-stream.mjs",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "oci-catalog.mjs",
+    "catalog-schema.mjs",
+    "catalog-schema-data.mjs"
   ],
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
@@ -34,6 +37,7 @@
   "dependencies": {
     "sigstore": "^5.0.0",
     "@sigstore/bundle": "^5.0.0",
+    "ajv": "^8.20.0",
     "tar": "^7.5.22"
   },
   "scripts": {
