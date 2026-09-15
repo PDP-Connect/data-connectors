@@ -423,9 +423,12 @@ export class ProviderPacing {
 		}
 
 		if (this.tat === null) {
-			// First call: anchor TAT so the first request waits one full interval.
-			this.tat = nowMs + this._currentIntervalMs;
-			return this._currentIntervalMs;
+			// Admit the first request immediately, then anchor TAT at the admission
+			// time so the next request pays the full provider interval. Delaying the
+			// first request makes a connector appear hung before it has opened its
+			// first socket, especially for providers with a large safety floor.
+			this.tat = nowMs;
+			return 0;
 		}
 
 		// GCRA: if there's been a long idle gap, cap the accumulated credit to the

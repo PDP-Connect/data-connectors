@@ -16,7 +16,7 @@ function makeSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] } {
 	};
 }
 
-test("ProviderPacing: first admit() sleeps initialIntervalMs", async () => {
+test("ProviderPacing: first admit() is immediate and reserves the interval", async () => {
 	const spy = makeSpy();
 	const nowMs = 0;
 	const pacing = new ProviderPacing({
@@ -25,8 +25,10 @@ test("ProviderPacing: first admit() sleeps initialIntervalMs", async () => {
 		sleep: spy.sleep,
 	});
 	await pacing.admit();
-	assert.equal(spy.calls.length, 1);
-	assert.equal(spy.calls[0], 200, "first admit sleeps initialIntervalMs");
+	assert.deepEqual(spy.calls, []);
+
+	await pacing.admit();
+	assert.deepEqual(spy.calls, [200], "the next admission pays the interval");
 });
 
 test("ProviderPacing: inverted initial/min configuration cold-starts at the declared floor", async () => {
@@ -50,23 +52,26 @@ test("ProviderPacing: inverted initial/min configuration cold-starts at the decl
 	);
 
 	await pacing.admit();
+	assert.deepEqual(spy.calls, [], "the first admission does not delay collection");
+
+	await pacing.admit();
 
 	assert.deepEqual(
 		spy.calls,
 		[10_000],
-		"the first admission waits the declared provider floor",
+		"the second admission waits the declared provider floor",
 	);
 });
 
 test("ProviderPacing: inverted configuration enforces the floor through GCRA idle credit", async () => {
 	const minIntervalMs = 10_000;
 	const cases = [
-		{ burstToleranceMs: 0, expected: [10_000, 120_000, 130_000, 140_000] },
-		{ burstToleranceMs: 2000, expected: [10_000, 118_000, 128_000, 138_000] },
-		{ burstToleranceMs: 10_000, expected: [10_000, 110_000, 120_000, 130_000] },
+		{ burstToleranceMs: 0, expected: [0, 110_000, 120_000, 130_000] },
+		{ burstToleranceMs: 2000, expected: [0, 108_000, 118_000, 128_000] },
+		{ burstToleranceMs: 10_000, expected: [0, 100_000, 110_000, 120_000] },
 		// 20s of configured credit is capped to 10s: it may not buy a second
 		// zero-delay admission after the legitimate first immediate admission.
-		{ burstToleranceMs: 20_000, expected: [10_000, 110_000, 120_000, 130_000] },
+		{ burstToleranceMs: 20_000, expected: [0, 100_000, 110_000, 120_000] },
 	];
 
 	await Promise.all(
@@ -121,12 +126,9 @@ test("ProviderPacing: unset initialIntervalMs uses a conservative default", asyn
 	});
 
 	await pacing.admit();
+	await pacing.admit();
 
-	assert.equal(
-		spy.calls[0],
-		1000,
-		"configured pacing starts conservatively when no rate is provided",
-	);
+	assert.deepEqual(spy.calls, [1000], "the second admission starts conservatively");
 });
 
 test("ProviderPacing: additive increase reduces currentIntervalMs toward minIntervalMs", () => {
@@ -258,9 +260,8 @@ test("ProviderPacing: Retry-After honored exactly on next admit()", async () => 
 		now: () => nowMs,
 		sleep: spy.sleep,
 	});
-	// First admit anchors
+	// First admit is immediate and anchors the pacing floor.
 	await pacing.admit();
-	nowMs = 200;
 	// Signal a throttle with retryAfterMs
 	pacing.recordThrottle({ retryAfterMs: 5000 });
 	await pacing.admit();
@@ -289,7 +290,8 @@ test("ProviderPacing: shorter Retry-After cannot erase the sustained admission f
 	const secondAdmissionAtMs = nowMs;
 	await pacing.admit();
 
-	assert.deepEqual(sleeps, [minIntervalMs, minIntervalMs, minIntervalMs]);
+	assert.deepEqual(sleeps, [minIntervalMs, minIntervalMs]);
+	assert.equal(firstAdmissionAtMs, 0);
 	assert.equal(
 		secondAdmissionAtMs - firstAdmissionAtMs,
 		minIntervalMs,
