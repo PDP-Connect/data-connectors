@@ -41,7 +41,7 @@ test("static-secret registry knows static-secret connectors and rejects non-stat
 	assert.equal(isStaticSecretConnector("usaa"), true);
 	assert.equal(isStaticSecretConnector("steam"), true);
 	assert.equal(isStaticSecretConnector("jellyfin"), true);
-	assert.equal(isStaticSecretConnector("apple_contacts"), true);
+	assert.equal(isStaticSecretConnector("apple-contacts"), true);
 	assert.equal(isStaticSecretConnector("groupme"), true);
 	assert.equal(isStaticSecretConnector("claude-code"), false);
 });
@@ -138,9 +138,9 @@ test("jellyfin injection sets only the api_key secret when username/password are
 	});
 });
 
-test("apple_contacts injection sets the app-specific password and both Apple ID aliases", () => {
+test("apple-contacts injection sets the app-specific password and both Apple ID aliases", () => {
 	const env = buildConnectionScopedSecretEnv(
-		"apple_contacts",
+		"apple-contacts",
 		{
 			secret: "synthetic-app-specific-password",
 			credentialKind: "app_password",
@@ -165,20 +165,22 @@ test("groupme injection sets the access token secret", () => {
 	assert.deepEqual(env, { GROUPME_ACCESS_TOKEN: "synthetic-groupme-token" });
 });
 
-test("steam/apple_contacts/groupme registry env vars match their connector manifests", () => {
+test("steam/apple-contacts/groupme registry env vars match their connector manifests", () => {
 	const cases = [
 		{ connectorId: "steam", secretField: "secret", setupFields: ["steamid"] },
 		{
-			connectorId: "apple_contacts",
+			connectorId: "apple-contacts",
 			secretField: "secret",
 			setupFields: ["account_email"],
 		},
 		{ connectorId: "groupme", secretField: "secret", setupFields: [] },
 	];
 	for (const { connectorId, secretField, setupFields } of cases) {
+		const manifestName =
+			connectorId === "apple-contacts" ? "apple_contacts" : connectorId;
 		const manifest = JSON.parse(
 			readFileSync(
-				new URL(`../manifests/${connectorId}.json`, import.meta.url),
+				new URL(`../manifests/${manifestName}.json`, import.meta.url),
 				"utf8",
 			),
 		);

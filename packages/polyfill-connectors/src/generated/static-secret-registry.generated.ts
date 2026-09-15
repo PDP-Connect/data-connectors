@@ -44,7 +44,7 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			username: ["AMAZON_USERNAME"],
 		},
 	},
-	apple_contacts: {
+	"apple-contacts": {
 		credentialKind: "app_password",
 		secretEnvVars: ["APPLE_APP_SPECIFIC_PASSWORD"],
 		setupFieldEnvVars: {

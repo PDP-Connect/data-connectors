@@ -60,13 +60,10 @@ name: Publish Polyfill Connectors
 # before any push or sign step, and that the signing ref condition and the consumer
 # identity expression agree with each other.
 #
-# SCOPE. The matrix below names the connectors this path has actually been proven for,
-# rather than globbing all 45 of packages/polyfill-connectors/manifests/. Two reasons.
-# A connector that declares `external_tools` needs a per-platform binary layer that
-# scripts/build-connector-oci-artifact.mjs does not implement and will refuse to guess at
-# — Slack is the case, and it needs its own change. And a first publish is the wrong
-# moment to discover that some connector's bundle does not resolve; each entry added here
-# should be one whose artifact was built and imported first.
+# SCOPE. scripts/connector-publish-allowlist.mjs classifies all 45 manifests. Its
+# publish list supplies this workflow's matrix and the pull-request build gate;
+# its exclusions record why the three external-tool connectors cannot yet be
+# self-contained OCI artifacts.
 
 on:
   # A release tag still triggers a BUILD AND VERIFY — useful, and it keeps the tag as the
@@ -79,7 +76,7 @@ on:
   workflow_dispatch:
     inputs:
       connector:
-        description: "Connector key to publish (must appear in the matrix below)"
+        description: "Connector key to publish (must appear in the repository publish allowlist)"
         type: string
         required: true
       dry-run:
@@ -102,8 +99,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Load connector publish allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.allowlist.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Derive the publish matrix from the reviewed allowlist
+        id: allowlist
+        run: node scripts/connector-publish-allowlist.mjs --matrix
+
   publish:
     name: Publish ${{ matrix.connector }} to GHCR
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,25 +129,10 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        # Proven end to end. Grow this list one connector at a time.
-        #
-        # The pilot is `ynab`, not `oura`. Oura is registered on the owner's
-        # instance but collects nothing (freshness unknown, zero records), so
-        # publishing it proves the build and the transport and then stops short
-        # of the link that matters: an artifact a consumer installs and actually
-        # collects with. YNAB has 11 streams currently collecting, authenticates
-        # with a personal access token rather than browser automation or a
-        # native helper, and the owner holds the credential — so a published
-        # artifact can be taken all the way to real records.
-        #
-        # It also satisfies the self-sufficiency rule in
-        # scripts/connector-host-runtime-contract.mjs by construction: its only
-        # external imports are @pdpp/connector-protocol and zod, both pure ESM
-        # and both bundled. Contrast `gmail`, which the builder refuses by name
-        # because it statically imports imapflow's CommonJS tree.
-        connector:
-          - ynab
+      # YNAB authenticates with a personal access token, has many streams, and
+      # exercises the transport end to end, including a consumer install that
+      # collects data. Oura would prove the build, but not that collection path.
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -230,7 +228,7 @@ jobs:
         if: steps.target.outputs.selected == 'true'
         run: |
           node scripts/build-connector-oci-artifact.mjs \
-            --connector "${{ steps.target.outputs.connector }}" \
+            --connector "${{ steps.target.outputs.manifest }}" \
             --version "${{ steps.target.outputs.version }}" \
             --out "${RUNNER_TEMP}/artifact"
 
