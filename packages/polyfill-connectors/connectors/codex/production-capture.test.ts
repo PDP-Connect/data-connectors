@@ -121,6 +121,45 @@ async function makeSource(): Promise<Source> {
 	};
 }
 
+/**
+ * Write `state_5.sqlite#threads` with one row for `SESSION_ID`.
+ *
+ * Only the columns `THREADS_QUERY` selects are needed; `updated_at` and `title`
+ * are the two this file moves, since together they are exactly a thread-metadata
+ * change that leaves the rollout file alone.
+ */
+function writeThreadsDb(
+	source: Source,
+	row: { title: string; updatedAt: number },
+): void {
+	const db = new DatabaseSync(join(source.codexHome, "state_5.sqlite"));
+	try {
+		db.exec(`CREATE TABLE IF NOT EXISTS threads (
+			id TEXT PRIMARY KEY, rollout_path TEXT, created_at INTEGER,
+			updated_at INTEGER, source TEXT, model_provider TEXT, cwd TEXT,
+			title TEXT, sandbox_policy TEXT, approval_mode TEXT, tokens_used INTEGER,
+			has_user_event INTEGER, archived INTEGER, archived_at INTEGER,
+			git_sha TEXT, git_branch TEXT, git_origin_url TEXT, cli_version TEXT,
+			first_user_message TEXT, agent_nickname TEXT, agent_role TEXT,
+			memory_mode TEXT, model TEXT, reasoning_effort TEXT
+		)`);
+		db.prepare(
+			`INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, title, archived)
+			 VALUES (?, ?, ?, ?, ?, ?, 0)
+			 ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at`,
+		).run(
+			SESSION_ID,
+			source.rolloutPath,
+			1_776_000_000,
+			row.updatedAt,
+			"/repo",
+			row.title,
+		);
+	} finally {
+		db.close();
+	}
+}
+
 interface RunOptions {
 	/**
 	 * False models a run the operator has NOT wired artifact stores for: the
@@ -135,6 +174,8 @@ interface Harness {
 	ingested: Array<Record<string, unknown>>;
 	progress: string[];
 	run: (options?: RunOptions) => Promise<CollectorRunResult>;
+	/** Plant a STATE the connector will read on its next run, as the server holds it. */
+	seedState: (state: Record<string, unknown>) => void;
 	state: () => Record<string, unknown>;
 	server: Server;
 }
@@ -234,7 +275,16 @@ async function makeHarness(source: Source): Promise<Harness> {
 			sourceInstanceId: "codex-production",
 		});
 	};
-	return { ingested, progress, run, server, state: () => persistedState };
+	return {
+		ingested,
+		progress,
+		run,
+		seedState: (state) => {
+			persistedState = { ...persistedState, ...state };
+		},
+		server,
+		state: () => persistedState,
+	};
 }
 
 function sessionRecords(
@@ -243,6 +293,38 @@ function sessionRecords(
 	return ingested
 		.filter((record) => record.stream === "sessions")
 		.map((record) => (record.data ?? record) as Record<string, unknown>);
+}
+
+/**
+ * The session row as the server would hold it, over every run so far.
+ *
+ * The reference server upserts on `(connector_instance_id, stream, record_key)`
+ * with `record_json = excluded.record_json` — the payload is REPLACED, never
+ * merged (`reference-implementation/server/queries/records/ingest/upsert-record.sql`).
+ * Codex keys a session row by its `id` (`makeCodexEmitRecord` emits
+ * `key: String(d.id)`), so every emission for one session lands on one row and
+ * the last one wins outright.
+ *
+ * Reading the LATEST emission is therefore the only honest way to ask what the
+ * owner's stored session says. Asking whether SOME emission carried the digest
+ * would pass even while the row the server actually holds has lost it — which
+ * is precisely the defect these tests exist to catch.
+ */
+function latestStoredSession(
+	ingested: Array<Record<string, unknown>>,
+	id: string = SESSION_ID,
+): Record<string, unknown> | undefined {
+	let stored: Record<string, unknown> | undefined;
+	for (const record of ingested) {
+		if (record.stream !== "sessions") {
+			continue;
+		}
+		const data = (record.data ?? record) as Record<string, unknown>;
+		if (data.id === id) {
+			stored = data;
+		}
+	}
+	return stored;
 }
 
 /** The rollout cursor the next run will read, as the server persisted it. */
@@ -592,6 +674,313 @@ test("a capture-less run over a SAME-SIZE rewritten file does not strand the new
 		cursorFor(harness.state())?.captured_sha256,
 		rewrittenDigest,
 		"the cursor now vouches for the bytes actually held",
+	);
+});
+
+test("a thread-only metadata change does not erase the stored body reference", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, { title: "original title", updatedAt: 1_776_000_100 });
+	const harness = await makeHarness(source);
+
+	// Run 1 parses and captures, so the stored row carries the reference.
+	await harness.run();
+	const digest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_capture,
+		"captured",
+		"run 1 stored the capture outcome",
+	);
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_sha256,
+		digest,
+		"run 1 stored the digest",
+	);
+
+	// Codex renames the thread. Only state_5 moves — the rollout file is not
+	// touched, so run 2 builds NO aggregate for this session and re-emits the row
+	// from thread metadata alone.
+	writeThreadsDb(source, { title: "renamed thread", updatedAt: 1_776_000_900 });
+
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.ok(stored, "run 2 re-emitted the session on the metadata change");
+	assert.equal(
+		stored?.title,
+		"renamed thread",
+		"the re-emit really is the metadata change, not a stale copy",
+	);
+	// The defect: `artifactCaptureFields(undefined)` returned `{}`, so the rebuilt
+	// record omitted both fields. The server replaces `record_json` wholesale, so
+	// omission is deletion — the owner's stored session silently stopped pointing
+	// at a body that is still held in the spool.
+	assert.equal(
+		stored?.artifact_capture,
+		"captured",
+		"the stored row still says the body is captured after a metadata-only update",
+	);
+	assert.equal(
+		stored?.artifact_sha256,
+		digest,
+		"the stored row still carries the digest after a metadata-only update",
+	);
+
+	// The reference is not a fiction: the bytes it names are really held.
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(spool.has(digest), "the digest the row carries is a held body");
+});
+
+test("a backfill gives the stored session its body reference, not just the cursor", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, { title: "stable title", updatedAt: 1_776_000_100 });
+	const harness = await makeHarness(source);
+
+	// Run 1 has no artifact stores: the row is stored with no capture fields.
+	await harness.run({ capture: false });
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_capture,
+		undefined,
+		"a storeless run asserts nothing about the body",
+	);
+
+	// Run 2 enables capture. The rollout file is untouched and state_5 is
+	// untouched, so this run parses nothing and its only work is the skip-path
+	// backfill.
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const digest = createHash("sha256").update(source.body).digest("hex");
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(spool.has(digest), "the backfill captured the body");
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		digest,
+		"and marked the cursor",
+	);
+
+	// The defect: the backfill builds no aggregate and moves no count, so the
+	// ordinary emit gate stayed shut and the digest reached ONLY the cursor. The
+	// owner's stored session kept saying nothing about a body now held.
+	const stored = latestStoredSession(harness.ingested);
+	assert.ok(stored, "the backfill issued a targeted session update");
+	assert.equal(
+		stored?.artifact_capture,
+		"captured",
+		"the stored row gained the capture outcome from the backfill",
+	);
+	assert.equal(
+		stored?.artifact_sha256,
+		digest,
+		"the stored row gained the digest from the backfill",
+	);
+});
+
+test("a prior digest is not rescued from stale state when this run's capture fails", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, {
+		title: "precedence title",
+		updatedAt: 1_776_000_100,
+	});
+	const harness = await makeHarness(source);
+
+	// Run 1 captures, so the PRIOR state run 2 reads carries a real digest.
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		firstDigest,
+		"run 1 left a digest in durable state",
+	);
+
+	// The session keeps going: Codex appends. The run-1 digest describes only the
+	// smaller file, so it must not speak for the grown one.
+	await writeFile(
+		source.rolloutPath,
+		`${messageLine("y".repeat(100 * 1024), "2026-04-15T17:35:00.000Z")}\n`,
+		{ flag: "a" },
+	);
+
+	// Run 2 parses the appended lines but CANNOT capture them. Reconciliation
+	// reads the cursor this run is about to persist, which the scan deliberately
+	// left unmarked; the digest still sitting in the PRIOR map describes bytes
+	// that are no longer the whole file. Reporting `captured` here would be a
+	// false claim of retention — worse than the gap it hides — so a scanned file
+	// that ends the run unmarked must not be rescued from stale state.
+	const staging = join(source.spoolRoot, "tmp");
+	await mkdir(staging, { recursive: true });
+	await chmod(staging, 0o500);
+	harness.ingested.length = 0;
+	try {
+		await harness.run();
+	} finally {
+		await chmod(staging, 0o700);
+	}
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.ok(stored, "run 2 re-emitted the session");
+	assert.equal(
+		stored?.artifact_capture,
+		"failed",
+		"the failure is reported as itself",
+	);
+	assert.notEqual(
+		stored?.artifact_sha256,
+		firstDigest,
+		"and the prior digest is not carried onto the grown file's record",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		undefined,
+		"the persisted cursor is unmarked, so the next run retries the body",
+	);
+});
+
+test("a rewritten body and a failed capture never leave a stale digest on the stored session", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, { title: "control title", updatedAt: 1_776_000_100 });
+	const harness = await makeHarness(source);
+
+	// Run 1 captures, so a real digest exists to be wrongly carried.
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_sha256,
+		firstDigest,
+		"run 1 stored the digest it captured",
+	);
+
+	// Same-length in-place rewrite plus a moved mtime: the bytes changed, so the
+	// run-1 digest describes content the file no longer holds.
+	const rewritten = Buffer.from(
+		source.body.toString("utf8").replaceAll("z", "w"),
+		"utf8",
+	);
+	assert.equal(
+		rewritten.length,
+		source.body.length,
+		"the rewrite is the same length, so size equality alone still holds",
+	);
+	assert.ok(!rewritten.equals(source.body), "and the bytes really did change");
+	await writeFile(source.rolloutPath, rewritten);
+	const bumped = statSync(source.rolloutPath).mtimeMs + 5_000;
+	utimesSync(source.rolloutPath, bumped / 1000, bumped / 1000);
+
+	// Run 2 reparses the rewritten file, and its capture FAILS: the spool's
+	// staging directory is unwritable. Both invalidations are live at once — the
+	// bytes moved, and this run cannot vouch for the new ones either.
+	const staging = join(source.spoolRoot, "tmp");
+	await mkdir(staging, { recursive: true });
+	await chmod(staging, 0o500);
+	harness.ingested.length = 0;
+	try {
+		await harness.run();
+	} finally {
+		await chmod(staging, 0o700);
+	}
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.ok(stored, "run 2 re-emitted the session");
+	assert.notEqual(
+		stored?.artifact_sha256,
+		firstDigest,
+		"the stored row must not carry a digest of bytes the file no longer holds",
+	);
+	assert.equal(
+		stored?.artifact_capture,
+		"failed",
+		"the failure is reported as itself, not papered over with a durable digest",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		undefined,
+		"and no captured marker is persisted for a body that is not held",
+	);
+});
+
+test("a legacy mtime-only history enters capture instead of skipping forever", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	// The legacy shape: a history that has only ever recorded the whole-file
+	// mtime, with no rich cursor — what enrollment and a connector-version
+	// upgrade both leave behind. Seeded directly so the STATE is genuinely
+	// legacy, not a rich cursor with a field removed.
+	harness.seedState({
+		messages: {
+			file_mtimes: {
+				[source.rolloutPath]: statSync(source.rolloutPath).mtimeMs,
+			},
+		},
+	});
+
+	// Run 1 with capture on, file unchanged. The defect: the legacy fast path
+	// returns before any capture logic whenever the numeric mtime matches and no
+	// rich cursor exists — zero captures, no rich cursor written, no obligation
+	// recorded, repeating on every run forever.
+	await harness.run();
+
+	const digest = createHash("sha256").update(source.body).digest("hex");
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(
+		spool.has(digest),
+		"the legacy entry was captured rather than skipped past",
+	);
+	assert.equal(
+		harness.progress.filter((line) => line.includes("awaiting_upload=1"))
+			.length,
+		1,
+		"exactly one capture, not a re-capture storm",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		digest,
+		"the rich cursor was persisted, so the legacy entry is now upgraded",
+	);
+
+	// Run 2 changes nothing. The skip must be regained now that retention is
+	// established — the one-time reparse must not become a per-run cost.
+	harness.ingested.length = 0;
+	harness.progress.length = 0;
+	await harness.run();
+
+	assert.ok(
+		!harness.progress.some((line) => line.includes("awaiting_upload")),
+		"the second unchanged run captures nothing",
+	);
+	assert.ok(
+		!harness.progress.some((line) => line.includes("outstanding")),
+		"and owes nothing",
+	);
+});
+
+test("a legacy mtime-only history keeps the fast path when capture is not configured", async () => {
+	const source = await makeSource();
+	const harness = await makeHarness(source);
+
+	harness.seedState({
+		messages: {
+			file_mtimes: {
+				[source.rolloutPath]: statSync(source.rolloutPath).mtimeMs,
+			},
+		},
+	});
+
+	// The control for the repair's gate: with no artifact stores there is nothing
+	// to gain by reparsing a legacy entry, so the old behaviour must stand. A
+	// repair that dropped the fast path unconditionally would reparse every
+	// legacy file on every capture-less run.
+	await harness.run({ capture: false });
+
+	assert.equal(
+		sessionRecords(harness.ingested).length,
+		0,
+		"the unchanged legacy entry was skipped, emitting nothing",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		undefined,
+		"and no captured marker was invented",
 	);
 });
 

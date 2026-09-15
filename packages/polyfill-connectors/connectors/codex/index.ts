@@ -72,6 +72,7 @@ import {
 import {
 	type ArtifactCaptureContext,
 	captureFileArtifact,
+	type OpenedArtifactCapture,
 	openArtifactCapture,
 } from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
@@ -114,6 +115,7 @@ import {
 	parseFrontmatter,
 	payloadOutputPreview,
 	RULES_SUFFIX_RE,
+	type SessionCaptureState,
 	splitRulesLines,
 	type TimestampRange,
 	TWO_DIGIT_DIR_RE,
@@ -1180,9 +1182,50 @@ export interface EmitSessionsFromMapsArgs {
 	 * and no fingerprints are tracked.
 	 */
 	cursor?: CarryForwardCursor<ThreadFingerprint>;
+	/**
+	 * What durable state still vouches for, per session id — see
+	 * `durableCaptureLookup`. Omitted by callers pinning the pre-reconciliation
+	 * contract, in which case only this run's aggregates speak for the body.
+	 */
+	durableCapture?: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	/** Sessions whose body reference changed without any count moving. */
+	forceReemit?: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	threadsMap: Map<string, ThreadRow>;
+}
+
+/**
+ * Read a session's held-body digest out of the cursors this run is about to
+ * persist.
+ *
+ * The cursor map is the right source precisely because of the invariant every
+ * writer into it already maintains: a `captured_sha256` is only ever written
+ * alongside a size and mtime the run has just confirmed. The skip path writes
+ * one after `decideRolloutAction` returned `skip` (size AND mtime equal) or
+ * after capturing the current bytes itself; the parse path writes either a
+ * fresh digest or `priorStillDescribesFile`, which tests the same equality. So
+ * "present in `newFileCursors`" already means "describes this file generation",
+ * and reconciliation does not restate that rule in a second place where the two
+ * copies could drift apart.
+ *
+ * Falls back to the prior cursor map ONLY for a file this scan never reached
+ * (`newFileCursors` has no entry): a session whose rollout was not walked this
+ * run — filtered out by an enumeration scope, or in a run that skipped rollouts
+ * entirely — keeps the reference it already had rather than having the re-emit
+ * erase it. A file the scan DID reach and deliberately left unmarked (capture
+ * failed, bytes rewritten) must not be rescued from the stale prior map, which
+ * is why a present-but-digestless new cursor ends the lookup.
+ */
+function durableCaptureLookup(args: {
+	fileCursors: Record<string, RolloutFileCursor>;
+	newFileCursors: Record<string, RolloutFileCursor>;
+}): (id: string) => SessionCaptureState | undefined {
+	return (id: string): SessionCaptureState | undefined => {
+		const cursor = args.newFileCursors[id] ?? args.fileCursors[id];
+		const sha256 = cursor?.captured_sha256;
+		return sha256 === undefined ? undefined : { sha256 };
+	};
 }
 
 /**
@@ -1200,11 +1243,19 @@ export function shouldReemitThreadSession(
 	thread: ThreadRow,
 	agg: RolloutAggregate | undefined,
 	priorFingerprint: ThreadFingerprint | undefined,
+	captureReferenceChanged = false,
 ): boolean {
 	if (!priorFingerprint) {
 		return true;
 	}
 	if (agg) {
+		return true;
+	}
+	// A backfill moves no count and no `updated_at` — the fingerprint this gate
+	// compares is identical on both sides — but the stored row's body reference
+	// is now wrong. Churn reduction must not suppress the one emit that repairs
+	// it.
+	if (captureReferenceChanged) {
 		return true;
 	}
 	const priorUpdatedAt = priorFingerprint.updated_at ?? null;
@@ -1264,14 +1315,19 @@ export function emitSessionsFromMaps({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsFromMapsArgs): void {
 	const emittedSessionIds = new Set<string>();
 	for (const [id, t] of threadsMap) {
 		emittedSessionIds.add(id);
 		const agg = rolloutAggregates.get(id);
 		const prior = cursor?.prior(id);
-		if (shouldReemitThreadSession(t, agg, prior)) {
-			emitRecord("sessions", buildThreadSessionRecord(id, t, agg, prior));
+		if (shouldReemitThreadSession(t, agg, prior, forceReemit?.has(id))) {
+			emitRecord(
+				"sessions",
+				buildThreadSessionRecord(id, t, agg, prior, durableCapture?.(id)),
+			);
 		}
 		cursor?.note(id, makeThreadFingerprint(t, agg, prior));
 	}
@@ -1279,7 +1335,10 @@ export function emitSessionsFromMaps({
 		if (emittedSessionIds.has(id)) {
 			continue;
 		}
-		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		emitRecord(
+			"sessions",
+			buildRolloutOnlySessionRecord(id, agg, durableCapture?.(id)),
+		);
 		// Rollout-only sessions don't have a state_5 row to fingerprint
 		// against (updated_at lives in threads). They re-emit whenever
 		// their rollout file mtime changes — the rollout-file mtime gate
@@ -1289,7 +1348,10 @@ export function emitSessionsFromMaps({
 
 interface EmitSessionsFromRowsArgs {
 	cursor: CarryForwardCursor<ThreadFingerprint>;
+	durableCapture: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	/** Sessions whose body reference changed without any count moving. */
+	forceReemit: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	threadsRows: Iterable<ThreadRow>;
 }
@@ -1299,19 +1361,27 @@ function emitSessionsFromRows({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsFromRowsArgs): void {
 	for (const t of threadsRows) {
 		const agg = rolloutAggregates.get(t.id);
 		rolloutAggregates.delete(t.id);
 		const prior = cursor.prior(t.id);
-		if (shouldReemitThreadSession(t, agg, prior)) {
-			emitRecord("sessions", buildThreadSessionRecord(t.id, t, agg, prior));
+		if (shouldReemitThreadSession(t, agg, prior, forceReemit.has(t.id))) {
+			emitRecord(
+				"sessions",
+				buildThreadSessionRecord(t.id, t, agg, prior, durableCapture(t.id)),
+			);
 		}
 		cursor.note(t.id, makeThreadFingerprint(t, agg, prior));
 	}
 
 	for (const [id, agg] of rolloutAggregates) {
-		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		emitRecord(
+			"sessions",
+			buildRolloutOnlySessionRecord(id, agg, durableCapture(id)),
+		);
 	}
 }
 
@@ -1733,8 +1803,23 @@ async function processRolloutEntry(
 	// This map stays PATH-keyed (its pre-existing semantics): a relocated file
 	// has a new path, so it never spuriously hits this fast path — it falls
 	// through to resolveRolloutAction, which is keyed by the stable UUID.
+	//
+	// A capture-enabled run may NOT take it. The path predates capture and
+	// returns before any of it: a history carrying only `file_mtimes` entries
+	// (enrollment, or a connector-version upgrade) has no rich cursor to hold a
+	// `captured_sha256`, so an unchanged file would match the legacy mtime and
+	// return here on EVERY run — never capturing, never writing the richer
+	// marker, never even recording an obligation. Falling through costs one
+	// reparse per legacy entry, after which the rich cursor exists and the
+	// ordinary skip path takes over; a failed capture leaves no marker, so the
+	// retry obligation is the same one every other path carries. When capture is
+	// not configured there is nothing to gain by reparsing, so the old behaviour
+	// stands unchanged.
+	const legacyEntryNeedsCapture =
+		args.captureLedger?.enabled === true && !cursor;
 	if (
 		!cursor &&
+		!legacyEntryNeedsCapture &&
 		!args.sourceGaps[entry.path] &&
 		args.fileMtimes[entry.path] === mtime
 	) {
@@ -1763,6 +1848,13 @@ async function processRolloutEntry(
 					...(captured !== undefined ? { captured_sha256: captured } : {}),
 				};
 				args.newMtimes[entry.path] = mtime;
+				// No reparse happened, so no aggregate carries this outcome. Record
+				// the backfill so the run still owes the session record its body
+				// reference; without this the digest reaches only the cursor and the
+				// stored row keeps saying nothing about the bytes now held.
+				if (captured !== undefined) {
+					args.captureLedger.noteBackfilled(cursorKey);
+				}
 				return "skipped";
 			}
 		}
@@ -2217,7 +2309,9 @@ async function reportMalformedRolloutGap(
 
 interface EmitSessionsArgs {
 	cursor: CarryForwardCursor<ThreadFingerprint>;
+	durableCapture: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	forceReemit: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	stateDbPath: string;
 }
@@ -2227,6 +2321,8 @@ function emitSessions({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsArgs): void {
 	// Sessions: prefer state_5.sqlite#threads; fall back to rollout-derived
 	// fields only when state_5 doesn't have the session. Session PK stays the
@@ -2234,7 +2330,10 @@ function emitSessions({
 	const db = openThreadsDb(stateDbPath);
 	if (!db) {
 		for (const [id, agg] of rolloutAggregates) {
-			emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+			emitRecord(
+				"sessions",
+				buildRolloutOnlySessionRecord(id, agg, durableCapture(id)),
+			);
 		}
 		return;
 	}
@@ -2245,6 +2344,8 @@ function emitSessions({
 			rolloutAggregates,
 			emitRecord,
 			cursor,
+			durableCapture,
+			forceReemit,
 		});
 	} finally {
 		db.close();
@@ -3000,12 +3101,35 @@ async function main(): Promise<void> {
 		return fail("START.scope.streams is required");
 	}
 
-	const resFilters = buildResourceFilters(requested);
 	// The artifact stores live with the collector runner that spawned this
 	// process; `bin/collector-runner.ts` hands their locations over in the child
 	// env. Null means this run has none (a fixture, or a caller that has not
 	// opted in) and every body is honestly recorded `unavailable`.
+	//
+	// Acquired OUTSIDE the guarded span and released inside its `finally`, so the
+	// handle is closed on every exit from the collection that opened it —
+	// including the throwing ones, which previously ran past the close and leaked
+	// the outbox handle for the whole life of a failing process.
 	const openedCapture = openArtifactCapture({ connectorId: "codex" });
+	try {
+		await collect({ openedCapture, requested, startMsg });
+	} finally {
+		releaseArtifactStore(openedCapture);
+	}
+}
+
+interface CollectArgs {
+	openedCapture: OpenedArtifactCapture | null;
+	requested: Map<string, StreamScope>;
+	startMsg: StartMessage;
+}
+
+async function collect({
+	openedCapture,
+	requested,
+	startMsg,
+}: CollectArgs): Promise<void> {
+	const resFilters = buildResourceFilters(requested);
 	const captureContext = openedCapture?.context ?? null;
 	const captureLedger = new CodexArtifactLedger({
 		enabled: captureContext !== null,
@@ -3133,9 +3257,15 @@ async function main(): Promise<void> {
 		parsedRolloutFiles = rolloutScan.parsedFiles;
 	}
 
+	// A skip-path backfill parses nothing and may leave state_5 untouched, so
+	// neither ordinary trigger fires — yet the stored session row is now stale
+	// against a body this run durably holds. That is the targeted update: the
+	// same emission path, entered for the sessions whose reference just changed.
+	const backfilledSessions = captureLedger.backfilled;
 	if (
 		requested.has("sessions") &&
 		(parsedRolloutFiles > 0 ||
+			backfilledSessions.size > 0 ||
 			readPriorSessionsSourceMtimeMs(startMsg) !== sessionsSourceMtimeMs)
 	) {
 		emitSessions({
@@ -3143,6 +3273,8 @@ async function main(): Promise<void> {
 			rolloutAggregates,
 			emitRecord,
 			cursor: threadFingerprints,
+			durableCapture: durableCaptureLookup({ fileCursors, newFileCursors }),
+			forceReemit: backfilledSessions,
 		});
 		await waitForEmitDrain();
 	}
@@ -3198,10 +3330,31 @@ async function main(): Promise<void> {
 		});
 	}
 	await waitForEmitDrain();
-	openedCapture?.close();
 
 	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
 	flushAndExit(0);
+}
+
+/**
+ * Release the artifact store without letting cleanup speak over a real failure.
+ *
+ * `finally` runs while a primary error is propagating, so a throw from `close()`
+ * would REPLACE that error and report a cleanup symptom in place of the cause.
+ * The close failure is made visible and then swallowed — the same rule
+ * `claude_code` applies (data-connectors#100).
+ */
+function releaseArtifactStore(
+	openedCapture: OpenedArtifactCapture | null,
+): void {
+	try {
+		openedCapture?.close();
+	} catch (closeError) {
+		console.error(
+			`codex: releasing the artifact store failed: ${
+				closeError instanceof Error ? closeError.message : String(closeError)
+			}`,
+		);
+	}
 }
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime

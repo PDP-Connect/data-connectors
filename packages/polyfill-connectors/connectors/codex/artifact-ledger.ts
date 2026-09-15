@@ -35,6 +35,7 @@ export class CodexArtifactLedger {
 	readonly #enabled: boolean;
 	readonly #outstanding = new Set<string>();
 	readonly #captured = new Map<string, string>();
+	readonly #backfilled = new Set<string>();
 	#pendingUpload = 0;
 
 	constructor(options: { enabled: boolean }) {
@@ -79,6 +80,24 @@ export class CodexArtifactLedger {
 	/** True when this file's body is still owed. */
 	isOutstanding(cursorKey: string): boolean {
 		return this.#outstanding.has(cursorKey);
+	}
+
+	/**
+	 * Note that a body was captured WITHOUT reparsing its file — the skip path's
+	 * backfill.
+	 *
+	 * Such a run builds no aggregate, so nothing in the ordinary emission path
+	 * knows the session's stored row just became stale. Recording it here is what
+	 * lets the run decide it owes a targeted session update, rather than leaving
+	 * the digest visible only to the cursor.
+	 */
+	noteBackfilled(cursorKey: string): void {
+		this.#backfilled.add(cursorKey);
+	}
+
+	/** Cursor keys whose bodies were backfilled by a skip-path capture this run. */
+	get backfilled(): ReadonlySet<string> {
+		return this.#backfilled;
 	}
 
 	/**
