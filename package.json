@@ -8,6 +8,7 @@
     "packages/connector-installer-core"
   ],
   "files": [
+    "packages/connector-installer-core/package.json",
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-cli/index.mjs",
     "schemas/connector-index.schema.json",
@@ -21,7 +22,8 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "@pdpp/connector-manager": "*"
+    "@pdpp/connector-manager": "file:packages/connector-installer-core",
+    "sigstore": "^5.0.0"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
@@ -34,7 +36,7 @@
     "chatgpt-pdpp:test": "node --test ./test/chatgpt-pdpp/chatgpt-pdpp.test.mjs",
     "whoop-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact whoop-pdpp",
     "whoop-pdpp:test": "node --test ./test/whoop-pdpp/whoop-pdpp.test.mjs",
-    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs",
+    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/packaging.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
     "fixtures:validate": "node ./scripts/generate-fixture-index.mjs --validate-only",
