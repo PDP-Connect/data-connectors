@@ -23,7 +23,7 @@
  *
  *   1. Parse the trigger into a candidate name. No filesystem access yet.
  *   2. Check the name's SYNTAX against a strict pattern.
- *   3. Check the name's MEMBERSHIP in the matrix allowlist.
+ *   3. Check the name's MEMBERSHIP in the repository publish allowlist.
  *   4. Only then build a path and read the manifest, with readFile/JSON.parse.
  *
  * Steps 2 and 3 happen before step 4 touches a path, so a rejected name never
@@ -44,6 +44,7 @@
 import { readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 
 // A connector key is a lowercase npm-ish token. Anchored, no dots, no slashes,
 // no quotes — so it can be neither a traversal nor a fragment of any syntax.
@@ -53,6 +54,10 @@ const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // `connector-<key>-v<version>`. The key is captured non-greedily up to the LAST
 // `-v`, matching what the shell's `${REST%-v*}` / `${REST##*-v}` pair did.
 const RELEASE_TAG = /^connector-(.+)-v(.+)$/;
+
+const PUBLISHABLE_BY_KEY = new Map(
+  PUBLISHABLE_CONNECTORS.map((connector) => [connector.connectorKey, connector]),
+);
 
 export class SelectionError extends Error {}
 
@@ -83,22 +88,37 @@ export function parseTrigger(env) {
 }
 
 /**
- * Read a manifest's version as DATA. Only ever called with a connector key that
- * has already passed both the syntax check and the allowlist check, which is why
- * joining it into a path here is safe — but it reads with readFile/JSON.parse
- * regardless, so the name is never evaluated even if a future caller gets the
- * ordering wrong.
+ * Read a manifest's version as DATA. Resolve the repository-owned manifest name
+ * from the canonical connector key before joining a path. It still uses
+ * readFile/JSON.parse, so no connector-controlled string is evaluated.
  */
-export function readManifestVersion(connector, { cwd = process.cwd() } = {}) {
-  const path = join(cwd, "packages", "polyfill-connectors", "manifests", `${connector}.json`);
+export function readManifestVersion(connectorKey, { cwd = process.cwd() } = {}) {
+  const connector = PUBLISHABLE_BY_KEY.get(connectorKey);
+  if (!connector) {
+    throw new SelectionError(`connector '${connectorKey}' is not in the publish allowlist`);
+  }
+  const path = join(
+    cwd,
+    "packages",
+    "polyfill-connectors",
+    "manifests",
+    `${connector.manifest}.json`,
+  );
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    throw new SelectionError(`cannot read manifest for '${connector}': ${error.message}`);
+    throw new SelectionError(
+      `cannot read manifest for '${connector.connectorKey}' at '${connector.manifest}.json': ${error.message}`,
+    );
   }
   if (typeof parsed.version !== "string" || parsed.version === "") {
-    throw new SelectionError(`manifest for '${connector}' declares no version string`);
+    throw new SelectionError(`manifest for '${connector.connectorKey}' declares no version string`);
+  }
+  if (parsed.connector_key !== undefined && parsed.connector_key !== connector.connectorKey) {
+    throw new SelectionError(
+      `manifest '${connector.manifest}.json' declares connector_key '${parsed.connector_key}', expected '${connector.connectorKey}'`,
+    );
   }
   return parsed.version;
 }
@@ -110,6 +130,9 @@ export function selectPublishTarget(env = process.env, { cwd = process.cwd() } =
     // bug in this file's matrix rather than hostile input — but refusing keeps
     // the comparison below meaningful instead of vacuous.
     throw new SelectionError(`matrix connector '${matrixConnector}' is not a valid connector key`);
+  }
+  if (!PUBLISHABLE_BY_KEY.has(matrixConnector)) {
+    throw new SelectionError(`matrix connector '${matrixConnector}' is not in the publish allowlist`);
   }
 
   const { connector, version: taggedVersion } = parseTrigger(env);
@@ -123,9 +146,14 @@ export function selectPublishTarget(env = process.env, { cwd = process.cwd() } =
     );
   }
 
-  // MEMBERSHIP, still before anything reads a path. A run targeting a connector
-  // outside this leg's allowlist entry skips the leg — the same outcome as
-  // before, reached without having executed anything on its behalf.
+  const publishableConnector = PUBLISHABLE_BY_KEY.get(connector);
+  if (!publishableConnector) {
+    throw new SelectionError(`connector '${connector}' is not in the publish allowlist`);
+  }
+
+  // The global membership check above makes an excluded dispatch refuse rather
+  // than silently skipping every matrix leg. A valid target outside this leg
+  // skips without reading any manifest.
   if (connector !== matrixConnector) {
     return { selected: false, reason: `run targets '${connector}'; this leg is '${matrixConnector}'` };
   }
@@ -151,6 +179,7 @@ export function selectPublishTarget(env = process.env, { cwd = process.cwd() } =
   return {
     selected: true,
     connector,
+    manifest: publishableConnector.manifest,
     version: manifestVersion,
     repository: `ghcr.io/${owner}/connector/${connector}`,
   };
@@ -177,6 +206,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       emit({
         selected: "true",
         connector: result.connector,
+        manifest: result.manifest,
         version: result.version,
         repository: result.repository,
       });

@@ -16,7 +16,11 @@
     "packages/connector-installer-cli/index.mjs",
     "schemas/connector-index.schema.json",
     "schemas/scope-catalog.schema.json",
-    "scope-catalog.json"
+    "scope-catalog.json",
+    "packages/connector-installer-core/oci-catalog.mjs",
+    "packages/connector-installer-core/catalog-schema.mjs",
+    "packages/connector-installer-core/catalog-schema-data.mjs",
+    "schemas/connector-catalog.schema.json"
   ],
   "exports": {
     "./installer-core": "./packages/connector-installer-core/index.mjs"
@@ -27,7 +31,8 @@
   "dependencies": {
     "@pdpp/connector-manager": "file:packages/connector-installer-core",
     "sigstore": "^5.0.0",
-    "@sigstore/bundle": "^5.0.0"
+    "@sigstore/bundle": "^5.0.0",
+    "ajv": "^8.20.0"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
@@ -40,18 +45,19 @@
     "chatgpt-pdpp:test": "node --test ./test/chatgpt-pdpp/chatgpt-pdpp.test.mjs",
     "whoop-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact whoop-pdpp",
     "whoop-pdpp:test": "node --test ./test/whoop-pdpp/whoop-pdpp.test.mjs",
-    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs",
+    "installer:test": "npm run catalog-schema:check && node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs ./packages/connector-installer-core/oci-catalog.test.mjs ./scripts/generate-connector-catalog.test.mjs ./scripts/publish-connector-catalog.test.mjs ./scripts/publish-ref-gate.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
     "fixtures:validate": "node ./scripts/generate-fixture-index.mjs --validate-only",
     "scope-catalog:generate": "node ./scripts/generate-scope-catalog.mjs",
     "scope-catalog:check": "node ./scripts/generate-scope-catalog.mjs --check",
     "scope-catalog:test": "node --test ./scripts/generate-scope-catalog.test.mjs",
-    "release:sign": "node ./scripts/sign-release-assets.mjs"
+    "release:sign": "node ./scripts/sign-release-assets.mjs",
+    "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
+    "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check"
   },
   "devDependencies": {
-    "ajv": "^8.20.0",
     "esbuild": "0.28.2",
-    "zod": "4.5.4"
+    "zod": "4.6.5"
   }
 }

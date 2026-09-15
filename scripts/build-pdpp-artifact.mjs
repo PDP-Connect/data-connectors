@@ -45,6 +45,10 @@ async function main() {
   const connectorRoot = join(repoRoot, "connectors", artifactId);
   const specification = JSON.parse(readFileSync(join(connectorRoot, "artifact.json"), "utf8"));
   const { upstream, build } = specification;
+  if (specification.artifact_version !== undefined &&
+      (typeof specification.artifact_version !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(specification.artifact_version))) {
+    throw new Error("artifact_version must be a major.minor.patch version");
+  }
   const actualCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: pdppRoot, encoding: "utf8" }).trim();
   if (actualCommit !== upstream.commit) throw new Error(`PDPP HEAD must be ${upstream.commit}, got ${actualCommit}`);
 
@@ -59,7 +63,12 @@ async function main() {
     execFileSync("tar", ["-xf", "-", "-C", pinnedRoot], { input: archive, maxBuffer: 128 * 1024 * 1024 });
 
     const manifestSource = join(pinnedRoot, upstream.manifest);
-    const manifest = readFileSync(manifestSource);
+    let manifest = readFileSync(manifestSource);
+    if (specification.artifact_version !== undefined) {
+      const profile = JSON.parse(manifest);
+      profile.version = specification.artifact_version;
+      manifest = Buffer.from(`${JSON.stringify(profile, null, 2)}\n`);
+    }
     const manifestPath = join(connectorRoot, "collection-profile.json");
     writeFileSync(manifestPath, manifest);
 

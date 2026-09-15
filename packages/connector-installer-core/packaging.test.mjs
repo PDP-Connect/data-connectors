@@ -3,7 +3,8 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,29 @@ function packedFiles(packageRoot) {
 }
 
 for (const directory of [".", "packages/connector-installer-core"]) {
+  test(`${directory}: extracted package exports fetchCatalog with its schema`, (t) => {
+    const temporaryRoot = join(homedir(), ".tmp");
+    mkdirSync(temporaryRoot, { recursive: true });
+    const fixture = mkdtempSync(join(temporaryRoot, "catalog-package-"));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const output = execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", fixture], {
+      cwd: resolve(repoRoot, directory), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(output);
+    const [packed] = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    execFileSync("tar", ["-xzf", join(fixture, packed.filename), "-C", fixture]);
+    // Use installed dependencies, but resolve all package files from the tarball.
+    // The graph test below separately requires every import to be a production dependency.
+    symlinkSync(join(repoRoot, "node_modules"), join(fixture, "node_modules"), "dir");
+    const entry = directory === "." ? "./packages/connector-installer-core/index.mjs" : "./index.mjs";
+    execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { fetchCatalog } from ${JSON.stringify(entry)};
+      assert.equal(typeof fetchCatalog, "function");
+      await assert.rejects(fetchCatalog({ lastAcceptedGeneratedAt: "invalid" }), /Invalid lastAcceptedGeneratedAt/);
+    `], { cwd: join(fixture, "package"), stdio: ["ignore", "pipe", "pipe"] });
+  });
+
   test(`${directory}: packed entrypoints contain their runtime import graph`, async () => {
     const packageRoot = resolve(repoRoot, directory);
     const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));

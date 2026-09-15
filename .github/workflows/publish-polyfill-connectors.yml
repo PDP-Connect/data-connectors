@@ -60,13 +60,10 @@ name: Publish Polyfill Connectors
 # before any push or sign step, and that the signing ref condition and the consumer
 # identity expression agree with each other.
 #
-# SCOPE. The matrix below names the connectors this path has actually been proven for,
-# rather than globbing all 45 of packages/polyfill-connectors/manifests/. Two reasons.
-# A connector that declares `external_tools` needs a per-platform binary layer that
-# scripts/build-connector-oci-artifact.mjs does not implement and will refuse to guess at
-# — Slack is the case, and it needs its own change. And a first publish is the wrong
-# moment to discover that some connector's bundle does not resolve; each entry added here
-# should be one whose artifact was built and imported first.
+# SCOPE. scripts/connector-publish-allowlist.mjs classifies all 45 manifests. Its
+# publish list supplies this workflow's matrix and the pull-request build gate;
+# its exclusions record why the three external-tool connectors cannot yet be
+# self-contained OCI artifacts.
 
 on:
   # A release tag still triggers a BUILD AND VERIFY — useful, and it keeps the tag as the
@@ -79,13 +76,17 @@ on:
   workflow_dispatch:
     inputs:
       connector:
-        description: "Connector key to publish (must appear in the matrix below)"
+        description: "Connector key to publish (must appear in the repository publish allowlist)"
         type: string
-        required: true
+        required: false
       dry-run:
         description: "Build and verify without pushing or signing. Uncheck, from main, to release."
         type: boolean
         default: true
+      catalog-only:
+        description: "Regenerate the signed catalog without publishing a connector."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -102,8 +103,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Load connector publish allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.allowlist.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Derive the publish matrix from the reviewed allowlist
+        id: allowlist
+        run: node scripts/connector-publish-allowlist.mjs --matrix
+
   publish:
     name: Publish ${{ matrix.connector }} to GHCR
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,25 +133,10 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        # Proven end to end. Grow this list one connector at a time.
-        #
-        # The pilot is `ynab`, not `oura`. Oura is registered on the owner's
-        # instance but collects nothing (freshness unknown, zero records), so
-        # publishing it proves the build and the transport and then stops short
-        # of the link that matters: an artifact a consumer installs and actually
-        # collects with. YNAB has 11 streams currently collecting, authenticates
-        # with a personal access token rather than browser automation or a
-        # native helper, and the owner holds the credential — so a published
-        # artifact can be taken all the way to real records.
-        #
-        # It also satisfies the self-sufficiency rule in
-        # scripts/connector-host-runtime-contract.mjs by construction: its only
-        # external imports are @pdpp/connector-protocol and zod, both pure ESM
-        # and both bundled. Contrast `gmail`, which the builder refuses by name
-        # because it statically imports imapflow's CommonJS tree.
-        connector:
-          - ynab
+      # YNAB authenticates with a personal access token, has many streams, and
+      # exercises the transport end to end, including a consumer install that
+      # collects data. Oura would prove the build, but not that collection path.
+      matrix: ${{ inputs.catalog-only && fromJSON('{"include":[{"connector":"catalog"}]}') || fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -170,6 +172,7 @@ jobs:
           node scripts/assert-publish-ref.mjs
 
       - name: Select the connector and version this run publishes
+        if: ${{ !inputs.catalog-only }}
         # A tag names both: `connector-oura-v0.1.0`. On workflow_dispatch the
         # connector comes from the input and the version from the manifest.
         #
@@ -192,7 +195,7 @@ jobs:
         run: node scripts/select-publish-target.mjs
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: steps.target.outputs.selected == 'true'
+        if: steps.target.outputs.selected == 'true' || inputs.catalog-only
         with:
           # Matches the `engines.node` floor in packages/polyfill-connectors/package.json,
           # so the bundle is produced by the toolchain CI proved green.
@@ -217,20 +220,23 @@ jobs:
         # artifact that only loads against the publisher's installed tree is an
         # artifact that fails on every consumer. scripts/publish-ref-gate.test.mjs
         # asserts this step is still here and still precedes the build.
-        if: steps.target.outputs.selected == 'true'
+        if: steps.target.outputs.selected == 'true' || inputs.catalog-only
         env:
+          CATALOG_ONLY: ${{ inputs.catalog-only }}
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
-          npm ci --ignore-scripts --prefix packages/polyfill-connectors
+          if [ "$CATALOG_ONLY" != true ]; then
+            npm ci --ignore-scripts --prefix packages/polyfill-connectors
+          fi
 
       - name: Build the artifact layers
         if: steps.target.outputs.selected == 'true'
         run: |
           node scripts/build-connector-oci-artifact.mjs \
-            --connector "${{ steps.target.outputs.connector }}" \
+            --connector "${{ steps.target.outputs.manifest }}" \
             --version "${{ steps.target.outputs.version }}" \
             --out "${RUNNER_TEMP}/artifact"
 
@@ -244,13 +250,13 @@ jobs:
         run: node scripts/verify-connector-oci-artifact.mjs --artifact "${RUNNER_TEMP}/artifact"
 
       - name: Install ORAS
-        if: steps.target.outputs.selected == 'true'
+        if: steps.target.outputs.selected == 'true' || inputs.catalog-only
         uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
         with:
           version: "1.2.3"
 
       - name: Install Cosign
-        if: steps.target.outputs.selected == 'true'
+        if: steps.target.outputs.selected == 'true' || inputs.catalog-only
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
         with:
           cosign-release: "v2.4.3"
@@ -507,3 +513,46 @@ jobs:
           cosign verify "${REPOSITORY}@${DIGEST}" \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Publish and verify the connector catalog
+        if: ${{ (steps.target.outputs.selected == 'true' || inputs.catalog-only) && github.ref == 'refs/heads/main' && !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CATALOG_DIR="${RUNNER_TEMP}/connector-catalog"
+          mkdir -p "$CATALOG_DIR"
+          CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"
+          PREVIOUS_ARGS=()
+          node scripts/lookup-manifest.mjs \
+            --reference ghcr.io/pdp-connect/connector-catalog:latest > "$CATALOG_DIR/lookup.json"
+          OUTCOME="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).outcome)' "$CATALOG_DIR/lookup.json")"
+          case "$OUTCOME" in
+            present)
+              PREVIOUS_DIGEST="$(node -e 'const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).digest; if (!/^sha256:[0-9a-f]{64}$/.test(d)) process.exit(1); console.log(d)' "$CATALOG_DIR/lookup.json")"
+              cosign verify "ghcr.io/pdp-connect/connector-catalog@${PREVIOUS_DIGEST}" \
+                --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com
+              oras pull "ghcr.io/pdp-connect/connector-catalog@${PREVIOUS_DIGEST}" --output "$CATALOG_DIR/previous"
+              PREVIOUS_ARGS=(--previous-catalog "$CATALOG_DIR/previous/catalog.json")
+              ;;
+            absent) ;;
+            *) echo "::error::previous catalog lookup is unknown; refusing to replace it"; exit 1 ;;
+          esac
+          node scripts/generate-connector-catalog.mjs \
+            --out "$CATALOG_DIR/catalog.json" \
+            --source-commit "$GITHUB_SHA" --generated-at "$CREATED" "${PREVIOUS_ARGS[@]}"
+
+          printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          cd "$CATALOG_DIR"
+          oras push ghcr.io/pdp-connect/connector-catalog \
+            --artifact-type application/vnd.pdpp.connector-catalog.v1+json \
+            --annotation "org.opencontainers.image.created=${CREATED}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --format json catalog.json:application/vnd.pdpp.connector-catalog.v1+json > push-result.json
+          DIGEST="$(node -e 'const d = JSON.parse(require("fs").readFileSync("push-result.json", "utf8")).digest; if (!/^sha256:[0-9a-f]{64}$/.test(d)) process.exit(1); console.log(d)')"
+          cosign sign --yes "ghcr.io/pdp-connect/connector-catalog@${DIGEST}"
+          cosign verify "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          oras tag "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" latest

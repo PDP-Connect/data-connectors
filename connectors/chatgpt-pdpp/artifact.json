@@ -1,5 +1,6 @@
 {
   "artifact_id": "chatgpt-pdpp",
+  "artifact_version": "0.1.2",
   "artifact_kind": "pdpp-collection-profile",
   "upstream": {
     "repository": "https://github.com/PDP-Connect/pdpp",

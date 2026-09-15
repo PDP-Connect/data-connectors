@@ -1,8 +1,8 @@
 {
 	"protocol_version": "0.1.0",
-	"connector_id": "https://registry.pdpp.dev/connectors/apple_contacts",
-	"connector_key": "apple_contacts",
-	"manifest_uri": "https://registry.pdpp.dev/connectors/apple_contacts",
+	"connector_id": "https://registry.pdpp.dev/connectors/apple-contacts",
+	"connector_key": "apple-contacts",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
 	"version": "0.1.0",
 	"display_name": "Apple Contacts",
 	"brand": {

@@ -38,7 +38,7 @@ src/connector/schemas.ts
 src/connector/types.ts
 ```
 
-The profile manifest must remain byte-equal to the pinned upstream PDPP manifest. The build reads runtime source from the exact PDPP commit in `provenance.json`. It uses `git archive`, so worktree changes cannot become build inputs.
+The profile manifest must match the pinned upstream PDPP manifest except for `version`. For a dependency-only rebuild, bump that version and the matching registry entry. The build rejects changes to any other manifest field. It reads runtime source from the exact PDPP commit in `provenance.json` and uses `git archive`, so worktree changes cannot become build inputs.
 
 GitHub predates the `artifact.json` contract and generic `scripts/build-pdpp-artifact.mjs` builder. Do not copy its special builder for a new connector. The [default authoring workflow](../../AUTHORING.md#default-workflow) explains the target packaging path.
 

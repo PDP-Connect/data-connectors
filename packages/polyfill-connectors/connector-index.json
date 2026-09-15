@@ -559,13 +559,13 @@
 		},
 		{
 			"brandIcon": "./manifests/icons/apple_contacts.svg",
-			"connectorId": "https://registry.pdpp.dev/connectors/apple_contacts",
+			"connectorId": "https://registry.pdpp.dev/connectors/apple-contacts",
 			"entry": "./connectors/apple_contacts/index.js",
 			"manifest": {
 				"protocol_version": "0.1.0",
-				"connector_id": "https://registry.pdpp.dev/connectors/apple_contacts",
-				"connector_key": "apple_contacts",
-				"manifest_uri": "https://registry.pdpp.dev/connectors/apple_contacts",
+				"connector_id": "https://registry.pdpp.dev/connectors/apple-contacts",
+				"connector_key": "apple-contacts",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
 				"version": "0.1.0",
 				"display_name": "Apple Contacts",
 				"brand": {
@@ -6671,11 +6671,11 @@
 		},
 		{
 			"brandIcon": "./manifests/icons/google_maps.svg",
-			"connectorId": "google-maps",
+			"connectorId": "https://registry.pdpp.dev/connectors/google-maps",
 			"entry": "./connectors/google_maps/index.js",
 			"manifest": {
 				"protocol_version": "0.1.0",
-				"connector_id": "google-maps",
+				"connector_id": "https://registry.pdpp.dev/connectors/google-maps",
 				"connector_key": "google-maps",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
 				"version": "0.1.0",
