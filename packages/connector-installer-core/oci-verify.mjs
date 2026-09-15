@@ -35,14 +35,32 @@
 // be the digest being installed (C3.3). Verifying only the first is the mistake
 // this file exists to not make.
 //
-// TLOG. `toMessageSignatureBundle` produces a bundle with no transparency-log
-// entries, because cosign keeps the Rekor entry in its own annotation rather
-// than in the layer. The verification below therefore runs with a tlog
-// threshold of 0 and rests on the Fulcio certificate's identity, which is the
-// property being pinned. That is a narrower guarantee than the tarball path's
-// bundle gives, and it is stated here rather than left to be discovered.
+// TLOG, AND WHY IT IS REQUIRED RATHER THAN SKIPPED. `toMessageSignatureBundle`
+// produces a bundle with no transparency-log entries, because cosign keeps the
+// Rekor entry in its own annotation — `dev.sigstore.cosign/bundle` — rather
+// than in the layer. Reading that annotation is therefore work, and skipping it
+// costs something specific: a Fulcio certificate is valid for ten minutes, and
+// with no tlog entry and no RFC3161 timestamp `@sigstore/verify` has NO
+// TIMESTAMP to check that validity window against. Certificate expiry stops
+// being checked at all, so a signature made inside the window is
+// indistinguishable from one made a year later with a leaked ephemeral key.
+//
+// The publish workflow runs `cosign sign --yes` with no `--tlog-upload=false`,
+// and cosign 2.4.3 uploads to Rekor by default, so the annotation is present on
+// everything this repository publishes. It carries the SET, the canonicalized
+// body, `integratedTime` and `logIndex`, which is exactly a bundle
+// `tlogEntries[]` with an `inclusionPromise` — verified OFFLINE against the
+// Rekor public key in the trusted root, with no network call. So the entry is
+// parsed, `tlogThreshold` stays at the library default of 1, and a signature
+// object without one is refused rather than accepted on a weaker basis.
+//
+// `ctLogThreshold` stays at the default too: real Fulcio leaves embed an SCT.
 
-import { toMessageSignatureBundle, bundleToJSON } from "@sigstore/bundle";
+import {
+  BUNDLE_V01_MEDIA_TYPE,
+  bundleToJSON,
+  toMessageSignatureBundle,
+} from "@sigstore/bundle";
 import { verify as verifySigstoreBundle } from "sigstore";
 
 import {
@@ -53,10 +71,28 @@ import {
   sha256Digest,
 } from "./oci-registry.mjs";
 
+// THE PIN IS A REGULAR EXPRESSION, SO IT MUST BE ANCHORED. sigstore matches
+// `certificateIdentityURI` with `signerIdentity.match(policyIdentity)` — an
+// UNANCHORED regular expression against the certificate SAN
+// (`@sigstore/verify/dist/policy.js`; the sigstore README says "for exact
+// matching, use an anchored pattern"). The pinned identity ends in
+// `@refs/heads/main`, so passing it verbatim also accepts
+// `@refs/heads/mainline`, `@refs/heads/main2`, `@refs/heads/main-fix` — any
+// branch of this repository whose name extends `main` — and any SAN that
+// merely contains the pinned string, including one from another repository.
+// That is exactly the case the pin exists for: a collaborator with branch push
+// rights edits the `github.ref == 'refs/heads/main'` gate out of the workflow
+// on such a branch, runs it, and Fulcio mints a certificate a verbatim pin
+// accepts. The constant stays human-readable; the pattern is derived here.
+export function toAnchoredIdentityPattern(identity) {
+  return `^${identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+}
+
 export const COSIGN_SIGNATURE_MEDIA_TYPE =
   "application/vnd.dev.cosign.simplesigning.v1+json";
 export const COSIGN_SIGNATURE_ANNOTATION = "dev.cosignproject.cosign/signature";
 export const COSIGN_CERTIFICATE_ANNOTATION = "dev.sigstore.cosign/certificate";
+export const COSIGN_BUNDLE_ANNOTATION = "dev.sigstore.cosign/bundle";
 
 // The layer media types the connector artifact contract defines. Selection is
 // BY MEDIA TYPE, never by position: `assets.tar.gz` is emitted only when the
@@ -128,14 +164,69 @@ export function extractCosignSignatures(signatureManifest) {
     const certificate = layer?.annotations?.[COSIGN_CERTIFICATE_ANNOTATION];
     if (typeof signature !== "string" || signature.length === 0) continue;
     if (!isValidDigest(layer?.digest)) continue;
+    const bundle = layer?.annotations?.[COSIGN_BUNDLE_ANNOTATION];
     signatures.push({
       signature,
       certificate: typeof certificate === "string" ? certificate : null,
+      rekorBundle: typeof bundle === "string" ? bundle : null,
       payloadDigest: layer.digest,
     });
   }
 
   return signatures;
+}
+
+/**
+ * Turn cosign's `dev.sigstore.cosign/bundle` annotation into a bundle tlog entry.
+ *
+ * The annotation is cosign's own JSON: `{ SignedEntryTimestamp, Payload: {
+ * body, integratedTime, logIndex, logID } }`. Everything needed to verify the
+ * inclusion promise offline is in there — the SET is over the canonicalized
+ * `{body, integratedTime, logIndex, logID}`, checked against the Rekor public
+ * key in the trusted root.
+ *
+ * `kindVersion` is read from the body rather than assumed, because the body is
+ * what the SET covers and what `verifyTLogBody` re-checks against the
+ * signature; asserting a kind here that the body contradicts would be a claim
+ * this function is not entitled to make. Anything malformed returns null and
+ * the caller refuses — an unparseable inclusion promise is not a verified one.
+ */
+export function parseCosignRekorBundle(annotation) {
+  let parsed;
+  try {
+    parsed = JSON.parse(annotation);
+  } catch {
+    return null;
+  }
+
+  const set = parsed?.SignedEntryTimestamp;
+  const payload = parsed?.Payload;
+  const body = payload?.body;
+  const logId = payload?.logID;
+  if (typeof set !== "string" || set.length === 0) return null;
+  if (typeof body !== "string" || body.length === 0) return null;
+  if (typeof logId !== "string" || !/^[0-9a-f]{64}$/i.test(logId)) return null;
+  if (!Number.isInteger(payload?.integratedTime)) return null;
+  if (!Number.isInteger(payload?.logIndex)) return null;
+
+  let decodedBody;
+  try {
+    decodedBody = JSON.parse(Buffer.from(body, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+  const kind = decodedBody?.kind;
+  const version = decodedBody?.apiVersion;
+  if (typeof kind !== "string" || typeof version !== "string") return null;
+
+  return {
+    logIndex: String(payload.logIndex),
+    logId: { keyId: Buffer.from(logId, "hex").toString("base64") },
+    kindVersion: { kind, version },
+    integratedTime: String(payload.integratedTime),
+    inclusionPromise: { signedEntryTimestamp: set },
+    canonicalizedBody: body,
+  };
 }
 
 /**
@@ -179,7 +270,7 @@ export function assertPayloadNamesDigest(payloadBytes, manifestDigest) {
  * signature whose digest is those bytes' SHA-256, with the Fulcio certificate
  * as the verification material.
  */
-function assembleBundle({ payloadBytes, signature, certificate }) {
+function assembleBundle({ payloadBytes, signature, certificate, tlogEntry }) {
   const der = Buffer.from(
     certificate
       .replace(/-----BEGIN CERTIFICATE-----/g, "")
@@ -188,13 +279,32 @@ function assembleBundle({ payloadBytes, signature, certificate }) {
     "base64"
   );
 
-  return bundleToJSON(
+  const bundle = bundleToJSON(
     toMessageSignatureBundle({
       digest: Buffer.from(sha256Digest(payloadBytes).slice("sha256:".length), "hex"),
       signature: Buffer.from(signature, "base64"),
       certificate: der,
     })
   );
+
+  // The library builder has no parameter for a tlog entry, so the parsed entry
+  // is attached to the serialized bundle it produced. Nothing here is trusted:
+  // the entry is re-parsed by `bundleFromJSON` and its inclusion promise is
+  // checked against the trusted root's Rekor key inside sigstore.
+  bundle.verificationMaterial.tlogEntries = [tlogEntry];
+
+  // AND THE BUNDLE IS DECLARED v0.1, WHICH IS NOT A DOWNGRADE. Cosign's
+  // annotation carries an inclusion PROMISE (the SET) and no inclusion PROOF —
+  // no checkpoint, no Merkle path. Those are different bundle versions in the
+  // spec, and `bundleFromJSON` enforces the difference: v0.2 and later REQUIRE
+  // an inclusion proof and reject a promise-only entry as an invalid bundle,
+  // while v0.1 requires the promise. `toMessageSignatureBundle` emits v0.3, so
+  // leaving its media type would make every cosign signature unparseable.
+  // v0.1 is the version that describes what cosign actually published, and the
+  // promise is verified either way — `verifyTLogInclusion` checks the SET
+  // against the trusted root's Rekor key offline.
+  bundle.mediaType = BUNDLE_V01_MEDIA_TYPE;
+  return bundle;
 }
 
 /**
@@ -257,6 +367,21 @@ export async function verifyOciSignature({
       continue;
     }
 
+    // Without an inclusion promise there is no timestamp, and without a
+    // timestamp the certificate's ten-minute validity window is never checked.
+    // Refuse rather than fall back to the weaker basis (D2).
+    const tlogEntry = candidate.rekorBundle
+      ? parseCosignRekorBundle(candidate.rekorBundle)
+      : null;
+    if (!tlogEntry) {
+      failures.push(
+        candidate.rekorBundle
+          ? "a signature layer carries an unreadable Rekor inclusion promise"
+          : "a signature layer carries no Rekor inclusion promise"
+      );
+      continue;
+    }
+
     // Verified against the digest that named it, like any other blob.
     const payloadBytes = await fetchBlob({
       registry,
@@ -278,16 +403,12 @@ export async function verifyOciSignature({
           payloadBytes,
           signature: candidate.signature,
           certificate: candidate.certificate,
+          tlogEntry,
         }),
         payloadBytes,
         {
           certificateIssuer,
-          certificateIdentityURI,
-          // Cosign stores its Rekor entry in a separate annotation rather than
-          // in the layer, so an assembled bundle legitimately has none. See the
-          // TLOG note at the top of this file for what that narrows.
-          tlogThreshold: 0,
-          ctLogThreshold: 0,
+          certificateIdentityURI: toAnchoredIdentityPattern(certificateIdentityURI),
         }
       );
       return { certificateIdentityURI, certificateIssuer };
