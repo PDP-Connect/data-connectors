@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { fetchResolvedArtifact, generateLock, installFromLock, loadConnectorIndex, verifyInstalled } from "../../packages/connector-installer-core/index.mjs";
+import { fetchResolvedArtifact, generateLock, installFromLock, loadConnectorIndex, verifyInstalled } from "@pdpp/connector-manager";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const connectorRoot = join(root, "connectors", "github-pdpp");
