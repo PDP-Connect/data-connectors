@@ -518,12 +518,19 @@ jobs:
         if: ${{ (steps.target.outputs.selected == 'true' || inputs.catalog-only) && github.ref == 'refs/heads/main' && !inputs.dry-run }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           CATALOG_DIR="${RUNNER_TEMP}/connector-catalog"
           mkdir -p "$CATALOG_DIR"
           CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"
           PREVIOUS_ARGS=()
+          # Same credential the connector lookup uses: anonymously, GHCR answers a
+          # repository that does not exist yet with a token-endpoint 403, which the
+          # lookup rightly classifies as unknown — so the first catalog publish
+          # could never happen. Authenticated, a missing repository is a clean 404.
+          LOOKUP_USERNAME="${GH_ACTOR:-github-actions}" \
+          LOOKUP_PASSWORD="${GH_TOKEN:-}" \
           node scripts/lookup-manifest.mjs \
             --reference ghcr.io/pdp-connect/connector-catalog:latest > "$CATALOG_DIR/lookup.json"
           OUTCOME="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).outcome)' "$CATALOG_DIR/lookup.json")"
