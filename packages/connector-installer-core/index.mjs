@@ -1186,16 +1186,28 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
       relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
       buffer: resolved.provenanceBuffer,
     },
-    // Licences and brand assets, which only the OCI transport carries: the
-    // publisher ships licences unconditionally because distributing the code
-    // requires distributing them (C5.4), so they are written rather than
-    // dropped on the floor. A tarball entry has no `assetFiles` here and the
-    // spread contributes nothing, which is why the existing three writes are
-    // unchanged for it.
-    ...(resolved.assetFiles ?? []).map((file) => ({
-      relativePath: `${artifactRoot}/${validateRelativeArtifactPath(file.path, "artifact asset path")}`,
-      buffer: file.buffer,
-    })),
+    // Licences and brand assets, which the publisher ships unconditionally
+    // because distributing the code requires distributing them (C5.4), so they
+    // are written rather than dropped on the floor.
+    //
+    // Gated on `resolved.oci` rather than on `assetFiles` being non-empty,
+    // and the difference is not cosmetic. A TARBALL collection-profile
+    // artifact also populates `assetFiles` — `unpackArtifactBuffer` puts every
+    // file that is not the manifest, entrypoint, provenance, a schema or the
+    // README there. Spreading it unconditionally therefore starts installing
+    // stray files from tarball artifacts that were previously ignored, which
+    // is a behaviour change to the path this PR is supposed to leave alone.
+    // Measured, not assumed: an unconditional spread wrote a fourth file for a
+    // tarball artifact carrying one extra member. Today's two published
+    // collection profiles happen to carry no such member, so no existing test
+    // fails either way — which is exactly why the gate is on the transport and
+    // not on whether the list happens to be empty.
+    ...(resolved.oci
+      ? resolved.assetFiles.map((file) => ({
+          relativePath: `${artifactRoot}/${validateRelativeArtifactPath(file.path, "artifact asset path")}`,
+          buffer: file.buffer,
+        }))
+      : []),
   ];
 
   return writes.map((write) => ({
