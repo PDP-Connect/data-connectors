@@ -640,6 +640,79 @@ test("an OCI install writes the layout the existing readers expect", async () =>
   });
 });
 
+test("adding licence writes does not start installing stray tarball files", async () => {
+  // The OCI path writes `assetFiles` so licences land on disk (C5.4), and
+  // `buildPdppCollectionProfileWrites` is SHARED with the tarball path — where
+  // `assetFiles` is also populated, with every artifact member that is not the
+  // manifest, entrypoint, provenance, a schema or the README.
+  //
+  // So the obvious spelling of that change (spread `assetFiles`
+  // unconditionally) silently starts installing files a tarball artifact
+  // previously carried and the installer previously ignored. No existing test
+  // catches it, because the two published collection profiles happen to carry
+  // no such file. This one builds an artifact that does.
+  const { createHash } = await import("node:crypto");
+  const { mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
+  const digestOf = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
+
+  const root = mkdtempSync(join(tmpdir(), "tarball-stray-"));
+  try {
+    const bundle = join(root, "bundle");
+    const members = {
+      "profile/collection-profile.json": JSON.stringify({ version: "1.0.0", name: "n", description: "d" }),
+      "dist/collection-profile.mjs": "export const x = 1;\n",
+      "provenance.json": "{}\n",
+      "STRAY.txt": "not one of the three\n",
+    };
+    for (const [path, content] of Object.entries(members)) {
+      const target = join(bundle, path);
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, content);
+    }
+
+    mkdirSync(join(root, "artifacts", "stray"), { recursive: true });
+    const tarPath = join(root, "artifacts", "stray", "stray.tgz");
+    execFileSync("tar", ["-czf", tarPath, "-C", bundle, "."]);
+
+    const installRoot = join(root, "install");
+    const result = await installFromLock({
+      lock: {
+        connectors: [
+          {
+            connectorId: "stray",
+            company: "c",
+            version: "1.0.0",
+            artifactKind: "pdpp-collection-profile",
+            artifactPath: "artifacts/stray/stray.tgz",
+            artifactSha256: digestOf(readFileSync(tarPath)),
+            manifestPath: "profile/collection-profile.json",
+            manifestSha256: digestOf(Buffer.from(members["profile/collection-profile.json"])),
+            entrypointPath: "dist/collection-profile.mjs",
+            entrypointSha256: digestOf(Buffer.from(members["dist/collection-profile.mjs"])),
+            provenancePath: "provenance.json",
+            provenanceSha256: digestOf(Buffer.from(members["provenance.json"])),
+          },
+        ],
+      },
+      source: { mode: "local", rootDir: root },
+      installRoot,
+      layout: "source",
+    });
+
+    assert.deepEqual(result.expectedPaths, [
+      "collection-profiles/stray/profile/collection-profile.json",
+      "collection-profiles/stray/dist/collection-profile.mjs",
+      "collection-profiles/stray/provenance.json",
+    ]);
+    assert.ok(
+      !existsSync(join(installRoot, "collection-profiles/stray/STRAY.txt")),
+      "a tarball artifact's extra member must not become an installed file"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an unsigned artifact is refused rather than installed unverified", async () => {
   await withRegistry({}, async (registry) => {
     const signer = createSigner();
