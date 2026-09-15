@@ -33,11 +33,6 @@
  * OS) — and better-sqlite3 is a compiled native addon for the host's ABI.
  * Shipping the per-platform tool layer is tracked as separate work.
  *
- * imapflow is the exception and is labelled as one below, because an entry
- * whose stated reason is false is worse than no entry: it stops anyone
- * rechecking. It is bundleable, it is listed only until the bundler grows a
- * createRequire banner, and the reason recorded against it says so.
- *
  * Until an entry is removed, a connector that STATICALLY needs any of these
  * fails the build by name.
  */
@@ -49,7 +44,7 @@ import { builtinModules } from "node:module";
  * config.json and provenance.json so an installed artifact records which
  * contract it was published under, rather than leaving a consumer to guess.
  */
-export const HOST_RUNTIME_CONTRACT_VERSION = "1.0";
+export const HOST_RUNTIME_CONTRACT_VERSION = "1.1";
 
 /**
  * Packages the supported runtime provides. Each entry states why it cannot be
@@ -68,10 +63,6 @@ export const HOST_PROVIDED = new Map([
 	[
 		"better-sqlite3",
 		"Compiled native addon built against the host's Node ABI. Requires the per-platform tool layer, which is not implemented.",
-	],
-	[
-		"imapflow",
-		"CommonJS IMAP client, listed here pending the bundler change that would remove it. NOT a native or host-coupled dependency: the earlier reason recorded here — that its pino/thread-stream/sonic-boom tree resolves modules through runtime require() and worker threads — was wrong, and execution contradicts it. The 'Dynamic require is not supported' failure is an esbuild ESM-output artifact over the Node builtin `tls`, not a property of imapflow. Bundling it and adding the standard createRequire banner produces a bundle that loads on a host with no node_modules and drives imapflow for real (default pino logger emits, connect() reaches a clean ECONNREFUSED); thread-stream never spawns a worker because imapflow calls bare pino() with no transport. Adopting the banner affects every connector, so it is its own change; until it lands, gmail is refused by name rather than published broken.",
 	],
 	[
 		"canvas",

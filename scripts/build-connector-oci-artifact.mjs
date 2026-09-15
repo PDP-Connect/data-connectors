@@ -322,7 +322,7 @@ async function main() {
 	const build = await esbuild.build({
 		absWorkingDir: packageRoot,
 		banner: {
-			js: `/* GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-connector-oci-artifact.mjs --connector ${connectorDirectoryName}. */`,
+			js: `/* GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-connector-oci-artifact.mjs --connector ${connectorDirectoryName}. */\nimport { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);`,
 		},
 		bundle: true,
 		entryPoints: [entrySource],

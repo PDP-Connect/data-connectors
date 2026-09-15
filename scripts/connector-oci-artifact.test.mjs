@@ -9,9 +9,8 @@
  * then fixed, so a test that stops discriminating is a regression in the gate
  * rather than a stale expectation.
  *
- * The real Oura artifact is built ONCE and reused: it is the only enabled
- * connector, it is the connector P1-4 actually affects, and building it proves
- * the pipeline works on production bytes rather than on a synthetic stand-in.
+ * The real Oura artifact is built once and reused for negative controls.
+ * The publish build suite separately builds and verifies the full allowlist.
  * Synthetic cases then swap ONLY the code layer of that real artifact, so every
  * other layer stays byte-identical and a failure can only come from the code.
  */
@@ -31,6 +30,7 @@ import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { classifyExternals } from "./connector-host-runtime-contract.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
@@ -347,34 +347,39 @@ describe("P1-5 — executable connectors are driven through the protocol", () =>
 	});
 });
 
-describe("the host-runtime contract is checked, not assumed", () => {
-	it("refuses a connector that statically imports a host-provided package", () => {
-		// gmail imports imapflow at the top level. imapflow's CommonJS tree cannot
-		// be bundled to working ESM, so the artifact cannot carry it — which makes
-		// this connector unpublishable until it defers the import. Under the old
-		// builder it built, verified against the publisher's node_modules, and
-		// would have failed on every consumer.
-		const result = build([
-			"--connector",
-			"gmail",
-			"--out",
-			join(workspace, "gmail"),
-		]);
-		assert.notEqual(result.status, 0, "a static host-provided import must not build");
-		assert.match(result.stderr, /imported STATICALLY/);
+describe("C-T3 named packaging refusals and the Gmail repair", () => {
+	it("Gmail bundles imapflow and verifies without node_modules", () => {
+		const artifact = join(workspace, "gmail");
+		const result = build(["--connector", "gmail", "--out", artifact]);
+		assert.equal(result.status, 0, result.stderr);
+		const provenance = JSON.parse(readFileSync(join(artifact, "provenance.json"), "utf8"));
+		assert.ok(provenance.bundled_dependencies.includes("imapflow"));
+		const verified = verify(artifact);
+		assert.equal(verified.status, 0, verified.stderr);
+		assert.match(verified.stdout, /runs with no node_modules\s+ok/);
 	});
 
-	it("still refuses connectors needing an unbundled native helper", () => {
-		// Pre-existing behaviour that must survive: Slack shells out to slackdump.
-		const result = build([
-			"--connector",
-			"slack",
-			"--out",
-			join(workspace, "slack"),
-		]);
-		assert.notEqual(result.status, 0);
-		assert.match(result.stderr, /resolves an executable from PATH/);
+	it("still rejects a static host-provided import while permitting a deferred import", () => {
+		const staticImport = classifyExternals([{ path: "patchright", kind: "import-statement" }]);
+		assert.equal(staticImport.violations.length, 1);
+		assert.match(staticImport.violations[0], /patchright.*imported STATICALLY/);
+		const deferred = classifyExternals([{ path: "patchright", kind: "dynamic-import" }]);
+		assert.deepEqual(deferred.violations, []);
+		assert.equal(deferred.hostProvided[0].package, "patchright");
 	});
+
+	for (const [connector, binary] of [
+		["slack", "SLACKDUMP_BIN"],
+		["signal", "SIGTOP_BIN"],
+		["google_messages", "GMCLI_BIN"],
+	]) {
+		it(`${connector} refuses its unbundled native helper ${binary}`, () => {
+			const result = build(["--connector", connector, "--out", join(workspace, connector)]);
+			assert.notEqual(result.status, 0);
+			assert.ok(result.stderr.includes(`resolves an executable from PATH or $${binary}`), result.stderr);
+			assert.match(result.stderr, /per-platform tool layer must land first/);
+		});
+	}
 });
 
 describe("P2-1 — version agreement", () => {
