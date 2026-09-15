@@ -35,11 +35,17 @@
 //
 //   present  — HTTP 200 from the manifest endpoint, with a usable sha256 digest
 //   absent   — HTTP 404 from the manifest endpoint, AND a distribution-spec
-//              error body whose code is MANIFEST_UNKNOWN or NAME_UNKNOWN
+//              error body carrying at least one error code, EVERY one of which
+//              is MANIFEST_UNKNOWN or NAME_UNKNOWN
 //   unknown  — EVERYTHING else, with no exceptions worth carving out:
 //              401/403 (auth), 5xx, any token-endpoint failure, transport
 //              errors, HTML, unparseable JSON, a 404 whose body does not carry
-//              one of those two codes, a 200 without a usable digest.
+//              one of those two codes or which mixes one with a code that says
+//              something else, a 200 without a usable digest, a request that
+//              outruns its deadline or whose body outruns the size a manifest
+//              descriptor can be, and a 401 whose challenge names an
+//              unparseable token realm or one this script will not send the
+//              registry credential to.
 //
 // A token-endpoint 404 cannot reach `absent` here for a structural reason
 // rather than a textual one: the token request is a DIFFERENT request, its
@@ -68,6 +74,99 @@ const MANIFEST_ACCEPT = [
 // from a proxy that never reached the registry — stays UNKNOWN.
 const ABSENCE_CODES = new Set(["MANIFEST_UNKNOWN", "NAME_UNKNOWN"]);
 
+// A manifest descriptor is small: an OCI image manifest or index naming a
+// handful of layers is a few kilobytes, and the distribution-spec error bodies
+// this script classifies from are smaller still. 1 MiB is far above anything
+// either can legitimately be, so a response that exceeds it is not a reply this
+// script can read — it is a peer sending something else, and the answer to
+// "does this reference exist" is then `unknown`. The ceiling exists because the
+// body is accumulated in memory: without it, a peer that streams indefinitely
+// consumes the runner's memory instead of being classified.
+const MAX_BODY_BYTES = 1024 * 1024;
+
+// The token endpoints this script will send the registry Basic credential to.
+//
+// The credential is the publishing token. The challenge that names its
+// destination comes from the 401 — from the peer — so an unconstrained helper
+// forwards the token wherever that peer points, which is a credential-exfiltration
+// path that needs no compromise of this script at all. The destination is
+// therefore checked against policy rather than trusted:
+//
+//   - the scheme must be https, so the token is not sent in clear text;
+//   - the host must either BE the registry host, or be one of the token hosts
+//     documented below for a registry whose auth service is a separate name.
+//
+// GHCR is the one such split this repository publishes to: ghcr.io challenges
+// with a realm on ghcr.io itself, and Docker Hub — kept here because the same
+// helper resolves any `<registry>/<name>:<tag>` — uses auth.docker.io. Any
+// other host, including a subdomain of the registry, gets no credential and the
+// lookup returns `unknown`; widening this is a deliberate edit, not an accident
+// of a peer's challenge.
+const TOKEN_HOSTS = new Map([
+  ["ghcr.io", ["ghcr.io"]],
+  ["registry-1.docker.io", ["auth.docker.io"]],
+  ["docker.io", ["auth.docker.io"]],
+  ["index.docker.io", ["auth.docker.io"]],
+]);
+
+/**
+ * May the Basic credential be sent to this token realm?
+ *
+ * Returns null when it may, or a diagnostic sentence when it may not. Callers
+ * turn a refusal into `unknown`: the manifest question is unanswered, and an
+ * unanswered question must never read as absence.
+ *
+ * `allowInsecureLoopback` is the behavioural tests' hook and nothing else. It
+ * is off unless the caller passes it, and the entrypoint only sets it from
+ * LOOKUP_ALLOW_INSECURE_TOKEN_REALM. What it waives is the TRANSPORT
+ * requirement, for a loopback host only; the destination check still runs, so
+ * under the hook the realm must still be the registry's own authority, port
+ * included. A plaintext realm on a routable address stays refused, because a
+ * test needing one would be a test of something this script must not do.
+ */
+export function checkTokenRealm(realmUrl, registry, { allowInsecureLoopback = false } = {}) {
+  const registryAuthority = registry.split("/")[0].toLowerCase();
+  const registryHostname = registryAuthority.split(":")[0];
+  const realmHost = realmUrl.hostname.toLowerCase();
+  const loopback = realmHost === "127.0.0.1" || realmHost === "::1" || realmHost === "localhost";
+
+  if (realmUrl.protocol !== "https:") {
+    // The hook waives the TRANSPORT requirement for loopback and nothing more.
+    // It is deliberately not an early `return null`: the host check below still
+    // runs, so a test registry cannot be talked into forwarding its credential
+    // to a different loopback port than the one it is published to.
+    const waived = allowInsecureLoopback && realmUrl.protocol === "http:" && loopback;
+    if (!waived) {
+      return (
+        `the 401 challenge points the credential at a non-HTTPS token realm ` +
+        `(${realmUrl.protocol}//${realmUrl.host}); the registry credential is not sent in clear text`
+      );
+    }
+  }
+
+  // On loopback the PORT is part of the authority — two ports on 127.0.0.1 are
+  // two different servers, which is exactly the case the tests exercise.
+  // Elsewhere the port is ignored: a registry addressed as `host:5000`
+  // challenging to a realm on `host` is the same authority.
+  if (loopback) {
+    if (realmUrl.host.toLowerCase() === registryAuthority) return null;
+    return (
+      `the 401 challenge points the credential at ${realmUrl.host}, which is neither the registry ` +
+      `host (${registryAuthority}) nor a token host documented for it; the credential is not forwarded there`
+    );
+  }
+
+  if (realmHost === registryHostname) return null;
+
+  const documented = TOKEN_HOSTS.get(registryHostname) ?? [];
+  if (documented.includes(realmHost)) return null;
+
+  return (
+    `the 401 challenge points the credential at ${realmHost}, which is neither the registry ` +
+    `host (${registryHostname}) nor a token host documented for it; the credential is not forwarded there`
+  );
+}
+
 /**
  * One HTTP round trip, with the body collected as a string.
  *
@@ -78,7 +177,7 @@ const ABSENCE_CODES = new Set(["MANIFEST_UNKNOWN", "NAME_UNKNOWN"]);
  * unknown unless it is the registry's own blob/manifest redirect, which this
  * caller does not follow because it only needs the status and the digest header.
  */
-function fetchOnce(url, { method = "GET", headers = {}, timeoutMs = 30000 } = {}) {
+function fetchOnce(url, { method = "GET", headers = {}, timeoutMs = 30000, maxBodyBytes = MAX_BODY_BYTES } = {}) {
   return new Promise((resolve, reject) => {
     let target;
     try {
@@ -91,26 +190,64 @@ function fetchOnce(url, { method = "GET", headers = {}, timeoutMs = 30000 } = {}
     // loopback registry without a certificate. Real publication is https.
     const impl = target.protocol === "http:" ? requestHttp : request;
 
-    const req = impl(
+    // ONE deadline for the WHOLE exchange — connect, headers and body. The
+    // timer starts before the request is issued and is never restarted, so a
+    // peer cannot hold the publish job open by dribbling a byte every few
+    // seconds. `request.setTimeout` alone could not do this: it measures
+    // INACTIVITY on the socket, so any traffic resets it and a slow-drip peer
+    // stays under it forever. The publish workflow blocks on this call, so the
+    // bound has to be on elapsed time, not on quiet time.
+    let settled = false;
+    let req = null;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const fail = (error) => {
+      finish(reject, error);
+      // Tear the socket down so a peer that is still sending cannot keep the
+      // process alive after its answer has already been decided.
+      req?.destroy();
+    };
+
+    const timer = setTimeout(() => {
+      fail(new Error(`request exceeded its ${timeoutMs}ms deadline`));
+    }, timeoutMs);
+    // The deadline must not itself keep the process alive once an answer is in.
+    timer.unref?.();
+
+    req = impl(
       target,
       { method, headers: { "user-agent": "pdpp-manifest-lookup/1", ...headers } },
       (res) => {
         const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
+        let received = 0;
+        res.on("data", (chunk) => {
+          received += chunk.length;
+          if (received > maxBodyBytes) {
+            // Refused rather than truncated. A truncated body would be
+            // classified — and a half-read JSON body parses to nothing, which
+            // is indistinguishable from a registry that sent no error code.
+            // Failing the request keeps that on the `unknown` path explicitly.
+            fail(new Error(`response body exceeded ${maxBodyBytes} bytes`));
+            res.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on("end", () =>
-          resolve({
+          finish(resolve, {
             status: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString("utf8"),
           }),
         );
-        res.on("error", reject);
+        res.on("error", fail);
       },
     );
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`request timed out after ${timeoutMs}ms`));
-    });
+    req.on("error", fail);
     req.end();
   });
 }
@@ -200,19 +337,33 @@ export function classifyManifestResponse(response) {
 
   if (status === 404) {
     const codes = parseDistributionErrorCodes(body);
-    if (codes.some((code) => ABSENCE_CODES.has(code))) {
+    // EVERY code must be an absence code, and there must be at least one.
+    //
+    // `some()` was wrong in a way that matters: a body carrying both
+    // MANIFEST_UNKNOWN and DENIED asserts two different things, one of which
+    // says the request was not allowed to ask. A reply that contradicts itself
+    // has not established that this manifest is missing — it has established
+    // that this registry's answer cannot be read — and `absent` is the outcome
+    // that authorises moving a released version tag. An empty or malformed
+    // array falls out of the same test, since `every()` over nothing is
+    // vacuously true and the length check is what rejects it.
+    if (codes.length > 0 && codes.every((code) => ABSENCE_CODES.has(code))) {
       return { outcome: "absent" };
     }
     // A 404 alone is NOT an absence. An intercepting proxy, a wrong path, a
     // misrouted request and a token-service failure can all produce one, and
     // none of them has looked at this manifest.
     const said = registryMessage(body);
+    const contradictory = codes.some((code) => ABSENCE_CODES.has(code));
     return {
       outcome: "unknown",
       reason:
-        `the manifest endpoint returned 404 but the body carries no MANIFEST_UNKNOWN or ` +
-        `NAME_UNKNOWN distribution error (codes: ${codes.length ? codes.join(", ") : "none"}` +
-        `${said ? `; registry said: ${said}` : ""})`,
+        `the manifest endpoint returned 404 but its body does not state absence and only absence: ` +
+        (contradictory
+          ? `it mixes an absence code with ${codes.filter((code) => !ABSENCE_CODES.has(code)).join(", ")}, ` +
+            `so the reply contradicts itself`
+          : `it carries no MANIFEST_UNKNOWN or NAME_UNKNOWN distribution error`) +
+        ` (codes: ${codes.length ? codes.join(", ") : "none"}${said ? `; registry said: ${said}` : ""})`,
     };
   }
 
@@ -232,7 +383,8 @@ export function classifyManifestResponse(response) {
  * Resolve `<registry>/<name>:<tag>` to one of present/absent/unknown.
  *
  * The auth flow is the standard two-legged token handshake, and its failures
- * are contained: if the challenge is unusable or the token request does not
+ * are contained: if the challenge is unusable, if its realm is unparseable or
+ * fails the credential-destination policy, or if the token request does not
  * return 200 with a token, this returns UNKNOWN and never issues the second
  * manifest request. That containment is what makes the reviewer's token-404
  * counterexample structurally impossible rather than merely filtered.
@@ -244,6 +396,7 @@ export async function lookupManifest({
   credential,
   scheme = "https",
   timeoutMs,
+  allowInsecureLoopback = false,
   fetchImpl = fetchOnce,
 }) {
   const manifestUrl = `${scheme}://${registry}/v2/${name}/manifests/${encodeURIComponent(tag)}`;
@@ -266,7 +419,26 @@ export async function lookupManifest({
       };
     }
 
-    const tokenUrl = new URL(challenge.realm);
+    // The realm is peer-supplied text. `new URL` throws on anything that is not
+    // a URL, and a throw HERE — outside the protected request — would have
+    // escaped `lookupManifest` as an exception rather than becoming an outcome,
+    // so the caller would see a crashed lookup instead of `unknown`.
+    let tokenUrl;
+    try {
+      tokenUrl = new URL(challenge.realm);
+    } catch (error) {
+      return {
+        outcome: "unknown",
+        reason: `the 401 challenge names an unparseable token realm (${error.message})`,
+      };
+    }
+
+    // WHERE the credential goes is policy, not the peer's choice. Checked
+    // before the request is built, so a refused destination is never contacted
+    // at all.
+    const refusal = checkTokenRealm(tokenUrl, registry, { allowInsecureLoopback });
+    if (refusal) return { outcome: "unknown", reason: refusal };
+
     if (challenge.service) tokenUrl.searchParams.set("service", challenge.service);
     tokenUrl.searchParams.set("scope", challenge.scope ?? `repository:${name}:pull`);
 
@@ -359,10 +531,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     tag,
     credential,
     scheme: process.env.LOOKUP_SCHEME === "http" ? "http" : "https",
-    // A registry that never answers must not hold the job open indefinitely.
+    // A registry that never answers — or one that answers a byte at a time —
+    // must not hold the job open indefinitely. This bounds the WHOLE request.
     // The default is generous; the behavioural tests shorten it so the
     // never-answered case does not cost thirty seconds per run.
     timeoutMs: Number(process.env.LOOKUP_TIMEOUT_MS) || undefined,
+    // The behavioural tests' hook, and the only way to reach a plaintext token
+    // realm. Off unless set, opt-in by name rather than inferred from
+    // LOOKUP_SCHEME, and even when set it permits loopback only. A CI run that
+    // publishes for real never sets it.
+    allowInsecureLoopback: process.env.LOOKUP_ALLOW_INSECURE_TOKEN_REALM === "1",
   });
 
   if (result.reason) process.stderr.write(`${reference}: ${result.outcome}: ${result.reason}\n`);

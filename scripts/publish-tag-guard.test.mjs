@@ -490,6 +490,12 @@ function runPublish({ registry, dir, name, code, lookupFault = "" }) {
     // Loopback has no certificate. Publication is https; this is the only
     // concession the harness makes to running without one.
     LOOKUP_SCHEME: "http",
+    // The loopback registry also challenges to a plaintext token realm on
+    // itself, which the credential-destination policy refuses by default. This
+    // is the named hook that permits it, and it permits it only for a loopback
+    // host. A real publish never sets it, so the policy that protects the
+    // registry credential is not weakened by the existence of these checks.
+    LOOKUP_ALLOW_INSECURE_TOKEN_REALM: "1",
     // Keeps the never-answered case cheap; it changes only how long the
     // unknown takes to be reached, never which outcome is reached.
     LOOKUP_TIMEOUT_MS: "1500",
