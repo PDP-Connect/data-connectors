@@ -209,6 +209,10 @@ function isZeroBlock(block) {
   return true;
 }
 
+function normalizedMemberDestination(path) {
+  return path.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
+}
+
 function decompressedMeter(maxDecompressedBytes, observeDecompressedChunk) {
   let total = 0;
   return new Transform({
@@ -278,6 +282,7 @@ export async function readTarGzEntries(
   let nextGnuPath = null;
   const globalPax = new Map();
   const nextPax = new Map();
+  const memberDestinations = new Set();
 
   const stopStreams = () => {
     source.destroy();
@@ -381,6 +386,11 @@ export async function readTarGzEntries(
         }
 
         validateMemberPath(path);
+        const destination = normalizedMemberDestination(path);
+        if (memberDestinations.has(destination)) {
+          fail(`archive contains duplicate member destination "${destination}"`);
+        }
+        memberDestinations.add(destination);
         declared += size;
         if (declared > maxUnpackedBytes) {
           fail(

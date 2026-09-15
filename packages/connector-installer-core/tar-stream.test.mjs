@@ -389,6 +389,32 @@ test("member bytes survive the read intact", async () => {
   });
 });
 
+test("duplicate normalized regular-file destinations are refused", async () => {
+  const first = Buffer.from("first\n");
+  const second = Buffer.from("second\n");
+  for (const [label, firstPath, secondPath] of [
+    ["exact duplicates", "collection-profile.mjs", "collection-profile.mjs"],
+    ["leading-dot aliases", "x", "./x"],
+    ["trailing-separator aliases", "x", "x/"],
+    ["dot-segment aliases", "icons/x.svg", "icons/./x.svg"],
+  ]) {
+    const archive = gzipSync(
+      Buffer.concat([
+        tarHeaderBlock(firstPath, first.length),
+        padToBlock(first),
+        tarHeaderBlock(secondPath, second.length),
+        padToBlock(second),
+        Buffer.alloc(1024),
+      ])
+    );
+    await assert.rejects(
+      () => readTarGzEntries(archive, { maxUnpackedBytes: 1024 }),
+      /duplicate member destination/,
+      label
+    );
+  }
+});
+
 for (const label of [
   "size-override",
   "newline-path",

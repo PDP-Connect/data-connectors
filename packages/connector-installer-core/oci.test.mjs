@@ -64,6 +64,28 @@ function countTempArtifacts() {
   return readdirSync(tmpdir()).filter((name) => name.startsWith("connector-oci-layer-")).length;
 }
 
+function duplicateMemberTarball(entries) {
+  const root = mkdtempSync(join(tmpdir(), "oci-duplicate-member-"));
+  const archive = join(root, "layer.tar");
+  try {
+    for (const [index, { path, content }] of entries.entries()) {
+      const source = `member-${index}`;
+      writeFileSync(join(root, source), content);
+      execFileSync("tar", [
+        ...(index === 0 ? ["-cf", archive] : ["--append", "-f", archive]),
+        "--transform",
+        `s|${source}|${path}|`,
+        "-C",
+        root,
+        source,
+      ]);
+    }
+    return execFileSync("gzip", ["-c", archive]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 test("A-T1 resolves a version tag to a digest and refuses to re-resolve once pinned", async () => {
   await withRegistry({ challenge: true }, async (registry) => {
     const signer = createSigner();
@@ -934,6 +956,62 @@ test("an OCI install resolves artifact-wide config entrypoint to a code-layer me
     } finally {
       rmSync(installRoot, { recursive: true, force: true });
     }
+  });
+});
+
+test("an OCI artifact with two differing entrypoint members is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const codeBytes = duplicateMemberTarball([
+      { path: "collection-profile.mjs", content: "export const value = 1;\n" },
+      { path: "collection-profile.mjs", content: "export const value = 2;\n" },
+    ]);
+    const { digest } = publishArtifact(registry, { signer, codeBytes });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "unsafe-archive");
+        assert.match(error.message, /duplicate member destination "collection-profile\.mjs"/);
+        return true;
+      }
+    );
+  });
+});
+
+test("an OCI artifact with x and ./x code members is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const codeBytes = duplicateMemberTarball([
+      { path: "x", content: "export const value = 1;\n" },
+      { path: "./x", content: "export const value = 2;\n" },
+    ]);
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeBytes,
+      configOverrides: { entrypoint: "code/x" },
+    });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      /duplicate member destination "x"/
+    );
+  });
+});
+
+test("an OCI artifact with two differing assets at one destination is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const assetsBytes = duplicateMemberTarball([
+      { path: "icons/ynab.svg", content: "<svg>first</svg>\n" },
+      { path: "./icons/ynab.svg", content: "<svg>second</svg>\n" },
+    ]);
+    const { digest } = publishArtifact(registry, { signer, withAssets: true, assetsBytes });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      /duplicate member destination "icons\/ynab\.svg"/
+    );
   });
 });
 

@@ -326,6 +326,7 @@ export function publishArtifact(
     extraLayers = [],
     codeFiles = null,
     codeBytes: codeBytesOverride = null,
+    assetsBytes: assetsBytesOverride = null,
     tamperLayer = null,
     configOverrides = {},
   } = {}
@@ -344,7 +345,9 @@ export function publishArtifact(
     codeBytesOverride ??
     tarball(codeFiles ?? { "collection-profile.mjs": "export const collect = () => {};\n" });
   const licensesBytes = tarball({ LICENSE: "Apache-2.0\n", NOTICE: "notice\n" });
-  const assetsBytes = withAssets ? tarball({ "icons/ynab.svg": "<svg/>\n" }) : null;
+  const assetsBytes = withAssets
+    ? (assetsBytesOverride ?? tarball({ "icons/ynab.svg": "<svg/>\n" }))
+    : null;
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
   // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the
