@@ -199,6 +199,44 @@ test("a Bearer challenge naming a realm off the registry's origin is refused", a
   }
 });
 
+// D5: MAX_BLOB_BYTES bounds the COMPRESSED layer, which bounds nothing useful
+// about what lands on disk. This fixture is a real decompression bomb: well
+// under the 64 MiB blob cap on the wire, far over it unpacked.
+test("a layer that decompresses past the ceiling is refused and cleaned up", async () => {
+  await withRegistry({}, async (registry) => {
+    const before = countTempArtifacts();
+    const signer = createSigner();
+    // 200 MB of zeros; gzip takes it to a couple of hundred KB.
+    const bombBytes = tarball({ "code/collection-profile.mjs": Buffer.alloc(200 * 1024 * 1024) });
+    assert.ok(
+      bombBytes.length < 64 * 1024 * 1024,
+      "the fixture must pass the compressed-blob cap, or it proves nothing about the unpacked one"
+    );
+
+    const { digest } = publishArtifact(registry, { signer, codeBytes: bombBytes });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(
+          null,
+          ociLockEntry(registry, digest),
+          fixtureOptions(registry, signer)
+        ),
+      (error) => {
+        assert.equal(error.reason, "unsafe-archive");
+        assert.match(error.message, /ceiling/);
+        return true;
+      }
+    );
+
+    assert.equal(
+      countTempArtifacts(),
+      before,
+      "a refused bomb must not leave its bytes in the temp dir"
+    );
+  });
+});
+
 test("A-T2 classifies present/absent/unknown and refuses on unknown", async () => {
   // The decision table, driven directly. `unknown` must never read as absence,
   // because absence is what a caller acts on (C2.2, C6.4).
