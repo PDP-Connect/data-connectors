@@ -8,6 +8,7 @@ import {
   generateLock,
   installFromLock,
   loadConnectorIndex,
+  parseConnectorOciReference,
   readJson,
   verifyInstalled,
   checkForUpdates,
@@ -17,8 +18,47 @@ function usage() {
   console.error(`Usage:
   connector-installer lock --dependencies <path> [--lock <path>] [--index-url <url>] [--from-local <dir>]
   connector-installer install --lock <path> --install-root <dir> --layout <snapshot|source> [--index-url <url>] [--from-local <dir>] [--prune]
+  connector-installer install --oci <ref> --connector-id <id> --install-root <dir> --layout <snapshot|source> [--prune]
   connector-installer verify --lock <path> --install-root <dir> --layout <snapshot|source> [--index-url <url>] [--from-local <dir>]
-  connector-installer updates --lock <path> [--index-url <url>] [--from-local <dir>]`);
+  connector-installer verify --oci <ref> --connector-id <id> --install-root <dir> --layout <snapshot|source>
+  connector-installer updates --lock <path> [--index-url <url>] [--from-local <dir>]
+
+An <ref> is ghcr.io/pdp-connect/connector/<key>@sha256:<digest> or
+ghcr.io/pdp-connect/connector/<key>:<version>. Prefer the digest form: a
+version tag is resolved once and what it resolves to can change, so only a
+digest names the same bytes on every run.`);
+}
+
+/**
+ * Build a one-entry lock from an OCI reference given on the command line.
+ *
+ * The CLI does not get a second install path. A reference is turned into the
+ * same lock entry shape the file would have held and handed to the same
+ * `installFromLock`, so a one-off pull and a locked install go through
+ * identical verification — there is no "quick" route that checks less.
+ */
+function lockFromOciReference(options) {
+  const reference = parseConnectorOciReference(options.oci);
+  const connectorId = options.connectorId ?? `${reference.connectorKey}-pdpp`;
+  return {
+    lockVersion: "2.0",
+    connectors: [
+      {
+        connectorId,
+        connectorKey: reference.connectorKey,
+        version: options.version ?? reference.version ?? null,
+        artifactKind: "pdpp-collection-profile",
+        manifestPath: "profile/collection-profile.json",
+        entrypointPath: "dist/collection-profile.mjs",
+        provenancePath: "provenance.json",
+        oci: {
+          registry: reference.registry,
+          repository: reference.repository,
+          digest: reference.digest,
+        },
+      },
+    ],
+  };
 }
 
 function parseArgs(argv) {
@@ -79,13 +119,15 @@ async function main() {
   }
 
   if (options.command === "install") {
-    if (!(options.lock && options.installRoot && options.layout)) {
+    if (!((options.lock || options.oci) && options.installRoot && options.layout)) {
       usage();
       process.exit(1);
     }
 
-    const lock = readJson(options.lock);
-    const source = await loadIndexSource(options);
+    // An OCI reference needs no index: the reference IS the resolution, so no
+    // index is loaded and none is required to be reachable.
+    const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
+    const source = options.oci ? null : await loadIndexSource(options);
     const result = await installFromLock({
       lock,
       source,
@@ -98,13 +140,13 @@ async function main() {
   }
 
   if (options.command === "verify") {
-    if (!(options.lock && options.installRoot && options.layout)) {
+    if (!((options.lock || options.oci) && options.installRoot && options.layout)) {
       usage();
       process.exit(1);
     }
 
-    const lock = readJson(options.lock);
-    const source = await loadIndexSource(options);
+    const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
+    const source = options.oci ? null : await loadIndexSource(options);
     const result = await verifyInstalled({
       lock,
       source,
