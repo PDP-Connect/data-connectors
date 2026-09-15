@@ -28,8 +28,7 @@
  * `connectors/oura/` alone ships something that cannot run. Bundling resolves
  * the in-tree graph and leaves only genuine npm packages external, which the
  * declared-externals gate below then forces us to enumerate rather than
- * discover at install time. This mirrors scripts/build-pdpp-artifact.mjs,
- * which solved the same problem for the two PDPP-upstream artifacts.
+ * discover at install time.
  *
  * Usage:
  *   node scripts/build-connector-oci-artifact.mjs --connector oura --out /tmp/oura
