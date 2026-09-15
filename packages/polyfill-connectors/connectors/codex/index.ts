@@ -1196,35 +1196,53 @@ export interface EmitSessionsFromMapsArgs {
 }
 
 /**
- * Read a session's held-body digest out of the cursors this run is about to
- * persist.
+ * Read a session's held-body digest out of the state this run is about to
+ * persist, preferring what the run can say about the CURRENT file over what
+ * history says about a file that is gone.
  *
- * The cursor map is the right source precisely because of the invariant every
- * writer into it already maintains: a `captured_sha256` is only ever written
- * alongside a size and mtime the run has just confirmed. The skip path writes
- * one after `decideRolloutAction` returned `skip` (size AND mtime equal) or
- * after capturing the current bytes itself; the parse path writes either a
- * fresh digest or `priorStillDescribesFile`, which tests the same equality. So
- * "present in `newFileCursors`" already means "describes this file generation",
- * and reconciliation does not restate that rule in a second place where the two
- * copies could drift apart.
+ * Two sources, consulted in that order.
  *
- * Falls back to the prior cursor map ONLY for a file this scan never reached
- * (`newFileCursors` has no entry): a session whose rollout was not walked this
- * run — filtered out by an enumeration scope, or in a run that skipped rollouts
- * entirely — keeps the reference it already had rather than having the re-emit
- * erase it. A file the scan DID reach and deliberately left unmarked (capture
- * failed, bytes rewritten) must not be rescued from the stale prior map, which
- * is why a present-but-digestless new cursor ends the lookup.
+ * 1. The rollout file cursors. This map is authoritative about the current
+ *    generation because of the invariant every writer into it maintains: a
+ *    `captured_sha256` is only ever written alongside a size and mtime the run
+ *    has just confirmed. The skip path writes one after `decideRolloutAction`
+ *    returned `skip` (size AND mtime equal) or after capturing the current
+ *    bytes itself; the parse path writes either a fresh digest or
+ *    `priorStillDescribesFile`, which tests the same equality. So "present in
+ *    `newFileCursors`" already means "describes this file generation", and
+ *    reconciliation does not restate that rule in a second place where the two
+ *    copies could drift apart. The prior map answers only for a file this scan
+ *    never reached (`newFileCursors` has no entry) — filtered out by an
+ *    enumeration scope, or a run that skipped rollouts entirely.
+ *
+ * 2. The retained reference on the session's own fingerprint. A file cursor is
+ *    scan state: when the source rollout is deleted from every watched root, a
+ *    completed scan legitimately checkpoints a map without it, and after that
+ *    neither cursor map can name the body. The bytes are still held, so the
+ *    session's reference must be too — which is why it also lives in
+ *    per-session state that no scan prunes.
+ *
+ * The ordering is what keeps history from outranking the present. A file the
+ * scan DID reach and deliberately left unmarked (capture failed, bytes
+ * rewritten, a new generation this run could not hold) is a present object
+ * with no digest, and that ENDS the lookup: neither the stale prior map nor
+ * the retained reference may rescue it. `artifactCaptureFields` then reports
+ * this run's own outcome. The retained reference speaks only when the run has
+ * nothing at all to say about the file — the source is gone.
  */
 function durableCaptureLookup(args: {
 	fileCursors: Record<string, RolloutFileCursor>;
 	newFileCursors: Record<string, RolloutFileCursor>;
+	retained: (id: string) => string | undefined;
 }): (id: string) => SessionCaptureState | undefined {
 	return (id: string): SessionCaptureState | undefined => {
 		const cursor = args.newFileCursors[id] ?? args.fileCursors[id];
-		const sha256 = cursor?.captured_sha256;
-		return sha256 === undefined ? undefined : { sha256 };
+		if (cursor) {
+			const sha256 = cursor.captured_sha256;
+			return sha256 === undefined ? undefined : { sha256 };
+		}
+		const retained = args.retained(id);
+		return retained === undefined ? undefined : { sha256: retained };
 	};
 }
 
@@ -1273,17 +1291,53 @@ function makeThreadFingerprint(
 	thread: ThreadRow,
 	agg: RolloutAggregate | undefined,
 	priorFingerprint: ThreadFingerprint | undefined,
+	durableCapture: SessionCaptureState | undefined,
 ): ThreadFingerprint {
 	// Counts must follow the same fallback chain as buildThreadSessionRecord
 	// — otherwise the fingerprint we persist would disagree with the record
 	// we just emitted, and the next run would think state_5 hasn't moved
 	// while the count field oscillates.
+	const retained = retainedReference(agg, durableCapture);
 	return {
 		updated_at: thread.updated_at ?? null,
 		message_count: agg?.messageCount ?? priorFingerprint?.message_count ?? null,
 		function_call_count:
 			agg?.functionCallCount ?? priorFingerprint?.function_call_count ?? null,
+		// Omitted rather than written as null when there is no reference, so a
+		// session that never had a body adds no key to STATE and the fingerprint
+		// shape is unchanged for every pre-capture caller.
+		...(retained === null ? {} : { retained_sha256: retained }),
 	};
+}
+
+/**
+ * The body reference to persist for this session, following exactly the
+ * precedence the emitted record uses — the two must agree, or the row and the
+ * state that defends it would drift.
+ *
+ *   1. This run captured the bytes: that digest is the reference.
+ *   2. This run examined the file and did NOT end up holding it (capture
+ *      failed or was unavailable): the session has no reference this run can
+ *      vouch for. Clearing it is the point — a superseded or unheld
+ *      generation must not leave history behind to be mistaken for the
+ *      current body on a later metadata-only run. The retry obligation lives
+ *      on the unmarked file cursor, as before.
+ *   3. Otherwise take whatever `durableCaptureLookup` resolved. That single
+ *      call is the only carry-forward path, and it has already applied the
+ *      rule that a scanned-but-unmarked file ends the lookup — so a file the
+ *      scan reached and left digestless cannot have its reference resurrected
+ *      here either.
+ */
+function retainedReference(
+	agg: RolloutAggregate | undefined,
+	durableCapture: SessionCaptureState | undefined,
+): string | null {
+	if (agg?.artifactCapture) {
+		return agg.artifactCapture === "captured"
+			? (agg.artifactSha256 ?? null)
+			: null;
+	}
+	return durableCapture?.sha256 ?? null;
 }
 
 /**
@@ -1323,13 +1377,14 @@ export function emitSessionsFromMaps({
 		emittedSessionIds.add(id);
 		const agg = rolloutAggregates.get(id);
 		const prior = cursor?.prior(id);
+		const durable = durableCapture?.(id);
 		if (shouldReemitThreadSession(t, agg, prior, forceReemit?.has(id))) {
 			emitRecord(
 				"sessions",
-				buildThreadSessionRecord(id, t, agg, prior, durableCapture?.(id)),
+				buildThreadSessionRecord(id, t, agg, prior, durable),
 			);
 		}
-		cursor?.note(id, makeThreadFingerprint(t, agg, prior));
+		cursor?.note(id, makeThreadFingerprint(t, agg, prior, durable));
 	}
 	for (const [id, agg] of rolloutAggregates) {
 		if (emittedSessionIds.has(id)) {
@@ -1368,13 +1423,14 @@ function emitSessionsFromRows({
 		const agg = rolloutAggregates.get(t.id);
 		rolloutAggregates.delete(t.id);
 		const prior = cursor.prior(t.id);
+		const durable = durableCapture(t.id);
 		if (shouldReemitThreadSession(t, agg, prior, forceReemit.has(t.id))) {
 			emitRecord(
 				"sessions",
-				buildThreadSessionRecord(t.id, t, agg, prior, durableCapture(t.id)),
+				buildThreadSessionRecord(t.id, t, agg, prior, durable),
 			);
 		}
-		cursor.note(t.id, makeThreadFingerprint(t, agg, prior));
+		cursor.note(t.id, makeThreadFingerprint(t, agg, prior, durable));
 	}
 
 	for (const [id, agg] of rolloutAggregates) {
@@ -2754,6 +2810,9 @@ function coerceFingerprintEntry(value: unknown): ThreadFingerprint | null {
 		updated_at: nullableFiniteNumber(v.updated_at),
 		message_count: nullableFiniteNumber(v.message_count),
 		function_call_count: nullableFiniteNumber(v.function_call_count),
+		...(typeof v.retained_sha256 === "string" && v.retained_sha256.length > 0
+			? { retained_sha256: v.retained_sha256 }
+			: {}),
 	};
 }
 
@@ -3273,7 +3332,12 @@ async function collect({
 			rolloutAggregates,
 			emitRecord,
 			cursor: threadFingerprints,
-			durableCapture: durableCaptureLookup({ fileCursors, newFileCursors }),
+			durableCapture: durableCaptureLookup({
+				fileCursors,
+				newFileCursors,
+				retained: (id) =>
+					threadFingerprints.prior(id)?.retained_sha256 ?? undefined,
+			}),
 			forceReemit: backfilledSessions,
 		});
 		await waitForEmitDrain();

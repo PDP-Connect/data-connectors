@@ -327,6 +327,26 @@ function latestStoredSession(
 	return stored;
 }
 
+/**
+ * The session's retained body reference, as the server persisted it.
+ *
+ * This is the state that must outlive the source file, so a control that only
+ * reads the emitted row is incomplete: the row is rebuilt from this run's
+ * aggregate first, and would look right for one more run even after the state
+ * defending it had gone wrong. Asserting both is what pins the contract.
+ */
+function retainedFor(
+	state: Record<string, unknown>,
+	id: string = SESSION_ID,
+): string | undefined {
+	const fingerprints = (
+		state.sessions as
+			| { thread_fingerprints?: Record<string, { retained_sha256?: string }> }
+			| undefined
+	)?.thread_fingerprints;
+	return fingerprints?.[id]?.retained_sha256;
+}
+
 /** The rollout cursor the next run will read, as the server persisted it. */
 function cursorFor(
 	state: Record<string, unknown>,
@@ -1023,5 +1043,206 @@ test("enabling capture backfills a previously-unavailable body exactly once", as
 	assert.ok(
 		!harness.progress.some((line) => line.includes("awaiting_upload")),
 		"a settled body is not re-captured on a later unchanged run",
+	);
+});
+
+test("a deleted source does not erase the stored body reference", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, { title: "retained title", updatedAt: 1_776_000_100 });
+	const harness = await makeHarness(source);
+
+	// Run 1 parses and captures: spool, cursor and stored row all carry D.
+	await harness.run();
+	const digest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_sha256,
+		digest,
+		"run 1 stored the digest",
+	);
+
+	// The rollout is retired from every watched root. This is ordinary
+	// deletion, not a move into the archive tree the scan still walks: the
+	// roots stay readable and enumerate successfully, so no gap and no
+	// unreadable-boundary retention applies and the file's cursor legitimately
+	// drops out of the next persisted map.
+	await rm(source.rolloutPath);
+
+	// Run 2 is that completed scan. It checkpoints the cursor map without the
+	// deleted file, which is what retires the prior-map fallback.
+	harness.ingested.length = 0;
+	await harness.run();
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		undefined,
+		"the completed scan checkpointed a cursor map without the deleted file",
+	);
+
+	// Run 3: Codex renames the thread while the rollout stays absent. No
+	// aggregate, no cursor — the run rebuilds the row from thread metadata
+	// alone, and the server's replace-on-conflict upsert makes omission
+	// deletion.
+	writeThreadsDb(source, {
+		title: "renamed after deletion",
+		updatedAt: 1_776_000_900,
+	});
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.ok(stored, "run 3 re-emitted the session on the metadata change");
+	assert.equal(
+		stored?.title,
+		"renamed after deletion",
+		"the re-emit really is the metadata change",
+	);
+	assert.equal(
+		stored?.artifact_capture,
+		"captured",
+		"the stored row still says the body is captured after the source was deleted",
+	);
+	assert.equal(
+		stored?.artifact_sha256,
+		digest,
+		"the stored row still carries the digest after the source was deleted",
+	);
+
+	// Retention's whole point: the bytes outlive the source.
+	const spool = new LocalDeviceBlobSpool({ root: source.spoolRoot });
+	assert.ok(
+		spool.has(digest),
+		"the digest the row carries is still a held body",
+	);
+
+	// And the reference that defends the row is session state, not scan state:
+	// it is still there after the scan checkpointed a cursor map without the file.
+	assert.equal(
+		retainedFor(harness.state()),
+		digest,
+		"the reference is held in session state, independent of the cursor",
+	);
+});
+
+test("a new rollout generation supersedes the retained reference of a deleted one", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, {
+		title: "superseded title",
+		updatedAt: 1_776_000_100,
+	});
+	const harness = await makeHarness(source);
+
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_sha256,
+		firstDigest,
+		"run 1 stored the first generation's digest",
+	);
+
+	await rm(source.rolloutPath);
+	harness.ingested.length = 0;
+	await harness.run();
+
+	// A NEW rollout for the same thread appears with different bytes. Retained
+	// history describes a generation that is no longer the source of truth, so
+	// the live capture must win.
+	const replacement = Buffer.from(
+		jsonlLines([
+			sessionMetaLine(SESSION_ID),
+			messageLine("y".repeat(300 * 1024), "2026-04-15T19:00:00.000Z"),
+		]),
+		"utf8",
+	);
+	await writeFile(source.rolloutPath, replacement);
+	const secondDigest = createHash("sha256").update(replacement).digest("hex");
+	assert.notEqual(
+		secondDigest,
+		firstDigest,
+		"the new generation really differs",
+	);
+
+	harness.ingested.length = 0;
+	await harness.run();
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.equal(
+		stored?.artifact_sha256,
+		secondDigest,
+		"the live generation's digest replaced the retained one",
+	);
+	assert.equal(
+		stored?.artifact_capture,
+		"captured",
+		"and it is reported as a capture of this run",
+	);
+	assert.equal(
+		retainedFor(harness.state()),
+		secondDigest,
+		"and the retained reference was superseded, not left naming the old bytes",
+	);
+});
+
+test("a failed capture of a new generation reports failure, not the retained digest", async () => {
+	const source = await makeSource();
+	writeThreadsDb(source, { title: "failure title", updatedAt: 1_776_000_100 });
+	const harness = await makeHarness(source);
+
+	await harness.run();
+	const firstDigest = createHash("sha256").update(source.body).digest("hex");
+	assert.equal(
+		latestStoredSession(harness.ingested)?.artifact_sha256,
+		firstDigest,
+		"run 1 stored the first generation's digest",
+	);
+
+	await rm(source.rolloutPath);
+	harness.ingested.length = 0;
+	await harness.run();
+
+	// A new generation appears, but capture cannot hold it. Retained history
+	// must not stand in for bytes this run failed to take.
+	const replacement = Buffer.from(
+		jsonlLines([
+			sessionMetaLine(SESSION_ID),
+			messageLine("w".repeat(250 * 1024), "2026-04-15T20:00:00.000Z"),
+		]),
+		"utf8",
+	);
+	await writeFile(source.rolloutPath, replacement);
+	const staging = join(source.spoolRoot, "tmp");
+	await mkdir(staging, { recursive: true });
+	await chmod(staging, 0o500);
+
+	harness.ingested.length = 0;
+	try {
+		await harness.run();
+	} finally {
+		await chmod(staging, 0o700);
+	}
+
+	const stored = latestStoredSession(harness.ingested);
+	assert.equal(
+		stored?.artifact_capture,
+		"failed",
+		"the failure is reported as itself",
+	);
+	assert.notEqual(
+		stored?.artifact_sha256,
+		firstDigest,
+		"the retained digest did not paper over the failure",
+	);
+	assert.equal(
+		cursorFor(harness.state())?.captured_sha256,
+		undefined,
+		"and the cursor stays unmarked so the next run retries",
+	);
+	// The load-bearing assertion for this case. The emitted row is right either
+	// way, because it is built from this run's own failure first. What a
+	// surviving reference would corrupt is the NEXT run: a metadata-only update
+	// would find retained history naming a superseded generation and report it
+	// as the current body. Clearing it is what keeps retained history honest.
+	assert.equal(
+		retainedFor(harness.state()),
+		undefined,
+		"a generation this run failed to hold leaves no retained reference behind",
 	);
 });
