@@ -13,7 +13,7 @@ import {
   readJson,
   verifyInstalled,
   checkForUpdates,
-} from "@pdpp/connector-manager";
+} from "../connector-installer-core/index.mjs";
 
 function usage() {
   console.error(`Usage:
