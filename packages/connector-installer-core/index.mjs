@@ -35,6 +35,16 @@ export function defaultArtifactCertificateIdentityResolver() {
   return DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY;
 }
 
+// sigstore matches `certificateIdentityURI` as an unanchored regular expression
+// against the certificate SAN (sigstore README: "for exact matching, use an
+// anchored pattern"). The identities we pin end in `@refs/heads/main`, so an
+// unanchored pattern also accepts `@refs/heads/mainline`, `@refs/heads/main2`,
+// and any SAN that merely contains the pinned string. The pinned values stay
+// human-readable; this turns one into the exact-match pattern at the call site.
+export function toAnchoredIdentityPattern(identity) {
+  return `^${identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+}
+
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -284,7 +294,7 @@ async function verifyRemoteSignature({
   try {
     await sigstoreVerifier(bundle, payloadBuffer, {
       certificateIssuer: DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
-      certificateIdentityURI,
+      certificateIdentityURI: toAnchoredIdentityPattern(certificateIdentityURI),
     });
   } catch (error) {
     throw new Error(
