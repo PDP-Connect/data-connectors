@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { isBuiltin } from "node:module";
@@ -42,6 +43,29 @@ function packedFiles(packageRoot) {
 }
 
 for (const directory of [".", "packages/connector-installer-core"]) {
+  test(`${directory}: extracted package exports fetchCatalog with its schema`, (t) => {
+    const temporaryRoot = join(homedir(), ".tmp");
+    mkdirSync(temporaryRoot, { recursive: true });
+    const fixture = mkdtempSync(join(temporaryRoot, "catalog-package-"));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const output = execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", fixture], {
+      cwd: resolve(repoRoot, directory), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(output);
+    const [packed] = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    execFileSync("tar", ["-xzf", join(fixture, packed.filename), "-C", fixture]);
+    // Use installed dependencies, but resolve all package files from the tarball.
+    // The graph test below separately requires every import to be a production dependency.
+    symlinkSync(join(repoRoot, "node_modules"), join(fixture, "node_modules"), "dir");
+    const entry = directory === "." ? "./packages/connector-installer-core/index.mjs" : "./index.mjs";
+    execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { fetchCatalog } from ${JSON.stringify(entry)};
+      assert.equal(typeof fetchCatalog, "function");
+      await assert.rejects(fetchCatalog({ lastAcceptedGeneratedAt: "invalid" }), /Invalid lastAcceptedGeneratedAt/);
+    `], { cwd: join(fixture, "package"), stdio: ["ignore", "pipe", "pipe"] });
+  });
+
   test(`${directory}: packed entrypoints contain their runtime import graph`, async () => {
     const packageRoot = resolve(repoRoot, directory);
     const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
@@ -134,6 +158,7 @@ test("the packed root package works in an independent consumer", (t) => {
 import {
   DEFAULT_CONNECTOR_INDEX_URL,
   checkForUpdates,
+  fetchCatalog,
   generateLock,
   installFromLock,
   loadConnectorIndex,
@@ -143,6 +168,7 @@ import {
 } from "@opendatalabs/data-connectors-tools/installer-core";
 for (const value of [
   checkForUpdates,
+  fetchCatalog,
   generateLock,
   installFromLock,
   loadConnectorIndex,
@@ -152,7 +178,8 @@ for (const value of [
 ]) {
   assert.equal(typeof value, "function");
 }
-assert.equal(typeof DEFAULT_CONNECTOR_INDEX_URL, "string");`,
+assert.equal(typeof DEFAULT_CONNECTOR_INDEX_URL, "string");
+await assert.rejects(fetchCatalog({ lastAcceptedGeneratedAt: "invalid" }), /Invalid lastAcceptedGeneratedAt/);`,
     ],
     {
       cwd: consumerRoot,

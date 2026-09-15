@@ -59,6 +59,8 @@ export {
   parseConnectorOciReference,
 } from "./oci-registry.mjs";
 
+export { fetchCatalog } from "./oci-catalog.mjs";
+
 export const DEFAULT_CONNECTOR_INDEX_URL =
   "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
