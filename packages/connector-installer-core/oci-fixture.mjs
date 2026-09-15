@@ -93,14 +93,52 @@ export function createSigner(identity = PINNED_IDENTITY) {
 }
 
 /**
- * A verifier standing in for `sigstore.verify`.
+ * The three annotations cosign puts on a signature layer.
  *
- * It enforces exactly the two properties the real one enforces that these
- * tests are about: the signature verifies over the payload under the signer's
- * key, and the certificate's identity EQUALS the pinned identity — equality,
- * not prefix, so `...@refs/heads/attacker` fails (C3.1, C3.4). Real bundle
- * assembly is still exercised, because `verifyOciSignature` builds the bundle
- * before handing it here.
+ * The Rekor one matters to production: a layer without an inclusion promise is
+ * refused, because with no tlog entry there is no timestamp and the
+ * certificate's validity window stops being checked. The fixture verifier does
+ * not check the promise — the real engine does, in oci-identity.test.mjs — but
+ * the annotation must be present or every layout test would be exercising that
+ * refusal path instead of the behaviour it names. `omitRekorBundle` drives the
+ * refusal deliberately.
+ */
+export function cosignSignatureAnnotations(signer, payload, { omitRekorBundle = false } = {}) {
+  const annotations = {
+    "dev.cosignproject.cosign/signature": signer.sign(payload),
+    "dev.sigstore.cosign/certificate": signer.certificatePem,
+  };
+  if (!omitRekorBundle) {
+    annotations["dev.sigstore.cosign/bundle"] = JSON.stringify({
+      SignedEntryTimestamp: Buffer.from("fixture-set").toString("base64"),
+      Payload: {
+        body: Buffer.from(
+          JSON.stringify({ apiVersion: "0.0.1", kind: "hashedrekord", spec: {} })
+        ).toString("base64"),
+        integratedTime: 1757894400,
+        logIndex: 1,
+        logID: "c0d23d6a".repeat(8),
+      },
+    });
+  }
+  return annotations;
+}
+
+/**
+ * A verifier standing in for `sigstore.verify` in tests that are about LAYOUT —
+ * layer dispatch, unpacking, digest binding, registry behaviour. It is not
+ * evidence about identity matching and must not be used as such.
+ *
+ * It previously compared the identity with `!==`, which reimplemented the
+ * property under test and reported "exact" for a pin that was not: production
+ * hands sigstore an unanchored regular expression, and this fixture could not
+ * see the difference. The identity cases now live in oci-identity.test.mjs
+ * against the real `@sigstore/verify` engine.
+ *
+ * What remains here applies the pattern the way sigstore does — as a regular
+ * expression — so this fixture can never accept a SAN the real engine refuses.
+ * Real bundle assembly is still exercised, because `verifyOciSignature` builds
+ * the bundle before handing it here.
  */
 export function createFixtureVerifier(signers) {
   const list = Array.isArray(signers) ? signers : [signers];
@@ -109,9 +147,9 @@ export function createFixtureVerifier(signers) {
     if (!certificate) throw new Error("bundle carries no certificate");
     const identity = Buffer.from(certificate, "base64").toString("utf8");
 
-    if (identity !== options.certificateIdentityURI) {
+    if (!new RegExp(options.certificateIdentityURI).test(identity)) {
       throw new Error(
-        `certificate identity ${identity} does not equal the pinned ${options.certificateIdentityURI}`
+        `certificate identity ${identity} does not match the pinned ${options.certificateIdentityURI}`
       );
     }
     if (options.certificateIssuer !== PINNED_ISSUER) {
@@ -266,6 +304,7 @@ export function publishArtifact(
     withAssets = false,
     signer = null,
     signers = null,
+    omitRekorBundle = false,
     payloadDigestOverride = null,
     extraLayers = [],
     codeFiles = null,
@@ -374,10 +413,7 @@ export function publishArtifact(
         mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
         digest: registry.putBlob(payload),
         size: payload.length,
-        annotations: {
-          "dev.cosignproject.cosign/signature": candidate.sign(payload),
-          "dev.sigstore.cosign/certificate": candidate.certificatePem,
-        },
+        annotations: cosignSignatureAnnotations(candidate, payload, { omitRekorBundle }),
       };
     });
 
