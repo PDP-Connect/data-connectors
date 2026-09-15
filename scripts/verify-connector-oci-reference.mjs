@@ -58,6 +58,13 @@ async function main() {
   }
 
   const parsed = parseConnectorOciReference(reference);
+  if (!parsed.digest) {
+    process.stderr.write(
+      "usage: verify-connector-oci-reference.mjs --reference <registry>/<repository>@sha256:<digest>\n" +
+        "                                          [--connector-id <id>] [--json]\n"
+    );
+    process.exit(2);
+  }
   const connectorId = args.connectorId ?? `${parsed.connectorKey}-pdpp`;
 
   // The same lock-entry shape a real install uses, so this exercises the
