@@ -1,92 +1,79 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Does the published tarball contain everything the entrypoint imports?
-//
-// The `files` list in package.json is a hand-maintained allowlist, and the
-// installer entrypoint is no longer one file. When `index.mjs` grew imports of
-// `oci-registry.mjs` and `oci-verify.mjs`, the list still named only
-// `index.mjs`, so `npm pack` produced a tarball that resolved its own first
-// relative import to a file that was not in it. Nothing in this repository
-// noticed: every test here runs from the checkout, where those files exist.
-// A consumer installing the git-pinned package got ERR_MODULE_NOT_FOUND.
-//
-// So this test does not restate the list — restating it would drift the same
-// way. It walks the real import graph from each published entrypoint and
-// asserts that every local module it reaches is in the tarball `npm pack`
-// actually produces.
-
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { build } from "esbuild";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-// Every local module reachable from `entry`, as repo-relative POSIX paths.
-// Only relative specifiers are followed: a bare specifier is a dependency npm
-// installs, not a file this package ships.
-function localImportsFrom(entry) {
-  const seen = new Set();
-  const queue = [resolve(repoRoot, entry)];
-
-  while (queue.length > 0) {
-    const file = queue.pop();
-    const rel = relative(repoRoot, file).split("\\").join("/");
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-
-    const source = readFileSync(file, "utf8");
-    // A braced import list spans lines, so the clause between `import` and
-    // `from` must be allowed to contain newlines.
-    for (const match of source.matchAll(/\b(?:import|export)\b[\s\S]*?\bfrom\s*["'](\.[^"']+)["']/g)) {
-      queue.push(resolve(dirname(file), match[1]));
-    }
-    for (const match of source.matchAll(/\bimport\(\s*["'](\.[^"']+)["']\s*\)/g)) {
-      queue.push(resolve(dirname(file), match[1]));
-    }
+function exportTargets(value) {
+  if (value === null || value === undefined) return [];
+  if (typeof value === "string") {
+    assert.ok(!value.includes("*"), "expand wildcard exports before checking pack coverage");
+    return [value];
   }
-
-  return seen;
+  return Object.values(value).flatMap(exportTargets);
 }
 
-function packedFiles() {
-  const output = execFileSync("npm", ["pack", "--dry-run", "--json"], {
-    cwd: repoRoot,
+function packedFiles(packageRoot) {
+  const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: packageRoot,
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  // npm has reported this as an array of packages and, in later versions, as an
-  // object keyed by package name. Read whichever shape this npm produced rather
-  // than pinning one and failing obscurely on the other.
   const parsed = JSON.parse(output);
   const packages = Array.isArray(parsed) ? parsed : Object.values(parsed);
-  return new Set(packages.flatMap((pkg) => pkg.files).map((file) => file.path));
+  assert.equal(packages.length, 1);
+  return new Set(packages[0].files.map((file) => file.path));
 }
 
-test("the published tarball carries every module the installer entrypoints import", () => {
-  const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-  const entrypoints = [
-    ...Object.values(manifest.exports ?? {}),
-    "./packages/connector-installer-cli/index.mjs",
-  ].map((specifier) => specifier.replace(/^\.\//, ""));
-
-  const packed = packedFiles();
-  const missing = [];
-  for (const entry of entrypoints) {
-    for (const module of localImportsFrom(entry)) {
-      // Test files are imported by nothing shipped; they are not published.
-      if (module.endsWith(".test.mjs")) continue;
-      if (!packed.has(module)) missing.push(module);
+for (const directory of [".", "packages/connector-installer-core"]) {
+  test(`${directory}: packed entrypoints contain their runtime import graph`, async () => {
+    const packageRoot = resolve(repoRoot, directory);
+    const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    const entryPoints = [...new Set([
+      ...exportTargets(manifest.exports ?? manifest.main),
+      ...exportTargets(manifest.bin),
+    ])];
+    assert.ok(entryPoints.length > 0);
+    const packed = packedFiles(packageRoot);
+    // Parse the graph instead of matching import text: this covers re-exports,
+    // side-effect imports, require(), and literal dynamic imports as well.
+    const result = await build({
+      absWorkingDir: packageRoot,
+      entryPoints,
+      bundle: true,
+      packages: "external",
+      platform: "node",
+      format: "esm",
+      outdir: "pack-coverage-unused",
+      write: false,
+      metafile: true,
+      logLevel: "silent",
+      logOverride: { "unsupported-dynamic-import": "error", "unsupported-require-call": "error" },
+    });
+    assert.deepEqual(result.warnings, [], "the runtime graph must be statically checkable");
+    for (const [file, input] of Object.entries(result.metafile.inputs)) {
+      assert.ok(packed.has(file), `${manifest.name}: ${file} is missing from npm pack`);
+      for (const dependency of input.imports.filter((item) => item.external)) {
+        if (isBuiltin(dependency.path)) continue;
+        const name = dependency.path.startsWith("@")
+          ? dependency.path.split("/").slice(0, 2).join("/")
+          : dependency.path.split("/")[0];
+        assert.ok(Object.hasOwn(manifest.dependencies ?? {}, name),
+          `${manifest.name}: ${file} imports undeclared runtime dependency ${name}`);
+      }
     }
-  }
-
-  assert.deepEqual(
-    [...new Set(missing)].sort(),
-    [],
-    "these modules are imported by a published entrypoint but absent from the tarball; " +
-      'add them to "files" in package.json',
-  );
-});
+    for (const dependency of Object.values(manifest.dependencies ?? {})) {
+      if (!dependency.startsWith("file:")) continue;
+      const nestedManifest = relative(packageRoot, resolve(packageRoot, dependency.slice(5), "package.json"));
+      assert.ok(packed.has(nestedManifest), `${manifest.name}: file dependency manifest ${nestedManifest} is missing`);
+    }
+  });
+}

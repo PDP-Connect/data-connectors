@@ -12,6 +12,9 @@
   },
   "files": [
     "index.mjs",
+    "oci-registry.mjs",
+    "oci-verify.mjs",
+    "tar-stream.mjs",
     "README.md",
     "LICENSE",
     "NOTICE"
@@ -29,7 +32,8 @@
     "url": "https://github.com/PDP-Connect/data-connectors/issues"
   },
   "dependencies": {
-    "sigstore": "^5.0.0"
+    "sigstore": "^5.0.0",
+    "@sigstore/bundle": "^5.0.0"
   },
   "scripts": {
     "test": "node --test ./index.test.mjs"

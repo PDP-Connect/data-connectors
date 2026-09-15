@@ -8,6 +8,7 @@
     "packages/connector-installer-core"
   ],
   "files": [
+    "packages/connector-installer-core/package.json",
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-core/oci-registry.mjs",
     "packages/connector-installer-core/oci-verify.mjs",
@@ -24,7 +25,9 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "@pdpp/connector-manager": "*"
+    "@pdpp/connector-manager": "file:packages/connector-installer-core",
+    "sigstore": "^5.0.0",
+    "@sigstore/bundle": "^5.0.0"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
