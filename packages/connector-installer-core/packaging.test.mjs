@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { isBuiltin } from "node:module";
-import { dirname, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { build } from "esbuild";
@@ -70,10 +78,94 @@ for (const directory of [".", "packages/connector-installer-core"]) {
           `${manifest.name}: ${file} imports undeclared runtime dependency ${name}`);
       }
     }
-    for (const dependency of Object.values(manifest.dependencies ?? {})) {
-      if (!dependency.startsWith("file:")) continue;
-      const nestedManifest = relative(packageRoot, resolve(packageRoot, dependency.slice(5), "package.json"));
-      assert.ok(packed.has(nestedManifest), `${manifest.name}: file dependency manifest ${nestedManifest} is missing`);
-    }
   });
 }
+
+test("the packed root package works in an independent consumer", (t) => {
+  const scratchBase = join(homedir(), ".tmp");
+  mkdirSync(scratchBase, { recursive: true });
+
+  const packRoot = mkdtempSync(join(scratchBase, "data-connectors-pack-"));
+  t.after(() => rmSync(packRoot, { recursive: true, force: true }));
+  const consumerRoot = mkdtempSync(join(scratchBase, "data-connectors-consumer-"));
+  t.after(() => rmSync(consumerRoot, { recursive: true, force: true }));
+
+  const output = execFileSync(
+    "npm",
+    ["pack", "--json", "--ignore-scripts", "--pack-destination", packRoot],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  const parsed = JSON.parse(output);
+  const packages = Array.isArray(parsed) ? parsed : Object.values(parsed);
+  assert.equal(packages.length, 1);
+  const tarball = join(packRoot, packages[0].filename);
+
+  writeFileSync(
+    join(consumerRoot, "package.json"),
+    `${JSON.stringify({ private: true, type: "module" }, null, 2)}\n`
+  );
+  execFileSync(
+    "npm",
+    ["install", "--ignore-scripts", "--no-package-lock", "--no-save", tarball],
+    {
+      cwd: consumerRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  const installedRoot = join(
+    consumerRoot,
+    "node_modules",
+    "@opendatalabs",
+    "data-connectors-tools"
+  );
+  assert.equal(lstatSync(installedRoot).isSymbolicLink(), false);
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import assert from "node:assert/strict";
+import {
+  DEFAULT_CONNECTOR_INDEX_URL,
+  checkForUpdates,
+  generateLock,
+  installFromLock,
+  loadConnectorIndex,
+  pruneInstalled,
+  readJson,
+  verifyInstalled,
+} from "@opendatalabs/data-connectors-tools/installer-core";
+for (const value of [
+  checkForUpdates,
+  generateLock,
+  installFromLock,
+  loadConnectorIndex,
+  pruneInstalled,
+  readJson,
+  verifyInstalled,
+]) {
+  assert.equal(typeof value, "function");
+}
+assert.equal(typeof DEFAULT_CONNECTOR_INDEX_URL, "string");`,
+    ],
+    {
+      cwd: consumerRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  const cli = spawnSync(
+    join(consumerRoot, "node_modules", ".bin", "connector-installer"),
+    [],
+    { cwd: consumerRoot, encoding: "utf8" }
+  );
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.match(cli.stderr, /^Usage:/);
+});

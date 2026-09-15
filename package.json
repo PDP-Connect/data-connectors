@@ -8,7 +8,6 @@
     "packages/connector-installer-core"
   ],
   "files": [
-    "packages/connector-installer-core/package.json",
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-cli/index.mjs",
     "schemas/connector-index.schema.json",
@@ -22,7 +21,6 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "@pdpp/connector-manager": "file:packages/connector-installer-core",
     "sigstore": "^5.0.0"
   },
   "scripts": {
