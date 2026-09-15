@@ -94,7 +94,7 @@ Multi-account note: the runtime today defaults `profileName` to the connector na
 
 When deciding where a connector gets its data, prefer in this order:
 
-1. **Official API** — OAuth, API key, or equivalent. Stable, versioned, contract-respecting. Examples in this repo: `ynab` (PAT), `oura` (OAuth), `strava` (OAuth), `spotify` (OAuth API partial).
+1. **Official API** — OAuth, API key, or equivalent. Stable, versioned, contract-respecting. Examples in this repo: `ynab` (PAT), `oura` (OAuth), `spotify` (OAuth API partial).
 2. **Archive / compliance export** — GDPR/CCPA "download your data" flows. High-latency but stable, complete, regulator-backed. Examples: `google_takeout`, `twitter_archive`.
 3. **Structured web endpoints** — JSON-over-the-wire that the site's own SPA consumes. Reverse-engineerable; shape usually stable.
 4. **HTML scrape** — last resort. Locale-bound, A/B-test-bound, TOS-adjacent. Examples: `amazon`, `chase`, `usaa`.

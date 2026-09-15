@@ -347,7 +347,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["spotify.saved_tracks", "2c05bac3705c2f52"],
 	["spotify.top_artists", "56f6aedaf8d2dc5d"],
 	["spotify.recently_played", "cb5cb7f10b08629a"],
-	["strava.activities", "48ff5417d023dc35"],
 	["twitter_archive.tweets", "8085506aa0ddadff"],
 	["twitter_archive.direct_messages", "2b3c295be264d6ac"],
 	["uber.trips", "e5a6e4ab2ce5e2f6"],

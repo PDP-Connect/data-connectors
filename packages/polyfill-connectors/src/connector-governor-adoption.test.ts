@@ -39,7 +39,6 @@ const ADOPTED: Array<{ name: string; retryablePattern: RegExp }> = [
 	{ name: "notion", retryablePattern: /ECONN|fetch failed|rate_limited/i },
 	{ name: "oura", retryablePattern: /rate_limited|ECONN|fetch failed/i },
 	{ name: "spotify", retryablePattern: /rate_limited|ECONN|fetch failed/i },
-	{ name: "strava", retryablePattern: /ECONN|fetch failed|rate_limited/i },
 	{
 		name: "google_calendar",
 		retryablePattern:
