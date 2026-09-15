@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -269,7 +269,7 @@ test("a layer that decompresses past the ceiling is refused and cleaned up", asy
     const before = countTempArtifacts();
     const signer = createSigner();
     // 200 MB of zeros; gzip takes it to a couple of hundred KB.
-    const bombBytes = tarball({ "code/collection-profile.mjs": Buffer.alloc(200 * 1024 * 1024) });
+    const bombBytes = tarball({ "collection-profile.mjs": Buffer.alloc(200 * 1024 * 1024) });
     assert.ok(
       bombBytes.length < 64 * 1024 * 1024,
       "the fixture must pass the compressed-blob cap, or it proves nothing about the unpacked one"
@@ -512,7 +512,7 @@ test("A-T6 selects layers by media type with assets absent", async () => {
     // Same provenance and entrypoint despite every later layer having shifted.
     assert.match(rich.entrypointBuffer.toString("utf8"), /export const collect/);
     assert.deepEqual(rich.assetFiles.map((file) => file.path).sort(), [
-      "assets/icon.svg",
+      "assets/icons/ynab.svg",
       "licenses/LICENSE",
       "licenses/NOTICE",
     ]);
@@ -612,19 +612,18 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
     {
       label: "symlink escaping the extraction root",
       build: () =>
-        tarball({ "code/collection-profile.mjs": "x\n" }, {
-          mode: (root) => symlinkSync("/etc/passwd", join(root, "code", "escape")),
+        tarball({ "collection-profile.mjs": "x\n" }, {
+          mode: (root) => symlinkSync("/etc/passwd", join(root, "escape")),
         }),
     },
     {
       label: "hardlink",
       build: () => {
         const root = mkdtempSync(join(tmpdir(), "oci-hostile-"));
-        mkdirSync(join(root, "code"), { recursive: true });
-        writeFileSync(join(root, "code", "collection-profile.mjs"), "x\n");
-        execFileSync("ln", [join(root, "code", "collection-profile.mjs"), join(root, "code", "hard")]);
+        writeFileSync(join(root, "collection-profile.mjs"), "x\n");
+        execFileSync("ln", [join(root, "collection-profile.mjs"), join(root, "hard")]);
         const out = join(root, "hostile.tar.gz");
-        execFileSync("tar", ["-czf", out, "-C", root, "code"]);
+        execFileSync("tar", ["-czf", out, "-C", root, "collection-profile.mjs", "hard"]);
         const buffer = execFileSync("cat", [out]);
         rmSync(root, { recursive: true, force: true });
         return buffer;
@@ -634,11 +633,10 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
       label: "FIFO",
       build: () => {
         const root = mkdtempSync(join(tmpdir(), "oci-hostile-"));
-        mkdirSync(join(root, "code"), { recursive: true });
-        writeFileSync(join(root, "code", "collection-profile.mjs"), "x\n");
-        execFileSync("mkfifo", [join(root, "code", "pipe")]);
+        writeFileSync(join(root, "collection-profile.mjs"), "x\n");
+        execFileSync("mkfifo", [join(root, "pipe")]);
         const out = join(root, "hostile.tar.gz");
-        execFileSync("tar", ["-czf", out, "-C", root, "code"]);
+        execFileSync("tar", ["-czf", out, "-C", root, "collection-profile.mjs", "pipe"]);
         const buffer = execFileSync("cat", [out]);
         rmSync(root, { recursive: true, force: true });
         return buffer;
@@ -648,10 +646,10 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
       label: "parent-directory traversal",
       build: () => {
         const root = mkdtempSync(join(tmpdir(), "oci-hostile-"));
-        mkdirSync(join(root, "nested", "code"), { recursive: true });
-        writeFileSync(join(root, "nested", "code", "collection-profile.mjs"), "x\n");
+        mkdirSync(join(root, "nested"), { recursive: true });
+        writeFileSync(join(root, "nested", "collection-profile.mjs"), "x\n");
         const out = join(root, "hostile.tar.gz");
-        execFileSync("tar", ["-czf", out, "-C", join(root, "nested"), "code", "../nested/code"]);
+        execFileSync("tar", ["-czPf", out, "-C", join(root, "nested"), "../nested/collection-profile.mjs"]);
         const buffer = execFileSync("cat", [out]);
         rmSync(root, { recursive: true, force: true });
         return buffer;
@@ -661,10 +659,9 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
       label: "absolute path",
       build: () => {
         const root = mkdtempSync(join(tmpdir(), "oci-hostile-"));
-        mkdirSync(join(root, "code"), { recursive: true });
-        writeFileSync(join(root, "code", "collection-profile.mjs"), "x\n");
+        writeFileSync(join(root, "collection-profile.mjs"), "x\n");
         const out = join(root, "hostile.tar.gz");
-        execFileSync("tar", ["-czPf", out, "-C", root, "code", join(root, "code")]);
+        execFileSync("tar", ["-czPf", out, "-C", root, join(root, "collection-profile.mjs")]);
         const buffer = execFileSync("cat", [out]);
         rmSync(root, { recursive: true, force: true });
         return buffer;
@@ -676,7 +673,8 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
     let hostileBytes;
     try {
       hostileBytes = build();
-    } catch {
+    } catch (error) {
+      if (label === "parent-directory traversal" || label === "absolute path") throw error;
       continue; // the platform would not build this member; skip rather than pass vacuously
     }
 
@@ -705,6 +703,9 @@ test("A-T9 refuses unsafe archive members by type as well as name, and cleans up
             fixtureOptions(registry, signer)
           ),
         (error) => {
+          if (label === "parent-directory traversal" || label === "absolute path") {
+            assert.match(error.message, /Invalid archive member path/);
+          }
           assert.match(
             error.message,
             /unsupported archive entry type|unsupported link|archive member path|Invalid/,
@@ -900,6 +901,124 @@ test("an OCI install writes the layout the existing readers expect", async () =>
       rmSync(installRoot, { recursive: true, force: true });
     }
   });
+});
+
+test("an OCI install resolves artifact-wide config entrypoint to a code-layer member", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest, codeBytes, config } = publishArtifact(registry, { signer });
+    assert.equal(config.entrypoint, "code/collection-profile.mjs");
+    assert.equal(
+      execFileSync("tar", ["-tzf", "-"], { input: codeBytes, encoding: "utf8" }),
+      "collection-profile.mjs\n"
+    );
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-real-layout-"));
+
+    try {
+      const result = await installFromLock({
+        lock: { connectors: [ociLockEntry(registry, digest)] },
+        source: null,
+        installRoot,
+        layout: "source",
+        ...fixtureOptions(registry, signer),
+      });
+
+      assert.equal(result.connectorCount, 1);
+      assert.equal(
+        readFileSync(
+          join(installRoot, "collection-profiles/ynab-pdpp/dist/collection-profile.mjs"),
+          "utf8"
+        ),
+        "export const collect = () => {};\n"
+      );
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("an OCI config entrypoint preserves the exact nested member path", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      configOverrides: { entrypoint: "code/nested/collection-profile.mjs" },
+      codeFiles: {
+        "collection-profile.mjs": "export const wrong = true;\n",
+        "nested/collection-profile.mjs": "export const nested = true;\n",
+      },
+    });
+    const artifact = await fetchResolvedArtifact(
+      null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
+    );
+    assert.equal(artifact.entrypointBuffer.toString("utf8"), "export const nested = true;\n");
+  });
+});
+
+test("an OCI artifact whose config entrypoint member is absent from the code layer is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: {
+        "nested/collection-profile.mjs": "export const collect = () => 'wrong';\n",
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /is not present in the code layer/);
+        return true;
+      }
+    );
+  });
+});
+
+test("an OCI artifact whose config entrypoint names a non-code layer is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withAssets: true,
+      codeFiles: { "icons/ynab.svg": "export const collect = () => {};\n" },
+      configOverrides: { entrypoint: "assets/icons/ynab.svg" },
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /must name a member of the code layer/);
+        return true;
+      }
+    );
+  });
+});
+
+test("an OCI artifact whose config entrypoint is not a safe relative path is refused", async () => {
+  for (const entrypoint of ["code/../collection-profile.mjs", "code//collection-profile.mjs", "/code/collection-profile.mjs", "code/./collection-profile.mjs", "code/", "", null]) {
+    await withRegistry({}, async (registry) => {
+      const signer = createSigner();
+      const { digest } = publishArtifact(registry, {
+        signer,
+        configOverrides: { entrypoint },
+      });
+
+      await assert.rejects(
+        () =>
+          fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+        (error) => {
+          assert.equal(error.reason, "tampered");
+          assert.match(error.message, /Invalid config\.entrypoint/);
+          return true;
+        }
+      );
+    });
+  }
 });
 
 test("adding licence writes does not start installing stray tarball files", async () => {

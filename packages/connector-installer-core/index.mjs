@@ -957,7 +957,29 @@ async function fetchOciArtifact(entry, options = {}) {
 
   const codeFiles = await readLayerArchive(codeBytes, `${reference.repository} code layer`);
   const entrypointInArtifact = config.entrypoint;
-  const entrypointFile = codeFiles.find((file) => file.path === entrypointInArtifact);
+  let entrypointSegments;
+  try {
+    const validPath = validateRelativeArtifactPath(entrypointInArtifact, "config.entrypoint");
+    entrypointSegments = validPath.split("/");
+    if (entrypointSegments.some((segment) => segment === "" || segment === ".")) {
+      throw new Error(`Invalid config.entrypoint "${entrypointInArtifact}"`);
+    }
+  } catch (error) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: ${error.message}`,
+      "tampered"
+    );
+  }
+  const [entrypointLayer, ...memberSegments] = entrypointSegments;
+  if (entrypointLayer !== "code" || memberSegments.length === 0) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: config.entrypoint "${entrypointInArtifact}" ` +
+        `must name a member of the code layer`,
+      "tampered"
+    );
+  }
+  const codeEntrypointMember = memberSegments.join("/");
+  const entrypointFile = codeFiles.find((file) => file.path === codeEntrypointMember);
   // C4.6: the entrypoint the config declares must actually be in the code layer.
   if (!entrypointFile) {
     throw new OciRegistryError(

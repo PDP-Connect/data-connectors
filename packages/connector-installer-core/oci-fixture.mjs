@@ -47,8 +47,8 @@ export function canonicalJson(value) {
 }
 
 /**
- * A deterministic `.tar.gz` holding the given files, built the way the
- * publisher builds one.
+ * A `.tar.gz` with the publisher's layer-relative file names. A mode callback
+ * can add hostile members, so those tests archive the entire staging tree.
  */
 export function tarball(files, { mode = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), "oci-fixture-tar-"));
@@ -60,7 +60,7 @@ export function tarball(files, { mode = null } = {}) {
     }
     if (mode) mode(root);
     const out = join(root, "..", `${Math.random().toString(36).slice(2)}.tar.gz`);
-    execFileSync("tar", ["-czf", out, "-C", root, "."]);
+    execFileSync("tar", ["-czf", out, "-C", root, ...(mode ? ["."] : Object.keys(files).sort())]);
     const buffer = execFileSync("cat", [out]);
     rmSync(out, { force: true });
     return buffer;
@@ -336,16 +336,19 @@ export function publishArtifact(
     version,
     protocol_version: protocolVersion,
     display_name: "YNAB",
+    ...(withAssets ? { brand: { icon: "icons/ynab.svg" } } : {}),
   };
   const profileBytes = canonicalJson(profile);
 
   const codeBytes =
     codeBytesOverride ??
-    tarball(codeFiles ?? { "code/collection-profile.mjs": "export const collect = () => {};\n" });
+    tarball(codeFiles ?? { "collection-profile.mjs": "export const collect = () => {};\n" });
   const licensesBytes = tarball({ LICENSE: "Apache-2.0\n", NOTICE: "notice\n" });
-  const assetsBytes = withAssets ? tarball({ "icon.svg": "<svg/>\n" }) : null;
+  const assetsBytes = withAssets ? tarball({ "icons/ynab.svg": "<svg/>\n" }) : null;
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
+  // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the
+  // code layer tar member itself is layer-relative (`<member>`).
   const config = {
     config_version: "1.0",
     connector_key: connectorKey,
