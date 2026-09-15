@@ -708,6 +708,28 @@ function normalizeOciBlock(entry) {
   };
 }
 
+/**
+ * Which entries in a lock need the signed index, and which do not.
+ *
+ * The transport is a property of each ENTRY — `fetchEntryArtifact` dispatches on
+ * `entry.oci` and never consults `source` for an OCI entry — so whether an index
+ * is needed is a question about the lock, not about which flag the operator
+ * typed. Deciding it from `--oci` made a lock of digest-pinned OCI entries
+ * depend on the old index service anyway, and fail when it was down, while the
+ * identical reference passed as `--oci` did not.
+ *
+ * Exported so the CLI asks this module rather than re-deriving it: a second
+ * reading of "is this entry OCI" is a second thing to keep in step with the
+ * dispatch, and the two going out of step is exactly the defect.
+ *
+ * The mixed case is real and stays supported: the twelve legacy `*-playwright`
+ * connectors keep the tarball path until they are ported or retired, so a lock
+ * naming both transports must load the index for the entries that need it.
+ */
+export function lockNeedsIndexSource(lock) {
+  return (lock?.connectors ?? []).some((entry) => !normalizeOciBlock(entry));
+}
+
 function normalizeLockEntry(entry) {
   const artifactKind = entry.artifactKind ?? entry.artifact_kind ?? "legacy";
   return {
