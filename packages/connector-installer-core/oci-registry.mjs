@@ -386,13 +386,20 @@ export function classifyManifestResponse(response) {
  */
 async function fetchOnce(
   url,
-  { method = "GET", headers = {}, timeoutMs = 30000, maxBytes = MAX_MANIFEST_BYTES, fetchImpl = fetch } = {}
+  {
+    method = "GET",
+    headers = {},
+    timeoutMs = 30000,
+    maxBytes = MAX_MANIFEST_BYTES,
+    fetchImpl = fetch,
+    redirect = "follow",
+  } = {}
 ) {
   const response = await fetchImpl(url, {
     method,
     headers: { "user-agent": "pdpp-connector-installer/1", ...headers },
     signal: AbortSignal.timeout(timeoutMs),
-    redirect: "follow",
+    redirect,
   });
 
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -414,6 +421,70 @@ async function fetchOnce(
   });
 
   return { status: response.status, headers: headerObject, buffer, body: buffer.toString("utf8") };
+}
+
+// A 3xx this consumer will follow by hand. 304 is not a redirect to a location.
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// Enough hops for a realm that redirects once or twice; a chain longer than this
+// is a loop or a service this consumer should not be chasing.
+const MAX_TOKEN_REDIRECTS = 3;
+
+/**
+ * The token request, following redirects MANUALLY so every hop is checked.
+ *
+ * `redirect: "follow"` let the origin policy be satisfied once and then left
+ * behind: an allowed realm could answer 302 to any origin and the runtime would
+ * fetch it without the challenge check ever seeing that second origin. Since the
+ * realm is supplied by the peer in its own 401, that made the check advisory —
+ * the registry chose the final destination, including a port on the machine
+ * running the install.
+ *
+ * So the redirect is not followed by the runtime; each `Location` is resolved
+ * and put through the SAME `checkTokenRealm` the first realm passed, and a hop
+ * that fails is a refusal rather than a request. This is the token exchange
+ * only. Blob and manifest reads keep `redirect: "follow"`, because a registry
+ * redirecting a blob to its CDN is the documented way that transport works and
+ * those responses are pinned by digest rather than trusted by origin.
+ */
+async function fetchTokenFollowingRedirects(
+  startUrl,
+  { registry, timeoutMs, fetchImpl, allowInsecureLoopback }
+) {
+  let url = startUrl;
+
+  for (let hop = 0; hop <= MAX_TOKEN_REDIRECTS; hop += 1) {
+    const response = await fetchOnce(url.toString(), {
+      timeoutMs,
+      fetchImpl,
+      redirect: "manual",
+    });
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return { response };
+    }
+
+    const location = response.headers.location;
+    if (!location) {
+      return { error: `the token endpoint returned HTTP ${response.status} without a location` };
+    }
+
+    let next;
+    try {
+      // Resolved against the current URL, so a relative location is read the
+      // same way the runtime would have read it.
+      next = new URL(location, url);
+    } catch {
+      return { error: "the token endpoint redirected to a location that cannot be read as a URL" };
+    }
+
+    const refusal = checkTokenRealm(next, registry, { allowInsecureLoopback });
+    if (refusal) {
+      return { error: `the token endpoint redirected to a refused origin: ${refusal}` };
+    }
+    url = next;
+  }
+
+  return { error: `the token endpoint redirected more than ${MAX_TOKEN_REDIRECTS} times` };
 }
 
 // The token realms this consumer will talk to, keyed by registry origin. Moved
@@ -550,7 +621,16 @@ async function requestToken(
 
   let response;
   try {
-    response = await fetchOnce(tokenUrl.toString(), { timeoutMs, fetchImpl });
+    const followed = await fetchTokenFollowingRedirects(tokenUrl, {
+      registry,
+      timeoutMs,
+      fetchImpl,
+      allowInsecureLoopback,
+    });
+    if (followed.error) {
+      return { error: followed.error };
+    }
+    response = followed.response;
   } catch (error) {
     return { error: `token request failed: ${error.message}` };
   }

@@ -199,6 +199,68 @@ test("a Bearer challenge naming a realm off the registry's origin is refused", a
   }
 });
 
+test("a token realm that REDIRECTS to another origin is refused at the hop", async () => {
+  // The realm check above is satisfied once, at the first request. With
+  // `redirect: "follow"` the runtime then chased any `Location` the realm
+  // answered with, so an allowed realm could hand the exchange to an origin the
+  // same check would have refused — and since the realm comes from the peer's
+  // own 401, the registry chose that destination. Here the registry's OWN
+  // origin issues the challenge (so the first check passes) and answers the
+  // token request with a 302 to a second loopback server, which must never be
+  // contacted.
+  const decoy = await new FixtureRegistry({}).start();
+  try {
+    await withRegistry({ challenge: true }, async (registry) => {
+      const signer = createSigner();
+      const { digest } = publishArtifact(registry, { signer });
+
+      // The registry's own /token now redirects off-origin.
+      registry.redirectTokenTo = `http://127.0.0.1:${decoy.port}/token`;
+      decoy.requests.length = 0;
+
+      await assert.rejects(
+        () =>
+          fetchResolvedArtifact(
+            null,
+            ociLockEntry(registry, digest),
+            fixtureOptions(registry, signer)
+          ),
+        /redirected to a refused origin/
+      );
+
+      assert.deepEqual(
+        decoy.requests,
+        [],
+        "a redirect must not deliver the token exchange to an origin the policy refuses"
+      );
+    });
+  } finally {
+    await decoy.stop();
+  }
+});
+
+test("a token realm may redirect WITHIN the origin the policy already allows", async () => {
+  // The control that keeps the repair from being "refuse every redirect": a hop
+  // that lands back on an allowed origin is still allowed, so an ordinary
+  // same-origin redirect does not break the exchange.
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    registry.redirectTokenTo = `http://127.0.0.1:${registry.port}/token?hop=2`;
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+    assert.ok(artifact, "a same-origin redirect completes the token exchange");
+    assert.ok(
+      registry.requests.some((url) => url.includes("hop=2")),
+      "the redirected token request is the one that was followed"
+    );
+  });
+});
+
 // D5: MAX_BLOB_BYTES bounds the COMPRESSED layer, which bounds nothing useful
 // about what lands on disk. This fixture is a real decompression bomb: well
 // under the 64 MiB blob cap on the wire, far over it unpacked.
@@ -229,6 +291,10 @@ test("a layer that decompresses past the ceiling is refused and cleaned up", asy
       }
     );
 
+    // Still asserted, though the reader no longer writes a temp dir for a layer
+    // at all: the property this pins is that a refusal leaves nothing behind,
+    // and "nothing was ever written" satisfies it more strongly than the
+    // previous extract-then-clean-up did.
     assert.equal(
       countTempArtifacts(),
       before,
@@ -692,6 +758,65 @@ function publishArtifactSignature(registry, digest, signer, { payloadDigestOverr
     `${digest.replace(":", "-")}.sig`
   );
 }
+
+test("a candidate that cannot be evaluated does not hide a later valid signature", async () => {
+  // A signature object may carry several layers. The loop caught only the
+  // cryptographic call, so a candidate that failed EARLIER — fetching its
+  // payload blob, or checking which digest that payload names — threw straight
+  // out of the loop and the remaining candidates were never tried. An artifact
+  // was then refused as unsigned while carrying a valid signature.
+  //
+  // First candidate: a descriptor for a payload blob the registry does not
+  // have, so `fetchBlob` throws. Second: the real, valid signature.
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+
+    const payload = canonicalJson({
+      critical: {
+        identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/ynab` },
+        image: { "docker-manifest-digest": digest },
+        type: "cosign container image signature",
+      },
+      optional: null,
+    });
+
+    registry.putManifest(
+      {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        config: {
+          mediaType: "application/vnd.oci.image.config.v1+json",
+          digest: registry.putBlob(Buffer.from("{}")),
+          size: 2,
+        },
+        layers: [
+          {
+            mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+            // Never stored, so fetching it fails.
+            digest: `sha256:${"e".repeat(64)}`,
+            size: payload.length,
+            annotations: cosignSignatureAnnotations(signer, payload),
+          },
+          {
+            mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+            digest: registry.putBlob(payload),
+            size: payload.length,
+            annotations: cosignSignatureAnnotations(signer, payload),
+          },
+        ],
+      },
+      `${digest.replace(":", "-")}.sig`
+    );
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+    assert.ok(artifact, "the later valid signature is reached and accepted");
+  });
+});
 
 test("A-T10 refuses a signature whose simple-signing payload names a different manifest digest", async () => {
   await withRegistry({}, async (registry) => {

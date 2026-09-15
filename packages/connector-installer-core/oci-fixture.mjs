@@ -190,6 +190,9 @@ export class FixtureRegistry {
     // Points the Bearer challenge somewhere other than this server, which is
     // how a test drives the token-realm destination policy.
     this.realm = realm;
+    // When set, the next /token request answers 302 to this location instead of
+    // a token, so a test can drive the per-hop token-realm check.
+    this.redirectTokenTo = null;
     this.faults = new Map();
     this.requests = [];
     this.server = null;
@@ -220,6 +223,17 @@ export class FixtureRegistry {
       const url = new URL(req.url, "http://localhost");
 
       if (url.pathname === "/token") {
+        // `redirectTokenTo` makes this realm answer a 302 instead of a token,
+        // which is how a test drives the per-hop origin check. It fires once so
+        // the redirected request is answered normally and a same-origin hop can
+        // still complete.
+        if (this.redirectTokenTo && !url.searchParams.has("hop")) {
+          const location = this.redirectTokenTo;
+          this.redirectTokenTo = null;
+          res.writeHead(302, { location });
+          res.end();
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ token: "fixture-token" }));
         return;
