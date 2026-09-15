@@ -401,11 +401,19 @@ jobs:
             url: https://github.com/PDP-Connect/pdpp.git
             pin-output: pdpp-sha
             # Canonical path that backs drift job (d) reference-contract — see
-            # .github/cross-repo-pins.json's own note on pdpp's pin. Used to also list
-            # `reference-implementation` for the (now-retired, pdpp#284) integration job's
-            # RI-server checkout; pdpp#284 deleted that directory from pdpp entirely, so it's
-            # dropped here too — a path that can never again exist at any future pdpp SHA
-            # would never contribute a real diff, just dead weight in this list.
+            # .github/cross-repo-pins.json's own note on pdpp's pin. It is the only path the
+            # pdpp pin still backs, and the list stays a single entry for the same reason it
+            # became one: a path pdpp has deleted can never contribute a real diff again, so
+            # listing it would only manufacture failures on changes this repo does not track.
+            #   - `reference-implementation` was listed once, for the (now-retired, pdpp#284)
+            #     integration job's RI-server checkout; pdpp#284 deleted that directory.
+            #   - `vendor` and `packages/polyfill-connectors` were never listed here. They
+            #     backed the retired tarball-digests job through pdpp's vendor/SHA256SUMS, not
+            #     through this freshness comparison. pdpp#361 and pdpp#362 deleted both trees;
+            #     no job in this workflow reads either one now, so there is nothing to add.
+            # The similarly-named packages/polyfill-connectors/connectors/* entries in the
+            # data-connect list above are data-connect's own paths, which still exist there —
+            # they are not pdpp paths and are unaffected by pdpp's deletions.
             paths: "packages/reference-contract"
     needs: [changes, read-pins]
     if: always() && needs.changes.result == 'success'
