@@ -41,6 +41,29 @@ function fixtureManifest(root, manifestName = "source_name", connectorKey = "pub
   );
 }
 
+function fixtureManifestWithMetadata(root, {
+  manifestName = "source_name",
+  connectorKey = "public-name",
+  connectorId = `https://registry.pdpp.dev/connectors/${connectorKey}`,
+  displayName = "Public Name",
+  bindings = { network: { required: true } },
+  modality = "static_secret",
+  tier = "supported",
+} = {}) {
+  mkdirSync(root, { recursive: true });
+  writeFileSync(
+    join(root, `${manifestName}.json`),
+    `${JSON.stringify({
+      connector_id: connectorId,
+      connector_key: connectorKey,
+      display_name: displayName,
+      runtime_requirements: { bindings },
+      setup: { modality },
+      capabilities: { public_listing: { tier } },
+    }, null, 2)}\n`,
+  );
+}
+
 async function startRegistry({
   malformedPagination = false,
   manifestFault = null,
@@ -110,13 +133,12 @@ function fixtureDirectory() {
   return mkdtempSync(join(base, "connector-catalog-"));
 }
 
-async function generate(root, registry, overrides = {}) {
+async function generate(_sourceRoot, registry, overrides = {}) {
   return generateConnectorCatalog({
     registry,
     namespace: "acme",
     sourceCommit: SOURCE_COMMIT,
     generatedAt: GENERATED_AT,
-    manifestDirectory: root,
     connectors: [{ manifest: "source_name", connectorKey: "public-name" }],
     scheme: "http",
     allowInsecureLoopback: true,
@@ -142,6 +164,9 @@ test("catalog generation is deterministic, follows anonymous auth, and sorts sem
       digest: registry.digests.get("1.1.0"),
     });
     assert.equal(first.connectors[0].connector_key, "public-name");
+    assert.equal(first.connectors[0].connector_id, "https://github.com/PDP-Connect/data-connectors/connector/public-name");
+    assert.deepEqual(first.connectors[0].runtime_requirements.bindings, { network: { required: true } });
+    assert.equal(first.connectors[0].setup.modality, "static_secret");
     assert.ok(registry.requests.some((url) => url.includes("/tags/list?last=")));
     assert.ok(registry.requestHeaders.some((request) =>
       request.url.includes("/manifests/") && request.authorization === "Bearer fixture-token",
@@ -153,6 +178,101 @@ test("catalog generation is deterministic, follows anonymous auth, and sorts sem
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("latest metadata comes from the published artifact, not an unpublished source manifest", async () => {
+  const root = fixtureDirectory();
+  const registry = new FixtureRegistry({ challenge: true });
+  const artifact = publishArtifact(registry, {
+    connectorKey: "public-name",
+    connectorId: "https://registry.pdpp.dev/connectors/published-a",
+    version: "1.0.0",
+    displayName: "Published A",
+    runtimeBindings: { network: { required: true } },
+    setupModality: "static_secret",
+    tier: "supported",
+  });
+  registry.tagLists.set("acme/connector/public-name", { tags: ["1.0.0"] });
+  try {
+    await registry.start();
+    fixtureManifestWithMetadata(root, {
+      connectorId: "https://registry.pdpp.dev/connectors/unpublished-b",
+      displayName: "Unpublished B",
+      bindings: { filesystem: { required: true } },
+      modality: "manual_or_upload",
+      tier: "development",
+    });
+    const catalog = await generate(root, registry.registry);
+    assert.deepEqual(catalog.connectors[0], {
+      connector_key: "public-name",
+      connector_id: "https://registry.pdpp.dev/connectors/published-a",
+      display_name: "Published A",
+      tier: "supported",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      setup: { modality: "static_secret" },
+      latest: { version: "1.0.0", digest: artifact.digest },
+      versions: [{ version: "1.0.0", digest: artifact.digest }],
+    });
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("catalog refuses inconsistent published config metadata", async () => {
+  for (const configOverrides of [
+    { protocol_version: "9.9" },
+    { runtime: { bindings: "filesystem" } },
+    { runtime: { bindings: { filesystem: { required: true } } } },
+  ]) {
+    const root = fixtureDirectory();
+    const registry = new FixtureRegistry({ challenge: true });
+    publishArtifact(registry, {
+      connectorKey: "public-name",
+      version: "1.0.0",
+      configOverrides,
+    });
+    registry.tagLists.set("acme/connector/public-name", { tags: ["1.0.0"] });
+    try {
+      await registry.start();
+      fixtureManifest(root);
+      await assert.rejects(
+        generate(root, registry.registry),
+        /config\.protocol_version|config runtime bindings/,
+      );
+    } finally {
+      await registry.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("catalog refuses malformed published artifact layers", async () => {
+  for (const mutateManifest of [
+    (manifest) => { manifest.layers.push(null); },
+    (manifest) => {
+      manifest.layers.find((layer) => layer.mediaType.endsWith("code.v1.tar+gzip")).digest = "sha256:not-a-digest";
+    },
+  ]) {
+    const root = fixtureDirectory();
+    const registry = new FixtureRegistry({ challenge: true });
+    const artifact = publishArtifact(registry, { connectorKey: "public-name", version: "1.0.0" });
+    const manifest = structuredClone(artifact.manifest);
+    mutateManifest(manifest);
+    registry.putManifest(manifest, "1.0.0");
+    registry.tagLists.set("acme/connector/public-name", { tags: ["1.0.0"] });
+    try {
+      await registry.start();
+      fixtureManifest(root);
+      await assert.rejects(
+        generate(root, registry.registry),
+        /unrecognised layer media type|code.*invalid digest/,
+      );
+    } finally {
+      await registry.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -171,7 +291,7 @@ test("two full CLI runs write byte-identical catalogs from the same registry and
     assert.deepEqual(readFileSync(firstPath), readFileSync(secondPath));
     const catalog = JSON.parse(readFileSync(firstPath, "utf8"));
     assert.deepEqual(catalog.connectors.map((connector) => connector.connector_key), ["apple-photos"]);
-    assert.equal(catalog.connectors[0].setup.modality, null);
+    assert.equal(catalog.connectors[0].setup.modality, "static_secret");
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });
@@ -208,6 +328,24 @@ test("the CLI exits nonzero without writing output when any manifest lookup is u
     const result = await runCli(registry.registry, output);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /manifest lookup returned unknown/);
+    assert.equal(existsSync(output), false);
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI exits nonzero without writing output when published metadata is unavailable", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const latestDigest = registry.digests.get("1.1.0");
+  const latestManifest = JSON.parse(registry.manifests.get(latestDigest).toString("utf8"));
+  registry.blobs.delete(latestManifest.config.digest);
+  const output = join(root, "catalog.json");
+  try {
+    const result = await runCli(registry.registry, output);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Failed to fetch blob/);
     assert.equal(existsSync(output), false);
   } finally {
     await registry.stop();

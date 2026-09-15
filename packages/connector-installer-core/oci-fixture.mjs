@@ -356,9 +356,13 @@ export function publishArtifact(
   registry,
   {
     connectorKey = "ynab",
-    connectorId = "https://github.com/PDP-Connect/data-connectors/connector/ynab",
+    connectorId = null,
     version = "0.3.0",
     protocolVersion = "1.0",
+    displayName = "YNAB",
+    tier = "supported",
+    runtimeBindings = { network: { required: true } },
+    setupModality = "static_secret",
     withAssets = false,
     signer = null,
     signers = null,
@@ -372,12 +376,17 @@ export function publishArtifact(
     configOverrides = {},
   } = {}
 ) {
+  const resolvedConnectorId =
+    connectorId ?? `https://github.com/PDP-Connect/data-connectors/connector/${connectorKey}`;
   const profile = {
     connector_key: connectorKey,
-    connector_id: connectorId,
+    connector_id: resolvedConnectorId,
     version,
     protocol_version: protocolVersion,
-    display_name: "YNAB",
+    display_name: displayName,
+    runtime_requirements: { bindings: runtimeBindings },
+    setup: { modality: setupModality },
+    capabilities: { public_listing: { tier } },
     ...(withAssets ? { brand: { icon: "icons/ynab.svg" } } : {}),
   };
   const profileBytes = canonicalJson(profile);
@@ -396,13 +405,16 @@ export function publishArtifact(
   const config = {
     config_version: "1.0",
     connector_key: connectorKey,
-    connector_id: connectorId,
+    connector_id: resolvedConnectorId,
     version,
     protocol_version: protocolVersion,
     profile_digest: sha256(profileBytes),
     entrypoint: "code/collection-profile.mjs",
     entrypoint_kind: "import-safe",
     exports: ["collect"],
+    display_name: displayName,
+    tier,
+    runtime: { bindings: Object.keys(runtimeBindings).sort() },
     bundled_tools: [],
     licenses: "Apache-2.0",
     ...configOverrides,

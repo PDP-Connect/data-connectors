@@ -20,12 +20,24 @@ import {
   assertCatalog,
   isCatalogTimestamp,
 } from "../packages/connector-installer-core/catalog-schema.mjs";
+import {
+  fetchBlob,
+  fetchManifestByDigest,
+  isValidDigest,
+} from "../packages/connector-installer-core/oci-registry.mjs";
+import {
+  assertConfigMatchesProfile,
+  indexLayersByMediaType,
+} from "../packages/connector-installer-core/oci-verify.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_REGISTRY = "ghcr.io";
 const DEFAULT_NAMESPACE = "pdp-connect";
 const PAGE_SIZE = 100;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const CONFIG_MEDIA_TYPE = "application/vnd.pdpp.connector.config.v1+json";
+const PROFILE_MEDIA_TYPE = "application/vnd.pdpp.connector.profile.v1+json";
+const ARTIFACT_MEDIA_TYPE = "application/vnd.pdpp.connector.v1+json";
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function parseSemver(version) {
@@ -226,41 +238,143 @@ export async function listRepositoryTags({
   return [...tags];
 }
 
-function readConnectorMetadata(manifestDirectory, connector) {
-  const manifestPath = join(manifestDirectory, `${connector.manifest}.json`);
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  if (manifest.connector_key !== connector.connectorKey) {
+function parseJsonBytes(bytes, label) {
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`${label} is not JSON: ${error.message}`);
+  }
+}
+
+function assertDescriptor(descriptor, label) {
+  if (
+    !isValidDigest(descriptor?.digest) ||
+    !Number.isSafeInteger(descriptor?.size) ||
+    descriptor.size < 0 ||
+    descriptor.size > MAX_RESPONSE_BYTES
+  ) {
+    throw new Error(`${label} layer has an invalid digest or size`);
+  }
+}
+
+function assertSameArtifactField(config, profile, field, label) {
+  if (config?.[field] !== profile?.[field]) {
     throw new Error(
-      `${manifestPath}: connector_key '${manifest.connector_key}' does not match allowlist key '${connector.connectorKey}'`,
+      `${label} metadata disagrees: config.${field} is ${JSON.stringify(config?.[field])}, ` +
+        `but profile.${field} is ${JSON.stringify(profile?.[field])}`,
     );
   }
-  const required = [
-    ["connector_id", manifest.connector_id],
-    ["display_name", manifest.display_name],
-    ["capabilities.public_listing.tier", manifest.capabilities?.public_listing?.tier],
-  ];
-  for (const [field, value] of required) {
-    if (typeof value !== "string" || value.length === 0) {
-      throw new Error(`${manifestPath}: ${field} must be a non-empty string`);
+}
+
+async function readPublishedMetadata({
+  registry,
+  repository,
+  connectorKey,
+  version,
+  digest,
+  scheme,
+  timeoutMs,
+  fetchImpl,
+}) {
+  const transport = { registry, repository, scheme, timeoutMs, fetchImpl };
+  const { manifest } = await fetchManifestByDigest({ ...transport, digest });
+  if (
+    manifest?.schemaVersion !== 2 ||
+    manifest?.mediaType !== "application/vnd.oci.image.manifest.v1+json" ||
+    manifest?.artifactType !== ARTIFACT_MEDIA_TYPE ||
+    manifest?.config?.mediaType !== CONFIG_MEDIA_TYPE
+  ) {
+    throw new Error(`${registry}/${repository}@${digest} is not a Collection Profile artifact`);
+  }
+
+  const layers = indexLayersByMediaType(manifest, { repository: `${registry}/${repository}@${digest}` });
+  for (const [kind, descriptor] of Object.entries(layers)) {
+    assertDescriptor(descriptor, kind);
+  }
+  const configDescriptor = manifest.config;
+  assertDescriptor(configDescriptor, "config");
+  const configBytes = await fetchBlob({
+    ...transport,
+    digest: configDescriptor.digest,
+    maxBytes: MAX_RESPONSE_BYTES,
+  });
+  if (configBytes.length !== configDescriptor.size) {
+    throw new Error(`${registry}/${repository}@${digest} config size does not match its descriptor`);
+  }
+  const config = parseJsonBytes(configBytes, "artifact config");
+
+  if (layers.profile.mediaType !== PROFILE_MEDIA_TYPE) {
+    throw new Error(`${registry}/${repository}@${digest} has an unexpected profile layer`);
+  }
+  const profileDescriptor = layers.profile;
+  const profileBytes = await fetchBlob({
+    ...transport,
+    digest: profileDescriptor.digest,
+    maxBytes: MAX_RESPONSE_BYTES,
+  });
+  if (profileBytes.length !== profileDescriptor.size) {
+    throw new Error(`${registry}/${repository}@${digest} profile size does not match its descriptor`);
+  }
+  const profile = parseJsonBytes(profileBytes, "published profile");
+  assertConfigMatchesProfile({ config, profileBytes, profile, repository: `${registry}/${repository}@${digest}` });
+
+  if (config.connector_key !== connectorKey || profile.connector_key !== connectorKey) {
+    throw new Error(
+      `${registry}/${repository}@${digest} declares connector_key inconsistent with allowlist '${connectorKey}'`,
+    );
+  }
+  for (const field of ["display_name"]) {
+    assertSameArtifactField(config, profile, field, `${registry}/${repository}@${digest}`);
+  }
+  if (config.version !== version) {
+    throw new Error(
+      `${registry}/${repository}@${digest} config.version '${config.version}' does not match published tag '${version}'`,
+    );
+  }
+  if (typeof config.connector_id !== "string" || config.connector_id.length === 0) {
+    throw new Error(`${registry}/${repository}@${digest} has no connector_id`);
+  }
+  if (typeof config.display_name !== "string" || config.display_name.length === 0) {
+    throw new Error(`${registry}/${repository}@${digest} has no display_name`);
+  }
+  if (!["development", "preview", "supported"].includes(config.tier)) {
+    throw new Error(`${registry}/${repository}@${digest} has an invalid tier '${config.tier}'`);
+  }
+
+  const bindings = profile.runtime_requirements?.bindings;
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
+    throw new Error(`${registry}/${repository}@${digest} profile has no runtime_requirements.bindings`);
+  }
+  const modality = profile.setup?.modality;
+  if (modality !== undefined && (typeof modality !== "string" || modality.length === 0)) {
+    throw new Error(`${registry}/${repository}@${digest} profile has an invalid setup.modality`);
+  }
+  if (profile.capabilities?.public_listing?.tier !== undefined &&
+      profile.capabilities.public_listing.tier !== config.tier) {
+    throw new Error(`${registry}/${repository}@${digest} config.tier disagrees with profile public listing tier`);
+  }
+  if (config.runtime !== undefined &&
+      (!config.runtime || typeof config.runtime !== "object" || Array.isArray(config.runtime) ||
+       !Array.isArray(config.runtime.bindings) ||
+       !config.runtime.bindings.every((binding) => typeof binding === "string" && binding.length > 0))) {
+    throw new Error(`${registry}/${repository}@${digest} config runtime bindings must be an array of strings`);
+  }
+  if (config.runtime !== undefined) {
+    const configBindings = [...config.runtime.bindings].sort();
+    const profileBindings = Object.keys(bindings).sort();
+    if (JSON.stringify(configBindings) !== JSON.stringify(profileBindings)) {
+      throw new Error(`${registry}/${repository}@${digest} config runtime bindings disagree with profile`);
     }
   }
-  const bindings = manifest.runtime_requirements?.bindings;
-  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
-    throw new Error(`${manifestPath}: runtime_requirements.bindings must be an object`);
-  }
-  const modality = manifest.setup?.modality;
-  if (modality !== undefined && (typeof modality !== "string" || modality.length === 0)) {
-    throw new Error(`${manifestPath}: setup.modality must be a non-empty string when present`);
-  }
+
   return {
-    connector_key: connector.connectorKey,
-    connector_id: manifest.connector_id,
-    display_name: manifest.display_name,
-    tier: manifest.capabilities.public_listing.tier,
+    connector_key: connectorKey,
+    connector_id: config.connector_id,
+    display_name: config.display_name,
+    tier: config.tier,
     runtime_requirements: { bindings },
-    // Older profiles predate setup metadata. Preserve that absence explicitly
-    // instead of guessing how a host should acquire credentials for them.
     setup: { modality: modality ?? null },
+    version: config.version,
   };
 }
 
@@ -270,13 +384,13 @@ export async function generateConnectorCatalog({
   sourceCommit,
   generatedAt,
   previousCatalog = null,
-  manifestDirectory = join(repoRoot, "packages", "polyfill-connectors", "manifests"),
   connectors = PUBLISHABLE_CONNECTORS,
   scheme = "https",
   timeoutMs,
   allowInsecureLoopback = false,
   requestImpl = requestText,
   lookupImpl = lookupManifest,
+  fetchImpl = fetch,
 }) {
   if (!/^[0-9a-f]{40}$/.test(sourceCommit ?? "")) {
     throw new Error("source commit must be a 40-character lowercase hexadecimal Git object ID");
@@ -285,11 +399,11 @@ export async function generateConnectorCatalog({
     throw new Error("generated at must be an RFC 3339 timestamp");
   }
 
-  const inputs = [...connectors]
-    .sort((a, b) => a.connectorKey < b.connectorKey ? -1 : a.connectorKey > b.connectorKey ? 1 : 0)
-    .map((connector) => ({ connector, metadata: readConnectorMetadata(manifestDirectory, connector) }));
+  const inputs = [...connectors].sort((a, b) =>
+    a.connectorKey < b.connectorKey ? -1 : a.connectorKey > b.connectorKey ? 1 : 0,
+  );
   const catalogConnectors = [];
-  for (const { connector, metadata } of inputs) {
+  for (const connector of inputs) {
     const name = `${namespace}/connector/${connector.connectorKey}`;
     const tags = (await listRepositoryTags({
       registry,
@@ -322,9 +436,20 @@ export async function generateConnectorCatalog({
       }
       versions.push({ version: tag.version, digest: result.digest });
     }
+    const latest = versions.at(-1);
+    const metadata = await readPublishedMetadata({
+      registry,
+      repository: name,
+      connectorKey: connector.connectorKey,
+      version: latest.version,
+      digest: latest.digest,
+      scheme,
+      timeoutMs,
+      fetchImpl,
+    });
     catalogConnectors.push({
       ...metadata,
-      latest: { ...versions.at(-1) },
+      latest: { version: metadata.version, digest: latest.digest },
       versions,
     });
   }
@@ -332,7 +457,7 @@ export async function generateConnectorCatalog({
     catalog_version: "1.0",
     generated_at: new Date(Date.parse(generatedAt)).toISOString(),
     source_commit: sourceCommit,
-    connectors: catalogConnectors,
+    connectors: catalogConnectors.map(({ version, ...connector }) => connector),
   };
   if (previousCatalog !== null) {
     assertCatalog(previousCatalog);
