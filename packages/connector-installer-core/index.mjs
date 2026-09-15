@@ -777,17 +777,11 @@ function normalizeLockEntry(entry) {
  * exists (C4.5). Nothing is written to a temp directory at all, so a refusal
  * has nothing to clean up (C6.1).
  *
- * `MAX_BLOB_BYTES` bounds the COMPRESSED blob, and gzip's ratio means that
- * bounds nothing useful about what the layer expands to: a 190 KB layer expands
- * to 200 MB of zeros, comfortably inside the 64 MiB blob cap. The ceiling here
- * is what bounds the expansion, and it is applied to the sizes the archive's
- * headers declare, accumulated DURING a streaming gunzip — so crossing it
- * abandons the read (that 200 MB bomb stops after about 2 MB) rather than
- * discovering the overflow once the bytes already exist.
- *
- * The bytes actually received are then measured too, because a header is
- * written by whoever built the archive: the declared total is what makes the
- * refusal cheap, and the measured total is what makes it a guarantee.
+ * `MAX_BLOB_BYTES` limits compressed input. The tar reader separately limits
+ * regular-file bytes, decompressed input consumed, and entry count. It checks
+ * effective member sizes before collecting bodies and stops at the archive
+ * terminator. These are byte/count limits, not a measured peak-memory bound.
+ * The returned regular-file buffers are measured again here.
  */
 export const MAX_LAYER_UNPACKED_BYTES = 64 * 1024 * 1024;
 

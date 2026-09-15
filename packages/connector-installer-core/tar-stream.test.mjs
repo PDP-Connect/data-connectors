@@ -18,15 +18,52 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
-import { readTarGzEntries } from "./tar-stream.mjs";
+const TAR_READER_PATH = new URL("./tar-stream.mjs", import.meta.url);
+
+async function loadTarReader() {
+  const revision = process.env.TAR_STREAM_SOURCE_REVISION;
+  const disablePaxOverrides = process.env.TAR_STREAM_DISABLE_PAX_OVERRIDES === "1";
+  if (!revision && !disablePaxOverrides) return import(TAR_READER_PATH);
+
+  let source = revision
+    ? execFileSync("git", ["show", `${revision}:packages/connector-installer-core/tar-stream.mjs`], {
+        encoding: "utf8",
+      })
+    : readFileSync(TAR_READER_PATH, "utf8");
+  if (disablePaxOverrides) {
+    const original = source;
+    source = source.replace(
+      "const effective = effectiveMemberMetadata(globalPax, nextPax, rawSize);",
+      "const effective = { path: null, size: rawSize }; // mutation: ignore PAX overrides"
+    );
+    assert.notEqual(source, original, "the PAX override mutation matched production source");
+  }
+  return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+}
+
+const { readTarGzEntries } = await loadTarReader();
 
 async function withTempDir(run) {
   const dir = mkdtempSync(join(tmpdir(), "tar-stream-test-"));
+  try {
+    return await run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withDiskTempDir(run) {
+  const base = join(homedir(), ".tmp");
+  mkdirSync(base, { recursive: true });
+  const dir = mkdtempSync(join(base, "tar-stream-test-"));
   try {
     return await run(dir);
   } finally {
@@ -79,7 +116,7 @@ la.archive_write_free(ctypes.c_void_p(a))
 `;
 
 /** One valid ustar header block, so a bomb can be declared without being built. */
-function tarHeaderBlock(path, size) {
+function tarHeaderBlock(path, size, type = "0") {
   const block = Buffer.alloc(512, 0);
   block.write(path, 0, "utf8");
   block.write("000644 \0", 100, "ascii");
@@ -87,13 +124,184 @@ function tarHeaderBlock(path, size) {
   block.write("000000 \0", 116, "ascii");
   block.write(`${size.toString(8).padStart(11, "0")} `, 124, "ascii");
   block.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, "0")} `, 136, "ascii");
-  block.write("        ", 148, "ascii");
-  block.write("0", 156, "ascii");
+  block.write(type, 156, "ascii");
   block.write("ustar\0" + "00", 257, "ascii");
+  repairTarChecksum(block);
+  return block;
+}
+
+function repairTarChecksum(block) {
+  block.write("        ", 148, "ascii");
   let sum = 0;
   for (let i = 0; i < 512; i += 1) sum += block[i];
   block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
-  return block;
+}
+
+function padToBlock(buffer) {
+  const paddedSize = Math.ceil(buffer.length / 512) * 512;
+  return paddedSize === buffer.length
+    ? buffer
+    : Buffer.concat([buffer, Buffer.alloc(paddedSize - buffer.length)]);
+}
+
+function paxRecord(key, value) {
+  const suffix = ` ${key}=${value}\n`;
+  let length = Buffer.byteLength(suffix) + 1;
+  while (true) {
+    const record = Buffer.from(`${length}${suffix}`, "utf8");
+    if (record.length === length) return record;
+    length = record.length;
+  }
+}
+
+function paxHeader(type, records) {
+  const body = Buffer.concat(records.map(([key, value]) => paxRecord(key, value)));
+  return Buffer.concat([tarHeaderBlock(`PaxHeaders/${type}`, body.length, type), padToBlock(body)]);
+}
+
+function buildPaxFixture(dir, name, parts) {
+  const out = join(dir, `${name}.tar.gz`);
+  writeFileSync(out, gzipSync(Buffer.concat([...parts, Buffer.alloc(1024)])));
+  return { path: out, buffer: readFileSync(out) };
+}
+
+const INDEPENDENT_TAR_TABLE_SCRIPT = String.raw`
+import hashlib, json, sys, tarfile
+rows = []
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive:
+        if member.isfile():
+            body = archive.extractfile(member).read()
+            rows.append({"name": member.name, "sha256": hashlib.sha256(body).hexdigest()})
+print(json.dumps(rows, ensure_ascii=False))
+`;
+
+function independentTarTable(archivePath) {
+  return JSON.parse(
+    execFileSync("python3", ["-c", INDEPENDENT_TAR_TABLE_SCRIPT, archivePath], {
+      encoding: "utf8",
+    })
+  );
+}
+
+function independentTarOutcome(archivePath) {
+  const result = spawnSync("python3", ["-c", INDEPENDENT_TAR_TABLE_SCRIPT, archivePath], {
+    encoding: "utf8",
+  });
+  if (result.status === 0) return { accepted: true, entries: JSON.parse(result.stdout) };
+  return {
+    accepted: false,
+    error: result.stderr.trim().split("\n").at(-1) ?? `python exited ${result.status}`,
+  };
+}
+
+function readerTarTable(entries) {
+  return entries.map(({ path, buffer }) => ({
+    name: path,
+    sha256: createHash("sha256").update(buffer).digest("hex"),
+  }));
+}
+
+function assertMatchesIndependent(dir, label, archive, entries) {
+  const archivePath = join(dir, `${label}.tar.gz`);
+  writeFileSync(archivePath, archive);
+  const expected = independentTarTable(archivePath);
+  assert.deepEqual(readerTarTable(entries), expected);
+  process.stdout.write(`${JSON.stringify({ fixture: label, independentEntries: expected })}\n`);
+}
+
+function semanticPaxFixtures(dir) {
+  const sizePayload = Buffer.alloc(513, "S");
+  const followingPayload = Buffer.from("after-size-boundary");
+  const newlinePayload = Buffer.from("newline path bytes");
+  const globalPayload = Buffer.from("global path bytes");
+  const precedencePayload = Buffer.from("precedence bytes");
+  return [
+    {
+      label: "size-override",
+      ...buildPaxFixture(dir, "size-override", [
+        paxHeader("x", [["size", "513"]]),
+        tarHeaderBlock("raw-size.bin", 3),
+        padToBlock(sizePayload),
+        tarHeaderBlock("following.bin", followingPayload.length),
+        padToBlock(followingPayload),
+      ]),
+    },
+    {
+      label: "newline-path",
+      ...buildPaxFixture(dir, "newline-path", [
+        paxHeader("x", [["path", "code/☃a\nb.mjs"]]),
+        tarHeaderBlock("placeholder", newlinePayload.length),
+        padToBlock(newlinePayload),
+      ]),
+    },
+    {
+      label: "global-path-local-reset",
+      ...buildPaxFixture(dir, "global-path-local-reset", [
+        paxHeader("g", [["path", "code/global-name.mjs"]]),
+        paxHeader("x", [["path", "code/local-name.mjs"]]),
+        tarHeaderBlock("first-placeholder", globalPayload.length),
+        padToBlock(globalPayload),
+        tarHeaderBlock("second-placeholder", followingPayload.length),
+        padToBlock(followingPayload),
+      ]),
+    },
+    {
+      label: "global-size-persists",
+      ...buildPaxFixture(dir, "global-size-persists", [
+        paxHeader("g", [["size", "4"]]),
+        tarHeaderBlock("first.bin", 3),
+        padToBlock(Buffer.from("ABCD")),
+        tarHeaderBlock("second.bin", 3),
+        padToBlock(Buffer.from("EFGH")),
+      ]),
+    },
+    {
+      label: "global-path",
+      ...buildPaxFixture(dir, "global-path", [
+        paxHeader("g", [["path", "code/global-name.mjs"]]),
+        tarHeaderBlock("placeholder", globalPayload.length),
+        padToBlock(globalPayload),
+      ]),
+    },
+    {
+      label: "later-and-local-precedence",
+      ...buildPaxFixture(dir, "precedence", [
+        paxHeader("g", [["path", "code/global.mjs"]]),
+        paxHeader("x", [
+          ["path", "code/first-local.mjs"],
+          ["path", "code/final-local.mjs"],
+        ]),
+        tarHeaderBlock("placeholder", precedencePayload.length),
+        padToBlock(precedencePayload),
+      ]),
+    },
+    {
+      label: "informational-keys",
+      ...buildPaxFixture(dir, "informational-keys", [
+        paxHeader("x", [
+          ["mtime", "1.25"],
+          ["atime", "2.5"],
+          ["ctime", "3.75"],
+          ["uid", "123"],
+          ["gid", "456"],
+          ["uname", "builder"],
+          ["gname", "builders"],
+          ["comment", "independent reader cross-check"],
+        ]),
+        tarHeaderBlock("informational.bin", precedencePayload.length),
+        padToBlock(precedencePayload),
+      ]),
+    },
+    {
+      label: "leading-bom-path",
+      ...buildPaxFixture(dir, "leading-bom-path", [
+        paxHeader("x", [["path", "\uFEFFcode/bom-name.mjs"]]),
+        tarHeaderBlock("placeholder", precedencePayload.length),
+        padToBlock(precedencePayload),
+      ]),
+    },
+  ];
 }
 
 function hasLibarchive() {
@@ -128,6 +336,7 @@ test("a small archive written with a NAMED owner is read, not refused", async ()
     const file = entries.find((entry) => entry.path.endsWith("small.txt"));
     assert.ok(file, "the member is read");
     assert.equal(file.buffer.length, 32);
+    assertMatchesIndependent(dir, "named-owner", buffer, entries);
   });
 });
 
@@ -150,9 +359,10 @@ test("the size read is the archive's own, whatever the owner is spelled as", asy
   await withTempDir(async (dir) => {
     const named = buildArchive(dir, [["m.bin", 4096]], ["--owner=builduser", "--group=g"]);
     const numeric = buildArchive(dir, [["m.bin", 4096]], ["--owner=0", "--group=0"]);
-    for (const buffer of [named, numeric]) {
+    for (const [archiveLabel, buffer] of [["named", named], ["numeric", numeric]]) {
       const entries = await readTarGzEntries(buffer, { maxUnpackedBytes: 8192 });
       assert.equal(entries.find((e) => e.path.endsWith("m.bin")).buffer.length, 4096);
+      assertMatchesIndependent(dir, `owner-${archiveLabel}`, buffer, entries);
       await assert.rejects(
         () => readTarGzEntries(buffer, { maxUnpackedBytes: 4095 }),
         /over the 4095-byte ceiling/
@@ -175,18 +385,384 @@ test("member bytes survive the read intact", async () => {
     const file = entries.find((entry) => entry.path.endsWith("profile.mjs"));
     assert.deepEqual(file.buffer, payload);
     assert.equal(entries.find((entry) => entry.path.endsWith("empty")).buffer.length, 0);
+    assertMatchesIndependent(dir, "member-bytes", readFileSync(out), entries);
   });
 });
 
-test("a decompression bomb is refused without decompressing it", async () => {
-  // The property the old preflight could not have: `tar -tvzf` expands the whole
-  // archive to produce a listing, so the 200 MB existed before the ceiling was
-  // consulted. Here the ceiling is applied to a streaming read, so the refusal
-  // arrives after a couple of megabytes. The heap assertion is what makes that
-  // claim testable rather than asserted in a comment.
-  // Built by streaming zeros through gzip rather than by writing a 200 MB file:
-  // the point is that the READER never expands it, and materialising the bomb on
-  // a RAM-backed /tmp just to prove that fills the disk for every other suite.
+for (const label of [
+  "size-override",
+  "newline-path",
+  "global-path",
+  "global-path-local-reset",
+  "global-size-persists",
+  "later-and-local-precedence",
+  "informational-keys",
+  "leading-bom-path",
+]) {
+  test(`PAX fixture: ${label} matches Python tarfile names and sha256`, async () => {
+    await withTempDir(async (dir) => {
+      const fixture = semanticPaxFixtures(dir).find((candidate) => candidate.label === label);
+      const expected = independentTarTable(fixture.path);
+      const entries = await readTarGzEntries(fixture.buffer, { maxUnpackedBytes: 1 << 20 });
+      const actual = readerTarTable(entries);
+      assert.deepEqual(actual, expected);
+      process.stdout.write(`${JSON.stringify({ fixture: label, entries: actual })}\n`);
+    });
+  });
+}
+
+test("malformed and unsupported semantic PAX records are refused", async () => {
+  await withTempDir(async (dir) => {
+    const payload = Buffer.from("x");
+    const malformedBody = Buffer.from("99 path=truncated\n");
+    const invalidUtf8Body = paxRecord("path", "x");
+    invalidUtf8Body[invalidUtf8Body.indexOf("x")] = 0xff;
+    const cases = [
+      {
+        name: "malformed",
+        expected: /malformed PAX record/,
+        parts: [
+          tarHeaderBlock("PaxHeaders/x", malformedBody.length, "x"),
+          padToBlock(malformedBody),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+      {
+        name: "linkpath",
+        expected: /unsupported PAX linkpath/,
+        parts: [
+          paxHeader("x", [["linkpath", "elsewhere"]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+      {
+        name: "sparse-map",
+        expected: /unsupported PAX key "GNU\.sparse\.map"/,
+        parts: [
+          paxHeader("x", [["GNU.sparse.map", "0,1"]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+      ...["SCHILY.filetype", "LIBARCHIVE.xattr.user.key"].map((key) => ({
+        name: key,
+        expected: new RegExp(`unsupported PAX key "${key.replaceAll(".", "\\.")}"`),
+        parts: [
+          paxHeader("x", [[key, "semantic-value"]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      })),
+      ...["path", "size"].map((key) => ({
+        name: `empty-${key}`,
+        expected: new RegExp(`unsupported empty PAX ${key}`),
+        parts: [
+          paxHeader("x", [[key, ""]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      })),
+      {
+        name: "empty-linkpath",
+        expected: /unsupported PAX linkpath/,
+        parts: [
+          paxHeader("x", [["linkpath", ""]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+      {
+        name: "invalid-utf8",
+        expected: /malformed PAX record/,
+        parts: [
+          tarHeaderBlock("PaxHeaders/x", invalidUtf8Body.length, "x"),
+          padToBlock(invalidUtf8Body),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+      {
+        name: "nul-path",
+        expected: /PAX path containing a NUL byte/,
+        parts: [
+          paxHeader("x", [["path", "code/\0name"]]),
+          tarHeaderBlock("placeholder", payload.length),
+          padToBlock(payload),
+        ],
+      },
+    ];
+
+    for (const fixtureCase of cases) {
+      const fixture = buildPaxFixture(dir, fixtureCase.name, fixtureCase.parts);
+      await assert.rejects(
+        () => readTarGzEntries(fixture.buffer, { maxUnpackedBytes: 1 << 20 }),
+        fixtureCase.expected,
+        fixtureCase.name
+      );
+      process.stdout.write(
+        `${JSON.stringify({
+          fixture: fixtureCase.name,
+          independentReader: independentTarOutcome(fixture.path),
+          installer: "refused",
+        })}\n`
+      );
+    }
+  });
+});
+
+test("invalid UTF-8 in ustar and GNU long names is refused", async () => {
+  await withTempDir(async (dir) => {
+    const invalidHeader = tarHeaderBlock("placeholder", 0);
+    invalidHeader[0] = 0xff;
+    repairTarChecksum(invalidHeader);
+    const invalidLongName = Buffer.from([0xff, 0]);
+    const cases = [
+      {
+        name: "invalid-ustar-name",
+        expected: /member name that is not valid UTF-8/,
+        parts: [invalidHeader],
+      },
+      {
+        name: "invalid-gnu-long-name",
+        expected: /GNU long name that is not valid UTF-8/,
+        parts: [
+          tarHeaderBlock("././@LongLink", invalidLongName.length, "L"),
+          padToBlock(invalidLongName),
+          tarHeaderBlock("placeholder", 0),
+        ],
+      },
+    ];
+
+    for (const fixtureCase of cases) {
+      const fixture = buildPaxFixture(dir, fixtureCase.name, fixtureCase.parts);
+      await assert.rejects(
+        () => readTarGzEntries(fixture.buffer, { maxUnpackedBytes: 4096 }),
+        fixtureCase.expected
+      );
+      process.stdout.write(
+        `${JSON.stringify({
+          fixture: fixtureCase.name,
+          independentReader: independentTarOutcome(fixture.path),
+          installer: "refused",
+        })}\n`
+      );
+    }
+  });
+});
+
+test("consecutive per-entry metadata headers are refused", async () => {
+  await withTempDir(async (dir) => {
+    for (const [label, secondType] of [["x-to-x", "x"], ["x-to-g", "g"]]) {
+      const fixture = buildPaxFixture(dir, label, [
+        paxHeader("x", [["path", "first.mjs"]]),
+        paxHeader(secondType, [["path", "second.mjs"]]),
+        tarHeaderBlock("placeholder", 0),
+      ]);
+      await assert.rejects(
+        () => readTarGzEntries(fixture.buffer, { maxUnpackedBytes: 4096 }),
+        /consecutive per-entry metadata headers/
+      );
+      process.stdout.write(
+        `${JSON.stringify({
+          fixture: label,
+          independentReader: independentTarOutcome(fixture.path),
+          installer: "refused",
+        })}\n`
+      );
+    }
+  });
+});
+
+test(
+  "PAX mutation control turns the semantic fixture tests red",
+  { skip: process.env.TAR_STREAM_DISABLE_PAX_OVERRIDES === "1" },
+  () => {
+    const childEnv = { ...process.env, TAR_STREAM_DISABLE_PAX_OVERRIDES: "1" };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const child = spawnSync(
+      process.execPath,
+      ["--test", "--test-name-pattern=PAX fixture:", fileURLToPath(import.meta.url)],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: childEnv,
+      }
+    );
+    assert.notEqual(child.status, 0, "disabled PAX overrides must fail the semantic fixtures");
+    assert.match(`${child.stdout}\n${child.stderr}`, /AssertionError|Expected values to be strictly deep-equal/);
+  }
+);
+
+test("20,000 empty members are refused by the entry ceiling", async () => {
+  await withDiskTempDir(async (dir) => {
+    const out = join(dir, "many-empty.tar.gz");
+    const script = String.raw`
+import sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz", format=tarfile.USTAR_FORMAT) as archive:
+    for index in range(20_000):
+        entry = tarfile.TarInfo(f"empty-{index:05d}")
+        entry.size = 0
+        archive.addfile(entry)
+`;
+    execFileSync("python3", ["-c", script, out]);
+    await assert.rejects(
+      () =>
+        readTarGzEntries(readFileSync(out), {
+          maxUnpackedBytes: 4096,
+          maxEntries: 100,
+        }),
+      /archive contains more than 100 entries/
+    );
+  });
+});
+
+test("the reader stops before 16 MiB of compressed trailing tar padding", async () => {
+  await withDiskTempDir(async (dir) => {
+    const out = join(dir, "trailing-padding.tar.gz");
+    const script = String.raw`
+import gzip, io, sys, tarfile
+with gzip.open(sys.argv[1], "wb") as compressed:
+    with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        entry = tarfile.TarInfo("four.bin")
+        entry.size = 4
+        archive.addfile(entry, io.BytesIO(b"ABCD"))
+    block = b"\0" * (1024 * 1024)
+    for _ in range(16):
+        compressed.write(block)
+`;
+    execFileSync("python3", ["-c", script, out]);
+    const archive = readFileSync(out);
+    const expected = independentTarTable(out);
+    let observed = 0;
+    const entries = await readTarGzEntries(archive, {
+      maxUnpackedBytes: 4,
+      maxDecompressedBytes: 32 * 1024 * 1024,
+      observeDecompressedChunk: (length) => {
+        observed += length;
+        if (observed > 1024 * 1024) {
+          throw new Error("reader consumed trailing padding past the observable bound");
+        }
+      },
+    });
+    assert.deepEqual(readerTarTable(entries), expected);
+    assert.ok(observed < 16 * 1024 * 1024, `observed ${observed} decompressed bytes`);
+    process.stdout.write(`${JSON.stringify({ fixture: "trailing-padding", observed })}\n`);
+  });
+});
+
+test("an incomplete regular-file body is refused", async () => {
+  const incomplete = gzipSync(
+    Buffer.concat([tarHeaderBlock("incomplete.bin", 4), Buffer.from("ABC")])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(incomplete, { maxUnpackedBytes: 16 }),
+    /archive ends in the middle of a member/
+  );
+});
+
+test("the decompressed-input ceiling is enforced independently of member bytes", async () => {
+  const payload = Buffer.alloc(4096, "i");
+  const archive = gzipSync(
+    Buffer.concat([
+      tarHeaderBlock("within-member-budget.bin", payload.length),
+      padToBlock(payload),
+      Buffer.alloc(1024),
+    ])
+  );
+  await assert.rejects(
+    () =>
+      readTarGzEntries(archive, {
+        maxUnpackedBytes: 8192,
+        maxDecompressedBytes: 1024,
+      }),
+    /decompressed input exceeds the 1024-byte ceiling/
+  );
+});
+
+test("metadata headers count toward the entry ceiling", async () => {
+  const metadata = Array.from({ length: 4 }, (_, index) =>
+    paxHeader("g", [["comment", `metadata-${index}`]])
+  );
+  const archive = gzipSync(
+    Buffer.concat([
+      ...metadata,
+      tarHeaderBlock("empty.bin", 0),
+      Buffer.alloc(1024),
+    ])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(archive, { maxUnpackedBytes: 4096, maxEntries: 3 }),
+    /archive contains more than 3 entries/
+  );
+});
+
+test("metadata without a following entry is refused", async () => {
+  const archive = gzipSync(
+    Buffer.concat([paxHeader("x", [["path", "dangling.bin"]]), Buffer.alloc(1024)])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(archive, { maxUnpackedBytes: 4096 }),
+    /metadata that has no following entry/
+  );
+});
+
+test("a gzip stream truncated before the tar end marker is refused", async () => {
+  const complete = gzipSync(
+    Buffer.concat([tarHeaderBlock("empty.bin", 0), Buffer.alloc(1024)])
+  );
+  const truncated = complete.subarray(0, Math.floor(complete.length / 2));
+  await assert.rejects(
+    () => readTarGzEntries(truncated, { maxUnpackedBytes: 4096 }),
+    /unexpected end|invalid|unexpected end of file/i
+  );
+});
+
+test("a non-zero directory size is refused", async () => {
+  const archive = gzipSync(
+    Buffer.concat([
+      tarHeaderBlock("invalid-directory", 1, "5"),
+      padToBlock(Buffer.from("x")),
+      Buffer.alloc(1024),
+    ])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(archive, { maxUnpackedBytes: 4096 }),
+    /non-zero directory size/
+  );
+});
+
+test("a partial final header block is refused", async () => {
+  const archive = gzipSync(
+    Buffer.concat([tarHeaderBlock("empty.bin", 0), Buffer.alloc(100, "h")])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(archive, { maxUnpackedBytes: 4096 }),
+    /middle of a header block/
+  );
+});
+
+test("a non-zero block after the first tar end marker is refused", async () => {
+  const archive = gzipSync(
+    Buffer.concat([
+      tarHeaderBlock("first.bin", 0),
+      Buffer.alloc(512),
+      tarHeaderBlock("after-marker.bin", 0),
+      Buffer.alloc(1024),
+    ])
+  );
+  await assert.rejects(
+    () => readTarGzEntries(archive, { maxUnpackedBytes: 4096 }),
+    /non-zero block after its first end marker/
+  );
+});
+
+test("a 200 MiB archive is refused before full decompression", async () => {
+  // The old listing parser gave no observable proof that it stopped early. The
+  // callback sits between gunzip and the parser, so this assertion measures the
+  // decompressed bytes the reader actually consumes before refusing the header.
+  // Build by streaming zeros through gzip instead of retaining a 200 MiB input.
   const { createGzip } = await import("node:zlib");
   const declared = 200 * 1024 * 1024;
   const gzip = createGzip();
@@ -203,17 +779,23 @@ test("a decompression bomb is refused without decompressing it", async () => {
   const buffer = Buffer.concat(chunks);
   assert.ok(buffer.length < 1024 * 1024, "the compressed bomb is small");
 
-  global.gc?.();
-  const before = process.memoryUsage().heapUsed;
+  let observed = 0;
   await assert.rejects(
-    () => readTarGzEntries(buffer, { maxUnpackedBytes: 64 * 1024 * 1024 }),
+    () =>
+      readTarGzEntries(buffer, {
+        maxUnpackedBytes: 64 * 1024 * 1024,
+        observeDecompressedChunk: (length) => {
+          observed += length;
+          if (observed > 2 * 1024 * 1024) {
+            throw new Error("reader consumed the bomb past the observable bound");
+          }
+        },
+      }),
     /over the 67108864-byte ceiling/
   );
-  const grew = process.memoryUsage().heapUsed - before;
-  assert.ok(
-    grew < 32 * 1024 * 1024,
-    `the refusal must not first expand the layer (heap grew ${grew} bytes)`
-  );
+  assert.ok(observed > 0, "the decompressed-byte observer was exercised");
+  assert.ok(observed <= 2 * 1024 * 1024, `observed ${observed} decompressed bytes`);
+  process.stdout.write(`${JSON.stringify({ fixture: "200-mib-refusal", observed })}\n`);
 });
 
 test("unsupported member types are refused from the header, not a rendered line", async () => {
@@ -258,6 +840,7 @@ test("a path too long for the header is validated in full", async () => {
         entries.some((entry) => entry.path.endsWith("profile.mjs") && entry.buffer.length === 40),
         `${format}: the member is returned under its full path`
       );
+      assertMatchesIndependent(dir, `long-path-${format.slice(9)}`, readFileSync(out), entries);
     });
   }
 });
@@ -318,6 +901,7 @@ test(
             2048,
             `${label}/${owner} reads the declared size`
           );
+          assertMatchesIndependent(dir, `${label}-${owner}`, buffer, entries);
           await assert.rejects(
             () => readTarGzEntries(buffer, { maxUnpackedBytes: 2047 }),
             /over the 2047-byte ceiling/,
