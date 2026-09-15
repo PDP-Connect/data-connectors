@@ -28,6 +28,7 @@ import {
   loadConnectorIndex,
   pruneInstalled,
   resolveConnectorArtifacts,
+  toAnchoredIdentityPattern,
   toPortableArtifactPath,
   verifyInstalled,
 } from "./index.mjs";
@@ -167,9 +168,15 @@ async function withRemoteArtifactFetch(routes, callback) {
   }
 }
 
+// Production hands sigstore an anchored pattern, not the bare identity, so this
+// asserts on the pattern the resolver-selected identity must produce. The real
+// matching behaviour is covered against @sigstore/verify in signer-identity.test.mjs.
 function artifactVerifierFor(expectedCertificateIdentityURI) {
   return async (_bundle, _payloadBuffer, options) => {
-    assert.equal(options.certificateIdentityURI, expectedCertificateIdentityURI);
+    assert.equal(
+      options.certificateIdentityURI,
+      toAnchoredIdentityPattern(expectedCertificateIdentityURI),
+    );
   };
 }
 
