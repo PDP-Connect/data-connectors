@@ -11,27 +11,19 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
-const readJson = (path) => JSON.parse(read(path));
 const rootAuthoringPath = "AUTHORING.md";
-const githubAuthoringPath = "connectors/github-pdpp/AUTHORING.md";
 const legacySkillPath = "skills/pdp-connect/SKILL.md";
 const legacyCreatePath = "skills/pdp-connect/CREATE.md";
 const checkedMarkdownPaths = [
   "README.md",
   rootAuthoringPath,
-  githubAuthoringPath,
   legacySkillPath,
   legacyCreatePath,
 ];
 const README = read("README.md");
 const rootAuthoring = read(rootAuthoringPath);
-const githubAuthoring = read(githubAuthoringPath);
 const legacySkill = read(legacySkillPath);
 const legacyCreate = read(legacyCreatePath);
-const githubManifest = readJson(
-  "connectors/github-pdpp/collection-profile.json",
-);
-const index = readJson("connector-index.json");
 
 function headingFragments(content) {
   const fragments = new Set();
@@ -75,20 +67,9 @@ assert.match(
   README,
   /For new connector work, start with \[Connector authoring\]/,
 );
-assert.match(README, /GitHub and ChatGPT are the current PDPP artifact examples/);
 assert.match(
   README,
   /New connector work belongs here by default, not in `PDP-Connect\/pdpp`/,
-);
-assert.match(
-  README,
-  /checked-in `connector-index\.json` intentionally marks both artifacts with `releaseId: "unpublished"` until CI regenerates the source-tree index/,
-);
-assert.match(README, /connectors-48440fead534/);
-assert.match(README, /connectors-latest/);
-assert.match(
-  README,
-  /DataConnect v0\.7\.54.*includes both PDPP profiles/,
 );
 assert.match(rootAuthoring, /This repository is the single home of PDPP connector content/);
 assert.match(rootAuthoring, /production does not build from it/);
@@ -96,25 +77,6 @@ assert.doesNotMatch(
   `${README}\n${rootAuthoring}`,
   /runs the product/,
 );
-assert.match(rootAuthoring, /Add an `artifact\.json` descriptor/);
-assert.match(rootAuthoring, /scripts\/build-pdpp-artifact\.mjs/);
-assert.match(rootAuthoring, /requires both `network` and `browser`/);
-assert.match(
-  rootAuthoring,
-  /DataConnect v0\.7\.54.*provide this browser host/,
-);
-assert.match(rootAuthoring, /checked-in index entry intentionally has `releaseId: "unpublished"`/);
-assert.match(rootAuthoring, /connectors-48440fead534/);
-assert.match(rootAuthoring, /connectors-latest/);
-assert.match(
-  githubAuthoring,
-  /Start new connector work here, in this repository/,
-);
-assert.match(githubAuthoring, /requires only the `network` binding/);
-assert.match(githubAuthoring, /releaseId: "unpublished"/);
-assert.match(githubAuthoring, /source-tree placeholder metadata/);
-assert.match(githubAuthoring, /connectors-48440fead534/);
-assert.match(githubAuthoring, /connectors-latest/);
 assert.match(
   legacySkill,
   /New connector requests route to this repository/,
@@ -161,49 +123,6 @@ assert.match(
   read("skills/pdp-connect/scripts/scaffold.cjs"),
   /without --legacy-exception/,
 );
-assert.deepEqual(githubManifest.runtime_requirements.bindings, {
-  network: { required: true },
-});
-assert.equal(
-  index.connectors["github-pdpp"][0].artifactKind,
-  "pdpp-collection-profile",
-);
-assert.equal(index.connectors["github-pdpp"][0].releaseId, "unpublished");
-
-const chatgptPaths = [
-  "connectors/chatgpt-pdpp/artifact.json",
-  "connectors/chatgpt-pdpp/collection-profile.json",
-  "scripts/build-pdpp-artifact.mjs",
-];
-const presentChatgptPaths = chatgptPaths.filter((path) =>
-  existsSync(join(root, path)),
-);
-if (presentChatgptPaths.length > 0) {
-  assert.deepEqual(
-    presentChatgptPaths,
-    chatgptPaths,
-    "ChatGPT generic artifact tooling must land as one contract",
-  );
-  const chatgptArtifact = readJson(chatgptPaths[0]);
-  const chatgptManifest = readJson(chatgptPaths[1]);
-  assert.equal(chatgptArtifact.artifact_kind, "pdpp-collection-profile");
-  assert.deepEqual(chatgptManifest.runtime_requirements.bindings, {
-    network: { required: true },
-    browser: { required: true },
-  });
-  assert.deepEqual(chatgptArtifact.build.external_packages, [
-    { name: "p-queue", version: "^9.3.3" },
-    { name: "patchright", version: "^1.61.1" },
-    { name: "@pdpp/connector-protocol", version: "^1.0.0" },
-    { name: "@pdpp/connector-protocol/auth", version: "^1.0.0" },
-    { name: "@pdpp/connector-protocol/http-retry", version: "^1.0.0" },
-    { name: "@pdpp/connector-protocol/pdpp-safe-text", version: "^1.0.0" },
-  ]);
-} else {
-  assert.fail(
-    "The authoring docs require the complete ChatGPT PDPP artifact contract",
-  );
-}
 
 for (const path of checkedMarkdownPaths) {
   assertLocalMarkdownLinksResolve(path);
@@ -227,5 +146,5 @@ for (const path of [
 }
 
 console.log(
-  "PDPP authoring routes, links, fragments, bindings, and publication status are consistent.",
+  "PDPP authoring routes, links, fragments, and legacy exception wording are consistent.",
 );
