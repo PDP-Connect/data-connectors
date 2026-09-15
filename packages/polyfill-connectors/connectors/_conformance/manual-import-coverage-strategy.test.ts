@@ -69,6 +69,7 @@ test("every manual-upload connector is discoverable by setup modality", () => {
 		"apple-health",
 		"google-maps",
 		"netflix-export",
+		"strava",
 		"whatsapp",
 	]);
 });

@@ -29,7 +29,7 @@ These connectors fetch via the platform's public HTTP API using a long-lived tok
 | gmail | `GMAIL_ADDRESS` or `GMAIL_USER`; `GOOGLE_APP_PASSWORD_PDPP` or `GMAIL_APP_PASSWORD` | Google app password | ✅ | ✅ | ~27,359 |
 | notion | `NOTION_API_TOKEN` | Manual: notion.so/my-integrations → "New integration" | 🟡 code ready | ✅ (expected) | — |
 | oura | `OURA_PERSONAL_ACCESS_TOKEN` | Manual: cloud.ouraring.com/personal-access-tokens | 🟡 code ready | ✅ (expected) | — |
-| strava | `STRAVA_ACCESS_TOKEN` | Requires OAuth app registration | 🟡 code ready | ✅ (expected) | — |
+| strava | _none_ | Account export (`STRAVA_EXPORT_DIR`); no API token, no network | 🟡 code ready | — | Import connector: Strava's API Policy is incompatible with a Personal Server |
 | reddit | `REDDIT_USERNAME`, `REDDIT_PASSWORD` | Logged-in browser session against old.reddit.com JSON | 🟡 code ready | ⚠ browser session | — |
 | slack | `SLACK_WORKSPACE` + slackdump binary | Subprocess; wraps slackdump CLI | 🟡 code ready | ✅ (expected) | — |
 | spotify | `SPOTIFY_ACCESS_TOKEN` | OAuth app creation frozen by Spotify as of Feb 2026 | 🚫 blocked upstream | — | — |
