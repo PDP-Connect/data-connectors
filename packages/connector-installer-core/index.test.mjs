@@ -11,12 +11,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import {
   DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
@@ -36,6 +37,20 @@ import {
 
 const VANA_LEGACY_CERTIFICATE_IDENTITY =
   "https://github.com/vana-com/data-connectors/.github/workflows/publish-connectors.yml@refs/heads/main";
+
+const tempDirs = [];
+
+after(() => {
+  for (const dir of tempDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function createTempDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 function sha256(buffer) {
   return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
@@ -72,7 +87,7 @@ function baseEntry(overrides = {}) {
 }
 
 function pdppFixture(overrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), "pdpp-artifact-test-"));
+  const root = createTempDir("pdpp-artifact-test-");
   const manifestPath = overrides.manifestPath ?? "profile/collection-profile.json";
   const entrypointPath = overrides.entrypointPath ?? "dist/collection-profile.cjs";
   const provenancePath = overrides.provenancePath ?? "provenance.json";
@@ -109,7 +124,7 @@ function pdppFixture(overrides = {}) {
 }
 
 function legacyFixture() {
-  const root = mkdtempSync(join(tmpdir(), "legacy-artifact-test-"));
+  const root = createTempDir("legacy-artifact-test-");
   const manifestBuffer = Buffer.from(
     '{"connector_id":"legacy-connector","version":"1.0.0","name":"Legacy"}\n',
   );
@@ -460,8 +475,8 @@ test("remote artifact verification ignores identity metadata supplied by the con
 });
 
 test("pruning preserves configured link subtrees and removes only unpreserved links", () => {
-  const installRoot = mkdtempSync(join(tmpdir(), "prune-install-test-"));
-  const externalRoot = mkdtempSync(join(tmpdir(), "prune-external-test-"));
+  const installRoot = createTempDir("prune-install-test-");
+  const externalRoot = createTempDir("prune-external-test-");
   const externalFile = join(externalRoot, "must-survive.txt");
   writeFileSync(externalFile, "outside\n");
   writeFileSync(join(installRoot, "expected.txt"), "expected\n");

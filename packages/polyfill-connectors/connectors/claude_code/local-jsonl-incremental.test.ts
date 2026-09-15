@@ -17,12 +17,26 @@ import {
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { resolveExecutionRoot } from "../../src/execution-root.ts";
 import { scanLocalJsonl } from "../../src/local-jsonl-cursor.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
+
+const tempDirs: string[] = [];
+
+after(async () => {
+	await Promise.all(
+		tempDirs.map((dir) => rm(dir, { recursive: true, force: true })),
+	);
+});
+
+async function createTempDir(prefix: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), prefix));
+	tempDirs.push(dir);
+	return dir;
+}
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const IDS: Record<string, string> = {
@@ -57,7 +71,7 @@ async function makeSource(): Promise<{
 	top: string;
 	subagent: string;
 }> {
-	const claudeHome = await mkdtemp(join(tmpdir(), "pdpp-claude-incremental-"));
+	const claudeHome = await createTempDir("pdpp-claude-incremental-");
 	const projects = join(claudeHome, "projects");
 	const project = join(projects, "-tmp-incremental");
 	const top = join(project, `${SESSION_ID}.jsonl`);
@@ -195,7 +209,7 @@ test("M3: a complete append emits only the suffix", async () => {
 });
 
 test("M4: a committed-prefix mutation beyond 64 KiB rebuilds", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m4-"));
+	const root = await createTempDir("pdpp-m4-");
 	const path = join(root, "events.jsonl");
 	await writeFile(
 		path,
@@ -211,7 +225,7 @@ test("M4: a committed-prefix mutation beyond 64 KiB rebuilds", async () => {
 });
 
 test("M5: a same-size committed-prefix rewrite rebuilds", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m5-"));
+	const root = await createTempDir("pdpp-m5-");
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"one"}\n');
 	const first = await scanLines(path);
@@ -223,7 +237,7 @@ test("M5: a same-size committed-prefix rewrite rebuilds", async () => {
 });
 
 test("M6: replacement with a matching prefix tails only the replacement suffix", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m6-"));
+	const root = await createTempDir("pdpp-m6-");
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"one"}\n');
 	const first = await scanLines(path);
@@ -236,7 +250,7 @@ test("M6: replacement with a matching prefix tails only the replacement suffix",
 });
 
 test("M7: truncation rebuilds from the current source", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m7-"));
+	const root = await createTempDir("pdpp-m7-");
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"one"}\n');
 	const first = await scanLines(path);
@@ -248,7 +262,7 @@ test("M7: truncation rebuilds from the current source", async () => {
 });
 
 test("M8: an unterminated line is not committed until its LF arrives", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m8-"));
+	const root = await createTempDir("pdpp-m8-");
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"partial');
 	const first = await scanLines(path);
@@ -422,7 +436,7 @@ test("M13: a new contributor for an existing session folds into the existing agg
 });
 
 test("M15: concurrent rewrite plus growth rejects the scan and a retry rebuilds", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-m15-"));
+	const root = await createTempDir("pdpp-m15-");
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"one"}\n');
 	await assert.rejects(
@@ -2030,7 +2044,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 
 test("transcript symlinks report targets without following outside sources and retain prior gaps", async (t) => {
 	const source = await makeSource();
-	const external = await mkdtemp(join(tmpdir(), "pdpp-claude-link-target-"));
+	const external = await createTempDir("pdpp-claude-link-target-");
 	t.after(async () => {
 		await rm(source.claudeHome, { recursive: true, force: true });
 		await rm(external, { recursive: true, force: true });
@@ -2186,9 +2200,7 @@ test("transcript symlinks report targets without following outside sources and r
 
 test("dangling transcript and session-directory symlinks report gaps on every run", async (t) => {
 	const source = await makeSource();
-	const external = await mkdtemp(
-		join(tmpdir(), "pdpp-claude-dangling-target-"),
-	);
+	const external = await createTempDir("pdpp-claude-dangling-target-");
 	t.after(async () => {
 		await rm(source.claudeHome, { recursive: true, force: true });
 		await rm(external, { recursive: true, force: true });
