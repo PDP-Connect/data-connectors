@@ -22,11 +22,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, createSign, generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { FixtureRegistry, PINNED_IDENTITY, publishArtifact } from "./oci-fixture.mjs";
 import {
@@ -43,6 +43,10 @@ const { json: canonicalJson } = require("@sigstore/core");
 
 const ISSUER = DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER;
 const workDir = mkdtempSync(join(tmpdir(), "oci-identity-test-"));
+
+after(() => {
+  rmSync(workDir, { recursive: true, force: true });
+});
 
 function openssl(args) {
   execFileSync("openssl", args, { stdio: ["ignore", "pipe", "pipe"] });
