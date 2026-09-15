@@ -758,8 +758,40 @@ function normalizeLockEntry(entry) {
  * checking member TYPE via `tar -tvzf` as well as name, so a symlink, hardlink
  * or FIFO is refused before extraction rather than after (C4.5). The temp root
  * is removed in a `finally`, so a refusal leaves nothing behind (C6.1).
+ *
+ * The size ceiling is enforced TWICE, because the two checks catch different
+ * things. `MAX_BLOB_BYTES` bounds the compressed blob, and gzip's ratio means
+ * that bounds nothing useful about what lands on disk: a 190 KB layer expands
+ * to 200 MB of zeros, comfortably inside the 64 MiB blob cap, and on a host
+ * whose /tmp is RAM-backed that is memory rather than disk. So the member sizes
+ * the archive DECLARES are totalled first and refused before extraction starts,
+ * which is the cheap check; then the bytes actually written are measured, which
+ * is the one that holds when the declared sizes are a lie. Only the second is a
+ * guarantee — the header is written by whoever built the archive.
  */
-function readLayerArchive(buffer, label) {
+export const MAX_LAYER_UNPACKED_BYTES = 64 * 1024 * 1024;
+
+function assertDeclaredSizeWithinCeiling(tarPath, ceiling) {
+  const listing = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+  let declared = 0;
+  for (const member of listing) {
+    // `-rw-rw-r-- owner/group <size> <date> <time> <name>`
+    const size = Number(member.trim().split(/\s+/)[2]);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error("archive declares an unreadable member size");
+    }
+    declared += size;
+    if (declared > ceiling) {
+      throw new Error(
+        `archive declares ${declared} bytes of members, over the ${ceiling}-byte ceiling`
+      );
+    }
+  }
+}
+
+function readLayerArchive(buffer, label, { maxUnpackedBytes = MAX_LAYER_UNPACKED_BYTES } = {}) {
   const tempRoot = mkdtempSync(join(tmpdir(), "connector-oci-layer-"));
   const tarPath = join(tempRoot, "layer.tar.gz");
   const unpackDir = join(tempRoot, "unpacked");
@@ -768,9 +800,25 @@ function readLayerArchive(buffer, label) {
     mkdirSync(unpackDir, { recursive: true });
     writeFileSync(tarPath, buffer);
     assertSafeArchive(tarPath);
+    assertDeclaredSizeWithinCeiling(tarPath, maxUnpackedBytes);
     execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
+
     // Refuses symlinks that survived the listing check, post-extraction.
-    return walkArtifactFiles(unpackDir).map((file) => ({
+    const files = walkArtifactFiles(unpackDir);
+    let unpacked = 0;
+    for (const file of files) {
+      // `lstatSync`, not `statSync`: `walkArtifactFiles` has already refused
+      // every symlink, so these are regular files and following one is not a
+      // thing that can happen here.
+      unpacked += lstatSync(file.path).size;
+      if (unpacked > maxUnpackedBytes) {
+        throw new Error(
+          `archive unpacked to more than the ${maxUnpackedBytes}-byte ceiling`
+        );
+      }
+    }
+
+    return files.map((file) => ({
       path: file.relativePath,
       buffer: readFileSync(file.path),
     }));
@@ -780,6 +828,7 @@ function readLayerArchive(buffer, label) {
       "unsafe-archive"
     );
   } finally {
+    // Runs on the overflow path too, so a bomb's bytes do not outlive the refusal.
     rmSync(tempRoot, { recursive: true, force: true });
   }
 }
