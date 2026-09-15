@@ -8,6 +8,7 @@ import {
   generateLock,
   installFromLock,
   loadConnectorIndex,
+  lockNeedsIndexSource,
   parseConnectorOciReference,
   readJson,
   verifyInstalled,
@@ -93,6 +94,22 @@ async function loadIndexSource(options) {
   });
 }
 
+/**
+ * The lock to operate on, and the index source it actually requires.
+ *
+ * The index is loaded because an ENTRY needs it, never because of which flag
+ * was typed. A lock whose entries are all digest-pinned OCI references resolves
+ * to `source: null` and the index service is not contacted at all — so a pinned
+ * install keeps working when that service is down, which is the point of
+ * pinning. A lock naming any tarball entry still loads it, once, for those
+ * entries.
+ */
+async function resolveLockAndSource(options) {
+  const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
+  const source = lockNeedsIndexSource(lock) ? await loadIndexSource(options) : null;
+  return { lock, source };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
 
@@ -124,10 +141,7 @@ async function main() {
       process.exit(1);
     }
 
-    // An OCI reference needs no index: the reference IS the resolution, so no
-    // index is loaded and none is required to be reachable.
-    const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
-    const source = options.oci ? null : await loadIndexSource(options);
+    const { lock, source } = await resolveLockAndSource(options);
     const result = await installFromLock({
       lock,
       source,
@@ -149,8 +163,7 @@ async function main() {
       process.exit(1);
     }
 
-    const lock = options.oci ? lockFromOciReference(options) : readJson(options.lock);
-    const source = options.oci ? null : await loadIndexSource(options);
+    const { lock, source } = await resolveLockAndSource(options);
     // `verify` deliberately does NOT opt into tag resolution, even for a
     // command-line reference. Verifying is a question about what is installed;
     // answering it by resolving a tag would compare the tree against whatever
@@ -162,6 +175,12 @@ async function main() {
       layout: options.layout,
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    // A mismatch is a failed check, so it must be a failed PROCESS: this command
+    // is meant to be usable as a gate, and a gate that exits 0 on `ok:false`
+    // reports every tampered tree as a pass to whatever runs it.
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
     return;
   }
 
