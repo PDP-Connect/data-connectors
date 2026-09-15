@@ -36,6 +36,11 @@ provenance.json
 
 Do not hand-edit generated files. Review the recorded input and output hashes after each build.
 
+## OCI entrypoint contract
+
+The OCI config sets `entrypoint` to `code/collection-profile.mjs`; installation writes that module to `dist/collection-profile.mjs`.
+An OCI config entrypoint has the form `<layer-kind>/<member>`: the first segment selects the `code` layer, and the remainder must exactly match a layer-relative tar member, with no absolute paths, traversal, or empty segments.
+
 ## Binding and publication status
 
 ### GitHub
