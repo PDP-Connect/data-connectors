@@ -302,6 +302,31 @@ test("large code and asset layers do not trip the metadata download ceiling", as
   }
 });
 
+test("an oversized config or profile descriptor still refuses", async () => {
+  for (const mutateManifest of [
+    (manifest) => { manifest.config.size = 1024 * 1024 + 1; },
+    (manifest) => {
+      manifest.layers.find((layer) => layer.mediaType.includes("profile")).size = 1024 * 1024 + 1;
+    },
+  ]) {
+    const root = fixtureDirectory();
+    const registry = new FixtureRegistry({ challenge: true });
+    const artifact = publishArtifact(registry, { connectorKey: "public-name", version: "1.0.0" });
+    const manifest = structuredClone(artifact.manifest);
+    mutateManifest(manifest);
+    registry.putManifest(manifest, "1.0.0");
+    registry.tagLists.set("acme/connector/public-name", { tags: ["1.0.0"] });
+    try {
+      await registry.start();
+      fixtureManifest(root);
+      await assert.rejects(generate(root, registry.registry), /invalid digest or size/);
+    } finally {
+      await registry.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("two full CLI runs write byte-identical catalogs from the same registry and source", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({
