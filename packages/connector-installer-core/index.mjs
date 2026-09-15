@@ -39,6 +39,7 @@ import {
   assertConfigMatchesProfile,
   defaultOciCertificateIdentityResolver,
   indexLayersByMediaType,
+  toAnchoredIdentityPattern,
   verifyOciSignature,
 } from "./oci-verify.mjs";
 
@@ -46,6 +47,9 @@ export {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
   defaultOciCertificateIdentityResolver,
+  // One definition, used by both paths: the tarball pin and the OCI pin have
+  // the same unanchored-regex hazard and must not drift apart.
+  toAnchoredIdentityPattern,
 } from "./oci-verify.mjs";
 export {
   OciRegistryError,
@@ -66,16 +70,6 @@ export function defaultArtifactCertificateIdentityResolver() {
 
 export function defaultIndexCertificateIdentityResolver() {
   return DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY;
-}
-
-// sigstore matches `certificateIdentityURI` as an unanchored regular expression
-// against the certificate SAN (sigstore README: "for exact matching, use an
-// anchored pattern"). The identities we pin end in `@refs/heads/main`, so an
-// unanchored pattern also accepts `@refs/heads/mainline`, `@refs/heads/main2`,
-// and any SAN that merely contains the pinned string. The pinned values stay
-// human-readable; this turns one into the exact-match pattern at the call site.
-export function toAnchoredIdentityPattern(identity) {
-  return `^${identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
 }
 
 export function readJson(path) {
