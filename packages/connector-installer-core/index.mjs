@@ -24,6 +24,35 @@ import {
 } from "node:path";
 import { verify as verifySigstoreBundle } from "sigstore";
 
+import {
+  DEFAULT_OCI_REGISTRY as DEFAULT_OCI_REGISTRY_NAME,
+  OciRegistryError,
+  fetchBlob,
+  fetchManifestByDigest,
+  isValidConnectorKey,
+  parseOciReference,
+  resolveVersionToDigest,
+  sha256Digest,
+} from "./oci-registry.mjs";
+import {
+  OCI_CONFIG_MEDIA_TYPE,
+  assertConfigMatchesProfile,
+  defaultOciCertificateIdentityResolver,
+  indexLayersByMediaType,
+  verifyOciSignature,
+} from "./oci-verify.mjs";
+
+export {
+  DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
+  DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
+  defaultOciCertificateIdentityResolver,
+} from "./oci-verify.mjs";
+export {
+  OciRegistryError,
+  DEFAULT_OCI_REGISTRY,
+  parseConnectorOciReference,
+} from "./oci-registry.mjs";
+
 export const DEFAULT_CONNECTOR_INDEX_URL =
   "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
@@ -664,10 +693,33 @@ function deriveSourceMeta(indexSource, connectors = []) {
   };
 }
 
+/**
+ * Read an `oci` block off a lock entry, or null when the entry is a tarball one.
+ *
+ * `connectorKey` is carried separately from `connectorId` because they are
+ * genuinely different strings — `chatgpt-pdpp` is installed at
+ * `collection-profiles/chatgpt-pdpp/`, but its artifact lives at
+ * `.../connector/chatgpt`. The repository path is a function of the key and the
+ * install path is a function of the id, so a consumer that conflates them
+ * either fetches the wrong repository or moves every install root.
+ */
+function normalizeOciBlock(entry) {
+  const oci = entry.oci ?? null;
+  if (!oci || typeof oci !== "object") return null;
+  return {
+    registry: oci.registry ?? DEFAULT_OCI_REGISTRY_NAME,
+    repository: oci.repository ?? null,
+    digest: oci.digest ?? null,
+    configDigest: oci.configDigest ?? oci.config_digest ?? null,
+  };
+}
+
 function normalizeLockEntry(entry) {
   const artifactKind = entry.artifactKind ?? entry.artifact_kind ?? "legacy";
   return {
     connectorId: entry.connectorId ?? entry.id,
+    connectorKey: entry.connectorKey ?? entry.connector_key ?? null,
+    oci: normalizeOciBlock(entry),
     company: entry.company,
     version: entry.version,
     resolvedFrom: entry.resolvedFrom ?? entry.resolved_from ?? entry.version,
@@ -696,6 +748,213 @@ function normalizeLockEntry(entry) {
     publishedAt: entry.publishedAt ?? entry.published_at ?? null,
     name: entry.name ?? null,
     description: entry.description ?? null,
+  };
+}
+
+/**
+ * Unpack one `.tar.gz` layer into a temp dir, refusing unsafe members first.
+ *
+ * Reuses `assertSafeArchive` — the same predicate the tarball path applies,
+ * checking member TYPE via `tar -tvzf` as well as name, so a symlink, hardlink
+ * or FIFO is refused before extraction rather than after (C4.5). The temp root
+ * is removed in a `finally`, so a refusal leaves nothing behind (C6.1).
+ */
+function readLayerArchive(buffer, label) {
+  const tempRoot = mkdtempSync(join(tmpdir(), "connector-oci-layer-"));
+  const tarPath = join(tempRoot, "layer.tar.gz");
+  const unpackDir = join(tempRoot, "unpacked");
+
+  try {
+    mkdirSync(unpackDir, { recursive: true });
+    writeFileSync(tarPath, buffer);
+    assertSafeArchive(tarPath);
+    execFileSync("tar", ["-xzf", tarPath, "-C", unpackDir]);
+    // Refuses symlinks that survived the listing check, post-extraction.
+    return walkArtifactFiles(unpackDir).map((file) => ({
+      path: file.relativePath,
+      buffer: readFileSync(file.path),
+    }));
+  } catch (error) {
+    throw new OciRegistryError(
+      `Refusing ${label}: ${error instanceof Error ? error.message : String(error)}`,
+      "unsafe-archive"
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Resolve, verify and unpack one OCI connector artifact.
+ *
+ * The ORDER here is the contract, and it is the reason this is one function
+ * rather than a pipeline a caller assembles: nothing is written, and no layer
+ * is even fetched, until the manifest has been proven to be what the lock
+ * pinned AND signed by the pinned identity. Every step refuses rather than
+ * degrades (C6.1), and because the only writes happen after all of them, a
+ * failure at any point leaves the install tree untouched.
+ *
+ *   1. coordinates are validated, and a non-GHCR registry is refused    (C1.1, C1.3)
+ *   2. a version is resolved to a digest ONLY when the lock has none    (C2.1, C2.3)
+ *   3. the manifest is fetched by digest and self-verified             (C2.1)
+ *   4. the cosign signature is verified against the pinned identity    (C3)
+ *   5. layers are selected by media type, unknown types refuse         (C4.2, C4.3)
+ *   6. every blob is verified against its descriptor digest            (C4.1)
+ *   7. config and profile are cross-checked                            (C4.4)
+ *
+ * Returns the same shape `unpackAndVerifyArtifact` returns for a tarball, so
+ * everything downstream — install writes, prune, verify — is untouched.
+ */
+async function fetchOciArtifact(entry, options = {}) {
+  const connectorKey = entry.connectorKey;
+  // Checked before any network call: a key that could never have been
+  // published is a lock defect, not a registry question (C1.1).
+  if (!isValidConnectorKey(connectorKey)) {
+    throw new OciRegistryError(
+      `Connector ${entry.connectorId} has an invalid connectorKey "${connectorKey}"`,
+      "invalid-reference"
+    );
+  }
+
+  const reference = parseOciReference({
+    registry: entry.oci.registry,
+    repository: entry.oci.repository,
+    digest: entry.oci.digest,
+    version: entry.version,
+    ...(options.allowedOciRegistries ? { allowedRegistries: options.allowedOciRegistries } : {}),
+  });
+  const transport = {
+    registry: reference.registry,
+    repository: reference.repository,
+    scheme: options.ociScheme ?? "https",
+    timeoutMs: options.ociTimeoutMs,
+    fetchImpl: options.fetchImpl,
+  };
+
+  // A pinned digest is used as-is. Re-resolving a tag that the lock already
+  // pinned is how a consumer installs something other than what it recorded,
+  // so resolution happens only on a first pin (C2.3).
+  const digest = reference.digest ?? (await resolveVersionToDigest({ ...transport, version: entry.version }));
+
+  const { manifest } = await fetchManifestByDigest({ ...transport, digest });
+
+  // Before any layer is written — or fetched (C3.1).
+  const trust = await verifyOciSignature({
+    ...transport,
+    digest,
+    certificateIdentityResolver:
+      options.ociCertificateIdentityResolver ?? defaultOciCertificateIdentityResolver,
+    sigstoreVerifier: options.sigstoreVerifier,
+  });
+
+  const layers = indexLayersByMediaType(manifest, { repository: reference.repository });
+
+  if (manifest?.config?.mediaType !== OCI_CONFIG_MEDIA_TYPE) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: unexpected config media type "${manifest?.config?.mediaType}"`,
+      "unsupported-layer"
+    );
+  }
+
+  // Every one of these is digest-verified inside `fetchBlob` against the
+  // descriptor that named it (C4.1).
+  const configBytes = await fetchBlob({ ...transport, digest: manifest.config.digest });
+  const profileBytes = await fetchBlob({ ...transport, digest: layers.profile.digest });
+  const codeBytes = await fetchBlob({ ...transport, digest: layers.code.digest });
+  const provenanceBytes = await fetchBlob({ ...transport, digest: layers.provenance.digest });
+  const licensesBytes = await fetchBlob({ ...transport, digest: layers.licenses.digest });
+  const assetsBytes = layers.assets
+    ? await fetchBlob({ ...transport, digest: layers.assets.digest })
+    : null;
+
+  let config;
+  let profile;
+  try {
+    config = JSON.parse(configBytes.toString("utf8"));
+    profile = JSON.parse(profileBytes.toString("utf8"));
+  } catch (error) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: config or profile is not JSON (${error.message})`,
+      "tampered"
+    );
+  }
+
+  assertConfigMatchesProfile({
+    config,
+    profileBytes,
+    profile,
+    repository: reference.repository,
+  });
+
+  // The key the lock used to build the repository path must be the key the
+  // artifact declares, or the lock fetched from a repository that does not
+  // belong to the connector it is installing.
+  if (config.connector_key !== connectorKey) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: artifact declares connector_key ` +
+        `"${config.connector_key}" but the lock names "${connectorKey}"`,
+      "misidentified"
+    );
+  }
+
+  // C4.7: the version installed is the version the lock claims.
+  if (entry.version && profile.version !== entry.version) {
+    throw new OciRegistryError(
+      `${entry.connectorId} version mismatch: lock says ${entry.version} ` +
+        `but the artifact profile declares ${profile.version}`,
+      "tampered"
+    );
+  }
+
+  const codeFiles = readLayerArchive(codeBytes, `${reference.repository} code layer`);
+  const entrypointInArtifact = config.entrypoint;
+  const entrypointFile = codeFiles.find((file) => file.path === entrypointInArtifact);
+  // C4.6: the entrypoint the config declares must actually be in the code layer.
+  if (!entrypointFile) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: config.entrypoint "${entrypointInArtifact}" ` +
+        `is not present in the code layer`,
+      "tampered"
+    );
+  }
+
+  const licenseFiles = readLayerArchive(licensesBytes, `${reference.repository} licenses layer`);
+  const assetFiles = assetsBytes
+    ? readLayerArchive(assetsBytes, `${reference.repository} assets layer`)
+    : [];
+
+  // Translated into the layout the installed tree already has (C5.1): the
+  // artifact stores its entrypoint at `code/collection-profile.mjs`, the
+  // installed tree expects it at the lock's `entrypointPath`. Licences and
+  // assets get their own subtrees, and licences are written rather than
+  // dropped because distribution requires shipping them (C5.4).
+  return {
+    manifest: profile,
+    manifestBuffer: profileBytes,
+    entrypointBuffer: entrypointFile.buffer,
+    entrypointPath: entry.entrypointPath,
+    provenanceBuffer: provenanceBytes,
+    provenancePath: entry.provenancePath,
+    artifactKind: entry.artifactKind,
+    schemaFiles: [],
+    assetFiles: [
+      ...licenseFiles.map((file) => ({ path: `licenses/${file.path}`, buffer: file.buffer })),
+      ...assetFiles.map((file) => ({ path: `assets/${file.path}`, buffer: file.buffer })),
+    ],
+    readme: null,
+    oci: {
+      registry: reference.registry,
+      repository: reference.repository,
+      digest,
+      configDigest: manifest.config.digest,
+      certificateIdentityURI: trust.certificateIdentityURI,
+    },
+    checksums: {
+      artifact: digest,
+      manifest: sha256Digest(profileBytes),
+      entrypoint: sha256Digest(entrypointFile.buffer),
+      provenance: sha256Digest(provenanceBytes),
+    },
   };
 }
 
@@ -927,6 +1186,16 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
       relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
       buffer: resolved.provenanceBuffer,
     },
+    // Licences and brand assets, which only the OCI transport carries: the
+    // publisher ships licences unconditionally because distributing the code
+    // requires distributing them (C5.4), so they are written rather than
+    // dropped on the floor. A tarball entry has no `assetFiles` here and the
+    // spread contributes nothing, which is why the existing three writes are
+    // unchanged for it.
+    ...(resolved.assetFiles ?? []).map((file) => ({
+      relativePath: `${artifactRoot}/${validateRelativeArtifactPath(file.path, "artifact asset path")}`,
+      buffer: file.buffer,
+    })),
   ];
 
   return writes.map((write) => ({
@@ -951,19 +1220,41 @@ function buildInstallWrites(layout, installRoot, resolved) {
   throw new Error(`Unsupported install layout "${layout}"`);
 }
 
-async function fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver }) {
+async function fetchLockArtifacts({
+  lock,
+  source,
+  artifactCertificateIdentityResolver,
+  ...options
+}) {
   const normalizedEntries = (lock.connectors ?? []).map(normalizeLockEntry);
   const resolved = [];
 
   for (const entry of normalizedEntries) {
-    const artifactBuffer = await fetchArtifactForEntry(source, entry, {
+    const artifact = await fetchEntryArtifact(source, entry, {
       artifactCertificateIdentityResolver,
+      ...options,
     });
-    const artifact = unpackAndVerifyArtifact(entry, artifactBuffer);
     resolved.push(normalizeFetchedArtifact(entry, artifact));
   }
 
   return resolved;
+}
+
+/**
+ * The transport dispatch: an entry carrying an `oci` block is pulled from a
+ * registry, everything else keeps the tarball path byte for byte.
+ *
+ * The lock is the switch. There is no feature flag and no environment
+ * variable, because the presence of `oci` on an entry already says which
+ * transport that entry uses, and a flag would be a second place for the answer
+ * to live — one that CI cannot diff.
+ */
+async function fetchEntryArtifact(source, entry, options = {}) {
+  if (entry.oci) {
+    return fetchOciArtifact(entry, options);
+  }
+  const artifactBuffer = await fetchArtifactForEntry(source, entry, options);
+  return unpackAndVerifyArtifact(entry, artifactBuffer);
 }
 
 function expectedWritesForLock({ installRoot, layout, resolved }) {
@@ -1011,10 +1302,9 @@ function removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel = 
 
 export async function fetchResolvedArtifact(indexSource, entry, options = {}) {
   const normalizedEntry = normalizeLockEntry(entry);
-  const artifactBuffer = await fetchArtifactForEntry(indexSource, normalizedEntry, options);
   return projectFetchedArtifact(
     normalizedEntry,
-    unpackAndVerifyArtifact(normalizedEntry, artifactBuffer)
+    await fetchEntryArtifact(indexSource, normalizedEntry, options)
   );
 }
 
@@ -1178,8 +1468,14 @@ export async function installFromLock({
   prune = false,
   preserveTopLevel = [],
   artifactCertificateIdentityResolver,
+  ...options
 }) {
-  const resolved = await fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver });
+  const resolved = await fetchLockArtifacts({
+    lock,
+    source,
+    artifactCertificateIdentityResolver,
+    ...options,
+  });
   const writes = expectedWritesForLock({ installRoot, layout, resolved });
   const expectedPaths = writes.map((write) => write.relativePath);
 
@@ -1211,8 +1507,14 @@ export async function verifyInstalled({
   installRoot,
   layout,
   artifactCertificateIdentityResolver,
+  ...options
 }) {
-  const resolved = await fetchLockArtifacts({ lock, source, artifactCertificateIdentityResolver });
+  const resolved = await fetchLockArtifacts({
+    lock,
+    source,
+    artifactCertificateIdentityResolver,
+    ...options,
+  });
   const writes = expectedWritesForLock({ installRoot, layout, resolved });
   const missing = [];
   const mismatched = [];
