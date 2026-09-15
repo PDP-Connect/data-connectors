@@ -8,6 +8,7 @@
     "packages/connector-installer-core"
   ],
   "files": [
+    "packages/connector-installer-core/package.json",
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-core/oci-registry.mjs",
     "packages/connector-installer-core/oci-verify.mjs",
@@ -24,6 +25,7 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
+    "@sigstore/bundle": "^5.0.0",
     "sigstore": "^5.0.0"
   },
   "scripts": {
