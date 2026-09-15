@@ -141,13 +141,11 @@ test("a path traversal in the connector name is refused before any read", () => 
   }
 });
 
-test("a well-formed name outside the allowlist skips the leg without reading its manifest", () => {
-  // slack.json EXISTS in the fixture. The membership check must reject before
-  // the manifest read, and the observable consequence is that no version is
-  // emitted — the leg is skipped, not versioned.
+test("an allowlisted name for a different leg skips without reading its manifest", () => {
+  // ynab.json is absent: skipping must not try to read it.
   const tree = makeTree();
   try {
-    const result = run(tree, { ...BASE, EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "slack" });
+    const result = run(tree, { ...BASE, EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "ynab" });
 
     assert.equal(result.status, 0, "an unmatched leg skips rather than fails");
     assert.equal(result.outputs.selected, "false");
@@ -204,12 +202,65 @@ test("an allowlisted name with no manifest refuses rather than selecting a blank
   try {
     const result = run(tree, {
       ...BASE,
-      MATRIX_CONNECTOR: "fitbit",
+      MATRIX_CONNECTOR: "ynab",
       EVENT_NAME: "workflow_dispatch",
-      INPUT_CONNECTOR: "fitbit",
+      INPUT_CONNECTOR: "ynab",
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /cannot read manifest/);
+  } finally {
+    rmSync(tree.dir, { recursive: true, force: true });
+  }
+});
+
+
+test("an excluded target refuses even when the matrix leg names it", () => {
+  for (const matrix of ["oura", "slack"]) {
+    const tree = makeTree();
+    try {
+      // A malformed manifest makes an accidental read observable.
+      writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/slack.json"), "not JSON");
+      const result = run(tree, { ...BASE, MATRIX_CONNECTOR: matrix,
+        EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "slack" });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /not in the publish allowlist/);
+      assert.doesNotMatch(result.stderr, /cannot read manifest/);
+      assert.equal(result.outputs.version, undefined);
+    } finally {
+      rmSync(tree.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("canonical hyphenated keys select underscored manifest files", () => {
+  const tree = makeTree();
+  try {
+    writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/apple_health.json"),
+      JSON.stringify({ connector_key: "apple-health", version: "0.2.0" }));
+    for (const trigger of [
+      { EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "apple-health" },
+      { EVENT_NAME: "push", GIT_REF_NAME: "connector-apple-health-v0.2.0" },
+    ]) {
+      const result = run(tree, { ...BASE, MATRIX_CONNECTOR: "apple-health", ...trigger });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.outputs.connector, "apple-health");
+      assert.equal(result.outputs.manifest, "apple_health");
+      assert.equal(result.outputs.repository, "ghcr.io/pdp-connect/connector/apple-health");
+      assert.equal(result.outputs.version, "0.2.0");
+    }
+  } finally {
+    rmSync(tree.dir, { recursive: true, force: true });
+  }
+});
+
+test("a manifest with a conflicting publish identity refuses", () => {
+  const tree = makeTree();
+  try {
+    writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/oura.json"),
+      JSON.stringify({ connector_key: "ynab", version: "0.1.0" }));
+    const result = run(tree, { ...BASE, EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "oura" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /declares connector_key 'ynab', expected 'oura'/);
   } finally {
     rmSync(tree.dir, { recursive: true, force: true });
   }
