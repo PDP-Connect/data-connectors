@@ -246,12 +246,15 @@ function parseJsonBytes(bytes, label) {
   }
 }
 
-function assertDescriptor(descriptor, label) {
+// Every descriptor must carry a valid digest and a sane size. The 1 MiB ceiling
+// applies only to the layers this generator downloads (config and profile);
+// code and asset layers are never fetched here and are routinely larger.
+function assertDescriptor(descriptor, label, { fetched = false } = {}) {
   if (
     !isValidDigest(descriptor?.digest) ||
     !Number.isSafeInteger(descriptor?.size) ||
     descriptor.size < 0 ||
-    descriptor.size > MAX_RESPONSE_BYTES
+    (fetched && descriptor.size > MAX_RESPONSE_BYTES)
   ) {
     throw new Error(`${label} layer has an invalid digest or size`);
   }
@@ -292,7 +295,7 @@ async function readPublishedMetadata({
     assertDescriptor(descriptor, kind);
   }
   const configDescriptor = manifest.config;
-  assertDescriptor(configDescriptor, "config");
+  assertDescriptor(configDescriptor, "config", { fetched: true });
   const configBytes = await fetchBlob({
     ...transport,
     digest: configDescriptor.digest,
@@ -307,6 +310,7 @@ async function readPublishedMetadata({
     throw new Error(`${registry}/${repository}@${digest} has an unexpected profile layer`);
   }
   const profileDescriptor = layers.profile;
+  assertDescriptor(profileDescriptor, "profile", { fetched: true });
   const profileBytes = await fetchBlob({
     ...transport,
     digest: profileDescriptor.digest,

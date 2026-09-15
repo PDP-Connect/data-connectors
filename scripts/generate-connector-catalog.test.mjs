@@ -276,6 +276,32 @@ test("catalog refuses malformed published artifact layers", async () => {
   }
 });
 
+test("large code and asset layers do not trip the metadata download ceiling", async () => {
+  // The 1 MiB ceiling protects the config and profile downloads. Code and asset
+  // layers are never fetched by the generator and are routinely larger.
+  const root = fixtureDirectory();
+  const registry = new FixtureRegistry({ challenge: true });
+  const artifact = publishArtifact(registry, { connectorKey: "public-name", version: "1.0.0" });
+  const manifest = structuredClone(artifact.manifest);
+  for (const layer of manifest.layers) {
+    if (layer.mediaType.endsWith("code.v1.tar+gzip") || layer.mediaType.includes("assets")) {
+      layer.size = 5 * 1024 * 1024;
+    }
+  }
+  registry.putManifest(manifest, "1.0.0");
+  registry.tagLists.set("acme/connector/public-name", { tags: ["1.0.0"] });
+  try {
+    await registry.start();
+    fixtureManifest(root);
+    const catalog = await generate(root, registry.registry);
+    assert.equal(catalog.connectors.length, 1);
+    assert.equal(catalog.connectors[0].latest.version, "1.0.0");
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("two full CLI runs write byte-identical catalogs from the same registry and source", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({
