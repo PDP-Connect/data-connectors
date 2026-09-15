@@ -51,6 +51,7 @@
     "scope-catalog:generate": "node ./scripts/generate-scope-catalog.mjs",
     "scope-catalog:check": "node ./scripts/generate-scope-catalog.mjs --check",
     "scope-catalog:test": "node --test ./scripts/generate-scope-catalog.test.mjs",
+    "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs",
     "release:sign": "node ./scripts/sign-release-assets.mjs",
     "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
     "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check"
