@@ -242,43 +242,6 @@
         "consumerMetadata": null
       }
     ],
-    "chatgpt-pdpp": [
-      {
-        "connectorId": "chatgpt-pdpp",
-        "company": "openai",
-        "version": "0.1.2",
-        "name": "ChatGPT (PDPP Collection Profile)",
-        "status": "experimental",
-        "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
-        "artifactKind": "pdpp-collection-profile",
-        "manifestPath": "profile/collection-profile.json",
-        "entrypointPath": "dist/collection-profile.mjs",
-        "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:46ac136066bcc536a329544dceb3df4961e119b8c12452ad74f3179143bcbfa8",
-        "entrypointSha256": "sha256:f18b9e61e74e3e0b6d9dff09132a32d344501dab59a31004eb428374188f0b83",
-        "provenanceSha256": "sha256:0ecbbb590793ba27861f83820adab60e76c3f11c6f42c4e41f547cb110884e01",
-        "artifactSha256": "sha256:85c92e507e460f71f390ecb854fd03e9fde1132bf3607143470a6418b454232b",
-        "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.2.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/chatgpt-pdpp-0.1.2.tgz",
-        "publishedAt": "2026-09-09T00:00:00Z",
-        "sourceTag": "pdpp-2ad6eedce1deecf8e15dcceabe0464ba81d66039",
-        "sourceCommit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039",
-        "releaseId": "unpublished",
-        "upstream": {
-          "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "2ad6eedce1deecf8e15dcceabe0464ba81d66039"
-        },
-        "scopes": [
-          "conversations",
-          "messages",
-          "memories",
-          "custom_gpts",
-          "custom_instructions",
-          "shared_conversations"
-        ],
-        "consumerMetadata": null
-      }
-    ],
     "chatgpt-playwright": [
       {
         "connectorId": "chatgpt-playwright",
@@ -659,44 +622,6 @@
         "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f9f6c8c2f37a496df3312c0aa6b2989f6c7b0b25/artifacts/doordash-playwright/doordash-playwright-1.0.1.tgz",
         "scopes": [
           "doordash.orders"
-        ],
-        "consumerMetadata": null
-      }
-    ],
-    "github-pdpp": [
-      {
-        "connectorId": "github-pdpp",
-        "company": "github",
-        "version": "0.5.2",
-        "name": "GitHub (PDPP Collection Profile)",
-        "status": "experimental",
-        "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
-        "artifactKind": "pdpp-collection-profile",
-        "manifestPath": "profile/collection-profile.json",
-        "entrypointPath": "dist/collection-profile.mjs",
-        "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:c2db303d9a00629004a454edbd1e4111922f5d49732d1de6532b91195758fbfd",
-        "entrypointSha256": "sha256:d34287df2f165ee1a59df3599b3f79d1601fe14aa90bb3953fb504a7f4cc8e8d",
-        "provenanceSha256": "sha256:53a9877a159cab2e8149359da2a8ea7959076435781110668d12ce82e7578825",
-        "artifactSha256": "sha256:b59a1cd76836bd74c4dcefb8bf2111ead0dd9ef7b3f7d18888e72ce796cd6b86",
-        "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.2.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/github-pdpp-0.5.2.tgz",
-        "publishedAt": "2026-09-09T00:00:00Z",
-        "sourceTag": "pdpp-6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
-        "sourceCommit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128",
-        "releaseId": "unpublished",
-        "upstream": {
-          "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "6d2be0a2a1c052afcffc8ec035190e1dffc3c128"
-        },
-        "scopes": [
-          "user",
-          "user_stats",
-          "repositories",
-          "starred",
-          "issues",
-          "pull_requests",
-          "gists"
         ],
         "consumerMetadata": null
       }
@@ -1994,43 +1919,6 @@
           "iconKey": "wholefoods",
           "defaultScope": "wholefoods.orders"
         }
-      }
-    ],
-    "whoop-pdpp": [
-      {
-        "connectorId": "whoop-pdpp",
-        "company": "whoop",
-        "version": "0.1.2",
-        "name": "WHOOP (PDPP Collection Profile)",
-        "status": "experimental",
-        "description": "Collects your WHOOP profile, body measurements, cycles, recoveries, sleeps, and workouts through the PDPP Collection Profile protocol.",
-        "artifactKind": "pdpp-collection-profile",
-        "manifestPath": "profile/collection-profile.json",
-        "entrypointPath": "dist/collection-profile.mjs",
-        "provenancePath": "provenance.json",
-        "manifestSha256": "sha256:a171402e088de671a4170cc89fbec0d5adc7f27ebbfec9f8af42fdebf6519790",
-        "entrypointSha256": "sha256:67fa80687e72eebef7f4de25c44dcad2b2514c7b6c035fa461f3db3e98c74fa7",
-        "provenanceSha256": "sha256:37677bb31feae029faf2db6f49e9369a68cdc3868bf69ae760168951f9e8a573",
-        "artifactSha256": "sha256:86b620e1a26454ae7301a511cc472048fc73d7e2dce585fcbf54fbbd3f6f2ee3",
-        "artifactPath": "artifacts/whoop-pdpp/whoop-pdpp-0.1.2.tgz",
-        "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/unpublished/whoop-pdpp-0.1.2.tgz",
-        "publishedAt": "2026-09-09T00:00:00Z",
-        "sourceTag": "pdpp-4c785e1f5816b09b113f011ab46066f8057d9959",
-        "sourceCommit": "4c785e1f5816b09b113f011ab46066f8057d9959",
-        "releaseId": "unpublished",
-        "upstream": {
-          "repository": "https://github.com/PDP-Connect/pdpp",
-          "commit": "4c785e1f5816b09b113f011ab46066f8057d9959"
-        },
-        "scopes": [
-          "profile",
-          "body",
-          "cycles",
-          "recoveries",
-          "sleeps",
-          "workouts"
-        ],
-        "consumerMetadata": null
       }
     ],
     "youtube-playwright": [

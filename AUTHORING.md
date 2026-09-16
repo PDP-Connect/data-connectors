@@ -1,61 +1,23 @@
 # Connector authoring
 
-This repository is the single home of PDPP connector content. Keep source code and the canonical Collection Profile here, under `connectors/`.
+This repository is the single home of PDPP connector content. Keep connector source and the canonical Collection Profile here, under `packages/polyfill-connectors/`.
 
 `PDP-Connect/pdpp` keeps a copy of `packages/polyfill-connectors`, but production does not build from it. DataConnect builds the production package from this repository, and pdpp's copy does not own the primary implementation of a new connector.
 
 ## Default workflow
 
-1. Add or change the connector here, in this repository.
+1. Add or change the collector here, in this repository, under `packages/polyfill-connectors/connectors/<key>/`.
 
-2. Test the connector and its Collection Profile here.
+2. Add or update its manifest at `packages/polyfill-connectors/manifests/<key>.json`.
 
-3. Commit the work and select the exact source commit.
+3. Test the connector and its Collection Profile here. Work through the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md).
 
-4. Add an `artifact.json` descriptor in this repository.
-
-5. Build the pinned artifact with `scripts/build-pdpp-artifact.mjs`.
-
-6. Verify the manifest, bundle, provenance, installer path, and required host bindings.
-
-7. Publish the artifact only after its DataConnect host bindings are available.
-
-The ChatGPT artifact uses the generic descriptor and builder. Do not copy the GitHub-specific builder to create a new artifact.
-
-## Artifact descriptor
-
-`artifact.json` records packaging facts. It identifies the artifact, pinned PDPP commit, manifest, entrypoint, connector files, runtime root, build target, and external packages.
-
-For a dependency-only rebuild, set `artifact_version` to the new `major.minor.patch` version and update the matching registry entry. The builder sets the generated profile's `version` to this value while preserving all other profile fields. Without `artifact_version`, it copies the pinned manifest byte-for-byte. Provenance keeps the original upstream manifest hash and records the descriptor hash, so both the source and version override remain verifiable.
-
-The generic builder archives the pinned commit. Dirty and untracked files in the PDPP worktree do not become build inputs. The builder generates these files:
-
-```text
-collection-profile.json
-dist/collection-profile.mjs
-provenance.json
-```
-
-Do not hand-edit generated files. Review the recorded input and output hashes after each build.
+4. Publish the connector as an OCI artifact. `scripts/build-connector-oci-artifact.mjs` produces the layer bytes, `scripts/connector-publish-allowlist.mjs` decides which connectors a run publishes, and `.github/workflows/publish-polyfill-connectors.yml` pushes and Cosign-signs them from `main` as `ghcr.io/pdp-connect/connector/<key>`.
 
 ## OCI entrypoint contract
 
 The OCI config sets `entrypoint` to `code/collection-profile.mjs`; installation writes that module to `dist/collection-profile.mjs`.
 An OCI config entrypoint has the form `<layer-kind>/<member>`: the first segment selects the `code` layer, and the remainder must exactly match a layer-relative tar member, with no absolute paths, traversal, or empty segments.
-
-## Binding and publication status
-
-### GitHub
-
-GitHub requires only the `network` binding. The checked-in index entry intentionally has `releaseId: "unpublished"` before CI regenerates the source-tree index. The immutable [`connectors-48440fead534` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-48440fead534) contains the signed GitHub artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it.
-
-GitHub predates the generic descriptor. It uses a maintainer-only builder and checked-in connector source. See [GitHub PDPP maintenance](connectors/github-pdpp/AUTHORING.md).
-
-### ChatGPT
-
-ChatGPT uses `artifact.json` and the generic builder. The checked-in index entry intentionally has `releaseId: "unpublished"` before CI regenerates the source-tree index. The immutable [`connectors-48440fead534` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-48440fead534) contains the signed ChatGPT artifact. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides it.
-
-The ChatGPT profile requires both `network` and `browser`. Its host must provide Node 22, `p-queue@^9.3.3`, and `patchright@^1.61.1`. [DataConnect v0.7.54](https://github.com/PDP-Connect/data-connect/releases/tag/v0.7.54) and later provide this browser host.
 
 ## Legacy Playwright exception
 

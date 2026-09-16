@@ -28,12 +28,6 @@ export const EXCLUDED_PATH_SEGMENTS = ["node_modules", "dist", "build"];
  * structural category.
  */
 export const EXCLUDED_FILES = new Map([
-  // Same hash-pinning reason, for the github-pdpp connector (PR #9's second commit).
-  ["connectors/github-pdpp/src/connector/index.ts", "hash-locked versioned connector source (#42)"],
-  ["connectors/github-pdpp/src/connector/parsers.ts", "hash-locked versioned connector source (#42)"],
-  ["connectors/github-pdpp/src/connector/schemas.ts", "hash-locked versioned connector source (#42)"],
-  ["connectors/github-pdpp/src/connector/types.ts", "hash-locked versioned connector source (#42)"],
-
   // Captured/synthetic fixture data — not first-party logic.
   [
     "packages/polyfill-connectors/fixtures/codex/source-home/deviceA/codex-home/shell-snapshots/snapshot-1.sh",
