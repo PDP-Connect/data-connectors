@@ -15,13 +15,24 @@ import {
   checkTokenRealm,
   classifyManifestResponse,
   cosignSignatureTag,
+  fetchBlob,
   isValidConnectorKey,
+  lookupManifest,
   parseBearerChallenge,
   parseConnectorOciReference,
   parseDistributionErrorCodes,
   parseOciReference,
   sha256Digest,
 } from "./oci-registry.mjs";
+
+function retryTestOptions({ delays = [], retries = [], ...overrides } = {}) {
+  return {
+    jitter: false,
+    sleep: async (ms) => delays.push(ms),
+    onRetry: (event) => retries.push(event),
+    ...overrides,
+  };
+}
 
 /** A 200 whose header agrees with its body, which is the only present shape. */
 function present(bodyText) {
@@ -153,6 +164,93 @@ test("only GHCR is accepted, and a lock cannot widen that", () => {
     () => parseOciReference({ registry: "ghcr.io", repository: "pdp-connect/connector/ynab" }),
     (error) => error.reason === "invalid-reference"
   );
+});
+
+test("retries a GHCR blob 503 and returns the digest-verified bytes", async () => {
+  const payload = Buffer.from("registry blob");
+  const digest = sha256Digest(payload);
+  const calls = [];
+  const retries = [];
+  const delays = [];
+  const responses = [
+    new Response("temporarily unavailable", { status: 503 }),
+    new Response(payload, { status: 200 }),
+  ];
+
+  const bytes = await fetchBlob({
+    registry: "ghcr.io",
+    repository: "pdp-connect/connector/ynab",
+    digest,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return responses.shift();
+    },
+    retryOptions: retryTestOptions({ delays, retries }),
+  });
+
+  assert.deepEqual(bytes, payload);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(retries.map(({ status }) => status), [503]);
+});
+
+test("does not retry a 4xx registry response", async () => {
+  const payload = Buffer.from("registry blob");
+  const calls = [];
+  await assert.rejects(
+    () =>
+      fetchBlob({
+        registry: "ghcr.io",
+        repository: "pdp-connect/connector/ynab",
+        digest: sha256Digest(payload),
+        fetchImpl: async () => {
+          calls.push(true);
+          return new Response("missing", { status: 404 });
+        },
+        retryOptions: retryTestOptions({ attempts: 6 }),
+      }),
+    (error) => error.reason === "unverifiable"
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("does not retry a digest mismatch", async () => {
+  const calls = [];
+  await assert.rejects(
+    () =>
+      fetchBlob({
+        registry: "ghcr.io",
+        repository: "pdp-connect/connector/ynab",
+        digest: sha256Digest(Buffer.from("expected")),
+        fetchImpl: async () => {
+          calls.push(true);
+          return new Response("wrong", { status: 200 });
+        },
+        retryOptions: retryTestOptions({ attempts: 6 }),
+      }),
+    (error) => error.reason === "tampered"
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("an exhausted lookup retry remains unknown, never absent", async () => {
+  const calls = [];
+  const retries = [];
+  const result = await lookupManifest({
+    registry: "ghcr.io",
+    repository: "pdp-connect/connector/ynab",
+    reference: "1.0.0",
+    fetchImpl: async () => {
+      calls.push(true);
+      return new Response("registry unavailable", { status: 503 });
+    },
+    retryOptions: retryTestOptions({ attempts: 3, retries }),
+  });
+
+  assert.equal(result.outcome, "unknown");
+  assert.match(result.reason, /HTTP 503/);
+  assert.equal(calls.length, 3);
+  assert.equal(retries.length, 2);
 });
 
 test("a reference is split on @digest before :tag", () => {

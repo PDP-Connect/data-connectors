@@ -29,6 +29,7 @@ export async function fetchCatalog({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
   allowedRegistries,
   sigstoreVerifier,
 } = {}) {
@@ -40,7 +41,14 @@ export async function fetchCatalog({
     throw new OciRegistryError("Invalid lastAcceptedGeneratedAt", "invalid-reference");
   }
   const previous = lastAcceptedGeneratedAt === undefined ? null : Date.parse(lastAcceptedGeneratedAt);
-  const transport = { registry, repository: CATALOG_REPOSITORY, scheme, timeoutMs, fetchImpl };
+  const transport = {
+    registry,
+    repository: CATALOG_REPOSITORY,
+    scheme,
+    timeoutMs,
+    fetchImpl,
+    retryOptions,
+  };
   const digest = await resolveVersionToDigest({ ...transport, version: "latest" });
   const { manifest } = await fetchManifestByDigest({ ...transport, digest });
   await verifyOciSignature({

@@ -546,6 +546,8 @@ test("PDPP collection profiles install, verify, and report tampering without a l
 test("retries a transient 5xx artifact fetch and returns the eventual bytes", async () => {
   const payload = Buffer.from("connector-tarball-bytes");
   const calls = [];
+  const delays = [];
+  const logs = [];
   const responses = [
     { ok: false, status: 504, statusText: "Gateway Time-out" },
     {
@@ -560,13 +562,56 @@ test("retries a transient 5xx artifact fetch and returns the eventual bytes", as
     return responses[calls.length - 1];
   };
 
-  const bytes = await fetchBinary("https://example.invalid/connector.tgz", {
-    fetchImpl,
-    baseDelayMs: 0,
-  });
+  const originalWarn = console.warn;
+  console.warn = (message) => logs.push(message);
+  let bytes;
+  try {
+    bytes = await fetchBinary("https://example.invalid/connector.tgz", {
+      fetchImpl,
+      jitter: false,
+      sleep: async (ms) => delays.push(ms),
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
 
   assert.deepEqual(bytes, payload);
   assert.equal(calls.length, 2, "the 504 must be retried, not surfaced");
+  assert.deepEqual(delays, [1000]);
+  assert.match(logs[0], /returned 504; retrying in 1000ms \(attempt 2\/6\)/);
+});
+
+test("honors retry-after without delaying the test", async () => {
+  const calls = [];
+  const delays = [];
+  const retries = [];
+  const fetchImpl = async () => {
+    calls.push(true);
+    if (calls.length === 1) {
+      return {
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "retry-after": "4" },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+    };
+  };
+
+  await fetchBinary("https://example.invalid/connector.tgz", {
+    fetchImpl,
+    jitter: false,
+    sleep: async (ms) => delays.push(ms),
+    onRetry: (event) => retries.push(event),
+  });
+
+  assert.deepEqual(delays, [4000]);
+  assert.equal(retries[0].retryAfterMs, 4000);
 });
 
 test("retries a network error and gives up loudly after the bounded attempts", async () => {

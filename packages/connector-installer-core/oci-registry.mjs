@@ -34,6 +34,8 @@
 
 import { createHash } from "node:crypto";
 
+import { fetchWithRetry } from "./retry.mjs";
+
 const MANIFEST_ACCEPT = [
   "application/vnd.oci.image.manifest.v1+json",
   "application/vnd.oci.image.index.v1+json",
@@ -393,13 +395,18 @@ async function fetchOnce(
     maxBytes = MAX_MANIFEST_BYTES,
     fetchImpl = fetch,
     redirect = "follow",
+    retryOptions = {},
   } = {}
 ) {
-  const response = await fetchImpl(url, {
-    method,
-    headers: { "user-agent": "pdpp-connector-installer/1", ...headers },
-    signal: AbortSignal.timeout(timeoutMs),
-    redirect,
+  const response = await fetchWithRetry(url, {
+    ...retryOptions,
+    fetchImpl,
+    fetchOptions: () => ({
+      method,
+      headers: { "user-agent": "pdpp-connector-installer/1", ...headers },
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect,
+    }),
   });
 
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -449,7 +456,7 @@ const MAX_TOKEN_REDIRECTS = 3;
  */
 async function fetchTokenFollowingRedirects(
   startUrl,
-  { registry, timeoutMs, fetchImpl, allowInsecureLoopback }
+  { registry, timeoutMs, fetchImpl, allowInsecureLoopback, retryOptions }
 ) {
   let url = startUrl;
 
@@ -458,6 +465,7 @@ async function fetchTokenFollowingRedirects(
       timeoutMs,
       fetchImpl,
       redirect: "manual",
+      retryOptions,
     });
     if (!REDIRECT_STATUSES.has(response.status)) {
       return { response };
@@ -603,7 +611,14 @@ export function checkTokenRealm(realmUrl, registry, { allowInsecureLoopback = fa
  */
 async function requestToken(
   challenge,
-  { registry, repository, timeoutMs, fetchImpl, allowInsecureLoopback = false }
+  {
+    registry,
+    repository,
+    timeoutMs,
+    fetchImpl,
+    allowInsecureLoopback = false,
+    retryOptions,
+  }
 ) {
   let tokenUrl;
   try {
@@ -626,6 +641,7 @@ async function requestToken(
       timeoutMs,
       fetchImpl,
       allowInsecureLoopback,
+      retryOptions,
     });
     if (followed.error) {
       return { error: followed.error };
@@ -672,12 +688,19 @@ async function registryGet(
     maxBytes,
     fetchImpl = fetch,
     allowInsecureLoopback = false,
+    retryOptions = {},
   }
 ) {
   const url = `${scheme}://${registry}/v2/${repository}/${path}`;
   const headers = accept ? { accept } : {};
 
-  let response = await fetchOnce(url, { headers, timeoutMs, maxBytes, fetchImpl });
+  let response = await fetchOnce(url, {
+    headers,
+    timeoutMs,
+    maxBytes,
+    fetchImpl,
+    retryOptions,
+  });
   if (response.status !== 401) return { response };
 
   const challenge = parseBearerChallenge(response.headers["www-authenticate"]);
@@ -689,6 +712,7 @@ async function registryGet(
     repository,
     timeoutMs,
     fetchImpl,
+    retryOptions,
     // `scheme` is ALREADY the explicit, caller-supplied hook this module uses to
     // reach a test registry: production never sets it, so it is `https` on every
     // real path and a plaintext realm is refused there whatever this resolves
@@ -705,6 +729,7 @@ async function registryGet(
     timeoutMs,
     maxBytes,
     fetchImpl,
+    retryOptions,
   });
   return { response };
 }
@@ -725,6 +750,7 @@ export async function lookupManifest({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
 }) {
   let result;
   try {
@@ -737,6 +763,7 @@ export async function lookupManifest({
       timeoutMs,
       maxBytes: MAX_MANIFEST_BYTES,
       fetchImpl,
+      retryOptions,
     });
   } catch (error) {
     return { outcome: "unknown", reason: `manifest request failed: ${error.message}` };
@@ -762,6 +789,7 @@ export async function resolveVersionToDigest({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
 }) {
   const result = await lookupManifest({
     registry,
@@ -770,6 +798,7 @@ export async function resolveVersionToDigest({
     scheme,
     timeoutMs,
     fetchImpl,
+    retryOptions,
   });
 
   if (result.outcome === "present") return result.digest;
@@ -800,6 +829,7 @@ export async function fetchManifestByDigest({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
 }) {
   if (!isValidDigest(digest)) {
     throw new OciRegistryError(`Invalid OCI manifest digest "${digest}"`, "invalid-reference");
@@ -816,6 +846,7 @@ export async function fetchManifestByDigest({
       timeoutMs,
       maxBytes: MAX_MANIFEST_BYTES,
       fetchImpl,
+      retryOptions,
     });
   } catch (error) {
     throw new OciRegistryError(
@@ -875,6 +906,7 @@ export async function fetchBlob({
   timeoutMs = 30000,
   maxBytes = MAX_BLOB_BYTES,
   fetchImpl = fetch,
+  retryOptions = {},
 }) {
   if (!isValidDigest(digest)) {
     throw new OciRegistryError(`Invalid OCI blob digest "${digest}"`, "invalid-reference");
@@ -890,6 +922,7 @@ export async function fetchBlob({
       timeoutMs,
       maxBytes,
       fetchImpl,
+      retryOptions,
     });
   } catch (error) {
     throw new OciRegistryError(
@@ -937,6 +970,7 @@ export async function fetchSignatureManifest({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
 }) {
   const tag = cosignSignatureTag(digest);
   const result = await lookupManifest({
@@ -946,6 +980,7 @@ export async function fetchSignatureManifest({
     scheme,
     timeoutMs,
     fetchImpl,
+    retryOptions,
   });
 
   if (result.outcome === "absent") return null;

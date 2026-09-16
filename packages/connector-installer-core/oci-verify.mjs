@@ -323,6 +323,7 @@ export async function verifyOciSignature({
   scheme = "https",
   timeoutMs = 30000,
   fetchImpl = fetch,
+  retryOptions = {},
   certificateIdentityResolver = defaultOciCertificateIdentityResolver,
   certificateIssuer = DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
   sigstoreVerifier = verifySigstoreBundle,
@@ -344,6 +345,7 @@ export async function verifyOciSignature({
     scheme,
     timeoutMs,
     fetchImpl,
+    retryOptions,
   });
   if (signatureObject === null) {
     throw new OciRegistryError(
@@ -399,6 +401,7 @@ export async function verifyOciSignature({
         scheme,
         timeoutMs,
         fetchImpl,
+        retryOptions,
       });
 
       // Checked BEFORE the cryptographic verification, so a signature lifted
