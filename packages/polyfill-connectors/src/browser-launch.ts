@@ -1336,6 +1336,26 @@ export async function acquireIsolatedBrowser({
 				"or set PDPP_BROWSER_EXTRA_ARGS=--disable-gpu before launching.\n",
 		);
 	}
+	// A headed launch under tmux/SSH inherits DISPLAY (X11) but no
+	// WAYLAND_DISPLAY, while XDG_RUNTIME_DIR may still advertise a Wayland
+	// session. Chromium's ozone auto-pick then chooses Wayland, fails to
+	// connect ("Failed to connect to Wayland display"), and exits before any
+	// page loads — reported as an opaque "Target page, context or browser has
+	// been closed". Observed live on this shape. X11 is available and works;
+	// the caller just has to say so.
+	if (
+		!(waylandWarningEmitted || managedDisplayAvailable) &&
+		process.env.DISPLAY &&
+		!process.env.WAYLAND_DISPLAY &&
+		!extraArgsRaw?.includes("--ozone-platform")
+	) {
+		waylandWarningEmitted = true;
+		process.stderr.write(
+			"[browser-launch] DISPLAY is set but WAYLAND_DISPLAY is empty (common in tmux/SSH). " +
+				"Chromium may auto-select Wayland and exit before loading a page. " +
+				"Set PDPP_BROWSER_EXTRA_ARGS=--ozone-platform=x11 to pin X11.\n",
+		);
+	}
 	if (streamingEnabled) {
 		baseArgs.push("--remote-debugging-address=127.0.0.1");
 		baseArgs.push("--remote-debugging-port=0");
@@ -1910,6 +1930,8 @@ export async function fetchPageTargetWsUrl({
 // Module-scope so the DISPLAY-without-XAUTHORITY warning fires once per
 // process, not once per browser launch — quiet logs in normal operation.
 let displayAuthWarningEmitted = false;
+/** Same once-per-process posture, for the ozone/Wayland auto-pick warning. */
+let waylandWarningEmitted = false;
 
 /**
  * Acquire a browser context for connector use.
