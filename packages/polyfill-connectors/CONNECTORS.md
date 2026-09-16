@@ -29,7 +29,6 @@ These connectors fetch via the platform's public HTTP API using a long-lived tok
 | gmail | `GMAIL_ADDRESS` or `GMAIL_USER`; `GOOGLE_APP_PASSWORD_PDPP` or `GMAIL_APP_PASSWORD` | Google app password | ✅ | ✅ | ~27,359 |
 | notion | `NOTION_API_TOKEN` | Manual: notion.so/my-integrations → "New integration" | 🟡 code ready | ✅ (expected) | — |
 | oura | `OURA_PERSONAL_ACCESS_TOKEN` | Manual: cloud.ouraring.com/personal-access-tokens | 🟡 code ready | ✅ (expected) | — |
-| strava | _none_ | Account export (`STRAVA_EXPORT_DIR`); no API token, no network | 🟡 code ready | — | Import connector: Strava's API Policy is incompatible with a Personal Server |
 | reddit | `REDDIT_USERNAME`, `REDDIT_PASSWORD` | Logged-in browser session against old.reddit.com JSON | 🟡 code ready | ⚠ browser session | — |
 | slack | `SLACK_WORKSPACE` + slackdump binary | Subprocess; wraps slackdump CLI | 🟡 code ready | ✅ (expected) | — |
 | spotify | `SPOTIFY_ACCESS_TOKEN` | OAuth app creation frozen by Spotify as of Feb 2026 | 🚫 blocked upstream | — | — |
@@ -80,6 +79,7 @@ These connectors parse local files without network access. Run on-device only. *
 | twitter_archive | `~/.pdpp/imports/twitter_archive/` (extracted archive) | 🟡 code ready | ✅ (expected) |
 | imessage | `~/Library/Messages/chat.db` (auto-discovered on macOS) | 🟡 code ready | ✅ (expected) |
 | apple_health | `~/.pdpp/imports/apple_health/` (extracted iOS export) | 🟡 code ready | ✅ (expected) |
+| strava | `~/.pdpp/imports/strava/` (`.zip` account export or `activities.csv`; no API token, no network) | 🟡 code ready | ✅ (expected) |
 | apple_photos | `~/.pdpp/imports/apple_photos/` (Photos.app "Export Unmodified Originals") | 🟡 code ready | ✅ (expected) |
 | google_messages | External `gmcli` (github.com/johnlindquist/gmkit, AGPL-3.0) subprocess — QR-paired local SQLite archive, `gmcli --json` query output normalized (slackdump-style arms-length wrapper; PDPP never imports libgm) | 🟡 in progress, unproven without a real paired account | ⚠️ requires `gmcli` binary + one-time QR pairing + phone online |
 | ical | `.ics` files or `ICAL_SUBSCRIPTION_URL` | 🟡 code ready | ✅ (expected) |

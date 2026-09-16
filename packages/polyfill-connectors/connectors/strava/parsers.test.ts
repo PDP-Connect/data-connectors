@@ -22,6 +22,7 @@ import {
 	parseActivityDate,
 	parseCsvRows,
 	resolveColumns,
+	streamCsvRows,
 } from "./parsers.ts";
 
 /**
@@ -461,4 +462,30 @@ test("elapsed time falls back to the display column only when it is a bare numbe
 	row[5] = "30:00";
 	row[15] = "1795";
 	assert.equal(buildActivityRecord(row, cols, null)?.elapsed_time_s, 1795);
+});
+
+test("streamCsvRows preserves quoted newlines and doubled quotes across chunks", async () => {
+	const rows: string[][] = [];
+	const chunks = [
+		'\uFEFFid,note\n1,"line one',
+		'\nline two""quoted"""\n2,plain\n',
+	];
+	const result = await streamCsvRows(
+		(async function* () {
+			for (const chunk of chunks) {
+				yield chunk;
+			}
+		})(),
+		(row) => {
+			rows.push(row);
+		},
+	);
+
+	assert.equal(result.error, undefined);
+	assert.equal(result.rowCount, 3);
+	assert.deepEqual(rows, [
+		["id", "note"],
+		["1", 'line one\nline two"quoted"'],
+		["2", "plain"],
+	]);
 });

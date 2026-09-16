@@ -41,8 +41,49 @@ const ROW_RIDE =
 	'11385479491,"2024-06-01T06:00:00Z","Commute",Ride,,' +
 	"35:00,9.3,,,,activities/2.fit.gz,,9.1,2100,2000,14967.0,,31.0,";
 
+function makeStoredZip(
+	entries: readonly { name: string; data: Buffer }[],
+): Buffer {
+	const localParts: Buffer[] = [];
+	const centralParts: Buffer[] = [];
+	let offset = 0;
+	for (const entry of entries) {
+		const name = Buffer.from(entry.name, "utf8");
+		const local = Buffer.alloc(30);
+		local.writeUInt32LE(0x04_03_4b_50, 0);
+		local.writeUInt16LE(20, 4);
+		local.writeUInt16LE(0, 6);
+		local.writeUInt16LE(0, 8);
+		local.writeUInt32LE(entry.data.length, 18);
+		local.writeUInt32LE(entry.data.length, 22);
+		local.writeUInt16LE(name.length, 26);
+		localParts.push(local, name, entry.data);
+
+		const central = Buffer.alloc(46);
+		central.writeUInt32LE(0x02_01_4b_50, 0);
+		central.writeUInt16LE(20, 4);
+		central.writeUInt16LE(20, 6);
+		central.writeUInt16LE(0, 8);
+		central.writeUInt16LE(0, 10);
+		central.writeUInt32LE(entry.data.length, 20);
+		central.writeUInt32LE(entry.data.length, 24);
+		central.writeUInt16LE(name.length, 28);
+		central.writeUInt32LE(offset, 42);
+		centralParts.push(central, name);
+		offset += local.length + name.length + entry.data.length;
+	}
+	const central = Buffer.concat(centralParts);
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06_05_4b_50, 0);
+	end.writeUInt16LE(entries.length, 8);
+	end.writeUInt16LE(entries.length, 10);
+	end.writeUInt32LE(central.length, 12);
+	end.writeUInt32LE(offset, 16);
+	return Buffer.concat([...localParts, central, end]);
+}
+
 async function withImportDir(
-	files: Record<string, string>,
+	files: Record<string, string | Buffer>,
 	body: (dir: string) => Promise<void>,
 ): Promise<void> {
 	const dir = await mkdtemp(join(tmpdir(), "strava-export-"));
@@ -58,7 +99,11 @@ async function withImportDir(
 	}
 }
 
-async function run(dir: string, state?: Record<string, unknown>) {
+async function run(
+	dir: string,
+	state?: Record<string, unknown>,
+	timeRange?: { since?: string; until?: string },
+) {
 	return await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
@@ -71,7 +116,13 @@ async function run(dir: string, state?: Record<string, unknown>) {
 		},
 		start: {
 			scope: {
-				streams: [{ name: "activities" }, { name: "coverage_diagnostics" }],
+				streams: [
+					{
+						name: "activities",
+						...(timeRange ? { time_range: timeRange } : {}),
+					},
+					{ name: "coverage_diagnostics" },
+				],
 			},
 			...(state ? { state } : {}),
 			type: "START",
@@ -160,6 +211,18 @@ test("a normal export emits activities in canonical units", async () => {
 	);
 });
 
+test("a ZIP export streams activities.csv through the same collection path", async () => {
+	const zip = makeStoredZip([
+		{ name: "activities.csv", data: Buffer.from(`${HEADER}\n${ROW_RUN}\n`) },
+		{ name: "profile.csv", data: Buffer.from("private data") },
+	]);
+	await withImportDir({ "strava-export.zip": zip }, async (dir) => {
+		const result = await run(dir);
+		assert.equal(recordsOf(result, "activities").length, 1);
+		assert.equal(recordsOf(result, "activities")[0]?.id, "11385479490");
+	});
+});
+
 test("a complete import reports covered_in_full with the window it actually read", async () => {
 	await withImportDir(
 		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n` },
@@ -173,6 +236,27 @@ test("a complete import reports covered_in_full with the window it actually read
 			assert.equal(diagnostic?.window_covered_from, "2024-05-20T13:05:32");
 			assert.equal(diagnostic?.window_covered_to, "2024-06-01T06:00:00Z");
 			assert.equal(diagnostic?.freshness, "snapshot");
+		},
+	);
+});
+
+test("a scoped import reports only the records and window that survived time_range", async () => {
+	await withImportDir(
+		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n` },
+		async (dir) => {
+			const result = await run(dir, undefined, {
+				since: "2024-06-01T00:00:00Z",
+				until: "2024-06-02T00:00:00Z",
+			});
+			assert.equal(recordsOf(result, "activities").length, 1);
+			assert.equal(recordsOf(result, "activities")[0]?.id, "11385479491");
+
+			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
+			assert.equal(diagnostic?.record_count, 1);
+			assert.equal(diagnostic?.window_requested_from, "2024-06-01T00:00:00Z");
+			assert.equal(diagnostic?.window_requested_to, "2024-06-02T00:00:00Z");
+			assert.equal(diagnostic?.window_covered_from, "2024-06-01T06:00:00Z");
+			assert.equal(diagnostic?.window_covered_to, "2024-06-01T06:00:00Z");
 		},
 	);
 });

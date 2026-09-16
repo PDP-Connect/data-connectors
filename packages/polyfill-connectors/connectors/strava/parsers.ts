@@ -129,57 +129,129 @@ export function parseCsvRows(text: string): {
 	error?: string;
 	rows: string[][];
 } {
-	const rows: string[][] = [];
-	let row: string[] = [];
-	let field = "";
-	let inQuotes = false;
-	let sawAnyChar = false;
+	const parser = new CsvRowParser();
+	const rows = parser.push(text);
+	const finished = parser.finish();
+	rows.push(...finished.rows);
+	return finished.error ? { error: finished.error, rows } : { rows };
+}
 
-	// Strip a UTF-8 BOM: Strava writes one, and it would otherwise become part
-	// of the first header name and break the "Activity ID" lookup.
-	const src = text.charCodeAt(0) === 0xfe_ff ? text.slice(1) : text;
+interface CsvParseResult {
+	readonly error?: string;
+	readonly rows: string[][];
+}
 
-	for (let i = 0; i < src.length; i += 1) {
-		const ch = src[i];
-		sawAnyChar = true;
-		if (inQuotes) {
-			if (ch === '"') {
-				if (src[i + 1] === '"') {
-					field += '"';
-					i += 1;
-				} else {
-					inQuotes = false;
-				}
-			} else {
-				field += ch;
+/**
+ * Stateful RFC 4180 parser shared by the buffer and file-backed paths.
+ * `push()` returns only the rows completed by that chunk; it never retains a
+ * completed row after handing it to the caller. A chunk can contain more than
+ * one row, so the streaming wrapper awaits each returned row before reading
+ * the next input chunk, keeping parser memory bounded by one input chunk plus
+ * the current field.
+ */
+class CsvRowParser {
+	private field = "";
+	private inQuotes = false;
+	private pendingQuote = false;
+	private row: string[] = [];
+	private sawAnyChar = false;
+
+	push(text: string): string[][] {
+		const rows: string[][] = [];
+		for (let i = 0; i < text.length; i += 1) {
+			const ch = text[i];
+			if (!this.sawAnyChar && ch === "\uFEFF") {
+				continue;
 			}
-			continue;
+			this.sawAnyChar = true;
+
+			// A quote at the end of a chunk may be either an escaped quote or the
+			// closing quote. Defer that decision until the next chunk arrives.
+			if (this.pendingQuote) {
+				this.pendingQuote = false;
+				if (ch === '"') {
+					this.field += '"';
+					continue;
+				}
+				this.inQuotes = false;
+			}
+
+			if (this.inQuotes) {
+				if (ch === '"') {
+					if (text[i + 1] === '"') {
+						this.field += '"';
+						i += 1;
+					} else if (i + 1 === text.length) {
+						this.pendingQuote = true;
+					} else {
+						this.inQuotes = false;
+					}
+				} else {
+					this.field += ch;
+				}
+				continue;
+			}
+
+			if (ch === '"') {
+				this.inQuotes = true;
+			} else if (ch === ",") {
+				this.row.push(this.field);
+				this.field = "";
+			} else if (ch === "\n") {
+				this.row.push(this.field);
+				rows.push(this.row);
+				this.row = [];
+				this.field = "";
+			} else if (ch !== "\r") {
+				this.field += ch;
+			}
 		}
-		if (ch === '"') {
-			inQuotes = true;
-		} else if (ch === ",") {
-			row.push(field);
-			field = "";
-		} else if (ch === "\n") {
-			row.push(field);
-			rows.push(row);
-			row = [];
-			field = "";
-		} else if (ch !== "\r") {
-			field += ch;
+		return rows;
+	}
+
+	finish(): CsvParseResult {
+		if (this.pendingQuote) {
+			this.pendingQuote = false;
+			this.inQuotes = false;
+		}
+		if (this.inQuotes) {
+			return { error: "CSV ended inside a quoted field", rows: [] };
+		}
+		const rows: string[][] = [];
+		if (this.field !== "" || this.row.length > 0) {
+			this.row.push(this.field);
+			rows.push(this.row);
+		}
+		if (!this.sawAnyChar) {
+			return { error: "CSV file is empty", rows };
+		}
+		return { rows };
+	}
+}
+
+/**
+ * Parse a file-backed CSV incrementally. The callback is awaited after each
+ * completed row, so a slow protocol emit cannot make the reader race ahead
+ * and accumulate the remainder of a large export.
+ */
+export async function streamCsvRows(
+	chunks: AsyncIterable<string>,
+	onRow: (row: string[]) => Promise<void> | void,
+): Promise<{ error?: string; rowCount: number }> {
+	const parser = new CsvRowParser();
+	let rowCount = 0;
+	for await (const chunk of chunks) {
+		for (const row of parser.push(chunk)) {
+			await onRow(row);
+			rowCount += 1;
 		}
 	}
-	if (inQuotes) {
-		return { error: "CSV ended inside a quoted field", rows };
+	const finished = parser.finish();
+	for (const row of finished.rows) {
+		await onRow(row);
+		rowCount += 1;
 	}
-	if (field !== "" || row.length > 0) {
-		row.push(field);
-		rows.push(row);
-	}
-	if (!sawAnyChar) {
-		return { error: "CSV file is empty", rows };
-	}
-	return { rows };
+	return finished.error ? { error: finished.error, rowCount } : { rowCount };
 }
 
 function indexOccurrences(header: readonly string[]): Map<string, number[]> {

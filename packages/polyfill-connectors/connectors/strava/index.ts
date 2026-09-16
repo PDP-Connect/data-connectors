@@ -55,46 +55,30 @@ import {
 	existsSync,
 	openSync,
 	readdirSync,
-	readSync,
 	realpathSync,
 	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import {
-	hasZipLocalFileSignature,
-	readZipEntriesFromFile,
-	ZipPolicyViolationError,
-	zipBasename,
-} from "../../src/bounded-zip-archive.ts";
 import type { CollectContext } from "../../src/connector-runtime.ts";
 import { runConnector } from "../../src/connector-runtime.ts";
+import {
+	ACTIVITIES_CSV,
+	type ActivitiesCsvSource,
+	streamActivitiesCsvFromFile,
+} from "./artifact-stream.ts";
 import {
 	type ActivityRecord,
 	buildActivityRecord,
 	type ColumnIndex,
-	parseCsvRows,
 	resolveColumns,
+	streamCsvRows,
 } from "./parsers.ts";
 import { type COVERAGE_REASONS, validateRecord } from "./schemas.ts";
 
 const ACTIVITIES_STREAM = "activities";
 const DIAGNOSTICS_STREAM = "coverage_diagnostics";
 const UPLOADED_ARTIFACT_RE = /\.(csv|zip)$/i;
-const ACTIVITIES_CSV = "activities.csv";
-
-/**
- * A Strava archive holds one file per activity beside the index, so entry
- * counts are high and legitimate. The budget bounds inflation rather than
- * ambition: only `activities.csv` is ever inflated, and nothing else in the
- * archive is read at all.
- */
-const ZIP_POLICY = {
-	maxEntries: 200_000,
-	maxEntryUncompressedBytes: 256 * 1024 * 1024,
-	maxTotalUncompressedBytes: 256 * 1024 * 1024,
-} as const;
-
 type CoverageReason = (typeof COVERAGE_REASONS)[number];
 
 interface ActivitiesState {
@@ -111,20 +95,6 @@ interface LoadFailure {
 		| "strava_export_not_recognised"
 		| "strava_export_columns_unexpected";
 	readonly message: string;
-}
-
-interface LoadedCsv {
-	readonly failed: false;
-	/** ISO timestamp of the artifact the rows came from. See resolveExportedAt. */
-	readonly exportedAt: string | null;
-	readonly columns: ColumnIndex;
-	readonly rows: string[][];
-	/** Rows the CSV reader could not complete — a truncated download. */
-	readonly truncated: boolean;
-}
-
-function isFailure(value: LoadedCsv | LoadFailure): value is LoadFailure {
-	return value.failed;
 }
 
 /**
@@ -182,104 +152,56 @@ function findUploadedArtifact(importDir: string): string | null {
 	}
 }
 
+type CsvSourceResult =
+	| {
+			readonly ok: true;
+			readonly exportedAt: string | null;
+			readonly source: ActivitiesCsvSource;
+	  }
+	| { readonly ok: false; readonly message: string };
+
 /**
- * Pull `activities.csv` out of the uploaded artifact. Accepts the archive ZIP
- * or a bare `activities.csv`, because the manifest tells owners with a large
- * archive to upload just that file.
+ * Open the uploaded artifact as a UTF-8 stream. Bare CSVs stream directly from
+ * the caller-owned file descriptor. ZIPs use the shared bounded extractor to
+ * stream only `activities.csv` to a scratch file, then parse that file row by
+ * row. Neither path materializes the CSV or retains its rows in memory.
  */
-function readActivitiesCsv(
-	filePath: string,
-): { ok: true; text: string } | { ok: false; message: string } {
+async function openActivitiesCsv(filePath: string): Promise<CsvSourceResult> {
 	let fd: number;
 	try {
 		fd = openSync(filePath, "r");
 	} catch {
 		return { ok: false, message: "The uploaded file could not be opened." };
 	}
+	let handedOff = false;
 	try {
 		const size = statSync(filePath).size;
-		if (size === 0) {
-			return { ok: false, message: "The uploaded file is empty." };
+		const result = await streamActivitiesCsvFromFile(fd, filePath, size);
+		if (!result.ok) {
+			return result;
 		}
-		if (!filePath.toLowerCase().endsWith(".zip")) {
-			// A bare CSV upload. hasZipLocalFileSignature guards the case where a
-			// ZIP was renamed to .csv, which would otherwise parse as one very
-			// strange row of binary.
-			const head = Buffer.alloc(Math.min(4, size));
-			readSync(fd, head, 0, head.length, 0);
-			if (hasZipLocalFileSignature(head)) {
-				return {
-					ok: false,
-					message:
-						"That file is a ZIP archive with a .csv name. Upload it with its original .zip name.",
-				};
-			}
-			const buf = Buffer.alloc(size);
-			readSync(fd, buf, 0, size, 0);
-			return { ok: true, text: buf.toString("utf8") };
-		}
-
-		const entries = readZipEntriesFromFile(fd, size, ZIP_POLICY);
-		const match = entries.find(
-			(entry) => zipBasename(entry.name).toLowerCase() === ACTIVITIES_CSV,
-		);
-		if (!match) {
-			return {
-				ok: false,
-				message: `The archive does not contain ${ACTIVITIES_CSV}. Upload the ZIP Strava emailed you, or the ${ACTIVITIES_CSV} from inside it.`,
-			};
-		}
-		return { ok: true, text: match.data().toString("utf8") };
+		handedOff = true;
+		return {
+			ok: true,
+			exportedAt: resolveExportedAt(filePath),
+			source: {
+				close: () => {
+					result.source.close();
+					closeSync(fd);
+				},
+				stream: result.source.stream,
+			},
+		};
 	} catch (error) {
-		if (error instanceof ZipPolicyViolationError) {
-			return {
-				ok: false,
-				message: `The archive exceeds the safe read policy: ${error.message}`,
-			};
-		}
 		return {
 			ok: false,
 			message: `The uploaded file could not be read: ${error instanceof Error ? error.message : String(error)}`,
 		};
 	} finally {
-		closeSync(fd);
+		if (!handedOff) {
+			closeSync(fd);
+		}
 	}
-}
-
-function loadCsv(importDir: string, fileName: string): LoadedCsv | LoadFailure {
-	const filePath = join(importDir, fileName);
-	const read = readActivitiesCsv(filePath);
-	if (!read.ok) {
-		return {
-			failed: true,
-			reason: "strava_export_not_recognised",
-			message: read.message,
-		};
-	}
-	const parsed = parseCsvRows(read.text);
-	const header = parsed.rows.at(0);
-	if (!header) {
-		return {
-			failed: true,
-			reason: "strava_export_not_recognised",
-			message: `${ACTIVITIES_CSV} has no header row.`,
-		};
-	}
-	const columns = resolveColumns(header);
-	if ("message" in columns && !("occurrences" in columns)) {
-		return {
-			failed: true,
-			reason: "strava_export_columns_unexpected",
-			message: columns.message,
-		};
-	}
-	return {
-		failed: false,
-		columns: columns as ColumnIndex,
-		rows: parsed.rows.slice(1),
-		exportedAt: resolveExportedAt(filePath),
-		truncated: Boolean(parsed.error),
-	};
 }
 
 interface Coverage {
@@ -289,6 +211,7 @@ interface Coverage {
 	readonly from: string | null;
 	readonly to: string | null;
 	readonly requestedFrom: string | null;
+	readonly requestedTo: string | null;
 	/**
 	 * Optional columns this archive did not carry. Calories and gear are the two
 	 * fields the export path exists to deliver, and neither is a required
@@ -314,7 +237,7 @@ async function emitDiagnostics(
 		record_count: coverage.recordCount,
 		fields_unavailable: [...coverage.fieldsUnavailable],
 		window_requested_from: coverage.requestedFrom,
-		window_requested_to: null,
+		window_requested_to: coverage.requestedTo,
 		window_covered_from: coverage.from,
 		window_covered_to: coverage.to,
 		freshness: "snapshot",
@@ -326,6 +249,7 @@ async function emitDiagnostics(
 function emptyCoverage(
 	reason: CoverageReason,
 	requestedFrom: string | null,
+	requestedTo: string | null = null,
 ): Coverage {
 	return {
 		reason,
@@ -334,8 +258,23 @@ function emptyCoverage(
 		from: null,
 		to: null,
 		requestedFrom,
+		requestedTo,
 		fieldsUnavailable: [],
 	};
+}
+
+/** Match the runtime's inclusive-since/exclusive-until date filtering locally. */
+function isOutsideRequestedTimeRange(
+	dateValue: string,
+	timeRange: { since?: string; until?: string } | undefined,
+): boolean {
+	if (!timeRange) {
+		return false;
+	}
+	if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
+		return true;
+	}
+	return Boolean(timeRange.until && dateValue >= timeRange.until.slice(0, 10));
 }
 
 async function collectActivities(
@@ -344,6 +283,11 @@ async function collectActivities(
 	state: ActivitiesState | undefined,
 ): Promise<void> {
 	const { emit, emitRecord } = ctx;
+	const fullRefresh = ctx.collectionMode === "full_refresh";
+	const since = fullRefresh ? undefined : state?.last_start_time;
+	const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
+	const requestedFrom = timeRange?.since ?? since ?? null;
+	const requestedTo = timeRange?.until ?? null;
 
 	let canonicalDir: string;
 	try {
@@ -357,7 +301,7 @@ async function collectActivities(
 		});
 		await emitDiagnostics(
 			ctx,
-			emptyCoverage("source_unreadable", state?.last_start_time ?? null),
+			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
 			null,
 		);
 		return;
@@ -377,29 +321,29 @@ async function collectActivities(
 		// prevent: every value has to end in the right sentence.
 		await emitDiagnostics(
 			ctx,
-			emptyCoverage("awaiting_upload", state?.last_start_time ?? null),
+			emptyCoverage("awaiting_upload", requestedFrom, requestedTo),
 			null,
 		);
 		return;
 	}
 
-	const loaded = loadCsv(canonicalDir, fileName);
-	if (isFailure(loaded)) {
+	const opened = await openActivitiesCsv(join(canonicalDir, fileName));
+	if (!opened.ok) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
-			reason: loaded.reason,
-			message: loaded.message,
+			reason: "strava_export_not_recognised",
+			message: opened.message,
 		});
 		await emitDiagnostics(
 			ctx,
-			emptyCoverage("source_unreadable", state?.last_start_time ?? null),
+			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
 			null,
 		);
 		return;
 	}
 
-	const { columns, rows, exportedAt, truncated } = loaded;
+	const { source, exportedAt } = opened;
 	// Strava activities are mutable at source: owners rename them, correct the
 	// sport, and delete them. An incremental run keyed on start_time can never
 	// see any of that, because an edit does not move the activity in time. A
@@ -407,57 +351,130 @@ async function collectActivities(
 	// cursor and re-emit the archive whole — the stream is declared
 	// mutable_state and the primary key is stable, so the reader supersedes
 	// rather than duplicates.
-	const fullRefresh = ctx.collectionMode === "full_refresh";
-	const since = fullRefresh ? undefined : state?.last_start_time;
-
 	await emit({
 		type: "PROGRESS",
 		stream: ACTIVITIES_STREAM,
-		message: `Strava phase=emit stream=activities source=${fileName} total_rows=${rows.length}`,
-		total: rows.length,
+		message: `Strava phase=emit stream=activities source=${fileName} mode=streaming`,
 	});
 
 	let emitted = 0;
 	let unreadable = 0;
 	let earliest: string | null = null;
-	let latest: string | undefined = since;
+	let coveredLatest: string | null = null;
+	let cursorLatest: string | null = since ?? null;
+	const parseState: {
+		columns: ColumnIndex | null;
+		headerSeen: boolean;
+		loadFailure: LoadFailure | null;
+	} = { columns: null, headerSeen: false, loadFailure: null };
+	let truncated = false;
 
-	for (const row of rows) {
-		if (row.length === 1 && row[0]?.trim() === "") {
-			continue; // trailing newline
-		}
-		const record: ActivityRecord | null = buildActivityRecord(
-			row,
-			columns,
+	try {
+		const parsed = await streamCsvRows(source.stream, async (row) => {
+			if (!parseState.headerSeen) {
+				parseState.headerSeen = true;
+				const resolved = resolveColumns(row);
+				if (!("occurrences" in resolved)) {
+					parseState.loadFailure = {
+						failed: true,
+						reason: "strava_export_columns_unexpected",
+						message: resolved.message,
+					};
+					return;
+				}
+				parseState.columns = resolved;
+				return;
+			}
+			const resolvedColumns = parseState.columns;
+			if (!resolvedColumns || parseState.loadFailure) {
+				return;
+			}
+			if (row.length === 1 && row[0]?.trim() === "") {
+				return; // trailing newline
+			}
+			const record: ActivityRecord | null = buildActivityRecord(
+				row,
+				resolvedColumns,
+				exportedAt,
+			);
+			if (!record) {
+				unreadable += 1;
+				return;
+			}
+			// The cursor makes a re-import of an overlapping archive cheap: Strava's
+			// activity ids are stable across exports, so the second archive collapses
+			// onto the first rather than double-counting.
+			if (
+				(since && record.start_time <= since) ||
+				isOutsideRequestedTimeRange(record.start_time, timeRange)
+			) {
+				return;
+			}
+			// Apply the requested time range before emitRecord. The runtime repeats
+			// this guard, but doing it here makes these diagnostics describe the same
+			// records that the collection actually retains.
+			await emitRecord(ACTIVITIES_STREAM, { ...record });
+			emitted += 1;
+			if (!earliest || record.start_time < earliest) {
+				earliest = record.start_time;
+			}
+			if (!coveredLatest || record.start_time > coveredLatest) {
+				coveredLatest = record.start_time;
+			}
+			if (!cursorLatest || record.start_time > cursorLatest) {
+				cursorLatest = record.start_time;
+			}
+			if (emitted % 250 === 0) {
+				await emit({
+					type: "PROGRESS",
+					stream: ACTIVITIES_STREAM,
+					message: `Strava phase=emit stream=activities emitted=${emitted} unreadable=${unreadable}`,
+					count: emitted,
+				});
+			}
+		});
+		truncated = Boolean(parsed.error);
+	} catch (error) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ACTIVITIES_STREAM,
+			reason: "strava_export_not_recognised",
+			message: `The uploaded file could not be read: ${error instanceof Error ? error.message : String(error)}`,
+		});
+		await emitDiagnostics(
+			ctx,
+			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
 			exportedAt,
 		);
-		if (!record) {
-			unreadable += 1;
-			continue;
-		}
-		// The cursor makes a re-import of an overlapping archive cheap: Strava's
-		// activity ids are stable across exports, so the second archive collapses
-		// onto the first rather than double-counting.
-		if (since && record.start_time <= since) {
-			continue;
-		}
-		await emitRecord(ACTIVITIES_STREAM, { ...record });
-		emitted += 1;
-		if (!earliest || record.start_time < earliest) {
-			earliest = record.start_time;
-		}
-		if (!latest || record.start_time > latest) {
-			latest = record.start_time;
-		}
-		if (emitted % 250 === 0) {
+		return;
+	} finally {
+		source.close();
+	}
+
+	const resolvedColumns = parseState.columns;
+	if (parseState.loadFailure || !resolvedColumns || !parseState.headerSeen) {
+		const failure = parseState.loadFailure;
+		if (failure?.reason === "strava_export_columns_unexpected") {
 			await emit({
-				type: "PROGRESS",
+				type: "SKIP_RESULT",
 				stream: ACTIVITIES_STREAM,
-				message: `Strava phase=emit stream=activities emitted=${emitted} unreadable=${unreadable}`,
-				count: emitted,
-				total: rows.length,
+				reason: "strava_export_columns_unexpected",
+				message: failure.message,
+			});
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACTIVITIES_STREAM,
+				reason: "strava_export_not_recognised",
+				message: failure?.message ?? `${ACTIVITIES_CSV} has no header row.`,
 			});
 		}
+		await emitDiagnostics(
+			ctx,
+			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
+			exportedAt,
+		);
+		return;
 	}
 
 	// Three outcomes that must not be conflated, because each ends in a different
@@ -501,12 +518,12 @@ async function collectActivities(
 	// neither is a required column, so an archive without them must say so
 	// rather than presenting a column of nulls.
 	const fieldsUnavailable = [
-		columns.calories === null ? "calories_kcal" : null,
-		columns.gear === null ? "gear" : null,
-		columns.movingTimeS === null ? "moving_time_s" : null,
-		columns.averageHeartRate === null ? "average_heartrate" : null,
-		columns.maxHeartRate === null ? "max_heartrate" : null,
-		columns.elevationGainM === null ? "total_elevation_gain_m" : null,
+		resolvedColumns.calories === null ? "calories_kcal" : null,
+		resolvedColumns.gear === null ? "gear" : null,
+		resolvedColumns.movingTimeS === null ? "moving_time_s" : null,
+		resolvedColumns.averageHeartRate === null ? "average_heartrate" : null,
+		resolvedColumns.maxHeartRate === null ? "max_heartrate" : null,
+		resolvedColumns.elevationGainM === null ? "total_elevation_gain_m" : null,
 	].filter((field): field is string => field !== null);
 
 	await emitDiagnostics(
@@ -516,8 +533,9 @@ async function collectActivities(
 			status,
 			recordCount: emitted,
 			from: earliest,
-			to: latest ?? null,
-			requestedFrom: since ?? null,
+			to: coveredLatest,
+			requestedFrom,
+			requestedTo,
 			fieldsUnavailable,
 		},
 		exportedAt,
@@ -532,7 +550,7 @@ async function collectActivities(
 		type: "STATE",
 		stream: ACTIVITIES_STREAM,
 		cursor: {
-			last_start_time: truncated ? (since ?? null) : (latest ?? null),
+			last_start_time: truncated ? (since ?? null) : cursorLatest,
 		},
 	});
 }
@@ -552,6 +570,7 @@ runConnector({
 		const state = ctx.state as StravaState | undefined;
 
 		if (!existsSync(importDir)) {
+			const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
 			// This is the commonest first-run state, and it used to emit a bare
 			// PROGRESS and return — no skip, no receipt. A run that collected
 			// nothing looked exactly like a healthy one.
@@ -566,7 +585,8 @@ runConnector({
 					ctx,
 					emptyCoverage(
 						"awaiting_upload",
-						state?.activities?.last_start_time ?? null,
+						timeRange?.since ?? state?.activities?.last_start_time ?? null,
+						timeRange?.until ?? null,
 					),
 					null,
 				);
