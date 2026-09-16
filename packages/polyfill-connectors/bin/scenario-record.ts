@@ -215,6 +215,11 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import {
+	type ExcludedFieldsByStream,
+	projectRecordForComparison,
+	readExcludedComparisonFields,
+} from "../src/scenario/record-comparison-fields.ts";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
 import {
@@ -1674,6 +1679,11 @@ function expectedForRecords(
 		op: "upsert" | "delete";
 		stream: string;
 	}>,
+	/** Declared per-stream comparison exclusions — see
+	 *  `src/scenario/record-comparison-fields.ts`. Hashing the PROJECTED record
+	 *  here (and identically in `verify.ts`) is what lets a connector whose
+	 *  records carry a collection-time value replay at all. */
+	excludedFields: ExcludedFieldsByStream,
 ): ScenarioRun["expected"]["records"] {
 	const byStream = new Map<
 		string,
@@ -1693,7 +1703,11 @@ function expectedForRecords(
 			count: recs.length,
 			ids: recs.map((r) => r.id),
 			ops: recs.map((r) => r.op),
-			record_sha256s: recs.map((r) => hashCanonicalJson(r.data)),
+			record_sha256s: recs.map((r) =>
+				hashCanonicalJson(
+					projectRecordForComparison(r.data, excludedFields.get(stream) ?? []),
+				),
+			),
 		};
 	}
 	return out;
@@ -2069,6 +2083,9 @@ async function captureRuns(
 	interactionOptions: InteractionOptions,
 	workspace: ScenarioEvidenceWorkspace,
 ): Promise<CaptureRunsResult> {
+	// Read once per capture: both runs must hash under the SAME projection, and
+	// `scenario-verify` reads the same declaration when it recomputes.
+	const excludedComparisonFields = readExcludedComparisonFields(args.connector);
 	process.stdout.write(
 		`RECORDING ${args.connector} — run 1 (full refresh, state=null)\n`,
 	);
@@ -2111,7 +2128,7 @@ async function captureRuns(
 		},
 		interactions: run1.interactions,
 		expected: {
-			records: expectedForRecords(run1.records),
+			records: expectedForRecords(run1.records, excludedComparisonFields),
 			final_state: run1.finalState,
 			protocol_trace: run1.protocolTrace,
 		},
@@ -2157,7 +2174,7 @@ async function captureRuns(
 			},
 			interactions: run2.interactions,
 			expected: {
-				records: expectedForRecords(run2.records),
+				records: expectedForRecords(run2.records, excludedComparisonFields),
 				final_state: run2.finalState,
 				protocol_trace: run2.protocolTrace,
 			},
