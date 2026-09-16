@@ -76,6 +76,10 @@ import type {
 	ScenarioStreamExpectation,
 	TraceValueDigest,
 } from "./format.ts";
+import {
+	projectRecordForComparison,
+	readExcludedComparisonFields,
+} from "./record-comparison-fields.ts";
 import { createReplayFetch, type ReplayFetch } from "./replay.ts";
 
 /**
@@ -1642,6 +1646,10 @@ function verifyStream(
 	stream: string,
 	actual: RunCollectorRecordedRecord[],
 	expected: ScenarioStreamExpectation,
+	/** Declared per-stream comparison exclusions. MUST match what
+	 *  `scenario-record` hashed under, or every record mismatches — see
+	 *  `record-comparison-fields.ts`. */
+	excludedFields: readonly string[],
 ): VerifyFailure[] {
 	const failures: VerifyFailure[] = [];
 
@@ -1664,7 +1672,9 @@ function verifyStream(
 		});
 	}
 
-	const actualHashes = actual.map((r) => hashRecordDataStrict(r.data));
+	const actualHashes = actual.map((r) =>
+		hashRecordDataStrict(projectRecordForComparison(r.data, excludedFields)),
+	);
 	for (
 		let i = 0;
 		i < Math.max(actualHashes.length, expected.record_sha256s.length);
@@ -1730,6 +1740,13 @@ async function verifyRun(
 ): Promise<VerifyFailure[]> {
 	const failures: VerifyFailure[] = [];
 	const run = scenario.runs[runIndex] as ScenarioRun;
+	// Same declaration `scenario-record` hashed under. Read from the manifest
+	// rather than the scenario file so a stream whose exclusions changed since
+	// capture fails loudly on hash rather than silently comparing under the old
+	// projection.
+	const excludedComparisonFields = readExcludedComparisonFields(
+		scenario.connector.id,
+	);
 
 	// A run with zero recorded interactions AND zero expected records proves
 	// nothing: the collector could do absolutely nothing (or crash before
@@ -1875,7 +1892,13 @@ async function verifyRun(
 
 	for (const [stream, expected] of Object.entries(run.expected.records)) {
 		failures.push(
-			...verifyStream(runIndex, stream, byStream.get(stream) ?? [], expected),
+			...verifyStream(
+				runIndex,
+				stream,
+				byStream.get(stream) ?? [],
+				expected,
+				excludedComparisonFields.get(stream) ?? [],
+			),
 		);
 	}
 
