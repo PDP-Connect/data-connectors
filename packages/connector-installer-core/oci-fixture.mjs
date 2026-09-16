@@ -17,7 +17,7 @@
 //
 // The registry is a few dozen lines of `node:http` rather than a container
 // because the tests must run in CI without a Docker daemon. It serves exactly
-// the three verbs a puller uses — token, manifest, blob — and nothing else, so
+// the endpoints a puller uses — token, tags, manifest, blob — so
 // it cannot accidentally paper over a request the real GHCR would reject.
 //
 // The signature is minted with a locally generated key and a self-issued
@@ -195,6 +195,9 @@ export class FixtureRegistry {
     this.redirectTokenTo = null;
     this.faults = new Map();
     this.requests = [];
+    this.requestHeaders = [];
+    this.pathFaults = new Map();
+    this.tagLists = new Map();
     this.server = null;
   }
 
@@ -220,9 +223,20 @@ export class FixtureRegistry {
   async start() {
     this.server = createServer((req, res) => {
       this.requests.push(req.url);
+      this.requestHeaders.push({ url: req.url, authorization: req.headers.authorization });
       const url = new URL(req.url, "http://localhost");
 
+      const pathFault = this.pathFaults.get(url.pathname);
+      const sendPathFault = () => {
+        res.writeHead(pathFault.status, pathFault.headers ?? { "content-type": "application/json" });
+        res.end(pathFault.body ?? "");
+      };
+
       if (url.pathname === "/token") {
+        if (pathFault) {
+          sendPathFault();
+          return;
+        }
         // `redirectTokenTo` makes this realm answer a 302 instead of a token,
         // which is how a test drives the per-hop origin check. It fires once so
         // the redirected request is answered normally and a same-origin hop can
@@ -245,6 +259,33 @@ export class FixtureRegistry {
           "content-type": "application/json",
         });
         res.end(JSON.stringify({ errors: [{ code: "UNAUTHORIZED", message: "auth required" }] }));
+        return;
+      }
+
+      if (pathFault) {
+        sendPathFault();
+        return;
+      }
+
+      const tagsMatch = /^\/v2\/(.+)\/tags\/list$/.exec(url.pathname);
+      if (tagsMatch) {
+        const repository = tagsMatch[1];
+        const listing = this.tagLists.get(repository);
+        if (!listing) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ errors: [{ code: "NAME_UNKNOWN", message: "repository unknown" }] }));
+          return;
+        }
+        const { tags, pageSize = tags.length, nextLink = null } = listing;
+        const last = url.searchParams.get("last");
+        const start = last === null ? 0 : tags.indexOf(last) + 1;
+        const page = tags.slice(start, start + pageSize);
+        const headers = { "content-type": "application/json" };
+        if (page.length && start + page.length < tags.length) {
+          headers.link = nextLink ?? `<${url.pathname}?last=${encodeURIComponent(page.at(-1))}&n=${pageSize}>; rel="next"`;
+        }
+        res.writeHead(200, headers);
+        res.end(JSON.stringify({ name: repository, tags: page }));
         return;
       }
 
@@ -315,9 +356,13 @@ export function publishArtifact(
   registry,
   {
     connectorKey = "ynab",
-    connectorId = "https://github.com/PDP-Connect/data-connectors/connector/ynab",
+    connectorId = null,
     version = "0.3.0",
     protocolVersion = "1.0",
+    displayName = "YNAB",
+    tier = "supported",
+    runtimeBindings = { network: { required: true } },
+    setupModality = "static_secret",
     withAssets = false,
     signer = null,
     signers = null,
@@ -331,12 +376,17 @@ export function publishArtifact(
     configOverrides = {},
   } = {}
 ) {
+  const resolvedConnectorId =
+    connectorId ?? `https://github.com/PDP-Connect/data-connectors/connector/${connectorKey}`;
   const profile = {
     connector_key: connectorKey,
-    connector_id: connectorId,
+    connector_id: resolvedConnectorId,
     version,
     protocol_version: protocolVersion,
-    display_name: "YNAB",
+    display_name: displayName,
+    runtime_requirements: { bindings: runtimeBindings },
+    setup: { modality: setupModality },
+    capabilities: { public_listing: { tier } },
     ...(withAssets ? { brand: { icon: "icons/ynab.svg" } } : {}),
   };
   const profileBytes = canonicalJson(profile);
@@ -355,13 +405,16 @@ export function publishArtifact(
   const config = {
     config_version: "1.0",
     connector_key: connectorKey,
-    connector_id: connectorId,
+    connector_id: resolvedConnectorId,
     version,
     protocol_version: protocolVersion,
     profile_digest: sha256(profileBytes),
     entrypoint: "code/collection-profile.mjs",
     entrypoint_kind: "import-safe",
     exports: ["collect"],
+    display_name: displayName,
+    tier,
+    runtime: { bindings: Object.keys(runtimeBindings).sort() },
     bundled_tools: [],
     licenses: "Apache-2.0",
     ...configOverrides,

@@ -69,7 +69,13 @@ test("C-T4 the workflow matrix and the allowlist module agree", () => {
   assert.ok(Math.max(...shards.map((row) => row.connectors.length)) -
     Math.min(...shards.map((row) => row.connectors.length)) <= 1);
   for (const source of [publish, gate]) {
-    assert.match(source, /matrix: \$\{\{ fromJSON\(needs\.[\w-]+\.outputs\.matrix\) \}\}/);
+    // Only catalog-only dispatch may bypass connector enumeration; normal
+    // publishes must still consume the reviewed allowlist output.
+    const connectorMatrix = source.replace(
+      `inputs.catalog-only && fromJSON('{"include":[{"connector":"catalog"}]}') || `,
+      "",
+    );
+    assert.match(connectorMatrix, /matrix: \$\{\{ fromJSON\(needs\.[\w-]+\.outputs\.matrix\) \}\}/);
     assert.match(source, /matrix: \$\{\{ steps\.[\w-]+\.outputs\.matrix \}\}/);
     assert.doesNotMatch(source, /matrix:\s*\n/, "no independent inline connector matrix");
   }
