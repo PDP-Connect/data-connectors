@@ -1,6 +1,6 @@
-fix(publish): authenticate the previous-catalog lookup so the first catalog can publish
+fix(ci): check out the integrity scripts in the pin-freshness job
 
-The catalog step looked up ghcr.io/pdp-connect/connector-catalog:latest anonymously. For a repository that does not exist yet GHCR answers the token request with 403, which lookup-manifest correctly reports as unknown, and the step refuses to proceed on unknown. The connector publish step already sends the job token for the same reason; the catalog step now does too, so a missing catalog is a clean absent and the first publish can run.
+The job sparse-checks-out only the pins file, so the new check-pin-freshness.mjs was not on disk at run time and the job failed with a missing module.
 
 Signed-off-by: Tim Nunamaker <tnunamak@gmail.com>
 
