@@ -93,8 +93,11 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
+      # Fork pull requests run with a read-only token, so the comment API
+      # answers "Resource not accessible by integration". The report is still
+      # printed to the job log and the gate below still decides pass/fail.
       - name: Post or update PR comment
-        if: always()
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
         uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:
           header: schema-health-check
