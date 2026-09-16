@@ -4,8 +4,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 
 const workflow = readFileSync(new URL("../../workflows/cross-repo-integrity.yml", import.meta.url), "utf8");
+const parsedWorkflow = parse(workflow);
+const freshnessSteps = parsedWorkflow.jobs["pin-freshness"].steps;
+
+function checkoutProvidesComparator(step) {
+	if (!step.uses?.startsWith("actions/checkout@")) {
+		return false;
+	}
+
+	const sparsePaths = step.with?.["sparse-checkout"];
+	return sparsePaths?.includes(".github/scripts/cross-repo-integrity") ||
+		(step.with?.ref === "main" && !sparsePaths);
+}
+
+function checkoutCoversTrigger(step, trigger) {
+	if (!checkoutProvidesComparator(step)) {
+		return false;
+	}
+
+	if (step.if === "github.event_name != 'push' && github.event_name != 'schedule'") {
+		return trigger !== "push" && trigger !== "schedule";
+	}
+
+	return step.if === "github.event_name == 'push' || github.event_name == 'schedule'" &&
+		(trigger === "push" || trigger === "schedule");
+}
 
 test("runs freshness on every main push and daily", () => {
 	assert.match(workflow, /  push:\n    branches: \[main\]\n  schedule:\n/);
@@ -41,6 +67,28 @@ test("repin automation is write-scoped and idempotent", () => {
 	assert.match(workflow, /do not add vendored or registry repairs here/);
 	assert.match(workflow, /gh pr close/);
 	assert.match(workflow, /Superseded by the newer automated repin PR/);
+});
+
+test("every workflow trigger checks out the comparator", () => {
+	const triggers = Object.keys(parsedWorkflow.on);
+	assert.deepEqual(triggers.sort(), ["pull_request", "push", "schedule", "workflow_dispatch"]);
+
+	for (const trigger of triggers) {
+		assert.ok(
+			freshnessSteps.some((step) => checkoutCoversTrigger(step, trigger)),
+			`${trigger} must have a pin-freshness checkout containing the comparator`,
+		);
+	}
+});
+
+test("remote lookup failures stop refresh and older-candidate closure", () => {
+	const repinRun = freshnessSteps.find((step) => step.name.startsWith("Open or update"))?.run;
+	assert.ok(repinRun);
+	assert.match(repinRun, /remote_ref_exists\(\)/);
+	assert.match(repinRun, /BRANCH_LOOKUP_STATUS/);
+	assert.match(repinRun, /OLD_BRANCH_LOOKUP_STATUS/);
+	assert.match(repinRun, /could not determine whether \$BRANCH exists/);
+	assert.match(repinRun, /could not determine whether older branch \$OLD_BRANCH exists/);
 });
 
 test("freshness comparison delegates its four outcomes to the tested comparator", () => {

@@ -423,10 +423,11 @@ jobs:
     needs: [changes, read-pins]
     if: always() && needs.changes.result == 'success'
     steps:
-      # Pull-request runs need this repository's pins file and the integrity
-      # scripts on disk; the main checkout below only runs for push/schedule.
+      # Every trigger needs this repository's pins file and integrity scripts on disk. Pushes
+      # and schedules use the full main checkout because they may repin; pull requests and
+      # manual runs only need the comparator inputs and stay non-writing.
       - name: Checkout the pins file and integrity scripts
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push' && github.event_name != 'schedule'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
@@ -508,8 +509,22 @@ jobs:
           TITLE="chore: repin ${REPO_ID} to ${SHORT_SHA}"
           BOT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
 
+          remote_ref_exists() {
+            local lookup_status
+            if git ls-remote --exit-code --heads origin "$1" >/dev/null 2>&1; then
+              return 0
+            else
+              lookup_status=$?
+            fi
+
+            if [ "$lookup_status" -eq 2 ]; then
+              return 2
+            fi
+            return "$lookup_status"
+          }
+
           git fetch origin main
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+          if remote_ref_exists "$BRANCH"; then
             git fetch origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
             NON_BOT_COMMITS="$(node .github/scripts/cross-repo-integrity/repin-branch-policy.mjs \
               --base-ref origin/main \
@@ -523,6 +538,12 @@ jobs:
               fi
               echo "::notice::$NOTICE"
               exit 0
+            fi
+          else
+            BRANCH_LOOKUP_STATUS=$?
+            if [ "$BRANCH_LOOKUP_STATUS" -ne 2 ]; then
+              echo "::error::could not determine whether $BRANCH exists (git ls-remote exited $BRANCH_LOOKUP_STATUS); leaving the branch untouched" >&2
+              exit 1
             fi
           fi
           git checkout -B "$BRANCH" origin/main
@@ -579,7 +600,7 @@ jobs:
             esac
             [ "$OLD_BRANCH" != "$BRANCH" ] || continue
 
-            if git ls-remote --exit-code --heads origin "$OLD_BRANCH" >/dev/null 2>&1; then
+            if remote_ref_exists "$OLD_BRANCH"; then
               git fetch origin "refs/heads/$OLD_BRANCH:refs/remotes/origin/$OLD_BRANCH"
               OLD_NON_BOT_COMMITS="$(node .github/scripts/cross-repo-integrity/repin-branch-policy.mjs \
                 --base-ref origin/main \
@@ -588,6 +609,12 @@ jobs:
               if [ -n "$OLD_NON_BOT_COMMITS" ]; then
                 echo "::notice::leaving older repin PR #$OLD_PR_NUMBER open because $OLD_BRANCH contains non-bot commits"
                 continue
+              fi
+            else
+              OLD_BRANCH_LOOKUP_STATUS=$?
+              if [ "$OLD_BRANCH_LOOKUP_STATUS" -ne 2 ]; then
+                echo "::error::could not determine whether older branch $OLD_BRANCH exists (git ls-remote exited $OLD_BRANCH_LOOKUP_STATUS); leaving it open" >&2
+                exit 1
               fi
             fi
 

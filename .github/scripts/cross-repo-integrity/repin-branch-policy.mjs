@@ -17,7 +17,7 @@ const branchRef = option("--branch");
 const botEmail = option("--bot-email");
 const commits = execFileSync(
 	"git",
-	["log", "--format=%H%x09%ae", `${baseRef}..${branchRef}`],
+	["log", "--format=%H%x09%ae%x09%ce", `${baseRef}..${branchRef}`],
 	{ encoding: "utf8" },
 )
 	.trim()
@@ -25,8 +25,21 @@ const commits = execFileSync(
 	.filter(Boolean);
 
 for (const commit of commits) {
-	const [, authorEmail] = commit.split("\t");
-	if (authorEmail !== botEmail) {
-		console.log(commit.split("\t", 1)[0]);
+	const [hash, authorEmail, committerEmail] = commit.split("\t");
+	const changedPaths = execFileSync(
+		"git",
+		["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", hash],
+		{ encoding: "utf8" },
+	)
+		.trim()
+		.split("\n")
+		.filter(Boolean);
+
+	if (
+		authorEmail !== botEmail ||
+		committerEmail !== botEmail ||
+		changedPaths.some((path) => path !== ".github/cross-repo-pins.json")
+	) {
+		console.log(hash);
 	}
 }
