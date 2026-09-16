@@ -11,6 +11,10 @@ import {
 	validateNetflixExportArtifactFromFile,
 } from "../connectors/netflix_export/validation.ts";
 import {
+	validateStravaAccountExportArtifact,
+	validateStravaAccountExportArtifactFromFile,
+} from "../connectors/strava/validation.ts";
+import {
 	validateWhatsAppChatExportArtifact,
 	validateWhatsAppChatExportArtifactFromFile,
 } from "../connectors/whatsapp/validation.ts";
@@ -19,11 +23,26 @@ export type ManualUploadValidationResult =
 	| Awaited<ReturnType<typeof validateAppleHealthExportArtifactFromFile>>
 	| ReturnType<typeof validateGoogleMapsTimelineArtifact>
 	| ReturnType<typeof validateNetflixExportArtifact>
+	| ReturnType<typeof validateStravaAccountExportArtifact>
+	| Awaited<ReturnType<typeof validateStravaAccountExportArtifactFromFile>>
 	| ReturnType<typeof validateWhatsAppChatExportArtifact>;
 
 export interface ManualUploadValidationOptions {
 	readonly fileName?: string | null;
+	readonly existingFileHashes?: readonly string[];
 	readonly maxFileBytes?: number | null;
+}
+
+function existingFileHashesOption(
+	existingFileHashes: readonly string[] | undefined,
+): { readonly existingFileHashes?: readonly string[] } {
+	return existingFileHashes === undefined ? {} : { existingFileHashes };
+}
+
+function fileNameOption(fileName: string | null | undefined): {
+	readonly fileName?: string | null;
+} {
+	return fileName === undefined ? {} : { fileName };
 }
 
 export function validateManualUploadArtifactByKind(
@@ -33,7 +52,16 @@ export function validateManualUploadArtifactByKind(
 ): ManualUploadValidationResult | null {
 	const maxFileBytes = options.maxFileBytes ?? null;
 	if (kind === "google_maps_timeline") {
-		return validateGoogleMapsTimelineArtifact(input, { maxFileBytes });
+		return validateGoogleMapsTimelineArtifact(input, {
+			maxFileBytes,
+		});
+	}
+	if (kind === "strava_account_export") {
+		return validateStravaAccountExportArtifact(input, {
+			...existingFileHashesOption(options.existingFileHashes),
+			...fileNameOption(options.fileName),
+			maxFileBytes,
+		});
 	}
 	if (kind === "whatsapp_chat_export") {
 		return validateWhatsAppChatExportArtifact(input, {
@@ -63,6 +91,7 @@ export interface ManualUploadFileValidationOptions {
 	 *  display name. */
 	readonly filePath: string;
 	readonly fileSha256: string;
+	readonly existingFileHashes?: readonly string[];
 	readonly maxFileBytes?: number | null;
 }
 
@@ -133,6 +162,19 @@ export async function validateManualUploadArtifactFromFileByKind(
 			options.filePath,
 			fileSize,
 			{
+				fileSha256: options.fileSha256,
+				maxFileBytes: options.maxFileBytes ?? null,
+			},
+		);
+	}
+	if (kind === "strava_account_export") {
+		return await validateStravaAccountExportArtifactFromFile(
+			fd,
+			options.filePath,
+			fileSize,
+			{
+				...existingFileHashesOption(options.existingFileHashes),
+				fileName: options.fileName,
 				fileSha256: options.fileSha256,
 				maxFileBytes: options.maxFileBytes ?? null,
 			},
