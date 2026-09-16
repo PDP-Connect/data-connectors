@@ -76,6 +76,36 @@ test("connector governor: recovers a 429-then-200 and returns the parsed value",
 	assert.deepEqual(slept, [7000]);
 });
 
+test("connector governor: request retry observer receives the resolved delay and status", async () => {
+	const events: Array<{ delayMs: number; status?: number }> = [];
+	const statuses = [429, 200];
+	const g = createConnectorHttpGovernor({
+		name: "github",
+		profile: TEST_PROFILE,
+		maxAttempts: 2,
+		pacingInitialIntervalMs: 0,
+		sleep: () => {
+			/* no-op */
+		},
+	});
+
+	await g.request(
+		() => ({
+			status: statuses.shift() ?? 200,
+			headers: { "retry-after": "2" },
+			body: null,
+		}),
+		classify,
+		{
+			onRetry: (event) => {
+				events.push(event);
+			},
+		},
+	);
+
+	assert.deepEqual(events, [{ delayMs: 2000, status: 429 }]);
+});
+
 test("connector governor: Retry-After double-pay guard — the server interval is slept once, not stacked on backoff", async () => {
 	const slept: number[] = [];
 	const statuses = [429, 200];
@@ -625,6 +655,34 @@ test("observability: buildCollectionRateProgress returns null when pacing is opt
 		{},
 		"nothing to persist when pacing is off",
 	);
+});
+
+test("connector governor: a local finite retry budget replenishes after success", async () => {
+	const retryBudget = new RetryBudget({
+		capacity: 2,
+		initialTokens: 1,
+		refillPerSuccess: 1,
+	});
+	const g = createConnectorHttpGovernor({
+		name: "github",
+		profile: TEST_PROFILE,
+		maxAttempts: 3,
+		pacingInitialIntervalMs: 0,
+		retryBudget,
+		sleep: () => undefined,
+		now: () => 0,
+		random: () => 0.5,
+	});
+
+	await g.request(() => ({ status: 200, body: null }), classify);
+
+	let calls = 0;
+	const statuses = [429, 429, 200];
+	await g.request(() => {
+		calls += 1;
+		return { status: statuses.shift() ?? 200, body: null };
+	}, classify);
+	assert.equal(calls, 3, "the successful request refilled both retry tokens");
 });
 
 /** Helper: a governor whose pacing snapshot reports a specific learned interval. */

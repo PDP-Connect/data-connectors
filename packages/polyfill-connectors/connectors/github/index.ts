@@ -20,8 +20,8 @@
  *   - gists via `since` + updated_at
  *
  * Rate limit: 5000 req/hr (authenticated). We paginate 100 per page.
- * On 403+x-ratelimit-remaining=0 the `gh()` helper throws `github_rate_limited`,
- * which main() surfaces as a retryable DONE failure (see catch at bottom).
+ * Rate-limit responses are retried through the shared governor; exhaustion keeps
+ * the observed GitHub HTTP status and is surfaced as a retryable DONE failure.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -89,25 +89,36 @@ const USER_AGENT = "pdpp-connector-github/0.1";
 // docs/research/per-connector-rate-profiles-2026-06-13.md for the derivation.
 
 interface GithubHttpGovernorOptions {
+	now?: () => number;
 	restoredIntervalMs?: number;
 	retrySleep?: (ms: number) => void | Promise<void>;
+	sleep?: (ms: number) => void | Promise<void>;
 }
 
 export function createGithubHttpGovernor(
 	options: GithubHttpGovernorOptions = {},
 ): ConnectorHttpGovernor {
 	return createConnectorHttpGovernor({
+		baseDelayMs: 60_000,
+		maxDelayMs: 15 * 60_000,
+		// GitHub's Retry-After/reset values are server-directed waits. The 15-minute
+		// cap applies only to our exponential fallback, not an explicit server wait.
+		maxRetryAfterMs: Number.POSITIVE_INFINITY,
 		name: "github",
 		maxAttempts: 4,
 		profile: githubPacingProfile(),
 		retryBudget: new RetryBudget({
 			capacity: 8,
-			initialTokens: 2,
+			// Three retry tokens make the four-attempt envelope reachable on a
+			// cold request while the shared budget still bounds run-wide retry volume.
+			initialTokens: 3,
 			refillPerSuccess: 0.25,
 		}),
+		...(options.now === undefined ? {} : { now: options.now }),
 		...(options.retrySleep === undefined
 			? {}
 			: { retrySleep: options.retrySleep }),
+		...(options.sleep === undefined ? {} : { sleep: options.sleep }),
 		...(options.restoredIntervalMs === undefined
 			? {}
 			: { restoredIntervalMs: options.restoredIntervalMs }),
@@ -119,7 +130,7 @@ let maxGithubListPages = DEFAULT_GITHUB_MAX_LIST_PAGES;
 
 /** Runtime retry classification, including the governor's exhausted 5xx form. */
 export const GITHUB_RETRYABLE_PATTERN =
-	/github_malformed_response|rate_limited|ECONN|fetch failed|retryable status \d+/i;
+	/github_malformed_response|rate(?:_| )limit(?:ed)?|ECONN|fetch failed|retryable status \d+/i;
 
 /** Test-only cap injection; production keeps the bounded default. */
 export function __setMaxGithubListPages(maxPages: number): void {
@@ -164,6 +175,55 @@ interface GhRawResponse {
 	status: number;
 }
 
+function isGithubBadCredentials(
+	response: Pick<GhRawResponse, "body" | "status">,
+): boolean {
+	return (
+		response.status === 401 ||
+		(response.status === 403 && /\bbad credentials\b/i.test(response.body))
+	);
+}
+
+function isGithubRateLimited(
+	response: Pick<GhRawResponse, "body" | "status">,
+	remaining: string | null,
+	retryAfter: string | null,
+): boolean {
+	return (
+		response.status === 429 ||
+		(response.status === 403 &&
+			!isGithubBadCredentials(response) &&
+			(remaining === "0" ||
+				retryAfter !== null ||
+				/\bsecondary rate limit\b/i.test(response.body)))
+	);
+}
+
+function githubRetryAfter(
+	status: number,
+	remaining: string | null,
+	retryAfter: string | null,
+	reset: string | null,
+): string | undefined {
+	if (retryAfter !== null) {
+		return retryAfter;
+	}
+	// x-ratelimit-reset is authoritative only when the quota signal says the
+	// primary bucket is empty. A secondary 403 with no Retry-After must use the
+	// exponential fallback instead of waiting for an unrelated reset timestamp.
+	if (status !== 429 && remaining !== "0") {
+		return undefined;
+	}
+	if (reset === null || reset.trim() === "") {
+		return undefined;
+	}
+	const resetSeconds = Number(reset);
+	if (!Number.isFinite(resetSeconds)) {
+		return undefined;
+	}
+	return String(Math.max(0, Math.ceil(resetSeconds - Date.now() / 1000)));
+}
+
 async function gh<T>(
 	ctx: StreamCtx,
 	path: string,
@@ -171,6 +231,7 @@ async function gh<T>(
 	extra?: ProgressExtra,
 ): Promise<GhResult<T>> {
 	let raw: GhRawResponse;
+	let lastResponse: GhRawResponse | undefined;
 	try {
 		const r = await ctx.httpGovernor.request<GhRawResponse, GhRawResponse>(
 			async (): Promise<GhRawResponse> => {
@@ -182,18 +243,30 @@ async function gh<T>(
 						"User-Agent": USER_AGENT,
 					},
 				});
-				const retryAfter = res.headers.get("retry-after");
-				return {
+				const response = {
 					body: await res.text().catch((): string => ""),
 					link: res.headers.get("link"),
-					// GitHub signals quota exhaustion as 403 + x-ratelimit-remaining: 0
-					// (not 429). Surface it to the governor as the rate-limit terminal.
-					rateLimited:
-						res.status === 403 &&
-						res.headers.get("x-ratelimit-remaining") === "0",
-					...(retryAfter === null ? {} : { retryAfter }),
 					status: res.status,
 				};
+				const rateLimited = isGithubRateLimited(
+					response,
+					res.headers.get("x-ratelimit-remaining"),
+					res.headers.get("retry-after"),
+				);
+				const retryAfter = rateLimited
+					? githubRetryAfter(
+							response.status,
+							res.headers.get("x-ratelimit-remaining"),
+							res.headers.get("retry-after"),
+							res.headers.get("x-ratelimit-reset"),
+						)
+					: undefined;
+				lastResponse = {
+					...response,
+					rateLimited,
+					...(retryAfter === undefined ? {} : { retryAfter }),
+				};
+				return lastResponse;
 			},
 			(resp) => ({
 				// Map GitHub's 403-quota-exhausted onto 429 so the governor's
@@ -204,19 +277,32 @@ async function gh<T>(
 					: { headers: { "retry-after": resp.retryAfter } }),
 				value: resp,
 			}),
+			{
+				onRetry: async ({ delayMs, status }) => {
+					if (status === 429) {
+						await ctx.progress(
+							`Rate limited by GitHub, retrying in ${String(Math.ceil(delayMs / 1000))}s`,
+							{
+								...extra,
+								phase: "rate_limit",
+								rate_limit_pressure: 1,
+							},
+						);
+					}
+				},
+			},
 		);
 		raw = r.value;
 	} catch (error) {
 		if (error instanceof Error && error.message === "github_rate_limited") {
-			await ctx.progress("GitHub request rate limited", {
-				...extra,
-				phase: "rate_limit",
-				rate_limit_pressure: 1,
-			});
+			throw new Error(
+				`github_http_${String(lastResponse?.status ?? 429)}: GitHub rate limit exhausted after bounded retries`,
+				{ cause: error },
+			);
 		}
 		throw error;
 	}
-	if (raw.status === 401) {
+	if (isGithubBadCredentials(raw)) {
 		throw new Error("github_auth_failed");
 	}
 	if (raw.status < 200 || raw.status >= 300) {
@@ -807,7 +893,7 @@ export async function collectIssues(ctx: StreamCtx): Promise<void> {
 // somehow still exceeds the cap emits a terminal-gap SKIP_RESULT so the run is
 // honestly incomplete rather than silently truncated.
 const PR_ERROR_BUBBLE_PATTERN =
-	/rate_limited|auth_failed|ECONN|fetch failed|retryable status [45]\d\d\b/i;
+	/rate(?:_| )limit(?:ed)?|auth_failed|ECONN|fetch failed|retryable status [45]\d\d\b/i;
 
 // A single search window that still reports more than this many total results
 // cannot be fully drained (the API stops at ~1000). We treat any window whose
