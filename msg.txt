@@ -1,7 +1,0 @@
-fix(ci): check out the integrity scripts in the pin-freshness job
-
-The job sparse-checks-out only the pins file, so the new check-pin-freshness.mjs was not on disk at run time and the job failed with a missing module.
-
-Signed-off-by: Tim Nunamaker <tnunamak@gmail.com>
-
-Assisted-by: AI
