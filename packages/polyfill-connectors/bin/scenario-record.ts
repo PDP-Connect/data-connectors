@@ -205,6 +205,7 @@ import { spawn } from "node:child_process";
 import {
 	chmodSync,
 	copyFileSync,
+	existsSync,
 	mkdirSync,
 	readFileSync,
 	renameSync,
@@ -215,11 +216,6 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
-import {
-	type ExcludedFieldsByStream,
-	projectRecordForComparison,
-	readExcludedComparisonFields,
-} from "../src/scenario/record-comparison-fields.ts";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
 import {
@@ -249,6 +245,11 @@ import type {
 } from "../src/scenario/format.ts";
 import { SCENARIO_FORMAT } from "../src/scenario/format.ts";
 import {
+	type ExcludedFieldsByStream,
+	projectRecordForComparison,
+	readExcludedComparisonFields,
+} from "../src/scenario/record-comparison-fields.ts";
+import {
 	cleanupScenarioEvidenceWorkspace,
 	createScenarioEvidenceWorkspace,
 	messagesToRecordsAndState,
@@ -271,7 +272,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dirname, "..");
 const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 
-dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
+const REPO_ENV_LOCAL = join(REPO_ROOT, ".env.local");
+dotenvConfig({ path: REPO_ENV_LOCAL, quiet: true });
+
+// A `.env.local` placed next to the package (rather than at the repo root this
+// file actually loads from) is a silent misconfiguration: credentials never
+// load, the connector asks for them interactively, and a non-TTY capture then
+// stalls until the inactivity watchdog kills it minutes later. Observed live.
+// Name it at startup instead, while the fix is still cheap.
+if (
+	!existsSync(REPO_ENV_LOCAL) &&
+	existsSync(join(PACKAGE_ROOT, ".env.local"))
+) {
+	process.stderr.write(
+		`[scenario-record] found ${join(PACKAGE_ROOT, ".env.local")} but credentials are loaded from ${REPO_ENV_LOCAL}, ` +
+			`which does not exist. Move or link it there (\`ln -s <your>/.env.local ${REPO_ENV_LOCAL}\`), ` +
+			"or pass credentials with --answer/--answers.\n",
+	);
+}
 
 /** `bin/scenario-record.ts`'s own recorder-tool version string, stamped onto
  *  `ConnectorScenario.connector.tool_version` (src/scenario/format.ts). Bump
