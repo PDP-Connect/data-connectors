@@ -47,6 +47,7 @@ function fixtureOptions(registry, signer, overrides = {}) {
     allowedOciRegistries: new Set([registry.registry]),
     ociCertificateIdentityResolver: () => PINNED_IDENTITY,
     sigstoreVerifier: createFixtureVerifier(signer),
+    retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
     ...overrides,
   };
 }
@@ -379,6 +380,7 @@ test("A-T2 classifies present/absent/unknown and refuses on unknown", async () =
     reference: "0.3.0",
     scheme: "http",
     timeoutMs: 250,
+    retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
   });
   assert.equal(timedOut.outcome, "unknown");
 
@@ -392,6 +394,7 @@ test("A-T2 classifies present/absent/unknown and refuses on unknown", async () =
         version: "0.3.0",
         scheme: "http",
         timeoutMs: 250,
+        retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
       }),
     (error) => error.reason === "unverifiable"
   );
@@ -404,6 +407,7 @@ test("A-T2 classifies present/absent/unknown and refuses on unknown", async () =
       repository: "pdp-connect/connector/ynab",
       reference: "0.3.0",
       scheme: "http",
+      retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
     });
     assert.equal(result.outcome, "unknown");
   });

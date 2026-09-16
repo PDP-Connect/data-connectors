@@ -9,6 +9,7 @@
   ],
   "files": [
     "packages/connector-installer-core/index.mjs",
+    "packages/connector-installer-core/retry.mjs",
     "packages/connector-installer-core/oci-registry.mjs",
     "packages/connector-installer-core/oci-verify.mjs",
     "packages/connector-installer-core/tar-stream.mjs",

@@ -25,6 +25,12 @@ import {
 import { verify as verifySigstoreBundle } from "sigstore";
 
 import { readTarGzEntries } from "./tar-stream.mjs";
+import {
+  DEFAULT_RETRY_ATTEMPTS,
+  DEFAULT_RETRY_BASE_DELAY_MS,
+  DEFAULT_RETRY_MAX_DELAY_MS,
+  fetchWithRetry,
+} from "./retry.mjs";
 
 import {
   DEFAULT_OCI_REGISTRY as DEFAULT_OCI_REGISTRY_NAME,
@@ -207,10 +213,9 @@ function enrichRemoteEntry(indexSource, entry) {
   };
 }
 
-export const ARTIFACT_FETCH_ATTEMPTS = 4;
-export const ARTIFACT_FETCH_BASE_DELAY_MS = 500;
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const ARTIFACT_FETCH_ATTEMPTS = DEFAULT_RETRY_ATTEMPTS;
+export const ARTIFACT_FETCH_BASE_DELAY_MS = DEFAULT_RETRY_BASE_DELAY_MS;
+export const ARTIFACT_FETCH_MAX_DELAY_MS = DEFAULT_RETRY_MAX_DELAY_MS;
 
 /**
  * Downloads a release asset, retrying transient failures.
@@ -233,42 +238,29 @@ export async function fetchBinary(
     fetchImpl = fetch,
     attempts = ARTIFACT_FETCH_ATTEMPTS,
     baseDelayMs = ARTIFACT_FETCH_BASE_DELAY_MS,
+    maxDelayMs = ARTIFACT_FETCH_MAX_DELAY_MS,
+    jitter = true,
+    random = Math.random,
+    sleep,
+    now,
+    onRetry,
   } = {}
 ) {
-  let lastError;
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    let response;
-    try {
-      response = await fetchImpl(url);
-    } catch (error) {
-      lastError = error;
-      if (attempt === attempts) break;
-      console.warn(
-        `[connector-installer] fetch ${url} failed (${error instanceof Error ? error.message : String(error)}); retrying (attempt ${attempt + 1}/${attempts})`
-      );
-      await sleep(baseDelayMs * 2 ** (attempt - 1));
-      continue;
-    }
-
-    if (response.ok) {
-      return Buffer.from(await response.arrayBuffer());
-    }
-
-    const failure = new Error(
-      `Failed to fetch ${url}: ${response.status} ${response.statusText}`
-    );
-    if (response.status < 500) throw failure;
-
-    lastError = failure;
-    if (attempt === attempts) break;
-    console.warn(
-      `[connector-installer] fetch ${url} returned ${response.status}; retrying (attempt ${attempt + 1}/${attempts})`
-    );
-    await sleep(baseDelayMs * 2 ** (attempt - 1));
+  const response = await fetchWithRetry(url, {
+    fetchImpl,
+    attempts,
+    baseDelayMs,
+    maxDelayMs,
+    jitter,
+    random,
+    ...(sleep ? { sleep } : {}),
+    ...(now ? { now } : {}),
+    ...(onRetry ? { onRetry } : {}),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
   }
-
-  throw lastError;
+  return Buffer.from(await response.arrayBuffer());
 }
 
 function normalizeSignature(signature) {
@@ -301,6 +293,8 @@ async function verifyRemoteSignature({
   allowUnsignedRemote = false,
   certificateIdentityURI = DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
   sigstoreVerifier = verifySigstoreBundle,
+  fetchImpl = fetch,
+  retryOptions = {},
 }) {
   const normalizedSignature = normalizeSignature(signature);
   if (!normalizedSignature) {
@@ -319,7 +313,10 @@ async function verifyRemoteSignature({
   }
 
   const bundleUrl = resolveBundleUrl(subjectUrl, normalizedSignature);
-  const bundleBuffer = await fetchBinary(bundleUrl);
+  const bundleBuffer = await fetchBinary(bundleUrl, {
+    fetchImpl,
+    ...retryOptions,
+  });
   const bundle = JSON.parse(bundleBuffer.toString("utf8"));
 
   try {
@@ -593,6 +590,8 @@ export async function loadConnectorIndex({
   allowUnsignedRemote = false,
   indexCertificateIdentityResolver = defaultIndexCertificateIdentityResolver,
   sigstoreVerifier = undefined,
+  fetchImpl = fetch,
+  retryOptions = {},
 }) {
   const resolvedLocal = fromLocal
     ? resolvePath(fromLocal)
@@ -619,12 +618,7 @@ export async function loadConnectorIndex({
     throw new Error("No connector index source configured");
   }
 
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
-  }
-
-  const indexBuffer = Buffer.from(await response.arrayBuffer());
+  const indexBuffer = await fetchBinary(url, { fetchImpl, ...retryOptions });
   const doc = JSON.parse(indexBuffer.toString("utf8"));
   const certificateIdentityURI = await resolveIndexCertificateIdentity({
     indexCertificateIdentityResolver,
@@ -637,6 +631,8 @@ export async function loadConnectorIndex({
     signature: doc.signature,
     allowUnsignedRemote,
     certificateIdentityURI,
+    fetchImpl,
+    retryOptions,
     ...(sigstoreVerifier ? { sigstoreVerifier } : {}),
   });
 
@@ -865,6 +861,7 @@ async function fetchOciArtifact(entry, options = {}) {
     scheme: options.ociScheme ?? "https",
     timeoutMs: options.ociTimeoutMs,
     fetchImpl: options.fetchImpl,
+    retryOptions: options.retryOptions,
   };
 
   // A pinned digest is used as-is, and an unpinned entry is REFUSED rather
@@ -1049,7 +1046,10 @@ async function fetchArtifactForEntry(indexSource, entry, options = {}) {
   if (!resolvedEntry.artifactUrl) {
     throw new Error(`Connector ${resolvedEntry.connectorId} is missing artifactUrl`);
   }
-  const artifactBuffer = await fetchBinary(resolvedEntry.artifactUrl);
+  const artifactBuffer = await fetchBinary(resolvedEntry.artifactUrl, {
+    fetchImpl: options.fetchImpl,
+    ...options.retryOptions,
+  });
   const certificateIdentityURI = await resolveArtifactCertificateIdentity({
     artifactCertificateIdentityResolver: options.artifactCertificateIdentityResolver,
     artifactUrl: resolvedEntry.artifactUrl,
@@ -1062,6 +1062,8 @@ async function fetchArtifactForEntry(indexSource, entry, options = {}) {
     signature: resolvedEntry.artifactSignature,
     certificateIdentityURI,
     sigstoreVerifier: options.sigstoreVerifier,
+    fetchImpl: options.fetchImpl,
+    retryOptions: options.retryOptions,
   });
   return artifactBuffer;
 }

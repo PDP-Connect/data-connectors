@@ -49,7 +49,13 @@ async function fixture(t, identity = PINNED_IDENTITY) {
   return {
     registry,
     signer,
-    options: { registry: registry.registry, allowedRegistries: new Set([registry.registry]), scheme: "http", sigstoreVerifier: createFixtureVerifier(signer) },
+    options: {
+      registry: registry.registry,
+      allowedRegistries: new Set([registry.registry]),
+      scheme: "http",
+      sigstoreVerifier: createFixtureVerifier(signer),
+      retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
+    },
   };
 }
 
