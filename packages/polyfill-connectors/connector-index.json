@@ -8425,6 +8425,9 @@
 					},
 					{
 						"name": "order_items",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"required": true,
 						"description": "Line items within H-E-B orders. Curbside/delivery orders only; in-store purchases are not available from heb.com. product_id is the H-E-B provider/catalog identifier observed on the order-detail purchase line, not a global product identity (GTIN/UPC/EAN); no such field is collected because no live-evidenced H-E-B response has been shown to carry one on the purchase line, and this connector does not crawl product pages to obtain one.",
 						"display": {
@@ -10624,6 +10627,9 @@
 				"streams": [
 					{
 						"name": "submitted",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Posts submitted by the user.",
 						"display": {
 							"label": "Your Reddit posts",
@@ -10717,6 +10723,9 @@
 					},
 					{
 						"name": "comments",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Comments by the user.",
 						"display": {
 							"label": "Your Reddit comments",
@@ -10797,6 +10806,9 @@
 					},
 					{
 						"name": "saved",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Items the user has saved.",
 						"display": {
 							"label": "Your saved Reddit items",
@@ -10874,6 +10886,9 @@
 					},
 					{
 						"name": "upvoted",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Posts and comments the user has upvoted.",
 						"display": {
 							"label": "Your upvoted Reddit items",
@@ -10959,6 +10974,9 @@
 					},
 					{
 						"name": "downvoted",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Posts and comments the user has downvoted.",
 						"display": {
 							"label": "Your downvoted Reddit items",
@@ -11044,6 +11062,9 @@
 					},
 					{
 						"name": "hidden",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"description": "Posts and comments the user has hidden.",
 						"display": {
 							"label": "Your hidden Reddit items",
@@ -12952,6 +12973,9 @@
 					},
 					{
 						"name": "dm_read_states",
+						"compaction_fingerprint": {
+							"exclude_keys": ["fetched_at"]
+						},
 						"required": false,
 						"description": "Per-DM last_read timestamps (conversations.info last_read / unread_count_display). Collected via direct conversations.info calls scoped to DM/MPIM channels, using the connector's existing session credential (slackdump's archive mode strips these fields, but the credential it already captures can call the method directly).",
 						"display": {
@@ -16930,6 +16954,9 @@
 					},
 					{
 						"name": "payees",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
 						"required": true,
 						"description": "Payees within each budget.",
 						"display": {
@@ -17471,6 +17498,9 @@
 					},
 					{
 						"name": "month_categories",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
 						"required": true,
 						"description": "Per-month snapshot of every category's budgeted/activity/balance and goal progress. This is the real budget history matrix — historical months are frozen in YNAB, the current month mutates. Amounts in YNAB milliunits (1000 milliunits = 1 currency unit).",
 						"display": {
