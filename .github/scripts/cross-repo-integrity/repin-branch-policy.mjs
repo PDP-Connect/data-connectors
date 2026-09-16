@@ -24,22 +24,42 @@ const commits = execFileSync(
 	.split("\n")
 	.filter(Boolean);
 
+const violations = new Set();
+
 for (const commit of commits) {
 	const [hash, authorEmail, committerEmail] = commit.split("\t");
-	const changedPaths = execFileSync(
+	const parents = execFileSync(
 		"git",
-		["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", hash],
+		["rev-list", "--parents", "-n", "1", hash],
 		{ encoding: "utf8" },
 	)
 		.trim()
-		.split("\n")
+		.split(" ")
 		.filter(Boolean);
 
-	if (
-		authorEmail !== botEmail ||
-		committerEmail !== botEmail ||
-		changedPaths.some((path) => path !== ".github/cross-repo-pins.json")
-	) {
-		console.log(hash);
+	if (authorEmail !== botEmail || committerEmail !== botEmail) {
+		violations.add(hash);
+	}
+
+	if (parents.length > 2) {
+		violations.add(
+			`${hash}: merge commit is not allowed on a linear pin-only branch (${parents.length - 1} parents)`,
+		);
 	}
 }
+
+const changedPaths = execFileSync(
+	"git",
+	["diff", "--name-only", baseRef, branchRef],
+	{ encoding: "utf8" },
+)
+	.trim()
+	.split("\n")
+	.filter(Boolean);
+
+const hasUnexpectedPaths = changedPaths.some((path) => path !== ".github/cross-repo-pins.json");
+if (hasUnexpectedPaths && violations.size === 0) {
+	violations.add(commits.at(-1)?.split("\t", 1)[0] ?? branchRef);
+}
+
+console.log([...violations].join("\n"));
