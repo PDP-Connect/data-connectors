@@ -406,6 +406,44 @@ test("signing is restricted to refs/heads/main, and the advertised identity says
   }
 });
 
+test("the catalog fan-in job also cannot sign a tag push", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1];
+  assert.ok(catalog, "expected the catalog fan-in job");
+
+  const stepCondition = catalog.match(/^        if: (.+)$/m)?.[1] ?? "";
+  assert.match(
+    stepCondition,
+    /github\.ref\s*==\s*'refs\/heads\/main'/,
+    "the catalog publish step must not run on a tag ref",
+  );
+
+  const gate = catalog.indexOf("node scripts/assert-publish-ref.mjs");
+  const sign = catalog.indexOf("cosign sign");
+  assert.ok(gate >= 0, "the catalog job must run the ref gate");
+  assert.ok(sign > gate, "the catalog signing command must follow its ref gate");
+});
+
+test("a main push uses the filtered matrix and a no-op skips publish jobs", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  assert.match(
+    workflow,
+    /^    branches:\n      - main$/m,
+    "the publish workflow must trigger on main branch pushes",
+  );
+  assert.match(workflow, /id: main-selection/);
+  assert.match(workflow, /run: node scripts\/select-publish-connectors\.mjs/);
+  assert.match(
+    workflow,
+    /^    if: \$\{\{ !inputs\.catalog-only && needs\.prepare\.outputs\.has-publishable-changes == 'true' \}\}$/m,
+    "an empty filtered matrix must not create skipped connector legs",
+  );
+  assert.match(
+    readFileSync(join(repoRoot, "scripts", "select-publish-connectors.mjs"), "utf8"),
+    /No connector version changed/,
+  );
+});
+
 test("the signed digest comes from the push, and the tag is never re-resolved", () => {
   // P1-3. The reproduced failure was `oras resolve` after the push: with the tag
   // repointed in between, the workflow pushed A, signed B, verified B and exited

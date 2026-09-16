@@ -34,9 +34,11 @@
  *
  * Environment:
  *   EVENT_NAME        "push" | "workflow_dispatch" (required)
- *   GIT_REF_NAME      tag name, for a push (e.g. "connector-oura-v0.1.0")
+ *   GIT_REF_NAME      tag name, or "main" for the automatic main-branch push path
+ *   GIT_REF_TYPE      "tag" or "branch", for a push
  *   INPUT_CONNECTOR   connector key, for a dispatch
  *   MATRIX_CONNECTOR  this matrix leg's connector (the allowlist entry)
+ *   MATRIX_VERSION    version selected by the main-branch change detector (optional)
  *   GITHUB_REPOSITORY_OWNER  owner segment of the GHCR repository
  *   GITHUB_OUTPUT     step output file (optional; stdout when absent)
  */
@@ -71,6 +73,12 @@ export function parseTrigger(env) {
 
   if (eventName === "push") {
     const refName = env.GIT_REF_NAME || "";
+    if (env.GIT_REF_TYPE === "branch") {
+      if (refName !== "main") {
+        throw new SelectionError(`branch '${refName}' is not the main publish branch`);
+      }
+      return { connector: env.MATRIX_CONNECTOR || "", version: null };
+    }
     const match = RELEASE_TAG.exec(refName);
     if (!match) {
       throw new SelectionError(
@@ -168,6 +176,11 @@ export function selectPublishTarget(env = process.env, { cwd = process.cwd() } =
   if (taggedVersion !== null && taggedVersion !== manifestVersion) {
     throw new SelectionError(
       `tag implies ${connector} version '${taggedVersion}' but the manifest declares '${manifestVersion}'`,
+    );
+  }
+  if (env.MATRIX_VERSION && env.MATRIX_VERSION !== manifestVersion) {
+    throw new SelectionError(
+      `selected matrix version '${env.MATRIX_VERSION}' disagrees with the manifest '${manifestVersion}'`,
     );
   }
 

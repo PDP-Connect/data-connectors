@@ -76,7 +76,11 @@ test("C-T4 the workflow matrix and the allowlist module agree", () => {
       "",
     );
     assert.match(connectorMatrix, /matrix: \$\{\{ fromJSON\(needs\.[\w-]+\.outputs\.matrix\) \}\}/);
-    assert.match(source, /matrix: \$\{\{ steps\.[\w-]+\.outputs\.matrix \}\}/);
+    if (source === publish) {
+      assert.match(source, /matrix: \$\{\{ steps\.main-selection\.outputs\.matrix \|\| steps\.allowlist\.outputs\.matrix \}\}/);
+    } else {
+      assert.match(source, /matrix: \$\{\{ steps\.allowlist\.outputs\.matrix \}\}/);
+    }
     assert.doesNotMatch(source, /matrix:\s*\n/, "no independent inline connector matrix");
   }
   assert.match(publish, /INPUT_CONNECTOR: \$\{\{ inputs\.connector \}\}/);
