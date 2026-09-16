@@ -64,6 +64,7 @@ import { createInactivityWatchdog as createRecordInactivityWatchdog } from "./sc
 import {
 	assertNoPostRunSourceMutation,
 	createInactivityWatchdog as createVerifyInactivityWatchdog,
+	parseArgs as parseVerifyArgs,
 } from "./scenario-verify.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3478,3 +3479,24 @@ for (const [label, createInactivityWatchdog] of [
 		assert.equal(fired, 0, "touch() after dispose() must not re-arm");
 	});
 }
+
+test("scenario-verify --json is opt-in and carries a path", () => {
+	// Absent by default: the claim record is a side channel for CI, never
+	// something a plain local verify run writes to disk unasked.
+	assert.equal(parseVerifyArgs(["reddit", "/tmp/s.json"]).jsonPath, undefined);
+	assert.equal(
+		parseVerifyArgs(["reddit", "/tmp/s.json", "--json", "/tmp/claim.json"])
+			.jsonPath,
+		"/tmp/claim.json",
+	);
+	// Positional args still bind in order with the flag interleaved.
+	const mixed = parseVerifyArgs([
+		"reddit",
+		"--json",
+		"/tmp/claim.json",
+		"/tmp/s.json",
+	]);
+	assert.equal(mixed.connector, "reddit");
+	assert.equal(mixed.scenarioPath, "/tmp/s.json");
+	assert.equal(mixed.jsonPath, "/tmp/claim.json");
+});

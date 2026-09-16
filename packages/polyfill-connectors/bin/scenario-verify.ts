@@ -77,7 +77,7 @@
  * scrub pass).
  */
 
-import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "@pdpp/collector-runtime";
@@ -93,7 +93,10 @@ import {
 	resolveBrowserEvidence,
 	writeBrowserHarReplayPreload,
 } from "../src/scenario/browser-har-replay.ts";
-import { evaluateClaimEligibility } from "../src/scenario/claims.ts";
+import {
+	type ClaimDecision,
+	evaluateClaimEligibility,
+} from "../src/scenario/claims.ts";
 import type {
 	ConnectorScenario,
 	ScenarioUserInteraction,
@@ -152,6 +155,11 @@ dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 export interface CliArgs {
 	connector: string;
 	entrypoint?: string;
+	/** `--json <path>`: also write the claim decision as a machine-readable
+	 *  record, for a CI gate or a PR comment to consume. The human stdout
+	 *  report is unchanged and still authoritative; this is the same decision
+	 *  serialized, never a second evaluation. */
+	jsonPath?: string;
 	/** FIX D — `--require-capture-source`: restores strict equality between
 	 *  `scenario.connector.captured_with` and the CURRENT subject's digests,
 	 *  for exact-artifact reproduction. Off by default: a differing source is
@@ -207,6 +215,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 	let scenarioPath: string | undefined;
 	let entrypoint: string | undefined;
 	let requireCaptureSource = false;
+	let jsonPath: string | undefined;
 	let timeoutSeconds = DEFAULT_INACTIVITY_WINDOW_SECONDS;
 	let i = 0;
 	while (i < argv.length) {
@@ -223,6 +232,15 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		}
 		if (arg === "--require-capture-source") {
 			requireCaptureSource = true;
+			continue;
+		}
+		if (arg === "--json") {
+			const value = argv[i];
+			i += 1;
+			if (!value) {
+				usageAndExit(2);
+			}
+			jsonPath = value;
 			continue;
 		}
 		if (arg === "--timeout") {
@@ -248,6 +266,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		requireCaptureSource,
 		timeoutSeconds,
 		...(entrypoint ? { entrypoint } : {}),
+		...(jsonPath ? { jsonPath } : {}),
 	};
 }
 
@@ -1463,6 +1482,69 @@ function declaredStreamNamesFromManifest(
  * a stream in run 2 but not run 0 still exercised it. Skipped entirely in
  * `--entrypoint` mode (no manifest to compare against).
  */
+/**
+ * `--json <path>`: the claim decision this run just printed, serialized.
+ *
+ * WHY. The verification story ends at a human reading stdout. A maintainer
+ * reviewing a connector PR — the WHOOP case, where the reviewer had no account
+ * on the provider and the only evidence was the author's prose — still has
+ * nothing a gate can read. This is the same `ClaimDecision` the report above
+ * printed, written once so CI can assert on it.
+ *
+ * NOT A SECOND EVALUATION. Every field is copied from values already computed
+ * for the human report; this function decides nothing. If it ever needs a
+ * branch of its own, that branch belongs in `evaluateClaimEligibility`
+ * instead, or the two outputs will drift and the machine-readable one will be
+ * the one nobody notices is wrong.
+ *
+ * Best-effort by design: a failed write warns and does not change the exit
+ * code, because the verification verdict is already correct on stdout and
+ * failing a run over a side-channel artifact would be the tail wagging the dog.
+ */
+function writeClaimRecord(
+	args: CliArgs,
+	scenario: ConnectorScenario,
+	decision: ClaimDecision,
+	coverage: readonly string[],
+	capturedAt: string,
+): void {
+	if (!args.jsonPath) {
+		return;
+	}
+	const record = {
+		schema: "pdpp.connector-claim/1",
+		connector: scenario.connector.id,
+		captured_at: capturedAt,
+		verified_at: new Date().toISOString(),
+		claim: decision.claim,
+		// `ClaimDecision` carries limitations only on the withheld branch — the
+		// type makes "recorded_replay with caveats" unrepresentable, and this
+		// serialization keeps that property rather than casting around it.
+		limitations:
+			decision.claim === "diagnostic_replay" ? [...decision.limitations] : [],
+		coverage: [...coverage],
+		runs: scenario.runs.length,
+		drivers: [
+			...new Set(
+				scenario.runs.map(
+					(run) => run.environment?.network?.driver ?? "(none declared)",
+				),
+			),
+		],
+		scenario_path: args.scenarioPath,
+		scenario_status: "candidate oracle",
+	};
+	try {
+		writeFileSync(args.jsonPath, `${JSON.stringify(record, null, 2)}\n`, {
+			mode: 0o600,
+		});
+	} catch (err) {
+		process.stderr.write(
+			`[scenario-verify] could not write --json ${args.jsonPath}: ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+	}
+}
+
 function printStreamCoverageLine(
 	args: CliArgs,
 	scenario: ConnectorScenario,
@@ -2197,6 +2279,7 @@ function printCoverageReport(
 	);
 	process.stdout.write(`${isolationLine}\n`);
 	printStreamCoverageLine(args, scenario);
+	writeClaimRecord(args, scenario, decision, coverage, capturedAt);
 	if (scenario.runs.length >= 2 && !incrementalProven) {
 		// Three distinct, non-overlapping reasons
 		// state_seeded_second_run_with_changed_requests can go unclaimed even
