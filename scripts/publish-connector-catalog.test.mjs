@@ -378,11 +378,29 @@ for (const failure of [
   });
 }
 
-test("the catalog publish remains gated to a selected main-branch non-dry run", () => {
+test("the catalog publish runs once after successful publish legs or a catalog-only dispatch", () => {
   const { condition } = extractCatalogPublishStep();
-  assert.match(condition, /steps\.target\.outputs\.selected\s*==\s*'true'/);
-  assert.match(condition, /github\.ref\s*==\s*'refs\/heads\/main'/);
   assert.match(condition, /!inputs\.dry-run/);
+
+  const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1];
+  assert.ok(catalog, "expected the catalog fan-in job");
+  assert.match(catalog, /^    needs: \[prepare, publish\]$/m);
+  assert.match(catalog, /^    if: .*always\(\)/m);
+  assert.match(catalog, /needs\.prepare\.result\s*==\s*'success'/);
+  assert.match(catalog, /github\.ref\s*==\s*'refs\/heads\/main'/);
+  assert.match(catalog, /inputs\.catalog-only/);
+  assert.match(catalog, /needs\.publish\.result\s*==\s*'success'/);
+  assert.match(catalog, /needs\.prepare\.outputs\.has-publishable-changes\s*==\s*'true'/);
+  assert.match(
+    catalog,
+    /github\.ref\s*==\s*'refs\/heads\/main'.*needs\.publish\.result/s,
+    "a release-tag push must skip the catalog fan-in job",
+  );
+  assert.equal(
+    workflow.match(/^      - name: Publish and verify the connector catalog$/gm)?.length,
+    1,
+    "the catalog path must exist once, outside the connector matrix",
+  );
 });
 
 test("all publishes remain serialized by one workflow-wide concurrency group", () => {
@@ -427,23 +445,31 @@ test("catalog-only dispatch skips connector selection and publication but runs c
     assert.equal(evaluateCondition(stepCondition(name), catalogOnly), true, name);
   }
   const condition = stepCondition("Publish and verify the connector catalog");
-  for (const options of [
-    { ...catalogOnly, dryRun: true },
-    { ...catalogOnly, ref: "refs/heads/feature" },
-    { ...catalogOnly, ref: "refs/tags/connector-ynab-v0.3.0" },
-    { catalogOnly: false, selected: false },
-  ]) {
-    assert.equal(evaluateCondition(condition, options), false);
-  }
-  assert.equal(evaluateCondition(condition, { catalogOnly: false, selected: true }), true);
+  assert.equal(evaluateCondition(condition, { ...catalogOnly, dryRun: true }), false);
+  assert.equal(evaluateCondition(condition, { ...catalogOnly, dryRun: false }), true);
+  assert.equal(
+    evaluateCondition(condition, { ...catalogOnly, dryRun: false, ref: "refs/heads/feature" }),
+    false,
+  );
+  assert.equal(
+    evaluateCondition(condition, { ...catalogOnly, dryRun: false, ref: "refs/tags/connector-ynab-v0.3.0" }),
+    false,
+  );
+  const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1] ?? "";
+  assert.match(catalog, /inputs\.catalog-only/);
+  assert.match(catalog, /github\.ref\s*==\s*'refs\/heads\/main'/);
 });
 
-test("catalog-only dispatch selects exactly one matrix leg and normal dispatch preserves the allowlist", () => {
-  const expression = workflow.match(/^      matrix: \$\{\{ (.+fromJSON.+) \}\}$/m)?.[1];
+test("the publish matrix consumes the prepared selection and catalog has no matrix", () => {
+  const expression = workflow.match(/^      matrix: \$\{\{ (fromJSON\(.+\)) \}\}$/m)?.[1];
   assert.ok(expression);
   const matrix = { include: [{ connector: "ynab" }, { connector: "github" }] };
   const evaluate = Function("inputs", "needs", "fromJSON", `return (${expression.replaceAll("inputs.catalog-only", "inputs['catalog-only']")});`);
   const needs = { prepare: { outputs: { matrix: JSON.stringify(matrix) } } };
-  assert.deepEqual(evaluate({ "catalog-only": true }, needs, JSON.parse), { include: [{ connector: "catalog" }] });
   assert.deepEqual(evaluate({ "catalog-only": false }, needs, JSON.parse), matrix);
+  assert.doesNotMatch(
+    workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1] ?? "",
+    /^      matrix:/m,
+    "the catalog fan-in must run once, not as a connector matrix",
+  );
 });

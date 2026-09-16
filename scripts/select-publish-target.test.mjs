@@ -170,6 +170,26 @@ test("a normal dispatch selects the connector and its manifest version", () => {
   }
 });
 
+test("a main-branch push selects the connector already filtered into its matrix leg", () => {
+  const tree = makeTree();
+  try {
+    const result = run(tree, {
+      ...BASE,
+      EVENT_NAME: "push",
+      GIT_REF_NAME: "main",
+      GIT_REF_TYPE: "branch",
+      MATRIX_VERSION: "0.1.0",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.outputs.selected, "true");
+    assert.equal(result.outputs.connector, "oura");
+    assert.equal(result.outputs.version, "0.1.0");
+  } finally {
+    rmSync(tree.dir, { recursive: true, force: true });
+  }
+});
+
 test("a matching tag selects, and a version-mismatched tag refuses", () => {
   const tree = makeTree();
   try {
