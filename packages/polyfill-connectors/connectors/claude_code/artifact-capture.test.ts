@@ -28,7 +28,7 @@ import {
 	LocalDeviceOutbox,
 } from "@pdpp/collector-runtime";
 
-import type { ArtifactCaptureContext } from "./artifact-capture.ts";
+import type { ArtifactCaptureContext } from "../../src/artifact-capture.ts";
 import { emitToolResultFile } from "./index.ts";
 import { TOOL_RESULT_PREVIEW_CHARS } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";

@@ -1,0 +1,114 @@
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Exercise the OCI build-and-verify path on every pull request, WITHOUT any
+# ability to publish.
+#
+# The reviewer's finding on #97: five PR-triggered workflows were green at the
+# reviewed head, and not one of them ran the builder or the verifier. The
+# publish workflow is the only thing that executes this path, and it does not
+# run on pull requests — so the artifact contract had no PR-time coverage at
+# all, and both P1-4 and P1-5 reached review behind green checks.
+#
+# This job is deliberately powerless. `permissions: contents: read`, no
+# `packages: write`, no `id-token: write`, no registry login, no cosign. It
+# builds real bytes, verifies them against an independently constructed host,
+# and runs the negative controls. It cannot sign or push anything.
+
+name: Connector artifact gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connector-artifact-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Load connector publish allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.allowlist.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Split the publishable connectors across six runners
+        id: allowlist
+        run: node scripts/connector-publish-allowlist.mjs --shard-matrix 6
+
+  artifact-builds:
+    name: Build and verify connector shard ${{ matrix.shard }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: packages/polyfill-connectors/package.json
+
+      # Each shard installs once, then builds and verifies seven connectors.
+      # Browser downloads are not part of the artifact and would add cost only.
+      - name: Install connector package
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors
+
+      - name: Build and verify every connector in this shard
+        env:
+          CONNECTOR_TEST_SHARD: ${{ matrix.shard }}
+        run: node --test scripts/connector-publish-build.test.mjs
+
+  artifact-contract:
+    # Preserve the existing required check as the aggregate for all new shards.
+    needs: [prepare, artifact-builds]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require every artifact shard to pass
+        env:
+          BUILD_RESULT: ${{ needs.artifact-builds.result }}
+        run: test "$BUILD_RESULT" = success
+
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: packages/polyfill-connectors/package.json
+
+      # The builder needs esbuild and the connector sources; the VERIFIER
+      # deliberately does not use this tree, which is the point of P1-4.
+      - name: Install connector package
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors
+
+      - name: Publish allowlist and workflow contract tests
+        run: node --test scripts/connector-publish-allowlist.test.mjs scripts/select-publish-target.test.mjs
+
+      - name: Artifact contract tests, including the negative controls
+        run: node --test scripts/connector-oci-artifact.test.mjs
+
+      - name: Publish-ref gate tests
+        run: node --test scripts/publish-ref-gate.test.mjs
+
+      - name: Publish tag-guard behavioral tests
+        run: node --test scripts/publish-tag-guard.test.mjs
+
+      - name: Manifest lookup classifier tests
+        run: node --test scripts/lookup-manifest.test.mjs

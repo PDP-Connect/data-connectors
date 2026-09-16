@@ -4,12 +4,22 @@
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/connector-installer-core"
+  ],
   "files": [
     "packages/connector-installer-core/index.mjs",
+    "packages/connector-installer-core/oci-registry.mjs",
+    "packages/connector-installer-core/oci-verify.mjs",
+    "packages/connector-installer-core/tar-stream.mjs",
     "packages/connector-installer-cli/index.mjs",
     "schemas/connector-index.schema.json",
     "schemas/scope-catalog.schema.json",
-    "scope-catalog.json"
+    "scope-catalog.json",
+    "packages/connector-installer-core/oci-catalog.mjs",
+    "packages/connector-installer-core/catalog-schema.mjs",
+    "packages/connector-installer-core/catalog-schema-data.mjs",
+    "schemas/connector-catalog.schema.json"
   ],
   "exports": {
     "./installer-core": "./packages/connector-installer-core/index.mjs"
@@ -18,31 +28,31 @@
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
   },
   "dependencies": {
-    "sigstore": "^5.0.0"
+    "sigstore": "^5.0.0",
+    "@sigstore/bundle": "^5.0.0",
+    "ajv": "^8.20.0",
+    "tar": "^7.5.22"
   },
   "scripts": {
     "connector-index:generate": "node ./scripts/generate-connector-index.mjs",
     "connector-index:check": "node ./scripts/generate-connector-index.mjs --check",
-    "connector-index:test": "node --test ./schemas/manifest.schema.test.mjs ./scripts/brand-icon-fleet.test.mjs ./scripts/connector-artifact-contract.test.mjs ./scripts/generate-connector-index.test.mjs",
-    "github-pdpp:build": "node ./scripts/build-github-pdpp-artifact.mjs",
+    "connector-index:test": "node --test ./schemas/manifest.schema.test.mjs ./scripts/brand-icon-fleet.test.mjs ./scripts/connector-artifact-contract.test.mjs",
     "pdpp:authoring:check": "node ./scripts/check-pdpp-authoring-docs.mjs && node --test ./scripts/create-connector.test.mjs",
-    "github-pdpp:test": "node --test ./test/github-pdpp/github-pdpp.test.mjs",
-    "chatgpt-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact chatgpt-pdpp",
-    "chatgpt-pdpp:test": "node --test ./test/chatgpt-pdpp/chatgpt-pdpp.test.mjs",
-    "whoop-pdpp:build": "node ./scripts/build-pdpp-artifact.mjs --artifact whoop-pdpp",
-    "whoop-pdpp:test": "node --test ./test/whoop-pdpp/whoop-pdpp.test.mjs",
-    "installer:test": "node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs",
+    "installer:test": "npm run catalog-schema:check && node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs ./packages/connector-installer-core/oci-catalog.test.mjs ./scripts/generate-connector-catalog.test.mjs ./scripts/publish-connector-catalog.test.mjs ./scripts/publish-ref-gate.test.mjs ./scripts/connector-publish-allowlist.test.mjs",
     "fixture-index:generate": "node ./scripts/generate-fixture-index.mjs",
     "fixture-index:check": "node ./scripts/generate-fixture-index.mjs --check",
     "fixtures:validate": "node ./scripts/generate-fixture-index.mjs --validate-only",
     "scope-catalog:generate": "node ./scripts/generate-scope-catalog.mjs",
     "scope-catalog:check": "node ./scripts/generate-scope-catalog.mjs --check",
     "scope-catalog:test": "node --test ./scripts/generate-scope-catalog.test.mjs",
-    "release:sign": "node ./scripts/sign-release-assets.mjs"
+    "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs ./.github/scripts/cross-repo-integrity/pin-freshness.test.mjs ./.github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
+    "release:sign": "node ./scripts/sign-release-assets.mjs",
+    "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
+    "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check"
   },
   "devDependencies": {
-    "ajv": "^8.20.0",
     "esbuild": "0.28.2",
-    "zod": "4.5.4"
+    "yaml": "2.8.1",
+    "zod": "4.6.5"
   }
 }

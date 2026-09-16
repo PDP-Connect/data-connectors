@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import {
 	buildCollectorStartMessage,
@@ -20,8 +20,17 @@ import {
 	scopedDefaultQueuePath,
 } from "./collector-runner.ts";
 
+const tempDirs: string[] = [];
+
+after(async () => {
+	await Promise.all(
+		tempDirs.map((dir) => rm(dir, { recursive: true, force: true })),
+	);
+});
+
 async function tempOutboxPath(): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-collector-runner-outbox-"));
+	tempDirs.push(dir);
 	return join(dir, "outbox.sqlite");
 }
 

@@ -9,8 +9,6 @@ The existing Playwright connectors use browser automation for local desktop coll
 
 PDPP Collection Profiles are packaged and installed as a different artifact kind. They support only the bindings declared in their own manifest. Do not use the Playwright scaffold or create scripts to start a PDPP profile.
 
-GitHub and ChatGPT are the current PDPP artifact examples. The checked-in `connector-index.json` intentionally marks both artifacts with `releaseId: "unpublished"` until CI regenerates the source-tree index. The immutable [`connectors-48440fead534` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-48440fead534) contains the signed artifacts. The [`connectors-latest` release](https://github.com/PDP-Connect/data-connectors/releases/tag/connectors-latest) also provides them. [DataConnect v0.7.54](https://github.com/PDP-Connect/data-connect/releases/tag/v0.7.54) includes both PDPP profiles.
-
 ## Legacy Playwright connector status
 
 Each connector has a status indicating its maturity level:
@@ -66,8 +64,8 @@ node run-connector.cjs ./connectors/github/github-playwright.js --inputs '{"user
 
 | Folder                   | What's inside                                                                                  | Audience                 |
 | ------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------ |
-| **`connectors/`**        | Legacy Playwright connectors plus pinned GitHub and ChatGPT PDPP artifacts                       | Everyone                 |
-| **`scripts/`**           | PDPP packaging plus legacy Playwright test and exception tooling                               | Human developers         |
+| **`connectors/`**        | Legacy Playwright connectors                                                                   | Everyone                 |
+| **`scripts/`**           | Connector packaging plus legacy Playwright test and exception tooling                          | Human developers         |
 | **`skills/`**            | AI agent skill for running and maintaining legacy Playwright connectors (`pdp-connect/`)       | AI agents (Claude, etc.) |
 | **`schemas/`**           | Shared meta-schemas such as `manifest.schema.json`                                             | Validation               |
 | **`types/`**             | TypeScript type definitions (`connector.d.ts`)                                                 | TypeScript consumers     |
@@ -140,19 +138,17 @@ any one consumer.
   release indexes.
 - `artifacts/<connector>/<connector>-<version>.tgz` is the immutable bundle
   format consumed by installers.
-- `github-pdpp` is an opt-in, unpublished PDPP Collection Profile artifact.
-  Its GitHub collector source lives under `connectors/github-pdpp/`. Generic
-  PDPP runtime source does not. Explicit regeneration resolves that runtime
-  from the exact pinned PDPP worktree and records its full hash inventory in
-  provenance. The bundled entrypoint and provenance are generated. The raw
-  `dist/` build output is ignored, while its exact bytes are committed inside
-  the artifact tarball and recorded by the index and provenance digests.
-  Follow the [GitHub PDPP maintenance guide](connectors/github-pdpp/AUTHORING.md).
-  The checked-in index marks this artifact as unpublished.
 - `artifacts/**/*.tgz.sigstore.json` is the detached Sigstore bundle for each
   immutable artifact.
-- `@opendatalabs/data-connectors-tools/installer-core` exposes the supported
-  install/update contract used by consumer repos.
+- `@pdpp/connector-manager` (`packages/connector-installer-core/`) exposes the
+  supported install/update contract used by consumer repos. It is private and is
+  not published to npm: consumers take it by git pin, and the name is only a
+  workspace specifier. It verifies Sigstore bundles and digests and carries no
+  connector content. It installs the `artifacts/**` tarballs described above; it
+  does not consume the OCI registry artifacts the publish workflow builds.
+- `@opendatalabs/data-connectors-tools/installer-core` remains as an alias of
+  that same module for existing consumers. Prefer the package name in new code;
+  the alias is retired once consumers have switched.
 - `connector-installer` is the supported CLI wrapper for lock generation,
   installation, verification, and update checks.
 

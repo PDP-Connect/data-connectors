@@ -120,6 +120,19 @@ export interface ConnectorHttpResult<T> extends HttpRetryResponse {
 	value: T;
 }
 
+/** Retry event exposed to a request caller that needs operator progress. */
+export interface ConnectorHttpRetryEvent {
+	/** The delay that `retryHttp` will wait before the next attempt. */
+	delayMs: number;
+	/** Normalized HTTP status when the retry followed an HTTP response. */
+	status?: number;
+}
+
+export interface ConnectorHttpRequestOptions {
+	/** Called for each bounded retry after its delay and status are determined. */
+	onRetry?: (event: ConnectorHttpRetryEvent) => void | Promise<void>;
+}
+
 export interface ConnectorHttpGovernor {
 	/**
 	 * The single pre-flight send governor. Exposed so a stacking-regression test
@@ -141,6 +154,7 @@ export interface ConnectorHttpGovernor {
 			headers?: Record<string, string | undefined>;
 			value: T;
 		},
+		options?: ConnectorHttpRequestOptions,
 	) => Promise<ConnectorHttpResult<T>>;
 	/**
 	 * Operator-legible snapshot of the live rate controller, or `null` when pacing
@@ -256,6 +270,7 @@ export function createConnectorHttpGovernor(
 			headers?: Record<string, string | undefined>;
 			value: T;
 		},
+		requestOptions: ConnectorHttpRequestOptions = {},
 	): Promise<ConnectorHttpResult<T>> {
 		try {
 			const response = await retryHttp<ConnectorHttpResult<T>>({
@@ -286,7 +301,7 @@ export function createConnectorHttpGovernor(
 					}
 					return result;
 				},
-				onRetry: () => {
+				onRetry: async (retry) => {
 					// Feed the pacing AIMD with the throttle signal (multiplicative
 					// fill-rate decrease) ONLY. Crucially we do NOT forward Retry-After
 					// into the pacing bucket: `retryHttp` already sleeps the Retry-After
@@ -295,9 +310,27 @@ export function createConnectorHttpGovernor(
 					// `retryAfterAlreadySlept` / `absorbedByRequestWait` guard. The
 					// backoff (post-failure) and pacing (pre-flight) stay one wait each.
 					pacing.recordThrottle({});
+					await requestOptions.onRetry?.({
+						delayMs: retry.delayMs,
+						...(retry.response === undefined
+							? {}
+							: { status: retry.response.status }),
+					});
 				},
 			});
 			pacing.recordSuccess();
+			// `HttpRetryBudget` intentionally exposes only consume() to the protocol
+			// retry package. Local finite budgets may also expose recordSuccess() so a
+			// successful request can replenish their run-wide retry allowance without
+			// making that local policy part of the protocol package's contract.
+			const retryBudget = options.retryBudget;
+			if (
+				retryBudget &&
+				"recordSuccess" in retryBudget &&
+				typeof retryBudget.recordSuccess === "function"
+			) {
+				retryBudget.recordSuccess();
+			}
 			return response;
 		} catch (error) {
 			if (isRateLimitTerminal(error)) {
