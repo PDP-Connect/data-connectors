@@ -51,12 +51,14 @@
     "scope-catalog:generate": "node ./scripts/generate-scope-catalog.mjs",
     "scope-catalog:check": "node ./scripts/generate-scope-catalog.mjs --check",
     "scope-catalog:test": "node --test ./scripts/generate-scope-catalog.test.mjs",
+    "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs ./.github/scripts/cross-repo-integrity/pin-freshness.test.mjs ./.github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
     "release:sign": "node ./scripts/sign-release-assets.mjs",
     "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
     "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
+    "yaml": "2.8.1",
     "zod": "4.6.5"
   }
 }
