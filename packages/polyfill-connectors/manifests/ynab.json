@@ -558,6 +558,9 @@
 		},
 		{
 			"name": "payees",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
 			"required": true,
 			"description": "Payees within each budget.",
 			"display": {
@@ -1099,6 +1102,9 @@
 		},
 		{
 			"name": "month_categories",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
 			"required": true,
 			"description": "Per-month snapshot of every category's budgeted/activity/balance and goal progress. This is the real budget history matrix — historical months are frozen in YNAB, the current month mutates. Amounts in YNAB milliunits (1000 milliunits = 1 currency unit).",
 			"display": {

@@ -1386,6 +1386,9 @@
 		},
 		{
 			"name": "dm_read_states",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"required": false,
 			"description": "Per-DM last_read timestamps (conversations.info last_read / unread_count_display). Collected via direct conversations.info calls scoped to DM/MPIM channels, using the connector's existing session credential (slackdump's archive mode strips these fields, but the credential it already captures can call the method directly).",
 			"display": {
