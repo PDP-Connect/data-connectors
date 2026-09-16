@@ -133,14 +133,23 @@ exec ${JSON.stringify(realGit)} "$@"
 	);
 }
 
-function writeGhStub(binDir, { oldBranch = "", logPath = "/dev/null" } = {}) {
+function writeGhStub(
+	binDir,
+	{
+		oldBranch = "",
+		oldHeadSha = "c".repeat(40),
+		headRepository = "PDP-Connect/data-connectors",
+		authorLogin = botName,
+		logPath = "/dev/null",
+	} = {},
+) {
 	const stub = join(binDir, "gh");
 	writeExecutable(
 		stub,
 		`#!/bin/sh
 printf '%s\\n' "$*" >> "$GH_LOG"
 if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$5" = "--base" ]; then
-  printf '123\\t${oldBranch}\\n'
+  printf '123\\t${oldBranch}\\t${oldHeadSha}\\t${headRepository}\\t${authorLogin}\\n'
 fi
 exit 0
 `,
@@ -163,6 +172,7 @@ function runRepinWorkflow(repo, {
 			FAIL_REF: failRef,
 			GH_LOG: ghLog,
 			GH_TOKEN: "fixture-token",
+			GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
 			REPO_ID: "data-connect",
 			CURRENT_HEAD: currentHead,
 			TRACK_REF: "main",
@@ -170,7 +180,7 @@ function runRepinWorkflow(repo, {
 	});
 }
 
-test("a pristine bot pin-only branch is eligible and can be refreshed", () => {
+test("a linear bot pin-only branch is accepted and can be refreshed", () => {
 	const fixture = makeRemoteFixture();
 	try {
 		writePin(fixture.runner, "1".repeat(40));
@@ -294,6 +304,50 @@ test("a bot commit that changes a non-pin path is refused", () => {
 	}
 });
 
+test("a bot-authored merge commit with an extra path is refused", () => {
+	const mergeBranch = "chore/repin-data-connect-merge00";
+	const fixture = makeRemoteFixture({ branch: mergeBranch });
+	try {
+		writePin(fixture.runner, "9".repeat(40));
+		git(fixture.runner, "add", pinPath);
+		commit(fixture.runner, "bot pin refresh", {
+			authorName: botName,
+			authorEmail: botEmail,
+		});
+
+		const sideBranch = "merge-side";
+		git(fixture.runner, "switch", "-c", sideBranch, "origin/main");
+		writeFileSync(join(fixture.runner, "merge-only.txt"), "not pin-only\n");
+		git(fixture.runner, "add", "merge-only.txt");
+		commit(fixture.runner, "bot merge side change", {
+			authorName: botName,
+			authorEmail: botEmail,
+		});
+
+		git(fixture.runner, "switch", mergeBranch);
+		execFileSync("git", ["merge", "--no-ff", "--no-edit", sideBranch], {
+			cwd: fixture.runner,
+			encoding: "utf8",
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: botName,
+				GIT_AUTHOR_EMAIL: botEmail,
+				GIT_COMMITTER_NAME: botName,
+				GIT_COMMITTER_EMAIL: botEmail,
+			},
+		});
+		const mergeCommit = git(fixture.runner, "rev-parse", "HEAD");
+		pushBranch(fixture.runner, mergeBranch);
+
+		assert.match(
+			policyOutput(fixture.runner, mergeBranch),
+			new RegExp(`${mergeCommit}: merge commit is not allowed on a linear pin-only branch`),
+		);
+	} finally {
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
 test("an ls-remote failure leaves the candidate branch untouched", () => {
 	const currentHead = "a".repeat(40);
 	const fixture = makeRemoteFixture({ branch: `chore/repin-data-connect-${currentHead.slice(0, 7)}` });
@@ -356,7 +410,7 @@ test("an older-candidate ls-remote failure leaves its PR open", () => {
 		mkdirSync(binDir);
 		writeGitWrapper(binDir);
 		const ghLog = join(fixture.root, "gh.log");
-		writeGhStub(binDir, { oldBranch, logPath: ghLog });
+		writeGhStub(binDir, { oldBranch, oldHeadSha: oldBranchHead, logPath: ghLog });
 
 		assert.throws(
 			() => runRepinWorkflow(fixture.runner, {
@@ -369,6 +423,85 @@ test("an older-candidate ls-remote failure leaves its PR open", () => {
 		);
 		assert.equal(git(fixture.remote, "rev-parse", `refs/heads/${oldBranch}`), oldBranchHead);
 		assert.doesNotMatch(readFileSync(ghLog, "utf8"), /pr close/);
+	} finally {
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("an owned pin-only older candidate at its advertised head is closed", () => {
+	const currentHead = "a".repeat(40);
+	const currentBranch = `chore/repin-data-connect-${currentHead.slice(0, 7)}`;
+	const oldBranch = "chore/repin-data-connect-bbbbbbb";
+	const fixture = makeRemoteFixture({ branch: currentBranch });
+	try {
+		copyWorkflowScripts(fixture.runner);
+		writePin(fixture.runner, "7".repeat(40));
+		git(fixture.runner, "add", pinPath);
+		commit(fixture.runner, "bot current pin refresh", {
+			authorName: botName,
+			authorEmail: botEmail,
+		});
+		pushBranch(fixture.runner, currentBranch);
+
+		git(fixture.runner, "switch", "-c", oldBranch, "origin/main");
+		writePin(fixture.runner, "8".repeat(40));
+		git(fixture.runner, "add", pinPath);
+		commit(fixture.runner, "bot older pin refresh", {
+			authorName: botName,
+			authorEmail: botEmail,
+		});
+		pushBranch(fixture.runner, oldBranch);
+		const oldBranchHead = git(fixture.runner, "rev-parse", `refs/remotes/origin/${oldBranch}`);
+
+		git(fixture.runner, "switch", currentBranch);
+		const binDir = join(fixture.root, "bin");
+		mkdirSync(binDir);
+		const ghLog = join(fixture.root, "gh.log");
+		writeGhStub(binDir, { oldBranch, oldHeadSha: oldBranchHead, logPath: ghLog });
+
+		runRepinWorkflow(fixture.runner, { currentHead, binDir, ghLog });
+		assert.match(readFileSync(ghLog, "utf8"), /pr close 123 --comment Superseded by the newer automated repin PR/);
+	} finally {
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("an open fork repin PR without an origin branch is skipped", () => {
+	const currentHead = "a".repeat(40);
+	const currentBranch = `chore/repin-data-connect-${currentHead.slice(0, 7)}`;
+	const forkBranch = "chore/repin-data-connect-bbbbbbb";
+	const fixture = makeRemoteFixture({ branch: currentBranch });
+	try {
+		copyWorkflowScripts(fixture.runner);
+		writePin(fixture.runner, "a".repeat(40));
+		git(fixture.runner, "add", pinPath);
+		commit(fixture.runner, "bot current pin refresh", {
+			authorName: botName,
+			authorEmail: botEmail,
+		});
+		pushBranch(fixture.runner, currentBranch);
+
+		const binDir = join(fixture.root, "bin");
+		mkdirSync(binDir);
+		const ghLog = join(fixture.root, "gh.log");
+		writeGhStub(binDir, {
+			oldBranch: forkBranch,
+			oldHeadSha: "b".repeat(40),
+			headRepository: "fork-owner/data-connectors",
+			logPath: ghLog,
+		});
+
+		const output = runRepinWorkflow(fixture.runner, {
+			currentHead,
+			binDir,
+			ghLog,
+		});
+		assert.match(
+			output,
+			/::notice::skipping older repin PR #123 because its head repository fork-owner\/data-connectors is not PDP-Connect\/data-connectors/,
+		);
+		assert.doesNotMatch(readFileSync(ghLog, "utf8"), /pr close/);
+		assert.throws(() => git(fixture.remote, "rev-parse", `refs/heads/${forkBranch}`));
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
 	}

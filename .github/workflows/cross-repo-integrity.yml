@@ -508,6 +508,8 @@ jobs:
           BRANCH="chore/repin-${REPO_ID}-${SHORT_SHA}"
           TITLE="chore: repin ${REPO_ID} to ${SHORT_SHA}"
           BOT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+          BOT_LOGIN="${BOT_LOGIN:-github-actions[bot]}"
+          REPOSITORY="${GITHUB_REPOSITORY:-PDP-Connect/data-connectors}"
 
           remote_ref_exists() {
             local lookup_status
@@ -590,9 +592,9 @@ jobs:
           fi
 
           # The producer SHA is part of the branch name, so a new producer head creates a
-          # new candidate branch. Close older bot-owned candidates explicitly instead of
-          # leaving multiple open repin PRs for the same producer.
-          while IFS=$'\t' read -r OLD_PR_NUMBER OLD_BRANCH; do
+          # new candidate branch. Close older proven bot-owned candidates explicitly instead
+          # of leaving multiple open repin PRs for the same producer.
+          while IFS=$'\t' read -r OLD_PR_NUMBER OLD_BRANCH OLD_HEAD_SHA OLD_HEAD_REPOSITORY OLD_AUTHOR_LOGIN; do
             [ -n "$OLD_PR_NUMBER" ] || continue
             case "$OLD_BRANCH" in
               "chore/repin-${REPO_ID}-"*) ;;
@@ -600,14 +602,32 @@ jobs:
             esac
             [ "$OLD_BRANCH" != "$BRANCH" ] || continue
 
+            if [ "$OLD_HEAD_REPOSITORY" != "$REPOSITORY" ]; then
+              echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its head repository $OLD_HEAD_REPOSITORY is not $REPOSITORY"
+              continue
+            fi
+            if [ "$OLD_AUTHOR_LOGIN" != "$BOT_LOGIN" ]; then
+              echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its author $OLD_AUTHOR_LOGIN is not the configured automation identity $BOT_LOGIN"
+              continue
+            fi
+            if ! [[ "$OLD_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its head SHA is not a full lowercase Git object ID: $OLD_HEAD_SHA"
+              continue
+            fi
+
             if remote_ref_exists "$OLD_BRANCH"; then
               git fetch origin "refs/heads/$OLD_BRANCH:refs/remotes/origin/$OLD_BRANCH"
+              OLD_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$OLD_BRANCH")"
+              if [ "$OLD_BRANCH_SHA" != "$OLD_HEAD_SHA" ]; then
+                echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its head moved from $OLD_HEAD_SHA to $OLD_BRANCH_SHA"
+                continue
+              fi
               OLD_NON_BOT_COMMITS="$(node .github/scripts/cross-repo-integrity/repin-branch-policy.mjs \
                 --base-ref origin/main \
-                --branch "refs/remotes/origin/$OLD_BRANCH" \
+                --branch "$OLD_HEAD_SHA" \
                 --bot-email "$BOT_AUTHOR_EMAIL")"
               if [ -n "$OLD_NON_BOT_COMMITS" ]; then
-                echo "::notice::leaving older repin PR #$OLD_PR_NUMBER open because $OLD_BRANCH contains non-bot commits"
+                echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its head $OLD_HEAD_SHA fails the bot-owned pin-only branch policy: $(echo "$OLD_NON_BOT_COMMITS" | tr '\n' ' ')"
                 continue
               fi
             else
@@ -616,12 +636,14 @@ jobs:
                 echo "::error::could not determine whether older branch $OLD_BRANCH exists (git ls-remote exited $OLD_BRANCH_LOOKUP_STATUS); leaving it open" >&2
                 exit 1
               fi
+              echo "::notice::skipping older repin PR #$OLD_PR_NUMBER because its head branch $OLD_BRANCH is absent; ownership and pin-only policy cannot be proven"
+              continue
             fi
 
             gh pr close "$OLD_PR_NUMBER" --comment "Superseded by the newer automated repin PR for ${REPO_ID} at ${CURRENT_HEAD}."
           done < <(
-            gh pr list --state open --base main --json number,headRefName \
-              --jq '.[] | [.number, .headRefName] | @tsv'
+            gh pr list --state open --base main --json number,headRefName,headRefOid,headRepository,author \
+            --jq '.[] | [.number, .headRefName, .headRefOid, (.headRepository.nameWithOwner // ""), (.author.login // "")] | @tsv'
           )
 
       - name: Enforce freshness semantics
