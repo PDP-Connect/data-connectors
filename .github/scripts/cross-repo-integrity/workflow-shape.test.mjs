@@ -17,14 +17,13 @@ test("computes consumer-side pin relevance from the PR diff", () => {
 	assert.match(workflow, /data_connect_pin_backed=/);
 	assert.match(workflow, /pdpp_pin_backed=/);
 	assert.match(workflow, /PR_TOUCHES_PIN_BACKED_PATHS:/);
-	assert.match(workflow, /GITHUB_EVENT_NAME.*pull_request.*PR_TOUCHES_PIN_BACKED_PATHS.*true/s);
+	assert.match(workflow, /check-pin-freshness\.mjs/);
 });
 
 test("neutralizes unrelated stale pins but fails actionable stale pins", () => {
-	assert.match(workflow, /::notice::.*pin is stale/);
-	assert.match(workflow, /requires_failure=false/);
-	assert.match(workflow, /requires_failure=true/);
+	assert.match(workflow, /check-pin-freshness\.mjs/);
 	assert.match(workflow, /name: Enforce freshness semantics/);
+	assert.match(workflow, /requires_failure/);
 });
 
 test("repin automation is write-scoped and idempotent", () => {
@@ -36,6 +35,17 @@ test("repin automation is write-scoped and idempotent", () => {
 	assert.match(workflow, /gh pr create/);
 	assert.match(workflow, /gh label create repin/);
 	assert.match(workflow, /Signed-off-by: github-actions\[bot\]/);
+	assert.doesNotMatch(workflow, /merge it with the required vendored or registry changes/);
+	assert.match(workflow, /repin-branch-policy\.mjs/);
+	assert.match(workflow, /gh pr comment/);
+	assert.match(workflow, /do not add vendored or registry repairs here/);
+	assert.match(workflow, /gh pr close/);
+	assert.match(workflow, /Superseded by the newer automated repin PR/);
+});
+
+test("freshness comparison delegates its four outcomes to the tested comparator", () => {
+	assert.match(workflow, /check-pin-freshness\.mjs/);
+	assert.match(workflow, /steps\.compare\.outputs\.repin == 'true'/);
 });
 
 test("the aggregate gate requires a successful freshness job", () => {

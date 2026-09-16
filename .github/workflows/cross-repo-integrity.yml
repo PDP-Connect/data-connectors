@@ -389,7 +389,7 @@ jobs:
             # registry-derived connector-ID set in sync — that script now asserts its
             # comparison set against the canonical registry, but this workflow's path list is
             # necessarily static (GitHub Actions trigger/step config isn't runtime-computed).
-            paths: >-
+            paths: |-
               packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
               packages/local-collector/src/generated/collector-definitions.generated.ts
               packages/local-collector/tsconfig.build.json
@@ -437,6 +437,7 @@ jobs:
         working-directory: ${{ matrix.repo.id }}
         env:
           PINNED_SHA: ${{ matrix.repo.id == 'data-connect' && needs.read-pins.outputs.data-connect-sha || needs.read-pins.outputs.pdpp-sha }}
+          REPO_ID: ${{ matrix.repo.id }}
           # The ref this pin is meant to track right now: main once the pin is on the
           # producer's canonical trunk, or the exact PR-head branch named in
           # cross-repo-pins.json's "branch" field during a coordinated cutover, when main and
@@ -475,28 +476,11 @@ jobs:
             exit 0
           fi
 
-          mapfile -t RELEVANT_PATH_ARRAY <<< "$RELEVANT_PATHS"
-          DIFF="$(git diff --name-only "$PINNED_SHA" "$CURRENT_HEAD" -- "${RELEVANT_PATH_ARRAY[@]}")"
-
-          if [ -n "$DIFF" ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-            if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$PR_TOUCHES_PIN_BACKED_PATHS" != "true" ]; then
-              echo "::notice::${{ matrix.repo.id }} pin is stale: $TRACK_REF ($CURRENT_HEAD) changed paths backed by this repo's drift jobs since $PINNED_SHA. This unrelated PR does not touch those consumer-side paths; the daily/main automation will open or update chore/repin-${{ matrix.repo.id }}-${CURRENT_HEAD:0:7}."
-              echo "requires_failure=false" >> "$GITHUB_OUTPUT"
-              echo "$DIFF"
-              exit 0
-            fi
-
-            echo "::error::pin stale for relevant source paths — ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) has changed these paths since the pinned commit ($PINNED_SHA):"
-            echo "$DIFF"
-            echo "requires_failure=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Pin ($PINNED_SHA) unchanged relative to ${{ matrix.repo.id }}'s $TRACK_REF ($CURRENT_HEAD) across: $RELEVANT_PATHS"
+          CURRENT_HEAD="$CURRENT_HEAD" TRACK_REF="$TRACK_REF" \
+            node "$GITHUB_WORKSPACE/.github/scripts/cross-repo-integrity/check-pin-freshness.mjs"
 
       - name: Open or update the automated repin PR
-        if: steps.compare.outputs.stale == 'true' && (github.event_name == 'push' || github.event_name == 'schedule')
+        if: steps.compare.outputs.repin == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_ID: ${{ matrix.repo.id }}
@@ -508,10 +492,24 @@ jobs:
           SHORT_SHA="${CURRENT_HEAD:0:7}"
           BRANCH="chore/repin-${REPO_ID}-${SHORT_SHA}"
           TITLE="chore: repin ${REPO_ID} to ${SHORT_SHA}"
+          BOT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
 
           git fetch origin main
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+            NON_BOT_COMMITS="$(node .github/scripts/cross-repo-integrity/repin-branch-policy.mjs \
+              --base-ref origin/main \
+              --branch "refs/remotes/origin/$BRANCH" \
+              --bot-email "$BOT_AUTHOR_EMAIL")"
+            if [ -n "$NON_BOT_COMMITS" ]; then
+              PR_NUMBER="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // ""')"
+              NOTICE="Cross-Repo Integrity left $BRANCH untouched because it contains non-bot commit(s): $(echo "$NON_BOT_COMMITS" | tr '\n' ' '). The branch was not rewritten; put vendored or registry repairs on a separate branch and keep this branch bot-owned and pin-only."
+              if [ -n "$PR_NUMBER" ]; then
+                gh pr comment "$PR_NUMBER" --body "$NOTICE"
+              fi
+              echo "::notice::$NOTICE"
+              exit 0
+            fi
           fi
           git checkout -B "$BRANCH" origin/main
           node .github/scripts/cross-repo-integrity/update-pin.mjs "$REPO_ID" "$CURRENT_HEAD" "$TRACK_REF"
@@ -539,7 +537,7 @@ jobs:
           cat > repin-pr-body.md <<EOF
           The recorded ${REPO_ID} pin is stale against ${TRACK_REF} at ${CURRENT_HEAD}.
 
-          This PR updates .github/cross-repo-pins.json so the corresponding cross-repo drift jobs compare against the current producer revision. It is created or refreshed automatically by Cross-Repo Integrity; merge it with the required vendored or registry changes if the drift jobs identify content drift.
+          This PR updates .github/cross-repo-pins.json so the corresponding cross-repo drift jobs compare against the current producer revision. It is created or refreshed automatically by Cross-Repo Integrity. Keep this branch bot-owned and pin-only: do not add vendored or registry repairs here. Put required repairs on a separate branch or PR; a non-bot commit makes the refresh path stop and leave this branch untouched.
           EOF
           if [ "$(wc -w < repin-pr-body.md)" -gt 120 ]; then
             echo "repin PR body exceeds the 120-word limit" >&2
@@ -555,6 +553,35 @@ jobs:
             gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file repin-pr-body.md --label repin
             echo "Opened repin PR for $REPO_ID at $CURRENT_HEAD."
           fi
+
+          # The producer SHA is part of the branch name, so a new producer head creates a
+          # new candidate branch. Close older bot-owned candidates explicitly instead of
+          # leaving multiple open repin PRs for the same producer.
+          while IFS=$'\t' read -r OLD_PR_NUMBER OLD_BRANCH; do
+            [ -n "$OLD_PR_NUMBER" ] || continue
+            case "$OLD_BRANCH" in
+              "chore/repin-${REPO_ID}-"*) ;;
+              *) continue ;;
+            esac
+            [ "$OLD_BRANCH" != "$BRANCH" ] || continue
+
+            if git ls-remote --exit-code --heads origin "$OLD_BRANCH" >/dev/null 2>&1; then
+              git fetch origin "refs/heads/$OLD_BRANCH:refs/remotes/origin/$OLD_BRANCH"
+              OLD_NON_BOT_COMMITS="$(node .github/scripts/cross-repo-integrity/repin-branch-policy.mjs \
+                --base-ref origin/main \
+                --branch "refs/remotes/origin/$OLD_BRANCH" \
+                --bot-email "$BOT_AUTHOR_EMAIL")"
+              if [ -n "$OLD_NON_BOT_COMMITS" ]; then
+                echo "::notice::leaving older repin PR #$OLD_PR_NUMBER open because $OLD_BRANCH contains non-bot commits"
+                continue
+              fi
+            fi
+
+            gh pr close "$OLD_PR_NUMBER" --comment "Superseded by the newer automated repin PR for ${REPO_ID} at ${CURRENT_HEAD}."
+          done < <(
+            gh pr list --state open --base main --json number,headRefName \
+              --jq '.[] | [.number, .headRefName] | @tsv'
+          )
 
       - name: Enforce freshness semantics
         if: steps.compare.outputs.requires_failure == 'true'
