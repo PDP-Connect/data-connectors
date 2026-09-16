@@ -1,6 +1,6 @@
 {
   "schema": "pdpp.test-accounting/v3",
-  "inventory_base_sha": "abc720e9bec812d9321349b931a40a9bcf8378cd",
+  "inventory_base_sha": "8df81721c7a37f55a8cd6390aae2be1d5ac50249",
   "suites": [
     {
       "id": "mutation-falsification",
@@ -106,7 +106,7 @@
             "requires --experimental-test-module-mocks": 1,
             "run with --expose-gc for a reliable memory-growth comparison": 1,
             "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
-            "network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted — either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) — refusing to fall back to a PATH-resolved lookup": 2,
+            "network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted \u2014 either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) \u2014 refusing to fall back to a PATH-resolved lookup": 2,
             "requires usable bwrap": 10,
             "requires usable bwrap and unshare bind mounts": 5,
             "requires usable unshare bind mounts": 23,
@@ -211,7 +211,15 @@
         "scripts/test-accounting/node-reporter.ts"
       ],
       "include": [
-        "packages/connector-installer-core/index.test.mjs"
+        "packages/connector-installer-cli/cli.test.mjs",
+        "packages/connector-installer-core/index.test.mjs",
+        "packages/connector-installer-core/oci-catalog.test.mjs",
+        "packages/connector-installer-core/oci-identity.test.mjs",
+        "packages/connector-installer-core/oci-registry.test.mjs",
+        "packages/connector-installer-core/oci.test.mjs",
+        "packages/connector-installer-core/packaging.test.mjs",
+        "packages/connector-installer-core/signer-identity.test.mjs",
+        "packages/connector-installer-core/tar-stream.test.mjs"
       ],
       "profiles": [
         {
@@ -291,12 +299,23 @@
       ],
       "include": [
         "scripts/brand-icon-fleet.test.mjs",
+        "scripts/check-additive-schemas.test.mjs",
         "scripts/connector-artifact-contract.test.mjs",
+        "scripts/connector-oci-artifact.test.mjs",
+        "scripts/connector-publish-allowlist.test.mjs",
+        "scripts/connector-publish-build.test.mjs",
         "scripts/create-connector.test.mjs",
+        "scripts/generate-connector-catalog.test.mjs",
         "scripts/generate-connector-index.test.mjs",
         "scripts/generate-scope-catalog.test.mjs",
+        "scripts/lookup-manifest.test.mjs",
+        "scripts/manager-engines.test.mjs",
+        "scripts/publish-connector-catalog.test.mjs",
+        "scripts/publish-ref-gate.test.mjs",
+        "scripts/publish-tag-guard.test.mjs",
         "scripts/schema-artifact-kind.test.mjs",
         "scripts/schema-health-gate.test.mjs",
+        "scripts/select-publish-target.test.mjs",
         "scripts/test-connectors.test.cjs",
         "scripts/youtube-watched-at.test.mjs"
       ],
@@ -309,7 +328,7 @@
       ]
     },
     {
-      "id": "root-artifact-chatgpt",
+      "id": "root-cross-repo-integrity",
       "cwd": ".",
       "loader": "node-test",
       "execution": "direct",
@@ -323,66 +342,16 @@
         "scripts/test-accounting/node-reporter.ts"
       ],
       "include": [
-        "test/chatgpt-pdpp/chatgpt-pdpp.test.mjs"
+        ".github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs",
+        ".github/scripts/cross-repo-integrity/pin-freshness.test.mjs",
+        ".github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
+        ".github/scripts/cross-repo-integrity/workflow-shape.test.mjs"
       ],
       "profiles": [
         {
-          "id": "provisioned",
-          "required": false,
-          "skip_reasons": {},
-          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
-        }
-      ]
-    },
-    {
-      "id": "root-artifact-github",
-      "cwd": ".",
-      "loader": "node-test",
-      "execution": "direct",
-      "authority_argument": null,
-      "command": [
-        "node",
-        "--test",
-        "--import",
-        "tsx",
-        "--test-reporter",
-        "scripts/test-accounting/node-reporter.ts"
-      ],
-      "include": [
-        "test/github-pdpp/github-pdpp.test.mjs"
-      ],
-      "profiles": [
-        {
-          "id": "provisioned",
-          "required": false,
-          "skip_reasons": {},
-          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
-        }
-      ]
-    },
-    {
-      "id": "root-artifact-whoop",
-      "cwd": ".",
-      "loader": "node-test",
-      "execution": "direct",
-      "authority_argument": null,
-      "command": [
-        "node",
-        "--test",
-        "--import",
-        "tsx",
-        "--test-reporter",
-        "scripts/test-accounting/node-reporter.ts"
-      ],
-      "include": [
-        "test/whoop-pdpp/whoop-pdpp.test.mjs"
-      ],
-      "profiles": [
-        {
-          "id": "provisioned",
-          "required": false,
-          "skip_reasons": {},
-          "optional_predicate": "PDPP_ROOT_ARTIFACTS_PROVISIONED=1"
+          "id": "default",
+          "required": true,
+          "skip_reasons": {}
         }
       ]
     }
