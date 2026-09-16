@@ -423,6 +423,18 @@ jobs:
     needs: [changes, read-pins]
     if: always() && needs.changes.result == 'success'
     steps:
+      # Pull-request runs need this repository's pins file and the integrity
+      # scripts on disk; the main checkout below only runs for push/schedule.
+      - name: Checkout the pins file and integrity scripts
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/cross-repo-pins.json
+            .github/scripts/cross-repo-integrity
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Checkout data-connectors main for automatic repin
         if: github.event_name == 'push' || github.event_name == 'schedule'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
