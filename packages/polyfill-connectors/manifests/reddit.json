@@ -69,6 +69,9 @@
 	"streams": [
 		{
 			"name": "submitted",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Posts submitted by the user.",
 			"display": {
 				"label": "Your Reddit posts",
@@ -162,6 +165,9 @@
 		},
 		{
 			"name": "comments",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Comments by the user.",
 			"display": {
 				"label": "Your Reddit comments",
@@ -242,6 +248,9 @@
 		},
 		{
 			"name": "saved",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Items the user has saved.",
 			"display": {
 				"label": "Your saved Reddit items",
@@ -319,6 +328,9 @@
 		},
 		{
 			"name": "upvoted",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Posts and comments the user has upvoted.",
 			"display": {
 				"label": "Your upvoted Reddit items",
@@ -404,6 +416,9 @@
 		},
 		{
 			"name": "downvoted",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Posts and comments the user has downvoted.",
 			"display": {
 				"label": "Your downvoted Reddit items",
@@ -489,6 +504,9 @@
 		},
 		{
 			"name": "hidden",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"description": "Posts and comments the user has hidden.",
 			"display": {
 				"label": "Your hidden Reddit items",
