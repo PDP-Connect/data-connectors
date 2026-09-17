@@ -47,6 +47,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		signal: { testFile: "connectors/signal/integration.test.ts" },
 		slack: { testFile: "connectors/slack/integration.test.ts" },
 		steam: { testFile: "connectors/steam/index.test.ts" },
+		strava: { testFile: "connectors/strava/index.test.ts" },
 		usaa: { testFile: "connectors/usaa/integration.test.ts" },
 		venmo: { testFile: "connectors/venmo/integration.test.ts" },
 		whatsapp: { testFile: "connectors/whatsapp/integration.test.ts" },
@@ -98,6 +99,5 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
 	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
-	strava: { testFile: "connectors/strava/index.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
 };

@@ -324,6 +324,40 @@ test("group_by_time declarations target only server-supported date/date-time str
 	assert.deepEqual(violations, []);
 });
 
+test("cursor_field declarations target server-supported records sort schemas", () => {
+	// Mirrors the reference records path's classifyCursorFieldSqlSupport check:
+	// numeric fields and date/date-time strings (including nullable variants) can
+	// use SQL ordering and cursor seeks. A bare string would fall back to
+	// in-memory pagination and is rejected at manifest registration time.
+	const violations: string[] = [];
+
+	for (const file of manifestFiles()) {
+		const manifest = readManifest(file);
+		const connectorKey = manifest.connector_key ?? file.replace(/\.json$/, "");
+
+		for (const stream of manifest.streams ?? []) {
+			if (!stream.cursor_field) {
+				continue;
+			}
+			const streamName = stream.name ?? "<unnamed>";
+			const schema = stream.schema?.properties?.[stream.cursor_field];
+			if (!schema) {
+				violations.push(
+					`${connectorKey}.${streamName}.${stream.cursor_field}: cursor_field targets an absent schema field`,
+				);
+				continue;
+			}
+			if (!isRangeableSchema(schema)) {
+				violations.push(
+					`${connectorKey}.${streamName}.${stream.cursor_field}: cursor_field requires a numeric or date/date-time field; reference records sorting rejects this schema`,
+				);
+			}
+		}
+	}
+
+	assert.deepEqual(violations, []);
+});
+
 test("range_filters and group_by declarations target schema-supported fields", () => {
 	const violations: string[] = [];
 
