@@ -13839,7 +13839,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/strava",
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.0",
+				"version": "1.0.1",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icons/strava.svg",
