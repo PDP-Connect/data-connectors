@@ -303,7 +303,7 @@ test("connector governor: terminal abort status surfaces without rate_limited mi
 
 // ─── Adaptive collection is the DEFAULT (Phase A shared-primitive parity) ─────
 //
-// The six API connectors (github/notion/oura/spotify/strava/ynab) each construct
+// The five API connectors (github/notion/oura/spotify/ynab) each construct
 // their governor with the minimal profiled
 // `createConnectorHttpGovernor({ name, profile, ... })` call. These tests prove
 // that profiled call yields the full adaptive behavior the ChatGPT detail path
@@ -312,7 +312,7 @@ test("connector governor: terminal abort status surfaces without rate_limited mi
 // declared ProviderProfile.
 
 test("adaptive default: a profiled governor cold-starts at the shared discovery seed and exposes a snapshot", () => {
-	// The exact shape the six connectors ship — no pacing args beyond the
+	// The exact shape the five connectors ship — no pacing args beyond the
 	// required profile (which each connector declares; here the test profile).
 	const g = createConnectorHttpGovernor({
 		name: "oura",
@@ -343,7 +343,7 @@ test("adaptive default: a profiled governor cold-starts at the shared discovery 
 
 test("adaptive default: sustained success ACCELERATES the profiled governor toward the ceiling (the proven adaptive behavior)", async () => {
 	const slept: number[] = [];
-	// Minimal profiled call — the shape the six connectors ship. No extra pacing config.
+	// Minimal profiled call — the shape the five connectors ship. No extra pacing config.
 	const g = createConnectorHttpGovernor({
 		name: "github",
 		profile: TEST_PROFILE,

@@ -1616,11 +1616,18 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
-			path: "connectors/strava/index.ts",
-			line: 243,
-			column: 5,
+			path: "connectors/strava/parsers.ts",
+			line: 245,
+			column: 4,
 			category: "ordered_protocol_emission",
-			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
+			note: "streamCsvRows(): each CSV row is emitted before parsing the next row to keep memory bounded",
+		},
+		{
+			path: "connectors/strava/parsers.ts",
+			line: 251,
+			column: 3,
+			category: "ordered_protocol_emission",
+			note: "streamCsvRows(): the final CSV row is emitted before the parser returns",
 		},
 		{
 			path: "connectors/twitter_archive/index.ts",

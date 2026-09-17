@@ -65,7 +65,6 @@ const GOVERNOR_USING_CONNECTORS = [
 	"oura",
 	"spotify",
 	"steam",
-	"strava",
 	"ynab",
 ] as const;
 

@@ -25,13 +25,13 @@
  * stay shared-defaulted in the loop primitives; they are NOT forced here.
  *
  * Audit status (§9-C5): the FIELD SET and ChatGPT's values are
- * observation-backed (live ChatGPT probes 2026-06). The other six governor-using
- * connectors (github/notion/oura/spotify/strava/ynab) now each carry an AUDITED
+ * observation-backed (live ChatGPT probes 2026-06). The other five governor-using
+ * connectors (github/notion/oura/spotify/ynab) now each carry an AUDITED
  * pacing ceiling derived from THAT provider's documented rate limit — the WI-1b
  * per-connector behavioral audit. Each value traces to a provider doc URL in its
  * factory below; the derivation (documented sustained rate → chosen ceiling +
  * safety margin) is recorded in
- * docs/research/per-connector-rate-profiles-2026-06-13.md. None of the six emit
+ * docs/research/per-connector-rate-profiles-2026-06-13.md. None of the five emit
  * detail gaps, so none declares a terminal-gap (§10-A) or cooldown (§10-B)
  * profile — they legitimately use the safe shared defaults (see that doc).
  *
@@ -115,10 +115,10 @@ export interface ProviderProfile
 // it is set AT OR BELOW the provider's documented sustained rate (a safety prior:
 // even a fully-accelerated controller stays under the provider's budget). The
 // derivation (documented limit → chosen ceiling + margin) for every connector is
-// recorded in docs/research/per-connector-rate-profiles-2026-06-13.md. All six
+// recorded in docs/research/per-connector-rate-profiles-2026-06-13.md. All five
 // connectors are single-threaded (concurrency 1) and read-only, so the read/
 // primary limit — not upload/content-creation secondary limits — is the binding
-// axis. None of the six emits detail gaps, so none declares a terminal-gap
+// axis. None of the five emits detail gaps, so none declares a terminal-gap
 // (§10-A) or cooldown (§10-B) profile; they use the safe shared defaults.
 
 /**
@@ -165,20 +165,6 @@ export function ouraPacingProfile(): ProviderPacingProfile {
  */
 export function spotifyPacingProfile(): ProviderPacingProfile {
 	return { pacingMinIntervalMs: 500 };
-}
-
-/**
- * Strava — 10000ms (6 req/min). The connector reads only NON-UPLOAD endpoints,
- * whose default limit is 100 requests / 15 min + 1,000 / day (=0.111 req/s,
- * 9000ms / ~6.67 req/min sustained on the binding 15-min window). 10000ms is set
- * BELOW that sustained rate so a fully-accelerated controller can never drain the
- * 100-req window faster than it refills — the most conservative of the six by
- * design (tightest window + explicit ban warning). A real owner sync is a handful
- * of paginated requests, so the slow ceiling costs nothing on the real workload.
- * Doc: https://developers.strava.com/docs/rate-limits/
- */
-export function stravaPacingProfile(): ProviderPacingProfile {
-	return { pacingMinIntervalMs: 10_000 };
 }
 
 /**
