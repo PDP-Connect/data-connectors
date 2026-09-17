@@ -128,7 +128,7 @@ jobs:
           node scripts/connector-publish-allowlist.mjs --matrix
           echo "has-publishable-changes=true" >> "$GITHUB_OUTPUT"
 
-      - name: Select changed connector versions absent from GHCR
+      - name: Select connectors with changed shipped content
         id: main-selection
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:

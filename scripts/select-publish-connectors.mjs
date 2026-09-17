@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Select connector versions introduced by a push to main, then keep only
- * versions whose GHCR reference is definitely absent.
+ * Select connectors whose shipped content changed in a push to main, then
+ * keep only versions whose GHCR reference is definitely absent.
  *
  * The source-side decision is deliberately based on both version-bearing
  * representations. A manifest is the authoring source, while the generated
@@ -22,6 +22,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { artifactInputHash, ArtifactInputError } from "./connector-artifact-inputs.mjs";
 import { PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 import { lookupManifest } from "./lookup-manifest.mjs";
 
@@ -117,8 +118,9 @@ function readCommitVersions(commit, connectors, { cwd = process.cwd() } = {}) {
 }
 
 /**
- * Return allowlisted connectors whose manifest and generated index versions
- * both changed from `before` to `after`.
+ * Return connectors with changed shipped content after refusing a content
+ * change that would overwrite an existing version. The index is still a
+ * consistency gate, not an artifact input.
  */
 export function selectChangedConnectors({
   before,
@@ -133,10 +135,25 @@ export function selectChangedConnectors({
   return connectors.flatMap(({ manifest, connectorKey }) => {
     const beforeVersion = beforeVersions.get(connectorKey);
     const afterVersion = afterVersions.get(connectorKey);
-    if (
-      afterVersion === null ||
-      beforeVersion === afterVersion
-    ) {
+    if (afterVersion === null) return [];
+
+    if (beforeVersion === afterVersion) {
+      let beforeHash;
+      let afterHash;
+      try {
+        beforeHash = artifactInputHash({ commit: before, manifest, cwd });
+        afterHash = artifactInputHash({ commit: after, manifest, cwd });
+      } catch (error) {
+        if (error instanceof ArtifactInputError) {
+          throw new PublishSelectionError(error.message);
+        }
+        throw error;
+      }
+      if (beforeHash !== afterHash) {
+        throw new PublishSelectionError(
+          `${connectorKey} shipped artifact content changed without a version bump; bump the manifest and connector-index.json version before publishing`,
+        );
+      }
       return [];
     }
     return [{ connector: connectorKey, manifest, version: afterVersion }];
@@ -221,7 +238,7 @@ async function main() {
   });
   if (candidates.length === 0) {
     notice(
-      `No connector version changed between ${process.env.BEFORE_SHA} and ${process.env.AFTER_SHA}; ` +
+      `No connector version changed and no shipped connector content changed between ${process.env.BEFORE_SHA} and ${process.env.AFTER_SHA}; ` +
         "nothing to publish.",
     );
     emit({
