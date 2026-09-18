@@ -3525,6 +3525,7 @@
 			}
 		},
 		{
+			"brandIcon": "./manifests/icons/codex.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/codex",
 			"entry": "./connectors/codex/index.js",
 			"manifest": {
@@ -3534,6 +3535,10 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
 				"version": "0.3.0",
 				"display_name": "OpenAI Codex CLI",
+				"brand": {
+					"icon": "icons/codex.svg",
+					"background_color": "#10A37F"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"filesystem": {
@@ -11531,6 +11536,7 @@
 			}
 		},
 		{
+			"brandIcon": "./manifests/icons/slack.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/slack",
 			"entry": "./connectors/slack/index.js",
 			"manifest": {
@@ -11540,6 +11546,10 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
 				"version": "0.6.0",
 				"display_name": "Slack",
+				"brand": {
+					"icon": "icons/slack.svg",
+					"background_color": "#4A154B"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {

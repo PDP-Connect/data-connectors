@@ -45,20 +45,25 @@ function assertSafeRecognisableSvg(source, filename) {
   }
 }
 
-// Connectors with no legitimate brand mark available (verified against simple-icons
-// v16.31.0: slack/openai/pocket were removed from simple-icons after brand-owner
-// takedown/product-retirement; whoop/ynab/oura were never added; heb/usaa/wholefoods/
-// google_takeout have no vendor-published simple-icons entry at all). These manifests
-// declare no `brand` object at all, so the console falls back to the deterministic
-// monogram rather than shipping an invented or hand-drawn logo. See
-// /home/tnunamak/code/pdpp/local/ICON-ART-0918.md for the per-connector verdict.
+// Connectors with no legitimate brand mark available in any vendored, offline,
+// build-time-only source checked (verified, not assumed): simple-icons v16.31.0
+// (slack/openai/pocket removed after brand-owner takedown/product-retirement;
+// whoop/ynab/oura never added; heb/usaa/wholefoods/google_takeout have no
+// vendor-published entry), home-assistant/brands (PNG-only, incompatible with
+// this repo's SVG-only pipeline; also has zero coverage of heb/pocket/usaa/
+// wholefoods/ynab/google_takeout even as PNG), and @iconify/json's `logos`
+// collection (CC0, 2,174 marks; covers codex and slack — restored below from
+// this source — but not heb/oura/pocket/usaa/wholefoods/whoop/ynab). These
+// manifests declare no `brand` object at all, so the console falls back to the
+// deterministic monogram rather than shipping an invented or hand-drawn logo.
+// See /home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md for full source
+// research and coverage numbers, and ICON-ART-0918.md for the original
+// per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
-  "codex.json",
   "heb.json",
   "google_takeout.json",
   "oura.json",
   "pocket.json",
-  "slack.json",
   "usaa.json",
   "wholefoods.json",
   "whoop.json",

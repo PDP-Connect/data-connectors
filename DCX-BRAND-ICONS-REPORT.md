@@ -19,14 +19,22 @@ optional and is an opaque six-digit hex color for an icon tile. The SVG assets a
 manifest schema defines the same field shape for authoring tools.
 
 A manifest with no legitimately available brand mark declares **no `brand` object at all** —
-this is not an error state. As of the ICON-ART-0918 pass, 10 connectors (codex, heb,
-google_takeout, oura, pocket, slack, usaa, wholefoods, whoop, ynab) have no `brand` block: no
-real mark was available from simple-icons (verified against v16.31.0's full export list; several
-were removed after brand-owner trademark objections or product retirement), and per this
-project's own posture a hand-drawn placeholder is worse than no logo at all. These fall through
-to the console's deterministic monogram. See `NOTICE` and
-`/home/tnunamak/code/pdpp/local/ICON-ART-0918.md` for the per-connector verdict and the layer-2
-sourcing plan that could recover a mark for a subset of these later.
+this is not an error state. As of the ICON-ART-0918 pass, 10 connectors had no `brand` block
+because no real mark was available from simple-icons (verified against v16.31.0's full export
+list; several were removed after brand-owner trademark objections or product retirement), and
+per this project's own posture a hand-drawn placeholder is worse than no logo at all.
+
+The ICON-SOURCES-0918 pass checked two further vendored, offline, build-time-only sources
+(home-assistant/brands and `@iconify/json`'s `logos` collection) and recovered 2 of the 10:
+`codex` and `slack` now ship real marks sourced from `logos` (CC0), normalized to this fleet's
+monochrome convention. The remaining 8 — `heb`, `google_takeout`, `oura`, `pocket`, `usaa`,
+`wholefoods`, `whoop`, `ynab` — still have no `brand` block and fall through to the console's
+deterministic monogram; none of the three sources checked has a legitimate mark for them
+(`oura`/`whoop` exist in home-assistant/brands but as PNG only, incompatible with this
+manifest schema's SVG-only `brand.icon` path pattern). See `NOTICE`,
+`/home/tnunamak/code/pdpp/local/ICON-ART-0918.md` for the original per-connector verdict, and
+`/home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md` for the full source research, coverage
+numbers, and the recommended resolver chain for connectors added in the future.
 
 `connector-index.json` derives, rather than duplicates, this declaration in `brandIcons[connector_id]`. In the current polyfill manifest format, `connector_id` is the stable registry URI:
 

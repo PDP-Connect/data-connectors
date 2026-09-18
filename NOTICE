@@ -21,6 +21,14 @@ trademark or patent rights, and simple-icons maintains a brand-owner
 takedown channel. See
 https://github.com/simple-icons/simple-icons/blob/master/DISCLAIMER.md.
 
+Where an icon's SVG markup is drawn from the `logos` collection published via
+`@iconify/json` (https://github.com/gilbarbara/logos), it is released under
+CC0 1.0. As with simple-icons, CC0 waives copyright in the markup only; it
+does not and cannot waive any trademark rights the depicted brand owner
+holds. This source is used only where no legitimately available mark exists
+in simple-icons and the source's own artwork is genuine brand art, not an
+invented or hand-drawn substitute.
+
 A connector manifest with no legitimately available brand mark should not
 carry an invented or unofficial logo. Consumers of this package's
 `connector-index.json` render a deterministic monogram (the connector's
