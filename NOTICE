@@ -1,28 +1,2 @@
 Copyright © 2026 The PDP-Connect Contributors
 Licensed under the Apache License, Version 2.0.
-
-## Third-party connector brand icons
-
-Shipped connector manifests in `packages/polyfill-connectors/manifests/` each
-declare a small brand glyph (`brand.icon`, under `manifests/icons/*.svg`) to
-identify the third-party service the connector connects to (e.g. Amazon,
-GitHub, Spotify). All product names, trademarks, and registered trademarks
-referenced or depicted by these icons are the property of their respective
-owners. These icons are used by the PDP-Connect project strictly to identify
-the products and companies a connector integrates with; their use implies no
-sponsorship, affiliation, or endorsement by the mark holder. This mirrors the
-posture used by home-assistant/brands: identification only, no license to
-the trademarks themselves.
-
-Where an icon's SVG markup is drawn from `simple-icons`
-(https://simpleicons.org), it is released under CC0 1.0, but per that
-project's own LICENSE.md the CC0 waiver explicitly does not extend to
-trademark or patent rights, and simple-icons maintains a brand-owner
-takedown channel. See
-https://github.com/simple-icons/simple-icons/blob/master/DISCLAIMER.md.
-
-A connector manifest with no legitimately available brand mark should not
-carry an invented or unofficial logo. Consumers of this package's
-`connector-index.json` render a deterministic monogram (the connector's
-initial(s) and a color derived from its name) as the correct default for
-that case — this is a normal, first-class fallback, not an error state.
