@@ -4,8 +4,13 @@
 import connectorIndex from "../connector-index.json" with { type: "json" };
 
 export interface ConnectorImplementation {
-	/** A file URL for the connector's brand icon in the installed package. */
-	readonly brandIcon: string;
+	/**
+	 * A file URL for the connector's brand icon in the installed package, or
+	 * `undefined` when no legitimately available brand mark exists. Consumers
+	 * should render their deterministic monogram fallback in that case rather
+	 * than an invented or unofficial logo.
+	 */
+	readonly brandIcon: string | undefined;
 	/** A file URL for the built JavaScript implementation, safe for `import()`. */
 	readonly entry: string;
 	readonly manifest: Record<string, unknown>;
@@ -42,7 +47,10 @@ export function resolveConnectorImplementation(
 		throw new ConnectorImplementationNotFoundError(connectorId);
 	}
 	return {
-		brandIcon: new URL(implementation.brandIcon, packageRootUrl).href,
+		brandIcon:
+			implementation.brandIcon === undefined
+				? undefined
+				: new URL(implementation.brandIcon, packageRootUrl).href,
 		entry: new URL(implementation.entry, packageRootUrl).href,
 		manifest: implementation.manifest,
 	};

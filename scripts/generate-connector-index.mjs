@@ -135,8 +135,13 @@ function resolvePolyfillBrandIcons(sourceCommit) {
     if (typeof connectorId !== "string" || connectorId.trim() === "") {
       throw new Error(`${manifestPath}: connector_id must be a non-empty string`);
     }
+    if (manifest.brand === undefined) {
+      // No legitimate brand mark is available for this connector; the console falls back
+      // to a deterministic monogram. See NOTICE and /home/tnunamak/code/pdpp/local/ICON-ART-0918.md.
+      continue;
+    }
     if (!manifest.brand || typeof manifest.brand !== "object" || Array.isArray(manifest.brand)) {
-      throw new Error(`${manifestPath}: brand is required`);
+      throw new Error(`${manifestPath}: brand must be an object when present`);
     }
     const icon = assertRelativeBrandAssetPath(manifest.brand.icon, manifestPath, "icon");
     const iconPath = join(dirname(manifestPath), icon);

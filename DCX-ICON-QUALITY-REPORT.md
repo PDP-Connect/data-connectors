@@ -2,6 +2,12 @@
 
 Audit date: 2026-09-03. Scope: the 45 assets referenced by root `connector-index.json` `brandIcons`.
 
+**Stale as of ICON-ART-0918 (2026-09-18):** 10 of these entries (codex, heb, google_takeout,
+oura, pocket, slack, usaa, wholefoods, whoop, ynab) have since been dropped from `brandIcons`
+entirely — no legitimate mark was available, so those manifests now ship no `brand` block and
+fall through to the console's monogram instead. `brandIcons` now has 35 entries. See
+`DCX-BRAND-ICONS-REPORT.md` and `/home/tnunamak/code/pdpp/local/ICON-ART-0918.md`.
+
 The fleet now uses square viewBoxes, no fixed root dimensions, no scripts, external references, images, or text, and explicit root ink. The console renders these marks on each manifest's opaque `background_color`; the white monochrome foreground is therefore legible on dark surfaces without a duplicate dark asset. `dark_icon` remains available for a future surface that does not render the tile.
 
 | Icon | Status | Source / licence | Dark-surface result |

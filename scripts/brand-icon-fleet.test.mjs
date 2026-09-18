@@ -45,6 +45,39 @@ function assertSafeRecognisableSvg(source, filename) {
   }
 }
 
+// Connectors with no legitimate brand mark available (verified against simple-icons
+// v16.31.0: slack/openai/pocket were removed from simple-icons after brand-owner
+// takedown/product-retirement; whoop/ynab/oura were never added; heb/usaa/wholefoods/
+// google_takeout have no vendor-published simple-icons entry at all). These manifests
+// declare no `brand` object at all, so the console falls back to the deterministic
+// monogram rather than shipping an invented or hand-drawn logo. See
+// /home/tnunamak/code/pdpp/local/ICON-ART-0918.md for the per-connector verdict.
+const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
+  "codex.json",
+  "heb.json",
+  "google_takeout.json",
+  "oura.json",
+  "pocket.json",
+  "slack.json",
+  "usaa.json",
+  "wholefoods.json",
+  "whoop.json",
+  "ynab.json",
+]);
+
+function assertRealBrandMarkShape(source, filename) {
+  const root = source.match(/^\s*<svg\b([^>]*)>/);
+  assert.ok(root, `${filename}: SVG root is required`);
+  const viewBox = root[1].match(/\bviewBox\s*=\s*["']([^"']*)["']/i);
+  assert.ok(viewBox, `${filename}: viewBox is required`);
+  assert.equal(viewBox[1].replace(/\s+/g, " ").trim(), "0 0 24 24", `${filename}: viewBox must be exactly "0 0 24 24"`);
+  assert.doesNotMatch(source, /\bstroke\s*=/i, `${filename}: real brand marks are filled paths, not stroke-based glyphs`);
+  const innerFills = source.slice(root[0].length).match(/\bfill\s*=/gi) ?? [];
+  assert.equal(innerFills.length, 0, `${filename}: fill must be declared once on the root <svg>, not overridden on inner elements`);
+  const svgTagCount = (source.match(/<svg\b/g) ?? []).length;
+  assert.equal(svgTagCount, 1, `${filename}: must be a single bare <svg> root`);
+}
+
 function readManifest(filename) {
   const path = join(manifestsDir, filename);
   return { path, manifest: JSON.parse(readFileSync(path, "utf8")) };
@@ -62,22 +95,34 @@ function assertLocalAsset(manifestPath, assetPath, field) {
   return assetPath;
 }
 
-test("every shipped polyfill manifest declares a local brand icon", () => {
+test("every shipped polyfill manifest either declares a local brand icon or has none (monogram fallback)", () => {
   const files = readdirSync(manifestsDir).filter((file) => file.endsWith(".json")).sort();
   assert.ok(files.length > 0, "expected shipped polyfill manifests");
   for (const filename of files) {
     const { path, manifest } = readManifest(filename);
     assert.equal(typeof manifest.connector_id, "string", `${filename}: connector_id is required`);
-    assert.ok(manifest.brand && typeof manifest.brand === "object" && !Array.isArray(manifest.brand), `${filename}: brand is required`);
+    if (manifest.brand === undefined) {
+      assert.ok(CONNECTORS_WITHOUT_A_BRAND_MARK.has(filename), `${filename}: has no brand — either add one or add it to CONNECTORS_WITHOUT_A_BRAND_MARK`);
+      continue;
+    }
+    assert.ok(manifest.brand && typeof manifest.brand === "object" && !Array.isArray(manifest.brand), `${filename}: brand must be an object when present`);
     assertLocalAsset(path, manifest.brand.icon, "icon");
     if (manifest.brand.dark_icon !== undefined) assertLocalAsset(path, manifest.brand.dark_icon, "dark_icon");
   }
+
+  for (const filename of CONNECTORS_WITHOUT_A_BRAND_MARK) {
+    assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from CONNECTORS_WITHOUT_A_BRAND_MARK`);
+  }
 });
 
-test("connector index resolves every shipped polyfill brand icon", () => {
+test("connector index resolves every shipped polyfill brand icon, and omits connectors with none", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   for (const filename of readdirSync(manifestsDir).filter((file) => file.endsWith(".json"))) {
     const { manifest } = readManifest(filename);
+    if (manifest.brand === undefined) {
+      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: has no brand but connector-index.json still has a brandIcons entry`);
+      continue;
+    }
     const icon = index.brandIcons?.[manifest.connector_id];
     assert.ok(icon, `${filename}: connector-index.json is missing brandIcons.${manifest.connector_id}`);
     assert.match(
@@ -99,7 +144,8 @@ test("connector index resolves every shipped polyfill brand icon", () => {
 test("every indexed brand icon is a self-contained, intentionally inked SVG mark", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   const referenced = Object.values(index.brandIcons ?? {});
-  assert.equal(referenced.length, 45, "expected every shipped connector brand icon");
+  const expectedCount = readdirSync(manifestsDir).filter((file) => file.endsWith(".json")).length - CONNECTORS_WITHOUT_A_BRAND_MARK.size;
+  assert.equal(referenced.length, expectedCount, "expected every shipped connector with a brand mark to be indexed, and no others");
 
   for (const icon of referenced) {
     assert.equal(typeof icon?.url, "string", "brand icon URL is required");
@@ -111,5 +157,20 @@ test("every indexed brand icon is a self-contained, intentionally inked SVG mark
       const darkPath = iconPathFromUrl(icon.darkUrl);
       assertSafeRecognisableSvg(readFileSync(join(manifestsDir, darkPath), "utf8"), darkPath);
     }
+  }
+});
+
+test("every indexed brand icon is a real brand mark, not a hand-drawn glyph", () => {
+  // Every connector without a confidently-sourced brand mark has been dropped from the
+  // index (see CONNECTORS_WITHOUT_A_BRAND_MARK above) rather than shipping a placeholder,
+  // so nothing indexed here should need an exemption. This guard exists to catch a
+  // regression: a future manifest that adds a `brand.icon` pointing at a hand-drawn glyph.
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  const referenced = Object.values(index.brandIcons ?? {});
+
+  for (const icon of referenced) {
+    const relativePath = iconPathFromUrl(icon.url);
+    const source = readFileSync(join(manifestsDir, relativePath), "utf8");
+    assertRealBrandMarkShape(source, relativePath);
   }
 });

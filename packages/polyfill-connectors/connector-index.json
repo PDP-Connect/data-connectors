@@ -3525,7 +3525,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/codex.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/codex",
 			"entry": "./connectors/codex/index.js",
 			"manifest": {
@@ -3535,10 +3534,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
 				"version": "0.3.0",
 				"display_name": "OpenAI Codex CLI",
-				"brand": {
-					"icon": "icons/codex.svg",
-					"background_color": "#10A37F"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"filesystem": {
@@ -7381,7 +7376,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/google_takeout.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/google-takeout",
 			"entry": "./connectors/google_takeout/index.js",
 			"manifest": {
@@ -7391,10 +7385,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
 				"version": "0.1.0",
 				"display_name": "Google Takeout",
-				"brand": {
-					"icon": "icons/google_takeout.svg",
-					"background_color": "#FBBC05"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -8200,7 +8190,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/heb.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/heb",
 			"entry": "./connectors/heb/index.js",
 			"manifest": {
@@ -8210,10 +8199,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
 				"version": "0.2.0",
 				"display_name": "H-E-B",
-				"brand": {
-					"icon": "icons/heb.svg",
-					"background_color": "#E4002B"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -10157,7 +10142,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/oura.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/oura",
 			"entry": "./connectors/oura/index.js",
 			"manifest": {
@@ -10167,10 +10151,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
 				"version": "0.1.0",
 				"display_name": "Oura",
-				"brand": {
-					"icon": "icons/oura.svg",
-					"background_color": "#111111"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -10427,7 +10407,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/pocket.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/pocket",
 			"entry": "./connectors/pocket/index.js",
 			"manifest": {
@@ -10437,10 +10416,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
 				"version": "0.1.0",
 				"display_name": "Pocket",
-				"brand": {
-					"icon": "icons/pocket.svg",
-					"background_color": "#EF4056"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -11556,7 +11531,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/slack.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/slack",
 			"entry": "./connectors/slack/index.js",
 			"manifest": {
@@ -11566,10 +11540,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
 				"version": "0.6.0",
 				"display_name": "Slack",
-				"brand": {
-					"icon": "icons/slack.svg",
-					"background_color": "#4A154B"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -14484,7 +14454,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/usaa.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/usaa",
 			"entry": "./connectors/usaa/index.js",
 			"manifest": {
@@ -14494,10 +14463,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
 				"version": "0.1.0",
 				"display_name": "USAA",
-				"brand": {
-					"icon": "icons/usaa.svg",
-					"background_color": "#003057"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -15869,7 +15834,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/wholefoods.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/wholefoods",
 			"entry": "./connectors/wholefoods/index.js",
 			"manifest": {
@@ -15879,10 +15843,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
 				"version": "0.1.0",
 				"display_name": "Whole Foods",
-				"brand": {
-					"icon": "icons/wholefoods.svg",
-					"background_color": "#00674B"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -16021,7 +15981,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/whoop.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/whoop",
 			"entry": "./connectors/whoop/index.js",
 			"manifest": {
@@ -16031,10 +15990,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
 				"version": "0.1.0",
 				"display_name": "WHOOP",
-				"brand": {
-					"icon": "icons/whoop.svg",
-					"background_color": "#151515"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -16509,7 +16464,6 @@
 			}
 		},
 		{
-			"brandIcon": "./manifests/icons/ynab.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/ynab",
 			"entry": "./connectors/ynab/index.js",
 			"manifest": {
@@ -16519,10 +16473,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
 				"version": "0.3.0",
 				"display_name": "YNAB",
-				"brand": {
-					"icon": "icons/ynab.svg",
-					"background_color": "#3CB878"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
