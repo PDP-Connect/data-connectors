@@ -48,11 +48,23 @@
     "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs ./.github/scripts/cross-repo-integrity/pin-freshness.test.mjs ./.github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
     "release:sign": "node ./scripts/sign-release-assets.mjs",
     "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
-    "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check"
+    "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check",
+    "test:mutation-falsification": "node --import tsx scripts/test-accounting/authority.ts --run --suite mutation-falsification --profile default",
+    "test:accounting": "node --import tsx scripts/test-accounting/authority.ts --run --suite accounting --profile default",
+    "test:migration-oracle": "node --import tsx scripts/test-accounting/authority.ts --run --suite migration-oracle --profile default",
+    "test:polyfill-accounted": "node --import tsx scripts/test-accounting/authority.ts --run --suite polyfill-connectors --profile default",
+    "typecheck:mutation-falsification": "tsc --noEmit -p scripts/mutation-falsification/tsconfig.json",
+    "mutation:groupme-pilot": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts",
+    "mutation:groupme-preflight": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts --preflight"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
     "yaml": "2.8.1",
-    "zod": "4.6.5"
-  }
+    "zod": "4.6.5",
+    "@babel/parser": "8.0.4",
+    "@types/node": "26.4.0",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "npm@11.12.1"
 }
