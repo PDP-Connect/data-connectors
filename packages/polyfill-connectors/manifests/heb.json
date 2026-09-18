@@ -216,6 +216,9 @@
 		},
 		{
 			"name": "order_items",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
 			"required": true,
 			"description": "Line items within H-E-B orders. Curbside/delivery orders only; in-store purchases are not available from heb.com. product_id is the H-E-B provider/catalog identifier observed on the order-detail purchase line, not a global product identity (GTIN/UPC/EAN); no such field is collected because no live-evidenced H-E-B response has been shown to carry one on the purchase line, and this connector does not crawl product pages to obtain one.",
 			"display": {
