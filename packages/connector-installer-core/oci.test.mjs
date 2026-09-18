@@ -28,6 +28,7 @@ import {
   createSigner,
   ociLockEntry,
   publishArtifact,
+  publishIndexArtifact,
   sha256,
   tarball,
 } from "./oci-fixture.mjs";
@@ -549,12 +550,18 @@ test("A-T7 refuses an unrecognised layer media type", async () => {
   // Fail closed: a layer this consumer cannot name is one it cannot reason
   // about, and installing the rest while ignoring it decides on the
   // publisher's behalf that the addition did not matter (C4.3).
+  //
+  // `application/vnd.pdpp.connector.bogus.v1.tar+gzip` — deliberately NOT one
+  // of `OCI_LAYER_MEDIA_TYPES`'s real entries (which now includes `tools` and
+  // `toolConfig` for a platform child manifest per OCI-TOOL-LAYER-0918.md
+  // §5) — this test is about the fail-closed property for a media type this
+  // consumer has never heard of, not about any one specific string.
   assert.throws(
     () =>
       indexLayersByMediaType({
         layers: [
           {
-            mediaType: "application/vnd.pdpp.connector.tools.v1.tar+gzip",
+            mediaType: "application/vnd.pdpp.connector.bogus.v1.tar+gzip",
             digest: sha256(Buffer.from("x")),
           },
         ],
@@ -572,7 +579,7 @@ test("A-T7 refuses an unrecognised layer media type", async () => {
       signer,
       extraLayers: [
         {
-          mediaType: "application/vnd.pdpp.connector.tools.v1.tar+gzip",
+          mediaType: "application/vnd.pdpp.connector.bogus.v1.tar+gzip",
           digest: sha256(Buffer.from("tools")),
           size: 5,
         },
@@ -1191,5 +1198,318 @@ test("an unsigned artifact is refused rather than installed unverified", async (
         return true;
       }
     );
+  });
+});
+
+// I-T1…I-T6: the OCI image INDEX path for a platform-bearing connector
+// (OCI-TOOL-LAYER-0918.md §5). A JS-only connector never reaches
+// `isOciImageIndex` at all — every test above this point is that path,
+// unchanged. These are the new one: index digest -> platform child -> that
+// child's own independent signature -> layers, with the tool binary landing
+// where `resolveSlackdumpBin`'s `../tools/<name>` read expects it.
+
+test("I-T1 resolves an index to the platform child matching the host, and installs that child's own tool binary", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const toolBinaries = {
+      "linux/amd64": Buffer.from("real linux/amd64 slackdump bytes"),
+      "linux/arm64": Buffer.from("real linux/arm64 slackdump bytes — must NOT be installed"),
+      "darwin/arm64": Buffer.from("real darwin/arm64 slackdump bytes — must NOT be installed"),
+    };
+    const { digest } = publishIndexArtifact(registry, {
+      signer,
+      platforms: ["linux/amd64", "linux/arm64", "darwin/arm64"],
+      toolBinaries,
+    });
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest, {
+        connectorId: "slack-pdpp",
+        connectorKey: "slack",
+        version: "0.6.0",
+        oci: { registry: registry.registry, repository: "pdp-connect/connector/slack", digest },
+      }),
+      // hostPlatform pinned rather than reading the real process.platform/arch,
+      // so this test's outcome does not depend on which machine runs it.
+      fixtureOptions(registry, signer, { hostPlatform: { os: "linux", architecture: "amd64" } })
+    );
+
+    const toolFile = artifact.assetFiles.find((file) => file.path === "tools/slackdump");
+    assert.ok(toolFile, "the linux/amd64 child's tools layer must be installed under tools/");
+    assert.deepEqual(toolFile.buffer, toolBinaries["linux/amd64"]);
+    assert.equal(toolFile.executable, true, "the tool binary must be marked executable");
+
+    // The OTHER two platforms' binaries must never even be fetched, let alone
+    // installed — proving selection, not "install everything and hope".
+    const otherToolFiles = artifact.assetFiles.filter(
+      (file) => file.path === "tools/slackdump" && !file.buffer.equals(toolBinaries["linux/amd64"])
+    );
+    assert.deepEqual(otherToolFiles, []);
+  });
+});
+
+test("I-T2 installs the tool binary at a path resolveSlackdumpBin's own ../tools/<name> read would find", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const toolBytes = Buffer.from("linux/amd64 slackdump");
+    const { digest } = publishIndexArtifact(registry, {
+      signer,
+      platforms: ["linux/amd64"],
+      toolBinaries: { "linux/amd64": toolBytes },
+    });
+
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-index-install-"));
+    try {
+      await installFromLock({
+        lock: {
+          connectors: [
+            ociLockEntry(registry, digest, {
+              connectorId: "slack-pdpp",
+              connectorKey: "slack",
+              version: "0.6.0",
+              manifestPath: "profile/collection-profile.json",
+              entrypointPath: "code/collection-profile.mjs",
+              provenancePath: "provenance.json",
+              oci: { registry: registry.registry, repository: "pdp-connect/connector/slack", digest },
+            }),
+          ],
+        },
+        source: null,
+        installRoot,
+        layout: "snapshot",
+        ...fixtureOptions(registry, signer, { hostPlatform: { os: "linux", architecture: "amd64" } }),
+      });
+
+      const artifactRoot = join(installRoot, "collection-profiles", "slack-pdpp");
+      const codeEntrypoint = join(artifactRoot, "code", "collection-profile.mjs");
+      // The EXACT read `resolveSlackdumpBin` performs: one `..` from the
+      // installed entrypoint's own location, then `tools/<name>`.
+      const resolvedBinPath = new URL(
+        "../tools/slackdump",
+        `file://${codeEntrypoint}`
+      ).pathname;
+      assert.equal(resolvedBinPath, join(artifactRoot, "tools", "slackdump"));
+      assert.equal(readFileSync(resolvedBinPath).toString(), "linux/amd64 slackdump");
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("I-T3 refuses an index with no child for the host's platform", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishIndexArtifact(registry, {
+      signer,
+      platforms: ["darwin/arm64", "windows/amd64"],
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(
+          null,
+          ociLockEntry(registry, digest, {
+            connectorId: "slack-pdpp",
+            connectorKey: "slack",
+            oci: { registry: registry.registry, repository: "pdp-connect/connector/slack", digest },
+          }),
+          fixtureOptions(registry, signer, { hostPlatform: { os: "linux", architecture: "amd64" } })
+        ),
+      (error) => {
+        assert.equal(error.reason, "unsupported-layer");
+        assert.match(error.message, /no child for linux\/amd64/);
+        return true;
+      }
+    );
+  });
+});
+
+test("I-T4 verifies the CHILD's own signature independently — a validly-signed index with an unsigned child is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const indexSigner = createSigner();
+    const childSigner = createSigner("https://example.invalid/some-other-workflow@refs/heads/main");
+    // The index itself is validly signed by the pinned identity; the child it
+    // points at is signed by a DIFFERENT identity. If the installer trusted
+    // the index's signature to vouch for its children, this would install.
+    const { digest } = publishIndexArtifact(registry, {
+      signer: indexSigner,
+      platforms: ["linux/amd64"],
+      childSignerFor: () => childSigner,
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(
+          null,
+          ociLockEntry(registry, digest, {
+            connectorId: "slack-pdpp",
+            connectorKey: "slack",
+            oci: { registry: registry.registry, repository: "pdp-connect/connector/slack", digest },
+          }),
+          fixtureOptions(registry, indexSigner, {
+            hostPlatform: { os: "linux", architecture: "amd64" },
+            sigstoreVerifier: createFixtureVerifier([indexSigner, childSigner]),
+          })
+        ),
+      (error) => {
+        assert.equal(error.reason, "misidentified");
+        return true;
+      }
+    );
+  });
+});
+
+test("I-T5 refuses a platform child with no tools layer", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    // Hand-construct an index whose child manifest omits tools.tar.gz —
+    // publishIndexArtifact always includes it, so this simulates a corrupted
+    // or hand-edited publish rather than exercising the builder.
+    const profile = {
+      connector_key: "slack",
+      connector_id: "https://github.com/PDP-Connect/data-connectors/connector/slack",
+      version: "0.6.0",
+      protocol_version: "1.0",
+    };
+    const profileBytes = canonicalJson(profile);
+    const codeBytes = tarball({ "collection-profile.mjs": "export const collect = () => {};\n" });
+    const licensesBytes = tarball({ LICENSE: "Apache-2.0\n", NOTICE: "notice\n" });
+    const provenanceBytes = canonicalJson({ connector_key: "slack", version: "0.6.0" });
+    const config = {
+      config_version: "1.0",
+      connector_key: "slack",
+      connector_id: profile.connector_id,
+      version: "0.6.0",
+      protocol_version: "1.0",
+      profile_digest: sha256(profileBytes),
+      entrypoint: "code/collection-profile.mjs",
+      entrypoint_kind: "import-safe",
+      exports: ["collect"],
+      platform: { os: "linux", architecture: "amd64" },
+      runtime: { bindings: [] },
+      bundled_tools: [],
+    };
+    const configBytes = canonicalJson(config);
+    const layer = (buffer, mediaType, title) => ({
+      mediaType,
+      digest: registry.putBlob(buffer),
+      size: buffer.length,
+      annotations: { "org.opencontainers.image.title": title },
+    });
+    const childManifest = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      artifactType: "application/vnd.pdpp.connector.v1+json",
+      platform: { os: "linux", architecture: "amd64" },
+      config: {
+        mediaType: "application/vnd.pdpp.connector.config.v1+json",
+        digest: registry.putBlob(configBytes),
+        size: configBytes.length,
+      },
+      layers: [
+        layer(profileBytes, "application/vnd.pdpp.connector.profile.v1+json", "collection-profile.json"),
+        layer(codeBytes, "application/vnd.pdpp.connector.code.v1.tar+gzip", "code.tar.gz"),
+        layer(licensesBytes, "application/vnd.pdpp.connector.licenses.v1.tar+gzip", "licenses.tar.gz"),
+        layer(provenanceBytes, "application/vnd.pdpp.connector.provenance.v1+json", "provenance.json"),
+      ],
+    };
+    const { digest: childDigest } = registry.putManifest(childManifest);
+    const payload = canonicalJson({
+      critical: {
+        identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/slack` },
+        image: { "docker-manifest-digest": childDigest },
+        type: "cosign container image signature",
+      },
+      optional: null,
+    });
+    registry.putManifest(
+      {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: registry.putBlob(Buffer.from("{}")), size: 2 },
+        layers: [
+          {
+            mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+            digest: registry.putBlob(payload),
+            size: payload.length,
+            annotations: cosignSignatureAnnotations(signer, payload),
+          },
+        ],
+      },
+      `${childDigest.replace(":", "-")}.sig`
+    );
+
+    const index = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.index.v1+json",
+      artifactType: "application/vnd.pdpp.connector.v1+json",
+      manifests: [
+        {
+          platform: { os: "linux", architecture: "amd64" },
+          digest: childDigest,
+          size: canonicalJson(childManifest).length,
+          mediaType: "application/vnd.oci.image.manifest.v1+json",
+        },
+      ],
+    };
+    const { digest } = registry.putManifest(index, "0.6.0");
+    const indexPayload = canonicalJson({
+      critical: {
+        identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/slack` },
+        image: { "docker-manifest-digest": digest },
+        type: "cosign container image signature",
+      },
+      optional: null,
+    });
+    registry.putManifest(
+      {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: registry.putBlob(Buffer.from("{}")), size: 2 },
+        layers: [
+          {
+            mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+            digest: registry.putBlob(indexPayload),
+            size: indexPayload.length,
+            annotations: cosignSignatureAnnotations(signer, indexPayload),
+          },
+        ],
+      },
+      `${digest.replace(":", "-")}.sig`
+    );
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(
+          null,
+          ociLockEntry(registry, digest, {
+            connectorId: "slack-pdpp",
+            connectorKey: "slack",
+            oci: { registry: registry.registry, repository: "pdp-connect/connector/slack", digest },
+          }),
+          fixtureOptions(registry, signer, { hostPlatform: { os: "linux", architecture: "amd64" } })
+        ),
+      (error) => {
+        assert.equal(error.reason, "unsupported-layer");
+        assert.match(error.message, /carries no "tools" layer/);
+        return true;
+      }
+    );
+  });
+});
+
+test("I-T6 a JS-only connector never touches the index path — isOciImageIndex is false and layers resolve exactly as before", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+
+    assert.equal(artifact.assetFiles.some((file) => file.path.startsWith("tools/")), false);
   });
 });

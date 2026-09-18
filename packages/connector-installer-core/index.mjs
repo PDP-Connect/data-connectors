@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -47,6 +48,8 @@ import {
   assertConfigMatchesProfile,
   defaultOciCertificateIdentityResolver,
   indexLayersByMediaType,
+  isOciImageIndex,
+  resolveIndexPlatformChild,
   toAnchoredIdentityPattern,
   verifyOciSignature,
 } from "./oci-verify.mjs";
@@ -783,10 +786,60 @@ function normalizeLockEntry(entry) {
  */
 export const MAX_LAYER_UNPACKED_BYTES = 64 * 1024 * 1024;
 
+// Bits a member's mode may never carry, whatever layer it is in: setuid,
+// setgid, sticky, or WORLD-write. None of that is ever honoured on disk
+// anyway — `installFromLock` only ever `writeFileSync`s (mode governed by the
+// installing process's own umask, which is where this repository's own
+// build/dev environment's group-writable 0664 comes from — a real, benign
+// value this check must not reject) or, for a member this reader marked
+// executable, additionally `chmodSync`s to exactly 0755 — but refusing
+// setuid/setgid/sticky/world-write here means an archive that sets them is
+// refused outright rather than silently downgraded, so a publisher build
+// that produced one is a build-time-visible defect (C4.5 extended to mode).
+const FORBIDDEN_MODE_BITS = 0o7002;
+
+/**
+ * Is this member's mode one `readLayerArchive` accepts, and does it mean the
+ * member should be executable once installed?
+ *
+ * There is no single "the" regular-file mode to compare against: this
+ * repository's own build/dev environment writes plain files at 0664
+ * (group-writable via umask 002), and CI environments commonly differ again.
+ * Pinning one exact non-executable value would make the check a statement
+ * about whichever umask happened to build the fixture, not about safety. The
+ * owner-exec bit is what this reader actually cares about — everything else
+ * is either forbidden outright or ignored, and ignored is safe because
+ * nothing downstream ever writes an installed file with archive-supplied
+ * permissions: `installFromLock` decides the on-disk mode itself.
+ */
+function acceptableMemberMode(mode) {
+  if ((mode & FORBIDDEN_MODE_BITS) !== 0) return null;
+  return { executable: (mode & 0o100) !== 0 };
+}
+
+/**
+ * Read one `.tar.gz` layer, refusing unsafe members and oversized content.
+ *
+ * Member type and path are checked from the archive's own headers, so a
+ * symlink, hardlink or FIFO is refused as it is read rather than after a tree
+ * exists (C4.5). Nothing is written to a temp directory at all, so a refusal
+ * has nothing to clean up (C6.1).
+ *
+ * `MAX_BLOB_BYTES` limits compressed input. The tar reader separately limits
+ * regular-file bytes, decompressed input consumed, and entry count. It checks
+ * effective member sizes before collecting bodies and stops at the archive
+ * terminator. These are byte/count limits, not a measured peak-memory bound.
+ * The returned regular-file buffers are measured again here.
+ *
+ * `allowExecutable` is false for every layer except a platform child's
+ * `tools.tar.gz` (C4.5.tool): a JSON or JS layer that carries an executable
+ * member is not carrying what its media type claims, so it is refused
+ * outright rather than installed with the bit silently dropped.
+ */
 async function readLayerArchive(
   buffer,
   label,
-  { maxUnpackedBytes = MAX_LAYER_UNPACKED_BYTES } = {}
+  { maxUnpackedBytes = MAX_LAYER_UNPACKED_BYTES, allowExecutable = false } = {}
 ) {
   try {
     const entries = await readTarGzEntries(buffer, {
@@ -795,6 +848,7 @@ async function readLayerArchive(
     });
 
     let unpacked = 0;
+    const modes = [];
     for (const entry of entries) {
       unpacked += entry.buffer.length;
       if (unpacked > maxUnpackedBytes) {
@@ -802,11 +856,19 @@ async function readLayerArchive(
           `archive unpacked to more than the ${maxUnpackedBytes}-byte ceiling`
         );
       }
+      const accepted = acceptableMemberMode(entry.mode);
+      if (!accepted || (accepted.executable && !allowExecutable)) {
+        throw new Error(
+          `member "${entry.path}" has mode ${entry.mode.toString(8)}, which this layer does not allow`
+        );
+      }
+      modes.push(accepted);
     }
 
-    return entries.map((entry) => ({
+    return entries.map((entry, index) => ({
       path: toPortableArtifactPath(entry.path.replace(/^\.\//, ""), "/"),
       buffer: entry.buffer,
+      executable: modes[index].executable,
     }));
   } catch (error) {
     throw new OciRegistryError(
@@ -884,16 +946,61 @@ async function fetchOciArtifact(entry, options = {}) {
   }
   const digest = reference.digest ?? (await resolveVersionToDigest({ ...transport, version: entry.version }));
 
-  const { manifest } = await fetchManifestByDigest({ ...transport, digest });
+  const { manifest: rootManifest } = await fetchManifestByDigest({ ...transport, digest });
 
-  // Before any layer is written — or fetched (C3.1).
-  const trust = await verifyOciSignature({
+  // Before any layer is written — or fetched (C3.1). The INDEX digest is what
+  // the lock pinned and what the workflow signed, so it is verified first,
+  // exactly as a single-manifest artifact's digest always was. A platform
+  // child, if there is one, gets its OWN independent verification below —
+  // this call does not stand in for that.
+  const rootTrust = await verifyOciSignature({
     ...transport,
     digest,
     certificateIdentityResolver:
       options.ociCertificateIdentityResolver ?? defaultOciCertificateIdentityResolver,
     sigstoreVerifier: options.sigstoreVerifier,
   });
+
+  // A platform-bearing artifact (today: only slack) publishes an OCI image
+  // INDEX rather than a single manifest — one child manifest per platform the
+  // tool supports, per OCI-TOOL-LAYER-0918.md §5. Everything below this
+  // block, unchanged, operates on `manifest`/`trust`: for a JS-only connector
+  // `manifest` IS the root object fetched above, so that path is byte-for-
+  // byte what ran before an index existed.
+  let manifest = rootManifest;
+  let trust = rootTrust;
+  let selectedPlatform = null;
+
+  if (isOciImageIndex(rootManifest)) {
+    const { manifest: childManifest, digest: childDigest, platform } =
+      await resolveIndexPlatformChild({
+        index: rootManifest,
+        transport,
+        repository: reference.repository,
+        hostPlatform: options.hostPlatform,
+      });
+
+    // The child's OWN digest and signature are verified independently of the
+    // index's (OCI-TOOL-LAYER-0918.md §5: "verifies that child manifest's own
+    // digest and signature — the signature chain doesn't change shape, only
+    // which object in it a given install run is checking"). A valid index
+    // signature says nothing about a child if the child were not ALSO
+    // checked — the index's `manifests[].digest` is just a claim, no
+    // different in kind from any other descriptor, until the object at that
+    // digest is fetched and its own descriptors are chased down (C4.1 applied
+    // one level up).
+    const childTrust = await verifyOciSignature({
+      ...transport,
+      digest: childDigest,
+      certificateIdentityResolver:
+        options.ociCertificateIdentityResolver ?? defaultOciCertificateIdentityResolver,
+      sigstoreVerifier: options.sigstoreVerifier,
+    });
+
+    manifest = childManifest;
+    trust = childTrust;
+    selectedPlatform = platform;
+  }
 
   const layers = indexLayersByMediaType(manifest, { repository: reference.repository });
 
@@ -914,6 +1021,24 @@ async function fetchOciArtifact(entry, options = {}) {
   const assetsBytes = layers.assets
     ? await fetchBlob({ ...transport, digest: layers.assets.digest })
     : null;
+  const toolsBytes = layers.tools
+    ? await fetchBlob({ ...transport, digest: layers.tools.digest })
+    : null;
+  const toolConfigBytes = layers.toolConfig
+    ? await fetchBlob({ ...transport, digest: layers.toolConfig.digest })
+    : null;
+
+  // A platform child manifest MUST carry a `tools` layer — an index exists
+  // only because a tool needed bundling, so a selected child with no tool
+  // layer is not a smaller valid artifact, it is the one thing this whole
+  // path exists to deliver, missing.
+  if (selectedPlatform && !toolsBytes) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: the ${selectedPlatform.os}/${selectedPlatform.architecture} ` +
+        `child manifest carries no "tools" layer`,
+      "unsupported-layer"
+    );
+  }
 
   let config;
   let profile;
@@ -995,12 +1120,28 @@ async function fetchOciArtifact(entry, options = {}) {
   const assetFiles = assetsBytes
     ? await readLayerArchive(assetsBytes, `${reference.repository} assets layer`)
     : [];
+  // `allowExecutable`: this is the ONE layer kind that may legitimately carry
+  // a binary. Every other `readLayerArchive` call above and below leaves it
+  // at the default `false`, so a tool binary landing in any other layer is
+  // refused rather than silently accepted (C4.5.tool).
+  const toolFiles = toolsBytes
+    ? await readLayerArchive(toolsBytes, `${reference.repository} tools layer`, {
+        allowExecutable: true,
+      })
+    : [];
+  const toolConfigFiles = toolConfigBytes
+    ? await readLayerArchive(toolConfigBytes, `${reference.repository} tool-config layer`)
+    : [];
 
   // Translated into the layout the installed tree already has (C5.1): the
   // artifact stores its entrypoint at `code/collection-profile.mjs`, the
   // installed tree expects it at the lock's `entrypointPath`. Licences and
   // assets get their own subtrees, and licences are written rather than
-  // dropped because distribution requires shipping them (C5.4).
+  // dropped because distribution requires shipping them (C5.4). `tools/` and
+  // `config/` are SIBLINGS of `code/` for exactly the reason the connector's
+  // own `../tools/…`/`../config/…` reads need them to be: one `..` from
+  // `code/collection-profile.mjs` must land inside the install root, not walk
+  // out of it (the escape this whole layer exists to close).
   return {
     manifest: profile,
     manifestBuffer: profileBytes,
@@ -1013,6 +1154,12 @@ async function fetchOciArtifact(entry, options = {}) {
     assetFiles: [
       ...licenseFiles.map((file) => ({ path: `licenses/${file.path}`, buffer: file.buffer })),
       ...assetFiles.map((file) => ({ path: `assets/${file.path}`, buffer: file.buffer })),
+      ...toolFiles.map((file) => ({
+        path: `tools/${file.path}`,
+        buffer: file.buffer,
+        executable: file.executable,
+      })),
+      ...toolConfigFiles.map((file) => ({ path: `config/${file.path}`, buffer: file.buffer })),
     ],
     readme: null,
     oci: {
@@ -1284,6 +1431,7 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
       ? resolved.assetFiles.map((file) => ({
           relativePath: `${artifactRoot}/${validateRelativeArtifactPath(file.path, "artifact asset path")}`,
           buffer: file.buffer,
+          executable: file.executable === true,
         }))
       : []),
   ];
@@ -1572,6 +1720,12 @@ export async function installFromLock({
   for (const write of writes) {
     ensureParentDir(write.absolutePath);
     writeFileSync(write.absolutePath, write.buffer);
+    // The ONLY files ever marked executable are tool-layer members that
+    // `readLayerArchive` already restricted to mode 0644 or 0755 on the way
+    // in (C4.5.tool) — this sets the bit `writeFileSync`'s own default (0644)
+    // does not, it does not widen anything the archive read did not already
+    // allow.
+    if (write.executable) chmodSync(write.absolutePath, 0o755);
   }
 
   if (prune) {
