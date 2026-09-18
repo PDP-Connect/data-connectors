@@ -45,6 +45,39 @@ function assertSafeRecognisableSvg(source, filename) {
   }
 }
 
+// Hand-drawn placeholder glyphs, not real brand marks (verified against simple-icons
+// v16.31.0: slack/openai/pocket were removed from simple-icons after brand-owner
+// takedown/product-retirement; whoop/ynab/oura were never added; heb/usaa/wholefoods/
+// google_takeout have no vendor-published simple-icons entry at all). No legitimate
+// mark is available for any of these today, so they are exempted from the
+// real-brand-mark shape checks below rather than shipped as invented logos. See
+// /home/tnunamak/code/pdpp/local/ICON-ART-0918.md for the per-icon verdict.
+const KNOWN_PLACEHOLDER_ICONS = new Set([
+  "icons/codex.svg",
+  "icons/heb.svg",
+  "icons/google_takeout.svg",
+  "icons/oura.svg",
+  "icons/pocket.svg",
+  "icons/slack.svg",
+  "icons/usaa.svg",
+  "icons/wholefoods.svg",
+  "icons/whoop.svg",
+  "icons/ynab.svg",
+]);
+
+function assertRealBrandMarkShape(source, filename) {
+  const root = source.match(/^\s*<svg\b([^>]*)>/);
+  assert.ok(root, `${filename}: SVG root is required`);
+  const viewBox = root[1].match(/\bviewBox\s*=\s*["']([^"']*)["']/i);
+  assert.ok(viewBox, `${filename}: viewBox is required`);
+  assert.equal(viewBox[1].replace(/\s+/g, " ").trim(), "0 0 24 24", `${filename}: viewBox must be exactly "0 0 24 24"`);
+  assert.doesNotMatch(source, /\bstroke\s*=/i, `${filename}: real brand marks are filled paths, not stroke-based glyphs`);
+  const innerFills = source.slice(root[0].length).match(/\bfill\s*=/gi) ?? [];
+  assert.equal(innerFills.length, 0, `${filename}: fill must be declared once on the root <svg>, not overridden on inner elements`);
+  const svgTagCount = (source.match(/<svg\b/g) ?? []).length;
+  assert.equal(svgTagCount, 1, `${filename}: must be a single bare <svg> root`);
+}
+
 function readManifest(filename) {
   const path = join(manifestsDir, filename);
   return { path, manifest: JSON.parse(readFileSync(path, "utf8")) };
@@ -111,5 +144,21 @@ test("every indexed brand icon is a self-contained, intentionally inked SVG mark
       const darkPath = iconPathFromUrl(icon.darkUrl);
       assertSafeRecognisableSvg(readFileSync(join(manifestsDir, darkPath), "utf8"), darkPath);
     }
+  }
+});
+
+test("every indexed brand icon not on the known-placeholder allowlist is a real brand mark, not a hand-drawn glyph", () => {
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  const referenced = Object.values(index.brandIcons ?? {});
+
+  for (const icon of referenced) {
+    const relativePath = iconPathFromUrl(icon.url);
+    if (KNOWN_PLACEHOLDER_ICONS.has(relativePath)) continue;
+    const source = readFileSync(join(manifestsDir, relativePath), "utf8");
+    assertRealBrandMarkShape(source, relativePath);
+  }
+
+  for (const placeholder of KNOWN_PLACEHOLDER_ICONS) {
+    assert.ok(existsSync(join(manifestsDir, placeholder)), `${placeholder}: allow-listed placeholder no longer exists — remove it from KNOWN_PLACEHOLDER_ICONS`);
   }
 });
