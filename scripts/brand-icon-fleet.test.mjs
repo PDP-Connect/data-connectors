@@ -52,13 +52,18 @@ function assertSafeRecognisableSvg(source, filename) {
 // vendor-published entry), home-assistant/brands (PNG-only, incompatible with
 // this repo's SVG-only pipeline; also has zero coverage of heb/pocket/usaa/
 // wholefoods/ynab/google_takeout even as PNG), and @iconify/json's `logos`
-// collection (CC0, 2,174 marks; covers codex and slack — restored below from
-// this source — but not heb/oura/pocket/usaa/wholefoods/whoop/ynab). These
-// manifests declare no `brand` object at all, so the console falls back to the
-// deterministic monogram rather than shipping an invented or hand-drawn logo.
-// See /home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md for full source
-// research and coverage numbers, and ICON-ART-0918.md for the original
-// per-connector removal verdict.
+// collection (CC0-1.0, ~2,174 marks) — this last source covers codex and
+// slack, but not heb/oura/pocket/usaa/wholefoods/whoop/ynab. codex.svg and
+// slack.svg were vendored from that collection's `codex` and `slack-icon`
+// keys respectively (256x256 source viewBox), rescaled to this fleet's
+// 0 0 24 24 grid via a uniform linear transform (svgpath(...).scale(24/256)),
+// with slack-icon's 4 separate colored <path> elements merged into one path
+// under a single root fill="#FFFFFF" to match every other icon here. These
+// manifests declare no `brand` object at all, so the console falls back to
+// the deterministic monogram rather than shipping an invented or hand-drawn
+// logo. See /home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md for full
+// source research and coverage numbers, and ICON-ART-0918.md for the
+// original per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
   "google_takeout.json",
