@@ -88,6 +88,30 @@ Verification is not optional in any of these paths. A digest mismatch, an
 unexpected archive member, a path escaping the install root, or an
 unrecognised artifact kind all fail closed.
 
+## Subpath exports for a bytes-and-verification-only consumer
+
+The default `.` entry (`index.mjs`) is the full installer: it also imports
+`node:fs`, `node:child_process` and unpacks tarballs, which a consumer that
+only needs to fetch and verify OCI bytes should not have to pull in. Four
+modules are separately reachable so that surface stays out of the import:
+
+- `@pdpp/connector-manager/oci-registry.mjs` — `fetchManifestByDigest`,
+  `fetchBlob`, and reference/error primitives. Its only Node builtin is
+  `node:crypto` (`createHash`).
+- `@pdpp/connector-manager/oci-verify.mjs` — `verifyOciSignature` and the
+  Sigstore identity constants. Depends on `oci-registry.mjs` and `sigstore`
+  (itself Node-only).
+- `@pdpp/connector-manager/oci-catalog.mjs` — `fetchCatalog`.
+- `@pdpp/connector-manager/catalog-schema.mjs` — `assertCatalog`, the schema
+  guard `fetchCatalog` already applies internally.
+
+None of the four touch `node:fs` or `node:child_process`; the only Node
+builtin anywhere in that graph is `node:crypto`, pulled in by
+`oci-registry.mjs` and inherited by `oci-verify.mjs`/`oci-catalog.mjs`. That
+still makes the whole graph Node-only, not edge-runtime-safe — `sigstore`
+declares the same Node engine floor this package does — so a consumer must
+reach it from a Node server context, not edge middleware.
+
 ## Requirements
 
 Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`, and a `tar` binary on `PATH` for

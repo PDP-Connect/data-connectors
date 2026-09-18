@@ -8,6 +8,10 @@
   "main": "./index.mjs",
   "exports": {
     ".": "./index.mjs",
+    "./oci-registry.mjs": "./oci-registry.mjs",
+    "./oci-verify.mjs": "./oci-verify.mjs",
+    "./oci-catalog.mjs": "./oci-catalog.mjs",
+    "./catalog-schema.mjs": "./catalog-schema.mjs",
     "./package.json": "./package.json"
   },
   "files": [
