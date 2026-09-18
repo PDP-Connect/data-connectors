@@ -33,8 +33,14 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
       assert.ok(row.exclusionReason.trim().length > 0, row.manifest);
     }
   }
+  // Slack is no longer excluded: OCI-TOOL-LAYER-0918.md's index-per-platform
+  // shape (build-connector-oci-artifact.mjs's --tool-binary path) is what it
+  // needed. Signal and google_messages remain excluded for reasons bundling
+  // does not touch — sigtop needs the OS keyring on the same desktop
+  // session, gmcli needs interactive QR pairing with a live phone — neither
+  // is in this change's scope.
   assert.deepEqual(PUBLISH_EXCLUSIONS.map((row) => row.manifest).sort(),
-    ["google_messages", "signal", "slack"]);
+    ["google_messages", "signal"]);
 });
 
 function workflow(name) {

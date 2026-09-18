@@ -267,19 +267,23 @@ function runExecutableContract({ entrypoint, installRoot }) {
 	return { exports: [`protocol: DONE/${done.status}`] };
 }
 
-function main() {
-	const artifactRoot = argument("--artifact");
-
-	const config = JSON.parse(
-		readFileSync(join(artifactRoot, "config.json"), "utf8"),
-	);
-	const profileBytes = readFileSync(join(artifactRoot, "collection-profile.json"));
+/**
+ * Verify one manifest's worth of layers — the common artifact root for a
+ * JS-only connector, or one platform child directory for a bundled-tool
+ * connector. `layerFiles` lets a platform child point at the COMMON layers
+ * (which live at the artifact root, not inside the child's own directory —
+ * see build-connector-oci-artifact.mjs's platform-child layout) while still
+ * reading its own `config.json`/`layers.json` and its own `tools.tar.gz`.
+ */
+function verifyManifest({ manifestRoot, resolveLayerPath, label }) {
+	const config = JSON.parse(readFileSync(join(manifestRoot, "config.json"), "utf8"));
+	const profileBytes = readFileSync(resolveLayerPath("collection-profile.json"));
 	const profile = JSON.parse(profileBytes);
 
 	// 1. Config/profile cross-check.
 	if (config.profile_digest !== sha256(profileBytes)) {
 		throw new Error(
-			`config.profile_digest ${config.profile_digest} does not match the profile layer ${sha256(profileBytes)}`,
+			`${label}: config.profile_digest ${config.profile_digest} does not match the profile layer ${sha256(profileBytes)}`,
 		);
 	}
 	// `version` is in this list because the builder copies the profile layer
@@ -294,32 +298,61 @@ function main() {
 	]) {
 		if (config[field] !== profile[field]) {
 			throw new Error(
-				`config.${field} is '${config[field]}' but the profile says '${profile[field]}'`,
+				`${label}: config.${field} is '${config[field]}' but the profile says '${profile[field]}'`,
 			);
 		}
 	}
 
 	// 2. Archive safety, on every tarball present.
-	const layers = JSON.parse(readFileSync(join(artifactRoot, "layers.json"), "utf8"));
+	const layers = JSON.parse(readFileSync(join(manifestRoot, "layers.json"), "utf8"));
 	for (const layer of layers.layers) {
 		if (!layer.file.endsWith(".tar.gz")) continue;
-		const path = join(artifactRoot, layer.file);
-		if (!existsSync(path)) throw new Error(`Declared layer missing: ${layer.file}`);
+		const path = resolveLayerPath(layer.file);
+		if (!existsSync(path)) throw new Error(`${label}: declared layer missing: ${layer.file}`);
 		for (const member of listTarballMembers(path)) assertSafeMember(member.name);
 	}
 
-	// 3 + 4. Unpack the code layer and import it for real.
+	// A platform child's own `platform` must agree with what its filename
+	// promised and with the index that pointed at it — checked by the caller,
+	// which is why this function ALSO returns config/profile/layers rather
+	// than only validating and discarding them.
+	return { config, profile, layers };
+}
+
+/**
+ * Unpack the code layer (plus, for a platform child, its tool binary) into a
+ * fresh install root with NO node_modules, and drive the entrypoint through
+ * its declared contract for real.
+ *
+ * `toolBinaryPath` is set only for a platform child: it is the built
+ * `tools.tar.gz`'s member, unpacked to `tools/<name>` — a SIBLING of `code/`
+ * — so this exercises the exact layout `resolveSlackdumpBin`'s
+ * `../tools/slackdump` (one level up from `code/collection-profile.mjs`)
+ * actually resolves against, not an approximation of it.
+ */
+function verifyEntrypointLoads({ manifestRoot, layerPathFor, config, toolTarball, toolConfigTarball, label }) {
 	const scratch = mkdtempSync(join(tmpdir(), "pdpp-artifact-verify-"));
 	try {
 		const installRoot = join(scratch, "install");
 		const codeRoot = join(installRoot, "code");
 		execFileSync("mkdir", ["-p", codeRoot]);
-		execFileSync("tar", ["-xzf", join(artifactRoot, "code.tar.gz"), "-C", codeRoot]);
+		execFileSync("tar", ["-xzf", layerPathFor("code.tar.gz"), "-C", codeRoot]);
+
+		if (toolTarball) {
+			const toolsRoot = join(installRoot, "tools");
+			execFileSync("mkdir", ["-p", toolsRoot]);
+			execFileSync("tar", ["-xzf", toolTarball, "-C", toolsRoot]);
+		}
+		if (toolConfigTarball) {
+			const configRoot = join(installRoot, "config");
+			execFileSync("mkdir", ["-p", configRoot]);
+			execFileSync("tar", ["-xzf", toolConfigTarball, "-C", configRoot]);
+		}
 
 		const entrypoint = join(installRoot, config.entrypoint);
 		if (!existsSync(entrypoint)) {
 			throw new Error(
-				`config.entrypoint '${config.entrypoint}' does not exist once code.tar.gz is unpacked`,
+				`${label}: config.entrypoint '${config.entrypoint}' does not exist once code.tar.gz is unpacked`,
 			);
 		}
 
@@ -341,7 +374,7 @@ function main() {
 		const contract = config.runtime?.host_runtime_contract;
 		if (!contract) {
 			throw new Error(
-				"config.runtime.host_runtime_contract is missing. The artifact does not state which packages it " +
+				`${label}: config.runtime.host_runtime_contract is missing. The artifact does not state which packages it ` +
 					"expects the host to provide, so there is no claim to check — rebuild with a builder that records it.",
 			);
 		}
@@ -349,7 +382,7 @@ function main() {
 		const kind = config.entrypoint_kind;
 		if (kind !== "import-safe" && kind !== "executable") {
 			throw new Error(
-				`config.entrypoint_kind is '${kind}', so the verifier cannot tell whether importing this entrypoint is ` +
+				`${label}: config.entrypoint_kind is '${kind}', so the verifier cannot tell whether importing this entrypoint is ` +
 					"safe or whether it must be driven through the protocol. Rebuild with a builder that records it.",
 			);
 		}
@@ -361,19 +394,100 @@ function main() {
 			expected: config.exports,
 		});
 
+		console.log(`  [${label}] entrypoint ${config.entrypoint}`);
+		console.log(
+			`  [${label}] host contract v${contract.version}            ${contract.packages.length ? contract.packages.join(", ") : "nothing required"}`,
+		);
+		console.log(
+			`  [${label}] runs with no node_modules    ok (${kind}; ${result.exports.join(",")})`,
+		);
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
+	}
+}
+
+function main() {
+	const artifactRoot = argument("--artifact");
+	const indexPath = join(artifactRoot, "index.json");
+
+	if (!existsSync(indexPath)) {
+		// The JS-only shape, unchanged: one manifest, common layers at the
+		// artifact root, no platform children.
+		const { config } = verifyManifest({
+			manifestRoot: artifactRoot,
+			resolveLayerPath: (file) => join(artifactRoot, file),
+			label: artifactRoot,
+		});
+		verifyEntrypointLoads({
+			manifestRoot: artifactRoot,
+			layerPathFor: (file) => join(artifactRoot, file),
+			config,
+			label: config.connector_key,
+		});
 		console.log(`${config.connector_key}@${config.version} verified`);
 		console.log(`  profile digest cross-check   ok`);
 		console.log(`  archive members safe         ok`);
 		console.log(`  version agrees with profile  ok`);
-		console.log(`  entrypoint ${config.entrypoint}`);
-		console.log(
-			`  host contract v${contract.version}            ${contract.packages.length ? contract.packages.join(", ") : "nothing required"}`,
-		);
-		console.log(
-			`  runs with no node_modules    ok (${kind}; ${result.exports.join(",")})`,
-		);
-	} finally {
-		rmSync(scratch, { recursive: true, force: true });
+		return;
+	}
+
+	// The platform-index shape (OCI-TOOL-LAYER-0918.md §5): the five common
+	// layers live at the artifact root, same as above, and each platform
+	// child under platforms/<os>-<arch>/ carries its own config.json,
+	// layers.json, tools.tar.gz, and (optionally) config.tar.gz.
+	const index = JSON.parse(readFileSync(indexPath, "utf8"));
+	if (!Array.isArray(index.manifests) || index.manifests.length === 0) {
+		throw new Error("index.json declares no platform manifests");
+	}
+
+	console.log(`${index.annotations?.["dev.pdpp.connector.key"]}@${index.annotations?.["org.opencontainers.image.version"]} — image index with ${index.manifests.length} platform(s)`);
+
+	for (const entry of index.manifests) {
+		const platformDir = join(artifactRoot, entry.directory);
+		const label = `${entry.platform.os}/${entry.platform.architecture}`;
+
+		const { config, layers } = verifyManifest({
+			manifestRoot: platformDir,
+			resolveLayerPath: (file) =>
+				// Common layers (profile/code/assets/licenses/provenance) live at
+				// the artifact root; only tools.tar.gz/config.tar.gz are the
+				// child's OWN files. layers.json lists both by plain filename, so
+				// this dispatches on which of the two directories actually has it.
+				existsSync(join(platformDir, file)) ? join(platformDir, file) : join(artifactRoot, file),
+			label,
+		});
+
+		// The child's declared platform must agree with the index entry that
+		// points at it — the index is what a consumer selects BY, so a child
+		// whose own config disagrees with the slot the index put it in would
+		// verify individually while lying about which platform it is for.
+		if (config.platform?.os !== entry.platform.os || config.platform?.architecture !== entry.platform.architecture) {
+			throw new Error(
+				`${label}: index.json places this manifest at platform ${label}, but its own config.json declares ` +
+					`${config.platform?.os}/${config.platform?.architecture}`,
+			);
+		}
+
+		const toolsLayer = layers.layers.find((layer) => layer.file === "tools.tar.gz");
+		if (!toolsLayer) {
+			throw new Error(`${label}: a platform child manifest must declare a tools.tar.gz layer`);
+		}
+		const toolConfigLayer = layers.layers.find((layer) => layer.file === "config.tar.gz");
+
+		verifyEntrypointLoads({
+			manifestRoot: platformDir,
+			layerPathFor: (file) =>
+				existsSync(join(platformDir, file)) ? join(platformDir, file) : join(artifactRoot, file),
+			config,
+			toolTarball: join(platformDir, "tools.tar.gz"),
+			toolConfigTarball: toolConfigLayer ? join(platformDir, "config.tar.gz") : null,
+			label,
+		});
+
+		console.log(`  [${label}] profile digest cross-check   ok`);
+		console.log(`  [${label}] archive members safe         ok`);
+		console.log(`  [${label}] version agrees with profile  ok`);
+		console.log(`  [${label}] platform agrees with index   ok`);
 	}
 }
 
