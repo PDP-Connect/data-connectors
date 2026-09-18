@@ -66,6 +66,7 @@ import { verify as verifySigstoreBundle } from "sigstore";
 import {
   OciRegistryError,
   fetchBlob,
+  fetchManifestByDigest,
   fetchSignatureManifest,
   isValidDigest,
   sha256Digest,
@@ -104,6 +105,12 @@ export const OCI_LAYER_MEDIA_TYPES = {
   assets: "application/vnd.pdpp.connector.assets.v1.tar+gzip",
   licenses: "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
   provenance: "application/vnd.pdpp.connector.provenance.v1+json",
+  // Present only on a PLATFORM CHILD manifest (OCI-TOOL-LAYER-0918.md §5): the
+  // per-platform tool binary, and any code-relative config asset that used to
+  // escape the install root before it travelled inside the artifact. Absent
+  // from every JS-only connector's single manifest, same shape as `assets`.
+  tools: "application/vnd.pdpp.connector.tools.v1.tar+gzip",
+  toolConfig: "application/vnd.pdpp.connector.tool-config.v1.tar+gzip",
 };
 
 export const OCI_CONFIG_MEDIA_TYPE =
@@ -482,6 +489,103 @@ export function indexLayersByMediaType(manifest, { repository = "" } = {}) {
   }
 
   return byKind;
+}
+
+export const OCI_IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json";
+const DOCKER_MANIFEST_LIST_MEDIA_TYPE =
+  "application/vnd.docker.distribution.manifest.list.v2+json";
+
+/**
+ * Is this manifest object an image INDEX rather than a single image manifest?
+ *
+ * A JS-only connector's root object is a manifest with a `layers[]` array; a
+ * platform-bearing connector's root object is an index with a `manifests[]`
+ * array of descriptors instead. The two are structurally distinct at the
+ * media-type level, which is what OCI's own multi-arch tooling dispatches on
+ * — checked here rather than inferred from which array is present, so an
+ * index that (incorrectly) also carried a `layers[]` key would still be
+ * refused as unsupported by the code path it is routed to, rather than
+ * silently read as whichever shape happened to match.
+ */
+export function isOciImageIndex(manifest) {
+  return (
+    manifest?.mediaType === OCI_IMAGE_INDEX_MEDIA_TYPE ||
+    manifest?.mediaType === DOCKER_MANIFEST_LIST_MEDIA_TYPE
+  );
+}
+
+/**
+ * The `os`/`architecture` pair Node's own `process` reports, translated to
+ * the OCI spec's `GOOS`/`GOARCH`-shaped vocabulary the `platform` descriptor
+ * uses (image-index.md). This is the ONLY place that translation happens —
+ * every index-selection decision goes through this function, so a consumer
+ * built for a fifth platform fails by naming what it could not find rather
+ * than by drifting to whichever child happens to load.
+ */
+export function hostOciPlatform({ platform = process.platform, arch = process.arch } = {}) {
+  const os = { linux: "linux", darwin: "darwin", win32: "windows" }[platform];
+  const architecture = { x64: "amd64", arm64: "arm64" }[arch];
+  if (!os || !architecture) {
+    throw new OciRegistryError(
+      `This host (${platform}/${arch}) has no supported OCI platform mapping`,
+      "unsupported-layer"
+    );
+  }
+  return { os, architecture };
+}
+
+/**
+ * Pick the index child matching a platform, fetch it BY THE DIGEST THE INDEX
+ * NAMED, and prove those bytes are in fact that digest.
+ *
+ * Selection is by the spec's real `platform.os`/`platform.architecture`
+ * fields (OCI-TOOL-LAYER-0918.md §1, §5) — never by array position, never by
+ * a title annotation — because position and annotations are exactly the kind
+ * of implicit convention Homebrew's bottles needed to invent custom
+ * `sh.brew.*` matching to work around (same report, §3); slackdump needs
+ * nothing finer than bare os/arch, so the spec field alone is sufficient and
+ * no annotation convention is introduced.
+ *
+ * Refuses rather than guesses when: no child matches this host's platform: a
+ * consumer that cannot find its platform must say so, not fall back to the
+ * first entry (this is precisely the Helm/`helm-32540` failure mode
+ * OCI-TOOL-LAYER-0918.md §3 documents — "a consumer not purpose-built to
+ * resolve ambiguity inside an index will fail unpredictably" — so the
+ * resolution here is exhaustive and explicit rather than positional).
+ */
+export async function resolveIndexPlatformChild({
+  index,
+  transport,
+  repository = "",
+  hostPlatform = null,
+}) {
+  const wanted = hostPlatform ?? hostOciPlatform();
+  const candidates = Array.isArray(index?.manifests) ? index.manifests : [];
+
+  const match = candidates.find(
+    (candidate) =>
+      candidate?.platform?.os === wanted.os &&
+      candidate?.platform?.architecture === wanted.architecture
+  );
+  if (!match) {
+    const available = candidates
+      .map((candidate) => `${candidate?.platform?.os}/${candidate?.platform?.architecture}`)
+      .join(", ");
+    throw new OciRegistryError(
+      `Refusing ${repository}: the published index carries no child for ${wanted.os}/${wanted.architecture} ` +
+        `(available: ${available || "none"})`,
+      "unsupported-layer"
+    );
+  }
+  if (!isValidDigest(match.digest)) {
+    throw new OciRegistryError(
+      `Refusing ${repository}: the index child for ${wanted.os}/${wanted.architecture} has an invalid digest`,
+      "tampered"
+    );
+  }
+
+  const { manifest } = await fetchManifestByDigest({ ...transport, digest: match.digest });
+  return { manifest, digest: match.digest, platform: wanted };
 }
 
 /**

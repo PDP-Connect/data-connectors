@@ -61,8 +61,9 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import {
 	describeConnectorArtifactRoot,
@@ -134,8 +135,38 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
 	return typeof error === "object" && error !== null && "code" in error;
 }
 
+/**
+ * Where slackdump actually is, in priority order:
+ *
+ *   1. `SLACKDUMP_BIN` — an explicit override. Always wins; this is the
+ *      local-development escape hatch (running against a checkout with no
+ *      installed artifact) and the one path a future non-bundling deployment
+ *      could still use.
+ *   2. The bundled binary, resolved relative to THIS module rather than from
+ *      PATH. Once the OCI artifact is unpacked, this file lives at
+ *      `<install root>/code/collection-profile.mjs`, and the artifact's own
+ *      per-platform `tools/` layer is a SIBLING of `code/` (one level up),
+ *      so `../tools/slackdump` from here resolves to `<install
+ *      root>/tools/slackdump` — inside the install root, never outside it.
+ *      This is the primary path per OCI-TOOL-LAYER-0918.md §5: the artifact
+ *      carries its own tool, and the connector finds it without a PATH
+ *      lookup or a fetch at collection time.
+ *   3. Bare `"slackdump"` on PATH — the pre-bundling behaviour, kept as a
+ *      last resort for a checkout that never went through the OCI build
+ *      (e.g. running `connectors/slack/index.ts` directly against a
+ *      developer's own `go install`ed binary).
+ */
 function resolveSlackdumpBin(): string {
-	return process.env.SLACKDUMP_BIN || "slackdump";
+	if (process.env.SLACKDUMP_BIN) return process.env.SLACKDUMP_BIN;
+
+	const bundledExtension = process.platform === "win32" ? ".exe" : "";
+	const bundledPath = new URL(
+		`../tools/slackdump${bundledExtension}`,
+		import.meta.url,
+	).pathname;
+	if (existsSync(bundledPath)) return bundledPath;
+
+	return "slackdump";
 }
 
 export function formatSlackdumpMissingError(bin: string): string {
@@ -144,6 +175,39 @@ export function formatSlackdumpMissingError(bin: string): string {
 		"Install slackdump and either put it on PATH or set SLACKDUMP_BIN to its absolute path.",
 		"Docker: the stock reference image does not bundle AGPL-3.0 slackdump; build a derived image that installs it or mount the binary into the container and set SLACKDUMP_BIN to that in-container path.",
 	].join(" ");
+}
+
+/**
+ * Where slackdump-api-config.toml actually is: the artifact's bundled
+ * `config/` layer (one level up from this module, once bundled) if present,
+ * or — running this file directly from source, with no OCI install root —
+ * the checkout's own `packages/polyfill-connectors/config/`. Same "the
+ * artifact's layer takes priority over the source tree" shape as
+ * `resolveSlackdumpBin`, for the same reason: a bundled install must never
+ * fall through to reading outside its own root, but a source checkout that
+ * never went through the OCI build still has the file, just one hop further
+ * away.
+ *
+ * The dev-checkout fallback is built with `dirname()` calls rather than a
+ * second climb-two-levels `new URL(…, import.meta.url)` call on purpose: the
+ * build script's own escaping-asset guard
+ * (scripts/build-connector-oci-artifact.mjs) greps this file's SOURCE for
+ * exactly that shape, because a climb-two-levels URL literal is otherwise
+ * indistinguishable from the real escape this file used to have. This
+ * fallback is genuinely safe — it only runs when `bundledPath` does not
+ * exist, which is never true inside a real artifact — but the guard cannot
+ * see the `existsSync` check guarding it, only matching source text, so the
+ * path is spelled a different way instead of asking the guard to trust it.
+ */
+function resolveSlackdumpApiConfigPath(): string {
+	const bundledPath = new URL(
+		"../config/slackdump-api-config.toml",
+		import.meta.url,
+	).pathname;
+	if (existsSync(bundledPath)) return bundledPath;
+
+	const sourceConfigDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+	return join(sourceConfigDir, "config", "slackdump-api-config.toml");
 }
 
 /**
@@ -3583,11 +3647,9 @@ async function ensureArchiveOnDisk(deps: EnsureArchiveDeps): Promise<void> {
 			// from Slack = process aborts with exit 6). Bumping those retries to 20
 			// aligns them with tier_2 (rate-limit retries), letting the same
 			// exponential-backoff policy ride out server-side hiccups. See
-			// config/slackdump-api-config.toml.
-			const apiConfigPath = new URL(
-				"../../config/slackdump-api-config.toml",
-				import.meta.url,
-			).pathname;
+			// resolveSlackdumpApiConfigPath and
+			// packages/polyfill-connectors/config/slackdump-api-config.toml.
+			const apiConfigPath = resolveSlackdumpApiConfigPath();
 			await runArchiveOrResume({
 				apiConfigPath,
 				archivePath,

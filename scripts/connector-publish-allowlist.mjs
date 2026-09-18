@@ -56,11 +56,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
       "signal",
       "Requires sigtop from PATH or $SIGTOP_BIN; the OCI builder does not implement a per-platform tool layer yet.",
     ],
-    [
-      "slack",
-      "slack",
-      "Requires slackdump from PATH or $SLACKDUMP_BIN and a code-relative config asset; the OCI builder does not implement a per-platform tool layer or asset rewrite yet.",
-    ],
+    ["slack", "slack"],
     ["spotify", "spotify"],
     ["steam", "steam"],
     ["strava", "strava"],

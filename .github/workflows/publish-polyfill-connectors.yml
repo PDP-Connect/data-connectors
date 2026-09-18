@@ -256,13 +256,31 @@ jobs:
             npm ci --ignore-scripts --prefix packages/polyfill-connectors
           fi
 
+      - name: Fetch slackdump's per-platform release binaries
+        # Only Slack declares a `provisioning: "bundled"` external tool today
+        # (OCI-TOOL-LAYER-0918.md §5). This step's OUTPUT becomes bytes inside
+        # a signed, digest-pinned artifact — it is not the "fetch at
+        # collection time" pattern that report's §3.5 warns against; a
+        # consumer's install never reaches this URL.
+        if: steps.target.outputs.selected == 'true' && steps.target.outputs.manifest == 'slack'
+        id: slackdump-binaries
+        run: |
+          set -euo pipefail
+          node scripts/fetch-slackdump-release-binaries.mjs --out "${RUNNER_TEMP}/slackdump-bin" > "${RUNNER_TEMP}/slackdump-bin/args.txt"
+          {
+            echo "args<<SLACKDUMP_TOOL_BINARY_ARGS_EOF"
+            sed 's/^/--tool-binary /' "${RUNNER_TEMP}/slackdump-bin/args.txt"
+            echo "SLACKDUMP_TOOL_BINARY_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build the artifact layers
         if: steps.target.outputs.selected == 'true'
         run: |
           node scripts/build-connector-oci-artifact.mjs \
             --connector "${{ steps.target.outputs.manifest }}" \
             --version "${{ steps.target.outputs.version }}" \
-            --out "${RUNNER_TEMP}/artifact"
+            --out "${RUNNER_TEMP}/artifact" \
+            ${{ steps.slackdump-binaries.outputs.args }}
 
       - name: Prove the built bundle imports before publishing it
         # The gate that matters. The bundle is a single file with its in-tree
@@ -311,6 +329,46 @@ jobs:
 
           echo "$GH_TOKEN" | oras login ghcr.io \
             --username "${{ github.actor }}" --password-stdin
+
+          # A platform-bearing connector (today: only slack) built an OCI
+          # image INDEX rather than a single manifest — index.json is present
+          # only in that case (OCI-TOOL-LAYER-0918.md §5). Pushing N platform
+          # children plus an index, each independently signed, is genuinely
+          # different work from the single-manifest path below, so it is a
+          # SEPARATE, independently testable script
+          # (scripts/publish-connector-index.mjs) rather than a second inline
+          # bash sequence re-deriving this step's own republication-guard and
+          # sign-before-tag discipline. Everything below this block is
+          # untouched for the 43 JS-only connectors that never take it.
+          if [ -f index.json ]; then
+            GH_ACTOR="${{ github.actor }}" node "${GITHUB_WORKSPACE}/scripts/publish-connector-index.mjs" \
+              --artifact . \
+              --repository "${REPOSITORY}" \
+              --version "${VERSION}" \
+              --connector "${CONNECTOR}" \
+              | tee "${RUNNER_TEMP}/publish-index-output.txt"
+            DIGEST="$(grep '^digest=' "${RUNNER_TEMP}/publish-index-output.txt" | tail -1 | cut -d= -f2)"
+            case "$DIGEST" in
+              sha256:*) ;;
+              *) echo "::error::publish-connector-index.mjs did not report a sha256 digest"; exit 1 ;;
+            esac
+            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Published \`${CONNECTOR}\` ${VERSION} (multi-platform index)"
+              echo
+              echo "\`\`\`"
+              echo "${REPOSITORY}@${DIGEST}"
+              echo "\`\`\`"
+              echo
+              echo "Verify (resolves your platform's child manifest and verifies its own signature):"
+              echo "\`\`\`"
+              echo "cosign verify ${REPOSITORY}@${DIGEST} \\"
+              echo "  --certificate-identity 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main' \\"
+              echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           # The media types live in layers.json beside the bytes they describe,
           # written by the build script, so they are not restated in YAML where

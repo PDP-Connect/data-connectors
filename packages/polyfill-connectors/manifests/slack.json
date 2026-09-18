@@ -20,6 +20,8 @@
 				"license": "AGPL-3.0",
 				"purpose": "Session-token Slack archive export",
 				"install_hint": "go install github.com/rusq/slackdump/v4/cmd/slackdump@latest",
+				"provisioning": "bundled",
+				"platforms": ["linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"],
 				"detect": {
 					"executable": "slackdump",
 					"executable_env_override": "SLACKDUMP_BIN",

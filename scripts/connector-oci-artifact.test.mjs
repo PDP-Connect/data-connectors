@@ -369,7 +369,6 @@ describe("C-T3 named packaging refusals and the Gmail repair", () => {
 	});
 
 	for (const [connector, binary] of [
-		["slack", "SLACKDUMP_BIN"],
 		["signal", "SIGTOP_BIN"],
 		["google_messages", "GMCLI_BIN"],
 	]) {
@@ -377,9 +376,22 @@ describe("C-T3 named packaging refusals and the Gmail repair", () => {
 			const result = build(["--connector", connector, "--out", join(workspace, connector)]);
 			assert.notEqual(result.status, 0);
 			assert.ok(result.stderr.includes(`resolves an executable from PATH or $${binary}`), result.stderr);
-			assert.match(result.stderr, /per-platform tool layer must land first/);
+			assert.match(result.stderr, /provisioning: "bundled"/);
 		});
 	}
+
+	it("slack refuses to build when no --tool-binary is supplied for its declared platforms", () => {
+		// slack.json declares provisioning: "bundled" plus platforms[], which is
+		// what lets assertNoUnbundledNativeDependency's PATH-lookup guard step
+		// aside for it — but a manifest declaring bundling is not itself
+		// bundling. assertToolBinariesSupplied is the second half: it refuses a
+		// build that never actually supplies a binary for a declared platform,
+		// on a named connector and platform, rather than silently publishing an
+		// index with a missing child.
+		const result = build(["--connector", "slack", "--out", join(workspace, "slack-unbundled")]);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /slack declares slackdump for linux\/amd64 but no matching --tool-binary/);
+	});
 });
 
 describe("P2-1 — version agreement", () => {
