@@ -63,9 +63,13 @@ for (const file of manifestFiles) {
   const implementation = resolveConnectorImplementation(manifest.connector_id);
   assert.equal(implementation.manifest.connector_id, manifest.connector_id);
   assert.match(implementation.entry, /^file:\\/\\//);
-  assert.match(implementation.brandIcon, /^file:\\/\\//);
   await access(fileURLToPath(implementation.entry));
-  await access(fileURLToPath(implementation.brandIcon));
+  if (manifest.brand !== undefined) {
+    assert.match(implementation.brandIcon, /^file:\\/\\//);
+    await access(fileURLToPath(implementation.brandIcon));
+  } else {
+    assert.equal(implementation.brandIcon, undefined);
+  }
 }
 
 await access(join(packageRoot, "config", "slackdump-api-config.toml"));
@@ -138,7 +142,7 @@ async function typecheckEveryExport(projectDir, installedPackage) {
 import { resolveConnectorImplementation } from "@pdpp/polyfill-connectors/resolve";
 const resolvedConnector = resolveConnectorImplementation("https://registry.pdpp.dev/connectors/ynab");
 const resolvedEntry: string = resolvedConnector.entry;
-const resolvedBrandIcon: string = resolvedConnector.brandIcon;
+const resolvedBrandIcon: string | undefined = resolvedConnector.brandIcon;
 const resolvedManifest: Record<string, unknown> = resolvedConnector.manifest;
 void resolvedEntry;
 void resolvedBrandIcon;

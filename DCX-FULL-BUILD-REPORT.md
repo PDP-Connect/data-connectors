@@ -17,7 +17,7 @@ await import(implementation.entry);
 const executablePath = fileURLToPath(implementation.entry);
 ```
 
-`resolveConnectorImplementation(connectorId)` returns `{ entry, manifest, brandIcon }`. `entry` is a directly importable `file:` URL for the installed package's built JavaScript entrypoint. `brandIcon` is a `file:` URL for the installed SVG. `manifest` is the indexed manifest object. An unknown ID throws `ConnectorImplementationNotFoundError` with code `ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND`. The data-connect controller must call this resolver and, when it needs a process argument, use `fileURLToPath(entry)`; it must not enumerate manifest or connector directories.
+`resolveConnectorImplementation(connectorId)` returns `{ entry, manifest, brandIcon }`. `entry` is a directly importable `file:` URL for the installed package's built JavaScript entrypoint. `brandIcon` is a `file:` URL for the installed SVG, **or `undefined`** for a connector with no legitimately available brand mark (as of ICON-ART-0918; see `DCX-BRAND-ICONS-REPORT.md`) — callers must render the deterministic monogram fallback in that case rather than assuming a URL. `manifest` is the indexed manifest object. An unknown ID throws `ConnectorImplementationNotFoundError` with code `ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND`. The data-connect controller must call this resolver and, when it needs a process argument, use `fileURLToPath(entry)`; it must not enumerate manifest or connector directories.
 
 ## Validation
 

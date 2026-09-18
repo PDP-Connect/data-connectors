@@ -28,18 +28,29 @@ async function buildIndex() {
 				"string",
 				`${file} must declare connector_id`,
 			);
-			assert.equal(
-				typeof manifest.brand?.icon,
-				"string",
-				`${file} must declare brand.icon`,
-			);
+			// brand is optional: a connector with no legitimately available brand mark
+			// declares no brand object at all and falls back to the console's
+			// deterministic monogram, rather than shipping an invented or hand-drawn
+			// logo. See NOTICE and /home/tnunamak/code/pdpp/local/ICON-ART-0918.md.
+			if (manifest.brand !== undefined) {
+				assert.equal(
+					typeof manifest.brand.icon,
+					"string",
+					`${file} must declare brand.icon when brand is present`,
+				);
+			}
 			const connectorDirectory = file.slice(0, -".json".length);
 			const entry = `./connectors/${connectorDirectory}/index.js`;
-			const brandIcon = `./manifests/${manifest.brand.icon}`;
+			const brandIcon =
+				manifest.brand !== undefined
+					? `./manifests/${manifest.brand.icon}`
+					: undefined;
 			await access(
 				path.join(packageRoot, `./connectors/${connectorDirectory}/index.ts`),
 			);
-			await access(path.join(packageRoot, brandIcon));
+			if (brandIcon !== undefined) {
+				await access(path.join(packageRoot, brandIcon));
+			}
 			return { brandIcon, connectorId: manifest.connector_id, entry, manifest };
 		}),
 	);

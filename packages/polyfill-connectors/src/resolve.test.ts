@@ -26,7 +26,16 @@ test("every shipped manifest resolves to its built connector entry", () => {
 		const id = connectorId(manifest, file);
 		const implementation = resolveConnectorImplementation(id);
 		assert.match(implementation.entry, /^file:\/\//);
-		assert.match(implementation.brandIcon, /^file:\/\//);
+		if (
+			typeof manifest === "object" &&
+			manifest !== null &&
+			"brand" in manifest &&
+			manifest.brand !== undefined
+		) {
+			assert.match(implementation.brandIcon ?? "", /^file:\/\//);
+		} else {
+			assert.equal(implementation.brandIcon, undefined);
+		}
 		assert.equal(implementation.manifest.connector_id, id);
 	}
 });
