@@ -3,10 +3,16 @@
 Audit date: 2026-09-03. Scope: the 45 assets referenced by root `connector-index.json` `brandIcons`.
 
 **Stale as of ICON-ART-0918 (2026-09-18):** 10 of these entries (codex, heb, google_takeout,
-oura, pocket, slack, usaa, wholefoods, whoop, ynab) have since been dropped from `brandIcons`
-entirely — no legitimate mark was available, so those manifests now ship no `brand` block and
-fall through to the console's monogram instead. `brandIcons` now has 35 entries. See
-`DCX-BRAND-ICONS-REPORT.md` and `/home/tnunamak/code/pdpp/local/ICON-ART-0918.md`.
+oura, pocket, slack, usaa, wholefoods, whoop, ynab) were dropped from `brandIcons` entirely —
+no legitimate mark was available in simple-icons, so those manifests shipped no `brand` block
+and fell through to the console's monogram instead. `brandIcons` dropped to 35 entries.
+
+**Superseded by ICON-SOURCES-0918 (2026-09-18):** `codex` and `slack` are restored — real
+marks exist in `@iconify/json`'s CC0 `logos` collection, vendored and normalized to this
+fleet's monochrome convention. `brandIcons` now has 37 entries; `heb`, `google_takeout`,
+`oura`, `pocket`, `usaa`, `wholefoods`, `whoop`, `ynab` remain monogram-only (checked against
+simple-icons, home-assistant/brands, and `@iconify/json`'s `logos` collection — no legitimate
+mark available in any of the three). See `/home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md`.
 
 The fleet now uses square viewBoxes, no fixed root dimensions, no scripts, external references, images, or text, and explicit root ink. The console renders these marks on each manifest's opaque `background_color`; the white monochrome foreground is therefore legible on dark surfaces without a duplicate dark asset. `dark_icon` remains available for a future surface that does not render the tile.
 
