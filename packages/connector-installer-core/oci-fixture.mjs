@@ -471,40 +471,216 @@ export function publishArtifact(
 
   const { digest } = registry.putManifest(manifest, version);
 
-  // The cosign signature object: a manifest at `sha256-<hex>.sig` whose layers
-  // are simple-signing payloads, the signature in one annotation and the
-  // certificate in another.
-  const signerList = signers ?? (signer ? [signer] : []);
-  if (signerList.length > 0) {
-    const sigLayers = signerList.map((candidate) => {
-      const payload = canonicalJson({
-        critical: {
-          identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/${connectorKey}` },
-          image: { "docker-manifest-digest": payloadDigestOverride ?? digest },
-          type: "cosign container image signature",
-        },
-        optional: null,
-      });
-      return {
-        mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
-        digest: registry.putBlob(payload),
-        size: payload.length,
-        annotations: cosignSignatureAnnotations(candidate, payload, { omitRekorBundle }),
-      };
-    });
-
-    registry.putManifest(
-      {
-        schemaVersion: 2,
-        mediaType: "application/vnd.oci.image.manifest.v1+json",
-        config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: registry.putBlob(Buffer.from("{}")), size: 2 },
-        layers: sigLayers,
-      },
-      `${digest.replace(":", "-")}.sig`
-    );
-  }
+  signManifest(registry, digest, {
+    connectorKey,
+    signer,
+    signers,
+    omitRekorBundle,
+    payloadDigestOverride,
+  });
 
   return { digest, manifest, profile, profileBytes, config, configBytes, codeBytes, provenanceBytes };
+}
+
+/**
+ * Push the cosign signature object for a manifest digest that already exists
+ * in the registry: a manifest at `sha256-<hex>.sig` whose layers are
+ * simple-signing payloads, the signature in one annotation and the
+ * certificate in another. Factored out of `publishArtifact` so
+ * `publishIndexArtifact` can sign an index digest AND each child digest with
+ * the identical wire shape, rather than a second hand-rolled version of it.
+ */
+function signManifest(registry, digest, { connectorKey, signer = null, signers = null, omitRekorBundle = false, payloadDigestOverride = null } = {}) {
+  const signerList = signers ?? (signer ? [signer] : []);
+  if (signerList.length === 0) return;
+
+  const sigLayers = signerList.map((candidate) => {
+    const payload = canonicalJson({
+      critical: {
+        identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/${connectorKey}` },
+        image: { "docker-manifest-digest": payloadDigestOverride ?? digest },
+        type: "cosign container image signature",
+      },
+      optional: null,
+    });
+    return {
+      mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+      digest: registry.putBlob(payload),
+      size: payload.length,
+      annotations: cosignSignatureAnnotations(candidate, payload, { omitRekorBundle }),
+    };
+  });
+
+  registry.putManifest(
+    {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: registry.putBlob(Buffer.from("{}")), size: 2 },
+      layers: sigLayers,
+    },
+    `${digest.replace(":", "-")}.sig`
+  );
+}
+
+/**
+ * Push a platform-bearing connector artifact as a real OCI image INDEX: one
+ * child manifest per entry in `platforms`, each carrying the common
+ * profile/code/licenses/provenance layers PLUS its own `tools.tar.gz` (and
+ * optional `config.tar.gz`), a `config.json` restating its real
+ * `platform.os`/`platform.architecture`, and an INDEPENDENT signature —
+ * mirroring build-connector-oci-artifact.mjs's actual output shape
+ * (OCI-TOOL-LAYER-0918.md §5) rather than inventing a test-only layout.
+ *
+ * `toolBinaries` is `{ [platform]: Buffer }` — the raw bytes for that
+ * platform's `tools/<name>` member, so a test can assert the INSTALLED bytes
+ * for a given platform are that platform's own bytes and no other's.
+ */
+export function publishIndexArtifact(
+  registry,
+  {
+    connectorKey = "slack",
+    connectorId = null,
+    version = "0.6.0",
+    protocolVersion = "1.0",
+    displayName = "Slack",
+    toolName = "slackdump",
+    platforms = ["linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"],
+    toolBinaries = null,
+    toolConfigBytes = null,
+    signer = null,
+    signers = null,
+    childSignerFor = null,
+  } = {}
+) {
+  const resolvedConnectorId =
+    connectorId ?? `https://github.com/PDP-Connect/data-connectors/connector/${connectorKey}`;
+  const profile = {
+    connector_key: connectorKey,
+    connector_id: resolvedConnectorId,
+    version,
+    protocol_version: protocolVersion,
+    display_name: displayName,
+    runtime_requirements: {
+      bindings: { network: { required: true }, filesystem: { required: true } },
+      external_tools: [{ name: toolName, provisioning: "bundled", platforms }],
+    },
+    setup: { modality: "static_secret" },
+    capabilities: { public_listing: { tier: "supported" } },
+  };
+  const profileBytes = canonicalJson(profile);
+  const codeBytes = tarball({ "collection-profile.mjs": "export const collect = () => {};\n" });
+  const licensesBytes = tarball({ LICENSE: "Apache-2.0\n", NOTICE: "notice\n" });
+  const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
+
+  const layer = (buffer, mediaType, title) => ({
+    mediaType,
+    digest: registry.putBlob(buffer),
+    size: buffer.length,
+    annotations: { "org.opencontainers.image.title": title },
+  });
+
+  const commonLayers = [
+    layer(profileBytes, "application/vnd.pdpp.connector.profile.v1+json", "collection-profile.json"),
+    layer(codeBytes, "application/vnd.pdpp.connector.code.v1.tar+gzip", "code.tar.gz"),
+    layer(licensesBytes, "application/vnd.pdpp.connector.licenses.v1.tar+gzip", "licenses.tar.gz"),
+    layer(provenanceBytes, "application/vnd.pdpp.connector.provenance.v1+json", "provenance.json"),
+  ];
+
+  const childManifests = [];
+  for (const platformSpec of platforms) {
+    const [os, architecture] = platformSpec.split("/");
+    const toolBytes =
+      toolBinaries?.[platformSpec] ?? Buffer.from(`fixture-${toolName}-${platformSpec}`);
+    const toolMemberName = os === "windows" ? `${toolName}.exe` : toolName;
+    const toolsTarball = tarball(
+      { [toolMemberName]: toolBytes },
+      {
+        // A real mode callback so the archived member carries the executable
+        // bit — `tarball`'s default path (no callback) leaves whatever mode
+        // `writeFileSync` gave the staged file, which does not set exec.
+        mode: (root) => {
+          execFileSync("chmod", ["755", join(root, toolMemberName)]);
+        },
+      }
+    );
+    const toolConfigTarball = toolConfigBytes
+      ? tarball({ [`${toolName}-api-config.toml`]: toolConfigBytes })
+      : null;
+
+    const config = {
+      config_version: "1.0",
+      connector_key: connectorKey,
+      connector_id: resolvedConnectorId,
+      version,
+      protocol_version: protocolVersion,
+      profile_digest: sha256(profileBytes),
+      entrypoint: "code/collection-profile.mjs",
+      entrypoint_kind: "import-safe",
+      exports: ["collect"],
+      display_name: displayName,
+      tier: "supported",
+      platform: { os, architecture },
+      runtime: { bindings: ["filesystem", "network"] },
+      bundled_tools: [{ name: toolName, path: `tools/${toolMemberName}` }],
+      licenses: "Apache-2.0",
+    };
+    const configBytes = canonicalJson(config);
+
+    const childLayers = [
+      ...commonLayers,
+      layer(toolsTarball, "application/vnd.pdpp.connector.tools.v1.tar+gzip", "tools.tar.gz"),
+      ...(toolConfigTarball
+        ? [layer(toolConfigTarball, "application/vnd.pdpp.connector.tool-config.v1.tar+gzip", "config.tar.gz")]
+        : []),
+    ];
+
+    const childManifest = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      artifactType: "application/vnd.pdpp.connector.v1+json",
+      platform: { os, architecture },
+      config: {
+        mediaType: "application/vnd.pdpp.connector.config.v1+json",
+        digest: registry.putBlob(configBytes),
+        size: configBytes.length,
+      },
+      layers: childLayers,
+      annotations: {
+        "org.opencontainers.image.version": version,
+        "dev.pdpp.connector.key": connectorKey,
+      },
+    };
+    const { digest: childDigest } = registry.putManifest(childManifest);
+
+    const childSigner = childSignerFor ? childSignerFor(platformSpec) : signer;
+    signManifest(registry, childDigest, {
+      connectorKey,
+      signer: childSigner,
+      signers: childSigner ? null : signers,
+    });
+
+    childManifests.push({
+      platform: { os, architecture },
+      digest: childDigest,
+      size: canonicalJson(childManifest).length,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+    });
+  }
+
+  const index = {
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.index.v1+json",
+    artifactType: "application/vnd.pdpp.connector.v1+json",
+    manifests: childManifests,
+    annotations: {
+      "org.opencontainers.image.version": version,
+      "dev.pdpp.connector.key": connectorKey,
+    },
+  };
+  const { digest } = registry.putManifest(index, version);
+  signManifest(registry, digest, { connectorKey, signer, signers });
+
+  return { digest, index, profile, profileBytes, childManifests };
 }
 
 /** A lock entry pointing at a published fixture artifact. */

@@ -84,6 +84,31 @@ function readSize(block) {
   return size;
 }
 
+/**
+ * The tar header's `mode` field (bytes 100-107, octal ASCII), masked to the
+ * nine permission bits.
+ *
+ * The mask is the security boundary: a tar header can set setuid/setgid/
+ * sticky bits, and this parser must never let an archive turn those on for a
+ * file it is about to write to a consumer's disk. Masking BEFORE the caller
+ * ever sees the value means there is no path through which an unmasked mode
+ * could reach a filesystem write — the field literally does not exist past
+ * this function.
+ */
+function readMode(block) {
+  const offset = 100;
+  const length = 8;
+  const field = block.toString("ascii", offset, offset + length).replace(/\0/g, " ").trim();
+  if (!/^[0-7]+$/.test(field)) {
+    throw new Error("archive declares an unreadable member mode");
+  }
+  const mode = Number.parseInt(field, 8);
+  if (!Number.isSafeInteger(mode)) {
+    throw new Error("archive declares an unreadable member mode");
+  }
+  return mode & 0o777;
+}
+
 function readPaxSize(value) {
   if (!/^[0-9]+$/.test(value)) {
     throw new Error("archive declares an unreadable PAX member size");
@@ -279,8 +304,9 @@ function rawArchiveTap({ onHeader, onMetadata }) {
     const name = readString(block, 0, 100, "member name");
     const prefix = readString(block, 345, 155, "member name");
     const rawSize = readSize(block);
+    const mode = readMode(block);
     const path = prefix ? `${prefix}/${name}` : name;
-    currentHeader = { block: Buffer.from(block), type, rawSize, path };
+    currentHeader = { block: Buffer.from(block), type, rawSize, mode, path };
     onHeader(currentHeader);
 
     if (METADATA_TYPES.has(type)) {
@@ -574,6 +600,8 @@ export async function readTarGzEntries(
       );
     }
 
+    const mode = rawHeader.mode;
+
     const chunks = [];
     let received = 0;
     let finalized = false;
@@ -584,7 +612,7 @@ export async function readTarGzEntries(
         fail(`archive member ended after ${received} bytes, expected ${size}`);
         return;
       }
-      files.push({ path, buffer: Buffer.concat(chunks, size) });
+      files.push({ path, buffer: Buffer.concat(chunks, size), mode });
     };
     entry.on("data", (chunk) => {
       received += chunk.length;

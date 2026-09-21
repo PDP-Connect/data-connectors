@@ -12,7 +12,8 @@
  * so that the bytes an artifact contains are decided by a script that can be
  * run and tested locally, while credentials stay in CI.
  *
- * Layout written to <out>/:
+ * Layout written to <out>/, for a JS-only connector (43 of 46) — one OCI
+ * image MANIFEST, unchanged from before this file existed:
  *
  *   collection-profile.json   the manifest the runner consumes  (profile layer)
  *   code.tar.gz               esbuild single-file ESM bundle    (code layer)
@@ -21,6 +22,26 @@
  *   provenance.json           what was built, from what, with what
  *   config.json               the small metadata blob a resolve reads (config)
  *   layers.json               media types + titles, for `oras push` to consume
+ *
+ * A connector that declares `provisioning: "bundled"` on a
+ * `runtime_requirements.external_tools[]` entry (today: only `slack`) instead
+ * gets an OCI image INDEX, per OCI-TOOL-LAYER-0918.md §5: the five files above
+ * are still built once and shared, plus one child manifest per platform the
+ * tool supports:
+ *
+ *   platforms/<os>-<arch>/config.json    restates profile + this platform
+ *   platforms/<os>-<arch>/layers.json    this child's own layer list
+ *   platforms/<os>-<arch>/tools.tar.gz   this platform's tool binaries (+config)
+ *   index.json                           the OCI image index tying it together
+ *
+ * Each child manifest carries the SAME common layers (profile/code/assets/
+ * licenses/provenance) plus its own `tools.tar.gz`, so a consumer that
+ * resolves the wrong child still gets a self-consistent, importable artifact
+ * — it is simply missing the binary for a platform it was never going to run
+ * on. The index's `manifests[].platform` uses the spec's real `os`/
+ * `architecture` fields (OCI-TOOL-LAYER-0918.md §1); nothing finer is needed
+ * because slackdump is a static, `CGO_ENABLED=0` build with no glibc or
+ * keyring variance (EXTERNAL-TOOL-DESIGN-0918.md).
  *
  * Why the code layer is a bundle rather than the source tree: a connector in
  * packages/polyfill-connectors is NOT self-contained. connectors/oura/index.ts
@@ -35,11 +56,21 @@
  *   [--version 0.1.0]     override the manifest's version (CI passes the tag)
  *   [--esbuild <path>]    resolve esbuild from elsewhere (sandboxes without a
  *                         workspace install)
+ *   [--tool-binary <tool>=<platform>=<path>]   a locally-built or downloaded
+ *                         tool binary to embed for one platform (repeatable).
+ *                         `<tool>` matches an external_tools[].name declaring
+ *                         `provisioning: "bundled"`; `<platform>` is one of
+ *                         its declared `platforms[]` entries (`os/arch`). CI
+ *                         passes one per platform in the release matrix; a
+ *                         platform with no `--tool-binary` fails the build
+ *                         rather than publish an index missing a promised
+ *                         child.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -81,65 +112,120 @@ function declaredDependencies() {
 }
 
 /**
+ * A connector's declared `external_tools[]`, wherever the manifest actually
+ * puts it.
+ *
+ * The three manifests that declare one (`google_messages`, `signal`, `slack`)
+ * spell it `runtime_requirements.external_tools`; `profile.external_tools`
+ * itself is empty on all 46. Reading the top-level key — the obvious check —
+ * silently passes every native-tool connector, which is how Slack's bundle
+ * used to build and import cleanly while shelling out to a `slackdump` binary
+ * the artifact did not carry (OCI-PUBLISH-0911.md §4a).
+ */
+function declaredExternalTools(profile) {
+	return profile.runtime_requirements?.external_tools ?? [];
+}
+
+/**
  * Refuse to build a connector whose code needs something the artifact does not
- * carry.
+ * carry, UNLESS the manifest declares `provisioning: "bundled"` for that tool
+ * — in which case the caller builds an OCI image index with a per-platform
+ * tool layer instead of a single manifest, and this guard's job shrinks to
+ * catching the two failures bundling does not fix on its own.
  *
- * The obvious check — `if (profile.external_tools)` — does not work, and
- * believing it did would be the expensive mistake here. That key is empty on
- * every one of the 45 manifests: the three that declare external tools
- * (`google_messages`, `signal`, `slack`) spell it `runtime_requirements
- * .external_tools`, so the top-level read is `undefined` for all 45 and the
- * check silently passes everything. Slack shells out to a `slackdump` binary it
- * expects on `PATH`, and its bundle builds and imports perfectly cleanly,
- * because a missing subprocess is a RUN-time failure, not a load-time one.
- * Trusting that read would therefore have published a Slack artifact that
- * verifies, signs, installs, and then fails on the first collection against a
- * host that happens not to have slackdump installed — the precise failure this
- * distribution path exists to eliminate.
+ * The check stays positive: look at what the code actually reaches for.
  *
- * So the check is positive: look at what the code actually reaches for.
- *
- *   1. A binary resolved from PATH or an env override. Bundling the binary is
- *      the fix (design §2.5), and it needs a per-platform tool layer plus a
- *      manifest that declares it — neither of which exists yet.
- *   2. A code-relative asset that escapes the install root once the entrypoint
- *      is flattened to `code/collection-profile.mjs`. Slack reads
- *      `new URL("../../config/slackdump-api-config.toml", import.meta.url)`,
- *      which resolves ABOVE the connector's own install root. That is design
- *      §1.3's rewrite obligation, and until the bundler performs the rewrite,
- *      the artifact would be missing a file the code opens.
- *
- * Both are lifted the moment the tool-layer path is implemented. Until then
- * this fails loudly, on a named connector, at build time.
+ *   1. A binary resolved from PATH or an env override, on a connector that
+ *      does NOT declare `provisioning: "bundled"` for the matching tool. A
+ *      connector that does declare it is expected to still reference the env
+ *      override as a local-development escape hatch (see
+ *      `resolveSlackdumpBin` in connectors/slack/index.ts) — what changes is
+ *      that the primary path is now an in-artifact absolute path the
+ *      installer resolves, not a bare `PATH` lookup, so this refusal is
+ *      scoped to connectors that never bundle at all (today: signal,
+ *      google_messages).
+ *   2. A code-relative asset that escapes the install root once the
+ *      entrypoint is flattened to `code/collection-profile.mjs`. A path is
+ *      "escaping" only if it climbs OUT of the connector's own install root
+ *      — `../x` from `code/collection-profile.mjs` lands at `<install
+ *      root>/x`, which is inside it; `../../x` climbs one level further, out
+ *      of the artifact entirely. Slack originally read
+ *      `../../config/slackdump-api-config.toml` (escaping); the fix ships the
+ *      config file as a `config/` layer sibling to `code/` and reads
+ *      `../config/slackdump-api-config.toml` (inside).
  */
 function assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory) {
-	const declaresBundledTools = (profile.external_tools ?? []).some(
-		(tool) => tool.provisioning === "bundled",
+	const bundledToolNames = new Set(
+		declaredExternalTools(profile)
+			.filter((tool) => tool.provisioning === "bundled")
+			.map((tool) => tool.name),
 	);
-	if (declaresBundledTools) {
-		throw new Error(
-			`${connectorKey} declares a bundled external tool, but the per-platform tool layer is not implemented.`,
-		);
-	}
 
 	const source = readFileSync(join(connectorDirectory, "index.ts"), "utf8");
 
 	const pathResolvedBinary = source.match(/\b([A-Z][A-Z0-9_]*_BIN)\b/);
 	if (pathResolvedBinary) {
-		throw new Error(
-			`${connectorKey} resolves an executable from PATH or $${pathResolvedBinary[1]}, which the artifact does not carry. ` +
-				"A bundled per-platform tool layer must land first — see OCI-PUBLISH-0911.md, 'What Slack additionally needs'.",
+		const envOverride = pathResolvedBinary[1];
+		const toolsWithThisOverride = declaredExternalTools(profile).filter(
+			(tool) => tool.detect?.executable_env_override === envOverride,
 		);
+		const bundled = toolsWithThisOverride.some((tool) => bundledToolNames.has(tool.name));
+		if (!bundled) {
+			throw new Error(
+				`${connectorKey} resolves an executable from PATH or $${envOverride}, which the artifact does not carry. ` +
+					'Declare provisioning: "bundled" plus platforms[] on the matching runtime_requirements.external_tools[] ' +
+					"entry, or provisioning: \"host_provided\" if it structurally cannot be bundled.",
+			);
+		}
 	}
 
 	const escapingAsset = source.match(
-		/new URL\(\s*"(\.\.\/[^"]*)"\s*,\s*import\.meta\.url/,
+		/new URL\(\s*"(\.\.\/\.\.\/[^"]*)"\s*,\s*import\.meta\.url/,
 	);
 	if (escapingAsset) {
 		throw new Error(
 			`${connectorKey} reads '${escapingAsset[1]}' relative to its module, which escapes the install root once the ` +
-				"entrypoint is flattened to code/collection-profile.mjs. The bundler must rewrite that specifier first (design §1.3).",
+				"entrypoint is flattened to code/collection-profile.mjs. Rewrite it to climb at most one level " +
+				"(e.g. '../config/…') and ship the target as a layer sibling to code/.",
 		);
+	}
+}
+
+/**
+ * A manifest declaring `provisioning: "bundled"` is a PROMISE, not a build.
+ * `assertNoUnbundledNativeDependency` stops refusing Slack's PATH lookup the
+ * moment the manifest says "bundled" — that guard only ever asked what the
+ * MANIFEST claims, on purpose, because it runs before `--tool-binary` is even
+ * parsed. This is the second half: for every platform a bundled tool
+ * declares, a `--tool-binary` for exactly that tool and platform must have
+ * been given, and the path it names must exist. Without this, a build run
+ * with the manifest edited but no binaries supplied would silently publish
+ * an index with a missing child rather than fail loudly on a named platform.
+ */
+function assertToolBinariesSupplied(connectorKey, profile, toolBinaries) {
+	for (const tool of declaredExternalTools(profile)) {
+		if (tool.provisioning !== "bundled") continue;
+		if (!Array.isArray(tool.platforms) || tool.platforms.length === 0) {
+			throw new Error(
+				`${connectorKey} declares ${tool.name} as provisioning: "bundled" but no platforms[]`,
+			);
+		}
+		for (const platform of tool.platforms) {
+			const supplied = toolBinaries.find(
+				(entry) => entry.tool === tool.name && entry.platform === platform,
+			);
+			if (!supplied) {
+				throw new Error(
+					`${connectorKey} declares ${tool.name} for ${platform} but no matching ` +
+						`--tool-binary ${tool.name}=${platform}=<path> was given`,
+				);
+			}
+			if (!existsSync(supplied.path)) {
+				throw new Error(
+					`${connectorKey}: --tool-binary ${tool.name}=${platform}=${supplied.path} does not exist`,
+				);
+			}
+		}
 	}
 }
 
@@ -150,6 +236,33 @@ function argument(name, fallback = null) {
 		return fallback;
 	}
 	return process.argv[index + 1];
+}
+
+/** Every occurrence of a repeatable `--flag value` argument, in order given. */
+function repeatedArgument(name) {
+	const values = [];
+	for (let index = 0; index < process.argv.length - 1; index += 1) {
+		if (process.argv[index] === name) values.push(process.argv[index + 1]);
+	}
+	return values;
+}
+
+/**
+ * Parse `--tool-binary <tool>=<os>/<arch>=<path>` into `{ tool, platform, path
+ * }`. Three `=`-separated fields rather than three flags: CI's release matrix
+ * already produces exactly this triple per job, and one flag per triple keeps
+ * `--tool-binary` trivially repeatable without needing positional pairing
+ * across three different flag names.
+ */
+function parseToolBinaryArgument(raw) {
+	const match = /^([a-z0-9][a-z0-9_-]*)=([a-z0-9]+\/[a-z0-9]+)=(.+)$/.exec(raw);
+	if (!match) {
+		throw new Error(
+			`--tool-binary must be <tool>=<os>/<arch>=<path>, got "${raw}"`,
+		);
+	}
+	const [, tool, platform, path] = match;
+	return { tool, platform, path };
 }
 
 /**
@@ -279,6 +392,12 @@ async function main() {
 	}
 
 	assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory);
+
+	const toolBinaries = repeatedArgument("--tool-binary").map(parseToolBinaryArgument);
+	assertToolBinariesSupplied(connectorKey, profile, toolBinaries);
+	const bundledTools = declaredExternalTools(profile).filter(
+		(tool) => tool.provisioning === "bundled",
+	);
 
 	// `--version` exists so CI can assert the tag it is publishing under, not so
 	// it can relabel the artifact. The profile layer is copied byte-for-byte, so
@@ -598,6 +717,174 @@ async function main() {
 		`${JSON.stringify({ artifactType: "application/vnd.pdpp.connector.v1+json", config: { file: "config.json", mediaType: "application/vnd.pdpp.connector.config.v1+json" }, layers, annotations: { "org.opencontainers.image.source": "https://github.com/PDP-Connect/data-connectors", "org.opencontainers.image.revision": revision, "org.opencontainers.image.version": version, "org.opencontainers.image.licenses": "Apache-2.0", "dev.pdpp.connector.key": connectorKey, "dev.pdpp.connector.id": profile.connector_id, "dev.pdpp.protocol.version": profile.protocol_version } }, null, 2)}\n`,
 	);
 
+	// ---- platform children + index, only for a connector that bundles a
+	// native tool (OCI-TOOL-LAYER-0918.md §5) ------------------------------
+	//
+	// Every JS-only connector returns here: `bundledTools` is empty, so
+	// nothing below this point runs and the five files above are the whole
+	// artifact — byte-for-byte the single-manifest shape that existed before
+	// this function had an index path at all.
+	const platformIndexEntries = [];
+	if (bundledTools.length > 0) {
+		const platforms = [
+			...new Set(bundledTools.flatMap((tool) => tool.platforms)),
+		].sort();
+
+		for (const platformSpec of platforms) {
+			const [os, architecture] = platformSpec.split("/");
+			const platformDir = join(outputRoot, "platforms", platformSpec.replace("/", "-"));
+			mkdirSync(platformDir, { recursive: true });
+			const platformStaging = join(staging, "platforms", platformSpec.replace("/", "-"));
+
+			// ---- tools layer: one binary per bundled tool that supports this
+			// platform, at `tools/<name>` (or `tools/<name>.exe` for windows,
+			// matching the extension slackdump's own release archives use). ----
+			const toolsStaging = join(platformStaging, "tools");
+			mkdirSync(toolsStaging, { recursive: true });
+			for (const tool of bundledTools) {
+				if (!tool.platforms.includes(platformSpec)) continue;
+				const supplied = toolBinaries.find(
+					(entry) => entry.tool === tool.name && entry.platform === platformSpec,
+				);
+				const memberName = os === "windows" ? `${tool.name}.exe` : tool.name;
+				const bytes = readFileSync(supplied.path);
+				writeFileSync(join(toolsStaging, memberName), bytes);
+				chmodSync(join(toolsStaging, memberName), 0o755);
+			}
+			const toolsMembers = filesUnder(toolsStaging);
+			assertSafeMembers(toolsMembers);
+			// `deterministicTarball` passes no `--mode` flag to `tar`, so it
+			// already records each member's REAL on-disk mode — the `chmodSync`
+			// above is what makes the emitted tools.tar.gz carry the executable
+			// bit, with no change needed to the tarball helper itself.
+			deterministicTarball(
+				toolsStaging,
+				toolsMembers,
+				join(platformDir, "tools.tar.gz"),
+			);
+
+			// ---- tool-config layer: code-relative assets a bundled tool's own
+			// connector code needs at runtime, staged as a `config/` layer
+			// sibling to `code/` so `../config/<file>` from
+			// `code/collection-profile.mjs` resolves INSIDE the install root.
+			// Named by TOOL, not by connector: `<tool-name>-api-config.toml`
+			// under packages/polyfill-connectors/config/, matching the file
+			// that already exists there (`slackdump-api-config.toml`). A tool
+			// with no such file — most of them — gets no toolConfig layer,
+			// same optionality rule as `assets`. ----
+			const toolConfigStaging = join(platformStaging, "config");
+			let anyToolConfig = false;
+			for (const tool of bundledTools) {
+				if (!tool.platforms.includes(platformSpec)) continue;
+				const toolConfigName = `${tool.name}-api-config.toml`;
+				const toolConfigSource = join(packageRoot, "config", toolConfigName);
+				if (!existsSync(toolConfigSource)) continue;
+				mkdirSync(toolConfigStaging, { recursive: true });
+				writeFileSync(
+					join(toolConfigStaging, toolConfigName),
+					readFileSync(toolConfigSource),
+				);
+				anyToolConfig = true;
+			}
+			let toolConfigTarball = null;
+			if (anyToolConfig) {
+				const toolConfigMembers = filesUnder(toolConfigStaging);
+				assertSafeMembers(toolConfigMembers);
+				toolConfigTarball = deterministicTarball(
+					toolConfigStaging,
+					toolConfigMembers,
+					join(platformDir, "config.tar.gz"),
+				);
+			}
+
+			// ---- platform child's own config.json: the common config restated
+			// with a REAL platform (not "any"), plus bundled_tools naming where
+			// the installer will find each binary once it writes the tools
+			// layer to the `tools/` sibling of `code/`. ----
+			const platformConfig = {
+				...config,
+				platform: { os, architecture },
+				bundled_tools: bundledTools
+					.filter((tool) => tool.platforms.includes(platformSpec))
+					.map((tool) => ({
+						name: tool.name,
+						path: `tools/${os === "windows" ? `${tool.name}.exe` : tool.name}`,
+					})),
+			};
+			writeFileSync(
+				join(platformDir, "config.json"),
+				`${JSON.stringify(platformConfig, null, 2)}\n`,
+			);
+
+			// ---- platform child's own layer list: the common layers plus
+			// `tools.tar.gz` and, when present, `config.tar.gz`. ----
+			const platformLayers = [
+				...layers,
+				{ file: "tools.tar.gz", mediaType: "application/vnd.pdpp.connector.tools.v1.tar+gzip" },
+				...(toolConfigTarball
+					? [{ file: "config.tar.gz", mediaType: "application/vnd.pdpp.connector.tool-config.v1.tar+gzip" }]
+					: []),
+			];
+			writeFileSync(
+				join(platformDir, "layers.json"),
+				`${JSON.stringify(
+					{
+						artifactType: "application/vnd.pdpp.connector.v1+json",
+						config: { file: "config.json", mediaType: "application/vnd.pdpp.connector.config.v1+json" },
+						layers: platformLayers,
+						platform: { os, architecture },
+						annotations: {
+							"org.opencontainers.image.source": "https://github.com/PDP-Connect/data-connectors",
+							"org.opencontainers.image.revision": revision,
+							"org.opencontainers.image.version": version,
+							"org.opencontainers.image.licenses": "Apache-2.0",
+							"dev.pdpp.connector.key": connectorKey,
+							"dev.pdpp.connector.id": profile.connector_id,
+							"dev.pdpp.protocol.version": profile.protocol_version,
+						},
+					},
+					null,
+					2,
+				)}\n`,
+			);
+
+			platformIndexEntries.push({
+				platform: { os, architecture },
+				commonLayerFiles: layers.map((layer) => join(outputRoot, layer.file)),
+				commonConfigFile: join(outputRoot, "config.json"),
+				directory: platformDir,
+			});
+		}
+
+		// ---- the index itself: the object the lock pins and the workflow
+		// signs. `manifests[].platform` uses the spec's real os/architecture
+		// fields (image-index.md) — the shape OpenTofu's own provider indexes
+		// use for the identical problem (OCI-TOOL-LAYER-0918.md §4). ----
+		writeFileSync(
+			join(outputRoot, "index.json"),
+			`${JSON.stringify(
+				{
+					mediaType: "application/vnd.oci.image.index.v1+json",
+					artifactType: "application/vnd.pdpp.connector.v1+json",
+					schemaVersion: 2,
+					manifests: platformIndexEntries.map((entry) => ({
+						platform: entry.platform,
+						directory: relative(outputRoot, entry.directory),
+					})),
+					annotations: {
+						"org.opencontainers.image.source": "https://github.com/PDP-Connect/data-connectors",
+						"org.opencontainers.image.revision": revision,
+						"org.opencontainers.image.version": version,
+						"dev.pdpp.connector.key": connectorKey,
+						"dev.pdpp.connector.id": profile.connector_id,
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+	}
+
 	rmSync(staging, { recursive: true, force: true });
 
 	console.log(
@@ -605,6 +892,11 @@ async function main() {
 	);
 	for (const layer of layers) {
 		console.log(`  ${layer.file}  ${layer.mediaType}`);
+	}
+	for (const entry of platformIndexEntries) {
+		console.log(
+			`  platform ${entry.platform.os}/${entry.platform.architecture} -> ${relative(repoRoot, entry.directory)}`,
+		);
 	}
 }
 
