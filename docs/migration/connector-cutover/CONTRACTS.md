@@ -13,6 +13,10 @@ Base: `main` at `20bba85`.
 
 ## Decisions
 
+## Compatibility scope correction (Tim, 2026-09-22). Narrows P1–P7 below.
+
+P1–P7 apply ONLY to the protected set: public scopes actually exposed or issued through Unity/app.vana.org DCR. The protected set is the union of current and historical deployed Unity app and catalog scopes plus distinct scope strings in production DCR and grant records. It is NOT all 54 catalog scopes. New PDPP scopes (Strava, WHOOP) are handled separately. The mapping is a narrow Vana product migration artifact, not general connector alias or version machinery. Unity owns the protected public DCR vocabulary; enforcement and runtime consume one generated artifact, and nobody keeps a copied map. The protected-scope inventory must be established before any binding or projection work.
+
 ## Public compatibility contract (Tim, 2026-09-22). Supersedes D1; constrains D2 and D3.
 
 Third-party apps (builders.vana.org, app.vana.org/apps, and unknown external consumers) cannot be enumerated or migrated. Therefore:
