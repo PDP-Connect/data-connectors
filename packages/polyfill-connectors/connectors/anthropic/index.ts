@@ -7,12 +7,12 @@
  *
  * Acquisition (binding, per docs/migration/connector-cutover/
  * capability-map.json's `anthropic` source entry): browser session ->
- * official Claude data export (request, poll, download ZIP) -> pure ZIP
+ * official Claude data export (request, poll, download) -> pure ZIP
  * parser. This mirrors the legacy `claude-export-playwright.js` connector
- * (READ ONLY prior art at connectors/anthropic/, root of the repo) — same
- * endpoints, same async-export resumability design — reimplemented on the
- * modern runtime's seams (download-queue.ts, playwright-download.ts,
- * bounded-zip-archive.ts) instead of the legacy runner's bespoke
+ * (READ ONLY prior art at connectors/anthropic/, root of the repo) for the
+ * OLD single-ZIP export format, reimplemented on the modern runtime's
+ * seams (download-queue.ts, playwright-download.ts, bounded-zip-
+ * archive.ts) instead of the legacy runner's bespoke
  * `page.captureDownload`/`page.extractZipEntries` methods.
  *
  * Streams: conversations, messages (claude.conversations split per D3),
@@ -20,8 +20,65 @@
  * parsers.ts for the pure JSON -> record mapping and schemas.ts for the
  * capability-map field-mapping documentation.
  *
- * Async-export resumability (the crux of this connector): the export is
- * prepared by an async job on Anthropic's side. A run:
+ * ── TWO EXPORT FORMATS ──────────────────────────────────────────────────
+ *
+ * `POST export_data` has been observed to return two different response
+ * shapes, and this connector must handle both (evidence-gated: only kept
+ * where a real observation backs it — see cut-anthropic-export report):
+ *
+ * 1. OLD single-ZIP format (`{ nonce }`) — the legacy connector's
+ *    documented behavior: one nonce, one ZIP at
+ *    `/export/{org}/download/{nonce}`, containing top-level
+ *    `conversations.json` and `projects/*.json` entries. Evidence: legacy
+ *    `claude-export-playwright.js` (prior art) AND a live run by the
+ *    predecessor lane (2026-09-22, nonce `550cfd0a...`) that got this exact
+ *    response shape from the real API.
+ * 2. NEW multi-part manifest format (`{ version, total_files,
+ *    data_files: [{ batch_index, category, part, filename, export_url }] }`)
+ *    — observed 2026-09-22 in Tim's own UI-driven export manifest (private
+ *    copy, never committed — contains one-shot signed URLs). Categories seen:
+ *    `light_metadata`, `projects`, `memories`, `design_chats`,
+ *    `conversations`. Each `export_url` downloads exactly ONE ZIP and is
+ *    usable exactly once ("Each export URL can only be used once" per the
+ *    manifest's own `instructions` field).
+ *
+ * Both formats are handled by inspecting the `POST export_data` JSON body
+ * at runtime (`nonce` string -> old path; `data_files` array -> new path)
+ * rather than by a feature flag, since which format a given account/session
+ * gets is presumably server-controlled, not something this connector
+ * chooses.
+ *
+ * The INNER layout of each multi-part category ZIP is UNVERIFIED — no part
+ * was ever successfully downloaded and inspected this session (both known
+ * job identifiers, the predecessor's completed nonce and this lane's
+ * attempted re-fetch of the same two jobs, returned a Cloudflare bot
+ * challenge; see the report). `parsers.ts`'s `classifyManifestPartEntries`
+ * therefore classifies each part's JSON entries by CONTENT SHAPE, not by
+ * assumed filename, and flags anything it can't classify instead of
+ * silently dropping it.
+ *
+ * ── RESUMABILITY: OLD vs NEW FORMAT DIFFERS ─────────────────────────────
+ *
+ * Old format: the nonce is a stable, repeatedly-pollable reference —
+ * checkpointed to STATE, resumed across runs without a new POST (see below).
+ *
+ * New format: each `export_url` is ONE-SHOT and, per
+ * spec-collection-profile.md §5's "does not store secrets in STATE" rule,
+ * is NEVER persisted to STATE. Consequently a multi-part job is only
+ * resumable WITHIN the run that received the manifest — if that run is
+ * interrupted after downloading some parts but not others, the
+ * not-yet-downloaded parts' URLs are lost when the process exits (STATE
+ * never had them), and any already-downloaded-but-not-yet-consumed part
+ * bytes are discarded too (nothing durable to resume from). The next run
+ * has no pending-manifest STATE to resume — it starts fresh and must
+ * request an entirely new export. This is a real behavior difference from
+ * the old format, not an oversight: there is no way to make one-shot,
+ * secret, short-lived URLs resumable across process restarts without
+ * violating the no-secrets-in-STATE rule.
+ *
+ * Async-export resumability for the OLD format (the crux of the original
+ * implementation): the export is prepared by an async job on Anthropic's
+ * side. A run:
  *   1. Checks STATE for a pending export reference (org id + nonce +
  *      requested-at) from a prior run. If present, resumes polling with
  *      the SAME nonce — never requests a second export while one is
@@ -40,10 +97,11 @@
  *      run to resume — no data loss, no abandoned job, no duplicate
  *      request.
  *
- * Tested surfaces: NONE — this lane has not been given live-account
- * clearance (no "PROFILE READY: anthropic"). Every code path here is
- * proven only against the synthetic fixture and process-level protocol
- * tests. Live-run proof is PENDING; see the cut-anthropic report.
+ * Tested surfaces: process-level protocol tests against a fake page/context
+ * (integration.test.ts) for both formats, and pure-parser tests against
+ * SYNTHETIC fixtures for both formats. NO live account run has ever
+ * completed a parse against a real multi-part manifest's part bytes — see
+ * the cut-anthropic-export report for exactly what was and wasn't proven.
  *
  * Known untested / unconfirmed against a real account:
  *   - The exact `/api/organizations` capability field used to select the
@@ -52,10 +110,11 @@
  *     first org).
  *   - The exact `docs[]` sub-field names inside a project's detail (see
  *     parsers.ts header comment).
- *   - Whether claude.ai's download endpoint still gates on
+ *   - The INNER layout of a multi-part category ZIP (see above).
+ *   - Whether claude.ai's download endpoints still gate on
  *     `Sec-Fetch-Dest: document` (the legacy connector's documented reason
  *     for needing a real navigation/download event rather than in-page
- *     `fetch()`) — this connector navigates via `page.goto` on the
+ *     `fetch()`) — this connector navigates via `page.goto` on each
  *     download URL and captures the resulting `download` event via
  *     `attachDownloadQueue`, matching that constraint.
  */
@@ -79,7 +138,13 @@ import {
 } from "../../src/connector-runtime.ts";
 import { attachDownloadQueue } from "../../src/download-queue.ts";
 import { savePlaywrightDownload } from "../../src/playwright-download.ts";
-import { parseExport } from "./parsers.ts";
+import {
+	classifyManifestPartEntries,
+	type ManifestPartFile,
+	type ParsedExport,
+	parseClassifiedExport,
+	parseExport,
+} from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
@@ -125,6 +190,14 @@ const EXPORT_ZIP_POLICY: ZipReadPolicy = {
 };
 
 // ─── STATE shape ────────────────────────────────────────────────────────
+//
+// Only the OLD (single-nonce) export format is resumable across runs via
+// STATE — see the module header's "RESUMABILITY: OLD vs NEW FORMAT
+// DIFFERS" note. The new manifest format's per-part `export_url` values
+// are one-shot secrets and are NEVER written to STATE
+// (spec-collection-profile.md §5), so there is no `pending_manifest`
+// STATE shape to resume from; a manifest is fully consumed or fully lost
+// within the run that requested it.
 
 interface PendingExportState {
 	organization_id: string;
@@ -219,12 +292,48 @@ function selectChatOrganization(
 	);
 }
 
-interface RequestExportResult {
-	ok: boolean;
-	status: number;
-	nonce: string | null;
+/** One entry of a new-format manifest's `data_files[]`. */
+interface ManifestDataFile {
+	batch_index: number;
+	category: string;
+	part: number;
+	filename: string;
+	export_url: string;
 }
 
+interface ExportManifest {
+	version: string;
+	total_files: number;
+	data_files: ManifestDataFile[];
+}
+
+type RequestExportResult =
+	| { ok: true; status: number; format: "old"; nonce: string }
+	| { ok: true; status: number; format: "new"; manifest: ExportManifest }
+	| { ok: false; status: number; format: null };
+
+function isManifestDataFile(v: unknown): v is ManifestDataFile {
+	return (
+		isPlainObject(v) &&
+		typeof v.batch_index === "number" &&
+		typeof v.category === "string" &&
+		typeof v.part === "number" &&
+		typeof v.filename === "string" &&
+		typeof v.export_url === "string"
+	);
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * POST export_data and classify the response as the OLD single-nonce
+ * format or the NEW multi-part manifest format (see module header). Both
+ * are real, evidence-backed shapes — this dispatches on the response body
+ * rather than assuming one, since which shape a given request gets is
+ * server-controlled.
+ */
 async function requestExport(
 	page: BrowserCollectContext["page"],
 	organizationId: string,
@@ -240,16 +349,42 @@ async function requestExport(
 					body: "{}",
 				},
 			);
-			let nonce: string | null = null;
-			try {
-				const json = (await res.json()) as { nonce?: unknown };
-				nonce = typeof json.nonce === "string" ? json.nonce : null;
-			} catch {
-				// no JSON body — nonce stays null, ok/status still reported
+			if (!res.ok) {
+				return { ok: false as const, status: res.status, format: null };
 			}
-			return { ok: res.ok, status: res.status, nonce };
+			let json: unknown;
+			try {
+				json = await res.json();
+			} catch {
+				return { ok: false as const, status: res.status, format: null };
+			}
+			if (
+				typeof json === "object" &&
+				json !== null &&
+				typeof (json as { nonce?: unknown }).nonce === "string"
+			) {
+				return {
+					ok: true as const,
+					status: res.status,
+					format: "old" as const,
+					nonce: (json as { nonce: string }).nonce,
+				};
+			}
+			if (
+				typeof json === "object" &&
+				json !== null &&
+				Array.isArray((json as { data_files?: unknown }).data_files)
+			) {
+				return {
+					ok: true as const,
+					status: res.status,
+					format: "new" as const,
+					manifest: json as ExportManifest,
+				};
+			}
+			return { ok: false as const, status: res.status, format: null };
 		} catch {
-			return { ok: false, status: 0, nonce: null };
+			return { ok: false as const, status: 0, format: null };
 		}
 	}, organizationId);
 }
@@ -334,6 +469,29 @@ function readExportZip(zipPath: string): {
 	}
 }
 
+/**
+ * Read every `.json` entry out of one downloaded multi-part manifest ZIP.
+ * Unlike `readExportZip` (old format), this does NOT assume a specific
+ * entry name — the inner layout of a category ZIP is UNVERIFIED (see
+ * module header). Every `.json` entry is returned for
+ * `classifyManifestPartEntries` to sort by content shape.
+ */
+function readManifestPartZip(zipPath: string): ManifestPartFile[] {
+	const fd = openSync(zipPath, "r");
+	try {
+		const fileSize = statSync(zipPath).size;
+		const entries = readZipEntriesFromFile(fd, fileSize, EXPORT_ZIP_POLICY);
+		return entries
+			.filter((e) => e.name.endsWith(".json"))
+			.map((e) => ({
+				name: e.name,
+				json: safeJsonParse(e.data().toString("utf8")),
+			}));
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function safeJsonParse(text: string): unknown {
 	try {
 		return JSON.parse(text);
@@ -342,7 +500,49 @@ function safeJsonParse(text: string): unknown {
 	}
 }
 
-// ─── Retryable pending-export SKIP_RESULT ───────────────────────────────
+// ─── Multi-part manifest download (new format) ─────────────────────────
+
+interface ManifestPartDownloadResult {
+	category: string;
+	filename: string;
+	outcome: "downloaded" | "download_failed";
+	entries: ManifestPartFile[];
+}
+
+/**
+ * Download and read one manifest part. Each `export_url` is one-shot
+ * (navigating to an already-used or expired one is expected to 403 or
+ * simply not fire a `download` event) — that is a normal, anticipated
+ * outcome here, not a bug, and is reported as `download_failed` rather
+ * than thrown.
+ */
+async function downloadManifestPart(
+	page: BrowserCollectContext["page"],
+	dataFile: ManifestDataFile,
+): Promise<ManifestPartDownloadResult> {
+	const attempt = await attemptDownload(page, dataFile.export_url);
+	if (!attempt.ready || !attempt.zipPath) {
+		return {
+			category: dataFile.category,
+			filename: dataFile.filename,
+			outcome: "download_failed",
+			entries: [],
+		};
+	}
+	try {
+		const entries = readManifestPartZip(attempt.zipPath);
+		return {
+			category: dataFile.category,
+			filename: dataFile.filename,
+			outcome: "downloaded",
+			entries,
+		};
+	} finally {
+		await attempt.cleanup?.();
+	}
+}
+
+// ─── Retryable SKIP_RESULT helpers ───────────────────────────────────────
 
 async function emitPendingSkip(
 	emit: (msg: EmittedMessage) => Promise<void>,
@@ -358,6 +558,40 @@ async function emitPendingSkip(
 			stream,
 			reason: "export_pending",
 			message,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
+}
+
+/**
+ * One or more manifest parts failed to download this run (one-shot URL
+ * already used/expired, or the download never fired). Since the manifest
+ * itself is never persisted to STATE (see module header), there is no
+ * "resume the same manifest" option — the recovery hint is still
+ * retryable, but the next run must request an entirely new export.
+ */
+async function emitManifestPartFailureSkip(
+	emit: (msg: EmittedMessage) => Promise<void>,
+	requested: Map<string, unknown>,
+	failedParts: readonly ManifestPartDownloadResult[],
+): Promise<void> {
+	const failedList = failedParts
+		.map((p) => `${p.category} (${p.filename})`)
+		.join(", ");
+	for (const stream of ALL_STREAMS) {
+		if (!requested.has(stream)) {
+			continue;
+		}
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "export_part_download_failed",
+			message:
+				`${failedParts.length} of this export's parts could not be ` +
+				`downloaded (one-shot URL already used, expired, or never ` +
+				`became ready): ${failedList}. A fresh export must be ` +
+				"requested on the next run — this manifest's other part URLs " +
+				"cannot be reused.",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		});
 	}
@@ -391,103 +625,12 @@ export async function collectAnthropic({
 		.catch((): undefined => undefined);
 	await politeDelay(1500);
 
-	// Resume a pending export from a prior run — NEVER request a second
-	// export while one is already pending (would abandon the first job's
-	// budget and waste Anthropic's rate limit on this account).
-	let pending = readPendingExport(state);
+	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
+	const wantsMessages = requested.has(MESSAGES_STREAM);
+	const wantsProjects = requested.has(PROJECTS_STREAM);
+	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
 
-	if (!pending) {
-		const orgs = await fetchOrganizations(page);
-		const org = selectChatOrganization(orgs);
-		if (!org) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: CONVERSATIONS_STREAM,
-				reason: "no_chat_organization",
-				message:
-					"No chat-capable Claude organization could be resolved from the session.",
-				recovery_hint: { action: "refresh_credentials", retryable: false },
-			});
-			return;
-		}
-
-		await progress("Requesting Claude data export...", {
-			stream: CONVERSATIONS_STREAM,
-		});
-		const req = await requestExport(page, org.uuid);
-		if (!req.ok || !req.nonce) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: CONVERSATIONS_STREAM,
-				reason: "export_request_failed",
-				message: `Could not start the Claude export (HTTP ${req.status}).`,
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-			});
-			return;
-		}
-		pending = {
-			organization_id: org.uuid,
-			nonce: req.nonce,
-			requested_at: nowIso(),
-		};
-		// Checkpoint immediately, before polling: a crash mid-poll must not
-		// lose the nonce and force a second export request next run.
-		await emit({
-			type: "STATE",
-			stream: CONVERSATIONS_STREAM,
-			cursor: { pending_export: pending },
-		});
-	}
-
-	const downloadUrl = exportDownloadUrl(pending.organization_id, pending.nonce);
-	const waitStart = Date.now();
-	let attempt: ExportAttemptResult = { ready: false };
-	for (;;) {
-		const elapsedSeconds = Math.round((Date.now() - waitStart) / 1000);
-		await progress(
-			elapsedSeconds === 0
-				? "Waiting for Claude to prepare your export..."
-				: `Still preparing your export (${elapsedSeconds}s elapsed)...`,
-			{ stream: CONVERSATIONS_STREAM },
-		);
-		attempt = await attemptDownload(page, downloadUrl);
-		if (attempt.ready) {
-			break;
-		}
-		if (Date.now() - waitStart > MAX_POLL_WAIT_MS) {
-			break;
-		}
-		await politeDelay(POLL_INTERVAL_MS);
-	}
-
-	if (!attempt.ready || !attempt.zipPath) {
-		// Leave the pending-export STATE in place (do not overwrite it) so
-		// the next run resumes polling the SAME nonce.
-		await emitPendingSkip(
-			emit,
-			requested,
-			"Claude's export was not ready within this run's poll budget. " +
-				"The request is checkpointed — the next run will resume polling " +
-				"the same export instead of requesting a new one.",
-		);
-		return;
-	}
-
-	try {
-		await progress("Reading downloaded export...", {
-			stream: CONVERSATIONS_STREAM,
-		});
-		const { conversationsJson, projectFiles } = readExportZip(attempt.zipPath);
-		const parsed = parseExport(
-			conversationsJson,
-			projectFiles.map((f) => f.json),
-		);
-
-		const wantsConversations = requested.has(CONVERSATIONS_STREAM);
-		const wantsMessages = requested.has(MESSAGES_STREAM);
-		const wantsProjects = requested.has(PROJECTS_STREAM);
-		const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
-
+	async function emitParsed(parsed: ParsedExport): Promise<void> {
 		if (wantsConversations) {
 			for (const conversation of parsed.conversations) {
 				await emitRecord(CONVERSATIONS_STREAM, conversation);
@@ -508,12 +651,6 @@ export async function collectAnthropic({
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
-
-		// Export consumed successfully: clear the pending reference and
-		// checkpoint synced_at. One STATE per checkpoint stream this
-		// connector declares as incremental (conversations, messages,
-		// projects); project_documents is non-incremental (see
-		// manifests/anthropic.json) and gets no cursor.
 		const syncedAt = nowIso();
 		if (wantsConversations) {
 			await emit({
@@ -536,8 +673,180 @@ export async function collectAnthropic({
 				cursor: { synced_at: syncedAt },
 			});
 		}
-	} finally {
-		await attempt.cleanup?.();
+	}
+
+	// Resume a pending OLD-format export from a prior run — NEVER request a
+	// second export while one is already pending (would abandon the first
+	// job's budget and waste Anthropic's rate limit on this account). The
+	// NEW manifest format has no equivalent resume path (see module header)
+	// — STATE only ever holds an old-format pending reference.
+	const pending = readPendingExport(state);
+
+	if (pending) {
+		await pollAndEmitOldFormat(pending);
+		return;
+	}
+
+	const orgs = await fetchOrganizations(page);
+	const org = selectChatOrganization(orgs);
+	if (!org) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: CONVERSATIONS_STREAM,
+			reason: "no_chat_organization",
+			message:
+				"No chat-capable Claude organization could be resolved from the session.",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
+		});
+		return;
+	}
+
+	await progress("Requesting Claude data export...", {
+		stream: CONVERSATIONS_STREAM,
+	});
+	const req = await requestExport(page, org.uuid);
+	if (!req.ok) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: CONVERSATIONS_STREAM,
+			reason: "export_request_failed",
+			message: `Could not start the Claude export (HTTP ${req.status}).`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+		return;
+	}
+
+	if (req.format === "old") {
+		const newPending: PendingExportState = {
+			organization_id: org.uuid,
+			nonce: req.nonce,
+			requested_at: nowIso(),
+		};
+		// Checkpoint immediately, before polling: a crash mid-poll must not
+		// lose the nonce and force a second export request next run.
+		await emit({
+			type: "STATE",
+			stream: CONVERSATIONS_STREAM,
+			cursor: { pending_export: newPending },
+		});
+		await pollAndEmitOldFormat(newPending);
+		return;
+	}
+
+	// ── NEW multi-part manifest format ──────────────────────────────────
+	// No pending-STATE checkpoint here — the manifest's export_url values
+	// are one-shot secrets and are never persisted (see module header). A
+	// crash between here and full consumption loses this job; the next run
+	// starts over with a fresh POST export_data.
+	await downloadAndEmitManifest(req.manifest);
+
+	async function pollAndEmitOldFormat(
+		pendingExport: PendingExportState,
+	): Promise<void> {
+		const downloadUrl = exportDownloadUrl(
+			pendingExport.organization_id,
+			pendingExport.nonce,
+		);
+		const waitStart = Date.now();
+		let attempt: ExportAttemptResult = { ready: false };
+		for (;;) {
+			const elapsedSeconds = Math.round((Date.now() - waitStart) / 1000);
+			await progress(
+				elapsedSeconds === 0
+					? "Waiting for Claude to prepare your export..."
+					: `Still preparing your export (${elapsedSeconds}s elapsed)...`,
+				{ stream: CONVERSATIONS_STREAM },
+			);
+			attempt = await attemptDownload(page, downloadUrl);
+			if (attempt.ready) {
+				break;
+			}
+			if (Date.now() - waitStart > MAX_POLL_WAIT_MS) {
+				break;
+			}
+			await politeDelay(POLL_INTERVAL_MS);
+		}
+
+		if (!attempt.ready || !attempt.zipPath) {
+			// Leave the pending-export STATE in place (do not overwrite it) so
+			// the next run resumes polling the SAME nonce.
+			await emitPendingSkip(
+				emit,
+				requested,
+				"Claude's export was not ready within this run's poll budget. " +
+					"The request is checkpointed — the next run will resume polling " +
+					"the same export instead of requesting a new one.",
+			);
+			return;
+		}
+
+		try {
+			await progress("Reading downloaded export...", {
+				stream: CONVERSATIONS_STREAM,
+			});
+			const { conversationsJson, projectFiles } = readExportZip(
+				attempt.zipPath,
+			);
+			const parsed = parseExport(
+				conversationsJson,
+				projectFiles.map((f) => f.json),
+			);
+			await emitParsed(parsed);
+		} finally {
+			await attempt.cleanup?.();
+		}
+	}
+
+	async function downloadAndEmitManifest(
+		manifest: ExportManifest,
+	): Promise<void> {
+		const dataFiles = manifest.data_files.filter(isManifestDataFile);
+		await progress(`Downloading ${dataFiles.length} export part(s)...`, {
+			stream: CONVERSATIONS_STREAM,
+		});
+
+		const results: ManifestPartDownloadResult[] = [];
+		// Sequential, not Promise.all: each export_url is one-shot and this
+		// keeps at most one in-flight download per navigation, matching
+		// attemptDownload's single-page navigate+wait pattern (no-await-in-
+		// loops allowlisted below, same as the old poll loop's sequential
+		// awaits — see scripts/no-await-in-loops-allowlist.ts).
+		for (const dataFile of dataFiles) {
+			const result = await downloadManifestPart(page, dataFile);
+			results.push(result);
+			await politeDelay(500);
+		}
+
+		const failed = results.filter((r) => r.outcome === "download_failed");
+		if (failed.length > 0) {
+			await emitManifestPartFailureSkip(emit, requested, failed);
+			return;
+		}
+
+		const rawConversations: unknown[] = [];
+		const rawProjects: unknown[] = [];
+		const unclassified: string[] = [];
+		for (const result of results) {
+			const classified = classifyManifestPartEntries(
+				result.category,
+				result.entries,
+			);
+			rawConversations.push(...classified.conversations);
+			rawProjects.push(...classified.projects);
+			unclassified.push(...classified.unclassifiedEntryNames);
+		}
+
+		if (unclassified.length > 0) {
+			await progress(
+				`Warning: ${unclassified.length} export entry/entries did not ` +
+					"match a known conversation or project shape and were not " +
+					`parsed: ${unclassified.join(", ")}.`,
+				{ stream: CONVERSATIONS_STREAM },
+			);
+		}
+
+		const parsed = parseClassifiedExport(rawConversations, rawProjects);
+		await emitParsed(parsed);
 	}
 }
 

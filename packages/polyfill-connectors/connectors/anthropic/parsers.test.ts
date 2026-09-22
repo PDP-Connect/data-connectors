@@ -21,7 +21,9 @@ import {
 	zipBasename,
 } from "../../src/bounded-zip-archive.ts";
 import {
+	classifyManifestPartEntries,
 	flattenMessageText,
+	parseClassifiedExport,
 	parseConversation,
 	parseExport,
 	parseMessage,
@@ -312,4 +314,92 @@ test("synthetic fixture: readZipEntriesFromFile + parseExport produces every str
 	} finally {
 		closeSync(fd);
 	}
+});
+
+// ─── Multi-part manifest classification (SYNTHETIC — 2026 export format) ──
+//
+// The inner layout of a real multi-part manifest category ZIP has never
+// been observed (see index.ts module header and the cut-anthropic-export
+// report). These fixtures are hand-authored guesses at plausible shapes,
+// clearly labeled synthetic, and do not satisfy any real-fixture proof
+// gate — they only prove classifyManifestPartEntries's content-shape
+// dispatch logic, not that it matches the real export.
+
+test("classifyManifestPartEntries: a bare array of conversation-shaped objects classifies as conversations", () => {
+	const result = classifyManifestPartEntries("conversations", [
+		{
+			name: "conversations-000.json",
+			json: [
+				{ uuid: "syn-conv-1", chat_messages: [] },
+				{ uuid: "syn-conv-2", chat_messages: [] },
+			],
+		},
+	]);
+	assert.equal(result.category, "conversations");
+	assert.equal(result.conversations.length, 2);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, []);
+});
+
+test("classifyManifestPartEntries: a bare array of project-shaped objects classifies as projects", () => {
+	const result = classifyManifestPartEntries("projects", [
+		{
+			name: "projects-000.json",
+			json: [
+				{ uuid: "syn-proj-1", docs: [] },
+				{ uuid: "syn-proj-2", archived_at: null },
+			],
+		},
+	]);
+	assert.equal(result.projects.length, 2);
+	assert.equal(result.conversations.length, 0);
+});
+
+test("classifyManifestPartEntries: a single bare project object (not wrapped in an array) still classifies", () => {
+	const result = classifyManifestPartEntries("projects", [
+		{ name: "projects-000.json", json: { uuid: "syn-proj-1", docs: [] } },
+	]);
+	assert.equal(result.projects.length, 1);
+});
+
+test("classifyManifestPartEntries: an unrecognized shape is reported as unclassified, never silently dropped", () => {
+	const result = classifyManifestPartEntries("light_metadata", [
+		{ name: "light_metadata-000.json", json: { some_unknown_field: 1 } },
+	]);
+	assert.equal(result.conversations.length, 0);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, ["light_metadata-000.json"]);
+});
+
+test("classifyManifestPartEntries: a bare array containing only unrecognized items is fully unclassified", () => {
+	const result = classifyManifestPartEntries("memories", [
+		{ name: "memories-000.json", json: [{ text: "some memory" }] },
+	]);
+	assert.equal(result.conversations.length, 0);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, ["memories-000.json"]);
+});
+
+test("parseClassifiedExport: pools classified raw items across parts through the same field mapping as parseExport", () => {
+	const rawConversations = [
+		{
+			uuid: "syn-conv-1",
+			name: "Synthetic",
+			created_at: "2026-01-01T00:00:00.000Z",
+			chat_messages: [],
+		},
+	];
+	const rawProjects = [
+		{
+			uuid: "syn-proj-1",
+			name: "Synthetic project",
+			docs: [{ uuid: "syn-doc-1", filename: "a.md", content: "body" }],
+		},
+	];
+	const parsed = parseClassifiedExport(rawConversations, rawProjects);
+	assert.equal(parsed.conversations.length, 1);
+	assert.equal(parsed.conversations[0]?.id, "syn-conv-1");
+	assert.equal(parsed.projects.length, 1);
+	assert.equal(parsed.projectDocuments.length, 1);
+	assert.equal(parsed.projectDocuments[0]?.filename, "a.md");
 });

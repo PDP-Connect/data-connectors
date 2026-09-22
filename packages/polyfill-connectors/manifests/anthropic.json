@@ -320,6 +320,7 @@
 	"reason_display_messages": {
 		"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
 		"no_chat_organization": "No Claude organization with chat access could be found for this account.",
-		"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically."
+		"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically.",
+		"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically."
 	}
 }

@@ -358,6 +358,91 @@ export function parseProject(raw: unknown): {
 	};
 }
 
+// ─── Multi-part manifest export (2026 format) ──────────────────────────────
+//
+// Anthropic's UI-driven export (observed 2026-09-22 against Tim's own
+// account manifest, private copy — never committed, contains one-shot
+// signed URLs) returns a JSON manifest instead of a single `{nonce}`:
+//   { version: "1.0", total_files: N,
+//     data_files: [{ batch_index, category, part, filename, export_url }] }
+// with `category` values `light_metadata`, `projects`, `memories`,
+// `design_chats`, `conversations`, each `export_url` usable exactly once,
+// downloading one ZIP per category (e.g. `conversations-000.zip`).
+//
+// The INNER layout of each category ZIP is UNVERIFIED — no part was ever
+// successfully downloaded and inspected (the two known job nonces returned
+// a Cloudflare bot challenge on re-fetch; see the cut-anthropic-export
+// report). `classifyManifestPartEntries` below does NOT assume a specific
+// filename inside a part ZIP (unlike the old format's hardcoded
+// `conversations.json`/`projects/*.json` names) — it scans every `.json`
+// entry in the part and classifies each by CONTENT SHAPE (a bare array of
+// objects carrying `chat_messages` -> conversations-shaped; a bare array or
+// per-file object carrying `docs`/`prompt_template` -> project-shaped),
+// reusing the same `parseConversation`/`parseProject` field mapping either
+// way. A part whose entries match no known shape is reported to the caller
+// as unclassified rather than silently dropped, so index.ts can emit an
+// honest SKIP_RESULT instead of a false "0 records".
+
+export interface ManifestPartFile {
+	/** Entry name inside the part ZIP (e.g. "conversations.json" or
+	 * something else — UNVERIFIED, kept for diagnostics only). */
+	name: string;
+	json: unknown;
+}
+
+export interface ClassifiedManifestPart {
+	category: string;
+	conversations: unknown[];
+	projects: unknown[];
+	/** Entries that parsed as JSON but matched no known conversation/project
+	 * shape — evidence for a SKIP_RESULT, never silently dropped. */
+	unclassifiedEntryNames: string[];
+}
+
+function looksLikeConversation(v: unknown): boolean {
+	return isRecord(v) && Array.isArray(v.chat_messages);
+}
+
+function looksLikeProject(v: unknown): boolean {
+	return (
+		isRecord(v) && ("docs" in v || "prompt_template" in v || "archived_at" in v)
+	);
+}
+
+/**
+ * Classify one manifest part's extracted JSON entries by content shape
+ * (see module note above for why: the inner filename convention is
+ * UNVERIFIED). A bare array is treated as a list of same-shaped items; a
+ * bare object is treated as one item of whichever shape it matches.
+ */
+export function classifyManifestPartEntries(
+	category: string,
+	entries: readonly ManifestPartFile[],
+): ClassifiedManifestPart {
+	const conversations: unknown[] = [];
+	const projects: unknown[] = [];
+	const unclassifiedEntryNames: string[] = [];
+
+	for (const entry of entries) {
+		const items = Array.isArray(entry.json) ? entry.json : [entry.json];
+		let matchedAny = false;
+		for (const item of items) {
+			if (looksLikeConversation(item)) {
+				conversations.push(item);
+				matchedAny = true;
+			} else if (looksLikeProject(item)) {
+				projects.push(item);
+				matchedAny = true;
+			}
+		}
+		if (!matchedAny) {
+			unclassifiedEntryNames.push(entry.name);
+		}
+	}
+
+	return { category, conversations, projects, unclassifiedEntryNames };
+}
+
 // ─── Whole-archive parse ─────────────────────────────────────────────────
 
 export interface ParsedExport {
@@ -404,4 +489,20 @@ export function parseExport(
 	}
 
 	return { conversations, messages, projectDocuments, projects };
+}
+
+/**
+ * Same as `parseExport`, but for the multi-part manifest format: takes
+ * already-classified raw conversation/project objects (pooled across
+ * however many category parts contributed them — see
+ * `classifyManifestPartEntries`) instead of the old format's
+ * `conversationsJson` bare-array + `projectFiles` per-file split. The
+ * underlying per-item field mapping is identical; only how the raw items
+ * were extracted from the archive differs.
+ */
+export function parseClassifiedExport(
+	rawConversations: readonly unknown[],
+	rawProjects: readonly unknown[],
+): ParsedExport {
+	return parseExport(rawConversations, rawProjects);
 }
