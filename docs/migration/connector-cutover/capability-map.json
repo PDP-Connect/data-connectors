@@ -1,0 +1,162 @@
+{
+  "schema": "pdpp-connector-cutover-capability-map/v1",
+  "base_commit": "20bba85314034594f64a0a97ac029b76521f6785",
+  "contract_doc": "docs/migration/connector-cutover/CONTRACTS.md",
+  "status_values": ["contracted", "implemented", "fixture_proven", "live_proven", "needs_parity_audit", "deliberate_break", "unregistered_remove"],
+  "sources": [
+    {
+      "legacy_source_id": "claude",
+      "legacy_connectors": ["claude-export-playwright"],
+      "connector_key": "anthropic",
+      "oci_name": "anthropic",
+      "lane": "cut-anthropic",
+      "acquisition": "browser session -> official Claude data export (request, poll, download ZIP) -> pure ZIP parser",
+      "browser_profile": "anthropic",
+      "tier_target": "development until the proof gate passes",
+      "scopes": [
+        {"legacy_scope": "claude.conversations", "streams": ["anthropic.conversations", "anthropic.messages"], "migration": "split",
+         "field_map": {"conversations[].id": "conversations.id", "conversations[].title": "conversations.title", "conversations[].createdAt": "conversations.create_time", "conversations[].updatedAt": "conversations.update_time", "conversations[].projectId": "conversations.project_id", "conversations[].messageCount": "conversations.message_count", "conversations[].starred": "conversations.is_starred", "conversations[].messages[].id": "messages.id", "conversations[].messages[].sender": "messages.role", "conversations[].messages[].parentId": "messages.parent_id", "conversations[].messages[].createdAt": "messages.create_time", "conversations[].messages[].updatedAt": "messages.update_time", "conversations[].messages[].content": "messages.content", "conversations[].messages[].attachments": "messages.attachments"},
+         "dropped": [{"field": "profile.name, profile.plan, organizationId, total, messageTotal, source, conversations[].href, conversations[].fetchError", "reason": "D3 envelope/derived metadata, not entity data"}],
+         "status": "contracted"},
+        {"legacy_scope": "claude.projects", "streams": ["anthropic.projects", "anthropic.project_documents"], "migration": "split",
+         "field_map": {"projects[].id": "projects.id", "projects[].title": "projects.name", "projects[].createdAt": "projects.create_time", "projects[].updatedAt": "projects.update_time", "projects[].archived": "projects.is_archived", "projects[].detail.prompt_template": "projects.prompt_template", "projects[].detail.docs[]": "project_documents"},
+         "dropped": [{"field": "projects[].detail (raw blob), projects[].label, projects[].href, total, source", "reason": "raw payload replaced by typed fields; lane must name any detail sub-field with user content that is not typed"}],
+         "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "doordash", "legacy_connectors": ["doordash-playwright"], "connector_key": "doordash", "oci_name": "doordash", "lane": "cut-doordash",
+      "acquisition": "browser session -> order history (GraphQL response capture preferred over DOM)", "browser_profile": "doordash", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "doordash.orders", "streams": ["doordash.orders", "doordash.order_items"], "migration": "split",
+         "field_map": {"orders[].orderId": "orders.id", "orders[].restaurant": "orders.restaurant_name", "orders[].date": "orders.order_date", "orders[].total": "orders.total_cents", "orders[].itemCount": "orders.item_count", "orders[].status": "orders.status", "orders[].deliveryAddress": "orders.delivery_address", "orders[].items[].name": "order_items.name", "orders[].items[].quantity": "order_items.quantity", "orders[].items[].price": "order_items.unit_price_cents"},
+         "dropped": [], "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "uber", "legacy_connectors": ["uber-playwright"], "connector_key": "uber", "oci_name": "uber", "lane": "cut-uber",
+      "acquisition": "browser session -> riders.uber.com activity list (trips) + per-trip detail (receipts)", "browser_profile": "uber", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "uber.trips", "streams": ["uber.trips"], "migration": "rename+fields",
+         "field_map": {"trips[].id": "trips.id", "trips[].status": "trips.status", "trips[].requestTime": "trips.requested_at", "trips[].dropoffTime": "trips.completed_at", "trips[].pickupAddress": "trips.pickup_address", "trips[].dropoffAddress": "trips.dropoff_address", "trips[].fare": "trips.fare_total_cents", "trips[].currencyCode": "trips.currency", "trips[].vehicleType": "trips.product_type", "trips[].city": "trips.city", "trips[].isSurge": "trips.is_surge"},
+         "dropped": [], "status": "contracted"},
+        {"legacy_scope": "uber.receipts", "streams": ["uber.receipts"], "migration": "rename+fields",
+         "field_map": {"receipts[].tripId": "receipts.trip_id", "receipts[].fare": "receipts.fare_total_cents", "receipts[].currencyCode": "receipts.currency", "receipts[].distance": "receipts.distance_meters", "receipts[].duration": "receipts.duration_seconds", "receipts[].vehicleType": "receipts.product_type", "receipts[].surgeMultiplier": "receipts.surge_multiplier", "receipts[].fareBreakdown": "receipts.fare_breakdown[] {label, amount_cents}"},
+         "dropped": [{"field": "distanceLabel, durationLabel", "reason": "display strings of the parsed numeric values"}],
+         "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "instagram", "legacy_connectors": ["instagram-playwright", "instagram-ads-playwright"], "connector_key": "meta", "oci_name": "meta", "lane": "cut-meta",
+      "acquisition": "browser session -> instagram.com internal web APIs (profile, posts, likers, following) + accountscenter ads surfaces; one connector", "browser_profile": "meta", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "instagram.profile", "streams": ["meta.profile"], "migration": "rename+fields",
+         "field_map": {"username": "profile.username", "full_name": "profile.full_name", "bio": "profile.bio", "profile_pic_url": "profile.profile_pic_url", "external_url": "profile.external_url", "follower_count": "profile.follower_count", "following_count": "profile.following_count", "media_count": "profile.post_count", "is_private": "profile.is_private", "is_verified": "profile.is_verified", "is_business": "profile.is_business"},
+         "dropped": [], "status": "contracted"},
+        {"legacy_scope": "instagram.posts", "streams": ["meta.posts", "meta.post_likes"], "migration": "split",
+         "field_map": {"posts[].img_url": "posts.media_url", "posts[].caption": "posts.caption", "posts[].num_of_likes": "posts.like_count", "posts[].taken_at": "posts.taken_at", "posts[].who_liked[]": "post_likes {post_id, user_id, username}"},
+         "dropped": [{"field": "who_liked[].profile_pic_url", "reason": "expiring signed CDN URL of a third party; not durable data"}],
+         "status": "contracted"},
+        {"legacy_scope": "instagram.following", "streams": ["meta.following"], "migration": "rename+fields",
+         "field_map": {"accounts[].pk": "following.id", "accounts[].username": "following.username", "accounts[].full_name": "following.full_name", "accounts[].is_private": "following.is_private", "accounts[].is_verified": "following.is_verified", "accounts[].profile_pic_url": "following.profile_pic_url"},
+         "dropped": [{"field": "total", "reason": "D3 envelope"}], "notes": "legacy capped at ~1000 accounts; modern must be complete or report honest coverage", "status": "contracted"},
+        {"legacy_scope": "instagram.ads", "streams": ["meta.ads"], "migration": "merge (two legacy connectors -> one stream, kind discriminator)",
+         "field_map": {"advertisers[].name": "ads{kind:'advertiser'}.name", "ad_topics[].name": "ads{kind:'ad_topic'}.name", "categories[].name": "ads{kind:'ad_category'}.name", "categories[].description": "ads{kind:'ad_category'}.description"},
+         "dropped": [], "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "linkedin", "legacy_connectors": ["linkedin-playwright"], "connector_key": "linkedin", "oci_name": "linkedin", "lane": "cut-linkedin",
+      "acquisition": "browser session -> LinkedIn Voyager JSON endpoints from the logged-in page context", "browser_profile": "linkedin", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "linkedin.profile", "streams": ["linkedin.profile"], "migration": "rename+fields", "field_map": {"profileUrl": "profile.public_url", "fullName": "profile.full_name", "headline": "profile.headline", "location": "profile.location", "connections": "profile.connection_count", "profilePictureUrl": "profile.profile_picture_url", "about": "profile.summary"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "linkedin.experience", "streams": ["linkedin.experience"], "migration": "rename+fields", "field_map": {"jobTitle": "experience.title", "companyName": "experience.company", "dates": "experience.start_date + experience.end_date (D4 partial dates)", "location": "experience.location", "description": "experience.description"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "linkedin.education", "streams": ["linkedin.education"], "migration": "rename+fields", "field_map": {"schoolName": "education.school", "degree": "education.degree", "years": "education.start_date + education.end_date", "grade": "education.grade", "logoUrl": "education.logo_url"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "linkedin.skills", "streams": ["linkedin.skills"], "migration": "rename+fields", "field_map": {"name": "skills.name", "endorsements": "skills.endorsement_count (integer)"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "linkedin.languages", "streams": ["linkedin.languages"], "migration": "new stream", "field_map": {"name": "languages.name", "proficiency": "languages.proficiency"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "linkedin.connections", "streams": ["linkedin.connections"], "migration": "new stream", "field_map": {"fullName": "connections.full_name", "headline": "connections.headline", "profileUrl": "connections.profile_url", "dateConnected": "connections.connected_at"}, "dropped": [], "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "wholefoods", "legacy_connectors": ["wholefoods-playwright"], "connector_key": "wholefoods", "oci_name": "wholefoods", "lane": "cut-wholefoods",
+      "acquisition": "browser session on amazon.com (shared Amazon session seam in the runtime library) -> Whole Foods order search + order detail; nutrition enrichment from wholefoodsmarket.com product pages, USDA FDC fallback", "browser_profile": "wholefoods", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "wholefoods.profile", "streams": ["wholefoods.profile"], "migration": "new stream", "field_map": {"name": "profile.name", "email": "profile.email"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "wholefoods.orders", "streams": ["wholefoods.orders", "wholefoods.order_items"], "migration": "split",
+         "field_map": {"orders[].orderId": "orders.id", "orders[].orderUrl": "orders.order_url", "orders[].orderDate": "orders.order_date", "orders[].total": "orders.total_cents", "orders[].itemCount": "orders.item_count", "orders[].status": "orders.status", "orders[].items[].name": "order_items.name", "orders[].items[].productId": "order_items.product_id", "orders[].items[].productUrl": "order_items.product_url", "orders[].items[].imageUrl": "order_items.image_url", "orders[].items[].quantity": "order_items.quantity", "orders[].items[].price": "order_items.unit_price_cents"},
+         "dropped": [{"field": "totalOrders, totalItems", "reason": "D3 envelope"}, {"field": "modern order_items.nutrition (untyped object)", "reason": "replaced by the typed nutrition stream"}], "status": "contracted"},
+        {"legacy_scope": "wholefoods.nutrition", "streams": ["wholefoods.nutrition"], "migration": "new stream (typed)",
+         "field_map": {"items{id}": "nutrition.product_id", "name": "nutrition.name", "source": "nutrition.source", "confidence": "nutrition.confidence", "calories": "nutrition.calories", "protein_g": "nutrition.protein_g", "carbs_g": "nutrition.carbs_g", "fat_g": "nutrition.fat_g", "sodium_mg": "nutrition.sodium_mg", "fiber_g": "nutrition.fiber_g", "sugar_g": "nutrition.sugar_g", "servingSize": "nutrition.serving_size", "servingsPerContainer": "nutrition.servings_per_container"},
+         "dropped": [{"field": "coverage{}", "reason": "D3 aggregate; report as run evidence/PROGRESS, not a record"}], "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "icloud_notes", "legacy_connectors": ["icloud-notes-playwright"], "connector_key": "icloud_notes", "oci_name": "icloud-notes", "lane": "cut-icloud-notes",
+      "acquisition": "browser session on icloud.com -> CloudKit web service (endpoint from setup.icloud.com validate) -> notes + folders; greenfield profile", "browser_profile": "icloud_notes", "tier_target": "development until proof gate",
+      "scopes": [
+        {"legacy_scope": "icloud_notes.notes", "streams": ["icloud_notes.notes"], "migration": "new connector", "field_map": {"notes[].recordName": "notes.id", "notes[].title": "notes.title", "notes[].snippet": "notes.snippet", "notes[].folder": "notes.folder_id", "notes[].isPinned": "notes.is_pinned", "notes[].createdDate": "notes.created_at", "notes[].modifiedDate": "notes.modified_at", "notes[].hasAttachments": "notes.has_attachments", "notes[].textContent": "notes.text_content"}, "dropped": [{"field": "total, userName", "reason": "D3 envelope"}], "status": "contracted"},
+        {"legacy_scope": "icloud_notes.folders", "streams": ["icloud_notes.folders"], "migration": "new connector", "field_map": {"folders[].recordName": "folders.id", "folders[].title|name": "folders.name"}, "dropped": [], "notes": "lane fills the full legacy folder field list from connectors/apple/schemas/icloud_notes.folders.json", "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "youtube", "legacy_connectors": ["youtube-playwright"], "connector_key": "youtube", "oci_name": "youtube", "lane": "cut-youtube",
+      "acquisition": "manual import of a Google Takeout 'YouTube and YouTube Music' export (filesystem, manual_or_upload); no Google browser scraping unless Takeout provably lacks a scope and a decision record approves a narrow fallback", "browser_profile": null, "tier_target": "development until proof gate",
+      "takeout_coverage": "UNVERIFIED until Tim's Takeout arrives. The inventory claim that Takeout contains only watch history is NOT accepted (it was derived from google_takeout code, not from an export).",
+      "scopes": [
+        {"legacy_scope": "youtube.profile", "streams": ["youtube.profile"], "migration": "rename+fields", "field_map": {"channelId": "profile.id", "channelTitle": "profile.title", "channelUrl": "profile.channel_url", "handle": "profile.handle", "email": "profile.email", "joinedDate": "profile.joined_at", "avatarUrl": "profile.avatar_url", "description": "profile.description", "country": "profile.country", "subscriberCount": "profile.subscriber_count", "viewCount": "profile.view_count", "videoCount": "profile.video_count"}, "dropped": [], "notes": "fields absent from Takeout become documented breaks, per field", "status": "contracted"},
+        {"legacy_scope": "youtube.subscriptions", "streams": ["youtube.subscriptions"], "migration": "rename+fields", "field_map": {"channelId": "subscriptions.channel_id", "channelTitle": "subscriptions.channel_title", "channelUrl": "subscriptions.channel_url", "handle": "subscriptions.handle", "avatarUrl": "subscriptions.avatar_url", "subscriberCount": "subscriptions.subscriber_count", "description": "subscriptions.description", "isVerified": "subscriptions.is_verified", "isBellNotification": "subscriptions.notifications"}, "dropped": [{"field": "subscriberCountText", "reason": "display string"}], "status": "contracted"},
+        {"legacy_scope": "youtube.playlists", "streams": ["youtube.playlists"], "migration": "rename+fields", "field_map": {"playlistId": "playlists.id", "url": "playlists.url", "title": "playlists.title", "owner": "playlists.owner", "ownerUrl": "playlists.owner_url", "privacy": "playlists.visibility", "videoCount": "playlists.video_count", "views": "playlists.view_count"}, "dropped": [], "notes": "legacy capped at 50 playlists; modern uncapped", "status": "contracted"},
+        {"legacy_scope": "youtube.playlistItems", "streams": ["youtube.playlist_items"], "migration": "rename (camelCase->snake_case) + flatten", "field_map": {"playlists[].playlistId": "playlist_items.playlist_id", "items[].videoId": "playlist_items.video_id", "items[].videoUrl": "playlist_items.video_url", "items[].videoTitle": "playlist_items.video_title", "items[].channelTitle": "playlist_items.channel_title", "items[].channelUrl": "playlist_items.channel_url", "items[].durationText": "playlist_items.duration_seconds", "items[].thumbnailUrl": "playlist_items.thumbnail_url"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "youtube.likes", "streams": ["youtube.likes"], "migration": "rename+fields", "field_map": {"videoId": "likes.video_id", "videoUrl": "likes.video_url", "videoTitle": "likes.video_title", "channelTitle": "likes.channel_title", "channelUrl": "likes.channel_url", "durationText": "likes.duration_seconds", "thumbnailUrl": "likes.thumbnail_url"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "youtube.watchLater", "streams": ["youtube.watch_later"], "migration": "rename (camelCase->snake_case)", "field_map": {"videoId": "watch_later.video_id", "videoUrl": "watch_later.video_url", "videoTitle": "watch_later.video_title", "channelTitle": "watch_later.channel_title", "channelUrl": "watch_later.channel_url", "durationText": "watch_later.duration_seconds", "thumbnailUrl": "watch_later.thumbnail_url"}, "dropped": [], "status": "contracted"},
+        {"legacy_scope": "youtube.history", "streams": ["youtube.watch_history"], "migration": "rename", "field_map": {"watchedAt": "watch_history.watched_at", "videoId": "watch_history.video_id", "videoUrl": "watch_history.video_url", "videoTitle": "watch_history.video_title", "channelTitle": "watch_history.channel_title", "views": "watch_history.view_count", "description": "watch_history.description"}, "dropped": [{"field": "timeWindow, watchedAtText", "reason": "legacy 50-item window artifacts; Takeout gives exact timestamps"}], "notes": "Takeout watch-history parsing must be shared with google_takeout.youtube_watch_history through one runtime-library module (same file format, same reason to change)", "status": "contracted"}
+      ]
+    },
+    {
+      "legacy_source_id": "shop", "legacy_connectors": ["shop-playwright"], "connector_key": "shopify", "oci_name": "shopify", "lane": "cut-shopify",
+      "acquisition": "browser session on shop.app -> order history (Apollo cache/network responses)", "browser_profile": "shopify", "tier_target": "development (no live account; stays development until independent live evidence exists)",
+      "scopes": [
+        {"legacy_scope": "shop.orders", "streams": ["shopify.orders"], "migration": "rename+fields", "field_map": {"orders[].id": "orders.id", "orders[].orderNumber": "orders.order_number", "orders[].placedAt": "orders.order_date", "orders[].merchantName": "orders.merchant_name", "orders[].total": "orders.total_cents", "orders[].currency": "orders.currency", "orders[].status": "orders.status", "orders[].itemCount": "orders.item_count", "orders[].lineItemTitles[]": "orders.line_item_titles", "orders[].detailUrl": "orders.detail_url"}, "dropped": [], "status": "contracted"}
+      ]
+    },
+    {"legacy_source_id": "amazon", "legacy_connectors": ["amazon-playwright"], "connector_key": "amazon", "oci_name": "amazon", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "amazon.orders", "streams": ["amazon.orders", "amazon.order_items"], "migration": "split", "status": "needs_parity_audit"},
+      {"legacy_scope": "amazon.profile", "streams": [], "migration": "GAP: no modern profile stream", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "chatgpt", "legacy_connectors": ["chatgpt-playwright"], "connector_key": "chatgpt", "oci_name": "chatgpt", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "chatgpt.conversations", "streams": ["chatgpt.conversations", "chatgpt.messages"], "migration": "split", "status": "needs_parity_audit"},
+      {"legacy_scope": "chatgpt.memories", "streams": ["chatgpt.memories"], "migration": "rename", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "claude_code", "legacy_connectors": ["claude-code-local"], "connector_key": "claude_code", "oci_name": "claude-code", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "claude_code.sessions", "streams": ["claude_code.sessions"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "claude_code.prompts", "streams": ["claude_code.messages?"], "migration": "UNKNOWN", "status": "needs_parity_audit"},
+      {"legacy_scope": "claude_code.trajectories", "streams": ["claude_code.messages?"], "migration": "UNKNOWN", "status": "needs_parity_audit"},
+      {"legacy_scope": "claude_code.usage", "streams": [], "migration": "UNKNOWN", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "github", "legacy_connectors": ["github-playwright"], "connector_key": "github", "oci_name": "github", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "github.profile", "streams": ["github.user", "github.user_stats"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "github.repositories", "streams": ["github.repositories"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "github.starred", "streams": ["github.starred"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "github.events", "streams": [], "migration": "GAP", "status": "needs_parity_audit"},
+      {"legacy_scope": "github.contributions", "streams": [], "migration": "GAP", "status": "needs_parity_audit"},
+      {"legacy_scope": "github.history", "streams": [], "migration": "GAP", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "heb", "legacy_connectors": ["heb-playwright"], "connector_key": "heb", "oci_name": "heb", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "heb.orders", "streams": ["heb.orders", "heb.order_items"], "migration": "split", "status": "needs_parity_audit"},
+      {"legacy_scope": "heb.profile", "streams": [], "migration": "GAP", "status": "needs_parity_audit"},
+      {"legacy_scope": "heb.nutrition", "streams": [], "migration": "GAP (align with wholefoods.nutrition shape)", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "oura", "legacy_connectors": ["oura-playwright"], "connector_key": "oura", "oci_name": "oura", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "oura.activity", "streams": ["oura.activity"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "oura.readiness", "streams": ["oura.readiness"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "oura.sleep", "streams": ["oura.sleep"], "migration": "rename", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "spotify", "legacy_connectors": ["spotify-playwright"], "connector_key": "spotify", "oci_name": "spotify", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "spotify.playlists", "streams": ["spotify.playlists"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "spotify.savedTracks", "streams": ["spotify.saved_tracks"], "migration": "rename (camelCase->snake_case)", "status": "needs_parity_audit"},
+      {"legacy_scope": "spotify.profile", "streams": [], "migration": "GAP", "status": "needs_parity_audit"}]},
+    {"legacy_source_id": "steam", "legacy_connectors": ["steam-playwright"], "connector_key": "steam", "oci_name": "steam", "lane": "wave2-parity", "scopes": [
+      {"legacy_scope": "steam.profile", "streams": ["steam.profile", "steam.steam_level"], "migration": "rename", "status": "needs_parity_audit"},
+      {"legacy_scope": "steam.games", "streams": ["steam.owned_games", "steam.recently_played_games"], "migration": "split", "status": "needs_parity_audit"},
+      {"legacy_scope": "steam.friends", "streams": ["steam.friends"], "migration": "rename", "status": "needs_parity_audit"}]}
+  ],
+  "unregistered_legacy": [
+    {"path": "connectors/tinder/", "registered": false, "advertised_in_scope_catalog": false, "decision": "unregistered_remove: not an advertised capability; delete at hard cut, record here"},
+    {"path": "connectors/amazon/goodreads/", "registered": false, "advertised_in_scope_catalog": false, "decision": "unregistered_remove"},
+    {"path": "connectors/_conformance/ (legacy playwright conformance fixture)", "registered": false, "advertised_in_scope_catalog": false, "decision": "unregistered_remove; the PDPP _conformance connector moves to root connectors/_conformance/"}
+  ]
+}
