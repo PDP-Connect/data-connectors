@@ -64,6 +64,9 @@ const friendSchema = z.object({
 	owner_steamid: z.string(),
 	relationship: z.string(),
 	friend_since: z.number(),
+	persona_name: z.string().nullable(),
+	avatar_url: z.string().nullable(),
+	profile_url: z.string().nullable(),
 });
 
 const steamLevelSchema = z.object({

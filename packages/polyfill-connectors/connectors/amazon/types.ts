@@ -90,6 +90,14 @@ export interface OrderItemRecord {
 	[field: string]: unknown;
 }
 
+// Shape of the emitted `profile` stream record.
+export interface ProfileRecord {
+	id: string;
+	is_prime: boolean | null;
+	name: string | null;
+	[field: string]: unknown;
+}
+
 export interface ListPageDiagnostics {
 	any_card: number;
 	any_order_header: number;

@@ -94,6 +94,18 @@ interface SpotifySavedTrack {
 	track: SpotifyTrack | null;
 }
 
+interface SpotifyPlaylistItem {
+	added_at?: string | null;
+	added_by?: { id?: string | null } | null;
+	track: SpotifyTrack | null;
+}
+
+interface SpotifyProfile {
+	display_name?: string | null;
+	followers?: { total?: number | null } | null;
+	id?: string;
+}
+
 interface SpotifyPlayHistory {
 	context?: { type?: string | null };
 	played_at: string;
@@ -227,6 +239,42 @@ export function spotifyPlaylistRecord(
 		track_count: p.items?.total ?? p.tracks?.total ?? null,
 		snapshot_id: p.snapshot_id ?? null,
 		description: p.description ?? null,
+	};
+}
+
+/**
+ * playlist_items child stream (D3): one record per track-in-playlist, keyed
+ * by `<playlist_id>:<position>` so the id stays stable across runs as long
+ * as the playlist's own ordering does not change (matching the API's own
+ * offset-based pagination contract).
+ */
+export function spotifyPlaylistItemRecord(
+	playlistId: string,
+	position: number,
+	item: SpotifyPlaylistItem,
+): Record<string, unknown> {
+	const t = item.track;
+	return {
+		id: `${playlistId}:${String(position)}`,
+		playlist_id: playlistId,
+		track_id: t?.id ?? null,
+		position,
+		added_at: item.added_at ?? null,
+		added_by: item.added_by?.id ?? null,
+		name: t?.name,
+		artist_names: (t?.artists || []).map((a) => a.name),
+		album_name: t?.album?.name ?? null,
+		duration_ms: t?.duration_ms ?? null,
+	};
+}
+
+export function spotifyProfileRecord(
+	profile: SpotifyProfile,
+): Record<string, unknown> {
+	return {
+		id: profile.id,
+		display_name: profile.display_name ?? null,
+		followers: profile.followers?.total ?? null,
 	};
 }
 
@@ -376,6 +424,106 @@ async function collectPlaylists(
 			hydratedKeys: [],
 			considered: tally.totalSeen,
 			covered: tally.covered,
+		},
+	);
+}
+
+/**
+ * playlist_items (D3 child stream): enumerates every playlist the account
+ * owns/follows, then paginates each playlist's own /tracks endpoint. The
+ * playlist id list is re-fetched here rather than threaded from
+ * collectPlaylists so this stream stands alone when only playlist_items (not
+ * playlists) is requested — mirroring how order_items independently walks
+ * Amazon's order list rather than depending on the orders stream having run
+ * this turn.
+ */
+async function collectPlaylistItems(
+	token: string,
+	emit: (msg: EmittedMessage) => Promise<void>,
+	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<void> {
+	await progress("Fetching playlist ids for playlist_items", {
+		stream: "playlist_items",
+		phase: "start",
+	});
+	const playlistIds: string[] = [];
+	await paginate<SpotifyPlaylist, PaginationTally>(
+		"/me/playlists?limit=50",
+		token,
+		progress,
+		"playlist_items",
+		{ totalSeen: 0, covered: 0 },
+		(current, p) => {
+			if (p.id) {
+				playlistIds.push(p.id);
+			}
+			return { totalSeen: current.totalSeen + 1, covered: current.covered };
+		},
+	);
+
+	let totalSeen = 0;
+	let covered = 0;
+	for (const playlistId of playlistIds) {
+		const tally = await paginate<SpotifyPlaylistItem, PaginationTally>(
+			`/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100`,
+			token,
+			progress,
+			"playlist_items",
+			{ totalSeen: 0, covered: 0 },
+			async (current, item) => {
+				const record = spotifyPlaylistItemRecord(
+					playlistId,
+					current.totalSeen,
+					item,
+				);
+				const recordCovered =
+					current.covered +
+					(validateRecord("playlist_items", record).ok ? 1 : 0);
+				await emitRecord("playlist_items", record);
+				return { totalSeen: current.totalSeen + 1, covered: recordCovered };
+			},
+		);
+		totalSeen += tally.totalSeen;
+		covered += tally.covered;
+	}
+	// Full re-walk of every in-scope playlist's tracks each run, so the
+	// considered/covered denominator spans every playlist enumerated above.
+	await emitDetailCoverage(
+		{ emit },
+		{
+			stream: "playlist_items",
+			stateStream: "playlist_items",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: totalSeen,
+			covered,
+		},
+	);
+}
+
+async function collectProfile(
+	token: string,
+	emit: (msg: EmittedMessage) => Promise<void>,
+	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<void> {
+	await progress("Fetching profile", { stream: "profile", phase: "start" });
+	const profile = await sp<SpotifyProfile>("/me", token, progress, {
+		stream: "profile",
+	});
+	const record = spotifyProfileRecord(profile);
+	const covered = validateRecord("profile", record).ok ? 1 : 0;
+	await emitRecord("profile", record);
+	await emitDetailCoverage(
+		{ emit },
+		{
+			stream: "profile",
+			stateStream: "profile",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: 1,
+			covered,
 		},
 	);
 }
@@ -621,6 +769,10 @@ export async function spotifyCollect({
 		await collectPlaylists(token, emit, emitRecord, progress);
 	}
 
+	if (requested.has("playlist_items")) {
+		await collectPlaylistItems(token, emit, emitRecord, progress);
+	}
+
 	if (requested.has("saved_tracks")) {
 		await collectSavedTracks(token, state, emit, emitRecord, progress);
 	}
@@ -631,6 +783,10 @@ export async function spotifyCollect({
 
 	if (requested.has("recently_played")) {
 		await collectRecentlyPlayed(token, state, emit, emitRecord, progress);
+	}
+
+	if (requested.has("profile")) {
+		await collectProfile(token, emit, emitRecord, progress);
 	}
 }
 

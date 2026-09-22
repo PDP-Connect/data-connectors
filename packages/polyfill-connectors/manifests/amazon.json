@@ -282,6 +282,45 @@
 			},
 			"coverage_strategy": "parent_detail_accounting",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "profile",
+			"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership).",
+			"display": {
+				"label": "Your Amazon account",
+				"detail": "Display name and Prime membership status, as shown in the Amazon nav bar. Both are null when not observable, never guessed."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"is_prime": {
+						"type": ["boolean", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"profiles": [

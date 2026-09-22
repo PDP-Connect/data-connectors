@@ -52,6 +52,8 @@ const DELIBERATELY_TIMELESS: Record<string, string> = {
 		"a label is a folder, not an event; Gmail exposes no created/applied time",
 	"spotify/playlists":
 		"playlist rows carry no owner-scoped created/followed time",
+	"spotify/profile":
+		"a standing account snapshot (id, display name, follower count), not an event",
 	"spotify/top_artists":
 		"a computed ranking over a window, not a moment the owner lived",
 	"steam/profile": "a standing profile snapshot",

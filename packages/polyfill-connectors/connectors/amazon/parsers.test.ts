@@ -13,6 +13,7 @@ import {
 	itemId,
 	mergeDetailByKey,
 	mergeOrderItems,
+	parseAmazonProfileDom,
 	parseCurrencyCents,
 	parseOrderDate,
 	parseOrderDetailDom,
@@ -858,4 +859,42 @@ test("mergeDetailByKey: buckets by ASIN first, name second", () => {
 	assert.equal(byAsin.get("B01ABCDEFG")?.name, "Widget");
 	assert.equal(byName.size, 1);
 	assert.equal(byName.get("gadget")?.name, "Gadget");
+});
+
+test("parseAmazonProfileDom: signed-in Prime member nav bar", () => {
+	const html = `<html><body>
+		<div id="nav-link-accountList"><span class="nav-line-1">Hello, Jane Doe</span></div>
+		<div id="nav-prime-menu">Your Prime</div>
+	</body></html>`;
+	const record = parseAmazonProfileDom(html);
+	assert.deepEqual(record, { id: "me", name: "Jane Doe", is_prime: true });
+});
+
+test("parseAmazonProfileDom: signed-in non-Prime nav bar (Try Prime upsell is not membership)", () => {
+	const html = `<html><body>
+		<div id="nav-link-accountList"><span class="nav-line-1">Hello, Jane Doe</span></div>
+		<div id="navbar-prime">Try Prime</div>
+	</body></html>`;
+	const record = parseAmazonProfileDom(html);
+	assert.deepEqual(record, { id: "me", name: "Jane Doe", is_prime: false });
+});
+
+test("parseAmazonProfileDom: signed-out nav bar yields null name and null is_prime", () => {
+	const html = `<html><body>
+		<div id="nav-link-accountList"><span class="nav-line-1">Hello, sign in</span></div>
+	</body></html>`;
+	const record = parseAmazonProfileDom(html);
+	assert.equal(record.name, null);
+	assert.equal(
+		record.is_prime,
+		null,
+		"no Prime nav element present at all — unobservable, not false",
+	);
+});
+
+test("parseAmazonProfileDom: missing nav bar entirely (selector drift) degrades to nulls, not a throw", () => {
+	const record = parseAmazonProfileDom(
+		"<html><body>unexpected layout</body></html>",
+	);
+	assert.deepEqual(record, { id: "me", name: null, is_prime: null });
 });

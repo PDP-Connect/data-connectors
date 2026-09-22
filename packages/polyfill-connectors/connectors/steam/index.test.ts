@@ -193,10 +193,33 @@ test("steam friends schema - validates friend record", () => {
 		owner_steamid: "76561198012345678",
 		relationship: "friend",
 		friend_since: 1_234_567_890,
+		persona_name: "SomeFriend",
+		avatar_url: "https://avatars.cloudflare.steamstatic.com/...",
+		profile_url: "https://steamcommunity.com/profiles/76561198087654321/",
 	};
 
 	const result = validateRecord("friends", record);
 	assert.strictEqual(result.ok, true, "friend record should validate");
+});
+
+test("steam friends schema - validates friend record with null persona fields", () => {
+	const record = {
+		id: "76561198012345678:76561198087654321",
+		steamid: "76561198087654321",
+		owner_steamid: "76561198012345678",
+		relationship: "friend",
+		friend_since: 1_234_567_890,
+		persona_name: null,
+		avatar_url: null,
+		profile_url: null,
+	};
+
+	const result = validateRecord("friends", record);
+	assert.strictEqual(
+		result.ok,
+		true,
+		"friend record with null persona fields should validate",
+	);
 });
 
 test("steam steam_level schema - validates level record", () => {

@@ -459,13 +459,20 @@ function recentlyPlayedRecord(
 	};
 }
 
-function friendRecord(friend: SteamFriend, steamid: string): RecordData {
+function friendRecord(
+	friend: SteamFriend,
+	steamid: string,
+	persona: SteamPlayerSummary | undefined,
+): RecordData {
 	return {
 		id: `${steamid}:${friend.steamid}`,
 		steamid: friend.steamid,
 		owner_steamid: steamid,
 		relationship: friend.relationship,
 		friend_since: friend.friend_since,
+		persona_name: persona?.personaname ?? null,
+		avatar_url: persona?.avatarfull ?? null,
+		profile_url: persona?.profileurl ?? null,
 	};
 }
 
@@ -715,6 +722,46 @@ async function collectRecentlyPlayed(
 	);
 }
 
+// GetPlayerSummaries accepts up to 100 comma-separated steamids per call, so a
+// friends list of any realistic size stays a small, bounded number of
+// requests rather than one request per friend (N+1).
+const PLAYER_SUMMARIES_BATCH_SIZE = 100;
+
+/**
+ * Batch-fetch persona fields (name, avatar, profile URL) for a set of
+ * steamids via GetPlayerSummaries, chunked at the API's 100-id-per-call
+ * limit. Returns a map keyed by steamid; a steamid absent from the response
+ * (private profile, deleted account) is simply absent from the map, and
+ * `friendRecord` treats that as `null` persona fields rather than failing
+ * the whole friends stream.
+ */
+async function fetchPlayerSummaries(
+	apiKey: string,
+	steamids: readonly string[],
+): Promise<Map<string, SteamPlayerSummary>> {
+	const out = new Map<string, SteamPlayerSummary>();
+	for (let i = 0; i < steamids.length; i += PLAYER_SUMMARIES_BATCH_SIZE) {
+		const batch = steamids.slice(i, i + PLAYER_SUMMARIES_BATCH_SIZE);
+		if (batch.length === 0) {
+			continue;
+		}
+		const res = await steamApiRequest<GetPlayerSummariesResponse>(
+			"/ISteamUser/GetPlayerSummaries/v0002",
+			apiKey,
+			{ steamids: batch.join(",") },
+		);
+		const response = requireSteamResponse(res);
+		const players = requireSteamArray<SteamPlayerSummary>(
+			response.players,
+			"response.players",
+		);
+		for (const player of players) {
+			out.set(player.steamid, player);
+		}
+	}
+	return out;
+}
+
 async function collectFriends(
 	deps: StreamDeps,
 	apiKey: string,
@@ -756,12 +803,24 @@ async function collectFriends(
 		count: friends.length,
 	});
 
+	// Best-effort persona hydration: a failure here (rate limit, transient
+	// error) must not fail the whole friends stream, since relationship data
+	// (the required D3 parity fields) is already in hand. A degraded fetch
+	// falls back to an empty map, so every friend record still emits with
+	// null persona fields instead of the run aborting.
+	const personas = await fetchPlayerSummaries(
+		apiKey,
+		friends.map((friend) => friend.steamid),
+	).catch((): Map<string, SteamPlayerSummary> => new Map());
+
 	const friendsCursor = openFingerprintCursor(
 		(newState.friends as unknown) ?? {},
 	);
 	const coverage = await emitSteamSnapshotRecords(
 		"friends",
-		friends.map((friend) => friendRecord(friend, steamid)),
+		friends.map((friend) =>
+			friendRecord(friend, steamid, personas.get(friend.steamid)),
+		),
 		friendsCursor,
 		deps.emitRecord,
 	);

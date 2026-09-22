@@ -12,7 +12,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	playlistItemsSchema,
 	playlistsSchema,
+	profileSchema,
 	recentlyPlayedSchema,
 	savedTracksSchema,
 	topArtistsSchema,
@@ -49,6 +51,25 @@ const TOP_ARTIST_RECORD = {
 	popularity: 100,
 	followers: 89_000_000,
 	time_range: "medium_term",
+};
+
+const PLAYLIST_ITEM_RECORD = {
+	id: "37i9dQZF1DXcBWIGoYBM5M:0",
+	playlist_id: "37i9dQZF1DXcBWIGoYBM5M",
+	track_id: "11dFghVXANMlKmJXsNCbNl",
+	position: 0,
+	added_at: "2024-04-01T18:22:05Z",
+	added_by: "spotify",
+	name: "Cut To The Feeling",
+	artist_names: ["Carly Rae Jepsen"],
+	album_name: "Cut To The Feeling",
+	duration_ms: 207_959,
+};
+
+const PROFILE_RECORD = {
+	id: "spotify_user_id",
+	display_name: "Real Person",
+	followers: 12,
 };
 
 const RECENTLY_PLAYED_RECORD = {
@@ -145,5 +166,44 @@ test("validateRecord routes by stream and passes unknown streams through", () =>
 		validateRecord("recently_played", RECENTLY_PLAYED_RECORD).ok,
 		true,
 	);
+	assert.equal(validateRecord("playlist_items", PLAYLIST_ITEM_RECORD).ok, true);
+	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
 	assert.equal(validateRecord("top_tracks", { id: "x" }).ok, true);
+});
+
+test("playlist_items schema accepts a representative emitted record", () => {
+	const result = playlistItemsSchema.safeParse(PLAYLIST_ITEM_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("playlist_items schema accepts a track with a null track_id and added_by (deleted track, unknown adder)", () => {
+	const result = playlistItemsSchema.safeParse({
+		...PLAYLIST_ITEM_RECORD,
+		track_id: null,
+		added_at: null,
+		added_by: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("playlist_items schema rejects a negative position (parse leak)", () => {
+	assert.equal(
+		playlistItemsSchema.safeParse({ ...PLAYLIST_ITEM_RECORD, position: -1 })
+			.success,
+		false,
+	);
+});
+
+test("profile schema accepts a representative emitted record", () => {
+	const result = profileSchema.safeParse(PROFILE_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema accepts null display_name and followers", () => {
+	const result = profileSchema.safeParse({
+		...PROFILE_RECORD,
+		display_name: null,
+		followers: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });

@@ -47,6 +47,7 @@ import {
 	buildOrderRecord,
 	countOrderCardsWithoutOrderId,
 	mergeOrderItems,
+	parseAmazonProfileDom,
 	parseOrderDate,
 	parseOrderDetailDom,
 	parseOrdersListDom,
@@ -1115,6 +1116,57 @@ export async function emitOrdersCoverage(
 	});
 }
 
+/**
+ * Emit the `profile` singleton from the current page's account nav bar — no
+ * extra navigation, since the session probe already lands on
+ * `/your-orders/orders`, which carries the same nav bar as every other
+ * signed-in Amazon page. Best-effort per D4: a name or Prime status the nav
+ * bar does not clearly show comes back null, never guessed, and a page-read
+ * failure degrades to a SKIP_RESULT instead of failing the whole run
+ * (profile is not required).
+ */
+export async function collectAmazonProfile(
+	page: Pick<Page, "content">,
+	deps: Pick<EmitDeps, "emit" | "emitRecord">,
+): Promise<void> {
+	let html: string;
+	try {
+		html = await readPageContentWithin(page);
+	} catch (error) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "profile_page_read_failed",
+			message:
+				"Could not read the current page to extract the account profile.",
+			diagnostics: {
+				error_class:
+					error instanceof Error ? error.constructor.name : "unknown",
+			},
+		});
+		await emitDetailCoverage(deps, {
+			stream: "profile",
+			stateStream: "profile",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: 1,
+			covered: 0,
+		});
+		return;
+	}
+	const record = parseAmazonProfileDom(html);
+	const covered = validateRecord("profile", record).ok ? 1 : 0;
+	await deps.emitRecord("profile", record);
+	await emitDetailCoverage(deps, {
+		stream: "profile",
+		stateStream: "profile",
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered: 1,
+		covered,
+	});
+}
+
 /** Per-run dependencies threaded through processListOrder → emitOrderAndItems. */
 export interface EmitDeps {
 	capture: CaptureDep;
@@ -2131,6 +2183,10 @@ if (isMainModule(import.meta.url)) {
 			}
 			if (gapRecovery.suppressForward) {
 				return;
+			}
+
+			if (requested.has("profile")) {
+				await collectAmazonProfile(page, { emit, emitRecord });
 			}
 
 			// STATE is stream-keyed per Collection Profile: `state` is
