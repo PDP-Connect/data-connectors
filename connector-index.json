@@ -79,6 +79,10 @@
       "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/a3233ca5a66a0a3b0a415333abab8e125ae9abf7/packages/polyfill-connectors/manifests/icons/ical.svg",
       "backgroundColor": "#FF3B30"
     },
+    "https://registry.pdpp.dev/connectors/icloud-notes": {
+      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/a3233ca5a66a0a3b0a415333abab8e125ae9abf7/packages/polyfill-connectors/manifests/icons/icloud_notes.svg",
+      "backgroundColor": "#FFD426"
+    },
     "https://registry.pdpp.dev/connectors/imessage": {
       "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/a3233ca5a66a0a3b0a415333abab8e125ae9abf7/packages/polyfill-connectors/manifests/icons/imessage.svg",
       "backgroundColor": "#30D158"

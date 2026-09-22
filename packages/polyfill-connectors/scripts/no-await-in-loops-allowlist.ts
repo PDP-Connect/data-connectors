@@ -1364,6 +1364,27 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "collectNutrition(): each product lookup navigates the shared page after the prior lookup completes",
 		},
 		{
+			path: "connectors/icloud_notes/index.ts",
+			line: 297,
+			column: 18,
+			category: "dependent_pagination",
+			note: "fetchNoteRecords(): next request depends on the prior page's continuationMarker",
+		},
+		{
+			path: "connectors/icloud_notes/index.ts",
+			line: 362,
+			column: 5,
+			category: "ordered_protocol_emission",
+			note: "collectAllStreams(): Collection Profile protocol emission requiring in-order delivery",
+		},
+		{
+			path: "connectors/icloud_notes/index.ts",
+			line: 405,
+			column: 5,
+			category: "ordered_protocol_emission",
+			note: "collectAllStreams(): Collection Profile protocol emission requiring in-order delivery",
+		},
+		{
 			path: "connectors/ical/index.ts",
 			line: 61,
 			column: 11,
@@ -2576,10 +2597,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1844,
+			line: 1902,
 			column: 7,
 			category: "shared_mutable_accumulator",
-			note: "closeBrowserPage(): loop body mutates a shared accumulator the next iteration reads",
+			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
 		},
 		{
 			path: "src/interaction-handler.ts",

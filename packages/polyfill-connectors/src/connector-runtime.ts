@@ -806,6 +806,28 @@ export const politeDelay = (ms: number): Promise<void> =>
 /**
  * Run a connector end-to-end. The only entry point connectors should use.
  */
+/**
+ * Whether static-secret resolution waits for the session probe.
+ *
+ * Deferral applies only to browser connectors that declare `auth` and
+ * `probeSession` but no `ensureSession`. An `ensureSession` connector runs
+ * first in `establishSession` and may log in with the resolved credentials,
+ * so its credentials stay eager (unchanged behavior).
+ */
+export function shouldDeferCredentialsToProbe(config: {
+	auth: unknown;
+	browser: unknown;
+	ensureSession: unknown;
+	probeSession: unknown;
+}): boolean {
+	return Boolean(
+		config.browser &&
+			config.auth &&
+			typeof config.probeSession === "function" &&
+			typeof config.ensureSession !== "function",
+	);
+}
+
 export function runConnector(config: RunConnectorConfig): void {
 	if (!config.name) {
 		throw new Error("runConnector: config.name required");
@@ -1165,15 +1187,35 @@ export function runConnector(config: RunConnectorConfig): void {
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
 		const requested = buildRequested(startMsg);
-		const credentials = await resolveCredentials(auth, {
-			authOptional,
-			sendInteraction,
-			connectorName: name,
+		// Deferred for browser connectors that declare BOTH `auth` and
+		// `probeSession`: a valid pre-authenticated browser profile must be
+		// sufficient on its own, so credential resolution (which can itself raise
+		// a `credentials` INTERACTION or fail the run) waits until
+		// `establishSession`'s probe has actually proven the session is dead —
+		// see `session-establish.ts`'s `resolveDeferredCredentials`. Every other
+		// shape (non-browser, no `auth`, or `ensureSession`-based) resolves
+		// exactly as before, eagerly, right here.
+		const deferCredentialsToProbe = shouldDeferCredentialsToProbe({
+			auth,
+			browser,
+			ensureSession,
+			probeSession,
 		});
+		let credentials: Credentials = deferCredentialsToProbe
+			? {}
+			: await resolveCredentials(auth, {
+					authOptional,
+					sendInteraction,
+					connectorName: name,
+				});
 		// Registered before any page interaction so a capture taken mid-login can
 		// redact these values wherever they surface — including a field no
-		// field-name rule would recognize as secret.
-		capture?.registerSecrets(Object.values(credentials));
+		// field-name rule would recognize as secret. Skipped here when deferred;
+		// the closure built below (after `baseCtx` exists) registers at resolve
+		// time instead.
+		if (!deferCredentialsToProbe) {
+			capture?.registerSecrets(Object.values(credentials));
+		}
 
 		const emitRecord = makeEmitRecord({
 			requested,
@@ -1215,6 +1257,17 @@ export function runConnector(config: RunConnectorConfig): void {
 		};
 
 		if (browser) {
+			const resolveDeferredCredentials = deferCredentialsToProbe
+				? async (): Promise<void> => {
+						credentials = await resolveCredentials(auth, {
+							authOptional,
+							sendInteraction,
+							connectorName: name,
+						});
+						capture?.registerSecrets(Object.values(credentials));
+						baseCtx.credentials = credentials;
+					}
+				: undefined;
 			await runInBrowser({
 				browser,
 				name,
@@ -1225,6 +1278,7 @@ export function runConnector(config: RunConnectorConfig): void {
 				progress,
 				ensureSession,
 				probeSession,
+				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 				collect,
 				baseCtx,
 				retryablePattern,
@@ -1528,6 +1582,8 @@ async function runInBrowser(args: {
 	progress: BaseCollectContext["progress"];
 	ensureSession: BrowserConnectorConfig["ensureSession"];
 	probeSession: BrowserConnectorConfig["probeSession"];
+	/** See `run()`'s construction site and `session-establish.ts`'s doc comment. */
+	resolveDeferredCredentials?: () => Promise<void>;
 	collect: BrowserConnectorConfig["collect"];
 	baseCtx: BaseCollectContext;
 	retryablePattern: RegExp;
@@ -1542,6 +1598,7 @@ async function runInBrowser(args: {
 		progress,
 		ensureSession,
 		probeSession,
+		resolveDeferredCredentials,
 		collect,
 		baseCtx,
 		retryablePattern,
@@ -1645,6 +1702,7 @@ async function runInBrowser(args: {
 					page: page as Page,
 					name,
 					progress,
+					...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 					retryablePattern,
 					sendInteraction: watchdog.wrapSendInteraction(browserSendInteraction),
 				},

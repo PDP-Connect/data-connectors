@@ -95,6 +95,17 @@ export interface SessionEstablishArgs {
 	name: string;
 	page: Page;
 	progress: EnsureSessionArgs["progress"];
+	/**
+	 * Resolve and apply static-secret credentials on demand, only on the
+	 * `probeSession` dead-session path (see `establishSession`'s doc comment).
+	 * A connector whose seeded browser profile already carries a live session
+	 * must never pay for credential resolution — resolving a declared `auth`
+	 * strategy can itself raise a `credentials` INTERACTION or fail the run,
+	 * neither of which should happen on a connection that never needed a
+	 * credential this run. Absent for connectors with no `auth` declared, and
+	 * never consulted on the live-probe path regardless.
+	 */
+	resolveDeferredCredentials?: () => Promise<void>;
 	retryablePattern: RegExp;
 	sendInteraction: EnsureSessionArgs["sendInteraction"];
 }
@@ -143,6 +154,15 @@ export function buildSessionEstablishTerminalError(
  * The runtime frames the window with a `begin` checkpoint before delegating
  * and a `probe` checkpoint around the read-only probe path so the watchdog
  * has progress markers even for connectors that do not checkpoint themselves.
+ *
+ * Credential deferral (probeSession path only): a valid pre-authenticated
+ * browser profile must be sufficient on its own — static secrets are only
+ * required when an interactive login is actually needed. `resolveDeferredCredentials`,
+ * when supplied, is called ONLY after the first probe reports the session is
+ * dead, never on the live-probe path. This keeps a connection with a live
+ * session from ever resolving (or being asked for) a stored credential it
+ * does not need. When no `resolveDeferredCredentials` is supplied — including
+ * every connector on the `ensureSession` path — behavior is unchanged.
  */
 export async function establishSession(
 	hooks: {
@@ -161,6 +181,7 @@ export async function establishSession(
 		credentials = {},
 		page,
 		name,
+		resolveDeferredCredentials,
 		retryablePattern,
 		sendInteraction,
 		progress,
@@ -230,6 +251,14 @@ export async function establishSession(
 	if (await probeSession({ context, page })) {
 		return;
 	}
+
+	// Session is confirmed dead only past this point — safe to pay for
+	// credential resolution now. `resolveDeferredCredentials` populates the
+	// same `credentials` object `collect()` receives (see `runInBrowser`); it
+	// runs the connector's declared `auth` strategy exactly as
+	// `resolveCredentials` always has, including registering secrets for
+	// capture redaction, just deferred until the probe proves it's needed.
+	await resolveDeferredCredentials?.();
 
 	await manualAction(
 		{
