@@ -13,39 +13,19 @@ Base: `main` at `20bba85`.
 
 ## Decisions
 
-## Compatibility scope correction (Tim, 2026-09-22). Narrows P1–P7 below.
+## Ownership boundary: public DPv2 scopes are out of scope for this repo (Tim, 2026-09-22)
 
-P1–P7 apply ONLY to the protected set: public scopes actually exposed or issued through Unity/app.vana.org DCR. The protected set is the union of current and historical deployed Unity app and catalog scopes plus distinct scope strings in production DCR and grant records. It is NOT all 54 catalog scopes. New PDPP scopes (Strava, WHOOP) are handled separately. The mapping is a narrow Vana product migration artifact, not general connector alias or version machinery. Unity owns the protected public DCR vocabulary; enforcement and runtime consume one generated artifact, and nobody keeps a copied map. The protected-scope inventory must be established before any binding or projection work.
+Flat `platform.scope` strings (for example `claude.conversations` and `instagram.profile`) are Vana DPv2 compatibility vocabulary. This repository does not own, rename, bind, or project them:
 
-## Public compatibility contract (Tim, 2026-09-22). Supersedes D1; constrains D2 and D3.
+- No Vana legacy DCR scope bindings, public-scope projection code, `scope-bindings.json`, or new `scope-catalog.json` fulfillment fields land in PDP-Connect/data-connectors.
+- The Vana stack owns the compatibility implementation, likely a shared `unity-surfaces` package used by app.vana.org, Desktop, and the embedded Personal Server runtime, which consume one generated contract. Context Gateway (ODL's commercial wrapper) does not own or define it, and Vana takes no dependency on Context Gateway. Data Gateway remains the issued-grant ledger, not the owner of connector fulfillment.
+- Vana derives the protected scope set from production issued-scope records (Context Gateway `connect_sessions.canonical_scopes` as evidence, and Data Gateway `grants.scopes` / `grant_registration_history.scopes`), not from all 54 catalog entries.
+- This repo keeps only connector-side evidence: which PDPP connector streams and fields can produce each legacy payload. That evidence lives in the cutover report, not in product code here.
+- The cutover does not rename any published scope ID. The fate of the legacy-derived `scope-catalog.json` and `SCOPES.md` (Vana DPv2 vocabulary that currently lives here) is an open decision: hand them over to the Vana owner, or freeze them. They must not be deleted while consumers pin them.
 
-Third-party apps (builders.vana.org, app.vana.org/apps, and unknown external consumers) cannot be enumerated or migrated. Therefore:
+**D1. Identity.** The connector key (`anthropic`, `meta`, `shopify`, `youtube`, `icloud_notes`, ...) is the PDPP implementation identity: directory, manifest `connector_key`, and OCI name. It is not a public DPv2 scope prefix. The earlier proposal to rename public scopes (`claude.*`→`anthropic.*`, etc.) is WITHDRAWN (see the ownership boundary above).
 
-- **P1. Stable public API.** Every published scope ID in `scope-catalog.json` (54 scopes), together with its payload schema (`schema.path`) and semantics, is a stable public API. Its ID, schema bytes, and stored or read shape do not change.
-- **P2. Canonical public scopes stay.** `claude.*`, `instagram.*`, `shop.*`, `youtube.*` (including `playlistItems`, `watchLater`, `history`), `spotify.savedTracks`, and every other published ID keep their exact IDs. D1's public renames are REVERSED. Connector keys and OCI artifact IDs (`anthropic`, `meta`, `shopify`, ...) remain internal implementation identities.
-- **P3. Explicit catalog binding.** Each public scope gets an explicit catalog binding to the PDPP implementation: `connector_key`, stream(s), and a declared projection that produces the published payload shape from those streams. `scripts/generate-scope-catalog.mjs` (which today skips `artifactKind: pdpp-collection-profile` entries, line 76) is extended to emit this binding. There is no dual runtime: the binding is data, and exactly one implementation (the PDPP connector) fulfills each scope.
-- **P4. Byte-for-byte grant compatibility.** Existing grants and DCR requests stay byte-for-byte scope-compatible. No scope string that a client could send today may change meaning or stop being accepted.
-- **P5. Additive only.** New normalized streams (D3 splits, D2 snake_case names) may be exposed under NEW public IDs only when they do not replace an existing scope. They never replace or alias an existing public scope.
-- **P6. No silent migrations.** Any intentional incompatibility (a field, semantic, or behavior a published scope can no longer deliver) is recorded as a BLOCKED DECISION in the capability map for Tim. It is never migrated silently.
-- **P7. End-to-end compatibility tests.** Required tests trace the path catalog → DCR/grant → ingest → read for `claude.conversations`, `instagram.posts`, `instagram.profile`, `instagram.ads`, `instagram.following`, and `shop.orders`, proving the published scope ID and payload shape are preserved.
-
-Consequences: D2 and D3 now govern only INTERNAL PDPP stream design. The public payload for a legacy scope is produced by the P3 projection. The capability map is re-audited scope by scope for schema and semantic breaks (priority: the anthropic conversations/messages split, Meta posts/post_likes, Uber receipts, Whole Foods nutrition).
-
-**D1. Identity. HELD (Tim, 2026-09-22): the public scope renames below (`claude.*`→`anthropic.*`, `instagram.*`→`meta.*`, `shop.*`→`shopify.*`) are NOT authorized. Do not encode them. A source-layout cutover does not authorize breaking public scope IDs. Pending a compatibility trace, public source and scope IDs stay as published; the connector key remains the internal identity. The rest of this entry is the superseded proposal.**
-
-**D1. Identity.** The connector key is the single identity. It is used for the directory, the manifest `connector_key`, the OCI name (`ghcr.io/pdp-connect/connector/<key with _ as ->`), and the public scope prefix. The public scope ID is `<connector_key>.<stream>`. The existing keys are already published to GHCR, so they are kept. The legacy source IDs map as follows:
-
-| Legacy source | Connector key | Reason |
-|---|---|---|
-| `claude` | `anthropic` | Published key. `claude_code` is a separate source. |
-| `instagram` (two legacy connectors) | `meta` | Published key. One connector covers instagram.com and the Accounts Center ads surfaces. A future Facebook source is a different key. |
-| `shop` | `shopify` | Published key. |
-| `youtube` | `youtube` (new) | Unchanged. |
-| `icloud_notes` | `icloud_notes` (new, OCI `icloud-notes`) | Unchanged. The name states the acquisition surface (iCloud web), unlike the local `apple_*` connectors. |
-
-The capability map records every legacy-to-new scope change. That record is the explicit migration marker that `HC-COMPAT-SOURCE-ID-001` requires. Downstream impact: Vana Desktop must key grants and preferences on the new scope IDs, and the catalog major version increments. Connector code does not depend on D1. If Tim chooses legacy public source IDs, only the catalog projection changes.
-
-**D2. Stream names** use snake_case. Legacy camelCase scopes become snake_case streams, for example `playlistItems` → `playlist_items`, `watchLater` → `watch_later`, and `savedTracks` → `saved_tracks`. Existing modern stream and field names stay unchanged, so published names do not churn.
+**D2. Stream names** (internal PDPP streams) use snake_case. Legacy camelCase scopes become snake_case streams, for example `playlistItems` → `playlist_items`, `watchLater` → `watch_later`, and `savedTracks` → `saved_tracks`. Existing modern stream and field names stay unchanged, so published names do not churn.
 
 **D3. Record granularity.** Legacy scopes emitted one aggregate document. A PDPP stream emits one RECORD per entity, each with a `primary_key`.
 - A nested array whose elements have their own identity becomes a child stream with a parent foreign key. Examples: messages, order items, playlist items, post likes.
