@@ -126,6 +126,49 @@ export type PreexistingSocketLimitation =
 export type SocketScanIncompleteLimitation =
 	`pre-existing-socket scan could not fully enumerate one or more read-only bind subtrees (unreadable path(s), possibly hiding a dialable socket): ${string}`;
 
+/**
+ * The filesystem-input limitation, PARAMETERIZED on the variable, the path
+ * replay actually read, and whether that path was bound read-only — a
+ * template-literal type for the same reason `ScenarioStalenessLimitation` is:
+ * the path is per-run data, not a closed enum value.
+ *
+ * WHY IT EXISTS. A filesystem connector's replay only works because the
+ * sandbox re-exposes one extra host path (its manifest-declared import
+ * directory). That widens what the isolation boundary excludes, so a passing
+ * claim must say so rather than read like a fully-sandboxed run. Disclosure,
+ * not refusal, matches every surveyed precedent (Debian `.buildinfo`, SLSA
+ * `internalParameters`, SPDX `environment`); the path + access-mode shape
+ * mirrors CycloneDX's `workspace.mountPath`/`accessMode`. See
+ * ai/research/testing/sandboxed-executors-put-the-path-grant-in-author-
+ * declared-manifest-data-and-disclose-widening-as-a-fact-rather-than-
+ * blocking-it.md.
+ *
+ * The two variants are deliberately different sentences: "read-only bind" is
+ * only true when OS isolation actually enforced it. Without isolation the
+ * connector could read or write anything, and saying "read-only" there would
+ * be a claim exceeding its evidence.
+ */
+export type FilesystemInputLimitation =
+	| `filesystem input: replay read ${string} via ${string} (read-only bind, manifest-declared); isolation did not exclude this host path`
+	| `filesystem input: replay read ${string} via ${string} (manifest-declared); not bound read-only - isolation inactive`;
+
+/** One manifest-declared filesystem input a replay depended on. */
+export interface FilesystemInputDisclosure {
+	readonly envVar: string;
+	readonly path: string;
+	/** True only when OS isolation bound `path` read-only for this replay. */
+	readonly readOnlyBind: boolean;
+}
+
+/** The single place a `FilesystemInputLimitation` string is built. */
+export function buildFilesystemInputLimitation(
+	input: FilesystemInputDisclosure,
+): FilesystemInputLimitation {
+	return input.readOnlyBind
+		? `filesystem input: replay read ${input.path} via ${input.envVar} (read-only bind, manifest-declared); isolation did not exclude this host path`
+		: `filesystem input: replay read ${input.path} via ${input.envVar} (manifest-declared); not bound read-only - isolation inactive`;
+}
+
 export type ClaimLimitation =
 	| "unbound entrypoint replay"
 	| "no capture-time declaration digest"
@@ -142,7 +185,8 @@ export type ClaimLimitation =
 	| "no recorded HAR entries - driver evidence for recorded-browser not satisfied"
 	| PreexistingSocketLimitation
 	| SocketScanIncompleteLimitation
-	| ScenarioStalenessLimitation;
+	| ScenarioStalenessLimitation
+	| FilesystemInputLimitation;
 
 /**
  * Builds the exact repository-UDS-socket limitation string for a run whose
@@ -199,6 +243,10 @@ function anyRunDeclaresBrowserDriver(scenario: ConnectorScenario): boolean {
 }
 
 export interface ClaimEligibilityInput {
+	/** Manifest-declared filesystem inputs this replay depended on. Each one
+	 *  adds a `FilesystemInputLimitation`. Optional so callers with no such
+	 *  input (every network/browser connector) change nothing. */
+	filesystemInputs?: readonly FilesystemInputDisclosure[];
 	/** True when `scenario.connector.captured_with` (or its deprecated
 	 *  top-level fallback) carries a `declaration_digest` — the capture-time
 	 *  half of the declaration-identity binding. */
@@ -457,6 +505,13 @@ export function evaluateClaimEligibility(
 		limitations.push(
 			buildBrowserStalenessLimitation(input.scenario.capture.captured_at),
 		);
+	}
+
+	// Always named when present, for the same reason the staleness disclaimer
+	// is: a reader of `limitations` must never have to infer that the sandbox
+	// was widened from the absence of a stronger claim.
+	for (const fsInput of input.filesystemInputs ?? []) {
+		limitations.push(buildFilesystemInputLimitation(fsInput));
 	}
 
 	if (limitations.length === 0) {

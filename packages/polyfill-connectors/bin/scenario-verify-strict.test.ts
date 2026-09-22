@@ -1109,6 +1109,22 @@ test("evaluateClaimEligibility: every condition met — claim: recorded_replay, 
 	assert.deepEqual(decision, { claim: "recorded_replay" });
 });
 
+test("evaluateClaimEligibility: a manifest-declared filesystem input is always named — an otherwise-eligible replay cannot read like a fully sandboxed one", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		filesystemInputs: [
+			{ envVar: "STRAVA_EXPORT_DIR", path: "/data/strava", readOnlyBind: true },
+		],
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"filesystem input: replay read /data/strava via STRAVA_EXPORT_DIR (read-only bind, manifest-declared); isolation did not exclude this host path",
+	]);
+});
+
 test("evaluateClaimEligibility: condition (a) fails — --entrypoint override yields 'unbound entrypoint replay'", () => {
 	const decision = evaluateClaimEligibility({
 		scenario: eligibleScenario(),

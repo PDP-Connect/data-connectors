@@ -234,6 +234,11 @@ import {
 	MANIFEST_DIR,
 	readManifest,
 } from "../src/orchestrator.ts";
+import {
+	FilesystemInputError,
+	readDeclaredFilesystemInput,
+	resolveFilesystemInput,
+} from "../src/scenario/filesystem-input.ts";
 import type {
 	ConnectorScenario,
 	NormalizedTraceEntry,
@@ -2522,6 +2527,47 @@ function writeScenarioAtomically(outPath: string, contents: string): void {
 	renameSync(tmpPath, outPath);
 }
 
+/**
+ * Presence guard for a connector's manifest-declared import directory, applied
+ * BEFORE capture so an empty or mis-pointed directory fails with a diagnosis
+ * instead of recording a scenario that proves nothing. See
+ * src/scenario/filesystem-input.ts.
+ *
+ * Unset is allowed here — the connector then reads its own default location,
+ * which is normal production behavior — but replay can only bind a directory
+ * named by the variable, so this says so up front rather than at verify time.
+ * Returns false when capture must not proceed.
+ */
+function reportFilesystemInputForRecord(args: CliArgs): boolean {
+	if (args.entrypoint) {
+		return true;
+	}
+	const declared = readDeclaredFilesystemInput(readManifest(args.connector));
+	if (declared === undefined) {
+		return true;
+	}
+	if (!process.env[declared.envVar]?.trim()) {
+		process.stdout.write(
+			`filesystem input: ${declared.envVar} not set - the connector will read its default location, ` +
+				`and scenario-verify will require ${declared.envVar} pointing at the same input\n`,
+		);
+		return true;
+	}
+	try {
+		const input = resolveFilesystemInput(args.connector, declared, process.env);
+		process.stdout.write(
+			`filesystem input: ${input.envVar}=${input.path} (${String(input.acceptedFileCount)} input file(s))\n`,
+		);
+		return true;
+	} catch (err) {
+		if (err instanceof FilesystemInputError) {
+			process.stderr.write(`[scenario-record] FATAL: ${err.message}\n`);
+			return false;
+		}
+		throw err;
+	}
+}
+
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 	let resolved: ResolvedConnector;
@@ -2556,6 +2602,10 @@ async function main(): Promise<void> {
 	// guarantee than what actually happened) also covers the one CLI that
 	// intentionally has none.
 	process.stdout.write("recording network: live (unisolated by design)\n");
+	if (!reportFilesystemInputForRecord(args)) {
+		process.exitCode = 1;
+		return;
+	}
 
 	// FIX B: every generated preload/capture file for this invocation lives
 	// inside this single 0700 workspace, cleaned up here in `finally` on EVERY

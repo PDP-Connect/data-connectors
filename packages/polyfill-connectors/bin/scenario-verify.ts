@@ -97,6 +97,11 @@ import {
 	type ClaimDecision,
 	evaluateClaimEligibility,
 } from "../src/scenario/claims.ts";
+import {
+	type ResolvedFilesystemInput,
+	readDeclaredFilesystemInput,
+	resolveFilesystemInput,
+} from "../src/scenario/filesystem-input.ts";
 import type {
 	ConnectorScenario,
 	ScenarioUserInteraction,
@@ -1119,6 +1124,11 @@ function runReplaySubprocess(args: {
 	 *  subprocess's Date.now()/new Date() so wall-clock-dependent request
 	 *  planning replays deterministically. */
 	fixedNow?: string;
+	/** The connector's manifest-declared import directory, already through
+	 *  the presence guard — bound read-only into the sandbox and handed to
+	 *  the child under its declared variable at its REAL path (the bind is
+	 *  of the realpath, so a symlinked value would not resolve inside). */
+	filesystemInput?: ResolvedFilesystemInput;
 	/** The mechanism the caller's single upfront `isNamespaceIsolationAvailable()`
 	 *  probe already selected (or `false` when isolation isn't available) —
 	 *  never a bare `true`, so `spawnWithNetworkIsolation` never re-probes. */
@@ -1169,6 +1179,9 @@ function runReplaySubprocess(args: {
 					...(args.udsPath === undefined
 						? {}
 						: { [PDPP_SCENARIO_BRIDGE_UDS_PATH_ENV]: args.udsPath }),
+					...(args.filesystemInput === undefined
+						? {}
+						: { [args.filesystemInput.envVar]: args.filesystemInput.path }),
 					NODE_OPTIONS: `--import ${preloadPath}`,
 					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
 						process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
@@ -1178,6 +1191,9 @@ function runReplaySubprocess(args: {
 				stdio: ["pipe", "pipe", "pipe"],
 				isolate: args.isolate,
 				filesystemBindPath: args.workspace.dir,
+				...(args.filesystemInput === undefined
+					? {}
+					: { extraReadOnlyBinds: [args.filesystemInput.path] }),
 			},
 		);
 		// `spawnWithNetworkIsolation` returns a plain `child_process.ChildProcess`
@@ -1671,16 +1687,42 @@ function resolveIsolationMechanism(
  */
 function scanPreexistingSocketsIfIsolated(
 	isolationCapability: NamespaceIsolationCapability,
+	extraReadOnlyPaths: readonly string[] = [],
 ): SocketScanResult {
 	return isolationCapability.available
-		? findPreexistingSocketsUnderReadOnlyBinds()
+		? findPreexistingSocketsUnderReadOnlyBinds(extraReadOnlyPaths)
 		: { sockets: [], complete: true, errors: [] };
+}
+
+/**
+ * Resolves the connector's manifest-declared import directory, if it declares
+ * one, and applies the presence guard. `undefined` for `--entrypoint` runs (no
+ * manifest to read) and for every connector without
+ * `setup.manual_or_upload.import_dir_env_var` — those replay exactly as before.
+ * Throws `FilesystemInputError` for a declared input that is unset, missing,
+ * not a directory, or empty — caught by `main`'s pre-flight tier.
+ */
+function resolveDeclaredFilesystemInputForVerify(
+	args: CliArgs,
+): ResolvedFilesystemInput | undefined {
+	if (args.entrypoint) {
+		return;
+	}
+	const declared = readDeclaredFilesystemInput(readManifest(args.connector));
+	return declared === undefined
+		? undefined
+		: resolveFilesystemInput(args.connector, declared, process.env);
 }
 
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 	const connectorPath = resolveConnectorPath(args);
 	const scenario = loadScenario(args.scenarioPath);
+
+	// Manifest-declared filesystem input (upload-style connectors), resolved
+	// and presence-guarded in the pre-flight tier below — see
+	// src/scenario/filesystem-input.ts.
+	let filesystemInput: ResolvedFilesystemInput | undefined;
 
 	// FIX 3: identity binding — fails BEFORE any subprocess is spawned.
 	// Errors here are treated the same as the loadScenario/parseArgs failures
@@ -1691,6 +1733,7 @@ async function main(): Promise<void> {
 		// FIX 5 — modality-neutral envelope: same pre-flight tier as identity
 		// above, fails before any subprocess is spawned.
 		assertSupportedEnvironmentDrivers(scenario);
+		filesystemInput = resolveDeclaredFilesystemInputForVerify(args);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
@@ -1752,8 +1795,17 @@ async function main(): Promise<void> {
 		? "network isolation: os-namespace"
 		: `network isolation: process-local only (${isolationCapability.reason})`;
 	process.stdout.write(`  ${isolationLine}\n`);
-	const socketScanResult =
-		scanPreexistingSocketsIfIsolated(isolationCapability);
+	if (filesystemInput !== undefined) {
+		process.stdout.write(
+			`  filesystem input: ${filesystemInput.envVar}=${filesystemInput.path} ` +
+				`(${String(filesystemInput.acceptedFileCount)} input file(s); ` +
+				`${isolationCapability.available ? "bound read-only" : "NOT bound - isolation inactive"})\n`,
+		);
+	}
+	const socketScanResult = scanPreexistingSocketsIfIsolated(
+		isolationCapability,
+		filesystemInput === undefined ? [] : [filesystemInput.path],
+	);
 	// Every replayed response is served from the recording, not a live
 	// provider, so a connector's own pacing/backoff timers (governor pacing,
 	// an inline PAGE_DELAY sleep, anything else built on setTimeout/
@@ -1903,6 +1955,7 @@ async function main(): Promise<void> {
 			result = await runReplaySubprocess({
 				connectorPath,
 				preloadPath,
+				...(filesystemInput === undefined ? {} : { filesystemInput }),
 				...(evidence.fixedNowIso === undefined
 					? {}
 					: { fixedNow: evidence.fixedNowIso }),
@@ -1960,6 +2013,7 @@ async function main(): Promise<void> {
 				result = await runReplaySubprocess({
 					connectorPath,
 					bridgeUrl: bridge.url,
+					...(filesystemInput === undefined ? {} : { filesystemInput }),
 					preloadPath,
 					...(fixedNow === undefined ? {} : { fixedNow }),
 					startState: isPlainStateRecord(collectorArgs.state)
@@ -2074,6 +2128,7 @@ async function main(): Promise<void> {
 		isolationCapability,
 		observedUnsupportedEvidenceSurface(allRunMessages),
 		socketScanResult,
+		filesystemInput,
 	);
 	process.exitCode = 0;
 }
@@ -2107,6 +2162,7 @@ function printCoverageReport(
 	isolationCapability: NamespaceIsolationCapability,
 	observedUnsupportedEvidenceSurfaceFlag: boolean,
 	socketScanResult: SocketScanResult,
+	filesystemInput: ResolvedFilesystemInput | undefined,
 ): void {
 	const capturedAt = scenario.capture.captured_at;
 	// state_seeded_second_run_with_changed_requests (formerly named
@@ -2211,6 +2267,17 @@ function printCoverageReport(
 	// comment and src/scenario/claims.ts's module doc for the full rationale.
 	const decision = evaluateClaimEligibility({
 		scenario,
+		...(filesystemInput === undefined
+			? {}
+			: {
+					filesystemInputs: [
+						{
+							envVar: filesystemInput.envVar,
+							path: filesystemInput.path,
+							readOnlyBind: isolationCapability.available,
+						},
+					],
+				}),
 		isEntrypointOverride: Boolean(args.entrypoint),
 		capturedDeclarationDigestPresent:
 			digestObservation.capturedDeclarationDigestPresent,
