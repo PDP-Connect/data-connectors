@@ -63,28 +63,32 @@
  * manual browser hand-off. DoorDash's login form is multi-step
  * (email → Continue → password → Submit) per the legacy scraper.
  *
- * ## PENDING — no live account access for this lane
+ * ## Live-verified 2026-09-22 (cut-doordash-live lane)
  *
- * No DoorDash account has been connected for this lane ("PROFILE READY" has
- * not been sent). Every field-shape decision above comes from the legacy
- * scraper's own response walk and DoorDash's documented public GraphQL money
- * convention, not a live capture. `__fixtures__/synthetic/` is therefore a
- * hand-authored, clearly-labeled SYNTHETIC fixture, not a scrubbed real
- * capture — `fixtures/doordash/scrubbed/pilot-real-shape/` stays absent
- * until a real capture is scrubbed and reviewed (see the cut-doordash lane
- * report for the exact proof-gate status). Whoever gets live access MUST:
- *   1. Run with `PDPP_CAPTURE_FIXTURES=1` and inspect the raw
- *      `getConsumerOrdersWithDetails` response shape.
- *   2. Re-verify every field path in parsers.ts against the real shape
- *      (especially `payment_method_summary`, which this connector currently
- *      always emits null for — no observed source carries it).
- *   3. Decide whether a real incremental cursor exists; if so, replace the
- *      full-refresh design above and update the manifest.
+ * Two live runs against a real, freshly-authenticated DoorDash account
+ * (`www.doordash.com/orders`, confirmed not `identity.doordash.com`)
+ * captured the real `getConsumerOrdersWithDetails` response: 3 orders,
+ * identical ids across both runs (full-refresh consistency, no dupes). The
+ * real response did NOT carry `deliveryStatus` or `orderItems` on any of
+ * the 3 orders (both fields absent, not empty-array) — `status` and
+ * `item_count` correctly resolve to `null` for every record, and no
+ * `order_items` records were ever emitted (there is nothing to emit). No
+ * `payment_method_summary` source field was observed, confirming the
+ * pre-existing null-only decision below. No incremental cursor/`hasMore`/
+ * `after` param was observed on the real request either, confirming the
+ * full-refresh design. `fixtures/doordash/scrubbed/pilot-real-shape/` is
+ * now populated, calibrated by this capture's null/non-null field pattern
+ * (no real owner values committed — see the pilot-fixture.test.ts header
+ * and the lane report's Live evidence section). A negative control against
+ * a fresh empty profile root confirmed the connector fails honestly
+ * (`doordash_login_manual_incomplete`, landing on `identity.doordash.com`)
+ * instead of reporting a false empty success.
  *
  * CHANGES
  *   v0.2.0 (2026-09-22) — real GraphQL response-capture collector; parsers.ts
  *     extracted and unit-tested against synthetic fixtures; full-refresh
- *     cursor policy (no evidenced incremental cursor).
+ *     cursor policy (no evidenced incremental cursor). Live-verified same
+ *     day (see above) after the session-probe host-detection fix.
  *   v0.1.0 (2026-04-19) — scaffold: session reachability probe only,
  *     unconditional SKIP_RESULT.
  */
