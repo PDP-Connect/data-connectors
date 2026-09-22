@@ -282,6 +282,45 @@
 			},
 			"coverage_strategy": "parent_detail_accounting",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "profile",
+			"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership).",
+			"display": {
+				"label": "Your Amazon account",
+				"detail": "Display name and Prime membership status, as shown in the Amazon nav bar. Both are null when not observable, never guessed."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"is_prime": {
+						"type": ["boolean", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"profiles": [
@@ -310,6 +349,7 @@
 		"no_orders_text": "This account shows no orders to import",
 		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
 		"pagination_exhausted": "We reached the end of the available pages",
+		"profile_page_read_failed": "We couldn't read the page to get your account profile",
 		"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 		"selector_drift": "The page layout changed and we couldn't find what we needed",
 		"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",

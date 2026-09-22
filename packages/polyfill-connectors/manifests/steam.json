@@ -120,7 +120,8 @@
 						"type": ["string", "null"]
 					},
 					"timecreated": {
-						"type": ["integer", "null"]
+						"type": ["integer", "null"],
+						"description": "Unix epoch seconds, as returned by Steam's GetPlayerSummaries. Not named *_at because it is raw epoch seconds, not ISO-8601 — the field keeps its published Steam name and type (no churn) and the unit is documented here instead of converted."
 					},
 					"loccountrycode": {
 						"type": ["string", "null"]
@@ -132,7 +133,8 @@
 						"type": ["string", "null"]
 					},
 					"lastlogoff": {
-						"type": ["integer", "null"]
+						"type": ["integer", "null"],
+						"description": "Unix epoch seconds, as returned by Steam's GetPlayerSummaries. Not named *_at for the same reason as timecreated."
 					},
 					"commentcount": {
 						"type": ["integer", "null"]
@@ -278,7 +280,7 @@
 			"description": "Your Steam friends list.",
 			"display": {
 				"label": "Your Steam friends",
-				"detail": "Steam friends: friend steamid, relationship type, friend-since timestamp."
+				"detail": "Steam friends: friend steamid, relationship type, friend-since timestamp, and (when the friend's profile is visible) display name, avatar, and profile URL."
 			},
 			"semantics": "mutable_state",
 			"primary_key": ["id"],
@@ -305,7 +307,20 @@
 						"x_pdpp_role": "secondary"
 					},
 					"friend_since": {
-						"type": "integer"
+						"type": "integer",
+						"description": "Unix epoch seconds, as returned by Steam's GetFriendList. Not named *_at because it is raw epoch seconds, not ISO-8601 (see the profile stream's timecreated/lastlogoff for the same convention)."
+					},
+					"persona_name": {
+						"type": ["string", "null"],
+						"description": "The friend's Steam display name at fetch time, from a batched GetPlayerSummaries lookup (up to 100 steamids per call). Null when the friend's profile is private or the lookup did not return this steamid."
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"description": "The friend's full-size avatar URL from GetPlayerSummaries. Null under the same conditions as persona_name."
+					},
+					"profile_url": {
+						"type": ["string", "null"],
+						"description": "The friend's Steam Community profile URL from GetPlayerSummaries. Null under the same conditions as persona_name."
 					}
 				},
 				"required": [

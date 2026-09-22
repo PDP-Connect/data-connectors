@@ -116,6 +116,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	steam: c("steam"),
 	venmo: c("venmo"),
 	signal: c("signal"),
+	youtube: c("youtube"),
 };
 
 export const KNOWN_CONNECTOR_NAMES: string[] = Object.keys(KNOWN_CONNECTORS);

@@ -197,6 +197,7 @@ test("CLI local-agent defaults request safe inventory and coverage streams", () 
 			"memory_notes",
 			"skills",
 			"slash_commands",
+			"usage",
 			"file_history",
 			"cache_inventory",
 			"coverage_diagnostics",

@@ -3,23 +3,33 @@
 
 /**
  * Zod schemas for Uber stream records. Shape-check-before-emit per
- * docs/reference/connector-authoring-guide.md §3.
+ * docs/connector-authoring-guide.md §3.
  *
- * GROUND-TRUTH CAVEAT (same posture as connectors/loom/schemas.ts):
- * uber/index.ts does NOT yet emit any RECORD — it is a browser scaffold that
- * verifies riders.uber.com session reachability and emits
- * `SKIP_RESULT reason=uber_graphql_wiring_pending`. The GraphQL
- * (getActivities / getTrip) extraction is deferred to a live session so the
- * frequently-rotating operation names and persistedQueryHash values can be
- * captured. There is no observed emitted shape; this schema is derived from the
- * connector's MANIFEST stream declaration (manifests/uber.json) — the contract
- * the connector commits to emit once extraction lands.
+ * Two streams per D5 (docs/migration/connector-cutover/CONTRACTS.md):
+ *   - `trips`: list-level fields from the riders.uber.com Activities GraphQL
+ *     response. No detail-only field lives here.
+ *   - `receipts`: 1:1 per-trip detail (`primary_key: ["trip_id"]`),
+ *     including `fare_breakdown`. Declared with `parent_streams: ["trips"]`
+ *     in the manifest so a trips-only START performs no detail fetches.
  *
- * Wiring `validateRecord` now is the honest move: the first real emit is
- * shape-checked against the declared contract instead of silently trusted.
- * Whoever wires the GraphQL extraction MUST re-verify these field shapes
- * against the real payload and tighten them — especially the id and fare
- * formats. This file is a contract scaffold, not a fixture-proven schema.
+ * LIVE EVIDENCE (2026-09-22, real account capture — see the connector
+ * cutover report's "Live evidence" section): the Activities list feed
+ * carries NO structured status/date/currency/vehicle-type/address field —
+ * only `title` (destination name), a no-year display `subtitle`, and a
+ * currency-prefixed `description` fare string. Every field
+ * capability-map.json's `uber.trips` field_map mapped onto `trips` is, in
+ * reality, detail-only (`GetTrip`/`GetReceipt`). `trips` therefore always
+ * emits those fields `null` — see parsers.ts's module doc and the report's
+ * CONTRACT-CHANGE-REQUEST.
+ *
+ * `currency` is intentionally NOT modeled as a field: every observed
+ * amount is a currency-SYMBOL-prefixed display string ("$43.07", "CHF21.31",
+ * "€40.95") with no separate ISO 4217 code anywhere in either response.
+ * Symbols are ambiguous ("$" alone cannot distinguish USD/CAD/AUD/etc.) —
+ * guessing a code from a symbol would violate the "never guess" invariant
+ * more than omitting the field. `fare_total` (the display string) is the
+ * source of truth for currency; a future revision can add a symbol→code
+ * table if the ambiguous cases are resolved by a documented policy.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -28,58 +38,69 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 
 // Module-scoped regexes (Biome useTopLevelRegex).
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-const CURRENCY_CODE_RE = /^[A-Z]{3}$/; // ISO 4217
 
 const isoDateTimeNullable = z
 	.string()
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
 	.nullable();
-const coordSchema = z.number().nullable(); // lat/lng; manifest type "number"
-const centsSchema = z.number().int().min(0).nullable();
+const centsSchema = z.number().int().nullable();
 
 /**
- * trips stream (manifest required: id). One record per Uber trip.
- *
- * Mirrors the amazon-style dual money representation: `fare_total` is the
- * display string ("$12.34") and `fare_total_cents` is the integer amount.
- * Addresses, driver name, and vehicle description are free-form human text →
- * pdppSafeText. `status` / `product_type` / `currency` are short structural
- * strings. `receipt_url` is a URL.
+ * trips stream (manifest required: id). One record per Uber trip. The list
+ * feed carries only `id` — every other field is declared (manifest-declared,
+ * connector-null per the authoring guide §8) but always null; see module doc.
  */
 export const tripsSchema = z.object({
 	id: z.string().min(1).max(200),
 	status: z.string().min(1).max(64).nullable(),
-	product_type: z.string().min(1).max(128).nullable(),
 	requested_at: isoDateTimeNullable,
-	started_at: isoDateTimeNullable,
 	completed_at: isoDateTimeNullable,
 	pickup_address: pdppSafeText.max(1000).nullable(),
-	pickup_lat: coordSchema,
-	pickup_lng: coordSchema,
 	dropoff_address: pdppSafeText.max(1000).nullable(),
-	dropoff_lat: coordSchema,
-	dropoff_lng: coordSchema,
-	distance_meters: z.number().min(0).nullable(),
-	duration_seconds: z.number().int().min(0).nullable(),
 	fare_total: pdppSafeText.max(64).nullable(),
 	fare_total_cents: centsSchema,
-	currency: z
-		.string()
-		.regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code")
-		.nullable(),
-	tip_cents: centsSchema,
-	surge_multiplier: z.number().min(0).nullable(),
-	driver_name: pdppSafeText.max(300).nullable(),
-	vehicle_description: pdppSafeText.max(500).nullable(),
-	receipt_url: z.url().max(4096).nullable(),
+	product_type: z.string().min(1).max(128).nullable(),
+	is_surge: z.boolean().nullable(),
+});
+
+const fareBreakdownLineSchema = z.object({
+	label: pdppSafeText.max(200),
+	amount_cents: z.number().int().nullable(),
 });
 
 /**
- * Stream → schema registry. Single source of truth for the stream this
- * connector declares (and will emit once GraphQL extraction is wired).
+ * receipts stream (manifest required: trip_id; manifest `primary_key:
+ * ["trip_id"]`). 1:1 per trip. `id` mirrors `trip_id` — the runtime's emit
+ * gate requires a literal `id` field regardless of the manifest's declared
+ * `primary_key` (see parsers.ts's `receiptRecord` doc for the production
+ * bug this fixed). `trip_id` is the foreign key to `trips.id`.
+ * `fare_breakdown` is a nested array with no independent identity per D3 —
+ * stays an array field, not a child stream. Sourced from `GetTrip`
+ * (trip/status/dates/waypoints/driver/surge) and `GetReceipt`
+ * (fare_breakdown, parsed via structural `data-testid` selectors — see
+ * parsers.ts's `parseFareBreakdown`).
  */
+export const receiptsSchema = z.object({
+	id: z.string().min(1).max(200),
+	trip_id: z.string().min(1).max(200),
+	status: z.string().min(1).max(64).nullable(),
+	requested_at: isoDateTimeNullable,
+	completed_at: isoDateTimeNullable,
+	pickup_address: pdppSafeText.max(1000).nullable(),
+	dropoff_address: pdppSafeText.max(1000).nullable(),
+	driver_name: pdppSafeText.max(300).nullable(),
+	fare_total: pdppSafeText.max(64).nullable(),
+	fare_total_cents: centsSchema,
+	distance_meters: z.number().min(0).nullable(),
+	duration_seconds: z.number().int().min(0).nullable(),
+	product_type: z.string().min(1).max(128).nullable(),
+	is_surge: z.boolean().nullable(),
+	fare_breakdown: z.array(fareBreakdownLineSchema),
+});
+
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	trips: tripsSchema,
+	receipts: receiptsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

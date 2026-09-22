@@ -47,6 +47,8 @@ const HOME_ROOTED_READ_EXEMPTIONS: Readonly<Record<string, string>> = {
 	netflix_export:
 		"reads the user's Netflix export drop-box (NETFLIX_EXPORT_DIR)",
 	google_takeout: "reads the user's Takeout drop-box (GOOGLE_TAKEOUT_DIR)",
+	youtube:
+		"reads the user's YouTube Takeout export drop-box (YOUTUBE_TAKEOUT_DIR)",
 	strava: "reads the user's Strava export drop-box (STRAVA_EXPORT_DIR)",
 	google_maps:
 		"reads the user's Maps timeline drop-box (GOOGLE_MAPS_TIMELINE_DIR)",

@@ -40,14 +40,18 @@
 			"description": "Orders placed across merchants via the Shop app.",
 			"display": {
 				"label": "Your Shop app orders",
-				"detail": "Order date, merchant, items, prices, shipping status, tracking numbers, payment summary."
+				"detail": "Order date, merchant, item titles, totals, and status."
 			},
+			"required": true,
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
 					"id": {
 						"type": "string"
+					},
+					"order_number": {
+						"type": ["string", "null"]
 					},
 					"order_date": {
 						"type": ["string", "null"],
@@ -67,14 +71,17 @@
 					"currency": {
 						"type": ["string", "null"]
 					},
-					"tracking_number": {
-						"type": ["string", "null"]
-					},
-					"tracking_url": {
-						"type": ["string", "null"]
-					},
 					"item_count": {
 						"type": ["integer", "null"]
+					},
+					"line_item_titles": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"detail_url": {
+						"type": "string"
 					}
 				},
 				"required": ["id"]
@@ -105,6 +112,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"shopify_apollo_wiring_pending": "Shopify support isn't wired up yet"
+		"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
+		"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 	}
 }

@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/uber",
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "0.1.0",
+	"version": "0.3.0",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icons/uber.svg",
@@ -37,10 +37,11 @@
 	"streams": [
 		{
 			"name": "trips",
-			"description": "Uber trips (ride-share + Uber Eats deliveries if mingled).",
+			"required": true,
+			"description": "Uber trips, list-level fields from the riders.uber.com Activities GraphQL response. Live evidence (2026-09-22): the list feed carries only a trip id — status, dates, addresses, fare, product type, and surge are detail-only fields (see the receipts stream).",
 			"display": {
 				"label": "Your Uber trips",
-				"detail": "Trip date, pickup/dropoff locations, distance, duration, fare breakdown, driver, car type, status. Supports reconciliation to bank-statement 'UBER *TRIP' entries."
+				"detail": "Trip identity only at list level. Status, date, fare, addresses, and vehicle type are in the receipts stream — request it for full trip detail."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -52,14 +53,7 @@
 					"status": {
 						"type": ["string", "null"]
 					},
-					"product_type": {
-						"type": ["string", "null"]
-					},
 					"requested_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"started_at": {
 						"type": ["string", "null"],
 						"format": "date-time",
 						"x_pdpp_role": "event-time"
@@ -71,50 +65,22 @@
 					"pickup_address": {
 						"type": ["string", "null"]
 					},
-					"pickup_lat": {
-						"type": ["number", "null"]
-					},
-					"pickup_lng": {
-						"type": ["number", "null"]
-					},
 					"dropoff_address": {
 						"type": ["string", "null"]
-					},
-					"dropoff_lat": {
-						"type": ["number", "null"]
-					},
-					"dropoff_lng": {
-						"type": ["number", "null"]
-					},
-					"distance_meters": {
-						"type": ["number", "null"]
-					},
-					"duration_seconds": {
-						"type": ["integer", "null"]
 					},
 					"fare_total": {
 						"type": ["string", "null"]
 					},
 					"fare_total_cents": {
-						"type": ["integer", "null"]
+						"type": ["integer", "null"],
+						"x_pdpp_role": "amount"
 					},
-					"currency": {
-						"type": ["string", "null"]
+					"product_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
 					},
-					"tip_cents": {
-						"type": ["integer", "null"]
-					},
-					"surge_multiplier": {
-						"type": ["number", "null"]
-					},
-					"driver_name": {
-						"type": ["string", "null"]
-					},
-					"vehicle_description": {
-						"type": ["string", "null"]
-					},
-					"receipt_url": {
-						"type": ["string", "null"]
+					"is_surge": {
+						"type": ["boolean", "null"]
 					}
 				},
 				"required": ["id"]
@@ -127,40 +93,136 @@
 				"resources": true
 			},
 			"incremental": true,
-			"views": [
-				{
-					"id": "reconciliation",
-					"label": "Fields for YNAB matching",
-					"fields": [
-						"id",
-						"completed_at",
-						"fare_total",
-						"fare_total_cents",
-						"pickup_address",
-						"dropoff_address",
-						"product_type"
-					]
-				}
-			],
 			"query": {
-				"search": {
-					"lexical_fields": ["driver_name", "vehicle_description"]
-				},
 				"range_filters": {
-					"started_at": ["gte", "gt", "lte", "lt"],
-					"requested_at": ["gte", "gt", "lte", "lt"]
+					"requested_at": ["gte", "gt", "lte", "lt"],
+					"completed_at": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
-					"group_by_time": ["started_at"],
+					"group_by_time": ["requested_at"],
 					"group_by": ["status", "product_type"]
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "receipts",
+			"required": false,
+			"description": "Per-trip detail: status, dates, pickup/dropoff addresses, driver, fare, fare breakdown, distance, duration, vehicle type, surge flag. 1:1 with trips. Fetched from GetTrip + GetReceipt.",
+			"display": {
+				"label": "Your Uber receipts",
+				"detail": "Trip status and date, pickup/dropoff addresses, driver name, itemized fare breakdown, distance, duration, and vehicle type. Fetched per-trip, so this stream is only populated when explicitly requested — a trips-only grant performs no detail fetches."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"trip_id": {
+						"type": "string"
+					},
+					"status": {
+						"type": ["string", "null"]
+					},
+					"requested_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"completed_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"pickup_address": {
+						"type": ["string", "null"]
+					},
+					"dropoff_address": {
+						"type": ["string", "null"]
+					},
+					"driver_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"fare_total": {
+						"type": ["string", "null"]
+					},
+					"fare_total_cents": {
+						"type": ["integer", "null"],
+						"x_pdpp_role": "amount"
+					},
+					"distance_meters": {
+						"type": ["number", "null"]
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"]
+					},
+					"product_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"is_surge": {
+						"type": ["boolean", "null"]
+					},
+					"fare_breakdown": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"label": {
+									"type": "string"
+								},
+								"amount_cents": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["label"]
+						}
+					}
+				},
+				"required": ["id", "trip_id"]
+			},
+			"primary_key": ["trip_id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "trip",
+					"stream": "trips",
+					"foreign_key": "trip_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["driver_name"]
+				},
+				"range_filters": {
+					"distance_meters": ["gte", "gt", "lte", "lt"],
+					"duration_seconds": ["gte", "gt", "lte", "lt"],
+					"requested_at": ["gte", "gt", "lte", "lt"],
+					"completed_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"sum": ["fare_total_cents"],
+					"group_by": ["product_type", "status"],
+					"group_by_time": ["requested_at"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"parent_streams": ["trips"],
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"uber_graphql_wiring_pending": "Uber support isn't wired up yet"
+		"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
+		"receipts_deferred_detail_budget": "Uber receipt detail stopped early to stay within a safety limit"
 	}
 }

@@ -1,100 +1,114 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Schema tests for the Uber connector.
- *
- * IMPORTANT: uber/index.ts does not yet emit any RECORD (GraphQL extraction is
- * deferred; it emits SKIP_RESULT). So these fixtures are NOT parser-derived —
- * they are records shaped to the connector's MANIFEST stream contract
- * (manifests/uber.json). They prove the schema accepts the declared contract
- * and rejects representative drift, so the first real emit is shape-checked.
- * Whoever wires extraction MUST replace these with fixture-proven records and
- * tighten the id/fare shapes.
- */
-
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tripsSchema, validateRecord } from "./schemas.ts";
+import { receiptsSchema, tripsSchema, validateRecord } from "./schemas.ts";
 
 const TRIP_RECORD = {
 	id: "b3a1c2d4-5e6f-7081-92a3-b4c5d6e7f809",
-	status: "COMPLETED",
-	product_type: "UberX",
-	requested_at: "2024-05-01T18:00:00.000Z",
-	started_at: "2024-05-01T18:04:00.000Z",
-	completed_at: "2024-05-01T18:32:00.000Z",
-	pickup_address: "1 Market St, San Francisco, CA",
-	pickup_lat: 37.7936,
-	pickup_lng: -122.395,
-	dropoff_address: "1455 Market St, San Francisco, CA",
-	dropoff_lat: 37.7766,
-	dropoff_lng: -122.4169,
-	distance_meters: 3210.5,
-	duration_seconds: 1680,
-	fare_total: "$18.42",
-	fare_total_cents: 1842,
-	currency: "USD",
-	tip_cents: 300,
-	surge_multiplier: 1.0,
-	driver_name: "Jordan",
-	vehicle_description: "Toyota Prius (Silver)",
-	receipt_url: "https://riders.uber.com/trips/b3a1c2d4/receipt",
+	status: null,
+	requested_at: null,
+	completed_at: null,
+	pickup_address: null,
+	dropoff_address: null,
+	fare_total: null,
+	fare_total_cents: null,
+	product_type: null,
+	is_surge: null,
 };
 
-test("trips schema accepts a contract-shaped record", () => {
+const RECEIPT_RECORD = {
+	id: "b3a1c2d4-5e6f-7081-92a3-b4c5d6e7f809",
+	trip_id: "b3a1c2d4-5e6f-7081-92a3-b4c5d6e7f809",
+	status: "COMPLETED",
+	requested_at: "2026-01-15T10:00:00.000Z",
+	completed_at: "2026-01-15T10:35:24.000Z",
+	pickup_address: "Example Straße 1, 10115 Example City",
+	dropoff_address: "Example Airport Terminal 1, 12345 Example City",
+	driver_name: "Example Driver",
+	fare_total: "$47.43",
+	fare_total_cents: 4743,
+	distance_meters: 29_490,
+	duration_seconds: 2100,
+	product_type: "UberX",
+	is_surge: false,
+	fare_breakdown: [
+		{ label: "Trip fare", amount_cents: 4095 },
+		{ label: "Booking Fee", amount_cents: 200 },
+	],
+};
+
+test("trips schema accepts a record where every field but id is null (live evidence: the list feed carries no other structured field)", () => {
 	const result = tripsSchema.safeParse(TRIP_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("trips schema accepts a canceled trip (null fare / coords / driver)", () => {
-	const result = tripsSchema.safeParse({
-		...TRIP_RECORD,
-		status: "CANCELED",
-		started_at: null,
+test("trips schema rejects a missing id", () => {
+	const { id, ...rest } = TRIP_RECORD;
+	assert.equal(tripsSchema.safeParse(rest).success, false);
+});
+
+test("trips schema has no detail-only field (D3: detail lives on receipts)", () => {
+	for (const field of [
+		"distance_meters",
+		"duration_seconds",
+		"fare_breakdown",
+		"driver_name",
+	]) {
+		assert.ok(
+			!(field in tripsSchema.shape),
+			`trips schema must not declare detail-only field ${field}`,
+		);
+	}
+});
+
+test("trips schema does not model a currency field (live evidence: only a currency-symbol-prefixed display string exists)", () => {
+	assert.ok(!("currency" in tripsSchema.shape));
+});
+
+test("receipts schema accepts a fully populated record", () => {
+	const result = receiptsSchema.safeParse(RECEIPT_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("receipts schema accepts an all-null/empty unhydrated detail", () => {
+	const result = receiptsSchema.safeParse({
+		...RECEIPT_RECORD,
+		status: null,
+		requested_at: null,
 		completed_at: null,
-		pickup_lat: null,
-		pickup_lng: null,
+		pickup_address: null,
 		dropoff_address: null,
-		dropoff_lat: null,
-		dropoff_lng: null,
-		distance_meters: null,
-		duration_seconds: null,
+		driver_name: null,
 		fare_total: null,
 		fare_total_cents: null,
-		currency: null,
-		tip_cents: null,
-		surge_multiplier: null,
-		driver_name: null,
-		vehicle_description: null,
-		receipt_url: null,
+		distance_meters: null,
+		duration_seconds: null,
+		product_type: null,
+		is_surge: null,
+		fare_breakdown: [],
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("trips schema rejects a negative fare_total_cents", () => {
+test("receipts schema rejects a missing trip_id", () => {
+	const { trip_id, ...rest } = RECEIPT_RECORD;
+	assert.equal(receiptsSchema.safeParse(rest).success, false);
+});
+
+test("receipts schema rejects a fare_breakdown line with no label", () => {
 	assert.equal(
-		tripsSchema.safeParse({ ...TRIP_RECORD, fare_total_cents: -1 }).success,
+		receiptsSchema.safeParse({
+			...RECEIPT_RECORD,
+			fare_breakdown: [{ amount_cents: 100 }],
+		}).success,
 		false,
 	);
 });
 
-test("trips schema rejects a non-ISO currency", () => {
-	assert.equal(
-		tripsSchema.safeParse({ ...TRIP_RECORD, currency: "dollars" }).success,
-		false,
-	);
-});
-
-test("trips schema rejects a non-URL receipt_url", () => {
-	assert.equal(
-		tripsSchema.safeParse({ ...TRIP_RECORD, receipt_url: "emailed receipt" })
-			.success,
-		false,
-	);
-});
-
-test("validateRecord routes trips and passes unknown streams through", () => {
+test("validateRecord routes trips and receipts and passes unknown streams through", () => {
 	assert.equal(validateRecord("trips", TRIP_RECORD).ok, true);
+	assert.equal(validateRecord("receipts", RECEIPT_RECORD).ok, true);
 	assert.equal(validateRecord("eats_orders", { id: "x" }).ok, true);
 });

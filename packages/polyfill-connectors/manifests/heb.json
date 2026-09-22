@@ -303,6 +303,204 @@
 			},
 			"coverage_strategy": "parent_detail_accounting",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "profile",
+			"required": false,
+			"description": "H-E-B account profile for this connection, scraped from My Account. Mirrors the wholefoods.profile shape (name, email) per the cutover capability map's lead_decision for heb.profile.",
+			"display": {
+				"label": "Your H-E-B profile",
+				"detail": "Name and email on file for your H-E-B account."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"email": {
+						"type": ["string", "null"]
+					},
+					"fetched_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "nutrition",
+			"required": false,
+			"description": "Nutrition facts per unique H-E-B product ordered, scraped from each product's detail page. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+			"display": {
+				"label": "Your H-E-B product nutrition",
+				"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"product_id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"source": {
+						"type": "string",
+						"enum": [
+							"heb_product_page",
+							"usda_fdc",
+							"not_found",
+							"error",
+							"blocked"
+						]
+					},
+					"confidence": {
+						"type": "string",
+						"enum": ["high", "medium", "low"]
+					},
+					"calories": {
+						"type": ["number", "null"]
+					},
+					"protein_g": {
+						"type": ["number", "null"]
+					},
+					"carbs_g": {
+						"type": ["number", "null"]
+					},
+					"fat_g": {
+						"type": ["number", "null"]
+					},
+					"sodium_mg": {
+						"type": ["number", "null"]
+					},
+					"fiber_g": {
+						"type": ["number", "null"]
+					},
+					"sugar_g": {
+						"type": ["number", "null"]
+					},
+					"serving_size": {
+						"type": ["string", "null"]
+					},
+					"servings_per_container": {
+						"type": ["string", "null"]
+					},
+					"saturated_fat_g": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"trans_fat_g": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"cholesterol_mg": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"added_sugar_g": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"calcium_mg": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"iron_mg": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"potassium_mg": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"vitamin_d_mcg": {
+						"type": ["number", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"upc": {
+						"type": ["string", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"ingredients": {
+						"type": ["string", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"allergens": {
+						"type": ["string", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"category": {
+						"type": ["string", "null"],
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"highlights": {
+						"type": ["array", "null"],
+						"items": {
+							"type": "string"
+						},
+						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"fetched_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				},
+				"required": ["id", "product_id", "name"]
+			},
+			"primary_key": ["id"],
+			"relationships": [
+				{
+					"name": "order_item",
+					"stream": "order_items",
+					"foreign_key": "product_id",
+					"cardinality": "has_many"
+				}
+			],
+			"selection": {
+				"fields": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "category", "ingredients"],
+					"semantic_fields": ["name"]
+				},
+				"range_filters": {
+					"calories": ["gte", "gt", "lte", "lt"],
+					"protein_g": ["gte", "gt", "lte", "lt"],
+					"sodium_mg": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["source", "confidence", "category"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"profiles": [
@@ -326,11 +524,17 @@
 		"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
 		"list_page_navigation_failed": "We couldn't load a page of your H-E-B order history and didn't want to assume that meant the end",
 		"list_page_shape_check_failed": "The page didn't look like we expected",
+		"nutrition_lookup_incomplete": "We couldn't look up nutrition facts for every product in your orders this run",
+		"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 		"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
 		"pagination_exhausted": "We reached the end of the available pages",
 		"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 		"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
+		"profile_navigation_failed": "We couldn't load your H-E-B account profile page",
+		"profile_shape_check_failed": "Your H-E-B account profile page didn't look like we expected",
+		"scope_not_supported": "This can't be collected with the streams you selected",
 		"selector_drift": "The page layout changed and we couldn't find what we needed",
+		"session_repair_required": "We need you to sign in or pass a verification check to continue",
 		"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
 		"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
 		"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",

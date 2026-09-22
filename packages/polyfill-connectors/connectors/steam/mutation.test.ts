@@ -24,6 +24,7 @@ function jsonResponse(body: unknown): Response {
 
 function makeContext(streams: readonly string[]): {
 	ctx: Parameters<typeof steamCollect>[0];
+	emittedRecords: ReturnType<typeof makeRecordingEmit>["emitted"];
 	messages: EmittedMessage[];
 	skippedRecords: ReturnType<typeof makeRecordingEmit>["skipped"];
 } {
@@ -32,6 +33,7 @@ function makeContext(streams: readonly string[]): {
 		streams.map((name) => [name, { name }]),
 	);
 	return {
+		emittedRecords: harness.emitted,
 		messages: harness.protocolMessages,
 		skippedRecords: harness.skipped,
 		ctx: {
@@ -150,6 +152,131 @@ test("steam: an explicit empty games array remains valid zero proof", async () =
 	assert.ok(coverage);
 	assert.equal(coverage.considered, 0);
 	assert.equal(coverage.covered, 0);
+});
+
+test("steam: friends stream hydrates persona fields via a single batched GetPlayerSummaries call", async () => {
+	const requestedUrls: URL[] = [];
+	globalThis.fetch = (input) => {
+		const url = new URL(String(input));
+		requestedUrls.push(url);
+		if (url.pathname.endsWith("/GetFriendList/v0001")) {
+			return Promise.resolve(
+				jsonResponse({
+					friendslist: {
+						friends: [
+							{
+								steamid: "76561198000000001",
+								relationship: "friend",
+								friend_since: 1_700_000_000,
+							},
+							{
+								steamid: "76561198000000002",
+								relationship: "friend",
+								friend_since: 1_700_000_001,
+							},
+						],
+					},
+				}),
+			);
+		}
+		if (url.pathname.endsWith("/GetPlayerSummaries/v0002")) {
+			return Promise.resolve(
+				jsonResponse({
+					response: {
+						players: [
+							{
+								steamid: "76561198000000001",
+								personaname: "Friend One",
+								avatarfull: "https://example.com/one.jpg",
+								profileurl:
+									"https://steamcommunity.com/profiles/76561198000000001/",
+							},
+							// 76561198000000002 omitted: simulates a private/unresolvable profile.
+						],
+					},
+				}),
+			);
+		}
+		throw new Error(`unexpected Steam fixture request: ${url.pathname}`);
+	};
+	const { ctx, emittedRecords } = makeContext(["friends"]);
+
+	await steamCollect(ctx);
+
+	const summariesRequests = requestedUrls.filter((url) =>
+		url.pathname.endsWith("/GetPlayerSummaries/v0002"),
+	);
+	assert.equal(
+		summariesRequests.length,
+		1,
+		"friend persona hydration must use one batched call, not one per friend",
+	);
+	assert.equal(
+		summariesRequests[0]?.searchParams.get("steamids"),
+		"76561198000000001,76561198000000002",
+	);
+
+	const records = emittedRecords.filter(
+		(record) => record.stream === "friends",
+	);
+	assert.equal(records.length, 2);
+	const hydrated = records.find(
+		(record) => record.data.steamid === "76561198000000001",
+	);
+	assert.equal(hydrated?.data.persona_name, "Friend One");
+	assert.equal(hydrated?.data.avatar_url, "https://example.com/one.jpg");
+	assert.equal(
+		hydrated?.data.profile_url,
+		"https://steamcommunity.com/profiles/76561198000000001/",
+	);
+	const unresolved = records.find(
+		(record) => record.data.steamid === "76561198000000002",
+	);
+	assert.equal(
+		unresolved?.data.persona_name,
+		null,
+		"a friend absent from GetPlayerSummaries gets null persona fields, not a failed run",
+	);
+	assert.equal(unresolved?.data.avatar_url, null);
+	assert.equal(unresolved?.data.profile_url, null);
+});
+
+test("steam: friends stream still emits relationship data when persona hydration fails", async () => {
+	globalThis.fetch = (input) => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith("/GetFriendList/v0001")) {
+			return Promise.resolve(
+				jsonResponse({
+					friendslist: {
+						friends: [
+							{
+								steamid: "76561198000000001",
+								relationship: "friend",
+								friend_since: 1_700_000_000,
+							},
+						],
+					},
+				}),
+			);
+		}
+		if (url.pathname.endsWith("/GetPlayerSummaries/v0002")) {
+			return Promise.resolve(new Response("", { status: 429 }));
+		}
+		throw new Error(`unexpected Steam fixture request: ${url.pathname}`);
+	};
+	const { ctx, emittedRecords } = makeContext(["friends"]);
+
+	await steamCollect(ctx);
+
+	const records = emittedRecords.filter(
+		(record) => record.stream === "friends",
+	);
+	assert.equal(
+		records.length,
+		1,
+		"a degraded persona lookup must not drop the friend relationship record",
+	);
+	assert.equal(records[0]?.data.persona_name, null);
 });
 
 test("steam: an invalid player_level fails schema coverage without a green checkpoint", async () => {

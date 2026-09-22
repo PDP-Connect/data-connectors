@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/github",
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.5.1",
+	"version": "0.7.0",
 	"display_name": "GitHub",
 	"brand": {
 		"icon": "icons/github.svg",
@@ -32,7 +32,7 @@
 					"secret": true,
 					"autocomplete": "off",
 					"help_url": "https://github.com/settings/tokens",
-					"help_text": "Create a GitHub personal access token with read:user, public_repo, repo, and gist access as applicable to the data you want, then paste it here.",
+					"help_text": "Create a GitHub personal access token with read:user, public_repo, repo, gist, and read:org access as applicable to the data you want, then paste it here.",
 					"env": ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"]
 				}
 			]
@@ -809,6 +809,232 @@
 			},
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "events",
+			"required": true,
+			"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
+			"display": {
+				"label": "Your recent activity",
+				"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
+			},
+			"semantics": "append",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"repository_full_name": {
+						"type": "string",
+						"x_pdpp_role": "actor"
+					},
+					"is_public": {
+						"type": "boolean"
+					}
+				},
+				"required": ["id", "type", "created_at", "repository_full_name"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "created_at",
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["type", "repository_full_name"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "contributions",
+			"required": true,
+			"description": "Daily contribution counts from the authenticated user's contribution graph, one record per calendar day (UTC), collected via the GitHub GraphQL contributionsCollection.",
+			"display": {
+				"label": "Your contribution history",
+				"detail": "One record per day with the total contribution count for that day, keyed by user and date."
+			},
+			"semantics": "append",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"user_id": {
+						"type": "string",
+						"x_pdpp_role": "actor"
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time"
+					},
+					"contribution_count": {
+						"type": "integer"
+					}
+				},
+				"required": ["id", "user_id", "date", "contribution_count"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"contribution_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "pinned_repositories",
+			"required": true,
+			"description": "The authenticated user's curated pinned-repository list (GraphQL user.pinnedItems, Repository nodes only; GitHub caps this at 6). Fully re-fetched each run to reflect current curation; there is no upstream cursor for a pin list.",
+			"display": {
+				"label": "Your pinned repositories",
+				"detail": "Repository full name, description, URL, languages, star/fork counts, and the user's chosen display position."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"full_name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"name": {
+						"type": ["string", "null"]
+					},
+					"description": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"html_url": {
+						"type": ["string", "null"]
+					},
+					"languages": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"stargazers_count": {
+						"type": ["integer", "null"]
+					},
+					"forks_count": {
+						"type": ["integer", "null"]
+					},
+					"position": {
+						"type": "integer"
+					}
+				},
+				"required": ["id", "full_name", "position"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["full_name", "name", "description"],
+					"semantic_fields": ["description"]
+				},
+				"range_filters": {
+					"stargazers_count": ["gte", "gt", "lte", "lt"],
+					"forks_count": ["gte", "gt", "lte", "lt"],
+					"position": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "organizations",
+			"required": true,
+			"description": "GitHub organizations the authenticated user is a member of (GET /user/orgs, requires the read:org scope). Fully re-fetched each run to reflect current membership.",
+			"display": {
+				"label": "Your organization memberships",
+				"detail": "Organization login, description, and avatar URL."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"login": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"description": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"avatar_url": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "login"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["login", "description"],
+					"semantic_fields": ["description"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
 		}
 	],
 	"profiles": [
@@ -832,7 +1058,7 @@
 		},
 		{
 			"id": "full",
-			"label": "Everything (profile, repos, stars, issues, PRs, gists)",
+			"label": "Everything (profile, repos, stars, issues, PRs, gists, activity, contributions, pins, orgs)",
 			"streams": [
 				{
 					"name": "user"
@@ -854,13 +1080,27 @@
 				},
 				{
 					"name": "gists"
+				},
+				{
+					"name": "events"
+				},
+				{
+					"name": "contributions"
+				},
+				{
+					"name": "pinned_repositories"
+				},
+				{
+					"name": "organizations"
 				}
 			]
 		}
 	],
 	"reason_display_messages": {
+		"github_event_missing_fields": "We skipped some activity events that were missing required details",
 		"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
 		"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
+		"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
 		"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
 		"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
 		"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"

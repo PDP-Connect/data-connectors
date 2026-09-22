@@ -84,6 +84,40 @@ export const savedTracksSchema = z.object({
 });
 
 /**
+ * profile stream: one singleton record for the authenticated user, from
+ * GET /me.
+ */
+export const profileSchema = z.object({
+	// Unlike track/playlist/artist ids, a Spotify user id (from GET /me) is not
+	// guaranteed base-62: legacy accounts can carry ids derived from an email
+	// or a linked Facebook account, so this only bounds length.
+	id: z.string().min(1).max(80),
+	display_name: pdppSafeText.max(1000).nullable(),
+	followers: z.number().int().min(0).nullable(),
+});
+
+/**
+ * playlist_items stream: one record per track in a playlist, from
+ * GET /playlists/{id}/tracks. Child of `playlists` via `playlist_id` (D3).
+ * `position` is the zero-based index of the item within the API's paginated
+ * ordering, so the id stays unique and stable across runs as long as the
+ * playlist's ordering does not change (a Spotify-side reorder invalidates
+ * positions the same way it would any offset-based list).
+ */
+export const playlistItemsSchema = z.object({
+	id: z.string().min(1).max(120),
+	playlist_id: spotifyIdSchema,
+	track_id: spotifyIdSchema.nullable(),
+	position: z.number().int().min(0),
+	added_at: isoDateTimeSchema.nullable(),
+	added_by: spotifyIdSchema.nullable(),
+	name: nameSchema,
+	artist_names: artistNamesSchema,
+	album_name: pdppSafeText.max(1000).nullable(),
+	duration_ms: z.number().int().min(0).nullable(),
+});
+
+/**
  * top_artists stream: one record per top artist, per time window.
  */
 export const topArtistsSchema = z.object({
@@ -116,9 +150,11 @@ export const recentlyPlayedSchema = z.object({
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	playlists: playlistsSchema,
+	playlist_items: playlistItemsSchema,
 	saved_tracks: savedTracksSchema,
 	top_artists: topArtistsSchema,
 	recently_played: recentlyPlayedSchema,
+	profile: profileSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

@@ -119,3 +119,96 @@ export type MaxPageResolution =
 	| { kind: "resolved"; source: "dom" | "structured"; value: number }
 	| { kind: "absent" }
 	| { kind: "contradictory"; reason: string };
+
+// ─── profile ────────────────────────────────────────────────────────────
+
+/** Account profile scraped from /my-account/profile. Field names mirror the
+ *  wholefoods.profile contract shape (capability-map.json lead_decision):
+ *  {id, name, email}. `id` is synthesized (this connector has one account per
+ *  connection, so a fixed literal id is stable and unique within the stream). */
+export interface ProfileRecord {
+	email: string | null;
+	fetched_at: string;
+	id: string;
+	name: string | null;
+	[field: string]: unknown;
+}
+
+// ─── nutrition ──────────────────────────────────────────────────────────
+
+/** Nutrition facts scraped from a product-detail page, keyed by H-E-B
+ *  product_id. Common nutrient fields share names with wholefoods.nutrition's
+ *  contracted shape (capability-map.json); H-E-B's extra legacy fields
+ *  (vitamins/minerals/upc/ingredients/allergens/category/highlights) are kept
+ *  as additional optional fields per the lead_decision — no shared-code
+ *  superset required. */
+export type NutritionSource =
+	| "heb_product_page"
+	| "usda_fdc"
+	| "not_found"
+	| "error"
+	| "blocked";
+
+export type NutritionConfidence = "high" | "medium" | "low";
+
+export interface NutritionRecord {
+	added_sugar_g: number | null;
+	allergens: string | null;
+	calcium_mg: number | null;
+	calories: number | null;
+	carbs_g: number | null;
+	category: string | null;
+	cholesterol_mg: number | null;
+	confidence: NutritionConfidence;
+	fat_g: number | null;
+	fetched_at: string;
+	fiber_g: number | null;
+	highlights: string[] | null;
+	id: string;
+	ingredients: string | null;
+	iron_mg: number | null;
+	name: string;
+	potassium_mg: number | null;
+	product_id: string;
+	protein_g: number | null;
+	saturated_fat_g: number | null;
+	serving_size: string | null;
+	servings_per_container: string | null;
+	sodium_mg: number | null;
+	source: NutritionSource;
+	sugar_g: number | null;
+	trans_fat_g: number | null;
+	upc: string | null;
+	vitamin_d_mcg: number | null;
+	[field: string]: unknown;
+}
+
+/** Pre-shape-check DOM extraction result for one product's nutrition panel.
+ *  `found` is false when no "Nutrition Facts" panel was located on the page
+ *  (a real, honest outcome — not every H-E-B product page carries one). */
+export interface NutritionDomExtraction {
+	addedSugarG: number | null;
+	allergens: string | null;
+	calciumMg: number | null;
+	calories: number | null;
+	carbsG: number | null;
+	category: string | null;
+	cholesterolMg: number | null;
+	fatG: number | null;
+	fiberG: number | null;
+	found: boolean;
+	highlights: string[] | null;
+	ingredients: string | null;
+	ironMg: number | null;
+	name: string | null;
+	potassiumMg: number | null;
+	proteinG: number | null;
+	saturatedFatG: number | null;
+	servingSize: string | null;
+	servingsPerContainer: string | null;
+	sodiumMg: number | null;
+	sugarG: number | null;
+	transFatG: number | null;
+	upc: string | null;
+	vitaminDMcg: number | null;
+}

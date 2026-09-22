@@ -8,6 +8,7 @@ import {
 	buildMemoryNoteRecord,
 	buildSkillRecord,
 	buildSlashCommandRecord,
+	buildUsageRecord,
 	extractContent,
 	makeEmptySessionAccumulator,
 	mergeSessionObservations,
@@ -157,6 +158,7 @@ test("SessionAccumulator: stores only bounded scalar summary fields", () => {
 		cwd: "/home/user owner/project",
 		entrypoint: "claude",
 		gitBranch: "main",
+		title: "Fix the flaky test",
 		userType: "human",
 		version: "1.2.3",
 	});
@@ -176,6 +178,7 @@ test("SessionAccumulator: stores only bounded scalar summary fields", () => {
 		"message_count",
 		"project_path",
 		"started_at",
+		"title",
 		"user_type",
 		"version",
 	]);
@@ -211,6 +214,7 @@ test("mergeSessionObservations: only non-null fields replace", () => {
 	mergeSessionObservations(acc, {
 		cwd: "/home",
 		gitBranch: "main",
+		title: null,
 		userType: null,
 		entrypoint: null,
 		version: null,
@@ -335,4 +339,115 @@ test("parseCsvEnv: trims and drops empties", () => {
 
 test("parseCsvEnv: undefined → []", () => {
 	assert.deepEqual(parseCsvEnv(undefined), []);
+});
+
+// ─── buildUsageRecord ─────────────────────────────────────────────────────
+
+test("buildUsageRecord: null raw → honest missing-file record", () => {
+	const rec = buildUsageRecord(null);
+	assert.equal(rec.id, "usage:aggregate");
+	assert.equal(rec.source, "stats-cache-missing");
+	assert.equal(rec.total_sessions, null);
+	assert.equal(rec.total_cost_usd_cents, 0);
+	assert.deepEqual(rec.models, []);
+	assert.deepEqual(rec.daily_activity, []);
+	assert.equal(rec.longest_session, null);
+});
+
+test("buildUsageRecord: real-shaped stats-cache.json parses and converts units", () => {
+	const rec = buildUsageRecord({
+		totalSessions: 54,
+		totalMessages: 40548,
+		firstSessionDate: "2026-01-06T09:33:39.062Z",
+		lastComputedDate: "2026-02-23",
+		totalSpeculationTimeSavedMs: 0,
+		modelUsage: {
+			"claude-opus-4-5-20251101": {
+				inputTokens: 463_393,
+				outputTokens: 2_253_207,
+				cacheReadInputTokens: 2_326_238_529,
+				cacheCreationInputTokens: 119_660_043,
+				webSearchRequests: 0,
+				costUSD: 1.5,
+				contextWindow: 200_000,
+				maxOutputTokens: 8192,
+			},
+		},
+		dailyActivity: [
+			{
+				date: "2026-01-06",
+				messageCount: 598,
+				sessionCount: 2,
+				toolCallCount: 151,
+			},
+		],
+		dailyModelTokens: [
+			{
+				date: "2026-01-06",
+				tokensByModel: { "claude-opus-4-5-20251101": 30_184 },
+			},
+		],
+		hourCounts: { "0": 3, "1": 2 },
+		longestSession: {
+			sessionId: "07f0a80e-dcf2-412e-9f77-8d79824d7bb7",
+			duration: 1_859_496_593,
+			messageCount: 379,
+			timestamp: "2026-01-06T09:33:39.062Z",
+		},
+	});
+	assert.equal(rec.source, "stats-cache");
+	assert.equal(rec.total_sessions, 54);
+	assert.equal(rec.total_messages, 40_548);
+	// costUSD 1.5 → 150 cents.
+	assert.equal(rec.total_cost_usd_cents, 150);
+	assert.equal(rec.currency, "USD");
+	assert.deepEqual(rec.models, [
+		{
+			model: "claude-opus-4-5-20251101",
+			input_tokens: 463_393,
+			output_tokens: 2_253_207,
+			cache_read_input_tokens: 2_326_238_529,
+			cache_creation_input_tokens: 119_660_043,
+			web_search_requests: 0,
+			cost_usd_cents: 150,
+			context_window: 200_000,
+			max_output_tokens: 8192,
+		},
+	]);
+	assert.deepEqual(rec.daily_activity, [
+		{
+			date: "2026-01-06",
+			message_count: 598,
+			session_count: 2,
+			tool_call_count: 151,
+		},
+	]);
+	assert.deepEqual(rec.daily_model_tokens, [
+		{
+			date: "2026-01-06",
+			tokens_by_model: { "claude-opus-4-5-20251101": 30_184 },
+		},
+	]);
+	assert.deepEqual(rec.hour_counts, { "0": 3, "1": 2 });
+	// duration ms → seconds, rounded.
+	assert.deepEqual(rec.longest_session, {
+		session_id: "07f0a80e-dcf2-412e-9f77-8d79824d7bb7",
+		duration_seconds: 1_859_497,
+		message_count: 379,
+		timestamp: "2026-01-06T09:33:39.062Z",
+	});
+});
+
+test("buildUsageRecord: malformed daily entries are dropped, not crashed on", () => {
+	const rec = buildUsageRecord({
+		dailyActivity: [{ date: "not-a-date" }, { date: "2026-01-06" }],
+	});
+	assert.deepEqual(rec.daily_activity, [
+		{
+			date: "2026-01-06",
+			message_count: 0,
+			session_count: 0,
+			tool_call_count: 0,
+		},
+	]);
 });

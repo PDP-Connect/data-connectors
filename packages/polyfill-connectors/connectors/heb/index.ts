@@ -44,16 +44,20 @@ import {
 	summarizeItemCounts,
 } from "./item-count-anchor.ts";
 import {
+	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
+	buildProfileRecord,
 	diagnoseEmptyListPage,
 	isIncapsulaBlocked,
 	looksLoggedOut,
 	mergeOrdersListPage,
+	parseNutritionDom,
 	parseOrderDate,
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
+	parseProfileDom,
 	resolveMaxPage,
 } from "./parsers.ts";
 import { listPageOrderShape, validateRecord } from "./schemas.ts";
@@ -1136,6 +1140,15 @@ export interface EmitDeps extends HydrationDeps {
 	 *  existing callers and tests that do not exercise the anchor need no
 	 *  change. */
 	itemCountTallies?: OrderItemTally[] | undefined;
+	/** Sink for unique products observed while emitting order_items this run,
+	 *  deduped by product_id — the source `collectNutrition` looks products up
+	 *  against. Undefined when nutrition is out of scope this run. */
+	nutritionTargetSink?:
+		| {
+				seenProductIds: Set<string>;
+				targets: NutritionTarget[];
+		  }
+		| undefined;
 	orderItemsCoverage: OrderItemsCoverage | undefined;
 	ordersCoverage: OrdersCoverage | undefined;
 	ordersFingerprintCursor: FingerprintCursor | undefined;
@@ -1496,6 +1509,18 @@ async function emitOrderAndItems(
 					detail.items,
 				),
 			);
+			if (
+				deps.nutritionTargetSink &&
+				item.productId &&
+				!deps.nutritionTargetSink.seenProductIds.has(item.productId)
+			) {
+				deps.nutritionTargetSink.seenProductIds.add(item.productId);
+				deps.nutritionTargetSink.targets.push({
+					name: item.name,
+					productId: item.productId,
+					productUrl: item.productUrl,
+				});
+			}
 		}
 		// Completeness anchor: H-E-B's own list card declared how many items
 		// this order has. Recording the pair here — declared (list page) vs
@@ -2028,6 +2053,161 @@ export function shouldStopPaginating(
 	return pageOrderDates.every((d) => d !== null && d < boundary);
 }
 
+// ─── profile ────────────────────────────────────────────────────────────
+
+const PROFILE_URL = "https://www.heb.com/my-account/profile";
+
+/** Fetch and emit the `profile` record. A profile page that fails to load or
+ *  yields no name/email is reported as SKIP_RESULT rather than emitting a
+ *  record with both fields null — an all-null profile is more likely a
+ *  navigation/selector failure than a genuinely blank H-E-B profile. */
+export async function collectProfile(
+	page: Page,
+	deps: Pick<
+		EmitDeps,
+		"emit" | "emitRecord" | "emittedAt" | "waitForHydration"
+	>,
+): Promise<void> {
+	try {
+		await page.goto(PROFILE_URL, {
+			waitUntil: "domcontentloaded",
+			timeout: NAV_TIMEOUT_MS,
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "profile_navigation_failed",
+			message: `H-E-B profile page navigation failed: ${message.slice(0, 160)}`,
+		});
+		return;
+	}
+	await (deps.waitForHydration ?? hydrationWait)();
+
+	const landedUrl = page.url();
+	const html = await page.content().catch((): string => "");
+	if (SIGNIN_URL_RE.test(landedUrl) || looksLoggedOut(landedUrl, html)) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "session_repair_required",
+			message: "H-E-B profile page redirected to sign-in.",
+		});
+		return;
+	}
+	if (isIncapsulaBlocked(html)) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "session_repair_required",
+			message: "H-E-B profile page was blocked by Incapsula.",
+		});
+		return;
+	}
+
+	const extraction = parseProfileDom(html);
+	if (!(extraction.name || extraction.email)) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "profile_shape_check_failed",
+			message: "H-E-B profile page yielded no name or email.",
+		});
+		return;
+	}
+	await deps.emitRecord(
+		"profile",
+		buildProfileRecord(extraction, deps.emittedAt),
+	);
+}
+
+// ─── nutrition ──────────────────────────────────────────────────────────
+
+/** One unique product referenced by items emitted this run (or, when
+ *  `order_items` is out of scope, an empty set — nutrition has no order-item
+ *  source to dedup against). Bounded like `MAX_DETAIL_ATTEMPTS_PER_RUN`: a
+ *  large order history should not turn one run into hundreds of product-page
+ *  navigations. */
+const MAX_NUTRITION_LOOKUPS_PER_RUN = 50;
+
+export interface NutritionTarget {
+	name: string;
+	productId: string;
+	productUrl: string | null;
+}
+
+/** Fetch and emit `nutrition` records for the unique products this run's
+ *  `order_items` collection observed, deduped by product_id and bounded by
+ *  `MAX_NUTRITION_LOOKUPS_PER_RUN`. A product with no resolvable
+ *  `product_url` is skipped (never guessed) and reported once in aggregate. */
+export async function collectNutrition(
+	page: Page,
+	targets: readonly NutritionTarget[],
+	deps: Pick<
+		EmitDeps,
+		"emit" | "emitRecord" | "emittedAt" | "waitForHydration"
+	>,
+): Promise<void> {
+	const withUrl = targets.filter(
+		(t): t is NutritionTarget & { productUrl: string } => Boolean(t.productUrl),
+	);
+	const skippedNoUrl = targets.length - withUrl.length;
+	const bounded = withUrl.slice(0, MAX_NUTRITION_LOOKUPS_PER_RUN);
+	const deferred = withUrl.length - bounded.length;
+
+	for (const target of bounded) {
+		try {
+			await page.goto(target.productUrl, {
+				waitUntil: "domcontentloaded",
+				timeout: NAV_TIMEOUT_MS,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "nutrition",
+				reason: "nutrition_navigation_failed",
+				message: `H-E-B product page navigation failed for ${target.productId}: ${message.slice(0, 160)}`,
+				diagnostics: { product_id: target.productId },
+			});
+			continue;
+		}
+		await (deps.waitForHydration ?? hydrationWait)();
+		const html = await page.content().catch((): string => "");
+		if (isIncapsulaBlocked(html)) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "nutrition",
+				reason: "session_repair_required",
+				message: `H-E-B product page was blocked by Incapsula for ${target.productId}.`,
+				diagnostics: { product_id: target.productId },
+			});
+			continue;
+		}
+		const extraction = parseNutritionDom(html);
+		await deps.emitRecord(
+			"nutrition",
+			buildNutritionRecord(
+				target.productId,
+				extraction,
+				target.name,
+				deps.emittedAt,
+			),
+		);
+	}
+
+	if (skippedNoUrl > 0 || deferred > 0) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "nutrition",
+			reason: "nutrition_lookup_incomplete",
+			message: `${skippedNoUrl} product(s) had no resolvable product page; ${deferred} product(s) deferred past this run's ${MAX_NUTRITION_LOOKUPS_PER_RUN}-lookup budget.`,
+			diagnostics: { skipped_no_url: skippedNoUrl, deferred },
+		});
+	}
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 if (isMainModule(import.meta.url)) {
@@ -2086,10 +2266,34 @@ if (isMainModule(import.meta.url)) {
 			const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
 			const wantsOrders = requested.has("orders");
 			const wantsItems = requested.has("order_items");
+			const wantsProfile = requested.has("profile");
+			const wantsNutrition = requested.has("nutrition");
+
+			if (wantsProfile) {
+				await collectProfile(page, { emit, emitRecord, emittedAt });
+			}
+
+			// `nutrition` looks up products by the item names/urls this run's
+			// order_items collection observes; it has no independent product
+			// catalog to browse. Without order_items also in scope this run,
+			// there is nothing to look nutrition up against.
+			if (wantsNutrition && !wantsItems) {
+				await emit({
+					type: "SKIP_RESULT",
+					stream: "nutrition",
+					reason: "scope_not_supported",
+					message:
+						"H-E-B nutrition lookup requires order_items in the same run's scope; it has no independent product catalog to browse.",
+				});
+			}
 
 			if (!(wantsOrders || wantsItems)) {
 				return;
 			}
+
+			const nutritionTargets: NutritionTarget[] = [];
+			const seenNutritionProductIds = new Set<string>();
+			const collectNutritionTargets = wantsNutrition && wantsItems;
 
 			const ordersState = (state.orders ?? {}) as OrdersStateShape;
 			const boundary = resumeBoundary(ordersState.checkpoint);
@@ -2129,6 +2333,12 @@ if (isMainModule(import.meta.url)) {
 				emitRecord,
 				emittedAt,
 				itemCountTallies,
+				nutritionTargetSink: collectNutritionTargets
+					? {
+							seenProductIds: seenNutritionProductIds,
+							targets: nutritionTargets,
+						}
+					: undefined,
 				orderItemsCoverage,
 				ordersCoverage,
 				ordersFingerprintCursor,
@@ -2218,6 +2428,14 @@ if (isMainModule(import.meta.url)) {
 			// `orders` list stream is never left permanently unmeasured.
 			if (ordersCoverage) {
 				await emitOrdersCoverage(deps, ordersCoverage);
+			}
+
+			if (collectNutritionTargets) {
+				await collectNutrition(page, nutritionTargets, {
+					emit,
+					emitRecord,
+					emittedAt,
+				});
 			}
 		},
 	});

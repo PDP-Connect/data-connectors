@@ -20,8 +20,10 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
+	buildProfileRecord,
 	diagnoseEmptyListPage,
 	hasOrdersEmptyState,
 	isIncapsulaBlocked,
@@ -30,10 +32,12 @@ import {
 	orderItemId,
 	parseCurrencyCents,
 	parseDetailQuantity,
+	parseNutritionDom,
 	parseOrderDate,
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
+	parseProfileDom,
 	productImageUrl,
 	resolveDomMaxPage,
 	resolveMaxPage,
@@ -1080,4 +1084,155 @@ test("the source-authored empty state is still detected with an overlay-capable 
 		isIncapsulaBlocked(fixture("orders-list-no-past-orders.html")),
 		false,
 	);
+});
+
+// ─── profile / nutrition parsers ──────────────────────────────────────────
+// SYNTHETIC: inline HTML fixtures below are hand-authored, shape-plausible
+// markup, not a live capture. No real H-E-B profile or product-detail page
+// has driven this connector yet (live proof pending — see report). Structural
+// selectors mirror the legacy connectors/heb/heb-playwright.js scrapeProfile()
+// / scrapeNutrition() strategy documented there.
+
+const SYNTHETIC_PROFILE_HTML = `
+<html><body><main>
+  <div>
+    <p>Name</p>
+    <p>Jamie Shopper</p>
+  </div>
+  <div>
+    <p>Email</p>
+    <p>shopper@example.com</p>
+  </div>
+</main></body></html>
+`;
+
+const SYNTHETIC_NUTRITION_HTML = `
+<html><body><main>
+  <h1>H-E-B Organic 2% Reduced Fat Milk</h1>
+  <nav aria-label="Breadcrumb">
+    <a href="/">H-E-B</a>
+    <a href="/dairy">Dairy &amp; Eggs</a>
+    <a href="/dairy/milk">Milk</a>
+  </nav>
+  <div>
+    <h3>Nutrition Facts</h3>
+    <div>Serving Size</div>
+    <div>1 cup (240mL)</div>
+    <p>8 servings per container</p>
+    <ul>
+      <li><div>Amount Per Serving</div></li>
+      <li><div><span>Calories</span>150</div></li>
+      <li><span>Total Fat</span><ul><li>8g</li><li>10%</li></ul></li>
+      <li><span>Saturated Fat</span><ul><li>5g</li></ul></li>
+      <li><i>Trans Fat</i><ul><li>0g</li></ul></li>
+      <li><span>Cholesterol</span><ul><li>20mg</li></ul></li>
+      <li><span>Sodium</span><ul><li>120mg</li></ul></li>
+      <li><span>Total Carbohydrate</span><ul><li>12g</li></ul></li>
+      <li><span>Dietary Fiber</span><ul><li>0g</li></ul></li>
+      <li><span>Total Sugars</span><ul><li>12g</li></ul></li>
+      <li><span>Includes Added Sugars</span><ul><li>0g</li></ul></li>
+      <li><span>Protein</span><ul><li>8g</li></ul></li>
+      <li><span>Vitamin D</span><ul><li>3mcg</li></ul></li>
+      <li><span>Calcium</span><ul><li>300mg</li></ul></li>
+      <li><span>Iron</span><ul><li>0mg</li></ul></li>
+      <li><span>Potassium</span><ul><li>380mg</li></ul></li>
+    </ul>
+  </div>
+  <h4>Ingredients</h4>
+  <p>Grade A organic reduced fat milk, vitamin D3</p>
+  <h4>Allergen Information</h4>
+  <p>Contains: Milk. Safe Handling: keep refrigerated.</p>
+</main></body></html>
+`;
+
+const SYNTHETIC_NUTRITION_NOT_FOUND_HTML = `
+<html><body><main>
+  <h1>Generic Product With No Panel</h1>
+</main></body></html>
+`;
+
+test("parseProfileDom extracts name and email from labeled fields", () => {
+	const result = parseProfileDom(SYNTHETIC_PROFILE_HTML);
+	assert.deepEqual(result, {
+		email: "shopper@example.com",
+		name: "Jamie Shopper",
+	});
+});
+
+test("parseProfileDom returns nulls when labels are absent", () => {
+	const result = parseProfileDom("<html><body><main></main></body></html>");
+	assert.deepEqual(result, { email: null, name: null });
+});
+
+test("buildProfileRecord builds the fixed-literal-id profile record", () => {
+	const record = buildProfileRecord(
+		{ email: "shopper@example.com", name: "Jamie Shopper" },
+		"2026-07-14T12:00:00.000Z",
+	);
+	assert.deepEqual(record, {
+		email: "shopper@example.com",
+		fetched_at: "2026-07-14T12:00:00.000Z",
+		id: "profile",
+		name: "Jamie Shopper",
+	});
+});
+
+test("parseNutritionDom extracts a full nutrition panel structurally", () => {
+	const result = parseNutritionDom(SYNTHETIC_NUTRITION_HTML);
+	assert.equal(result.found, true);
+	assert.equal(result.name, "H-E-B Organic 2% Reduced Fat Milk");
+	assert.equal(result.calories, 150);
+	assert.equal(result.proteinG, 8);
+	assert.equal(result.carbsG, 12);
+	assert.equal(result.fatG, 8);
+	assert.equal(result.sodiumMg, 120);
+	assert.equal(result.fiberG, 0);
+	assert.equal(result.sugarG, 12);
+	assert.equal(result.servingSize, "1 cup (240mL)");
+	assert.equal(result.servingsPerContainer, "8 servings per container");
+	assert.equal(result.vitaminDMcg, 3);
+	assert.equal(result.calciumMg, 300);
+	assert.equal(result.ironMg, 0);
+	assert.equal(result.potassiumMg, 380);
+	assert.equal(
+		result.ingredients,
+		"Grade A organic reduced fat milk, vitamin D3",
+	);
+	assert.equal(result.allergens, "Milk");
+	assert.equal(result.category, "Dairy & Eggs / Milk");
+});
+
+test("parseNutritionDom reports found:false honestly when no panel exists", () => {
+	const result = parseNutritionDom(SYNTHETIC_NUTRITION_NOT_FOUND_HTML);
+	assert.equal(result.found, false);
+	assert.equal(result.calories, null);
+	assert.equal(result.name, null);
+});
+
+test("buildNutritionRecord uses heb_product_page source when a panel was found", () => {
+	const extraction = parseNutritionDom(SYNTHETIC_NUTRITION_HTML);
+	const record = buildNutritionRecord(
+		"123456789",
+		extraction,
+		"H-E-B Organic 2% Reduced Fat Milk",
+		"2026-07-14T12:00:00.000Z",
+	);
+	assert.equal(record.source, "heb_product_page");
+	assert.equal(record.confidence, "high");
+	assert.equal(record.product_id, "123456789");
+	assert.equal(record.id, "123456789");
+});
+
+test("buildNutritionRecord uses not_found source and the fallback name when no panel exists", () => {
+	const extraction = parseNutritionDom(SYNTHETIC_NUTRITION_NOT_FOUND_HTML);
+	const record = buildNutritionRecord(
+		"999",
+		extraction,
+		"Fallback Item Name",
+		"2026-07-14T12:00:00.000Z",
+	);
+	assert.equal(record.source, "not_found");
+	assert.equal(record.confidence, "low");
+	assert.equal(record.name, "Fallback Item Name");
+	assert.equal(record.calories, null);
 });

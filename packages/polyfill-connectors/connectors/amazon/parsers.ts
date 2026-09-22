@@ -13,6 +13,7 @@ import type {
 	OrderDetail,
 	OrderItemRecord,
 	OrdersRecord,
+	ProfileRecord,
 } from "./types.ts";
 
 const CURRENCY_CENTS_MULTIPLIER = 100;
@@ -32,6 +33,14 @@ const HEADER_TOTAL_RE = /^TOTAL$/i;
 const TOTAL_VALUE_RE = /^\$[\d,]+\.\d{2}$/;
 const ASIN_HREF_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 const WHITESPACE_RE = /\s+/g;
+
+// Profile nav-bar parsing. The greeting reads "Hello, <Name>" when signed in
+// (never "Hello, Sign in"); Prime membership is a distinct nav element whose
+// link text names actual membership ("your prime"/"prime benefits"), not the
+// "Try Prime" upsell shown to non-members.
+const NAV_GREETING_RE = /Hello,\s*(.+)/;
+const NAV_SIGN_IN_RE = /sign in/i;
+const PRIME_MEMBER_TEXT_RE = /your prime|prime benefits/i;
 
 function textOf(el: Element | null | undefined): string {
 	if (!el) {
@@ -688,6 +697,37 @@ export function countOrderCardsWithoutOrderId(html: string): number {
 		}
 	}
 	return dropped;
+}
+
+/**
+ * Parse the account nav bar (present on any signed-in Amazon page, not just
+ * order pages) for the owner's display name and Prime membership. Both are
+ * best-effort: a signed-out or layout-drifted page yields `name: null` and
+ * `is_prime: null` rather than a guess (D4 — an unparseable value is null,
+ * never guessed). `id` is a stable placeholder ("me") because Amazon's nav
+ * bar carries no account id, only a display greeting.
+ */
+export function parseAmazonProfileDom(html: string): ProfileRecord {
+	const { document } = parseHTML(html);
+	const greetingEl = document.querySelector(
+		"#nav-link-accountList .nav-line-1",
+	);
+	const greeting = normText(greetingEl);
+	// "Hello, sign in" is Amazon's signed-out greeting, not a name — the "Hello,"
+	// prefix is shared by both states, so the match alone can't tell them apart.
+	const isSignedOut = NAV_SIGN_IN_RE.test(greeting);
+	const nameMatch = isSignedOut ? null : NAV_GREETING_RE.exec(greeting);
+	const name = nameMatch?.[1]?.trim() || null;
+
+	const primeEl = document.querySelector("#nav-prime-menu, #navbar-prime");
+	const primeText = normText(primeEl);
+	// Prime membership is only provable when the nav actually shows a
+	// membership-confirming link; a signed-out page or a page with neither
+	// element present tells us nothing, so is_prime stays null rather than
+	// defaulting to false.
+	const is_prime = primeEl ? PRIME_MEMBER_TEXT_RE.test(primeText) : null;
+
+	return { id: "me", name, is_prime };
 }
 
 export function parseOrderDate(raw: string | null | undefined): string | null {

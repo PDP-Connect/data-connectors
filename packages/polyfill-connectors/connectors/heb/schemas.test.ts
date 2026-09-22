@@ -11,7 +11,56 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { orderItemsSchema, ordersSchema, validateRecord } from "./schemas.ts";
+import {
+	nutritionSchema,
+	orderItemsSchema,
+	ordersSchema,
+	profileSchema,
+	validateRecord,
+} from "./schemas.ts";
+
+// SYNTHETIC: hand-authored, shape-real record. No real H-E-B profile/nutrition
+// page has driven this connector yet (live proof pending — see report). Field
+// shapes are derived from the legacy connectors/heb/schemas/heb.profile.json
+// and heb.nutrition.json contracts, not a live capture.
+const PROFILE_RECORD = {
+	email: "shopper@example.com",
+	fetched_at: "2026-07-14T12:00:00.000Z",
+	id: "profile",
+	name: "Jamie Shopper",
+};
+
+// SYNTHETIC: see PROFILE_RECORD note above.
+const NUTRITION_RECORD = {
+	added_sugar_g: 0,
+	allergens: "Milk",
+	calcium_mg: 300,
+	calories: 150,
+	carbs_g: 12,
+	category: "Dairy & Eggs / Milk",
+	cholesterol_mg: 20,
+	confidence: "high",
+	fat_g: 8,
+	fetched_at: "2026-07-14T12:00:00.000Z",
+	fiber_g: 0,
+	highlights: ["Organic"],
+	id: "123456789",
+	ingredients: "Grade A organic reduced fat milk, vitamin D3",
+	iron_mg: 0,
+	name: "H-E-B Organic 2% Reduced Fat Milk",
+	potassium_mg: 380,
+	product_id: "123456789",
+	protein_g: 8,
+	saturated_fat_g: 5,
+	serving_size: "1 cup (240mL)",
+	servings_per_container: "8",
+	sodium_mg: 120,
+	source: "heb_product_page",
+	sugar_g: 12,
+	trans_fat_g: 0,
+	upc: "072940001234",
+	vitamin_d_mcg: 3,
+};
 
 const ORDER_RECORD = {
 	id: "HEB1029384756",
@@ -238,4 +287,89 @@ test("validateRecord routes both streams and passes unknown streams through", ()
 test("validateRecord rejects a malformed orders record via shape check", () => {
 	const result = validateRecord("orders", { ...ORDER_RECORD, id: "not-heb" });
 	assert.equal(result.ok, false);
+});
+
+test("profile schema accepts a parser-shaped record", () => {
+	const result = profileSchema.safeParse(PROFILE_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema accepts null name/email", () => {
+	const result = profileSchema.safeParse({
+		...PROFILE_RECORD,
+		email: null,
+		name: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema rejects a malformed email", () => {
+	assert.equal(
+		profileSchema.safeParse({ ...PROFILE_RECORD, email: "not-an-email" })
+			.success,
+		false,
+	);
+});
+
+test("profile schema rejects an id other than the fixed literal", () => {
+	assert.equal(
+		profileSchema.safeParse({ ...PROFILE_RECORD, id: "other" }).success,
+		false,
+	);
+});
+
+test("nutrition schema accepts a parser-shaped record", () => {
+	const result = nutritionSchema.safeParse(NUTRITION_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("nutrition schema accepts an all-null-macros not_found record", () => {
+	const result = nutritionSchema.safeParse({
+		...NUTRITION_RECORD,
+		added_sugar_g: null,
+		allergens: null,
+		calcium_mg: null,
+		calories: null,
+		carbs_g: null,
+		category: null,
+		cholesterol_mg: null,
+		confidence: "low",
+		fat_g: null,
+		fiber_g: null,
+		highlights: null,
+		ingredients: null,
+		iron_mg: null,
+		potassium_mg: null,
+		protein_g: null,
+		saturated_fat_g: null,
+		serving_size: null,
+		servings_per_container: null,
+		sodium_mg: null,
+		source: "not_found",
+		sugar_g: null,
+		trans_fat_g: null,
+		upc: null,
+		vitamin_d_mcg: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("nutrition schema rejects an unknown source", () => {
+	assert.equal(
+		nutritionSchema.safeParse({ ...NUTRITION_RECORD, source: "guessed" })
+			.success,
+		false,
+	);
+});
+
+test("nutrition schema rejects a negative macro value", () => {
+	assert.equal(
+		nutritionSchema.safeParse({ ...NUTRITION_RECORD, calories: -1 }).success,
+		false,
+	);
+});
+
+test("validateRecord routes profile and nutrition streams", () => {
+	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
+	assert.equal(validateRecord("nutrition", NUTRITION_RECORD).ok, true);
 });

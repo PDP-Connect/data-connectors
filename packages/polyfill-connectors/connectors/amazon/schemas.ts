@@ -149,11 +149,20 @@ export const listPageOrderShape = z.object({
 	),
 });
 
+// profile: a best-effort nav-bar snapshot (name, Prime status). Both fields
+// are nullable per D4 — an unparseable value is null, never guessed.
+export const profileSchema = z.object({
+	id: z.string().min(1).max(40),
+	name: z.string().min(1).max(200).nullable(),
+	is_prime: z.boolean().nullable(),
+});
+
 // Map stream name → schema. Single source of truth for what streams this
 // connector produces at shape-check time.
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	orders: orderSchema,
 	order_items: orderItemSchema,
+	profile: profileSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

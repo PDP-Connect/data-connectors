@@ -117,6 +117,85 @@
 			"freshness_strategy": "manual_as_of"
 		},
 		{
+			"name": "playlist_items",
+			"description": "Tracks within the user's playlists (D3 child stream of playlists).",
+			"display": {
+				"label": "Your playlist tracks",
+				"detail": "One record per track in a playlist: playlist, track identity, position, when and by whom it was added."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"playlist_id": {
+						"type": "string"
+					},
+					"track_id": {
+						"type": ["string", "null"]
+					},
+					"position": {
+						"type": "integer"
+					},
+					"added_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"added_by": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"artist_names": {
+						"type": "array"
+					},
+					"album_name": {
+						"type": ["string", "null"]
+					},
+					"duration_ms": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id", "playlist_id", "position"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "added_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "playlist",
+					"stream": "playlists",
+					"foreign_key": "playlist_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "album_name"]
+				},
+				"range_filters": {
+					"added_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["added_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
 			"name": "saved_tracks",
 			"description": "User's saved/liked tracks.",
 			"display": {
@@ -287,6 +366,45 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "profile",
+			"description": "The authenticated Spotify account's own profile, from GET /me.",
+			"display": {
+				"label": "Your Spotify profile",
+				"detail": "Account id, display name, follower count."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"display_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"followers": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["display_name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
 			"freshness_strategy": "manual_as_of"
 		}
 	]

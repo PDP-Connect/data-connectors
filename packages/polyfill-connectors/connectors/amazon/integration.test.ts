@@ -50,6 +50,7 @@ import {
 	classifyAmazonDetailFailure,
 	classifyDetailOutcome,
 	classifyEmptyListPageDiagnostics,
+	collectAmazonProfile,
 	type EmitDeps,
 	emitOrderAndItems,
 	emitOrderItemsCoverage,
@@ -3643,4 +3644,61 @@ test("scrapeListPage: the forward walk's natural stopping page (no more cards) i
 		[],
 		"ordinary pagination exhaustion is a silent, expected terminal state",
 	);
+});
+
+// ─── collectAmazonProfile ────────────────────────────────────────────────
+
+test("collectAmazonProfile: emits a profile record parsed from the current page and reports full coverage", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = {
+		content: (): Promise<string> =>
+			Promise.resolve(
+				'<html><body><div id="nav-link-accountList"><span class="nav-line-1">Hello, Jane Doe</span></div><div id="nav-prime-menu">Your Prime</div></body></html>',
+			),
+	};
+
+	await collectAmazonProfile(page, {
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+	});
+
+	assert.deepEqual(harness.emitted, [
+		{ stream: "profile", data: { id: "me", name: "Jane Doe", is_prime: true } },
+	]);
+	const coverage = harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE",
+	);
+	assert.ok(coverage);
+	if (coverage?.type === "DETAIL_COVERAGE") {
+		assert.equal(coverage.considered, 1);
+		assert.equal(coverage.covered, 1);
+	}
+});
+
+test("collectAmazonProfile: a page-read failure emits SKIP_RESULT with zero coverage, not a thrown error", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = {
+		content: (): Promise<string> => Promise.reject(new Error("boom")),
+	};
+
+	await collectAmazonProfile(page, {
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+	});
+
+	assert.equal(harness.emitted.length, 0);
+	const skip = harness.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip);
+	if (skip?.type === "SKIP_RESULT") {
+		assert.equal(skip.stream, "profile");
+		assert.equal(skip.reason, "profile_page_read_failed");
+	}
+	const coverage = harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE",
+	);
+	assert.ok(coverage);
+	if (coverage?.type === "DETAIL_COVERAGE") {
+		assert.equal(coverage.considered, 1);
+		assert.equal(coverage.covered, 0);
+	}
 });

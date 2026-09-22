@@ -143,11 +143,77 @@ export const fetchedAtSchema = z
 	.string()
 	.regex(ISO_DATETIME_RE, "fetched_at must be an ISO-8601 datetime");
 
+/**
+ * profile stream (manifest required: id). One record for the account tied to
+ * this connection — {id, name, email}, mirroring the wholefoods.profile
+ * contract shape (capability-map.json lead_decision for heb.profile). `id` is
+ * a fixed literal ("profile"): this connector has exactly one account per
+ * connection.
+ */
+export const profileSchema = z.object({
+	email: z.string().email("email must be a valid email address").nullable(),
+	fetched_at: z.string(),
+	id: z.literal("profile"),
+	name: pdppSafeText.max(200).nullable(),
+});
+
+const NUTRITION_SOURCE_VALUES = [
+	"heb_product_page",
+	"usda_fdc",
+	"not_found",
+	"error",
+	"blocked",
+] as const;
+
+const nonNegativeNutrientSchema = z.number().min(0).max(100_000).nullable();
+
+/**
+ * nutrition stream (manifest required: id, product_id, name). One record per
+ * unique product ordered. Common nutrient field names (calories, protein_g,
+ * carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size,
+ * servings_per_container) are shared with wholefoods.nutrition's contracted
+ * shape (capability-map.json). H-E-B keeps its extra legacy fields
+ * (vitamins/minerals/upc/ingredients/allergens/category/highlights) as
+ * additional optional fields per the lead_decision — no shared-code superset.
+ */
+export const nutritionSchema = z.object({
+	added_sugar_g: nonNegativeNutrientSchema,
+	allergens: pdppSafeText.max(2000).nullable(),
+	calcium_mg: nonNegativeNutrientSchema,
+	calories: z.number().min(0).max(10_000).nullable(),
+	carbs_g: nonNegativeNutrientSchema,
+	category: pdppSafeText.max(500).nullable(),
+	cholesterol_mg: nonNegativeNutrientSchema,
+	confidence: z.enum(["high", "medium", "low"]),
+	fat_g: nonNegativeNutrientSchema,
+	fetched_at: z.string(),
+	fiber_g: nonNegativeNutrientSchema,
+	highlights: pdppSafeText.max(200).array().nullable(),
+	id: z.string().min(1).max(64),
+	ingredients: pdppSafeText.max(4000).nullable(),
+	iron_mg: nonNegativeNutrientSchema,
+	name: pdppSafeText.min(1).max(1024),
+	potassium_mg: nonNegativeNutrientSchema,
+	product_id: z.string().min(1).max(64),
+	protein_g: nonNegativeNutrientSchema,
+	saturated_fat_g: nonNegativeNutrientSchema,
+	serving_size: pdppSafeText.max(200).nullable(),
+	servings_per_container: pdppSafeText.max(200).nullable(),
+	sodium_mg: nonNegativeNutrientSchema,
+	source: z.enum(NUTRITION_SOURCE_VALUES),
+	sugar_g: nonNegativeNutrientSchema,
+	trans_fat_g: nonNegativeNutrientSchema,
+	upc: z.string().max(32).nullable(),
+	vitamin_d_mcg: nonNegativeNutrientSchema,
+});
+
 // Map stream name → schema. Single source of truth for what streams this
 // connector produces at shape-check time.
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
+	nutrition: nutritionSchema,
 	orders: ordersSchema,
 	order_items: orderItemsSchema,
+	profile: profileSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

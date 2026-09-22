@@ -5,100 +5,127 @@
  * Zod schemas for LinkedIn stream records. Shape-check-before-emit per
  * docs/reference/connector-authoring-guide.md §3.
  *
- * GROUND-TRUTH CAVEAT (same posture as connectors/loom/schemas.ts):
- * linkedin/index.ts does NOT yet emit any RECORD — it is a browser scaffold
- * that verifies session reachability and emits
- * `SKIP_RESULT reason=linkedin_voyager_wiring_pending`. The Voyager API
- * extraction is deferred to a live session (LinkedIn is aggressively anti-bot,
- * so the connector is deliberately conservative). There is no observed emitted
- * shape; these schemas are derived from the connector's MANIFEST stream
- * declarations (manifests/linkedin.json) — the contract the connector commits
- * to emit once extraction lands.
+ * These schemas describe records built by `parsers.ts` from the Voyager
+ * `dash/profiles` (FullProfileWithEntities decoration), `/me`, and
+ * `relationships/dash/connections` responses. Field shapes follow D4
+ * (docs/migration/connector-cutover/CONTRACTS.md): partial dates are
+ * `YYYY` or `YYYY-MM` strings (LinkedIn never gives day precision on
+ * experience/education), never invented; timestamps are ISO-8601.
  *
- * Wiring `validateRecord` now is the honest move: the first real emit is
- * shape-checked against the declared contract instead of silently trusted.
- * Whoever wires the Voyager extraction MUST re-verify these field shapes
- * against the real payload and tighten them — especially the id formats
- * (LinkedIn entity URNs vs. numeric ids), which the manifest leaves as opaque
- * strings. This file is a contract scaffold, not a fixture-proven schema.
+ * `id` shapes are intentionally loose (`z.string().min(1).max(200)`)
+ * because Voyager entity ids mix URNs (`urn:li:fsd_profilePosition:...`)
+ * and positional fallback ids (`exp-0-1`) — see `subEntityId` in
+ * parsers.ts. Connections use the member URN directly.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
 import { makeValidateRecord } from "../../src/schema-registry.ts";
 
-// Module-scoped regex (Biome useTopLevelRegex). Manifest declares date-time
-// format on the date fields; accept an ISO-8601 datetime prefix.
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+// Module-scoped regex (Biome useTopLevelRegex). D4 partial date: YYYY or
+// YYYY-MM only — LinkedIn's Voyager date points never carry day precision.
+const PARTIAL_DATE_RE = /^\d{4}(-\d{2})?$/;
 
-// Opaque bounded id — LinkedIn entity ids are URNs or numeric; tighten when the
-// real payload is observed.
 const idSchema = z.string().min(1).max(200);
-const isoDateTimeNullable = z
+const partialDateNullable = z
 	.string()
-	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.regex(PARTIAL_DATE_RE, "must be YYYY or YYYY-MM")
 	.nullable();
+const isoDateTimeNullable = z.iso.datetime().nullable();
+const urlNullable = z.url().max(4096).nullable();
 
 /**
- * profile stream (manifest required: id). One record: the owner's profile.
- * Every text field is free-form human content → pdppSafeText; public_url is a
- * URL.
+ * profile stream (manifest required: id). One record: the owner's own
+ * profile, keyed by public identifier (the only stable cross-run id
+ * Voyager's `/me` and dash-profile decorations both expose consistently).
  */
 export const profileSchema = z.object({
-	id: idSchema,
+	connection_count: z.number().int().min(0).nullable(),
+	current_company: pdppSafeText.max(500).nullable(),
+	current_position_title: pdppSafeText.max(500).nullable(),
 	full_name: pdppSafeText.max(300).nullable(),
 	headline: pdppSafeText.max(1000).nullable(),
-	summary: pdppSafeText.max(65_000).nullable(),
-	location: pdppSafeText.max(300).nullable(),
+	id: idSchema,
 	industry: pdppSafeText.max(300).nullable(),
-	public_url: z.url().max(4096).nullable(),
-	current_position_title: pdppSafeText.max(500).nullable(),
-	current_company: pdppSafeText.max(500).nullable(),
+	location: pdppSafeText.max(300).nullable(),
+	profile_picture_url: urlNullable,
+	public_url: urlNullable,
+	summary: pdppSafeText.max(65_000).nullable(),
 });
 
 /**
- * experience stream (manifest required: id). One record per role.
+ * experience stream (manifest required: id). One record per role —
+ * `profilePositionGroups` sub-positions expand 1:1; groups without
+ * sub-positions expand to one record. `end_date: null` means current.
  */
 export const experienceSchema = z.object({
-	id: idSchema,
-	title: pdppSafeText.max(500).nullable(),
 	company: pdppSafeText.max(500).nullable(),
-	employment_type: pdppSafeText.max(200).nullable(),
-	start_date: isoDateTimeNullable,
-	end_date: isoDateTimeNullable,
-	location: pdppSafeText.max(300).nullable(),
 	description: pdppSafeText.max(65_000).nullable(),
+	employment_type: pdppSafeText.max(200).nullable(),
+	end_date: partialDateNullable,
+	id: idSchema,
+	location: pdppSafeText.max(300).nullable(),
+	start_date: partialDateNullable,
+	title: pdppSafeText.max(500).nullable(),
 });
 
 /**
  * education stream (manifest required: id). One record per school.
  */
 export const educationSchema = z.object({
-	id: idSchema,
-	school: pdppSafeText.max(500).nullable(),
 	degree: pdppSafeText.max(500).nullable(),
+	end_date: partialDateNullable,
 	field_of_study: pdppSafeText.max(500).nullable(),
-	start_date: isoDateTimeNullable,
-	end_date: isoDateTimeNullable,
+	grade: pdppSafeText.max(200).nullable(),
+	id: idSchema,
+	logo_url: urlNullable,
+	school: pdppSafeText.max(500).nullable(),
+	start_date: partialDateNullable,
 });
 
 /**
  * skills stream (manifest required: id, name). One record per skill.
  */
 export const skillsSchema = z.object({
-	id: idSchema,
-	name: pdppSafeText.max(300),
 	endorsement_count: z.number().int().min(0).nullable(),
+	id: idSchema,
+	name: pdppSafeText.min(1).max(300),
+});
+
+/**
+ * languages stream (D7: new stream). One record per language listed.
+ */
+export const languagesSchema = z.object({
+	id: idSchema,
+	name: pdppSafeText.min(1).max(200),
+	proficiency: pdppSafeText.max(200).nullable(),
+});
+
+/**
+ * connections stream (D7: new stream). One record per connection, keyed by
+ * the connected member's URN. `full_name`/`headline`/`profile_url` are
+ * `null` when the batch profile-resolution pass failed for that member
+ * (rate limit, restricted profile) — the connection edge itself is still
+ * real and worth keeping, per "fail null, never fail wrong".
+ */
+export const connectionsSchema = z.object({
+	connected_at: isoDateTimeNullable,
+	full_name: pdppSafeText.max(300).nullable(),
+	headline: pdppSafeText.max(1000).nullable(),
+	id: z.string().min(1).max(300),
+	profile_url: urlNullable,
 });
 
 /**
  * Stream → schema registry. Single source of truth for the streams this
- * connector declares (and will emit once Voyager extraction is wired).
+ * connector declares and emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-	profile: profileSchema,
-	experience: experienceSchema,
+	connections: connectionsSchema,
 	education: educationSchema,
+	experience: experienceSchema,
+	languages: languagesSchema,
+	profile: profileSchema,
 	skills: skillsSchema,
 };
 

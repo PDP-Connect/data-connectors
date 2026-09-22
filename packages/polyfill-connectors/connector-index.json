@@ -288,6 +288,45 @@
 						},
 						"coverage_strategy": "parent_detail_accounting",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "profile",
+						"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership).",
+						"display": {
+							"label": "Your Amazon account",
+							"detail": "Display name and Prime membership status, as shown in the Amazon nav bar. Both are null when not observable, never guessed."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"is_prime": {
+									"type": ["boolean", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"profiles": [
@@ -316,6 +355,7 @@
 					"no_orders_text": "This account shows no orders to import",
 					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
 					"pagination_exhausted": "We reached the end of the available pages",
+					"profile_page_read_failed": "We couldn't read the page to get your account profile",
 					"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
@@ -2734,6 +2774,10 @@
 								"message_count": {
 									"type": ["integer", "null"]
 								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
 								"user_type": {
 									"type": ["string", "null"]
 								},
@@ -2758,9 +2802,11 @@
 									"cwd",
 									"git_branch",
 									"version",
+									"title",
 									"user_type",
 									"entrypoint"
-								]
+								],
+								"semantic_fields": ["title"]
 							},
 							"range_filters": {
 								"started_at": ["gte", "gt", "lte", "lt"],
@@ -2823,9 +2869,12 @@
 								},
 								"agent_id": {
 									"type": ["string", "null"]
+								},
+								"has_pasted_content": {
+									"type": "boolean"
 								}
 							},
-							"required": ["id", "session_id"]
+							"required": ["id", "session_id", "has_pasted_content"]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "timestamp",
@@ -2909,6 +2958,35 @@
 									"type": ["string", "null"],
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
+								},
+								"content_binary_reason": {
+									"type": ["string", "null"]
+								},
+								"blob_ref": {
+									"type": ["object", "null"],
+									"properties": {
+										"blob_id": {
+											"type": "string"
+										},
+										"mime_type": {
+											"type": "string"
+										},
+										"size_bytes": {
+											"type": "integer"
+										},
+										"sha256": {
+											"type": "string"
+										}
+									},
+									"required": ["blob_id", "mime_type", "size_bytes", "sha256"],
+									"additionalProperties": true
+								},
+								"artifact_capture": {
+									"type": ["string", "null"],
+									"enum": ["captured", "failed", "unavailable", null]
+								},
+								"artifact_sha256": {
+									"type": ["string", "null"]
 								}
 							},
 							"required": ["id", "session_id"]
@@ -3143,6 +3221,181 @@
 							},
 							"range_filters": {
 								"mtime_epoch": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "device_heartbeat"
+					},
+					{
+						"name": "usage",
+						"required": true,
+						"description": "Aggregate Claude Code usage from ~/.claude/stats-cache.json: total sessions and messages, per-model token/cost totals, day-by-day activity, hour-of-day distribution, and the longest session.",
+						"compaction_class": "recurring_snapshot",
+						"compaction_class_note": "single aggregate record re-derived in full from stats-cache.json every run; never compactable, never re-alarms as growth accumulates.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "Your Claude Code usage",
+							"detail": "Total sessions and messages, per-model token and cost totals, daily activity, hour-of-day distribution, and your longest session."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"total_sessions": {
+									"type": ["integer", "null"]
+								},
+								"total_messages": {
+									"type": ["integer", "null"]
+								},
+								"first_session_date": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"last_computed_date": {
+									"type": ["string", "null"],
+									"format": "date"
+								},
+								"total_speculation_time_saved_ms": {
+									"type": ["integer", "null"]
+								},
+								"total_cost_usd_cents": {
+									"type": "integer"
+								},
+								"currency": {
+									"type": "string"
+								},
+								"models": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"model": {
+												"type": "string"
+											},
+											"input_tokens": {
+												"type": "integer"
+											},
+											"output_tokens": {
+												"type": "integer"
+											},
+											"cache_read_input_tokens": {
+												"type": "integer"
+											},
+											"cache_creation_input_tokens": {
+												"type": "integer"
+											},
+											"web_search_requests": {
+												"type": "integer"
+											},
+											"cost_usd_cents": {
+												"type": "integer"
+											},
+											"context_window": {
+												"type": ["integer", "null"]
+											},
+											"max_output_tokens": {
+												"type": ["integer", "null"]
+											}
+										}
+									}
+								},
+								"daily_activity": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"date": {
+												"type": "string",
+												"format": "date"
+											},
+											"message_count": {
+												"type": "integer"
+											},
+											"session_count": {
+												"type": "integer"
+											},
+											"tool_call_count": {
+												"type": "integer"
+											}
+										}
+									}
+								},
+								"daily_model_tokens": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"date": {
+												"type": "string",
+												"format": "date"
+											},
+											"tokens_by_model": {
+												"type": "object"
+											}
+										}
+									}
+								},
+								"hour_counts": {
+									"type": "object"
+								},
+								"longest_session": {
+									"type": ["object", "null"],
+									"properties": {
+										"session_id": {
+											"type": ["string", "null"]
+										},
+										"duration_seconds": {
+											"type": ["integer", "null"]
+										},
+										"message_count": {
+											"type": ["integer", "null"]
+										},
+										"timestamp": {
+											"type": ["string", "null"],
+											"format": "date-time"
+										}
+									}
+								},
+								"source": {
+									"type": "string"
+								}
+							},
+							"required": [
+								"id",
+								"total_cost_usd_cents",
+								"currency",
+								"models",
+								"daily_activity",
+								"daily_model_tokens",
+								"hour_counts",
+								"source"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["source"]
+							},
+							"range_filters": {
+								"first_session_date": ["gte", "gt", "lte", "lt"],
+								"last_computed_date": ["gte", "gt", "lte", "lt"],
+								"total_sessions": ["gte", "gt", "lte", "lt"],
+								"total_messages": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["first_session_date"]
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
@@ -3456,6 +3709,9 @@
 							},
 							{
 								"name": "slash_commands"
+							},
+							{
+								"name": "usage"
 							}
 						]
 					},
@@ -4628,7 +4884,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/github",
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.5.1",
+				"version": "0.7.0",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icons/github.svg",
@@ -4657,7 +4913,7 @@
 								"secret": true,
 								"autocomplete": "off",
 								"help_url": "https://github.com/settings/tokens",
-								"help_text": "Create a GitHub personal access token with read:user, public_repo, repo, and gist access as applicable to the data you want, then paste it here.",
+								"help_text": "Create a GitHub personal access token with read:user, public_repo, repo, gist, and read:org access as applicable to the data you want, then paste it here.",
 								"env": ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"]
 							}
 						]
@@ -5434,6 +5690,232 @@
 						},
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "events",
+						"required": true,
+						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
+						"display": {
+							"label": "Your recent activity",
+							"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
+						},
+						"semantics": "append",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"type": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"created_at": {
+									"type": "string",
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"repository_full_name": {
+									"type": "string",
+									"x_pdpp_role": "actor"
+								},
+								"is_public": {
+									"type": "boolean"
+								}
+							},
+							"required": ["id", "type", "created_at", "repository_full_name"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "created_at",
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["type", "repository_full_name"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"],
+								"group_by": ["type"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "contributions",
+						"required": true,
+						"description": "Daily contribution counts from the authenticated user's contribution graph, one record per calendar day (UTC), collected via the GitHub GraphQL contributionsCollection.",
+						"display": {
+							"label": "Your contribution history",
+							"detail": "One record per day with the total contribution count for that day, keyed by user and date."
+						},
+						"semantics": "append",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"user_id": {
+									"type": "string",
+									"x_pdpp_role": "actor"
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time"
+								},
+								"contribution_count": {
+									"type": "integer"
+								}
+							},
+							"required": ["id", "user_id", "date", "contribution_count"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"contribution_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "pinned_repositories",
+						"required": true,
+						"description": "The authenticated user's curated pinned-repository list (GraphQL user.pinnedItems, Repository nodes only; GitHub caps this at 6). Fully re-fetched each run to reflect current curation; there is no upstream cursor for a pin list.",
+						"display": {
+							"label": "Your pinned repositories",
+							"detail": "Repository full name, description, URL, languages, star/fork counts, and the user's chosen display position."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"full_name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"name": {
+									"type": ["string", "null"]
+								},
+								"description": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
+								"html_url": {
+									"type": ["string", "null"]
+								},
+								"languages": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"stargazers_count": {
+									"type": ["integer", "null"]
+								},
+								"forks_count": {
+									"type": ["integer", "null"]
+								},
+								"position": {
+									"type": "integer"
+								}
+							},
+							"required": ["id", "full_name", "position"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["full_name", "name", "description"],
+								"semantic_fields": ["description"]
+							},
+							"range_filters": {
+								"stargazers_count": ["gte", "gt", "lte", "lt"],
+								"forks_count": ["gte", "gt", "lte", "lt"],
+								"position": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "organizations",
+						"required": true,
+						"description": "GitHub organizations the authenticated user is a member of (GET /user/orgs, requires the read:org scope). Fully re-fetched each run to reflect current membership.",
+						"display": {
+							"label": "Your organization memberships",
+							"detail": "Organization login, description, and avatar URL."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"login": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"description": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
+								"avatar_url": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "login"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["login", "description"],
+								"semantic_fields": ["description"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
 					}
 				],
 				"profiles": [
@@ -5457,7 +5939,7 @@
 					},
 					{
 						"id": "full",
-						"label": "Everything (profile, repos, stars, issues, PRs, gists)",
+						"label": "Everything (profile, repos, stars, issues, PRs, gists, activity, contributions, pins, orgs)",
 						"streams": [
 							{
 								"name": "user"
@@ -5479,13 +5961,27 @@
 							},
 							{
 								"name": "gists"
+							},
+							{
+								"name": "events"
+							},
+							{
+								"name": "contributions"
+							},
+							{
+								"name": "pinned_repositories"
+							},
+							{
+								"name": "organizations"
 							}
 						]
 					}
 				],
 				"reason_display_messages": {
+					"github_event_missing_fields": "We skipped some activity events that were missing required details",
 					"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
 					"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
+					"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
 					"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
 					"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
 					"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"
@@ -8506,6 +9002,204 @@
 						},
 						"coverage_strategy": "parent_detail_accounting",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "profile",
+						"required": false,
+						"description": "H-E-B account profile for this connection, scraped from My Account. Mirrors the wholefoods.profile shape (name, email) per the cutover capability map's lead_decision for heb.profile.",
+						"display": {
+							"label": "Your H-E-B profile",
+							"detail": "Name and email on file for your H-E-B account."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"email": {
+									"type": ["string", "null"]
+								},
+								"fetched_at": {
+									"type": "string",
+									"format": "date-time"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "nutrition",
+						"required": false,
+						"description": "Nutrition facts per unique H-E-B product ordered, scraped from each product's detail page. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+						"display": {
+							"label": "Your H-E-B product nutrition",
+							"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"product_id": {
+									"type": "string"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"source": {
+									"type": "string",
+									"enum": [
+										"heb_product_page",
+										"usda_fdc",
+										"not_found",
+										"error",
+										"blocked"
+									]
+								},
+								"confidence": {
+									"type": "string",
+									"enum": ["high", "medium", "low"]
+								},
+								"calories": {
+									"type": ["number", "null"]
+								},
+								"protein_g": {
+									"type": ["number", "null"]
+								},
+								"carbs_g": {
+									"type": ["number", "null"]
+								},
+								"fat_g": {
+									"type": ["number", "null"]
+								},
+								"sodium_mg": {
+									"type": ["number", "null"]
+								},
+								"fiber_g": {
+									"type": ["number", "null"]
+								},
+								"sugar_g": {
+									"type": ["number", "null"]
+								},
+								"serving_size": {
+									"type": ["string", "null"]
+								},
+								"servings_per_container": {
+									"type": ["string", "null"]
+								},
+								"saturated_fat_g": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"trans_fat_g": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"cholesterol_mg": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"added_sugar_g": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"calcium_mg": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"iron_mg": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"potassium_mg": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"vitamin_d_mcg": {
+									"type": ["number", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"upc": {
+									"type": ["string", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"ingredients": {
+									"type": ["string", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"allergens": {
+									"type": ["string", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"category": {
+									"type": ["string", "null"],
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"highlights": {
+									"type": ["array", "null"],
+									"items": {
+										"type": "string"
+									},
+									"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+								},
+								"fetched_at": {
+									"type": "string",
+									"format": "date-time"
+								}
+							},
+							"required": ["id", "product_id", "name"]
+						},
+						"primary_key": ["id"],
+						"relationships": [
+							{
+								"name": "order_item",
+								"stream": "order_items",
+								"foreign_key": "product_id",
+								"cardinality": "has_many"
+							}
+						],
+						"selection": {
+							"fields": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "category", "ingredients"],
+								"semantic_fields": ["name"]
+							},
+							"range_filters": {
+								"calories": ["gte", "gt", "lte", "lt"],
+								"protein_g": ["gte", "gt", "lte", "lt"],
+								"sodium_mg": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["source", "confidence", "category"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"profiles": [
@@ -8529,11 +9223,17 @@
 					"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
 					"list_page_navigation_failed": "We couldn't load a page of your H-E-B order history and didn't want to assume that meant the end",
 					"list_page_shape_check_failed": "The page didn't look like we expected",
+					"nutrition_lookup_incomplete": "We couldn't look up nutrition facts for every product in your orders this run",
+					"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 					"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
 					"pagination_exhausted": "We reached the end of the available pages",
 					"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 					"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
+					"profile_navigation_failed": "We couldn't load your H-E-B account profile page",
+					"profile_shape_check_failed": "Your H-E-B account profile page didn't look like we expected",
+					"scope_not_supported": "This can't be collected with the streams you selected",
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
+					"session_repair_required": "We need you to sign in or pass a verification check to continue",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
 					"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
 					"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
@@ -9175,7 +9875,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.1.0",
+				"version": "0.3.1",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icons/linkedin.svg",
@@ -9209,6 +9909,7 @@
 				"streams": [
 					{
 						"name": "profile",
+						"required": true,
 						"description": "The user's LinkedIn profile.",
 						"display": {
 							"label": "Your LinkedIn profile",
@@ -9247,6 +9948,14 @@
 								},
 								"current_company": {
 									"type": ["string", "null"]
+								},
+								"connection_count": {
+									"type": ["integer", "null"],
+									"description": "From the connections listing's reported total, not the profile payload itself. Null when the connections listing wasn't fetched or reported no total."
+								},
+								"profile_picture_url": {
+									"type": ["string", "null"],
+									"description": "Dash profile's own display image, falling back to /me's miniProfile picture. Null when neither is present."
 								}
 							},
 							"required": ["id"]
@@ -9273,6 +9982,7 @@
 					},
 					{
 						"name": "experience",
+						"required": true,
 						"description": "Work experience entries.",
 						"display": {
 							"label": "Your work experience",
@@ -9298,12 +10008,12 @@
 								},
 								"start_date": {
 									"type": ["string", "null"],
-									"format": "date-time",
+									"description": "Partial date at source precision: YYYY or YYYY-MM (LinkedIn never reports day precision for experience).",
 									"x_pdpp_role": "event-time"
 								},
 								"end_date": {
 									"type": ["string", "null"],
-									"format": "date-time"
+									"description": "Partial date at source precision: YYYY or YYYY-MM. Null means the role is current."
 								},
 								"location": {
 									"type": ["string", "null"]
@@ -9316,13 +10026,11 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "start_date",
-						"consent_time_field": "start_date",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -9332,14 +10040,6 @@
 									"description"
 								],
 								"semantic_fields": ["title", "description"]
-							},
-							"range_filters": {
-								"start_date": ["gte", "gt", "lte", "lt"],
-								"end_date": ["gte", "gt", "lte", "lt"]
-							},
-							"aggregations": {
-								"count": true,
-								"group_by_time": ["start_date"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -9347,6 +10047,7 @@
 					},
 					{
 						"name": "education",
+						"required": true,
 						"description": "Education entries.",
 						"display": {
 							"label": "Your education",
@@ -9370,12 +10071,19 @@
 								},
 								"start_date": {
 									"type": ["string", "null"],
-									"format": "date-time",
+									"description": "Partial date at source precision: YYYY or YYYY-MM.",
 									"x_pdpp_role": "event-time"
 								},
 								"end_date": {
 									"type": ["string", "null"],
-									"format": "date-time"
+									"description": "Partial date at source precision: YYYY or YYYY-MM. Null means ongoing."
+								},
+								"grade": {
+									"type": ["string", "null"]
+								},
+								"logo_url": {
+									"type": ["string", "null"],
+									"description": "School logo image. Null when the source shape (any of school.logo.vectorImage, the typed com.linkedin.common.VectorImage key, or the older schoolLogo.vectorImage) is absent."
 								}
 							},
 							"required": ["id"]
@@ -9389,14 +10097,6 @@
 						"query": {
 							"search": {
 								"lexical_fields": ["school", "degree"]
-							},
-							"range_filters": {
-								"start_date": ["gte", "gt", "lte", "lt"],
-								"end_date": ["gte", "gt", "lte", "lt"]
-							},
-							"aggregations": {
-								"count": true,
-								"group_by_time": ["start_date"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -9439,10 +10139,107 @@
 						},
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "languages",
+						"required": true,
+						"description": "Languages listed on the profile.",
+						"display": {
+							"label": "Your languages",
+							"detail": "Language name plus proficiency level, if visible."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"proficiency": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "name"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "proficiency"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "connections",
+						"required": true,
+						"description": "The owner's first-degree LinkedIn connections.",
+						"display": {
+							"label": "Your connections",
+							"detail": "Name, headline, profile URL, and date connected."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The connected member's LinkedIn URN."
+								},
+								"full_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"headline": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
+								"profile_url": {
+									"type": ["string", "null"]
+								},
+								"connected_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["full_name", "headline"],
+								"semantic_fields": ["headline"]
+							},
+							"range_filters": {
+								"connected_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["connected_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"linkedin_voyager_wiring_pending": "LinkedIn support isn't wired up yet"
+					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 				}
 			}
 		},
@@ -9615,7 +10412,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/meta",
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.1.0",
+				"version": "0.3.1",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icons/meta.svg",
@@ -9649,6 +10446,7 @@
 				"streams": [
 					{
 						"name": "profile",
+						"required": true,
 						"description": "The user's Instagram profile.",
 						"display": {
 							"label": "Your Instagram profile",
@@ -9673,6 +10471,12 @@
 									"type": ["string", "null"],
 									"x_pdpp_role": "secondary"
 								},
+								"profile_pic_url": {
+									"type": ["string", "null"]
+								},
+								"external_url": {
+									"type": ["string", "null"]
+								},
 								"follower_count": {
 									"type": ["integer", "null"]
 								},
@@ -9682,7 +10486,13 @@
 								"post_count": {
 									"type": ["integer", "null"]
 								},
+								"is_private": {
+									"type": ["boolean", "null"]
+								},
 								"is_verified": {
+									"type": ["boolean", "null"]
+								},
+								"is_business": {
 									"type": ["boolean", "null"]
 								}
 							},
@@ -9705,6 +10515,7 @@
 					},
 					{
 						"name": "posts",
+						"required": false,
 						"description": "Posts on the user's own timeline.",
 						"display": {
 							"label": "Your posts",
@@ -9722,6 +10533,10 @@
 									"x_pdpp_role": "primary-title"
 								},
 								"media_type": {
+									"type": ["string", "null"],
+									"enum": ["IMAGE", "VIDEO", "CAROUSEL_ALBUM", null]
+								},
+								"media_url": {
 									"type": ["string", "null"]
 								},
 								"like_count": {
@@ -9751,16 +10566,153 @@
 						"incremental": true,
 						"query": {
 							"search": {
-								"lexical_fields": ["caption"],
+								"lexical_fields": ["caption", "location_name"],
 								"semantic_fields": ["caption"]
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "post_likes",
+						"required": false,
+						"description": "Likers of the user's own posts (bounded top-likers sample per post; Instagram exposes no full-likers listing endpoint from a logged-in web session).",
+						"display": {
+							"label": "Likes on your posts",
+							"detail": "Post id, liker's user id and username. Sample, not a full likers list."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"post_id": {
+									"type": "string"
+								},
+								"user_id": {
+									"type": "string"
+								},
+								"username": {
+									"type": "string",
+									"x_pdpp_role": "actor"
+								}
+							},
+							"required": ["post_id", "user_id", "username"]
+						},
+						"primary_key": ["post_id", "user_id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["username"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "following",
+						"required": false,
+						"description": "Accounts the user follows.",
+						"display": {
+							"label": "Accounts you follow",
+							"detail": "Username, name, private/verified status."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"username": {
+									"type": "string",
+									"x_pdpp_role": "actor"
+								},
+								"full_name": {
+									"type": ["string", "null"]
+								},
+								"is_private": {
+									"type": ["boolean", "null"]
+								},
+								"is_verified": {
+									"type": ["boolean", "null"]
+								},
+								"profile_pic_url": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "username"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["username", "full_name"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "ads",
+						"required": false,
+						"description": "Advertisers, ad topics, and targeting categories from Meta Accounts Center.",
+						"display": {
+							"label": "Your Instagram ad preferences",
+							"detail": "Advertisers who have your info, ad topics, and categories used to reach you."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"kind": {
+									"type": "string",
+									"enum": ["advertiser", "ad_topic", "ad_category"]
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"description": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								}
+							},
+							"required": ["id", "kind", "name"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "description"],
+								"semantic_fields": ["description"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["kind"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"instagram_graphql_wiring_pending": "Instagram support isn't wired up yet"
+					"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
+					"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
 				}
 			}
 		},
@@ -11159,14 +12111,18 @@
 						"description": "Orders placed across merchants via the Shop app.",
 						"display": {
 							"label": "Your Shop app orders",
-							"detail": "Order date, merchant, items, prices, shipping status, tracking numbers, payment summary."
+							"detail": "Order date, merchant, item titles, totals, and status."
 						},
+						"required": true,
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
 									"type": "string"
+								},
+								"order_number": {
+									"type": ["string", "null"]
 								},
 								"order_date": {
 									"type": ["string", "null"],
@@ -11186,14 +12142,17 @@
 								"currency": {
 									"type": ["string", "null"]
 								},
-								"tracking_number": {
-									"type": ["string", "null"]
-								},
-								"tracking_url": {
-									"type": ["string", "null"]
-								},
 								"item_count": {
 									"type": ["integer", "null"]
+								},
+								"line_item_titles": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"detail_url": {
+									"type": "string"
 								}
 							},
 							"required": ["id"]
@@ -11224,7 +12183,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"shopify_apollo_wiring_pending": "Shopify support isn't wired up yet"
+					"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
+					"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 				}
 			}
 		},
@@ -13264,6 +14224,85 @@
 						"freshness_strategy": "manual_as_of"
 					},
 					{
+						"name": "playlist_items",
+						"description": "Tracks within the user's playlists (D3 child stream of playlists).",
+						"display": {
+							"label": "Your playlist tracks",
+							"detail": "One record per track in a playlist: playlist, track identity, position, when and by whom it was added."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"playlist_id": {
+									"type": "string"
+								},
+								"track_id": {
+									"type": ["string", "null"]
+								},
+								"position": {
+									"type": "integer"
+								},
+								"added_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"added_by": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "actor"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"artist_names": {
+									"type": "array"
+								},
+								"album_name": {
+									"type": ["string", "null"]
+								},
+								"duration_ms": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id", "playlist_id", "position"]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "added_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"relationships": [
+							{
+								"name": "playlist",
+								"stream": "playlists",
+								"foreign_key": "playlist_id",
+								"cardinality": "has_one"
+							}
+						],
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "album_name"]
+							},
+							"range_filters": {
+								"added_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["added_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
 						"name": "saved_tracks",
 						"description": "User's saved/liked tracks.",
 						"display": {
@@ -13435,6 +14474,45 @@
 						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "profile",
+						"description": "The authenticated Spotify account's own profile, from GET /me.",
+						"display": {
+							"label": "Your Spotify profile",
+							"detail": "Account id, display name, follower count."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"display_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"followers": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["display_name"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
 					}
 				]
 			}
@@ -13568,7 +14646,8 @@
 									"type": ["string", "null"]
 								},
 								"timecreated": {
-									"type": ["integer", "null"]
+									"type": ["integer", "null"],
+									"description": "Unix epoch seconds, as returned by Steam's GetPlayerSummaries. Not named *_at because it is raw epoch seconds, not ISO-8601 — the field keeps its published Steam name and type (no churn) and the unit is documented here instead of converted."
 								},
 								"loccountrycode": {
 									"type": ["string", "null"]
@@ -13580,7 +14659,8 @@
 									"type": ["string", "null"]
 								},
 								"lastlogoff": {
-									"type": ["integer", "null"]
+									"type": ["integer", "null"],
+									"description": "Unix epoch seconds, as returned by Steam's GetPlayerSummaries. Not named *_at for the same reason as timecreated."
 								},
 								"commentcount": {
 									"type": ["integer", "null"]
@@ -13732,7 +14812,7 @@
 						"description": "Your Steam friends list.",
 						"display": {
 							"label": "Your Steam friends",
-							"detail": "Steam friends: friend steamid, relationship type, friend-since timestamp."
+							"detail": "Steam friends: friend steamid, relationship type, friend-since timestamp, and (when the friend's profile is visible) display name, avatar, and profile URL."
 						},
 						"semantics": "mutable_state",
 						"primary_key": ["id"],
@@ -13762,7 +14842,20 @@
 									"x_pdpp_role": "secondary"
 								},
 								"friend_since": {
-									"type": "integer"
+									"type": "integer",
+									"description": "Unix epoch seconds, as returned by Steam's GetFriendList. Not named *_at because it is raw epoch seconds, not ISO-8601 (see the profile stream's timecreated/lastlogoff for the same convention)."
+								},
+								"persona_name": {
+									"type": ["string", "null"],
+									"description": "The friend's Steam display name at fetch time, from a batched GetPlayerSummaries lookup (up to 100 steamids per call). Null when the friend's profile is private or the lookup did not return this steamid."
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"description": "The friend's full-size avatar URL from GetPlayerSummaries. Null under the same conditions as persona_name."
+								},
+								"profile_url": {
+									"type": ["string", "null"],
+									"description": "The friend's Steam Community profile URL from GetPlayerSummaries. Null under the same conditions as persona_name."
 								}
 							},
 							"required": [
@@ -14301,7 +15394,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/uber",
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "0.1.0",
+				"version": "0.3.0",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icons/uber.svg",
@@ -14335,10 +15428,11 @@
 				"streams": [
 					{
 						"name": "trips",
-						"description": "Uber trips (ride-share + Uber Eats deliveries if mingled).",
+						"required": true,
+						"description": "Uber trips, list-level fields from the riders.uber.com Activities GraphQL response. Live evidence (2026-09-22): the list feed carries only a trip id — status, dates, addresses, fare, product type, and surge are detail-only fields (see the receipts stream).",
 						"display": {
 							"label": "Your Uber trips",
-							"detail": "Trip date, pickup/dropoff locations, distance, duration, fare breakdown, driver, car type, status. Supports reconciliation to bank-statement 'UBER *TRIP' entries."
+							"detail": "Trip identity only at list level. Status, date, fare, addresses, and vehicle type are in the receipts stream — request it for full trip detail."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -14350,14 +15444,7 @@
 								"status": {
 									"type": ["string", "null"]
 								},
-								"product_type": {
-									"type": ["string", "null"]
-								},
 								"requested_at": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"started_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
@@ -14369,50 +15456,22 @@
 								"pickup_address": {
 									"type": ["string", "null"]
 								},
-								"pickup_lat": {
-									"type": ["number", "null"]
-								},
-								"pickup_lng": {
-									"type": ["number", "null"]
-								},
 								"dropoff_address": {
 									"type": ["string", "null"]
-								},
-								"dropoff_lat": {
-									"type": ["number", "null"]
-								},
-								"dropoff_lng": {
-									"type": ["number", "null"]
-								},
-								"distance_meters": {
-									"type": ["number", "null"]
-								},
-								"duration_seconds": {
-									"type": ["integer", "null"]
 								},
 								"fare_total": {
 									"type": ["string", "null"]
 								},
 								"fare_total_cents": {
-									"type": ["integer", "null"]
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
 								},
-								"currency": {
-									"type": ["string", "null"]
+								"product_type": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
 								},
-								"tip_cents": {
-									"type": ["integer", "null"]
-								},
-								"surge_multiplier": {
-									"type": ["number", "null"]
-								},
-								"driver_name": {
-									"type": ["string", "null"]
-								},
-								"vehicle_description": {
-									"type": ["string", "null"]
-								},
-								"receipt_url": {
-									"type": ["string", "null"]
+								"is_surge": {
+									"type": ["boolean", "null"]
 								}
 							},
 							"required": ["id"]
@@ -14425,41 +15484,137 @@
 							"resources": true
 						},
 						"incremental": true,
-						"views": [
-							{
-								"id": "reconciliation",
-								"label": "Fields for YNAB matching",
-								"fields": [
-									"id",
-									"completed_at",
-									"fare_total",
-									"fare_total_cents",
-									"pickup_address",
-									"dropoff_address",
-									"product_type"
-								]
-							}
-						],
 						"query": {
-							"search": {
-								"lexical_fields": ["driver_name", "vehicle_description"]
-							},
 							"range_filters": {
-								"started_at": ["gte", "gt", "lte", "lt"],
-								"requested_at": ["gte", "gt", "lte", "lt"]
+								"requested_at": ["gte", "gt", "lte", "lt"],
+								"completed_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
-								"group_by_time": ["started_at"],
+								"group_by_time": ["requested_at"],
 								"group_by": ["status", "product_type"]
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "receipts",
+						"required": false,
+						"description": "Per-trip detail: status, dates, pickup/dropoff addresses, driver, fare, fare breakdown, distance, duration, vehicle type, surge flag. 1:1 with trips. Fetched from GetTrip + GetReceipt.",
+						"display": {
+							"label": "Your Uber receipts",
+							"detail": "Trip status and date, pickup/dropoff addresses, driver name, itemized fare breakdown, distance, duration, and vehicle type. Fetched per-trip, so this stream is only populated when explicitly requested — a trips-only grant performs no detail fetches."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"trip_id": {
+									"type": "string"
+								},
+								"status": {
+									"type": ["string", "null"]
+								},
+								"requested_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"completed_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"pickup_address": {
+									"type": ["string", "null"]
+								},
+								"dropoff_address": {
+									"type": ["string", "null"]
+								},
+								"driver_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "actor"
+								},
+								"fare_total": {
+									"type": ["string", "null"]
+								},
+								"fare_total_cents": {
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
+								},
+								"distance_meters": {
+									"type": ["number", "null"]
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"product_type": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
+								"is_surge": {
+									"type": ["boolean", "null"]
+								},
+								"fare_breakdown": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"label": {
+												"type": "string"
+											},
+											"amount_cents": {
+												"type": ["integer", "null"]
+											}
+										},
+										"required": ["label"]
+									}
+								}
+							},
+							"required": ["id", "trip_id"]
+						},
+						"primary_key": ["trip_id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"relationships": [
+							{
+								"name": "trip",
+								"stream": "trips",
+								"foreign_key": "trip_id",
+								"cardinality": "has_one"
+							}
+						],
+						"query": {
+							"search": {
+								"lexical_fields": ["driver_name"]
+							},
+							"range_filters": {
+								"distance_meters": ["gte", "gt", "lte", "lt"],
+								"duration_seconds": ["gte", "gt", "lte", "lt"],
+								"requested_at": ["gte", "gt", "lte", "lt"],
+								"completed_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"sum": ["fare_total_cents"],
+								"group_by": ["product_type", "status"],
+								"group_by_time": ["requested_at"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"parent_streams": ["trips"],
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"uber_graphql_wiring_pending": "Uber support isn't wired up yet"
+					"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
+					"receipts_deferred_detail_budget": "Uber receipt detail stopped early to stay within a safety limit"
 				}
 			}
 		},
@@ -15851,7 +17006,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.1.0",
+				"version": "0.2.0",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -15861,6 +17016,28 @@
 						"browser": {
 							"required": true
 						}
+					}
+				},
+				"setup": {
+					"modality": "static_secret",
+					"credential_capture": {
+						"kind": "api_key",
+						"label": "USDA FoodData Central API key (optional)",
+						"description": "Optional. A free USDA FoodData Central API key improves nutrition-lookup coverage and rate limits for products the Whole Foods product page does not have nutrition facts for. Leave blank to use the public rate-limited DEMO_KEY.",
+						"submit_label": "Save USDA API key",
+						"fields": [
+							{
+								"name": "usda_api_key",
+								"label": "USDA FoodData Central API key",
+								"type": "password",
+								"required": false,
+								"secret": true,
+								"autocomplete": "off",
+								"help_url": "https://fdc.nal.usda.gov/api-key-signup",
+								"help_text": "Get a free key at https://fdc.nal.usda.gov/api-key-signup. Without one, nutrition lookups use the shared DEMO_KEY, which is more rate-limited.",
+								"env": ["USDA_API_KEY"]
+							}
+						]
 					}
 				},
 				"capabilities": {
@@ -15880,11 +17057,51 @@
 				},
 				"streams": [
 					{
+						"name": "profile",
+						"required": false,
+						"description": "The Amazon account used to place Whole Foods orders.",
+						"display": {
+							"label": "Your Amazon account",
+							"detail": "Name and email of the Amazon account whose order history was scraped."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"email": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
 						"name": "orders",
+						"required": true,
 						"description": "Whole Foods orders via Amazon.",
 						"display": {
 							"label": "Your Whole Foods orders",
-							"detail": "Order date, store, total, delivery status. Uses your Amazon login."
+							"detail": "Order date, order URL, total, item count, status. Uses your Amazon login."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -15895,13 +17112,14 @@
 								},
 								"order_date": {
 									"type": ["string", "null"],
-									"format": "date-time",
+									"format": "date",
 									"x_pdpp_role": "event-time"
 								},
-								"store": {
-									"type": ["string", "null"]
+								"order_url": {
+									"type": ["string", "null"],
+									"format": "uri"
 								},
-								"method": {
+								"status": {
 									"type": ["string", "null"]
 								},
 								"total_cents": {
@@ -15922,16 +17140,12 @@
 						},
 						"incremental": true,
 						"query": {
-							"search": {
-								"lexical_fields": ["store"]
-							},
 							"range_filters": {
 								"order_date": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
-								"group_by_time": ["order_date"],
-								"group_by": ["method"]
+								"group_by_time": ["order_date"]
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
@@ -15939,10 +17153,11 @@
 					},
 					{
 						"name": "order_items",
-						"description": "Items within Whole Foods orders, with nutrition when available.",
+						"required": true,
+						"description": "Items within Whole Foods orders. Nutrition is a separate typed stream (see `nutrition`), joined on `product_id`.",
 						"display": {
 							"label": "Your Whole Foods items",
-							"detail": "Product name, quantity, price, nutrition info (USDA/API-sourced)."
+							"detail": "Product name, quantity, price."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -15958,19 +17173,97 @@
 									"type": "string",
 									"x_pdpp_role": "primary-title"
 								},
+								"product_id": {
+									"type": ["string", "null"]
+								},
+								"product_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"image_url": {
+									"type": ["string", "null"]
+								},
 								"quantity": {
 									"type": ["number", "null"]
 								},
 								"unit_price_cents": {
 									"type": ["integer", "null"]
-								},
-								"nutrition": {
-									"type": ["object", "null"]
 								}
 							},
 							"required": ["id", "order_id", "name"]
 						},
 						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "nutrition",
+						"required": false,
+						"description": "Typed nutrition facts per unique product, sourced from the Whole Foods product page first, then the USDA FoodData Central API. Joins to `order_items` on `product_id`.",
+						"display": {
+							"label": "Nutrition facts",
+							"detail": "Calories, macros, sodium, fiber, sugar, serving size — from the Whole Foods product page or USDA FoodData Central."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"product_id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"source": {
+									"type": "string",
+									"enum": ["wholefoods_product_page", "usda_fdc"]
+								},
+								"confidence": {
+									"type": "string",
+									"enum": ["high", "medium", "low"]
+								},
+								"calories": {
+									"type": ["number", "null"]
+								},
+								"protein_g": {
+									"type": ["number", "null"]
+								},
+								"carbs_g": {
+									"type": ["number", "null"]
+								},
+								"fat_g": {
+									"type": ["number", "null"]
+								},
+								"sodium_mg": {
+									"type": ["number", "null"]
+								},
+								"fiber_g": {
+									"type": ["number", "null"]
+								},
+								"sugar_g": {
+									"type": ["number", "null"]
+								},
+								"serving_size": {
+									"type": ["string", "null"]
+								},
+								"servings_per_container": {
+									"type": ["number", "null"]
+								}
+							},
+							"required": ["product_id", "source", "confidence"]
+						},
+						"primary_key": ["product_id"],
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -17866,6 +19159,581 @@
 						]
 					}
 				]
+			}
+		},
+		{
+			"brandIcon": "./manifests/icons/youtube.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/youtube",
+			"entry": "./connectors/youtube/index.js",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/youtube",
+				"connector_key": "youtube",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
+				"version": "0.1.0",
+				"display_name": "YouTube",
+				"brand": {
+					"icon": "icons/youtube.svg",
+					"background_color": "#FF0000"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": false
+						},
+						"filesystem": {
+							"required": true
+						}
+					}
+				},
+				"setup": {
+					"modality": "manual_or_upload",
+					"manual_or_upload": {
+						"label": "Google Takeout \"YouTube and YouTube Music\" export",
+						"description": "Request a Google Takeout export of \"YouTube and YouTube Music\", wait for the download link, then extract it and provide the folder here.",
+						"acquisition_methods": [
+							{
+								"label": "Request your export from Google Takeout",
+								"platform": "web",
+								"posture": "primary",
+								"detail": "Go to takeout.google.com, deselect all, select only \"YouTube and YouTube Music\", and create the export. Google emails a download link, usually within a few hours. Download the .zip, extract it, and place the extracted folder (or its contents) where this connector reads from.",
+								"help_url": "https://support.google.com/accounts/answer/3024190"
+							}
+						],
+						"accepted_file_extensions": [],
+						"import_dir_env_var": "YOUTUBE_TAKEOUT_DIR",
+						"help_url": "https://support.google.com/accounts/answer/3024190",
+						"help_text": "Per a recorded decision (D9 in docs/migration/connector-cutover/CONTRACTS.md), this connector reads a Google Takeout export rather than driving youtube.com through a browser. Google does not publish a stable API surface for personal-account playlists, subscriptions, and watch history equivalent to what Takeout exports, and automating sign-in against a Google account carries meaningfully higher account-safety risk than an owner-initiated data export. Takeout is Google's own documented self-service export path for exactly this data.",
+						"large_file_fallback": "This connector reads an already-extracted export directory, not the .zip directly. Extract the Takeout archive yourself and point YOUTUBE_TAKEOUT_DIR at the extracted folder.",
+						"validation_expectations": [
+							"Detected a Google Takeout \"YouTube and YouTube Music\" export directory",
+							"Reported per-stream coverage: which expected files were found, which were not",
+							"Estimated record counts per stream that was found"
+						]
+					}
+				},
+				"capabilities": {
+					"human_interaction": [],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "low",
+						"bot_detection_sensitivity": "low",
+						"background_safe": false,
+						"rationale": "Collection reads a Takeout export the owner requested; there is no credential, no session and nothing to poll, so an unattended run has nothing to collect. Refreshing means the owner requesting a new Takeout export and providing it again, which Google can take hours to days to prepare."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns (see coverage_diagnostics).",
+						"display": {
+							"label": "Your YouTube channel",
+							"detail": "Channel id and URL from the Takeout channel export. Title, handle, join date, and stats are not present in that file and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": ["string", "null"],
+									"description": "Google's channel id."
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"handle": {
+									"type": ["string", "null"]
+								},
+								"email": {
+									"type": ["string", "null"]
+								},
+								"joined_at": {
+									"type": ["string", "null"]
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"country": {
+									"type": ["string", "null"]
+								},
+								"subscriber_count": {
+									"type": ["integer", "null"]
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								},
+								"video_count": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "description"],
+								"semantic_fields": ["title", "description"]
+							}
+						},
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "subscriptions",
+						"required": false,
+						"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"display": {
+							"label": "Your subscriptions",
+							"detail": "Channel id, URL, and title. Handle, avatar, subscriber count, verification, and notification state are not present in the export file this connector reads and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"channel_id": {
+									"type": "string"
+								},
+								"channel_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"handle": {
+									"type": ["string", "null"]
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"subscriber_count": {
+									"type": ["integer", "null"]
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"is_verified": {
+									"type": ["boolean", "null"]
+								},
+								"notifications": {
+									"type": ["boolean", "null"]
+								}
+							},
+							"required": ["id", "channel_id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							}
+						},
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "playlists",
+						"required": false,
+						"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"display": {
+							"label": "Your playlists",
+							"detail": "Playlist id and name. URL, owner, visibility, video count, and view count are not present in the index file this connector reads and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"owner": {
+									"type": ["string", "null"]
+								},
+								"owner_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"visibility": {
+									"type": ["string", "null"]
+								},
+								"video_count": {
+									"type": ["integer", "null"]
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							}
+						},
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "playlist_items",
+						"required": false,
+						"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns — see coverage_diagnostics.",
+						"display": {
+							"label": "Your playlist items",
+							"detail": "Video id and a derived watch URL per playlist entry. Title, channel, duration, and thumbnail are not present in the per-playlist export file this connector reads and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"playlist_id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								}
+							},
+							"required": ["id", "playlist_id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "likes",
+						"required": false,
+						"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"display": {
+							"label": "Your liked videos",
+							"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "watch_later",
+						"required": false,
+						"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"display": {
+							"label": "Your watch later list",
+							"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "watch_history",
+						"required": false,
+						"description": "Videos the owner watched, from the Takeout watch-history.json export. VERIFIED: same file format and parser as google_takeout.youtube_watch_history (src/youtube-watch-history.ts).",
+						"display": {
+							"label": "Your watch history",
+							"detail": "Watched timestamp, video id, video URL, title, and channel. View count and description are not present in the Takeout history export and stay null."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"watched_at": {
+									"type": "string",
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								},
+								"description": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "watched_at"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "watched_at",
+						"selection": {
+							"fields": true,
+							"resources": true,
+							"time_range": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							},
+							"range_filters": {
+								"watched_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["watched_at"]
+							}
+						},
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "coverage_diagnostics",
+						"required": false,
+						"description": "What this import covered per stream and why it stops where it does. One record per stream per import.",
+						"display": {
+							"label": "What your YouTube import covered",
+							"detail": "Whether each expected Takeout file was found, how many records it produced, and which fields are not available from this export."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"stream": {
+									"type": ["string", "null"]
+								},
+								"status": {
+									"type": "string",
+									"enum": ["complete", "partial", "empty"]
+								},
+								"reason": {
+									"type": "string",
+									"enum": [
+										"covered_in_full",
+										"nothing_in_range",
+										"awaiting_upload",
+										"source_unreadable",
+										"records_unreadable",
+										"file_not_found_in_export"
+									],
+									"x_pdpp_role": "primary-title"
+								},
+								"record_count": {
+									"type": ["integer", "null"]
+								},
+								"fields_unavailable": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"freshness": {
+									"type": "string",
+									"enum": ["live", "snapshot"]
+								},
+								"exported_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": [
+								"id",
+								"status",
+								"reason",
+								"fields_unavailable",
+								"freshness"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"range_filters": {
+								"exported_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_policy": "inventory_only",
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
+					"covered_in_full": "Everything this export carries for this stream was imported.",
+					"nothing_in_range": "Your export didn't contain any records for this stream. That's not a problem — there was simply nothing to read.",
+					"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
+					"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
+					"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Coverage for this stream is unverified — Google's Takeout export contents can vary; report this if you expected data here."
+				}
 			}
 		}
 	],

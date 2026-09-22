@@ -18,9 +18,13 @@ import type {
 	ListPageDiagnostics,
 	ListPageOrder,
 	MaxPageResolution,
+	NutritionDomExtraction,
+	NutritionRecord,
+	NutritionSource,
 	OrderDetail,
 	OrderItemRecord,
 	OrdersRecord,
+	ProfileRecord,
 } from "./types.ts";
 
 const CURRENCY_CENTS_MULTIPLIER = 100;
@@ -943,5 +947,347 @@ export function buildOrderItemRecord(
 		line_total_cents: parseCurrencyCents(item.lineTotal),
 		order_date: orderDate,
 		fetched_at: emittedAt,
+	};
+}
+
+// ─── profile ────────────────────────────────────────────────────────────
+// docs/research/heb-site-knowledge-2026-07-14.md / legacy connectors/heb
+// heb-playwright.js scrapeProfile(): labeled <p>NAME</p> followed by a
+// sibling holding the value, on /my-account/profile. A fixed literal id is
+// used (single account per connection) so the stream has a stable key.
+
+const HEB_PROFILE_RECORD_ID = "profile";
+
+function labeledFieldValue(document: Document, label: string): string | null {
+	const labelEl = [...document.querySelectorAll("p")].find(
+		(p) => normText(p) === label,
+	);
+	const value = normText(labelEl?.nextElementSibling ?? null);
+	return value || null;
+}
+
+/** Pure DOM extraction for /my-account/profile. Structural: matches a <p>
+ *  whose text is exactly the field label, then reads its sibling's text —
+ *  no free-text regex over concatenated innerText. */
+export function parseProfileDom(html: string): {
+	email: string | null;
+	name: string | null;
+} {
+	const { document } = parseHTML(html);
+	return {
+		email: labeledFieldValue(document, "Email"),
+		name: labeledFieldValue(document, "Name"),
+	};
+}
+
+export function buildProfileRecord(
+	extraction: { email: string | null; name: string | null },
+	emittedAt: string,
+): ProfileRecord {
+	return {
+		email: extraction.email,
+		fetched_at: emittedAt,
+		id: HEB_PROFILE_RECORD_ID,
+		name: extraction.name,
+	};
+}
+
+// ─── nutrition ──────────────────────────────────────────────────────────
+// docs/research/heb-site-knowledge-2026-07-14.md / legacy connectors/heb
+// heb-playwright.js scrapeNutrition(): h3 "Nutrition Facts" -> ul > li
+// label/value pairs, structural (span/i name + nested ul > li value), with a
+// legacy plain-text-line fallback for older layouts. Ingredients/allergens
+// are sibling h4 sections; highlights are badge buttons inside a "Highlights"
+// region; category is the breadcrumb trail.
+
+const NUTRIENT_VALUE_RE = /-?\d+(?:\.\d+)?/;
+const CONTAINS_ALLERGENS_RE = /Contains:\s*([^.]+)/i;
+const SAFE_HANDLING_RE = /Safe Handling.*/i;
+const CAUTION_RE = /Caution.*/i;
+const KEEP_STORED_RE = /Keep (?:refrigerated|frozen).*/i;
+const TRAILING_PUNCTUATION_RE = /[.,;]+$/;
+const SERVING_SIZE_LABEL_RE = /^Serving Size$/i;
+const SERVINGS_PER_CONTAINER_RE = /servings per container/i;
+
+function nutrientNumber(
+	nutrients: Map<string, string>,
+	key: string,
+): number | null {
+	const raw = nutrients.get(key);
+	if (!raw) {
+		return null;
+	}
+	const match = NUTRIENT_VALUE_RE.exec(raw);
+	return match ? Number(match[0]) : null;
+}
+
+function findNutritionPanelHeading(document: Document): Element | null {
+	return (
+		[...document.querySelectorAll("h3")].find((h3) =>
+			(h3.textContent ?? "").includes("Nutrition Facts"),
+		) ?? null
+	);
+}
+
+function parseNutrientList(panel: Element): {
+	calories: number | null;
+	nutrients: Map<string, string>;
+} {
+	const nutrients = new Map<string, string>();
+	let calories: number | null = null;
+	const list = panel.querySelector("ul");
+	if (!list) {
+		return { calories, nutrients };
+	}
+	for (const li of list.querySelectorAll(":scope > li")) {
+		const text = normText(li);
+		if (!text || text.startsWith("% Daily Value")) {
+			continue;
+		}
+		if (calories === null && /calories/i.test(text)) {
+			for (const div of li.querySelectorAll("div")) {
+				const m = /^Calories\s*(\d+\.?\d*)/i.exec(normText(div) ?? "");
+				if (m?.[1]) {
+					calories = Number(m[1]);
+					break;
+				}
+			}
+			if (calories === null) {
+				const m = /Calories\s*(\d+\.?\d*)/i.exec(text);
+				if (m?.[1]) {
+					calories = Number(m[1]);
+				}
+			}
+			if (calories !== null) {
+				continue;
+			}
+		}
+		if (/amount per serving/i.test(text)) {
+			continue;
+		}
+		const nameEl = li.querySelector(":scope > span, :scope > i");
+		const valueEl = li.querySelector(":scope > ul > li");
+		if (nameEl && valueEl) {
+			const name = normText(nameEl);
+			const value = normText(valueEl);
+			if (name && value) {
+				nutrients.set(name, value);
+			}
+		}
+	}
+	// H-E-B omits the calorie row entirely for 0-calorie products (water,
+	// spices). A nutrition panel with nutrients but no parsed calorie row is
+	// that honest zero, not a parse failure.
+	if (calories === null && nutrients.size > 0) {
+		calories = 0;
+	}
+	return { calories, nutrients };
+}
+
+function parseServingInfo(panel: Element): {
+	servingSize: string | null;
+	servingsPerContainer: string | null;
+} {
+	const servingsPerContainer =
+		[...panel.querySelectorAll("p")]
+			.map((p) => normText(p))
+			.find(
+				(t): t is string => Boolean(t) && SERVINGS_PER_CONTAINER_RE.test(t),
+			) ?? null;
+	const divs = [...panel.querySelectorAll("div")];
+	let servingSize: string | null = null;
+	for (const [index, div] of divs.entries()) {
+		if (SERVING_SIZE_LABEL_RE.test(normText(div) ?? "")) {
+			servingSize = normText(divs[index + 1] ?? div.nextElementSibling);
+			break;
+		}
+	}
+	return { servingSize, servingsPerContainer };
+}
+
+function parseIngredientsAndAllergens(document: Document): {
+	allergens: string | null;
+	ingredients: string | null;
+} {
+	const headings = [...document.querySelectorAll("h4")];
+	const ingredientsHeading = headings.find(
+		(h4) => normText(h4) === "Ingredients",
+	);
+	const ingredients = ingredientsHeading
+		? (normText(ingredientsHeading.nextElementSibling) ??
+			normText(ingredientsHeading.parentElement?.lastElementChild ?? null))
+		: null;
+
+	const allergensHeading = headings.find((h4) =>
+		(h4.textContent ?? "").includes("Allergen"),
+	);
+	let allergens: string | null = null;
+	if (allergensHeading) {
+		const raw =
+			normText(allergensHeading.nextElementSibling) ??
+			normText(allergensHeading.parentElement?.lastElementChild ?? null) ??
+			"";
+		const match = CONTAINS_ALLERGENS_RE.exec(raw);
+		if (match?.[1]) {
+			allergens =
+				match[1]
+					.replace(SAFE_HANDLING_RE, "")
+					.replace(CAUTION_RE, "")
+					.replace(KEEP_STORED_RE, "")
+					.replace(TRAILING_PUNCTUATION_RE, "")
+					.trim() || null;
+		}
+	}
+	return { allergens, ingredients };
+}
+
+function parseHighlights(document: Document): string[] | null {
+	const highlights = [...document.querySelectorAll("button")]
+		.filter((btn) => {
+			const region = btn.closest('[role="region"]') ?? btn.closest("section");
+			return Boolean(
+				region &&
+					(region.querySelector("h2")?.textContent ?? "").includes(
+						"Highlights",
+					),
+			);
+		})
+		.map((btn) => normText(btn))
+		.filter((text): text is string => Boolean(text));
+	return highlights.length > 0 ? highlights : null;
+}
+
+function parseCategory(document: Document): string | null {
+	const crumbs = [
+		...document.querySelectorAll(
+			'nav[aria-label*="Breadcrumb"] a, nav[aria-label*="breadcrumb"] a',
+		),
+	]
+		.map((a) => normText(a))
+		.filter(
+			(text): text is string =>
+				Boolean(text) && text !== "H-E-B" && text !== "Shop",
+		);
+	return crumbs.length > 0 ? crumbs.join(" / ") : null;
+}
+
+function parseUpc(document: Document): string | null {
+	const metaUpc = document.querySelector(
+		'meta[property="product:upc"], meta[name="upc"], meta[itemprop="gtin13"], meta[itemprop="gtin12"], meta[itemprop="gtin"]',
+	);
+	const content = metaUpc?.getAttribute("content");
+	return content || null;
+}
+
+/** Pure DOM extraction for a product-detail page's nutrition panel.
+ *  `found: false` is an honest, real outcome — not every product page has a
+ *  "Nutrition Facts" panel. Mirrors the legacy heb-playwright.js scrapeNutrition
+ *  structural-selector strategy; no free-text regex over concatenated innerText. */
+export function parseNutritionDom(html: string): NutritionDomExtraction {
+	const { document } = parseHTML(html);
+	const panelHeading = findNutritionPanelHeading(document);
+	const empty: NutritionDomExtraction = {
+		addedSugarG: null,
+		allergens: null,
+		calciumMg: null,
+		calories: null,
+		carbsG: null,
+		category: parseCategory(document),
+		cholesterolMg: null,
+		fatG: null,
+		fiberG: null,
+		found: false,
+		highlights: null,
+		ingredients: null,
+		ironMg: null,
+		name: null,
+		potassiumMg: null,
+		proteinG: null,
+		saturatedFatG: null,
+		servingSize: null,
+		servingsPerContainer: null,
+		sodiumMg: null,
+		sugarG: null,
+		transFatG: null,
+		upc: parseUpc(document),
+		vitaminDMcg: null,
+	};
+	if (!panelHeading) {
+		return empty;
+	}
+	const panel = panelHeading.closest("div") ?? panelHeading.parentElement;
+	if (!panel) {
+		return empty;
+	}
+	const { calories, nutrients } = parseNutrientList(panel);
+	const { servingSize, servingsPerContainer } = parseServingInfo(panel);
+	const { allergens, ingredients } = parseIngredientsAndAllergens(document);
+
+	return {
+		addedSugarG: nutrientNumber(nutrients, "Includes Added Sugars"),
+		allergens,
+		calciumMg: nutrientNumber(nutrients, "Calcium"),
+		calories,
+		carbsG: nutrientNumber(nutrients, "Total Carbohydrate"),
+		category: empty.category,
+		cholesterolMg: nutrientNumber(nutrients, "Cholesterol"),
+		fatG: nutrientNumber(nutrients, "Total Fat"),
+		fiberG: nutrientNumber(nutrients, "Dietary Fiber"),
+		found: true,
+		highlights: parseHighlights(document),
+		ingredients,
+		ironMg: nutrientNumber(nutrients, "Iron"),
+		name: normText(document.querySelector("h1")),
+		potassiumMg: nutrientNumber(nutrients, "Potassium"),
+		proteinG: nutrientNumber(nutrients, "Protein"),
+		saturatedFatG: nutrientNumber(nutrients, "Saturated Fat"),
+		servingSize,
+		servingsPerContainer,
+		sodiumMg: nutrientNumber(nutrients, "Sodium"),
+		sugarG: nutrientNumber(nutrients, "Total Sugars"),
+		transFatG: nutrientNumber(nutrients, "Trans Fat"),
+		upc: empty.upc,
+		vitaminDMcg: nutrientNumber(nutrients, "Vitamin D"),
+	};
+}
+
+export function buildNutritionRecord(
+	productId: string,
+	extraction: NutritionDomExtraction,
+	fallbackName: string,
+	emittedAt: string,
+): NutritionRecord {
+	const source: NutritionSource = extraction.found
+		? "heb_product_page"
+		: "not_found";
+	return {
+		added_sugar_g: extraction.addedSugarG,
+		allergens: extraction.allergens,
+		calcium_mg: extraction.calciumMg,
+		calories: extraction.calories,
+		carbs_g: extraction.carbsG,
+		category: extraction.category,
+		cholesterol_mg: extraction.cholesterolMg,
+		confidence: extraction.found ? "high" : "low",
+		fat_g: extraction.fatG,
+		fetched_at: emittedAt,
+		fiber_g: extraction.fiberG,
+		highlights: extraction.highlights,
+		id: productId,
+		ingredients: extraction.ingredients,
+		iron_mg: extraction.ironMg,
+		name: extraction.name || fallbackName,
+		potassium_mg: extraction.potassiumMg,
+		product_id: productId,
+		protein_g: extraction.proteinG,
+		saturated_fat_g: extraction.saturatedFatG,
+		serving_size: extraction.servingSize,
+		servings_per_container: extraction.servingsPerContainer,
+		sodium_mg: extraction.sodiumMg,
+		source,
+		sugar_g: extraction.sugarG,
+		trans_fat_g: extraction.transFatG,
+		upc: extraction.upc,
+		vitamin_d_mcg: extraction.vitaminDMcg,
 	};
 }
