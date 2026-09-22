@@ -13,6 +13,8 @@ Base: `main` at `20bba85`.
 
 ## Decisions
 
+**D1. Identity. HELD (Tim, 2026-09-22): the public scope renames below (`claude.*`→`anthropic.*`, `instagram.*`→`meta.*`, `shop.*`→`shopify.*`) are NOT authorized. Do not encode them. A source-layout cutover does not authorize breaking public scope IDs. Pending a compatibility trace, public source and scope IDs stay as published; the connector key remains the internal identity. The rest of this entry is the superseded proposal.**
+
 **D1. Identity.** The connector key is the single identity. It is used for the directory, the manifest `connector_key`, the OCI name (`ghcr.io/pdp-connect/connector/<key with _ as ->`), and the public scope prefix. The public scope ID is `<connector_key>.<stream>`. The existing keys are already published to GHCR, so they are kept. The legacy source IDs map as follows:
 
 | Legacy source | Connector key | Reason |
