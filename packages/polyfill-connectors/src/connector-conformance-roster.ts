@@ -100,4 +100,5 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	shopify: { testFile: "connectors/shopify/index.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
+	youtube: { testFile: "connectors/youtube/index.test.ts" },
 };
