@@ -25,8 +25,7 @@ const RECEIPT_RECORD = {
 	requested_at: "2026-01-15T10:00:00.000Z",
 	completed_at: "2026-01-15T10:35:24.000Z",
 	pickup_address: "Example Straße 1, 10115 Example City",
-	dropoff_address:
-		"Example Airport Terminal 1, 12345 Example City",
+	dropoff_address: "Example Airport Terminal 1, 12345 Example City",
 	driver_name: "Example Driver",
 	fare_total: "$47.43",
 	fare_total_cents: 4743,
