@@ -13,6 +13,20 @@ Base: `main` at `20bba85`.
 
 ## Decisions
 
+## Public compatibility contract (Tim, 2026-09-22). Supersedes D1; constrains D2 and D3.
+
+Third-party apps (builders.vana.org, app.vana.org/apps, and unknown external consumers) cannot be enumerated or migrated. Therefore:
+
+- **P1. Stable public API.** Every published scope ID in `scope-catalog.json` (54 scopes), together with its payload schema (`schema.path`) and semantics, is a stable public API. Its ID, schema bytes, and stored or read shape do not change.
+- **P2. Canonical public scopes stay.** `claude.*`, `instagram.*`, `shop.*`, `youtube.*` (including `playlistItems`, `watchLater`, `history`), `spotify.savedTracks`, and every other published ID keep their exact IDs. D1's public renames are REVERSED. Connector keys and OCI artifact IDs (`anthropic`, `meta`, `shopify`, ...) remain internal implementation identities.
+- **P3. Explicit catalog binding.** Each public scope gets an explicit catalog binding to the PDPP implementation: `connector_key`, stream(s), and a declared projection that produces the published payload shape from those streams. `scripts/generate-scope-catalog.mjs` (which today skips `artifactKind: pdpp-collection-profile` entries, line 76) is extended to emit this binding. There is no dual runtime: the binding is data, and exactly one implementation (the PDPP connector) fulfills each scope.
+- **P4. Byte-for-byte grant compatibility.** Existing grants and DCR requests stay byte-for-byte scope-compatible. No scope string that a client could send today may change meaning or stop being accepted.
+- **P5. Additive only.** New normalized streams (D3 splits, D2 snake_case names) may be exposed under NEW public IDs only when they do not replace an existing scope. They never replace or alias an existing public scope.
+- **P6. No silent migrations.** Any intentional incompatibility (a field, semantic, or behavior a published scope can no longer deliver) is recorded as a BLOCKED DECISION in the capability map for Tim. It is never migrated silently.
+- **P7. End-to-end compatibility tests.** Required tests trace the path catalog → DCR/grant → ingest → read for `claude.conversations`, `instagram.posts`, `instagram.profile`, `instagram.ads`, `instagram.following`, and `shop.orders`, proving the published scope ID and payload shape are preserved.
+
+Consequences: D2 and D3 now govern only INTERNAL PDPP stream design. The public payload for a legacy scope is produced by the P3 projection. The capability map is re-audited scope by scope for schema and semantic breaks (priority: the anthropic conversations/messages split, Meta posts/post_likes, Uber receipts, Whole Foods nutrition).
+
 **D1. Identity. HELD (Tim, 2026-09-22): the public scope renames below (`claude.*`→`anthropic.*`, `instagram.*`→`meta.*`, `shop.*`→`shopify.*`) are NOT authorized. Do not encode them. A source-layout cutover does not authorize breaking public scope IDs. Pending a compatibility trace, public source and scope IDs stay as published; the connector key remains the internal identity. The rest of this entry is the superseded proposal.**
 
 **D1. Identity.** The connector key is the single identity. It is used for the directory, the manifest `connector_key`, the OCI name (`ghcr.io/pdp-connect/connector/<key with _ as ->`), and the public scope prefix. The public scope ID is `<connector_key>.<stream>`. The existing keys are already published to GHCR, so they are kept. The legacy source IDs map as follows:
