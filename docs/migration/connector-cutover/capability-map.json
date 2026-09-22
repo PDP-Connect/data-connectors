@@ -175,7 +175,8 @@
           ],
           "status": "contracted"
         }
-      ]
+      ],
+      "lead_decision_live": "Live evidence (cut-uber @9ca5a8f): the Activities list returns only trip UUIDs. D5 is revised, not dropped. trips = one record per trip, hydrated from GetTrip (status, requested/completed times, addresses, product_type, driver, distance, duration, fare_total). receipts = GetReceipt (fare_breakdown, currency, receipt totals), 1:1 by trip_id. A trips-only START makes zero GetReceipt calls. An all-null trips stream is not acceptable. Follow-up implementation lane required."
     },
     {
       "legacy_source_id": "instagram",
