@@ -1134,23 +1134,31 @@
         },
         {
           "legacy_scope": "heb.profile",
-          "streams": [],
-          "migration": "GAP",
-          "field_map": {},
+          "streams": [
+            "heb.profile"
+          ],
+          "migration": "new stream",
+          "field_map": {
+            "name": "profile.name",
+            "email": "profile.email"
+          },
           "dropped": [
             {
-              "field": "name, email, phone, deliveryAddresses[]",
-              "reason": "no modern heb.profile stream exists"
+              "field": "phone, deliveryAddresses[]",
+              "reason": "not part of the lead_decision shape ({id,name,email} mirroring wholefoods.profile); addresses stay out of scope as PII not advertised elsewhere"
             }
           ],
-          "status": "needs_parity_audit",
+          "status": "implemented",
           "question": "Add a heb.profile stream mirroring wholefoods.profile (name, email only, per D8 pattern), or accept as deliberate break? Addresses likely stay out of scope regardless (PII, not advertised elsewhere).",
-          "lead_decision": "ADD stream heb.profile {id,name,email}, mirroring wholefoods.profile."
+          "lead_decision": "ADD stream heb.profile {id,name,email}, mirroring wholefoods.profile.",
+          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb lane, commit fb3ce21). Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists). heb has no browser profile under Tim's bootstrap, so a live run to promote to fixture_proven/live_proven is pending."
         },
         {
           "legacy_scope": "heb.nutrition",
-          "streams": [],
-          "migration": "GAP (align with wholefoods.nutrition shape per D8)",
+          "streams": [
+            "heb.nutrition"
+          ],
+          "migration": "new stream (typed, common fields shared with wholefoods.nutrition)",
           "field_map": {
             "items{id}": "nutrition.product_id",
             "name": "nutrition.name",
@@ -1164,21 +1172,35 @@
             "fiber_g": "nutrition.fiber_g",
             "sugar_g": "nutrition.sugar_g",
             "servingSize": "nutrition.serving_size",
-            "servingsPerContainer": "nutrition.servings_per_container"
+            "servingsPerContainer": "nutrition.servings_per_container",
+            "saturated_fat_g": "nutrition.saturated_fat_g",
+            "trans_fat_g": "nutrition.trans_fat_g",
+            "cholesterol_mg": "nutrition.cholesterol_mg",
+            "added_sugar_g": "nutrition.added_sugar_g",
+            "calcium_mg": "nutrition.calcium_mg",
+            "iron_mg": "nutrition.iron_mg",
+            "potassium_mg": "nutrition.potassium_mg",
+            "vitamin_d_mcg": "nutrition.vitamin_d_mcg",
+            "upc": "nutrition.upc",
+            "ingredients": "nutrition.ingredients",
+            "allergens": "nutrition.allergens",
+            "category": "nutrition.category",
+            "highlights": "nutrition.highlights"
           },
           "dropped": [
             {
-              "field": "saturated_fat_g, trans_fat_g, cholesterol_mg, added_sugar_g, calcium_mg, iron_mg, potassium_mg, vitamin_d_mcg, upc, ingredients, allergens, category, highlights[], images",
-              "reason": "legacy heb.nutrition has more micronutrient/enrichment fields than the wholefoods.nutrition contract defines; needs a lead decision on whether to extend the shared nutrition shape or drop these fields to match wholefoods parity"
+              "field": "images",
+              "reason": "legacy gallery-image scrape (product photo URLs); not part of the lead_decision's field set and order_items.image_url already carries the purchase-line product image"
             },
             {
               "field": "coverage{}",
               "reason": "D3 aggregate; report as run PROGRESS, not a record"
             }
           ],
-          "status": "needs_parity_audit",
+          "status": "implemented",
           "question": "heb's legacy nutrition schema is richer than wholefoods.nutrition's contracted shape (extra vitamins/minerals/UPC/ingredients/allergens). Extend the shared nutrition contract to a superset, or truncate heb to match wholefoods and drop the extra fields?",
-          "lead_decision": "ADD stream heb.nutrition. Share field names with wholefoods.nutrition for the common nutrients. H-E-B keeps its extra legacy fields (vitamins, minerals, upc, ingredients, allergens) as additional optional fields in its own manifest. No shared-code superset is required."
+          "lead_decision": "ADD stream heb.nutrition. Share field names with wholefoods.nutrition for the common nutrients. H-E-B keeps its extra legacy fields (vitamins, minerals, upc, ingredients, allergens) as additional optional fields in its own manifest. No shared-code superset is required.",
+          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb lane, commit fb3ce21). Sources product targets from order_items emitted in the same run, deduped by product_id, bounded to 50 lookups/run. Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists). heb has no browser profile under Tim's bootstrap, so a live run to promote to fixture_proven/live_proven is pending. NOTE: wholefoods.nutrition/wholefoods.profile, the shapes this entry mirrors, are themselves not yet implemented in code as of this writing (wholefoods/index.ts is still a SKIP_RESULT scaffold with only orders/order_items streams) \u2014 this lane followed the field names recorded in this capability-map.json entry for wholefoods, not a running wholefoods implementation."
         }
       ]
     },

@@ -34,6 +34,8 @@ import {
 	buildOrdersStateCursor,
 	classifyEmptyListPage,
 	classifyHebDetailFailure,
+	collectNutrition,
+	collectProfile,
 	type DetailFailureKind,
 	type EmitDeps,
 	emitOrderItemsCoverage,
@@ -46,6 +48,7 @@ import {
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
 	hebAllowsInteractiveAuthRepair,
+	type NutritionTarget,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
 	type OrderItemsCoverage,
@@ -3295,4 +3298,158 @@ test("fetchOrderDetail: continuous remounts with matching count fail closed with
 	} finally {
 		await browser.close();
 	}
+});
+
+// ─── collectProfile / collectNutrition ─────────────────────────────────────
+// SYNTHETIC: inline HTML fixtures, not a live capture — see the connector's
+// header comment / report for live-proof status.
+
+const SYNTHETIC_PROFILE_HTML = `<html><body><main>
+  <div>
+    <p>Name</p>
+    <p>Jamie Shopper</p>
+  </div>
+  <div>
+    <p>Email</p>
+    <p>shopper@example.com</p>
+  </div>
+</main></body></html>`;
+
+const SYNTHETIC_EMPTY_PROFILE_HTML =
+	"<html><body><main>no profile fields here</main></body></html>";
+
+const SYNTHETIC_NUTRITION_HTML = `<html><body><main>
+  <h1>H-E-B Organic 2% Reduced Fat Milk</h1>
+  <div>
+    <h3>Nutrition Facts</h3>
+    <ul>
+      <li><div><span>Calories</span>150</div></li>
+      <li><span>Protein</span><ul><li>8g</li></ul></li>
+    </ul>
+  </div>
+</main></body></html>`;
+
+test("collectProfile emits a profile record on a healthy page", async () => {
+	const { deps, emitted } = makeRecordingDeps();
+	const page = makePageStub({ content: SYNTHETIC_PROFILE_HTML });
+
+	await collectProfile(page, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	const profileRecords = emitted.filter((r) => r.stream === "profile");
+	assert.equal(profileRecords.length, 1);
+	assert.equal(profileRecords[0]?.data.name, "Jamie Shopper");
+	assert.equal(profileRecords[0]?.data.email, "shopper@example.com");
+	assert.equal(profileRecords[0]?.data.id, "profile");
+});
+
+test("collectProfile emits SKIP_RESULT (not a null-only record) when no fields are found", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const page = makePageStub({ content: SYNTHETIC_EMPTY_PROFILE_HTML });
+
+	await collectProfile(page, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	assert.equal(emitted.filter((r) => r.stream === "profile").length, 0);
+	const skip = protocolMessages.find(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "profile",
+	);
+	assert.ok(skip, "expected a profile SKIP_RESULT");
+});
+
+test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redirect", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const page = makePageStub({
+		content: SYNTHETIC_EMPTY_PROFILE_HTML,
+		url: "https://www.heb.com/sign-in",
+	});
+
+	await collectProfile(page, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	assert.equal(emitted.filter((r) => r.stream === "profile").length, 0);
+	const skip = protocolMessages.find(
+		(m) =>
+			m.type === "SKIP_RESULT" &&
+			m.stream === "profile" &&
+			m.reason === "session_repair_required",
+	);
+	assert.ok(skip);
+});
+
+test("collectNutrition emits one record per unique product target", async () => {
+	const { deps, emitted } = makeRecordingDeps();
+	const page = makePageStub({ content: SYNTHETIC_NUTRITION_HTML });
+	const targets: NutritionTarget[] = [
+		{
+			name: "H-E-B Organic 2% Reduced Fat Milk",
+			productId: "123456789",
+			productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+		},
+	];
+
+	await collectNutrition(page, targets, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	const nutritionRecords = emitted.filter((r) => r.stream === "nutrition");
+	assert.equal(nutritionRecords.length, 1);
+	assert.equal(nutritionRecords[0]?.data.product_id, "123456789");
+	assert.equal(nutritionRecords[0]?.data.source, "heb_product_page");
+	assert.equal(nutritionRecords[0]?.data.calories, 150);
+});
+
+test("collectNutrition reports skipped products with no resolvable product_url without navigating", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const targets: NutritionTarget[] = [
+		{ name: "No URL Item", productId: "999", productUrl: null },
+	];
+
+	await collectNutrition(NEVER_CALLED_PAGE, targets, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	assert.equal(emitted.filter((r) => r.stream === "nutrition").length, 0);
+	const skip = protocolMessages.find(
+		(m) =>
+			m.type === "SKIP_RESULT" &&
+			m.stream === "nutrition" &&
+			m.reason === "nutrition_lookup_incomplete",
+	);
+	assert.ok(skip);
+});
+
+test("collectNutrition emits nothing when given zero targets", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+
+	await collectNutrition(NEVER_CALLED_PAGE, [], {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	assert.equal(emitted.filter((r) => r.stream === "nutrition").length, 0);
+	assert.equal(
+		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
 });
