@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/doordash",
 	"connector_key": "doordash",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"display_name": "DoorDash",
 	"brand": {
 		"icon": "icons/doordash.svg",
@@ -19,8 +19,37 @@
 			}
 		}
 	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "username_password",
+			"label": "DoorDash sign-in details",
+			"description": "Seal the DoorDash sign-in details for this source. The connector uses them only for this source's browser-backed collection.",
+			"submit_label": "Save DoorDash credential and start first sync",
+			"fields": [
+				{
+					"name": "username",
+					"label": "DoorDash email",
+					"type": "text",
+					"required": true,
+					"secret": true,
+					"autocomplete": "username",
+					"env": ["DOORDASH_USERNAME"]
+				},
+				{
+					"name": "password",
+					"label": "DoorDash password",
+					"type": "password",
+					"required": true,
+					"secret": true,
+					"autocomplete": "current-password",
+					"env": ["DOORDASH_PASSWORD"]
+				}
+			]
+		}
+	},
 	"capabilities": {
-		"human_interaction": ["manual_action"],
+		"human_interaction": ["manual_action", "otp"],
 		"refresh_policy": {
 			"recommended_mode": "manual",
 			"minimum_interval_seconds": 3600,
@@ -28,7 +57,7 @@
 			"rate_limit_sensitivity": "medium",
 			"bot_detection_sensitivity": "high",
 			"background_safe": false,
-			"rationale": "DoorDash order history is browser-scraped; treat as manual to avoid bot-detection signals."
+			"rationale": "DoorDash order history is browser-scraped behind Cloudflare bot protection; treat as manual to avoid bot-detection signals. No incremental cursor is implemented (see connectors/doordash/index.ts) — every run performs a full refresh of the order list, so more frequent scheduling buys nothing without also increasing bot-detection exposure."
 		},
 		"public_listing": {
 			"tier": "development"
@@ -37,6 +66,7 @@
 	"streams": [
 		{
 			"name": "orders",
+			"required": true,
 			"description": "DoorDash food-delivery orders.",
 			"display": {
 				"label": "Your DoorDash orders",
@@ -92,13 +122,12 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "order_date",
 			"consent_time_field": "order_date",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["restaurant_name"]
@@ -112,11 +141,12 @@
 					"group_by": ["status"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "order_items",
+			"required": false,
 			"description": "Individual items within DoorDash orders.",
 			"display": {
 				"label": "Your DoorDash order items",
@@ -153,7 +183,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"relationships": [
 				{
 					"name": "order",
@@ -167,11 +197,13 @@
 					"lexical_fields": ["name"]
 				}
 			},
-			"coverage_strategy": "parent_detail_accounting",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"doordash_graphql_wiring_pending": "DoorDash support isn't wired up yet"
+		"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
+		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
+		"shape_check_failed": "The data didn't look like we expected"
 	}
 }

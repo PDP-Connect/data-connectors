@@ -5,23 +5,23 @@
  * Zod schemas for DoorDash stream records. Shape-check-before-emit per
  * docs/reference/connector-authoring-guide.md §3.
  *
- * GROUND-TRUTH CAVEAT (same posture as connectors/loom and connectors/shopify):
- * doordash/index.ts does NOT yet emit any RECORD — it is a browser scaffold
- * that verifies session reachability and emits
- * `SKIP_RESULT reason=doordash_graphql_wiring_pending`. The GraphQL
- * OrderHistoryQuery extraction (persisted-query hash rotates per session) is
- * deferred to a live session. There is no observed emitted shape; these schemas
- * are derived from the connector's MANIFEST stream declarations
- * (manifests/doordash.json) — the contract the connector commits to emit once
- * extraction lands.
- *
- * Wiring `validateRecord` now is the honest, fail-fast move: the first real
- * emit is shape-checked against the declared contract instead of silently
- * trusted. Whoever wires the GraphQL extraction MUST re-verify these field
- * shapes against the real OrderHistoryQuery payload and tighten them —
- * especially the `id` / `order_id` formats and the `customizations` element
- * shape, which the manifest declares only as a bare array. This file is a
- * contract scaffold, not a fixture-proven schema.
+ * GROUND-TRUTH CAVEAT: doordash/index.ts now emits real RECORDs, parsed from
+ * `getConsumerOrdersWithDetails`-shaped GraphQL responses captured on the
+ * orders page (see parsers.ts). No live DoorDash session exists for this
+ * lane yet ("PROFILE READY" has not been sent) — the parser's field-level
+ * assumptions are derived from the legacy Playwright scraper's own response
+ * walk (data-connectors/doordash/doordash-playwright.js) plus DoorDash's
+ * known public GraphQL money-envelope convention, NOT a live capture. The
+ * `__fixtures__/synthetic/` fixture used by synthetic-shape.test.ts is
+ * therefore hand-authored synthetic-but-shape-real data, not a real capture
+ * — `fixtures/doordash/scrubbed/pilot-real-shape/` does not exist yet (see
+ * pilot-fixture.test.ts). See connectors/doordash/index.ts header for the
+ * exact pending-live status. Whoever gets live access MUST re-verify these
+ * field shapes against a real captured response and tighten anything that
+ * drifts (especially `order_date` presence, the `orderUuid` id format, and
+ * whether `payment_method_summary` is ever actually present on this
+ * response — the parser currently always emits null for it because no
+ * observed shape carries it).
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";

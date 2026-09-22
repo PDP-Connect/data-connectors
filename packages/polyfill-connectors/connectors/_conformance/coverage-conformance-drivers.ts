@@ -1266,6 +1266,10 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"codex.prompts",
 	"codex.skills",
 	"codex.coverage_diagnostics",
+	// DoorDash (browser + auth-walled; no live-proven capture yet, see the
+	// cut-doordash lane report — a live session that reaches authenticated
+	// order data is still pending).
+	"doordash.orders",
 	// API connectors with no driver registered yet.
 	"github.repositories",
 	"github.starred",

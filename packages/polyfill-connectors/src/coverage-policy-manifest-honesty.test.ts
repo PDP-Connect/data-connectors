@@ -274,8 +274,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["codex.prompts", "b46d9879df70b604"],
 	["codex.skills", "bd5a65644fcfe045"],
 	["codex.coverage_diagnostics", "fb67ab5be18229ef"],
-	["doordash.orders", "3f7608fe62440cad"],
-	["doordash.order_items", "3c8fd340d907545c"],
 	["github.user", "b6ec1e77b0c49ac1"],
 	["github.user_stats", "ad44e77cf37957c5"],
 	["github.repositories", "a281334e68e1a5f6"],
