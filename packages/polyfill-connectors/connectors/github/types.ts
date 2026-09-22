@@ -127,3 +127,63 @@ export interface GitHubGist {
 	public: boolean;
 	updated_at?: string | null;
 }
+
+export interface GitHubEventRepo {
+	name?: string;
+}
+
+export interface GitHubEvent {
+	created_at?: string | null;
+	id: string;
+	public?: boolean;
+	repo?: GitHubEventRepo;
+	type?: string | null;
+}
+
+export interface GitHubContributionDay {
+	contributionCount?: number;
+	date?: string;
+}
+
+export interface GitHubContributionWeek {
+	contributionDays?: GitHubContributionDay[];
+}
+
+export interface GitHubContributionsCollection {
+	contributionCalendar?: {
+		weeks?: GitHubContributionWeek[];
+	};
+}
+
+export interface GitHubPinnedRepoNode {
+	description?: string | null;
+	forkCount?: number | null;
+	id?: string;
+	languages?: { nodes?: Array<{ name?: string } | null> } | null;
+	name?: string;
+	nameWithOwner?: string;
+	stargazerCount?: number | null;
+	url?: string;
+}
+
+export interface GitHubPinnableItemsConnection {
+	nodes?: Array<GitHubPinnedRepoNode | null>;
+}
+
+export interface GitHubGraphQlResponse {
+	data?: {
+		user?: {
+			contributionsCollection?: GitHubContributionsCollection;
+			pinnedItems?: GitHubPinnableItemsConnection;
+		} | null;
+	};
+	errors?: Array<{ message?: string; type?: string }>;
+}
+
+/** REST GET /user/orgs entry. */
+export interface GitHubOrgMembership {
+	avatar_url?: string | null;
+	description?: string | null;
+	id: number;
+	login: string;
+}

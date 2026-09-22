@@ -1,6 +1,7 @@
 {
 	"format": "pdpp.fixture-provenance/1",
-	"class": "synthetic",
-	"labeled_by": "tool:provenance-labeler/1",
-	"labeled_at": "2026-08-13"
+	"class": "mixed",
+	"labeled_by": "human-review",
+	"labeled_at": "2026-09-22",
+	"note": "user/user_stats/repositories/starred/issues/pull_requests/gists are synthetic (labeled 2026-08-13, tool:provenance-labeler/1). events/contributions are real, scrubbed captures from a 2026-09-22 live run against Tim's own GitHub account (token from `gh auth token`, scopes repo/read:org/gist): events has repository_full_name replaced with owner/repo-N placeholders (id/type/created_at/is_public are real); contributions is unredacted (Tim's own daily contribution counts, not identifying). Run counts and scrub notes are in the cut-github connector cutover report (private, outside this repo)."
 }

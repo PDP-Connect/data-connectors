@@ -9,13 +9,19 @@ import { fileURLToPath } from "node:url";
 import {
 	API_BASE,
 	assigneeNames,
+	contributionDayRecord,
+	eventRecord,
+	flattenContributionDays,
+	flattenPinnedRepositories,
 	gistRecord,
 	isAtOrAfterUntil,
 	isBeforeSince,
 	issueRecord,
 	labelNames,
 	laterIso,
+	organizationRecord,
 	parseNextLink,
+	pinnedRepositoryRecord,
 	pullRequestRecord,
 	repoFullFromUrl,
 	repoRecord,
@@ -26,8 +32,12 @@ import {
 	userStatsRecord,
 } from "./parsers.ts";
 import type {
+	GitHubContributionsCollection,
+	GitHubEvent,
 	GitHubGist,
 	GitHubIssue,
+	GitHubOrgMembership,
+	GitHubPinnableItemsConnection,
 	GitHubPullDetail,
 	GitHubRepo,
 	GitHubUser,
@@ -418,4 +428,200 @@ test("isAtOrAfterUntil: true only when both present and iso >= until", () => {
 	assert.equal(isAtOrAfterUntil("2026-03-01", "2026-02-01"), true);
 	assert.equal(isAtOrAfterUntil("2026-01-01", "2026-02-01"), false);
 	assert.equal(isAtOrAfterUntil(null, "2026-02-01"), false);
+});
+
+// ─── eventRecord ──────────────────────────────────────────────────────────
+
+test("eventRecord: maps a well-formed PushEvent", () => {
+	const e: GitHubEvent = {
+		id: "123456789",
+		type: "PushEvent",
+		created_at: "2026-06-01T12:00:00Z",
+		repo: { name: "octocat/hello" },
+		public: true,
+	};
+	const r = eventRecord(e);
+	assert.deepEqual(r, {
+		id: "123456789",
+		type: "PushEvent",
+		created_at: "2026-06-01T12:00:00Z",
+		repository_full_name: "octocat/hello",
+		is_public: true,
+	});
+});
+
+test("eventRecord: defaults is_public to true when the field is absent", () => {
+	const e: GitHubEvent = {
+		id: "1",
+		type: "WatchEvent",
+		created_at: "2026-06-01T12:00:00Z",
+		repo: { name: "octocat/hello" },
+	};
+	assert.equal(eventRecord(e)?.is_public, true);
+});
+
+test("eventRecord: returns null when a required field is missing (fail null, not wrong)", () => {
+	assert.equal(
+		eventRecord({
+			id: "1",
+			type: "PushEvent",
+			created_at: null,
+			repo: { name: "octocat/hello" },
+		}),
+		null,
+	);
+	assert.equal(
+		eventRecord({
+			id: "1",
+			type: "PushEvent",
+			created_at: "2026-06-01T12:00:00Z",
+			repo: {},
+		}),
+		null,
+	);
+	assert.equal(
+		eventRecord({
+			id: "",
+			type: "PushEvent",
+			created_at: "2026-06-01T12:00:00Z",
+			repo: { name: "octocat/hello" },
+		}),
+		null,
+	);
+});
+
+// ─── contributionDayRecord / flattenContributionDays ───────────────────────
+
+test("contributionDayRecord: keys by {user_id}:{date}", () => {
+	assert.deepEqual(contributionDayRecord("42", "2026-06-01", 7), {
+		id: "42:2026-06-01",
+		user_id: "42",
+		date: "2026-06-01",
+		contribution_count: 7,
+	});
+});
+
+test("flattenContributionDays: flattens weeks into a flat day list", () => {
+	const collection: GitHubContributionsCollection = {
+		contributionCalendar: {
+			weeks: [
+				{
+					contributionDays: [
+						{ date: "2026-06-01", contributionCount: 3 },
+						{ date: "2026-06-02", contributionCount: 0 },
+					],
+				},
+				{
+					contributionDays: [{ date: "2026-06-03", contributionCount: 5 }],
+				},
+			],
+		},
+	};
+	assert.deepEqual(flattenContributionDays(collection), [
+		{ date: "2026-06-01", count: 3 },
+		{ date: "2026-06-02", count: 0 },
+		{ date: "2026-06-03", count: 5 },
+	]);
+});
+
+test("flattenContributionDays: missing contributionCount defaults to 0", () => {
+	const collection: GitHubContributionsCollection = {
+		contributionCalendar: {
+			weeks: [{ contributionDays: [{ date: "2026-06-01" }] }],
+		},
+	};
+	assert.deepEqual(flattenContributionDays(collection), [
+		{ date: "2026-06-01", count: 0 },
+	]);
+});
+
+test("flattenContributionDays: drops days missing a date rather than guessing one", () => {
+	const collection: GitHubContributionsCollection = {
+		contributionCalendar: {
+			weeks: [{ contributionDays: [{ contributionCount: 3 }] }],
+		},
+	};
+	assert.deepEqual(flattenContributionDays(collection), []);
+});
+
+test("flattenContributionDays: tolerates a null/undefined collection", () => {
+	assert.deepEqual(flattenContributionDays(null), []);
+	assert.deepEqual(flattenContributionDays(undefined), []);
+});
+
+// ─── pinnedRepositoryRecord / flattenPinnedRepositories ────────────────────
+
+test("pinnedRepositoryRecord: maps a well-formed pinned Repository node", () => {
+	const rec = pinnedRepositoryRecord(
+		{
+			nameWithOwner: "octocat/hello",
+			name: "hello",
+			description: "a demo",
+			url: "https://github.com/octocat/hello",
+			stargazerCount: 12,
+			forkCount: 3,
+			languages: { nodes: [{ name: "TypeScript" }, { name: "Rust" }] },
+		},
+		0,
+	);
+	assert.deepEqual(rec, {
+		id: "octocat/hello",
+		full_name: "octocat/hello",
+		name: "hello",
+		description: "a demo",
+		html_url: "https://github.com/octocat/hello",
+		languages: ["TypeScript", "Rust"],
+		stargazers_count: 12,
+		forks_count: 3,
+		position: 0,
+	});
+});
+
+test("pinnedRepositoryRecord: missing identity (nameWithOwner) returns null", () => {
+	assert.equal(pinnedRepositoryRecord({ name: "hello" }, 0), null);
+});
+
+test("pinnedRepositoryRecord: missing languages defaults to an empty array", () => {
+	const rec = pinnedRepositoryRecord({ nameWithOwner: "octocat/hello" }, 2);
+	assert.deepEqual(rec?.languages, []);
+	assert.equal(rec?.position, 2);
+});
+
+test("flattenPinnedRepositories: filters out null nodes", () => {
+	const connection: GitHubPinnableItemsConnection = {
+		nodes: [{ nameWithOwner: "a/a" }, null, { nameWithOwner: "b/b" }],
+	};
+	assert.deepEqual(
+		flattenPinnedRepositories(connection).map((n) => n.nameWithOwner),
+		["a/a", "b/b"],
+	);
+});
+
+test("flattenPinnedRepositories: tolerates a null/undefined connection", () => {
+	assert.deepEqual(flattenPinnedRepositories(null), []);
+	assert.deepEqual(flattenPinnedRepositories(undefined), []);
+});
+
+// ─── organizationRecord ─────────────────────────────────────────────────
+
+test("organizationRecord: maps fields with id stringified", () => {
+	const org: GitHubOrgMembership = {
+		id: 555,
+		login: "octo-org",
+		description: "An org",
+		avatar_url: "https://example.test/avatar.png",
+	};
+	assert.deepEqual(organizationRecord(org), {
+		id: "555",
+		login: "octo-org",
+		description: "An org",
+		avatar_url: "https://example.test/avatar.png",
+	});
+});
+
+test("organizationRecord: missing optional fields become null", () => {
+	const org: GitHubOrgMembership = { id: 1, login: "octo-org" };
+	const rec = organizationRecord(org);
+	assert.equal(rec.description, null);
+	assert.equal(rec.avatar_url, null);
 });

@@ -957,9 +957,11 @@
           "legacy_scope": "github.profile",
           "streams": [
             "github.user",
-            "github.user_stats"
+            "github.user_stats",
+            "github.pinned_repositories",
+            "github.organizations"
           ],
-          "migration": "split (static fields -> user, time-series metrics -> user_stats)",
+          "migration": "split (static fields -> user, time-series metrics -> user_stats, curated pins -> pinned_repositories, org membership -> organizations)",
           "field_map": {
             "username": "user.login",
             "fullName": "user.name",
@@ -970,7 +972,9 @@
             "avatarUrl": "user.avatar_url",
             "followers": "user_stats.followers",
             "following": "user_stats.following",
-            "repositoryCount": "user_stats.public_repos"
+            "repositoryCount": "user_stats.public_repos",
+            "pinnedRepositories": "pinned_repositories.* (GraphQL user.pinnedItems)",
+            "organizations": "organizations.* (REST GET /user/orgs, read:org scope)"
           },
           "dropped": [
             {
@@ -978,17 +982,16 @@
               "reason": "derivable as github.com/{login}; not stored redundantly"
             },
             {
-              "field": "pinnedRepositories, organizations, achievements",
-              "reason": "not exposed by GitHub REST public API without GraphQL; needs confirmation legacy actually populated these via scraping before treating as a real gap"
+              "field": "achievements",
+              "reason": "deliberate_break: legacy scraped achievement badges from the profile DOM (.js-achievement-card img); GitHub exposes no REST or GraphQL field for a user's achievement badges. No scrape fallback is authorized (lead_decision restricts contributions/profile gaps to REST-first, GraphQL-when-REST-cannot-supply; no field means no path). This is a permanent capability loss versus the legacy connector, not a bug to fix later."
             },
             {
               "field": "contributionsLastYear (aggregate)",
               "reason": "modern user_stats is a daily time series; aggregate is derivable by summation, not stored"
             }
           ],
-          "status": "needs_parity_audit",
-          "question": "Confirm whether legacy github-playwright actually populated pinnedRepositories/organizations/achievements from real scrapes (not just schema placeholders) before deciding whether this is a real gap requiring GraphQL.",
-          "lead_decision": "VERIFY first against legacy code and fixtures. Add only fields legacy really populated. REST first. GraphQL is allowed when REST cannot supply the field."
+          "status": "contracted",
+          "lead_decision": "RESOLVED: pinnedRepositories -> new github.pinned_repositories stream (GraphQL user.pinnedItems). organizations -> new github.organizations stream (REST GET /user/orgs, read:org scope). achievements has no REST or GraphQL equivalent; recorded as a deliberate_break in dropped[]."
         },
         {
           "legacy_scope": "github.repositories",

@@ -6,9 +6,14 @@
 // client and pagination loops live in index.ts.
 
 import type {
+	GitHubContributionsCollection,
+	GitHubEvent,
 	GitHubGist,
 	GitHubIssue,
 	GitHubLabelObj,
+	GitHubOrgMembership,
+	GitHubPinnableItemsConnection,
+	GitHubPinnedRepoNode,
 	GitHubPullDetail,
 	GitHubRepo,
 	GitHubStarredEntry,
@@ -286,6 +291,120 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 		comments_count: g.comments ?? null,
 		created_at: g.created_at ?? null,
 		updated_at: g.updated_at ?? null,
+	};
+}
+
+/**
+ * Public event record: GitHub Events API only retains a ~90-day rolling
+ * window (undocumented exact retention; GitHub states "recent" events and
+ * caps list endpoints at 300 events / 10 pages). `id` is the provider's own
+ * stable event id — monotonically increasing, safe as both primary key and
+ * dedup key. Returns null for a malformed entry missing a required field
+ * (id, type, created_at, repo name) rather than guessing.
+ */
+export function eventRecord(e: GitHubEvent): Record<string, unknown> | null {
+	if (!(e.id && e.type && e.created_at && e.repo?.name)) {
+		return null;
+	}
+	return {
+		id: e.id,
+		type: e.type,
+		created_at: e.created_at,
+		repository_full_name: e.repo.name,
+		is_public: e.public ?? true,
+	};
+}
+
+/**
+ * Daily contribution-count observation, keyed like `user_stats`
+ * ({user_id}:{YYYY-MM-DD}) so re-running the same day is idempotent and a
+ * changed day (GitHub backdates commits within its edit window) upserts
+ * cleanly rather than accumulating duplicate rows for one calendar date.
+ */
+export function contributionDayRecord(
+	userId: string,
+	date: string,
+	count: number,
+): Record<string, unknown> {
+	return {
+		id: `${userId}:${date}`,
+		user_id: userId,
+		date,
+		contribution_count: count,
+	};
+}
+
+/**
+ * Flatten the GraphQL `contributionsCollection.contributionCalendar.weeks`
+ * shape into a flat list of `{ date, count }`, dropping any day missing a
+ * date (defensive against a malformed response) rather than guessing one.
+ */
+export function flattenContributionDays(
+	collection: GitHubContributionsCollection | null | undefined,
+): Array<{ count: number; date: string }> {
+	const weeks = collection?.contributionCalendar?.weeks ?? [];
+	const out: Array<{ count: number; date: string }> = [];
+	for (const week of weeks) {
+		for (const day of week.contributionDays ?? []) {
+			if (typeof day.date === "string" && day.date) {
+				out.push({ date: day.date, count: day.contributionCount ?? 0 });
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Pinned-repository record: the user's own curated pin list (GraphQL
+ * `user.pinnedItems`, filtered to Repository nodes — Gists can also be
+ * pinned but are out of scope here). `position` preserves the user's chosen
+ * display order (GitHub has no other stable ordering key for pins).
+ * Returns null for a node missing its identity (`nameWithOwner`) rather
+ * than guessing one.
+ */
+export function pinnedRepositoryRecord(
+	node: GitHubPinnedRepoNode,
+	position: number,
+): Record<string, unknown> | null {
+	if (!node.nameWithOwner) {
+		return null;
+	}
+	const languageNodes = node.languages?.nodes ?? [];
+	const languages = languageNodes
+		.map((l) => l?.name)
+		.filter((name): name is string => Boolean(name));
+	return {
+		id: node.nameWithOwner,
+		full_name: node.nameWithOwner,
+		name: node.name ?? null,
+		description: node.description ?? null,
+		html_url: node.url ?? null,
+		languages,
+		stargazers_count: node.stargazerCount ?? null,
+		forks_count: node.forkCount ?? null,
+		position,
+	};
+}
+
+export function flattenPinnedRepositories(
+	connection: GitHubPinnableItemsConnection | null | undefined,
+): GitHubPinnedRepoNode[] {
+	const nodes = connection?.nodes ?? [];
+	return nodes.filter((n): n is GitHubPinnedRepoNode => Boolean(n));
+}
+
+/**
+ * Organization-membership record: `GET /user/orgs` (needs the `read:org`
+ * scope). `id` is the org's own stable numeric id.
+ */
+export function organizationRecord(
+	org: GitHubOrgMembership,
+): Record<string, unknown> {
+	return {
+		id: String(org.id),
+		login: org.login,
+		description: org.description ?? null,
+		avatar_url: org.avatar_url ?? null,
 	};
 }
 

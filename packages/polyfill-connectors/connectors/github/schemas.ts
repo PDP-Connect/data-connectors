@@ -5,8 +5,9 @@
  * Zod schemas for GitHub stream records. Used for shape-check-before-emit.
  * Ground truth: parsers.ts record builders and local/samples/github.json.
  *
- * Six manifest-declared streams: user, repositories, starred, issues,
- * pull_requests, gists. Per-stream cursor varies by semantics.
+ * Ten manifest-declared streams: user, user_stats, repositories, starred,
+ * issues, pull_requests, gists, events, contributions, pinned_repositories,
+ * organizations. Per-stream cursor varies by semantics.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -204,6 +205,57 @@ export const gistsSchema = z.object({
 });
 
 /**
+ * events stream: public activity events (GitHub Events API, ~90-day rolling
+ * window; see connector header for the retention caveat). Cursor: created_at.
+ */
+export const eventsSchema = z.object({
+	id: pdppSafeText.max(40),
+	type: pdppSafeText.max(80),
+	created_at: isoDateSchema,
+	repository_full_name: pdppSafeText.max(255),
+	is_public: booleanSchema,
+});
+
+/**
+ * contributions stream: daily contribution counts from the GraphQL
+ * `contributionsCollection`, keyed by {user_id}:{YYYY-MM-DD}. Cursor: date.
+ */
+export const contributionsSchema = z.object({
+	id: pdppSafeText.max(100),
+	user_id: idSchema,
+	date: z.string().regex(ISO_DATE_ONLY_RE),
+	contribution_count: z.number().int().min(0),
+});
+
+/**
+ * pinned_repositories stream: the user's own curated pin list (GraphQL
+ * `user.pinnedItems`, Repository nodes only). `position` preserves display
+ * order. No cursor — small, fully re-fetched list each run.
+ */
+export const pinnedRepositoriesSchema = z.object({
+	id: pdppSafeText.max(255),
+	full_name: pdppSafeText.max(255),
+	name: pdppSafeText.max(255).nullable(),
+	description: descriptionSchema,
+	html_url: urlSchema,
+	languages: z.array(pdppSafeText.max(80)),
+	stargazers_count: numericSchema,
+	forks_count: numericSchema,
+	position: z.number().int().min(0),
+});
+
+/**
+ * organizations stream: `GET /user/orgs` membership list (needs `read:org`).
+ * No cursor — small, fully re-fetched list each run.
+ */
+export const organizationsSchema = z.object({
+	id: idSchema,
+	login: pdppSafeText.max(80),
+	description: descriptionSchema,
+	avatar_url: urlSchema,
+});
+
+/**
  * Schema registry: stream name → zod schema.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -214,6 +266,10 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	issues: issuesSchema,
 	pull_requests: pullRequestsSchema,
 	gists: gistsSchema,
+	events: eventsSchema,
+	contributions: contributionsSchema,
+	pinned_repositories: pinnedRepositoriesSchema,
+	organizations: organizationsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

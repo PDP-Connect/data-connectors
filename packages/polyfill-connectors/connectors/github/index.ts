@@ -9,19 +9,31 @@
  * Auth: Personal Access Token via GITHUB_PERSONAL_ACCESS_TOKEN env var.
  * Create at https://github.com/settings/tokens (fine-grained or classic).
  * Minimum scopes: read:user, public_repo (for public), repo (for private),
- *   gist (for gists).
+ *   gist (for gists), read:org (for organizations). `events`, `contributions`,
+ *   and `pinned_repositories` need no extra scope beyond `read:user`.
  *
- * Streams: user, repositories, starred, issues, pull_requests, gists.
+ * Streams: user, user_stats, repositories, starred, issues, pull_requests,
+ * gists, events, contributions, pinned_repositories, organizations.
  * Incremental:
  *   - repositories via `since` + updated_at (by pushed_at)
  *   - starred via starred_at
  *   - issues via `since` + updated_at
  *   - pull_requests via updated_at (search ordered desc)
  *   - gists via `since` + updated_at
+ *   - events via created_at (emit-side skip; the Events API has no `since`
+ *     param). Provider-side 90-day rolling window: history older than that
+ *     is genuinely unavailable, not a connector gap.
+ *   - contributions via date (daily counts, GraphQL `contributionsCollection`)
+ *   - pinned_repositories, organizations: no cursor. Both are small
+ *     (pins capped at 6 by GitHub; org membership lists are typically small)
+ *     current-state lists, fully re-fetched every run.
  *
  * Rate limit: 5000 req/hr (authenticated). We paginate 100 per page.
  * Rate-limit responses are retried through the shared governor; exhaustion keeps
  * the observed GitHub HTTP status and is surfaced as a retryable DONE failure.
+ * `contributions` and `pinned_repositories` use the GraphQL v4 endpoint
+ * (`/graphql`) instead of REST; both share the same governor and primary
+ * rate-limit bucket as every REST call.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -44,12 +56,18 @@ import { RetryBudget } from "../../src/provider-budget.ts";
 import { githubPacingProfile } from "../../src/provider-profile.ts";
 import {
 	API_BASE as BASE,
+	contributionDayRecord,
+	eventRecord,
+	flattenContributionDays,
+	flattenPinnedRepositories,
 	gistRecord,
 	isAtOrAfterUntil,
 	isBeforeSince,
 	issueRecord,
 	laterIso,
+	organizationRecord,
 	parseNextLink,
+	pinnedRepositoryRecord,
 	pullRequestRecord,
 	repoFullFromUrl,
 	repoRecord,
@@ -61,8 +79,11 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	GhFetchOptions,
 	GhResult,
+	GitHubEvent,
 	GitHubGist,
+	GitHubGraphQlResponse,
 	GitHubIssue,
+	GitHubOrgMembership,
 	GitHubPullDetail,
 	GitHubRepo,
 	GitHubSearchResponse,
@@ -313,6 +334,110 @@ async function gh<T>(
 	const data = JSON.parse(raw.body) as T;
 	const nextUrl = parseNextLink(raw.link);
 	return { data, nextUrl };
+}
+
+const GRAPHQL_BASE = "https://api.github.com/graphql";
+
+/**
+ * GitHub GraphQL v4 request. Shares the same governor (pacing, retry budget,
+ * rate-limit classification) as the REST `gh()` helper — GraphQL requests
+ * count against the same primary rate limit bucket, so they must not bypass
+ * the governor that paces REST calls. `errors` in a 200 response is a
+ * GraphQL-level failure (e.g. a bad query) and is surfaced distinctly from a
+ * transport-level HTTP failure.
+ */
+async function ghGraphQl<T>(
+	ctx: StreamCtx,
+	query: string,
+	variables: Record<string, unknown>,
+	extra?: ProgressExtra,
+): Promise<T> {
+	let raw: GhRawResponse;
+	let lastResponse: GhRawResponse | undefined;
+	try {
+		const r = await ctx.httpGovernor.request<GhRawResponse, GhRawResponse>(
+			async (): Promise<GhRawResponse> => {
+				const res = await fetch(GRAPHQL_BASE, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${ctx.token}`,
+						Accept: "application/vnd.github+json",
+						"Content-Type": "application/json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": USER_AGENT,
+					},
+					body: JSON.stringify({ query, variables }),
+				});
+				const response = {
+					body: await res.text().catch((): string => ""),
+					link: null,
+					status: res.status,
+				};
+				const rateLimited = isGithubRateLimited(
+					response,
+					res.headers.get("x-ratelimit-remaining"),
+					res.headers.get("retry-after"),
+				);
+				const retryAfter = rateLimited
+					? githubRetryAfter(
+							response.status,
+							res.headers.get("x-ratelimit-remaining"),
+							res.headers.get("retry-after"),
+							res.headers.get("x-ratelimit-reset"),
+						)
+					: undefined;
+				lastResponse = {
+					...response,
+					rateLimited,
+					...(retryAfter === undefined ? {} : { retryAfter }),
+				};
+				return lastResponse;
+			},
+			(resp) => ({
+				status: resp.rateLimited ? 429 : resp.status,
+				...(resp.retryAfter === undefined
+					? {}
+					: { headers: { "retry-after": resp.retryAfter } }),
+				value: resp,
+			}),
+			{
+				onRetry: async ({ delayMs, status }) => {
+					if (status === 429) {
+						await ctx.progress(
+							`Rate limited by GitHub, retrying in ${String(Math.ceil(delayMs / 1000))}s`,
+							{ ...extra, phase: "rate_limit", rate_limit_pressure: 1 },
+						);
+					}
+				},
+			},
+		);
+		raw = r.value;
+	} catch (error) {
+		if (error instanceof Error && error.message === "github_rate_limited") {
+			throw new Error(
+				`github_http_${String(lastResponse?.status ?? 429)}: GitHub rate limit exhausted after bounded retries`,
+				{ cause: error },
+			);
+		}
+		throw error;
+	}
+	if (isGithubBadCredentials(raw)) {
+		throw new Error("github_auth_failed");
+	}
+	if (raw.status < 200 || raw.status >= 300) {
+		throw new Error(
+			`github_http_${String(raw.status)}: ${raw.body.slice(0, 200)}`,
+		);
+	}
+	const parsed = JSON.parse(raw.body) as GitHubGraphQlResponse;
+	if (parsed.errors && parsed.errors.length > 0) {
+		throw createConnectorFailure(
+			"github_malformed_response",
+			`GitHub GraphQL request failed: ${parsed.errors.map((e) => e.message ?? e.type ?? "unknown error").join("; ")}`,
+			{ retryable: true },
+		);
+	}
+	return parsed as T;
 }
 
 function parseGithubListResponse<T>(data: unknown, stream: string): T[] {
@@ -1368,6 +1493,351 @@ async function emitGistsPage(
 	return latest;
 }
 
+/**
+ * GitHub's Events API is a rolling window: the docs state it returns "the
+ * most recent 90 days" of a user's public activity, capped at 300 events /
+ * 10 pages of 100 (in practice 3 pages cover the whole window). There is no
+ * `since` query param, so incrementality is emit-side: skip any event whose
+ * `created_at` is at or before the stored cursor rather than asking the API
+ * to filter. History older than 90 days is genuinely unavailable — this is
+ * stated honestly in the manifest description, not silently truncated.
+ */
+const GITHUB_EVENTS_MAX_PAGES = 3;
+const GITHUB_EVENTS_PER_PAGE = 100;
+
+function emitEventsPage(
+	ctx: StreamCtx,
+	items: GitHubEvent[],
+	priorCreatedAt: string | undefined,
+	latestIn: string | null | undefined,
+): {
+	droppedMalformed: number;
+	emitted: Promise<void>[];
+	latest: string | null | undefined;
+	stop: boolean;
+} {
+	let latest = latestIn;
+	let droppedMalformed = 0;
+	const emitted: Promise<void>[] = [];
+	for (const e of items) {
+		if (priorCreatedAt && e.created_at && e.created_at <= priorCreatedAt) {
+			return { droppedMalformed, emitted, latest, stop: true };
+		}
+		const rec = eventRecord(e);
+		if (!rec) {
+			droppedMalformed += 1;
+			continue;
+		}
+		emitted.push(ctx.emitRecord("events", rec));
+		latest = laterIso(latest, e.created_at);
+	}
+	return { droppedMalformed, emitted, latest, stop: false };
+}
+
+export async function collectEvents(ctx: StreamCtx): Promise<void> {
+	await ctx.progress("Fetching activity events", {
+		stream: "events",
+		phase: "start",
+	});
+	const { data: me } = await gh<GitHubUser>(ctx, "/user");
+	const eventsState = ctx.state.events as
+		| { last_created_at?: string }
+		| undefined;
+	const priorCreatedAt = eventsState?.last_created_at;
+	let latestCreatedAt: string | null | undefined = priorCreatedAt;
+	let droppedTotal = 0;
+	let totalSeen = 0;
+	let stop = false;
+	for (
+		let pageIndex = 0;
+		pageIndex < GITHUB_EVENTS_MAX_PAGES && !stop;
+		pageIndex += 1
+	) {
+		const pageExtra = {
+			stream: "events",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+			cursor_present: pageIndex > 0 || Boolean(priorCreatedAt),
+		};
+		await ctx.progress("Fetching GitHub events page", pageExtra);
+		const { data } = await gh<unknown>(
+			ctx,
+			`/users/${me.login}/events/public?per_page=${String(GITHUB_EVENTS_PER_PAGE)}&page=${String(pageIndex + 1)}`,
+			{},
+			pageExtra,
+		);
+		const items = parseGithubListResponse<GitHubEvent>(data, "events");
+		totalSeen += items.length;
+		await ctx.progress("Fetched GitHub events page", {
+			stream: "events",
+			phase: "page",
+			page_index: pageIndex,
+			item_count: items.length,
+			total_seen: totalSeen,
+		});
+		const result = emitEventsPage(ctx, items, priorCreatedAt, latestCreatedAt);
+		await Promise.all(result.emitted);
+		latestCreatedAt = result.latest;
+		droppedTotal += result.droppedMalformed;
+		({ stop } = result);
+		if (items.length < GITHUB_EVENTS_PER_PAGE) {
+			break;
+		}
+	}
+	if (droppedTotal > 0) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "events",
+			reason: "github_event_missing_fields",
+			message: `dropped ${String(droppedTotal)} event(s) missing required fields (id, type, created_at, or repo name)`,
+			diagnostics: { dropped: droppedTotal, total_seen: totalSeen },
+		});
+	}
+	// The provider's own window is the honest boundary here (there is no
+	// larger inventory to compare against — everything older than 90 days is
+	// unavailable to any caller, not just this connector), so a full,
+	// non-early-stopped walk of the window can declare `considered` against
+	// what was actually enumerated this run.
+	await declareListConsidered(
+		ctx,
+		"events",
+		totalSeen,
+		totalSeen - droppedTotal,
+	);
+	await ctx.emit({
+		type: "STATE",
+		stream: "events",
+		cursor: { last_created_at: latestCreatedAt || priorCreatedAt || null },
+	});
+}
+
+const CONTRIBUTIONS_QUERY = `
+query($login: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      contributionCalendar {
+        weeks {
+          contributionDays {
+            date
+            contributionCount
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * GitHub's `contributionsCollection` accepts at most a one-year `from`/`to`
+ * window per call. A full resync (no stored cursor) walks back to the
+ * account's creation year, one calendar-year window per request, newest
+ * first — mirroring `resolvePrSearchWindows`'s per-year partitioning for the
+ * same reason (a provider-side window cap, not a search-result cap here, but
+ * the same "one window per calendar year" shape applies). An incremental run
+ * uses a single window from the stored cursor date to now.
+ */
+export function resolveContributionWindows(
+	sinceDate: string | null,
+	accountCreatedAt: string | null | undefined,
+	now: Date = new Date(),
+): Array<{ from: string; to: string }> {
+	if (sinceDate) {
+		return [{ from: `${sinceDate}T00:00:00Z`, to: now.toISOString() }];
+	}
+	const currentYear = now.getUTCFullYear();
+	const floorYear = isoYear(accountCreatedAt) ?? currentYear;
+	return prCreatedWindows(currentYear, floorYear).map(({ from, to }) => ({
+		from: `${from}T00:00:00Z`,
+		to: `${to}T23:59:59Z`,
+	}));
+}
+
+export async function collectContributions(ctx: StreamCtx): Promise<void> {
+	await ctx.progress("Fetching contribution history", {
+		stream: "contributions",
+		phase: "start",
+	});
+	const req = ctx.requested.get("contributions");
+	const contribState = ctx.state.contributions as
+		| { last_date?: string }
+		| undefined;
+	const priorDate = contribState?.last_date;
+	const sinceDate = req?.time_range?.since?.slice(0, 10) || priorDate || null;
+
+	const { data: me } = await gh<GitHubUser>(ctx, "/user");
+	const userId = String(me.id);
+	const windows = resolveContributionWindows(sinceDate, me.created_at);
+
+	let latestDate: string | null | undefined = priorDate;
+	let totalConsidered = 0;
+	for (const window of windows) {
+		const pageExtra = {
+			stream: "contributions",
+			phase: "fetch",
+			cursor_present: Boolean(sinceDate),
+		};
+		await ctx.progress("Fetching GitHub contributions window", pageExtra);
+		const response = await ghGraphQl<GitHubGraphQlResponse>(
+			ctx,
+			CONTRIBUTIONS_QUERY,
+			{ login: me.login, from: window.from, to: window.to },
+			pageExtra,
+		);
+		const days = flattenContributionDays(
+			response.data?.user?.contributionsCollection,
+		);
+		for (const day of days) {
+			if (priorDate && day.date <= priorDate) {
+				continue;
+			}
+			totalConsidered += 1;
+			await ctx.emitRecord(
+				"contributions",
+				contributionDayRecord(userId, day.date, day.count),
+			);
+			latestDate = laterIso(latestDate, day.date);
+		}
+	}
+	await declareListConsidered(
+		ctx,
+		"contributions",
+		totalConsidered,
+		totalConsidered,
+	);
+	await ctx.emit({
+		type: "STATE",
+		stream: "contributions",
+		cursor: { last_date: latestDate || priorDate || null },
+	});
+}
+
+const PINNED_ITEMS_QUERY = `
+query($login: String!) {
+  user(login: $login) {
+    pinnedItems(first: 6, types: [REPOSITORY]) {
+      nodes {
+        ... on Repository {
+          id
+          name
+          nameWithOwner
+          description
+          url
+          stargazerCount
+          forkCount
+          languages(first: 10) {
+            nodes {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * pinned_repositories: the user's own curated pin list (GraphQL
+ * `user.pinnedItems`). Small (GitHub caps pins at 6) and fully re-fetched
+ * each run — there is no upstream cursor for a pin list, and the whole
+ * point is to reflect the user's CURRENT curation, not history. Modeled as
+ * its own stream, not a nested array on `user`, because each pin has its
+ * own identity (a repository) per CONTRACTS D3.
+ */
+export async function collectPinnedRepositories(ctx: StreamCtx): Promise<void> {
+	await ctx.progress("Fetching pinned repositories", {
+		stream: "pinned_repositories",
+		phase: "start",
+	});
+	const { data: me } = await gh<GitHubUser>(ctx, "/user");
+	const response = await ghGraphQl<GitHubGraphQlResponse>(
+		ctx,
+		PINNED_ITEMS_QUERY,
+		{ login: me.login },
+		{ stream: "pinned_repositories", phase: "fetch" },
+	);
+	const nodes = flattenPinnedRepositories(response.data?.user?.pinnedItems);
+	let position = 0;
+	let dropped = 0;
+	for (const node of nodes) {
+		const rec = pinnedRepositoryRecord(node, position);
+		if (!rec) {
+			dropped += 1;
+			continue;
+		}
+		await ctx.emitRecord("pinned_repositories", rec);
+		position += 1;
+	}
+	if (dropped > 0) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "pinned_repositories",
+			reason: "github_pinned_item_missing_identity",
+			message: `dropped ${String(dropped)} pinned item(s) with no repository identity`,
+			diagnostics: { dropped, total_seen: nodes.length },
+		});
+	}
+	await declareListConsidered(
+		ctx,
+		"pinned_repositories",
+		nodes.length,
+		nodes.length - dropped,
+	);
+	await ctx.emit({
+		type: "STATE",
+		stream: "pinned_repositories",
+		cursor: { fetched_at: nowIso() },
+	});
+}
+
+/**
+ * organizations: `GET /user/orgs` membership list (needs the `read:org`
+ * scope declared in the manifest's credential help text). Small and fully
+ * re-fetched each run — membership is current state, not history.
+ */
+export async function collectOrganizations(ctx: StreamCtx): Promise<void> {
+	await ctx.progress("Fetching organization memberships", {
+		stream: "organizations",
+		phase: "start",
+	});
+	let path: string | null = "/user/orgs?per_page=100";
+	let pageIndex = 0;
+	let totalSeen = 0;
+	const visitedPaths = new Set<string>();
+	while (path) {
+		await guardGithubPagination(
+			ctx,
+			"organizations",
+			path,
+			pageIndex,
+			visitedPaths,
+		);
+		const pageExtra = {
+			stream: "organizations",
+			phase: "fetch",
+			page_index: pageIndex,
+			total_seen: totalSeen,
+		};
+		const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
+		const orgs = parseGithubListResponse<GitHubOrgMembership>(
+			page.data,
+			"organizations",
+		);
+		totalSeen += orgs.length;
+		for (const org of orgs) {
+			await ctx.emitRecord("organizations", organizationRecord(org));
+		}
+		path = page.nextUrl;
+		pageIndex += 1;
+	}
+	await declareListConsidered(ctx, "organizations", totalSeen, totalSeen);
+	await ctx.emit({
+		type: "STATE",
+		stream: "organizations",
+		cursor: { fetched_at: nowIso() },
+	});
+}
+
 export async function collectGists(ctx: StreamCtx): Promise<void> {
 	await ctx.progress("Fetching gists", { stream: "gists", phase: "start" });
 	const req = ctx.requested.get("gists");
@@ -1474,6 +1944,18 @@ if (isMainModule(import.meta.url)) {
 			}
 			if (requested.has("gists")) {
 				await collectGists(ctx);
+			}
+			if (requested.has("events")) {
+				await collectEvents(ctx);
+			}
+			if (requested.has("contributions")) {
+				await collectContributions(ctx);
+			}
+			if (requested.has("pinned_repositories")) {
+				await collectPinnedRepositories(ctx);
+			}
+			if (requested.has("organizations")) {
+				await collectOrganizations(ctx);
 			}
 
 			// Surface the controller's live rate to the operator (legibility) using the
