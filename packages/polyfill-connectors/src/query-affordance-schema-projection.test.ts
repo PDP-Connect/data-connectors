@@ -188,13 +188,13 @@ const EXPECTATIONS: Array<{
 	},
 	{
 		file: "uber",
-		stream: "receipts",
+		stream: "trips",
 		field: "driver_name",
 		check: (c) =>
 			assert.equal(
 				c.lexical_search.declared,
 				true,
-				"uber.receipts.driver_name lexical",
+				"uber.trips.driver_name lexical",
 			),
 	},
 	{

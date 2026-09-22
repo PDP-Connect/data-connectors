@@ -1799,17 +1799,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 417,
-			column: 5,
-			category: "ordered_protocol_emission",
-			note: "emitRecord('trips', ...): records must emit before this stream's STATE/DETAIL_COVERAGE",
-		},
-		{
-			path: "connectors/uber/index.ts",
-			line: 457,
-			column: 18,
+			line: 429,
+			column: 15,
 			category: "provider_pacing_backpressure",
-			note: "fetchTripDetail(): per-trip detail fetch, politely paced between trips",
+			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
 		},
 		{
 			path: "connectors/usaa/credit-card-billing-stats.test.ts",

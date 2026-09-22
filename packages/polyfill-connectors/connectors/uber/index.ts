@@ -3,20 +3,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Uber Connector (v0.3.0)
+ * PDPP Uber Connector (v0.4.0)
  *
- * Streams (D5, docs/migration/connector-cutover/CONTRACTS.md):
- *   - trips: list-level fields from riders.uber.com's Activities GraphQL
- *     response (one RECORD per Uber trip). The list feed carries only a
- *     trip id — see parsers.ts's module doc and the connector cutover
- *     report's CONTRACT-CHANGE-REQUEST for why every other declared field
- *     is honestly null here.
- *   - receipts: 1:1 per-trip detail (status, dates, addresses, driver,
- *     fare, fare_breakdown, distance, duration), fetched from GetTrip +
- *     GetReceipt. Declared with `parent_streams: ["trips"]` /
- *     `coverage_strategy: "parent_detail_accounting"` in
- *     manifests/uber.json, so a trips-only START never triggers a
- *     per-trip detail fetch (proven in integration.test.ts).
+ * Streams (D5 as revised by capability-map.json's `lead_decision_live`,
+ * docs/migration/connector-cutover/CONTRACTS.md):
+ *   - trips: one RECORD per Uber trip, hydrated from `GetTrip` (status,
+ *     requested_at, completed_at, pickup/dropoff addresses, product_type,
+ *     driver, distance, duration, fare_total). The Activities list feed
+ *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
+ *     its own hydration, so it is self-mapped: `coverage_strategy:
+ *     "checkpoint_window"` with no `state_stream`/`parent_streams` in
+ *     manifests/uber.json, and it emits its own DETAIL_COVERAGE.
+ *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
+ *     totals), fetched from `GetReceipt` only. Declared `state_stream:
+ *     "trips"` in the manifest — it rides trips' checkpoint rather than
+ *     proving its own, because it is fetched in the SAME per-trip loop as
+ *     trips and has no independent hydration lane (see the Collection
+ *     Profile spec's checkpoint-dependency section). Per the fleet-wide
+ *     `detail-coverage-state-stream-manifest-honesty` guard, a
+ *     `state_stream`-declared stream must never construct a
+ *     DETAIL_COVERAGE — this connector does not.
+ *   - A trips-only START (receipts absent from `requested`) makes ZERO
+ *     GetReceipt calls — proven in integration.test.ts. It still calls
+ *     GetTrip, because trips' own fields are hydrated from GetTrip.
  *
  * Architecture: same browser-session JSON-read pattern already proven by
  * `venmo`/`reddit` in this repo — an isolated persistent Patchright profile
@@ -45,6 +54,12 @@
  * submitted by this connector — see src/auto-login/uber.ts's doc for why.
  *
  * CHANGES
+ *   v0.4.0 (2026-09-22) — D5 revised per lead_decision_live: trips is now
+ *     hydrated per-trip from GetTrip (previously list-level-only, all
+ *     detail fields null); receipts is now GetReceipt-only (fare_breakdown,
+ *     currency, totals) and declared `state_stream: "trips"` instead of
+ *     `parent_streams: ["trips"]`, since it has no independent hydration
+ *     lane — both streams' detail is fetched in the same per-trip loop.
  *   v0.3.0 (2026-09-22) — live-verified: real Activities/GetTrip/GetReceipt
  *     shapes, real pagination (nextPageToken), real CSRF/session-type
  *     headers, collect() now navigates before fetching (fixes a real
@@ -77,8 +92,7 @@ import type {
 	UberActivity,
 	UberGetReceiptResponse,
 	UberGetTripResponse,
-	UberReceiptSummary,
-	UberTrip,
+	UberGetTripResult,
 } from "./types.ts";
 
 const RIDERS_ORIGIN = "https://riders.uber.com";
@@ -347,77 +361,104 @@ export async function fetchAllActivities(
 	return { activities: all, truncated: walk.truncated };
 }
 
-interface UberTripDetailFetch {
-	fareBreakdown: ReturnType<typeof parseFareBreakdown>;
-	receipt: UberReceiptSummary | undefined;
-	trip: UberTrip | undefined;
-}
-
-/** Fetch one trip's GetTrip + GetReceipt detail. Returns null (never throws) on a fetch/parse failure — the caller records that trip as an unhydrated key. */
-export async function fetchTripDetail(
+/** One trip's raw GetTrip result, kept as-is so the caller decides how to turn it into a trips RECORD. */
+async function fetchGetTrip(
 	fetchPath: UberPageFetch,
 	tripId: string,
-): Promise<UberTripDetailFetch | null> {
-	try {
-		const { status, body } = await fetchPath("GetTrip", GET_TRIP_QUERY, {
-			tripUUID: tripId,
-		});
-		assertUberOk(status, body, "GetTrip");
-		const parsed = JSON.parse(body) as UberGetTripResponse;
-		const getTrip = parsed.data?.getTrip;
-		if (!getTrip) {
-			return null;
-		}
-		let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
-		try {
-			const receiptRes = await fetchPath("GetReceipt", GET_RECEIPT_QUERY, {
-				tripUUID: tripId,
-				timestamp: "",
-			});
-			assertUberOk(receiptRes.status, receiptRes.body, "GetReceipt");
-			const receiptParsed = JSON.parse(
-				receiptRes.body,
-			) as UberGetReceiptResponse;
-			fareBreakdown = parseFareBreakdown(
-				receiptParsed.data?.getReceipt?.receiptData,
-			);
-		} catch {
-			// GetReceipt failure is non-fatal: the trip/receipt summary from
-			// GetTrip still hydrates most fields; fare_breakdown stays empty.
-		}
-		return {
-			fareBreakdown,
-			receipt: getTrip.receipt,
-			trip: getTrip.trip,
-		};
-	} catch {
-		return null;
-	}
+): Promise<UberGetTripResult | undefined> {
+	const { status, body } = await fetchPath("GetTrip", GET_TRIP_QUERY, {
+		tripUUID: tripId,
+	});
+	assertUberOk(status, body, "GetTrip");
+	const parsed = JSON.parse(body) as UberGetTripResponse;
+	return parsed.data?.getTrip;
 }
 
-/** Exported for integration tests — the full collect() body against an injected page fetch. */
+/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+async function fetchFareBreakdown(
+	fetchPath: UberPageFetch,
+	tripId: string,
+): Promise<ReturnType<typeof parseFareBreakdown>> {
+	const { status, body } = await fetchPath("GetReceipt", GET_RECEIPT_QUERY, {
+		tripUUID: tripId,
+		timestamp: "",
+	});
+	assertUberOk(status, body, "GetReceipt");
+	const parsed = JSON.parse(body) as UberGetReceiptResponse;
+	return parseFareBreakdown(parsed.data?.getReceipt?.receiptData);
+}
+
+/**
+ * Exported for integration tests — the full collect() body against an
+ * injected page fetch. Fetches the Activities list once for trip identity,
+ * then hydrates each requested stream from its own detail call: `trips`
+ * from `GetTrip`, `receipts` from `GetReceipt`. The dependency this D5
+ * revision requires: a trips-only grant (receipts absent from `requested`)
+ * must perform zero GetReceipt calls.
+ */
 export async function collectAllStreams(
 	ctx: BrowserCollectContext,
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<void> {
 	const { emit, emitRecord, requested } = ctx;
+	const wantTrips = requested.has("trips");
+	const wantReceipts = requested.has("receipts");
 
-	if (!requested.has("trips") && !requested.has("receipts")) {
+	if (!wantTrips && !wantReceipts) {
 		return;
 	}
 
 	const { activities, truncated } = await fetchAllActivities(fetchPath, delay);
+	const tripIds = activities
+		.map((a) => activityTripId(a))
+		.filter((id): id is string => Boolean(id))
+		.slice(0, MAX_DETAIL_FETCHES);
+	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
 
-	if (requested.has("trips")) {
-		let covered = 0;
-		for (const activity of activities) {
-			const record = tripRecord(activity);
+	const tripsRequired: string[] = [];
+	const tripsHydrated: string[] = [];
+	for (const [index, tripId] of tripIds.entries()) {
+		if (wantTrips) {
+			tripsRequired.push(tripId);
+		}
+
+		let getTrip: UberGetTripResult | undefined;
+		if (wantTrips) {
+			try {
+				getTrip = await fetchGetTrip(fetchPath, tripId);
+			} catch {
+				getTrip = undefined;
+			}
+			const record = getTrip
+				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
+				: null;
 			if (record) {
 				await emitRecord("trips", record);
-				covered += 1;
+				tripsHydrated.push(tripId);
 			}
 		}
+
+		if (wantReceipts) {
+			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
+			try {
+				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
+			} catch {
+				fareBreakdown = [];
+			}
+			const receipt = receiptRecord(tripId, fareBreakdown);
+			if (receipt) {
+				await emitRecord("receipts", receipt);
+			}
+		}
+
+		const isLast = index === tripIds.length - 1;
+		if (!isLast && (wantTrips || wantReceipts)) {
+			await delay(DETAIL_DELAY_MS);
+		}
+	}
+
+	if (wantTrips) {
 		if (truncated) {
 			await emit({
 				type: "SKIP_RESULT",
@@ -427,73 +468,35 @@ export async function collectAllStreams(
 				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
 			});
 		}
+		if (detailTruncated) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "trips",
+				reason: "trips_deferred_detail_budget",
+				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
+				diagnostics: {
+					detail_fetch_limit: MAX_DETAIL_FETCHES,
+					total_trips: activities.length,
+				},
+			});
+		}
 		await emit({ type: "STATE", stream: "trips", cursor: {} });
+		// `trips` does its own hydration (GetTrip per id), so it is
+		// self-mapped and emits its own DETAIL_COVERAGE. `receipts` is
+		// declared `state_stream: "trips"` in the manifest and must NEVER
+		// construct one — see the fleet-wide
+		// detail-coverage-state-stream-manifest-honesty guard.
 		await emit(
 			buildDetailCoverageMessage({
 				stream: "trips",
 				stateStream: "trips",
-				requiredKeys: [],
-				hydratedKeys: [],
-				considered: activities.length,
-				covered,
+				requiredKeys: tripsRequired,
+				hydratedKeys: tripsHydrated,
+				considered: tripsRequired.length,
+				covered: tripsHydrated.length,
 			}),
 		);
 	}
-
-	// The dependency this D5 requires: a trips-only grant (receipts absent
-	// from `requested`) must perform zero per-trip detail fetches.
-	if (!requested.has("receipts")) {
-		return;
-	}
-
-	const tripIds = activities
-		.map((a) => activityTripId(a))
-		.filter((id): id is string => Boolean(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const requiredKeys: string[] = [];
-	const hydratedKeys: string[] = [];
-	for (const [index, tripId] of tripIds.entries()) {
-		requiredKeys.push(tripId);
-		const detail = await fetchTripDetail(fetchPath, tripId);
-		if (detail) {
-			await emitRecord(
-				"receipts",
-				receiptRecord(
-					tripId,
-					detail.trip,
-					detail.receipt,
-					detail.fareBreakdown,
-				),
-			);
-			hydratedKeys.push(tripId);
-		}
-		if (index < tripIds.length - 1) {
-			await delay(DETAIL_DELAY_MS);
-		}
-	}
-	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
-	if (detailTruncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "receipts",
-			reason: "receipts_deferred_detail_budget",
-			message: `Uber receipts stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
-			diagnostics: {
-				detail_fetch_limit: MAX_DETAIL_FETCHES,
-				total_trips: activities.length,
-			},
-		});
-	}
-	await emit(
-		buildDetailCoverageMessage({
-			stream: "receipts",
-			stateStream: "trips",
-			requiredKeys,
-			hydratedKeys,
-			considered: requiredKeys.length,
-			covered: hydratedKeys.length,
-		}),
-	);
 }
 
 if (isMainModule(import.meta.url)) {

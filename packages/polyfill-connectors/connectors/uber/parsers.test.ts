@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
 	activityTripId,
 	parseCurrencyCents,
+	parseCurrencyCode,
 	parseDistanceMeters,
 	parseDurationSeconds,
 	parseFareBreakdown,
@@ -37,6 +38,18 @@ test("parseCurrencyCents: returns null for empty/unparseable input", () => {
 	assert.equal(parseCurrencyCents(""), null);
 	assert.equal(parseCurrencyCents(null), null);
 	assert.equal(parseCurrencyCents("Unable to display"), null);
+});
+
+test("parseCurrencyCode: resolves a known currency symbol", () => {
+	assert.equal(parseCurrencyCode("$18.42"), "USD");
+	assert.equal(parseCurrencyCode("€40.95"), "EUR");
+	assert.equal(parseCurrencyCode("CHF21.31"), "CHF");
+});
+
+test("parseCurrencyCode: returns null for an unrecognized or missing symbol", () => {
+	assert.equal(parseCurrencyCode("18.42"), null);
+	assert.equal(parseCurrencyCode(null), null);
+	assert.equal(parseCurrencyCode(""), null);
 });
 
 test("parseIsoDateTime: normalizes an ISO-8601 string", () => {
@@ -108,53 +121,7 @@ test("activityTripId: returns null with no usable identity", () => {
 	assert.equal(activityTripId({}), null);
 });
 
-test("tripRecord: emits only the id — the list feed carries no other structured field (live evidence)", () => {
-	const activity: UberActivity = {
-		uuid: "b3a1c2d4-5e6f-7081-92a3-b4c5d6e7f809",
-		title: "Example Airport",
-		subtitle: "Sep 8 • 3:58 AM",
-		description: "$43.07",
-	};
-	const record = tripRecord(activity);
-	assert.ok(record);
-	assert.equal(record.id, "b3a1c2d4-5e6f-7081-92a3-b4c5d6e7f809");
-	// Every other declared trips field is honestly null — see parsers.ts's
-	// module doc and the connector cutover report's CONTRACT-CHANGE-REQUEST.
-	assert.equal(record.status, null);
-	assert.equal(record.requested_at, null);
-	assert.equal(record.completed_at, null);
-	assert.equal(record.pickup_address, null);
-	assert.equal(record.dropoff_address, null);
-	assert.equal(record.fare_total, null);
-	assert.equal(record.fare_total_cents, null);
-	assert.equal(record.product_type, null);
-	assert.equal(record.is_surge, null);
-	// Detail-only fields must never appear on a trips record (D3).
-	assert.ok(!("distance_meters" in record));
-	assert.ok(!("duration_seconds" in record));
-	assert.ok(!("fare_breakdown" in record));
-});
-
-test("tripRecord: returns null with no usable trip id", () => {
-	assert.equal(tripRecord({}), null);
-});
-
-test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
-	const html = `<div class="fare-breakdown-wrapper"><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_trip_fare" class="fare-breakdown-name">Trip fare</span><span data-testid="fare_line_item_amount_trip_fare" class="fare-breakdown-amount">€40.95</span></div><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_promotion" class="fare-breakdown-name">Promotion</span><span data-testid="fare_line_item_amount_promotion" class="fare-breakdown-amount">-€6.44</span></div></div><div class="unrelated"><span>Not a fare line</span></div>`;
-	const lines = parseFareBreakdown(html);
-	assert.deepEqual(lines, [
-		{ amountRaw: "€40.95", label: "Trip fare", slug: "trip_fare" },
-		{ amountRaw: "-€6.44", label: "Promotion", slug: "promotion" },
-	]);
-});
-
-test("parseFareBreakdown: returns an empty array for missing/empty input", () => {
-	assert.deepEqual(parseFareBreakdown(null), []);
-	assert.deepEqual(parseFareBreakdown(""), []);
-	assert.deepEqual(parseFareBreakdown("<html>no fare lines here</html>"), []);
-});
-
-test("receiptRecord: builds a full detail record from GetTrip + fare_breakdown lines", () => {
+test("tripRecord: builds a full trips record from GetTrip's trip + receipt", () => {
 	const trip: UberTrip = {
 		beginTripTime:
 			"Thu Jan 15 2026 10:00:00 GMT+0000 (Coordinated Universal Time)",
@@ -176,25 +143,9 @@ test("receiptRecord: builds a full detail record from GetTrip + fare_breakdown l
 		duration: "35 minutes",
 		vehicleType: "UberX",
 	};
-	const fareBreakdown = [
-		{ amountRaw: "€40.95", label: "Trip fare", slug: "trip_fare" },
-		{ amountRaw: "€2.00", label: "Booking Fee", slug: "booking_fee" },
-		{ amountRaw: "€4.30", label: "Tip", slug: "tip" },
-		{ amountRaw: "-€6.44", label: "Promotion", slug: "promotion" },
-		{
-			amountRaw: "$0.64",
-			label: "Currency conversion fee",
-			slug: "currency_conversion_fee",
-		},
-		{ amountRaw: "$47.43", label: "Fare total", slug: "fare_total" },
-	];
-	const record = receiptRecord("trip-1", trip, receipt, fareBreakdown);
-	// Regression: connector-runtime.ts's emitRecord silently no-ops when
-	// `data.id` is missing, regardless of the manifest's declared
-	// primary_key — a real bug caught on this connector's first live run
-	// (2026-09-22) where every receipts RECORD was silently dropped.
+	const record = tripRecord("trip-1", trip, receipt);
+	assert.ok(record);
 	assert.equal(record.id, "trip-1");
-	assert.equal(record.trip_id, "trip-1");
 	assert.equal(record.status, "COMPLETED");
 	assert.equal(record.requested_at, "2026-01-15T10:00:00.000Z");
 	assert.equal(record.completed_at, "2026-01-15T10:35:24.000Z");
@@ -204,31 +155,30 @@ test("receiptRecord: builds a full detail record from GetTrip + fare_breakdown l
 		"Example Airport Terminal 1, 12345 Example City",
 	);
 	assert.equal(record.driver_name, "Example Driver");
-	// fare_total's own line — the settled/converted total — wins over trip.fare.
-	assert.equal(record.fare_total, "$47.43");
-	assert.equal(record.fare_total_cents, 4743);
+	assert.equal(record.fare_total, "€41.36");
+	assert.equal(record.fare_total_cents, 4136);
 	assert.equal(record.distance_meters, 29_490);
 	assert.equal(record.duration_seconds, 2100);
 	assert.equal(record.product_type, "UberX");
 	assert.equal(record.is_surge, false);
-	// fare_total's own line is excluded from the itemized breakdown (it IS the total).
-	assert.deepEqual(record.fare_breakdown, [
-		{ label: "Trip fare", amount_cents: 4095 },
-		{ label: "Booking Fee", amount_cents: 200 },
-		{ label: "Tip", amount_cents: 430 },
-		{ label: "Promotion", amount_cents: -644 },
-		{ label: "Currency conversion fee", amount_cents: 64 },
-	]);
+	// Detail-only fields that belong to receipts must never appear here (D3).
+	assert.ok(!("fare_breakdown" in record));
+	assert.ok(!("currency" in record));
 });
 
-test("receiptRecord: falls back to trip.fare when no fare_total breakdown line exists", () => {
-	const record = receiptRecord("trip-2", { fare: "$9.00" }, undefined, []);
-	assert.equal(record.fare_total, "$9.00");
-	assert.equal(record.fare_total_cents, 900);
+test("tripRecord: falls back to vehicleDisplayName when receipt carries no vehicleType", () => {
+	const record = tripRecord(
+		"trip-2",
+		{ vehicleDisplayName: "UberX" },
+		undefined,
+	);
+	assert.ok(record);
+	assert.equal(record.product_type, "UberX");
 });
 
-test("receiptRecord: nulls every field cleanly with no trip/receipt/fare_breakdown evidence", () => {
-	const record = receiptRecord("trip-4", undefined, undefined, []);
+test("tripRecord: nulls every field cleanly with no trip evidence beyond an id", () => {
+	const record = tripRecord("trip-3", {}, undefined);
+	assert.ok(record);
 	assert.equal(record.status, null);
 	assert.equal(record.requested_at, null);
 	assert.equal(record.completed_at, null);
@@ -241,5 +191,75 @@ test("receiptRecord: nulls every field cleanly with no trip/receipt/fare_breakdo
 	assert.equal(record.duration_seconds, null);
 	assert.equal(record.product_type, null);
 	assert.equal(record.is_surge, null);
-	assert.deepEqual(record.fare_breakdown, []);
+});
+
+test("tripRecord: returns null when GetTrip produced no trip at all", () => {
+	assert.equal(tripRecord("trip-4", undefined, undefined), null);
+});
+
+test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
+	const html = `<div class="fare-breakdown-wrapper"><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_trip_fare" class="fare-breakdown-name">Trip fare</span><span data-testid="fare_line_item_amount_trip_fare" class="fare-breakdown-amount">€40.95</span></div><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_promotion" class="fare-breakdown-name">Promotion</span><span data-testid="fare_line_item_amount_promotion" class="fare-breakdown-amount">-€6.44</span></div></div><div class="unrelated"><span>Not a fare line</span></div>`;
+	const lines = parseFareBreakdown(html);
+	assert.deepEqual(lines, [
+		{ amountRaw: "€40.95", label: "Trip fare", slug: "trip_fare" },
+		{ amountRaw: "-€6.44", label: "Promotion", slug: "promotion" },
+	]);
+});
+
+test("parseFareBreakdown: returns an empty array for missing/empty input", () => {
+	assert.deepEqual(parseFareBreakdown(null), []);
+	assert.deepEqual(parseFareBreakdown(""), []);
+	assert.deepEqual(parseFareBreakdown("<html>no fare lines here</html>"), []);
+});
+
+test("receiptRecord: builds a full detail record from fare_breakdown lines", () => {
+	const fareBreakdown = [
+		{ amountRaw: "€40.95", label: "Trip fare", slug: "trip_fare" },
+		{ amountRaw: "€2.00", label: "Booking Fee", slug: "booking_fee" },
+		{ amountRaw: "€4.30", label: "Tip", slug: "tip" },
+		{ amountRaw: "-€6.44", label: "Promotion", slug: "promotion" },
+		{
+			amountRaw: "$0.64",
+			label: "Currency conversion fee",
+			slug: "currency_conversion_fee",
+		},
+		{ amountRaw: "$47.43", label: "Fare total", slug: "fare_total" },
+	];
+	const record = receiptRecord("trip-1", fareBreakdown);
+	assert.ok(record);
+	// Regression: connector-runtime.ts's emitRecord silently no-ops when
+	// `data.id` is missing, regardless of the manifest's declared
+	// primary_key — a real bug caught on this connector's first live run
+	// (2026-09-22) where every receipts RECORD was silently dropped.
+	assert.equal(record.id, "trip-1");
+	assert.equal(record.trip_id, "trip-1");
+	// fare_total's own line — the settled/converted total — is the source of truth.
+	assert.equal(record.fare_total, "$47.43");
+	assert.equal(record.fare_total_cents, 4743);
+	assert.equal(record.currency, "USD");
+	// fare_total's own line is excluded from the itemized breakdown (it IS the total).
+	assert.deepEqual(record.fare_breakdown, [
+		{ label: "Trip fare", amount_cents: 4095 },
+		{ label: "Booking Fee", amount_cents: 200 },
+		{ label: "Tip", amount_cents: 430 },
+		{ label: "Promotion", amount_cents: -644 },
+		{ label: "Currency conversion fee", amount_cents: 64 },
+	]);
+});
+
+test("receiptRecord: falls back to null fare_total when no fare_total line exists", () => {
+	const record = receiptRecord("trip-2", [
+		{ amountRaw: "$2.00", label: "Booking Fee", slug: "booking_fee" },
+	]);
+	assert.ok(record);
+	assert.equal(record.fare_total, null);
+	assert.equal(record.fare_total_cents, null);
+	assert.equal(record.currency, null);
+	assert.deepEqual(record.fare_breakdown, [
+		{ label: "Booking Fee", amount_cents: 200 },
+	]);
+});
+
+test("receiptRecord: returns null with no fare-breakdown evidence at all", () => {
+	assert.equal(receiptRecord("trip-3", []), null);
 });

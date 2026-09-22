@@ -19,7 +19,10 @@ export interface UberActivityButton {
  * NO structured date, status, currency, or vehicle-type field — only a
  * human-display `subtitle` ("Sep 8 • 3:58 AM", no year) and `description`
  * (a currency-prefixed fare string, sometimes suffixed " • N stop(s)").
- * `title` is the trip's destination/place name, not a full address.
+ * `title` is the trip's destination/place name, not a full address. The
+ * list feed's only durable use here is discovering trip identity for the
+ * `GetTrip`/`GetReceipt` detail fetches — see the connector cutover
+ * report's "lead_decision_live" revision to D5.
  */
 export interface UberActivity {
 	uuid?: string;

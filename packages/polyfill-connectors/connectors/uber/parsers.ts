@@ -7,18 +7,13 @@
  * fetch, session handling, and pagination loop live in index.ts.
  *
  * Ground truth: a real live session captured 2026-09-22 (see the connector
- * cutover report's "Live evidence" section). The Activities list feed
- * carries NO structured date, status, currency, or vehicle-type field —
- * only `title` (destination name), `subtitle` (a no-year display
- * date/time), and `description` (a currency-prefixed fare display
- * string). Every field capability-map.json's `uber.trips` field_map
- * mapped to `trips.status` / `.requested_at` / `.completed_at` /
- * `.pickup_address` / `.dropoff_address` / `.fare_total_cents` /
- * `.currency` / `.product_type` / `.city` / `.is_surge` is, in reality,
- * ONLY available from the per-trip GetTrip/GetReceipt detail calls — see
- * the connector cutover report's CONTRACT-CHANGE-REQUEST. `tripRecord`
- * therefore emits those fields as `null` (honest: the list genuinely does
- * not carry them), and `receiptRecord` carries the real values.
+ * cutover report's "Live evidence" section and capability-map.json's
+ * `lead_decision_live` for uber). The Activities list feed carries only a
+ * trip UUID — no structured date, status, currency, address, or
+ * vehicle-type field. Every field the capability map's `uber.trips`
+ * field_map declared is therefore hydrated per-trip from `GetTrip`
+ * (`tripRecord`), not read off the list row. `GetReceipt`'s `receiptData`
+ * HTML supplies the itemized fare breakdown consumed by `receiptRecord`.
  */
 
 import type { RecordData } from "../../src/connector-runtime.ts";
@@ -38,6 +33,14 @@ const CENTS_MULTIPLIER = 100;
 const TRIP_URL_UUID_RE = /\/trips\/([a-f0-9-]+)/i;
 const FARE_LINE_ITEM_RE =
 	/data-testid="fare_line_item_label_([a-z0-9_]+)"[^>]*>([^<]+)<[\s\S]*?data-testid="fare_line_item_amount_\1"[^>]*>([^<]+)</g;
+const CURRENCY_SYMBOL_RE = /^\s*(\$|€|£|CHF|¥)/;
+const CURRENCY_SYMBOL_TO_CODE: Record<string, string> = {
+	$: "USD",
+	"€": "EUR",
+	"£": "GBP",
+	CHF: "CHF",
+	"¥": "JPY",
+};
 
 /** "$18.42" / "-$4.50" / "(4.50)" / "CHF21.31" / "€40.95" -> integer cents. Null on unparseable input — never guessed. */
 export function parseCurrencyCents(
@@ -55,6 +58,25 @@ export function parseCurrencyCents(
 	}
 	const cents = Math.round(Number(m[1]) * CENTS_MULTIPLIER);
 	return negative ? -cents : cents;
+}
+
+/**
+ * A currency-symbol-prefixed display string ("$18.42", "CHF21.31", "€40.95")
+ * -> an ISO 4217 code, from the closed symbol table observed live. Null for
+ * an unrecognized or ambiguous symbol (e.g. a bare "$" cannot itself
+ * disambiguate USD/CAD/AUD) — never guessed.
+ */
+export function parseCurrencyCode(
+	raw: string | null | undefined,
+): string | null {
+	if (!raw) {
+		return null;
+	}
+	const m = String(raw).match(CURRENCY_SYMBOL_RE);
+	if (!m?.[1]) {
+		return null;
+	}
+	return CURRENCY_SYMBOL_TO_CODE[m[1]] ?? null;
 }
 
 /**
@@ -87,51 +109,6 @@ export function activityTripId(activity: UberActivity): string | null {
 		}
 	}
 	return null;
-}
-
-/**
- * List-level `trips` record from one Activities GraphQL activity row.
- * The list feed does not carry status, a parseable date, an address split,
- * currency, product type, city, or a surge flag (see module doc) — those
- * fields are declared `null` here, honestly, not guessed from `subtitle`'s
- * no-year display string or `description`'s currency-prefixed fare text.
- */
-export function tripRecord(activity: UberActivity): RecordData | null {
-	const id = activityTripId(activity);
-	if (!id) {
-		return null;
-	}
-	return {
-		id,
-		status: null,
-		requested_at: null,
-		completed_at: null,
-		pickup_address: null,
-		dropoff_address: null,
-		fare_total: null,
-		fare_total_cents: null,
-		product_type: null,
-		is_surge: null,
-	};
-}
-
-/** Extract `{label, amountCents}` fare-breakdown lines from a GetReceipt `receiptData` HTML blob via structural `data-testid` attributes (never text-regex over rendered content — see authoring guide §2). */
-export function parseFareBreakdown(
-	receiptDataHtml: string | null | undefined,
-): UberFareBreakdownLine[] {
-	if (!receiptDataHtml) {
-		return [];
-	}
-	const lines: UberFareBreakdownLine[] = [];
-	for (const m of receiptDataHtml.matchAll(FARE_LINE_ITEM_RE)) {
-		const slug = m[1];
-		const label = m[2]?.trim();
-		const amountRaw = m[3]?.trim();
-		if (slug && label && amountRaw) {
-			lines.push({ amountRaw, label, slug });
-		}
-	}
-	return lines;
 }
 
 const KILOMETERS_TO_METERS = 1000;
@@ -180,24 +157,81 @@ export function parseDurationSeconds(
 }
 
 /**
- * 1:1 `receipts` record per trip, built from `GetTrip`'s `trip`/`receipt`
- * plus the fare-breakdown lines parsed from `GetReceipt`'s HTML blob.
- * Every non-`fare_total` line makes up `fare_breakdown`; the `fare_total`
- * line (when present) supplies the receipt's headline amount, since
- * `trip.fare` can reflect a different (pre-conversion) currency than the
- * settled total — see `UberGetReceiptResponse`'s doc on mixed-currency
- * receipts.
+ * `trips` record for one trip, hydrated from `GetTrip`'s `trip`/`receipt`
+ * (D5 revised per capability-map.json's `lead_decision_live`: the Activities
+ * list carries only a trip id, so every other field comes from GetTrip, not
+ * the list row). Returns null when GetTrip produced no usable trip — the
+ * caller records that trip as an unhydrated key rather than emitting a
+ * mostly-null record.
  */
-export function receiptRecord(
+export function tripRecord(
 	tripId: string,
 	trip: UberTrip | undefined,
 	receiptSummary: UberReceiptSummary | undefined,
+): RecordData | null {
+	if (!trip) {
+		return null;
+	}
+	const waypoints = trip.waypoints ?? [];
+	return {
+		id: tripId,
+		status: trip.status ?? null,
+		requested_at: parseIsoDateTime(trip.beginTripTime),
+		completed_at: parseIsoDateTime(trip.dropoffTime),
+		pickup_address: waypoints[0] ?? null,
+		dropoff_address:
+			waypoints.length > 0 ? waypoints[waypoints.length - 1] : null,
+		driver_name: trip.driver || null,
+		fare_total: trip.fare ?? null,
+		fare_total_cents: parseCurrencyCents(trip.fare),
+		distance_meters: parseDistanceMeters(
+			receiptSummary?.distance,
+			receiptSummary?.distanceLabel,
+		),
+		duration_seconds: parseDurationSeconds(receiptSummary?.duration),
+		product_type:
+			receiptSummary?.vehicleType || trip.vehicleDisplayName || null,
+		is_surge: trip.isSurgeTrip ?? null,
+	};
+}
+
+/** Extract `{label, amountCents}` fare-breakdown lines from a GetReceipt `receiptData` HTML blob via structural `data-testid` attributes (never text-regex over rendered content — see authoring guide §2). */
+export function parseFareBreakdown(
+	receiptDataHtml: string | null | undefined,
+): UberFareBreakdownLine[] {
+	if (!receiptDataHtml) {
+		return [];
+	}
+	const lines: UberFareBreakdownLine[] = [];
+	for (const m of receiptDataHtml.matchAll(FARE_LINE_ITEM_RE)) {
+		const slug = m[1];
+		const label = m[2]?.trim();
+		const amountRaw = m[3]?.trim();
+		if (slug && label && amountRaw) {
+			lines.push({ amountRaw, label, slug });
+		}
+	}
+	return lines;
+}
+
+/**
+ * 1:1 `receipts` record per trip, built entirely from the fare-breakdown
+ * lines parsed out of `GetReceipt`'s HTML blob (fare_breakdown, currency,
+ * and the receipt's headline total) — see capability-map.json's
+ * `uber.receipts` field_map. Returns null when `GetReceipt` produced no
+ * fare-breakdown evidence at all (neither a total line nor any itemized
+ * line) — an honest "not hydrated" signal, not a record of all nulls.
+ */
+export function receiptRecord(
+	tripId: string,
 	fareBreakdown: UberFareBreakdownLine[],
-): RecordData {
+): RecordData | null {
+	if (fareBreakdown.length === 0) {
+		return null;
+	}
 	const totalLine = fareBreakdown.find((l) => l.slug === "fare_total");
-	const fareRaw = totalLine?.amountRaw ?? trip?.fare ?? null;
 	const breakdownLines = fareBreakdown.filter((l) => l.slug !== "fare_total");
-	const waypoints = trip?.waypoints ?? [];
+	const fareRaw = totalLine?.amountRaw ?? null;
 	return {
 		// The runtime's emit gate requires a literal `id` field regardless of
 		// the manifest's declared `primary_key` (see connector-runtime.ts's
@@ -207,23 +241,9 @@ export function receiptRecord(
 		// receipts RECORD was silently dropped because this field was missing.
 		id: tripId,
 		trip_id: tripId,
-		status: trip?.status ?? null,
-		requested_at: parseIsoDateTime(trip?.beginTripTime),
-		completed_at: parseIsoDateTime(trip?.dropoffTime),
-		pickup_address: waypoints[0] ?? null,
-		dropoff_address:
-			waypoints.length > 0 ? waypoints[waypoints.length - 1] : null,
-		driver_name: trip?.driver || null,
+		currency: parseCurrencyCode(fareRaw),
 		fare_total: fareRaw,
 		fare_total_cents: parseCurrencyCents(fareRaw),
-		distance_meters: parseDistanceMeters(
-			receiptSummary?.distance,
-			receiptSummary?.distanceLabel,
-		),
-		duration_seconds: parseDurationSeconds(receiptSummary?.duration),
-		product_type:
-			receiptSummary?.vehicleType || trip?.vehicleDisplayName || null,
-		is_surge: trip?.isSurgeTrip ?? null,
 		fare_breakdown: breakdownLines.map((l) => ({
 			label: l.label,
 			amount_cents: parseCurrencyCents(l.amountRaw),
