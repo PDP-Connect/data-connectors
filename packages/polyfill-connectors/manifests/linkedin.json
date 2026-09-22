@@ -37,6 +37,7 @@
 	"streams": [
 		{
 			"name": "profile",
+			"required": true,
 			"description": "The user's LinkedIn profile.",
 			"display": {
 				"label": "Your LinkedIn profile",
@@ -104,6 +105,7 @@
 		},
 		{
 			"name": "experience",
+			"required": true,
 			"description": "Work experience entries.",
 			"display": {
 				"label": "Your work experience",
@@ -163,6 +165,7 @@
 		},
 		{
 			"name": "education",
+			"required": true,
 			"description": "Education entries.",
 			"display": {
 				"label": "Your education",
@@ -257,6 +260,7 @@
 		},
 		{
 			"name": "languages",
+			"required": true,
 			"description": "Languages listed on the profile.",
 			"display": {
 				"label": "Your languages",
@@ -295,6 +299,7 @@
 		},
 		{
 			"name": "connections",
+			"required": true,
 			"description": "The owner's first-degree LinkedIn connections.",
 			"display": {
 				"label": "Your connections",
@@ -335,7 +340,8 @@
 			"incremental": false,
 			"query": {
 				"search": {
-					"lexical_fields": ["full_name", "headline"]
+					"lexical_fields": ["full_name", "headline"],
+					"semantic_fields": ["headline"]
 				},
 				"range_filters": {
 					"connected_at": ["gte", "gt", "lte", "lt"]

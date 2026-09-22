@@ -355,6 +355,7 @@
 					"no_orders_text": "This account shows no orders to import",
 					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
 					"pagination_exhausted": "We reached the end of the available pages",
+					"profile_page_read_failed": "We couldn't read the page to get your account profile",
 					"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
@@ -5692,6 +5693,7 @@
 					},
 					{
 						"name": "events",
+						"required": true,
 						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
 						"display": {
 							"label": "Your recent activity",
@@ -5749,6 +5751,7 @@
 					},
 					{
 						"name": "contributions",
+						"required": true,
 						"description": "Daily contribution counts from the authenticated user's contribution graph, one record per calendar day (UTC), collected via the GitHub GraphQL contributionsCollection.",
 						"display": {
 							"label": "Your contribution history",
@@ -5799,6 +5802,7 @@
 					},
 					{
 						"name": "pinned_repositories",
+						"required": true,
 						"description": "The authenticated user's curated pinned-repository list (GraphQL user.pinnedItems, Repository nodes only; GitHub caps this at 6). Fully re-fetched each run to reflect current curation; there is no upstream cursor for a pin list.",
 						"display": {
 							"label": "Your pinned repositories",
@@ -5851,7 +5855,7 @@
 						"incremental": false,
 						"query": {
 							"search": {
-								"lexical_fields": ["full_name", "description", "languages"],
+								"lexical_fields": ["full_name", "name", "description"],
 								"semantic_fields": ["description"]
 							},
 							"range_filters": {
@@ -5868,6 +5872,7 @@
 					},
 					{
 						"name": "organizations",
+						"required": true,
 						"description": "GitHub organizations the authenticated user is a member of (GET /user/orgs, requires the read:org scope). Fully re-fetched each run to reflect current membership.",
 						"display": {
 							"label": "Your organization memberships",
@@ -5973,8 +5978,10 @@
 					}
 				],
 				"reason_display_messages": {
+					"github_event_missing_fields": "We skipped some activity events that were missing required details",
 					"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
 					"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
+					"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
 					"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
 					"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
 					"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"
@@ -9902,6 +9909,7 @@
 				"streams": [
 					{
 						"name": "profile",
+						"required": true,
 						"description": "The user's LinkedIn profile.",
 						"display": {
 							"label": "Your LinkedIn profile",
@@ -9974,6 +9982,7 @@
 					},
 					{
 						"name": "experience",
+						"required": true,
 						"description": "Work experience entries.",
 						"display": {
 							"label": "Your work experience",
@@ -10038,6 +10047,7 @@
 					},
 					{
 						"name": "education",
+						"required": true,
 						"description": "Education entries.",
 						"display": {
 							"label": "Your education",
@@ -10132,6 +10142,7 @@
 					},
 					{
 						"name": "languages",
+						"required": true,
 						"description": "Languages listed on the profile.",
 						"display": {
 							"label": "Your languages",
@@ -10170,6 +10181,7 @@
 					},
 					{
 						"name": "connections",
+						"required": true,
 						"description": "The owner's first-degree LinkedIn connections.",
 						"display": {
 							"label": "Your connections",
@@ -10210,7 +10222,8 @@
 						"incremental": false,
 						"query": {
 							"search": {
-								"lexical_fields": ["full_name", "headline"]
+								"lexical_fields": ["full_name", "headline"],
+								"semantic_fields": ["headline"]
 							},
 							"range_filters": {
 								"connected_at": ["gte", "gt", "lte", "lt"]
@@ -10644,7 +10657,7 @@
 								"lexical_fields": ["username", "full_name"]
 							}
 						},
-						"coverage_strategy": "full_scan",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -10693,7 +10706,7 @@
 								"group_by": ["kind"]
 							}
 						},
-						"coverage_strategy": "full_scan",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
 				],
@@ -19275,6 +19288,12 @@
 							"resources": true
 						},
 						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "description"],
+								"semantic_fields": ["title", "description"]
+							}
+						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
 					},
@@ -19332,6 +19351,12 @@
 							"resources": true
 						},
 						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							}
+						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
 					},
@@ -19383,6 +19408,12 @@
 							"resources": true
 						},
 						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							}
+						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
 					},
@@ -19601,6 +19632,10 @@
 						},
 						"incremental": true,
 						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							},
 							"range_filters": {
 								"watched_at": ["gte", "gt", "lte", "lt"]
 							},

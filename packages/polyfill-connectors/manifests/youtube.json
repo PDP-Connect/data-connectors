@@ -96,6 +96,12 @@
 			"primary_key": ["id"],
 			"selection": { "fields": true, "resources": true },
 			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "description"],
+					"semantic_fields": ["title", "description"]
+				}
+			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
 		},
@@ -130,6 +136,12 @@
 			"primary_key": ["id"],
 			"selection": { "fields": true, "resources": true },
 			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				}
+			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
 		},
@@ -162,6 +174,12 @@
 			"primary_key": ["id"],
 			"selection": { "fields": true, "resources": true },
 			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				}
+			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
 		},
@@ -298,6 +316,10 @@
 			"selection": { "fields": true, "resources": true, "time_range": true },
 			"incremental": true,
 			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				},
 				"range_filters": {
 					"watched_at": ["gte", "gt", "lte", "lt"]
 				},

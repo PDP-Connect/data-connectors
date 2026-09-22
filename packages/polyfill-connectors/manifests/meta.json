@@ -248,7 +248,7 @@
 					"lexical_fields": ["username", "full_name"]
 				}
 			},
-			"coverage_strategy": "full_scan",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -297,7 +297,7 @@
 					"group_by": ["kind"]
 				}
 			},
-			"coverage_strategy": "full_scan",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		}
 	],
