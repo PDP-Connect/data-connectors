@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
@@ -13,6 +13,28 @@
 			"browser": {
 				"required": true
 			}
+		}
+	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "api_key",
+			"label": "USDA FoodData Central API key (optional)",
+			"description": "Optional. A free USDA FoodData Central API key improves nutrition-lookup coverage and rate limits for products the Whole Foods product page does not have nutrition facts for. Leave blank to use the public rate-limited DEMO_KEY.",
+			"submit_label": "Save USDA API key",
+			"fields": [
+				{
+					"name": "usda_api_key",
+					"label": "USDA FoodData Central API key",
+					"type": "password",
+					"required": false,
+					"secret": true,
+					"autocomplete": "off",
+					"help_url": "https://fdc.nal.usda.gov/api-key-signup",
+					"help_text": "Get a free key at https://fdc.nal.usda.gov/api-key-signup. Without one, nutrition lookups use the shared DEMO_KEY, which is more rate-limited.",
+					"env": ["USDA_API_KEY"]
+				}
+			]
 		}
 	},
 	"capabilities": {
@@ -32,11 +54,51 @@
 	},
 	"streams": [
 		{
+			"name": "profile",
+			"required": false,
+			"description": "The Amazon account used to place Whole Foods orders.",
+			"display": {
+				"label": "Your Amazon account",
+				"detail": "Name and email of the Amazon account whose order history was scraped."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"email": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
 			"name": "orders",
+			"required": true,
 			"description": "Whole Foods orders via Amazon.",
 			"display": {
 				"label": "Your Whole Foods orders",
-				"detail": "Order date, store, total, delivery status. Uses your Amazon login."
+				"detail": "Order date, order URL, total, item count, status. Uses your Amazon login."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -47,13 +109,14 @@
 					},
 					"order_date": {
 						"type": ["string", "null"],
-						"format": "date-time",
+						"format": "date",
 						"x_pdpp_role": "event-time"
 					},
-					"store": {
-						"type": ["string", "null"]
+					"order_url": {
+						"type": ["string", "null"],
+						"format": "uri"
 					},
-					"method": {
+					"status": {
 						"type": ["string", "null"]
 					},
 					"total_cents": {
@@ -74,16 +137,12 @@
 			},
 			"incremental": true,
 			"query": {
-				"search": {
-					"lexical_fields": ["store"]
-				},
 				"range_filters": {
 					"order_date": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
-					"group_by_time": ["order_date"],
-					"group_by": ["method"]
+					"group_by_time": ["order_date"]
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
@@ -91,10 +150,11 @@
 		},
 		{
 			"name": "order_items",
-			"description": "Items within Whole Foods orders, with nutrition when available.",
+			"required": true,
+			"description": "Items within Whole Foods orders. Nutrition is a separate typed stream (see `nutrition`), joined on `product_id`.",
 			"display": {
 				"label": "Your Whole Foods items",
-				"detail": "Product name, quantity, price, nutrition info (USDA/API-sourced)."
+				"detail": "Product name, quantity, price."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -110,19 +170,97 @@
 						"type": "string",
 						"x_pdpp_role": "primary-title"
 					},
+					"product_id": {
+						"type": ["string", "null"]
+					},
+					"product_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"image_url": {
+						"type": ["string", "null"]
+					},
 					"quantity": {
 						"type": ["number", "null"]
 					},
 					"unit_price_cents": {
 						"type": ["integer", "null"]
-					},
-					"nutrition": {
-						"type": ["object", "null"]
 					}
 				},
 				"required": ["id", "order_id", "name"]
 			},
 			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "nutrition",
+			"required": false,
+			"description": "Typed nutrition facts per unique product, sourced from the Whole Foods product page first, then the USDA FoodData Central API. Joins to `order_items` on `product_id`.",
+			"display": {
+				"label": "Nutrition facts",
+				"detail": "Calories, macros, sodium, fiber, sugar, serving size — from the Whole Foods product page or USDA FoodData Central."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"product_id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"source": {
+						"type": "string",
+						"enum": ["wholefoods_product_page", "usda_fdc"]
+					},
+					"confidence": {
+						"type": "string",
+						"enum": ["high", "medium", "low"]
+					},
+					"calories": {
+						"type": ["number", "null"]
+					},
+					"protein_g": {
+						"type": ["number", "null"]
+					},
+					"carbs_g": {
+						"type": ["number", "null"]
+					},
+					"fat_g": {
+						"type": ["number", "null"]
+					},
+					"sodium_mg": {
+						"type": ["number", "null"]
+					},
+					"fiber_g": {
+						"type": ["number", "null"]
+					},
+					"sugar_g": {
+						"type": ["number", "null"]
+					},
+					"serving_size": {
+						"type": ["string", "null"]
+					},
+					"servings_per_container": {
+						"type": ["number", "null"]
+					}
+				},
+				"required": ["product_id", "source", "confidence"]
+			},
+			"primary_key": ["product_id"],
 			"selection": {
 				"fields": true,
 				"resources": true

@@ -148,6 +148,10 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			username: ["VENMO_USERNAME"],
 		},
 	},
+	wholefoods: {
+		credentialKind: "api_key",
+		secretEnvVars: ["USDA_API_KEY"],
+	},
 	ynab: {
 		credentialKind: "personal_access_token",
 		secretEnvVars: ["YNAB_PERSONAL_ACCESS_TOKEN", "YNAB_PAT"],
