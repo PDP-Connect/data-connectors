@@ -29,8 +29,11 @@ import {
 } from "@pdpp/collector-runtime";
 
 import type { ArtifactCaptureContext } from "../../src/artifact-capture.ts";
-import { emitToolResultFile } from "./index.ts";
-import { TOOL_RESULT_PREVIEW_CHARS } from "./parsers.ts";
+import { buildAttachmentRecord, emitToolResultFile } from "./index.ts";
+import {
+	ATTACHMENT_PREVIEW_CHARS,
+	TOOL_RESULT_PREVIEW_CHARS,
+} from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
 const roots: string[] = [];
@@ -240,5 +243,81 @@ describe("claude_code artifact capture", () => {
 		assert.equal(first.artifact_capture, "captured");
 		assert.equal(second.artifact_capture, "captured");
 		h.outbox.close();
+	});
+});
+
+describe("claude_code inline attachment artifact capture (tool_use/tool_result JSONL content)", () => {
+	it("retains the complete body of an inline tool_result far larger than the preview", async () => {
+		const h = makeHarness();
+		const bigText = "y".repeat(ATTACHMENT_PREVIEW_CHARS * 20);
+		const record = await buildAttachmentRecord(
+			{
+				attachment: { content: bigText },
+				parentUuid: null,
+				sessionId: SESSION_ID,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				type: "attachment",
+				uuid: "6a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f6",
+			},
+			SESSION_ID,
+			"6a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f6",
+			h.captureContext,
+		);
+		assert.equal(record.artifact_capture, "captured");
+		assert.equal(
+			record.artifact_sha256,
+			createHash("sha256").update(bigText, "utf8").digest("hex"),
+		);
+		assert.deepEqual(
+			await readFile(h.spool.pathFor(record.artifact_sha256 as string)),
+			Buffer.from(bigText, "utf8"),
+		);
+		// The existing preview stays exactly as bounded as before.
+		const preview = record.content_preview as string;
+		assert.ok(preview.length <= ATTACHMENT_PREVIEW_CHARS + 1);
+		assert.equal(validateRecord("attachments", record).ok, true);
+		h.outbox.close();
+	});
+
+	it("claims no capture for empty content — matches the file-backed path's null-content behavior", async () => {
+		const h = makeHarness();
+		const record = await buildAttachmentRecord(
+			{
+				attachment: {},
+				parentUuid: null,
+				sessionId: SESSION_ID,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				type: "permission-mode",
+				uuid: "7a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f7",
+			},
+			SESSION_ID,
+			"7a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f7",
+			h.captureContext,
+		);
+		assert.equal(record.artifact_capture, null);
+		assert.equal(record.artifact_sha256, null);
+		assert.equal(record.blob_ref, null);
+		assert.equal(validateRecord("attachments", record).ok, true);
+		h.outbox.close();
+	});
+
+	it("reports honestly when no capture context is wired — record still emits", async () => {
+		const record = await buildAttachmentRecord(
+			{
+				attachment: { content: "still searchable inline" },
+				parentUuid: null,
+				sessionId: SESSION_ID,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				type: "attachment",
+				uuid: "8a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f8",
+			},
+			SESSION_ID,
+			"8a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f8",
+			null,
+		);
+		assert.equal(record.artifact_capture, "unavailable");
+		assert.equal(record.artifact_sha256, null);
+		assert.equal(record.content_preview, "still searchable inline");
+		assert.equal(validateRecord("attachments", record).ok, true);
 	});
 });

@@ -202,7 +202,7 @@ test("claude_code inventory streams emit safe metadata, one STATE per stream, an
 		Array.isArray(stores),
 		"successful collection must emit the committed coverage snapshot",
 	);
-	assert.equal(stores.length, 9);
+	assert.equal(stores.length, 10);
 	assert(!JSON.stringify(coverageState).includes("secret-token"));
 	assert(!JSON.stringify(coverageState).includes("reason"));
 

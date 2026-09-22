@@ -455,6 +455,10 @@ function updateSessionAccumulator(
 		cwd: obs.cwd,
 		entrypoint: obs.entrypoint,
 		gitBranch: obs.gitBranch,
+		// This frozen pre-tranche-c benchmark snapshot predates the `title`
+		// field; it never reads `obs.title` (also frozen), so this is a
+		// type-compat shim, not a behavior claim.
+		title: null,
 		userType: obs.userType,
 		version: obs.version,
 	});
