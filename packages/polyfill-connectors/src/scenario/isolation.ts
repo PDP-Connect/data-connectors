@@ -670,6 +670,18 @@ export interface SpawnWithNetworkIsolationOptions extends SpawnOptions {
 	 */
 	filesystemBindPath?: string;
 	/**
+	 * Additional host paths to re-expose READ-ONLY inside the default-deny
+	 * root — a filesystem connector's manifest-declared import directory
+	 * (`setup.manual_or_upload.import_dir_env_var`), resolved by the caller.
+	 * Routed through `requiredFilesystemBinds()` so they are bound, socket-
+	 * scanned, and post-pivot verified read-only exactly like the base set.
+	 * The caller owns disclosure: a run that needed one of these must say so
+	 * in its claim (see claims.ts's `FilesystemInputLimitation`), because the
+	 * isolation boundary no longer excludes that path. Ignored when `isolate`
+	 * is falsy.
+	 */
+	extraReadOnlyBinds?: readonly string[];
+	/**
 	 * When true, wrap the spawn in `unshare --map-root-user --net` with
 	 * loopback brought up first, so `cmd` and every descendant it spawns have
 	 * no external network reachability. When false (or omitted), this is a
@@ -825,7 +837,9 @@ interface FilesystemBind {
  * there surfaces as bwrap's own loud, diagnostic bind error, never a silent
  * widening of the sandbox.
  */
-export function requiredFilesystemBinds(): readonly FilesystemBind[] {
+export function requiredFilesystemBinds(
+	extraReadOnlyPaths: readonly string[] = [],
+): readonly FilesystemBind[] {
 	const nodeDir = dirname(process.execPath);
 	const binds: FilesystemBind[] = [
 		{ path: REPO_ROOT, mode: "ro" },
@@ -838,6 +852,17 @@ export function requiredFilesystemBinds(): readonly FilesystemBind[] {
 		join(homedir(), ".cache", "ms-playwright");
 	if (existsSync(playwrightCache)) {
 		binds.push({ path: playwrightCache, mode: "ro" });
+	}
+	// Caller-supplied read-only inputs (a filesystem connector's manifest-
+	// declared import directory — see `SpawnWithNetworkIsolationOptions.
+	// extraReadOnlyBinds`). Appended HERE rather than beside this function so
+	// every consumer of the bind set — bwrap's argv, the unshare prelude's
+	// staging/remount loop, both pre-existing-socket scans, and the post-pivot
+	// read-only verification — covers them identically. A path that bypassed
+	// this function would be bound without being proven read-only or scanned.
+	// Always `ro`: nothing here is a legitimate write target.
+	for (const path of extraReadOnlyPaths) {
+		binds.push({ path, mode: "ro" });
 	}
 	return dedupeBinds(binds);
 }
@@ -971,10 +996,12 @@ export interface SocketScanResult {
 	sockets: readonly string[];
 }
 
-export function findPreexistingSocketsUnderReadOnlyBinds(): SocketScanResult {
+export function findPreexistingSocketsUnderReadOnlyBinds(
+	extraReadOnlyPaths: readonly string[] = [],
+): SocketScanResult {
 	const sockets: string[] = [];
 	const errors: string[] = [];
-	for (const bind of requiredFilesystemBinds()) {
+	for (const bind of requiredFilesystemBinds(extraReadOnlyPaths)) {
 		if (SOCKET_SCAN_EXCLUDED_SYSTEM_PATHS.includes(bind.path)) {
 			continue;
 		}
@@ -1773,10 +1800,11 @@ function recursiveReadOnlyRemountCommand(stagedPathShQuoted: string): string {
 function filesystemClosureShellPrelude(
 	filesystemBindPath: string | undefined,
 	cwd: string | undefined,
+	extraReadOnlyPaths: readonly string[] = [],
 ): string {
 	const newroot = "/tmp/pdpp-scenario-isolation-newroot";
 	const oldroot = `${newroot}/oldroot`;
-	const binds = requiredFilesystemBinds();
+	const binds = requiredFilesystemBinds(extraReadOnlyPaths);
 
 	const statements: string[] = [
 		`PATH=${TRUSTED_SETUP_PATH}`,
@@ -2301,6 +2329,7 @@ export function postPivotVerificationStatements(
 
 function bwrapFilesystemClosureArgs(
 	filesystemBindPath: string | undefined,
+	extraReadOnlyPaths: readonly string[] = [],
 ): string[] {
 	const args: string[] = [
 		"--unshare-pid",
@@ -2313,7 +2342,7 @@ function bwrapFilesystemClosureArgs(
 		"--dev",
 		"/dev",
 	];
-	for (const bind of requiredFilesystemBinds()) {
+	for (const bind of requiredFilesystemBinds(extraReadOnlyPaths)) {
 		args.push(
 			bind.mode === "ro" ? "--ro-bind" : "--bind",
 			bind.path,
@@ -2371,6 +2400,7 @@ export function bwrapArgvForFilesystemClosure(
 	cmd: string,
 	args: readonly string[],
 	filesystemBindPath: string | undefined,
+	extraReadOnlyPaths: readonly string[] = [],
 ): string[] {
 	const innerCommand = [cmd, ...args].map(shQuote).join(" ");
 	// IN-NAMESPACE SOCKET SCAN (P1-2, external review of ced8300be): bwrap has
@@ -2382,7 +2412,7 @@ export function bwrapArgvForFilesystemClosure(
 	// collapse to the same single moment here — one scan, run as the first
 	// statement in this inner shell, immediately before `exec`.
 	const socketScan = inNamespaceSocketScanStatement(
-		requiredFilesystemBinds()
+		requiredFilesystemBinds(extraReadOnlyPaths)
 			.filter((b) => b.mode === "ro")
 			.map((b) => b.path),
 	);
@@ -2394,7 +2424,7 @@ export function bwrapArgvForFilesystemClosure(
 	// inside bwrap's own already-closed filesystem view.
 	return [
 		"--unshare-net",
-		...bwrapFilesystemClosureArgs(filesystemBindPath),
+		...bwrapFilesystemClosureArgs(filesystemBindPath, extraReadOnlyPaths),
 		"--",
 		resolveTrustedLauncherPath("sh"),
 		"-c",
@@ -2407,7 +2437,12 @@ export function spawnWithNetworkIsolation(
 	args: readonly string[],
 	opts: SpawnWithNetworkIsolationOptions = {},
 ): ChildProcess {
-	const { isolate, filesystemBindPath, ...spawnOpts } = opts;
+	const {
+		isolate,
+		filesystemBindPath,
+		extraReadOnlyBinds = [],
+		...spawnOpts
+	} = opts;
 	if (!isolate) {
 		return spawn(cmd, args, spawnOpts);
 	}
@@ -2420,7 +2455,12 @@ export function spawnWithNetworkIsolation(
 		// inherited $PATH — see that function's doc comment.
 		return spawn(
 			resolveTrustedLauncherPath("bwrap"),
-			bwrapArgvForFilesystemClosure(cmd, args, filesystemBindPath),
+			bwrapArgvForFilesystemClosure(
+				cmd,
+				args,
+				filesystemBindPath,
+				extraReadOnlyBinds,
+			),
 			spawnOpts,
 		);
 	}
@@ -2434,6 +2474,7 @@ export function spawnWithNetworkIsolation(
 	const closurePrelude = filesystemClosureShellPrelude(
 		filesystemBindPath,
 		requestedCwd,
+		extraReadOnlyBinds,
 	);
 	// `ip link set lo up` runs BEFORE the filesystem closure's pivot_root,
 	// while the real host filesystem (and therefore /usr/sbin/ip) is still
@@ -2457,7 +2498,7 @@ export function spawnWithNetworkIsolation(
 	// and the documented terminal-architecture follow-up this does not
 	// attempt to build.
 	const socketScanPointB = inNamespaceSocketScanStatement(
-		requiredFilesystemBinds()
+		requiredFilesystemBinds(extraReadOnlyBinds)
 			.filter((b) => b.mode === "ro")
 			.map((b) => b.path),
 	);
