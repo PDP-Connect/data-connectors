@@ -4,14 +4,13 @@
 /**
  * Schema tests for the Anthropic/Claude connector.
  *
- * IMPORTANT: anthropic/index.ts does not yet emit any RECORD (Claude API
- * extraction is deferred; it emits SKIP_RESULT). So these fixtures are NOT
- * parser-derived — they are records shaped to the connector's MANIFEST stream
- * contract (manifests/anthropic.json). They prove the schema accepts the
- * declared contract and rejects representative drift, so the first real emit is
- * shape-checked. Whoever wires extraction MUST replace these with
- * fixture-proven records and tighten the id shapes (Claude ids are expected to
- * be UUIDs).
+ * These fixtures are shaped to the capability map's binding field mapping
+ * (docs/migration/connector-cutover/capability-map.json, `anthropic` source)
+ * and the connector's MANIFEST stream contract (manifests/anthropic.json).
+ * Parser-derived proof against the real export shape is separate — see
+ * parsers.test.ts, which runs against the synthetic fixture ZIP
+ * (__fixtures__/synthetic/synthetic-export.zip). Real-fixture proof is
+ * PENDING (no real export has landed yet); see the cut-anthropic report.
  */
 
 import assert from "node:assert/strict";
@@ -19,6 +18,7 @@ import { test } from "node:test";
 import {
 	conversationsSchema,
 	messagesSchema,
+	projectDocumentsSchema,
 	projectsSchema,
 	validateRecord,
 } from "./schemas.ts";
@@ -31,15 +31,19 @@ const CONVERSATION_RECORD = {
 	project_id: "11112222-3333-4444-5555-666677778888",
 	model: "claude-3-5-sonnet",
 	message_count: 12,
+	is_starred: false,
 };
 
 const MESSAGE_RECORD = {
 	id: "msg_01ABCdefGHIjklMNOpqr",
 	conversation_id: "9f8e7d6c-1234-4abc-9def-0123456789ab",
 	role: "assistant",
+	parent_id: "msg_prior0000000000000000",
 	content: "Here's how the build-time gate works...",
 	model: "claude-3-5-sonnet",
 	create_time: "2024-05-02T14:30:00.000Z",
+	update_time: "2024-05-02T14:30:00.000Z",
+	attachments: [],
 };
 
 const PROJECT_RECORD = {
@@ -48,6 +52,17 @@ const PROJECT_RECORD = {
 	description: "All connector work for the reference implementation.",
 	create_time: "2024-04-01T09:00:00.000Z",
 	update_time: "2024-05-02T14:30:00.000Z",
+	is_archived: false,
+	prompt_template: "You are a helpful assistant for connector work.",
+};
+
+const PROJECT_DOCUMENT_RECORD = {
+	id: "d1111111-2222-4333-8444-555566667777",
+	project_id: "11112222-3333-4444-5555-666677778888",
+	filename: "notes.md",
+	content: "Project knowledge document body.",
+	create_time: "2024-04-01T09:00:00.000Z",
+	update_time: "2024-04-01T09:00:00.000Z",
 };
 
 test("conversations schema accepts a contract-shaped record", () => {
@@ -64,6 +79,7 @@ test("conversations schema accepts a minimal record (only id, rest null)", () =>
 		project_id: null,
 		model: null,
 		message_count: null,
+		is_starred: null,
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
@@ -96,9 +112,26 @@ test("projects schema rejects a missing name (manifest-required field)", () => {
 	assert.equal(projectsSchema.safeParse(withoutName).success, false);
 });
 
-test("validateRecord routes all three streams and passes unknown streams through", () => {
+test("project_documents schema accepts a contract-shaped record", () => {
+	const result = projectDocumentsSchema.safeParse(PROJECT_DOCUMENT_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("project_documents schema rejects a missing project_id (manifest-required field)", () => {
+	const { project_id: _omit, ...withoutProjectId } = PROJECT_DOCUMENT_RECORD;
+	assert.equal(
+		projectDocumentsSchema.safeParse(withoutProjectId).success,
+		false,
+	);
+});
+
+test("validateRecord routes all four streams and passes unknown streams through", () => {
 	assert.equal(validateRecord("conversations", CONVERSATION_RECORD).ok, true);
 	assert.equal(validateRecord("messages", MESSAGE_RECORD).ok, true);
 	assert.equal(validateRecord("projects", PROJECT_RECORD).ok, true);
+	assert.equal(
+		validateRecord("project_documents", PROJECT_DOCUMENT_RECORD).ok,
+		true,
+	);
 	assert.equal(validateRecord("unknown_stream", { x: 1 }).ok, true);
 });

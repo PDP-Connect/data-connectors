@@ -1266,6 +1266,10 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"codex.prompts",
 	"codex.skills",
 	"codex.coverage_diagnostics",
+	// DoorDash (browser + auth-walled; no live-proven capture yet, see the
+	// cut-doordash lane report — a live session that reaches authenticated
+	// order data is still pending).
+	"doordash.orders",
 	// API connectors with no driver registered yet.
 	"github.repositories",
 	"github.starred",
@@ -1318,6 +1322,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"ical.events",
 	"imessage.messages",
 	"signal.messages",
+	// iCloud Notes (REAL_UNLISTED_CONNECTORS, new for the connector cutover):
+	// browser-session-backed CloudKit collector, no credential-free fixture or
+	// driver yet — no live account access has been granted to this lane.
+	"icloud_notes.folders",
+	"icloud_notes.notes",
 	"notion.pages",
 	"notion.databases",
 	"oura.sleep",

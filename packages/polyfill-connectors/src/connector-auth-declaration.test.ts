@@ -41,6 +41,47 @@ import { GENERATED_STATIC_SECRET_REGISTRY } from "./generated/static-secret-regi
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
+const MANIFEST_DIR = join(PACKAGE_ROOT, "manifests");
+
+/**
+ * `GENERATED_STATIC_SECRET_REGISTRY` is keyed by each manifest's own
+ * `connector_key` (kebab-case, matching `connector_id` and the OCI
+ * repository name — see `scripts/generate-static-secret-registry.ts`).
+ * That is not always the same string as the on-disk directory/filename,
+ * which stays snake_case (e.g. `apple_contacts` directory, `apple-contacts`
+ * connector_key). Resolve the real registry key from the manifest rather
+ * than assuming directory name === registry key.
+ */
+function registryKeyForDirectory(directoryName: string): string {
+	const manifestPath = join(MANIFEST_DIR, `${directoryName}.json`);
+	if (!existsSync(manifestPath)) {
+		return directoryName;
+	}
+	try {
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+			connector_key?: unknown;
+		};
+		return typeof manifest.connector_key === "string" &&
+			manifest.connector_key.trim()
+			? manifest.connector_key.trim()
+			: directoryName;
+	} catch {
+		return directoryName;
+	}
+}
+
+/** Reverse of {@link registryKeyForDirectory}: map every shipped manifest's
+ *  `connector_key` back to its on-disk directory name, so a registry entry
+ *  keyed by connector_key (e.g. `icloud-notes`) resolves to the real
+ *  `connectors/<directory>/index.ts` path (e.g. `connectors/icloud_notes/`)
+ *  instead of a directory that happens to share the key's spelling. */
+function buildDirectoryByRegistryKey(): ReadonlyMap<string, string> {
+	const out = new Map<string, string>();
+	for (const directoryName of readdirSync(CONNECTORS_DIR)) {
+		out.set(registryKeyForDirectory(directoryName), directoryName);
+	}
+	return out;
+}
 
 /**
  * Credential kinds that represent an interactive USERNAME+PASSWORD sign-in.
@@ -74,6 +115,7 @@ function isRunnableConnector(source: string): boolean {
 test("every username/password connector declares an auth block naming its credential fields", () => {
 	const missingDeclaration: string[] = [];
 	const mismatched: string[] = [];
+	const directoryByRegistryKey = buildDirectoryByRegistryKey();
 
 	for (const [connectorKey, descriptor] of Object.entries(
 		GENERATED_STATIC_SECRET_REGISTRY,
@@ -89,7 +131,9 @@ test("every username/password connector declares an auth block naming its creden
 		if ((descriptor.optionalSecretBundleFields?.length ?? 0) > 0) {
 			continue;
 		}
-		const connectorPath = join(CONNECTORS_DIR, connectorKey, "index.ts");
+		const directoryName =
+			directoryByRegistryKey.get(connectorKey) ?? connectorKey;
+		const connectorPath = join(CONNECTORS_DIR, directoryName, "index.ts");
 		if (!existsSync(connectorPath)) {
 			continue;
 		}
@@ -176,7 +220,8 @@ test("no shipped connector directory is missing from the audit", () => {
 		if (declared === null) {
 			continue;
 		}
-		const descriptor = GENERATED_STATIC_SECRET_REGISTRY[name];
+		const descriptor =
+			GENERATED_STATIC_SECRET_REGISTRY[registryKeyForDirectory(name)];
 		if (!descriptor && declared.some((n) => n.endsWith("_PASSWORD"))) {
 			unregistered.push(name);
 		}

@@ -1,0 +1,3 @@
+{"id": "order-a1b2c3d4-0001-item-0", "order_id": "order-a1b2c3d4-0001", "name": "Tonkotsu Original", "quantity": 1, "unit_price_cents": 1495, "customizations": []}
+{"id": "order-a1b2c3d4-0001-item-1", "order_id": "order-a1b2c3d4-0001", "name": "Gyoza (6pc)", "quantity": 2, "unit_price_cents": 600, "customizations": []}
+{"id": "order-a1b2c3d4-0002-item-0", "order_id": "order-a1b2c3d4-0002", "name": "Large Pepperoni Pizza", "quantity": 1, "unit_price_cents": 1899, "customizations": []}

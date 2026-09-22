@@ -407,6 +407,7 @@
 					{
 						"name": "conversations",
 						"description": "Claude.ai conversations.",
+						"required": false,
 						"display": {
 							"label": "Your Claude conversations",
 							"detail": "Conversation titles, create/update times, project membership, message counts."
@@ -438,6 +439,9 @@
 								},
 								"message_count": {
 									"type": ["integer", "null"]
+								},
+								"is_starred": {
+									"type": ["boolean", "null"]
 								}
 							},
 							"required": ["id"]
@@ -469,6 +473,7 @@
 					{
 						"name": "messages",
 						"description": "Messages within Claude conversations.",
+						"required": false,
 						"display": {
 							"label": "Your Claude messages",
 							"detail": "Role, content, model, creation time, per-conversation ordering."
@@ -487,6 +492,9 @@
 									"type": ["string", "null"],
 									"x_pdpp_role": "actor"
 								},
+								"parent_id": {
+									"type": ["string", "null"]
+								},
 								"content": {
 									"type": ["string", "null"],
 									"x_pdpp_role": "primary-title"
@@ -498,6 +506,16 @@
 									"type": ["string", "null"],
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
+								},
+								"update_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"attachments": {
+									"type": ["array", "null"],
+									"items": {
+										"type": "object"
+									}
 								}
 							},
 							"required": ["id", "conversation_id"]
@@ -524,7 +542,8 @@
 								"semantic_fields": ["content"]
 							},
 							"range_filters": {
-								"create_time": ["gte", "gt", "lte", "lt"]
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -537,6 +556,7 @@
 					{
 						"name": "projects",
 						"description": "Claude Projects the user has created.",
+						"required": false,
 						"display": {
 							"label": "Your Claude projects",
 							"detail": "Project names, descriptions, create times, associated conversation counts."
@@ -563,6 +583,12 @@
 								"update_time": {
 									"type": ["string", "null"],
 									"format": "date-time"
+								},
+								"is_archived": {
+									"type": ["boolean", "null"]
+								},
+								"prompt_template": {
+									"type": ["string", "null"]
 								}
 							},
 							"required": ["id", "name"]
@@ -590,10 +616,80 @@
 						},
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "project_documents",
+						"description": "Documents attached to Claude Projects (project knowledge files).",
+						"required": false,
+						"display": {
+							"label": "Your Claude project documents",
+							"detail": "Filenames and content of documents attached to your Claude projects."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"project_id": {
+									"type": "string"
+								},
+								"filename": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"content": {
+									"type": ["string", "null"]
+								},
+								"create_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"update_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": ["id", "project_id"]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "create_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"relationships": [
+							{
+								"name": "project",
+								"stream": "projects",
+								"foreign_key": "project_id",
+								"cardinality": "has_one"
+							}
+						],
+						"query": {
+							"search": {
+								"lexical_fields": ["filename", "content"],
+								"semantic_fields": ["content"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"claude_api_wiring_pending": "Claude API support isn't wired up yet"
+					"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
+					"no_chat_organization": "No Claude organization with chat access could be found for this account.",
+					"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically."
 				}
 			}
 		},
@@ -4702,7 +4798,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/doordash",
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.1.0",
+				"version": "0.2.0",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icons/doordash.svg",
@@ -4718,8 +4814,37 @@
 						}
 					}
 				},
+				"setup": {
+					"modality": "static_secret",
+					"credential_capture": {
+						"kind": "username_password",
+						"label": "DoorDash sign-in details",
+						"description": "Seal the DoorDash sign-in details for this source. The connector uses them only for this source's browser-backed collection.",
+						"submit_label": "Save DoorDash credential and start first sync",
+						"fields": [
+							{
+								"name": "username",
+								"label": "DoorDash email",
+								"type": "text",
+								"required": true,
+								"secret": true,
+								"autocomplete": "username",
+								"env": ["DOORDASH_USERNAME"]
+							},
+							{
+								"name": "password",
+								"label": "DoorDash password",
+								"type": "password",
+								"required": true,
+								"secret": true,
+								"autocomplete": "current-password",
+								"env": ["DOORDASH_PASSWORD"]
+							}
+						]
+					}
+				},
 				"capabilities": {
-					"human_interaction": ["manual_action"],
+					"human_interaction": ["manual_action", "otp"],
 					"refresh_policy": {
 						"recommended_mode": "manual",
 						"minimum_interval_seconds": 3600,
@@ -4727,7 +4852,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "high",
 						"background_safe": false,
-						"rationale": "DoorDash order history is browser-scraped; treat as manual to avoid bot-detection signals."
+						"rationale": "DoorDash order history is browser-scraped behind Cloudflare bot protection; treat as manual to avoid bot-detection signals. No incremental cursor is implemented (see connectors/doordash/index.ts) — every run performs a full refresh of the order list, so more frequent scheduling buys nothing without also increasing bot-detection exposure."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -4736,6 +4861,7 @@
 				"streams": [
 					{
 						"name": "orders",
+						"required": true,
 						"description": "DoorDash food-delivery orders.",
 						"display": {
 							"label": "Your DoorDash orders",
@@ -4791,13 +4917,12 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "order_date",
 						"consent_time_field": "order_date",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["restaurant_name"]
@@ -4811,11 +4936,12 @@
 								"group_by": ["status"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
 						"name": "order_items",
+						"required": false,
 						"description": "Individual items within DoorDash orders.",
 						"display": {
 							"label": "Your DoorDash order items",
@@ -4852,7 +4978,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"relationships": [
 							{
 								"name": "order",
@@ -4866,12 +4992,14 @@
 								"lexical_fields": ["name"]
 							}
 						},
-						"coverage_strategy": "parent_detail_accounting",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"doordash_graphql_wiring_pending": "DoorDash support isn't wired up yet"
+					"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
+					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
+					"shape_check_failed": "The data didn't look like we expected"
 				}
 			}
 		},
@@ -9365,6 +9493,171 @@
 				"reason_display_messages": {
 					"ics_fetch_failed": "We couldn't download the calendar feed",
 					"no_calendar_sources": "No calendars are configured to import from"
+				}
+			}
+		},
+		{
+			"brandIcon": "./manifests/icons/icloud_notes.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/icloud-notes",
+			"entry": "./connectors/icloud_notes/index.js",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/icloud-notes",
+				"connector_key": "icloud-notes",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
+				"version": "0.1.0",
+				"display_name": "iCloud Notes",
+				"brand": {
+					"icon": "icons/icloud_notes.svg",
+					"background_color": "#FFD426"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true
+						},
+						"browser": {
+							"required": true
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "automatic",
+						"recommended_interval_seconds": 43200,
+						"minimum_interval_seconds": 14400,
+						"maximum_staleness_seconds": 172800,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": true,
+						"assisted_after_owner_auth": true,
+						"rationale": "Apple does not publish a rate limit for the CloudKit web service or the icloud.com sign-in surface. This connector is session-reuse-only: it never automates Apple ID sign-in or any two-factor challenge, so a scheduled run either reuses the seeded profile's live session or hands off to the owner via manual_action. First login from a new browser profile commonly serves a two-factor prompt and sometimes a 'Trust this browser?' step, but the session persists in the profile afterward, so most scheduled refreshes reuse it without any prompt. A conservative 12-hour cadence avoids repeatedly exercising Apple's undocumented sign-in friction; assisted_after_owner_auth:true lets a background run ask the owner for bounded help when the session has gone stale."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "notes",
+						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index.",
+						"display": {
+							"label": "Your iCloud notes",
+							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder assignment, attachment flag, and created/modified timestamps."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"snippet": {
+									"type": ["string", "null"]
+								},
+								"folder_id": {
+									"type": ["string", "null"]
+								},
+								"is_pinned": {
+									"type": "boolean"
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"modified_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"has_attachments": {
+									"type": "boolean"
+								},
+								"text_content": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								}
+							},
+							"required": ["id", "is_pinned", "has_attachments"]
+						},
+						"primary_key": ["id"],
+						"relationships": [
+							{
+								"name": "folder",
+								"stream": "folders",
+								"foreign_key": "folder_id",
+								"cardinality": "has_one"
+							}
+						],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "snippet", "text_content"],
+								"semantic_fields": ["title", "snippet", "text_content"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"modified_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at", "modified_at"],
+								"group_by": ["folder_id"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": true
+					},
+					{
+						"name": "folders",
+						"description": "Folders used to organize iCloud Notes, queried from the CloudKit private database's 'parentless' search index.",
+						"display": {
+							"label": "Your iCloud notes folders",
+							"detail": "Folder name and CloudKit record identity."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								}
+							},
+							"required": ["id", "name"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": true
+					}
+				],
+				"reason_display_messages": {
+					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
 				}
 			}
 		},

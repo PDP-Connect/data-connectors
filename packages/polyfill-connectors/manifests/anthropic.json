@@ -38,6 +38,7 @@
 		{
 			"name": "conversations",
 			"description": "Claude.ai conversations.",
+			"required": false,
 			"display": {
 				"label": "Your Claude conversations",
 				"detail": "Conversation titles, create/update times, project membership, message counts."
@@ -69,6 +70,9 @@
 					},
 					"message_count": {
 						"type": ["integer", "null"]
+					},
+					"is_starred": {
+						"type": ["boolean", "null"]
 					}
 				},
 				"required": ["id"]
@@ -100,6 +104,7 @@
 		{
 			"name": "messages",
 			"description": "Messages within Claude conversations.",
+			"required": false,
 			"display": {
 				"label": "Your Claude messages",
 				"detail": "Role, content, model, creation time, per-conversation ordering."
@@ -118,6 +123,9 @@
 						"type": ["string", "null"],
 						"x_pdpp_role": "actor"
 					},
+					"parent_id": {
+						"type": ["string", "null"]
+					},
 					"content": {
 						"type": ["string", "null"],
 						"x_pdpp_role": "primary-title"
@@ -129,6 +137,16 @@
 						"type": ["string", "null"],
 						"format": "date-time",
 						"x_pdpp_role": "event-time"
+					},
+					"update_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"attachments": {
+						"type": ["array", "null"],
+						"items": {
+							"type": "object"
+						}
 					}
 				},
 				"required": ["id", "conversation_id"]
@@ -155,7 +173,8 @@
 					"semantic_fields": ["content"]
 				},
 				"range_filters": {
-					"create_time": ["gte", "gt", "lte", "lt"]
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"update_time": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
@@ -168,6 +187,7 @@
 		{
 			"name": "projects",
 			"description": "Claude Projects the user has created.",
+			"required": false,
 			"display": {
 				"label": "Your Claude projects",
 				"detail": "Project names, descriptions, create times, associated conversation counts."
@@ -194,6 +214,12 @@
 					"update_time": {
 						"type": ["string", "null"],
 						"format": "date-time"
+					},
+					"is_archived": {
+						"type": ["boolean", "null"]
+					},
+					"prompt_template": {
+						"type": ["string", "null"]
 					}
 				},
 				"required": ["id", "name"]
@@ -221,9 +247,79 @@
 			},
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "project_documents",
+			"description": "Documents attached to Claude Projects (project knowledge files).",
+			"required": false,
+			"display": {
+				"label": "Your Claude project documents",
+				"detail": "Filenames and content of documents attached to your Claude projects."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"project_id": {
+						"type": "string"
+					},
+					"filename": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"content": {
+						"type": ["string", "null"]
+					},
+					"create_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"update_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": ["id", "project_id"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "create_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "project",
+					"stream": "projects",
+					"foreign_key": "project_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["filename", "content"],
+					"semantic_fields": ["content"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"update_time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"claude_api_wiring_pending": "Claude API support isn't wired up yet"
+		"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
+		"no_chat_organization": "No Claude organization with chat access could be found for this account.",
+		"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically."
 	}
 }
