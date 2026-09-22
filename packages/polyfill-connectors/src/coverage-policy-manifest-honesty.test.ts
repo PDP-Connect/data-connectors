@@ -326,7 +326,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["reddit.upvoted", "33f9037aa1ea6d85"],
 	["reddit.downvoted", "1a9026c2bead89eb"],
 	["reddit.hidden", "a4178a68b917c4c1"],
-	["shopify.orders", "82e53111c3127073"],
 	["slack.workspace", "2b5e89d561548e8a"],
 	["slack.channels", "b7ef731906d7805a"],
 	["slack.channel_stats", "ef2a59153d6fef45"],

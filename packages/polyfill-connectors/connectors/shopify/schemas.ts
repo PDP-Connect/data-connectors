@@ -5,21 +5,20 @@
  * Zod schemas for Shopify (Shop app) stream records. Shape-check-before-emit
  * per docs/reference/connector-authoring-guide.md §3.
  *
- * GROUND-TRUTH CAVEAT (same posture as connectors/loom/schemas.ts):
- * shopify/index.ts does NOT yet emit any RECORD — it is a browser scaffold that
- * verifies shop.app reachability and emits
- * `SKIP_RESULT reason=shopify_apollo_wiring_pending`. The Apollo-cache /
- * React-fiber extraction is deferred to a live session. There is no observed
- * emitted shape; this schema is derived from the connector's MANIFEST stream
- * declaration (manifests/shopify.json) — the contract the connector commits to
- * emit once extraction lands.
- *
- * Wiring `validateRecord` now is the honest move: the first real emit is
- * shape-checked against the declared contract instead of silently trusted.
- * Whoever wires the Apollo extraction MUST re-verify these field shapes against
- * the real payload and tighten them — especially the id and currency formats,
- * which the manifest leaves as opaque/loose strings. This file is a contract
- * scaffold, not a fixture-proven schema.
+ * GROUND-TRUTH CAVEAT: this connector's Apollo-cache extraction
+ * (parsers.ts) is implemented from the legacy Playwright connector's prior
+ * art (connectors/shopify/shop-playwright.js) per
+ * docs/migration/connector-cutover/CONTRACTS.md D10 — Tim has no Shop
+ * account, so there is no independently-captured real cache extract to
+ * derive this schema from. The shape below is the connector's own
+ * capability-map field contract (docs/migration/connector-cutover/
+ * capability-map.json, `shopify` entry), tightened against the legacy
+ * connector's known Apollo field shapes (Shopify Money scalar, GraphQL
+ * global ID). It has NOT been shape-checked against a real Shop order.
+ * Whoever runs this connector against a live account first MUST re-verify
+ * these shapes (especially `id`/`order_number`, which assume a
+ * `gid://shopify/Order/<...>`-style GraphQL global ID) and tighten or
+ * loosen as observed.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -31,13 +30,12 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const CURRENCY_CODE_RE = /^[A-Z]{3}$/; // ISO 4217
 
 /**
- * orders stream (manifest required: id). One record per Shop-app order.
- * `total_cents` / `item_count` are non-negative ints; `currency` is an ISO 4217
- * code; `merchant_name` and `status` are free-form/short strings;
- * `tracking_url` is a URL; `tracking_number` is an opaque carrier string.
+ * orders stream (manifest required: id). One record per Shop-app order,
+ * extracted from the Apollo client cache's `Order:<id>` entries.
  */
 export const ordersSchema = z.object({
 	id: z.string().min(1).max(200),
+	order_number: z.string().min(1).max(200).nullable(),
 	order_date: z
 		.string()
 		.regex(ISO_DT_RE, "order_date must be an ISO-8601 datetime")
@@ -49,14 +47,14 @@ export const ordersSchema = z.object({
 		.string()
 		.regex(CURRENCY_CODE_RE, "currency must be a 3-letter ISO 4217 code")
 		.nullable(),
-	tracking_number: z.string().min(1).max(128).nullable(),
-	tracking_url: z.url().max(4096).nullable(),
 	item_count: z.number().int().min(0).nullable(),
+	line_item_titles: z.array(pdppSafeText.max(500)).max(500),
+	detail_url: z.url().max(4096),
 });
 
 /**
  * Stream → schema registry. Single source of truth for the stream this
- * connector declares (and will emit once Apollo extraction is wired).
+ * connector declares and emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	orders: ordersSchema,

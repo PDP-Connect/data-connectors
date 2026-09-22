@@ -1476,6 +1476,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "resolveAttachmentHydration(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
+			path: "connectors/shopify/index.ts",
+			line: 238,
+			column: 4,
+			category: "ordered_protocol_emission",
+			note: "collectShopify(): emitRecord() per order, fingerprint-gated, must land before the run's single STATE message",
+		},
+		{
 			path: "connectors/slack/fail-open.test.ts",
 			line: 233,
 			column: 31,
