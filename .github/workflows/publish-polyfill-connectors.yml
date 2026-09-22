@@ -275,13 +275,13 @@ jobs:
 
       - name: Install ORAS
         if: steps.target.outputs.selected == 'true' || inputs.catalog-only
-        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           version: "1.2.3"
 
       - name: Install Cosign
         if: steps.target.outputs.selected == 'true' || inputs.catalog-only
-        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: "v2.4.3"
 
@@ -581,12 +581,12 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Install ORAS
-        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           version: "1.2.3"
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: "v2.4.3"
 
