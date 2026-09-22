@@ -2,68 +2,99 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Schema tests for the LinkedIn connector.
- *
- * IMPORTANT: linkedin/index.ts does not yet emit any RECORD (Voyager
- * extraction is deferred; it emits SKIP_RESULT). So these fixtures are NOT
- * parser-derived — they are records shaped to the connector's MANIFEST stream
- * contract (manifests/linkedin.json). They prove the schema accepts the
- * declared contract and rejects representative drift, so the first real emit is
- * shape-checked. Whoever wires extraction MUST replace these with
- * fixture-proven records and tighten the id shapes.
+ * Schema tests for the LinkedIn connector. Records are parser-derived
+ * (see parsers.test.ts) rather than hand-shaped to the manifest contract —
+ * the connector now emits real records via `collectLinkedIn`.
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	connectionsSchema,
 	educationSchema,
 	experienceSchema,
+	languagesSchema,
 	profileSchema,
 	skillsSchema,
 	validateRecord,
 } from "./schemas.ts";
 
 const PROFILE_RECORD = {
-	id: "ACoAAA1b2c3d",
+	connection_count: 842,
+	current_company: "Acme",
+	current_position_title: "Staff Engineer",
 	full_name: "Alex Rivera",
 	headline: "Staff Engineer at Acme",
-	summary: "Builds reliable data infrastructure.",
-	location: "San Francisco Bay Area",
+	id: "alexrivera",
 	industry: "Software Development",
-	public_url: "https://www.linkedin.com/in/alexrivera",
-	current_position_title: "Staff Engineer",
-	current_company: "Acme",
+	location: "San Francisco Bay Area",
+	profile_picture_url: "https://media.example/avatar.jpg",
+	public_url: "https://www.linkedin.com/in/alexrivera/",
+	summary: "Builds reliable data infrastructure.",
 };
 
 const EXPERIENCE_RECORD = {
-	id: "exp-100",
-	title: "Staff Engineer",
 	company: "Acme",
-	employment_type: "Full-time",
-	start_date: "2021-03-01T00:00:00.000Z",
-	end_date: null,
-	location: "Remote",
 	description: "Led the data platform team.",
+	employment_type: null,
+	end_date: null,
+	id: "urn:li:fsd_profilePosition:100",
+	location: "Remote",
+	start_date: "2021-03",
+	title: "Staff Engineer",
 };
 
 const EDUCATION_RECORD = {
-	id: "edu-200",
-	school: "State University",
 	degree: "B.S.",
+	end_date: "2017",
 	field_of_study: "Computer Science",
-	start_date: "2013-09-01T00:00:00.000Z",
-	end_date: "2017-06-01T00:00:00.000Z",
+	grade: "3.9 GPA",
+	id: "urn:li:fsd_profileEducation:200",
+	logo_url: "https://media.example/school-logo.png",
+	school: "State University",
+	start_date: "2013",
 };
 
 const SKILL_RECORD = {
+	endorsement_count: 42,
 	id: "skill-300",
 	name: "Distributed Systems",
-	endorsement_count: 42,
 };
 
-test("profile schema accepts a contract-shaped record", () => {
+const LANGUAGE_RECORD = {
+	id: "lang-0",
+	name: "Spanish",
+	proficiency: "Professional working proficiency",
+};
+
+const CONNECTION_RECORD = {
+	connected_at: "2023-11-14T22:13:20.000Z",
+	full_name: "Jamie Lee",
+	headline: "PM at Acme",
+	id: "urn:li:fsd_profile:abc123",
+	profile_url: "https://www.linkedin.com/in/jamielee/",
+};
+
+test("profile schema accepts a parser-shaped record", () => {
 	const result = profileSchema.safeParse(PROFILE_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema accepts null connection_count and profile_picture_url (never guessed when unavailable)", () => {
+	const result = profileSchema.safeParse({
+		...PROFILE_RECORD,
+		connection_count: null,
+		profile_picture_url: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema rejects a negative connection_count", () => {
+	assert.equal(
+		profileSchema.safeParse({ ...PROFILE_RECORD, connection_count: -1 })
+			.success,
+		false,
+	);
 });
 
 test("experience schema accepts a current role (null end_date)", () => {
@@ -71,13 +102,71 @@ test("experience schema accepts a current role (null end_date)", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("education schema accepts a contract-shaped record", () => {
+test("experience schema rejects a full ISO datetime (D4: partial date only)", () => {
+	assert.equal(
+		experienceSchema.safeParse({
+			...EXPERIENCE_RECORD,
+			start_date: "2021-03-01T00:00:00.000Z",
+		}).success,
+		false,
+	);
+});
+
+test("experience schema rejects an invented day precision (YYYY-MM-DD)", () => {
+	assert.equal(
+		experienceSchema.safeParse({
+			...EXPERIENCE_RECORD,
+			start_date: "2021-03-15",
+		}).success,
+		false,
+	);
+});
+
+test("education schema accepts a parser-shaped record", () => {
 	const result = educationSchema.safeParse(EDUCATION_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("skills schema accepts a contract-shaped record", () => {
+test("education schema accepts null grade and logo_url (never guessed when unavailable)", () => {
+	const result = educationSchema.safeParse({
+		...EDUCATION_RECORD,
+		grade: null,
+		logo_url: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("skills schema accepts a parser-shaped record", () => {
 	const result = skillsSchema.safeParse(SKILL_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("languages schema accepts a parser-shaped record", () => {
+	const result = languagesSchema.safeParse(LANGUAGE_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("languages schema accepts a null proficiency", () => {
+	const result = languagesSchema.safeParse({
+		...LANGUAGE_RECORD,
+		proficiency: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("connections schema accepts a parser-shaped record", () => {
+	const result = connectionsSchema.safeParse(CONNECTION_RECORD);
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("connections schema accepts an unresolved connection (all enrichment null)", () => {
+	const result = connectionsSchema.safeParse({
+		connected_at: null,
+		full_name: null,
+		headline: null,
+		id: "urn:li:fsd_profile:xyz789",
+		profile_url: null,
+	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
@@ -101,10 +190,12 @@ test("skills schema rejects a negative endorsement_count", () => {
 	);
 });
 
-test("validateRecord routes all four streams and passes unknown streams through", () => {
+test("validateRecord routes all six streams and passes unknown streams through", () => {
 	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
 	assert.equal(validateRecord("experience", EXPERIENCE_RECORD).ok, true);
 	assert.equal(validateRecord("education", EDUCATION_RECORD).ok, true);
 	assert.equal(validateRecord("skills", SKILL_RECORD).ok, true);
+	assert.equal(validateRecord("languages", LANGUAGE_RECORD).ok, true);
+	assert.equal(validateRecord("connections", CONNECTION_RECORD).ok, true);
 	assert.equal(validateRecord("recommendations", { id: "x" }).ok, true);
 });

@@ -17,7 +17,7 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (anthropic, doordash, linkedin, loom, meta, uber, wholefoods) — all
+ *      (anthropic, doordash, loom, meta, uber, wholefoods) — all
  *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
@@ -62,7 +62,6 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 export const KNOWN_SCAFFOLD_CONNECTORS = [
 	"anthropic",
 	"doordash",
-	"linkedin",
 	"loom",
 	"meta",
 	"uber",
@@ -96,6 +95,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
+	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
 	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
 	shopify: { testFile: "connectors/shopify/index.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
