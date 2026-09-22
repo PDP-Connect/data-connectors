@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/meta",
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-	"version": "0.1.0",
+	"version": "0.3.1",
 	"display_name": "Instagram (Meta)",
 	"brand": {
 		"icon": "icons/meta.svg",
@@ -37,6 +37,7 @@
 	"streams": [
 		{
 			"name": "profile",
+			"required": true,
 			"description": "The user's Instagram profile.",
 			"display": {
 				"label": "Your Instagram profile",
@@ -61,6 +62,12 @@
 						"type": ["string", "null"],
 						"x_pdpp_role": "secondary"
 					},
+					"profile_pic_url": {
+						"type": ["string", "null"]
+					},
+					"external_url": {
+						"type": ["string", "null"]
+					},
 					"follower_count": {
 						"type": ["integer", "null"]
 					},
@@ -70,7 +77,13 @@
 					"post_count": {
 						"type": ["integer", "null"]
 					},
+					"is_private": {
+						"type": ["boolean", "null"]
+					},
 					"is_verified": {
+						"type": ["boolean", "null"]
+					},
+					"is_business": {
 						"type": ["boolean", "null"]
 					}
 				},
@@ -93,6 +106,7 @@
 		},
 		{
 			"name": "posts",
+			"required": false,
 			"description": "Posts on the user's own timeline.",
 			"display": {
 				"label": "Your posts",
@@ -110,6 +124,10 @@
 						"x_pdpp_role": "primary-title"
 					},
 					"media_type": {
+						"type": ["string", "null"],
+						"enum": ["IMAGE", "VIDEO", "CAROUSEL_ALBUM", null]
+					},
+					"media_url": {
 						"type": ["string", "null"]
 					},
 					"like_count": {
@@ -139,15 +157,152 @@
 			"incremental": true,
 			"query": {
 				"search": {
-					"lexical_fields": ["caption"],
+					"lexical_fields": ["caption", "location_name"],
 					"semantic_fields": ["caption"]
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "post_likes",
+			"required": false,
+			"description": "Likers of the user's own posts (bounded top-likers sample per post; Instagram exposes no full-likers listing endpoint from a logged-in web session).",
+			"display": {
+				"label": "Likes on your posts",
+				"detail": "Post id, liker's user id and username. Sample, not a full likers list."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"post_id": {
+						"type": "string"
+					},
+					"user_id": {
+						"type": "string"
+					},
+					"username": {
+						"type": "string",
+						"x_pdpp_role": "actor"
+					}
+				},
+				"required": ["post_id", "user_id", "username"]
+			},
+			"primary_key": ["post_id", "user_id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["username"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "following",
+			"required": false,
+			"description": "Accounts the user follows.",
+			"display": {
+				"label": "Accounts you follow",
+				"detail": "Username, name, private/verified status."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"username": {
+						"type": "string",
+						"x_pdpp_role": "actor"
+					},
+					"full_name": {
+						"type": ["string", "null"]
+					},
+					"is_private": {
+						"type": ["boolean", "null"]
+					},
+					"is_verified": {
+						"type": ["boolean", "null"]
+					},
+					"profile_pic_url": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "username"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["username", "full_name"]
+				}
+			},
+			"coverage_strategy": "full_scan",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "ads",
+			"required": false,
+			"description": "Advertisers, ad topics, and targeting categories from Meta Accounts Center.",
+			"display": {
+				"label": "Your Instagram ad preferences",
+				"detail": "Advertisers who have your info, ad topics, and categories used to reach you."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["advertiser", "ad_topic", "ad_category"]
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"description": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					}
+				},
+				"required": ["id", "kind", "name"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "description"],
+					"semantic_fields": ["description"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["kind"]
+				}
+			},
+			"coverage_strategy": "full_scan",
+			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"instagram_graphql_wiring_pending": "Instagram support isn't wired up yet"
+		"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
+		"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
 	}
 }

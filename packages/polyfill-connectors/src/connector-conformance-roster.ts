@@ -17,7 +17,7 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (anthropic, doordash, loom, meta, uber, wholefoods) — all
+ *      (anthropic, doordash, loom, uber, wholefoods) — all
  *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
@@ -63,7 +63,6 @@ export const KNOWN_SCAFFOLD_CONNECTORS = [
 	"anthropic",
 	"doordash",
 	"loom",
-	"meta",
 	"uber",
 	"wholefoods",
 ] as const;
@@ -88,6 +87,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
+	meta: { testFile: "connectors/meta/integration.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
