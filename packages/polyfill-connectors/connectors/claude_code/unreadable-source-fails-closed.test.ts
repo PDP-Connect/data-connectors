@@ -20,13 +20,15 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "claude_code", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("claude_code");
 // chmod bits do not restrain root, so the unreadable-dir premise cannot hold.
 const RUNNING_AS_ROOT =
 	typeof process.getuid === "function" && process.getuid() === 0;

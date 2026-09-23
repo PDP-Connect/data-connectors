@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { buildFullScanCoverageMessage } from "../../src/connector-runtime.ts";
@@ -35,8 +35,12 @@ test("Notion full-scan coverage records the enumerated boundary, including empty
 	});
 });
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "notion", "index.ts");
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
+
+const ENTRYPOINT = connectorEntrypoint("notion");
 const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const DATABASE_ID = "22222222-2222-4222-8222-222222222222";
 const ACTOR_ID = "33333333-3333-4333-8333-333333333333";

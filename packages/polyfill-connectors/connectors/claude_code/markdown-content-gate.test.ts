@@ -20,14 +20,16 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "claude_code", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("claude_code");
 
 /** A fixed mtime, reapplied after every write so mtime is never the signal. */
 const PINNED_MTIME = new Date("2026-01-01T00:00:00Z");

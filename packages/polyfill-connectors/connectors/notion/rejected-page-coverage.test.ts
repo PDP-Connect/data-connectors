@@ -24,14 +24,17 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "notion", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("notion");
 const GOOD_PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const BAD_PAGE_ID = "44444444-4444-4444-8444-444444444444";
 const ARCHIVED_PAGE_ID = "55555555-5555-4555-8555-555555555555";
