@@ -20,7 +20,20 @@ test("defers credentials for a browser connector with auth and probeSession only
 	);
 });
 
-test("defers credentials even when ensureSession is also declared (heb shape): establishSession probes first", () => {
+test("defers credentials when ensureSession is also declared AND probeSessionIsAuthoritative is set (heb shape): establishSession probes first", () => {
+	assert.equal(
+		shouldDeferCredentialsToProbe({
+			auth,
+			browser: {},
+			ensureSession: fn,
+			probeSession: fn,
+			probeSessionIsAuthoritative: true,
+		}),
+		true,
+	);
+});
+
+test("keeps credentials eager when ensureSession is declared but probeSessionIsAuthoritative is NOT set (doordash/wholefoods shape)", () => {
 	assert.equal(
 		shouldDeferCredentialsToProbe({
 			auth,
@@ -28,7 +41,17 @@ test("defers credentials even when ensureSession is also declared (heb shape): e
 			ensureSession: fn,
 			probeSession: fn,
 		}),
-		true,
+		false,
+	);
+	assert.equal(
+		shouldDeferCredentialsToProbe({
+			auth,
+			browser: {},
+			ensureSession: fn,
+			probeSession: fn,
+			probeSessionIsAuthoritative: false,
+		}),
+		false,
 	);
 });
 

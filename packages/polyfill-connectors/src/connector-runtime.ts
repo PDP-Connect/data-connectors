@@ -352,6 +352,21 @@ export interface BrowserConnectorConfig extends BaseRunConnectorConfig {
 	collect: (ctx: BrowserCollectContext) => Promise<void>;
 	ensureSession?: (args: EnsureSessionArgs) => Promise<void>;
 	probeSession?: (args: ProbeSessionArgs) => Promise<boolean>;
+	/**
+	 * Opt in to treating a live `probeSession` result as authoritative when
+	 * BOTH `ensureSession` and `probeSession` are declared: a live probe skips
+	 * `ensureSession` (and defers/skips credential resolution) entirely.
+	 *
+	 * Default (unset/false): `ensureSession` always runs when declared,
+	 * regardless of what `probeSession` reports — the pre-existing behavior
+	 * for every connector that has not opted in. Only set this when
+	 * `probeSession` is a strong, page-level signal of a real live session
+	 * (not a cookie-name heuristic) — a weak probe (e.g. "does a
+	 * session-shaped cookie exist") can be fooled by a stale or
+	 * challenge-page cookie, which would then wrongly bypass `ensureSession`'s
+	 * page-level repair.
+	 */
+	probeSessionIsAuthoritative?: boolean;
 }
 
 /**
@@ -809,34 +824,56 @@ export const politeDelay = (ms: number): Promise<void> =>
 /**
  * Whether static-secret resolution waits for the session probe.
  *
- * Deferral applies to any browser connector that declares `auth` and
- * `probeSession` — whether or not it also declares `ensureSession`.
- * `establishSession` now runs the probe FIRST whenever both `probeSession`
- * and `ensureSession` are present (see its doc comment): a live probe skips
- * `ensureSession` entirely, so a connector shaped this way (e.g. heb) must
- * not pay for credential resolution — which can itself raise a `credentials`
- * INTERACTION or fail the run — on a connection whose seeded browser profile
- * already holds a live session. `ensureSession` still receives resolved
- * credentials unchanged on the dead-probe path, exactly as before.
+ * Two independent shapes both defer, for different reasons:
+ *
+ * 1. A browser connector that declares `auth` and `probeSession` but NOT
+ *    `ensureSession` (the probe-only shape, e.g. loom/anthropic/linkedin
+ *    minus their `auth` — none currently combine all three, but the shape is
+ *    supported): this is the original, pre-existing probe-only deferral and
+ *    is unconditional — it does not need or consult
+ *    `probeSessionIsAuthoritative`. `establishSession`'s probe-only branch
+ *    (no `ensureSession` declared) always runs read-only and only resolves
+ *    credentials once the probe has proven the session dead.
+ * 2. A browser connector that declares `auth`, `probeSession`, AND
+ *    `ensureSession`, AND has opted in via `probeSessionIsAuthoritative:
+ *    true` (see `BrowserConnectorConfig`'s doc comment): a live probe skips
+ *    `ensureSession` (and credential resolution) entirely, so deferring
+ *    credential resolution here too avoids paying for a credential the live
+ *    path will never use.
+ *
+ * A connector with all three hooks that has NOT opted in resolves
+ * credentials eagerly, exactly as it did before `probeSessionIsAuthoritative`
+ * existed — a live probe result is not trusted to skip
+ * `ensureSession`/credential resolution unless the connector has proven its
+ * probe is a strong, page-level signal.
  *
  * Root cause this closes: heb's probeSession was cookie-name-based and
  * missed the real session cookies (`sst`, `sat`, `HEB_AMP_SESSION_ID`), so a
  * genuinely live profile probed as dead; separately, credentials resolved
  * eagerly before the probe ever ran, so a missing HEB_USERNAME/HEB_PASSWORD
- * failed the run as `heb_credentials_missing` even on a live session. Fixing
- * only the probe (index.ts) without this deferral would still fail the run
- * on eager credential resolution before the (now-correct) probe result could
- * matter.
+ * failed the run as `heb_credentials_missing` even on a live session. heb's
+ * probe is now page-based (`probeHebSession`, navigates the real orders
+ * page) and has opted in; doordash/wholefoods keep cookie-name-based probes
+ * and have NOT opted in, so their `ensureSession` repair still always runs.
  */
 export function shouldDeferCredentialsToProbe(config: {
 	auth: unknown;
 	browser: unknown;
 	ensureSession: unknown;
 	probeSession: unknown;
+	probeSessionIsAuthoritative?: boolean | undefined;
 }): boolean {
-	return Boolean(
-		config.browser && config.auth && typeof config.probeSession === "function",
-	);
+	if (
+		!config.browser ||
+		!config.auth ||
+		typeof config.probeSession !== "function"
+	) {
+		return false;
+	}
+	if (typeof config.ensureSession !== "function") {
+		return true;
+	}
+	return Boolean(config.probeSessionIsAuthoritative);
 }
 
 export function runConnector(config: RunConnectorConfig): void {
@@ -862,10 +899,13 @@ export function runConnector(config: RunConnectorConfig): void {
 		auth,
 		authOptional = false,
 	} = config;
-	// ensureSession/probeSession are only on BrowserConnectorConfig; extract
-	// after the browser-narrowing check.
+	// ensureSession/probeSession/probeSessionIsAuthoritative are only on
+	// BrowserConnectorConfig; extract after the browser-narrowing check.
 	const ensureSession = browser ? config.ensureSession : undefined;
 	const probeSession = browser ? config.probeSession : undefined;
+	const probeSessionIsAuthoritative = browser
+		? config.probeSessionIsAuthoritative
+		: undefined;
 
 	const timeRangeFieldFor: (stream: string) => string =
 		typeof timeRangeField === "function"
@@ -1211,6 +1251,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			browser,
 			ensureSession,
 			probeSession,
+			probeSessionIsAuthoritative,
 		});
 		let credentials: Credentials = deferCredentialsToProbe
 			? {}
@@ -1290,6 +1331,7 @@ export function runConnector(config: RunConnectorConfig): void {
 				progress,
 				ensureSession,
 				probeSession,
+				probeSessionIsAuthoritative,
 				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 				collect,
 				baseCtx,
@@ -1594,6 +1636,7 @@ async function runInBrowser(args: {
 	progress: BaseCollectContext["progress"];
 	ensureSession: BrowserConnectorConfig["ensureSession"];
 	probeSession: BrowserConnectorConfig["probeSession"];
+	probeSessionIsAuthoritative: BrowserConnectorConfig["probeSessionIsAuthoritative"];
 	/** See `run()`'s construction site and `session-establish.ts`'s doc comment. */
 	resolveDeferredCredentials?: () => Promise<Credentials>;
 	collect: BrowserConnectorConfig["collect"];
@@ -1610,6 +1653,7 @@ async function runInBrowser(args: {
 		progress,
 		ensureSession,
 		probeSession,
+		probeSessionIsAuthoritative,
 		resolveDeferredCredentials,
 		collect,
 		baseCtx,
@@ -1701,7 +1745,7 @@ async function runInBrowser(args: {
 		});
 		await watchdog.run(() =>
 			establishSession(
-				{ ensureSession, probeSession },
+				{ ensureSession, probeSession, probeSessionIsAuthoritative },
 				{
 					assist: watchdog.wrapAssist(browserAssist),
 					capture: baseCtx.capture,

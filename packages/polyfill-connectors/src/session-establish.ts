@@ -85,6 +85,19 @@ export interface ProbeSessionArgs {
 	page: Page;
 }
 
+export interface SessionEstablishHooks {
+	ensureSession: ((args: EnsureSessionArgs) => Promise<void>) | undefined;
+	probeSession: ((args: ProbeSessionArgs) => Promise<boolean>) | undefined;
+	/**
+	 * Opt-in: when BOTH hooks are declared AND this is `true`, a live probe
+	 * skips `ensureSession` entirely (see `establishSession`'s doc comment).
+	 * Default (unset/false): `ensureSession` always runs when declared,
+	 * regardless of the probe result — the pre-existing, unconditional
+	 * ordering that every connector without this opt-in keeps.
+	 */
+	probeSessionIsAuthoritative?: boolean | undefined;
+}
+
 export interface SessionEstablishArgs {
 	assist: EnsureSessionArgs["assist"];
 	capture: CaptureSession | null;
@@ -152,12 +165,20 @@ export function buildSessionEstablishTerminalError(
  * Run whichever session-management flow the connector configured.
  * Throws TerminalError if the session is dead and we couldn't recover.
  *
- * Priority when a connector declares BOTH hooks: probeSession runs FIRST. A
- * live probe returns immediately — `ensureSession` never runs, and no static
- * credential is resolved or required, because a pre-authenticated browser
- * profile is sufficient on its own. Only a dead probe falls through to
- * `ensureSession` (automated re-auth, unchanged: resolved credentials,
- * `onCredentialSubmit`, the same non-retryable-after-submit classification).
+ * Priority when a connector declares BOTH hooks depends on
+ * `probeSessionIsAuthoritative`:
+ * - `true` (explicit per-connector opt-in): probeSession runs FIRST. A live
+ *   probe returns immediately — `ensureSession` never runs, and no static
+ *   credential is resolved or required, because a pre-authenticated browser
+ *   profile is sufficient on its own. Only a dead probe falls through to
+ *   `ensureSession` (automated re-auth, unchanged: resolved credentials,
+ *   `onCredentialSubmit`, the same non-retryable-after-submit
+ *   classification). Reserve this for a connector whose `probeSession` is a
+ *   strong, page-level signal of a real live session — a cookie-name
+ *   heuristic can be fooled by a stale or challenge-page cookie, which would
+ *   wrongly skip `ensureSession`'s page-level repair.
+ * - unset/false (default): `ensureSession` always runs, exactly as it did
+ *   before this opt-in existed — the probe result never skips it.
  *
  * A connector with only `ensureSession` (no `probeSession`) runs it directly,
  * unchanged. A connector with only `probeSession` (no `ensureSession`) keeps
@@ -168,23 +189,16 @@ export function buildSessionEstablishTerminalError(
  * and a `probe` checkpoint around the read-only probe path so the watchdog
  * has progress markers even for connectors that do not checkpoint themselves.
  *
- * Credential deferral: a valid pre-authenticated browser profile must be
- * sufficient on its own — static secrets are only required when an
- * interactive login is actually needed. `resolveDeferredCredentials`, when
- * supplied, is called ONLY after a probe reports the session is dead, never
- * on the live-probe path — this now applies whether or not `ensureSession` is
- * also declared. This keeps a connection with a live session from ever
- * resolving (or being asked for) a stored credential it does not need. When
- * no `resolveDeferredCredentials` is supplied, behavior is unchanged.
+ * Credential deferral: `resolveDeferredCredentials`, when supplied, is called
+ * ONLY after a probe reports the session is dead. On the both-hooks path this
+ * only happens when `probeSessionIsAuthoritative` is set — otherwise
+ * `ensureSession` runs eagerly with `initialCredentials`, unchanged.
  */
 export async function establishSession(
-	hooks: {
-		ensureSession: ((args: EnsureSessionArgs) => Promise<void>) | undefined;
-		probeSession: ((args: ProbeSessionArgs) => Promise<boolean>) | undefined;
-	},
+	hooks: SessionEstablishHooks,
 	args: SessionEstablishArgs,
 ): Promise<void> {
-	const { ensureSession, probeSession } = hooks;
+	const { ensureSession, probeSession, probeSessionIsAuthoritative } = hooks;
 	const {
 		assist,
 		capture,
@@ -202,18 +216,19 @@ export async function establishSession(
 
 	await checkpoint("session-establish:begin");
 
-	// Both hooks: probe first. A live session skips ensureSession (and any
-	// credential resolution) entirely; a dead probe falls through to the same
-	// ensureSession call below that a probeSession-less connector would run,
-	// after resolving credentials exactly like the probe-only dead path does.
-	// `resolvedCredentials` carries the freshly resolved values into
-	// ensureSession below — `initialCredentials` (captured before this
+	// Both hooks, opted in: probe first. A live session skips ensureSession
+	// (and any credential resolution) entirely; a dead probe falls through to
+	// the same ensureSession call below that a probeSession-less connector
+	// would run, after resolving credentials exactly like the probe-only dead
+	// path does. `resolvedCredentials` carries the freshly resolved values
+	// into ensureSession below — `initialCredentials` (captured before this
 	// function ran resolveDeferredCredentials) would otherwise still be the
 	// stale empty object from the deferred-credentials call site.
 	let resolvedCredentials: Readonly<Record<string, string>> | undefined;
 	if (
 		typeof ensureSession === "function" &&
-		typeof probeSession === "function"
+		typeof probeSession === "function" &&
+		probeSessionIsAuthoritative
 	) {
 		await checkpoint("session-establish:probe");
 		if (await probeSession({ context, page })) {

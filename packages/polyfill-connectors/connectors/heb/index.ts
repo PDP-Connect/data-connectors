@@ -2230,6 +2230,12 @@ if (isMainModule(import.meta.url)) {
 		async probeSession({ page }: ProbeSessionArgs): Promise<boolean> {
 			return probeHebSession(page);
 		},
+		// Opt in to treating a live probeSession as authoritative (skips
+		// ensureSession/credential resolution entirely): probeHebSession is
+		// page-based (navigates the real orders page), not a cookie-name
+		// heuristic, so a live result here is a strong signal — see
+		// `shouldDeferCredentialsToProbe` / `establishSession`'s doc comments.
+		probeSessionIsAuthoritative: true,
 		async ensureSession({
 			page,
 			sendInteraction,

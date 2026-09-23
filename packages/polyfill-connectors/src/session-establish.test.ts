@@ -270,7 +270,7 @@ test("ensureSession-only path (no probeSession) is unaffected: resolveDeferredCr
 // resolveDeferredCredentials + ensureSession, unchanged from the
 // ensureSession-only path from that point on.
 
-test("both hooks, live probe (heb shape): ensureSession never runs and credentials are never resolved", async () => {
+test("both hooks, live probe, probeSessionIsAuthoritative=true (heb shape): ensureSession never runs and credentials are never resolved", async () => {
 	let resolveCalls = 0;
 	let ensureSessionCalls = 0;
 	let probeCalls = 0;
@@ -284,6 +284,7 @@ test("both hooks, live probe (heb shape): ensureSession never runs and credentia
 				probeCalls += 1;
 				return true;
 			},
+			probeSessionIsAuthoritative: true,
 		},
 		{
 			assist: async () => "req-1",
@@ -327,7 +328,7 @@ test("both hooks, live probe (heb shape): ensureSession never runs and credentia
 	);
 });
 
-test("both hooks, dead probe (heb shape): credentials resolve before ensureSession, which then runs with the resolved values", async () => {
+test("both hooks, dead probe, probeSessionIsAuthoritative=true (heb shape): credentials resolve before ensureSession, which then runs with the resolved values", async () => {
 	let resolveCalls = 0;
 	let ensureSessionCredentials: Readonly<Record<string, string>> | null = null;
 	let probeCalls = 0;
@@ -341,6 +342,7 @@ test("both hooks, dead probe (heb shape): credentials resolve before ensureSessi
 				probeCalls += 1;
 				return false;
 			},
+			probeSessionIsAuthoritative: true,
 		},
 		{
 			assist: async () => "req-1",
@@ -383,7 +385,7 @@ test("both hooks, dead probe (heb shape): credentials resolve before ensureSessi
 	});
 });
 
-test("both hooks, no resolveDeferredCredentials supplied: dead probe still runs ensureSession with the eagerly-resolved credentials", async () => {
+test("both hooks, not opted in, no resolveDeferredCredentials supplied: dead probe still runs ensureSession with the eagerly-resolved credentials", async () => {
 	let ensureSessionCredentials: Readonly<Record<string, string>> | null = null;
 
 	await establishSession(
@@ -426,4 +428,111 @@ test("both hooks, no resolveDeferredCredentials supplied: dead probe still runs 
 		HEB_USERNAME: "already-resolved",
 		HEB_PASSWORD: "already-resolved",
 	});
+});
+
+// ─── Negative controls: connectors with weak (cookie-only) probes that have
+// NOT opted in via probeSessionIsAuthoritative (doordash/wholefoods shape) ──
+//
+// Integration-blocker regression this guards: a stale or challenge cookie
+// can make a cookie-name-based probeSession report "live" even when the
+// session is actually dead/challenged. Without requiring an explicit opt-in,
+// that false-live probe would skip ensureSession's page-level repair entirely
+// for every auth+browser+probeSession+ensureSession connector, not just heb.
+// These tests pin that a live probe result, by itself, is NOT authoritative
+// unless the connector explicitly opts in.
+
+test("both hooks, live probe, probeSessionIsAuthoritative NOT set (doordash/wholefoods shape): ensureSession still runs despite the stale-cookie live probe", async () => {
+	let ensureSessionCalls = 0;
+	let probeCalls = 0;
+
+	await establishSession(
+		{
+			ensureSession: async () => {
+				ensureSessionCalls += 1;
+			},
+			probeSession: async () => {
+				probeCalls += 1;
+				// Simulates a stale/challenge cookie still present: the cookie-only
+				// probe reports "live" even though the session is not actually usable.
+				return true;
+			},
+			// probeSessionIsAuthoritative intentionally omitted.
+		},
+		{
+			assist: async () => "req-1",
+			capture: null,
+			checkpoint: async () => {
+				/* no-op */
+			},
+			completeAssistance: async () => {
+				/* no-op */
+			},
+			context: makeStubContext(),
+			credentials: {
+				DOORDASH_USERNAME: "resolved",
+				DOORDASH_PASSWORD: "resolved",
+			},
+			name: "doordash",
+			page: makeStubPage(),
+			progress: async () => {
+				/* no-op */
+			},
+			retryablePattern: /never/,
+			sendInteraction: async (req) => ({
+				request_id: req.request_id ?? "int-1",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+		},
+	);
+
+	assert.equal(
+		probeCalls,
+		0,
+		"without the opt-in, establishSession runs ensureSession directly and never consults probeSession at all — restoring exact pre-1ab4e75 ordering",
+	);
+	assert.equal(
+		ensureSessionCalls,
+		1,
+		"a connector without the opt-in must always run ensureSession, even though a cookie-only probe would have reported live — this is the fix for the stale-cookie regression",
+	);
+});
+
+test("both hooks, live probe, probeSessionIsAuthoritative=false explicitly (wholefoods shape): ensureSession still runs", async () => {
+	let ensureSessionCalls = 0;
+
+	await establishSession(
+		{
+			ensureSession: async () => {
+				ensureSessionCalls += 1;
+			},
+			probeSession: async () => true,
+			probeSessionIsAuthoritative: false,
+		},
+		{
+			assist: async () => "req-1",
+			capture: null,
+			checkpoint: async () => {
+				/* no-op */
+			},
+			completeAssistance: async () => {
+				/* no-op */
+			},
+			context: makeStubContext(),
+			credentials: {},
+			name: "wholefoods",
+			page: makeStubPage(),
+			progress: async () => {
+				/* no-op */
+			},
+			retryablePattern: /never/,
+			sendInteraction: async (req) => ({
+				request_id: req.request_id ?? "int-1",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+		},
+	);
+
+	assert.equal(ensureSessionCalls, 1);
 });
