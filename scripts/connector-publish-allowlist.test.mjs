@@ -34,7 +34,7 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
     }
   }
   assert.deepEqual(PUBLISH_EXCLUSIONS.map((row) => row.manifest).sort(),
-    ["google_messages", "signal", "slack"]);
+    ["google_messages", "icloud_notes", "signal", "slack", "youtube"]);
 });
 
 function workflow(name) {
