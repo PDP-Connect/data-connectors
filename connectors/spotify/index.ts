@@ -4,65 +4,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Spotify Connector (v0.1.1)
+ * PDPP Spotify Connector (v0.1.2)
  *
- * Auth: Spotify Web API OAuth token (user-provided). v1 expects a pre-issued
- *   token via SPOTIFY_ACCESS_TOKEN env var. Full OAuth loop deferred.
- * Scopes needed: user-library-read, user-top-read, user-read-recently-played,
- *   playlist-read-private, playlist-read-collaborative.
- *
- * Endpoints used:
- *   GET /v1/me/playlists?limit=50&offset=N
- *   GET /v1/playlists/{id}?fields=followers.total (per playlist; the list
- *     endpoint above returns the Simplified Playlist Object, which has no
- *     `followers` field — only the full object does. See collectPlaylists.)
- *   GET /v1/me/tracks?limit=50&offset=N
- *   GET /v1/me/top/artists?time_range=short_term|medium_term|long_term&limit=50
- *   GET /v1/me/player/recently-played?limit=50&after=<unix_ms>
- *   GET /v1/me/following?type=artist (profile.following; one call total)
- *
- * Rate limit: Spotify does not publish a fixed numeric limit. The Web API uses
- * a rolling window and returns Retry-After on 429 responses; the connector
- * honors that header and uses a conservative provider-local pacing profile.
+ * Uses a logged-in open.spotify.com browser session and Spotify web-player
+ * GraphQL endpoints. This keeps the legacy Desktop UX and avoids pasted public
+ * Web API tokens that expire after roughly one hour.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
-	buildDetailCoverageMessage,
-	type CollectContext,
+	type BrowserCollectContext,
 	type EmittedMessage,
+	type EnsureSessionArgs,
 	emitDetailCoverage,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { spotifyPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.spotify.com/v1";
-
-// Single per-provider send governor + retry layer. `maxAttempts: 1` keeps the
-// 429 throw byte-identical (cross-run cooldown via `retryablePattern`).
-// §3 ProviderProfile: spotify declares its own AUDITED pacing ceiling (500ms ≈
-// 2 req/s, ~67% of the commonly-cited ~180 req/min; WI-1b). Spotify does not
-// publish the exact limit (rolling 30s window), so this is margin-heavy and
-// honors Retry-After on 429. NOT a borrow of ChatGPT's 250ms. See
-// src/provider-profile.ts → spotifyPacingProfile and
-// docs/research/per-connector-rate-profiles-2026-06-13.md for the derivation.
-const httpGovernor = createConnectorHttpGovernor({
-	name: "spotify",
-	maxAttempts: 1,
-	profile: spotifyPacingProfile(),
-});
-interface ProgressExtra {
-	cursor_present?: boolean;
-	item_count?: number;
-	offset_ordinal?: number;
-	page_index?: number;
-	phase?: string;
-	rate_limit_pressure?: number;
-	stream?: string;
-	total_seen?: number;
-}
+const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
 
 interface SpotifyImage {
 	height?: number | null;
@@ -110,11 +71,6 @@ export interface SpotifyPlaylist {
 	uri?: string;
 }
 
-interface SpotifySavedTrack {
-	added_at: string;
-	track: SpotifyTrack | null;
-}
-
 interface SpotifyPlaylistItem {
 	added_at?: string | null;
 	added_by?: { id?: string | null } | null;
@@ -129,45 +85,15 @@ interface SpotifyProfile {
 	uri?: string;
 }
 
-interface SpotifyFollowingArtistsResponse {
-	artists?: { total?: number | null };
+interface BrowserData {
+	playlist_items: Record<string, unknown>[];
+	playlists: Record<string, unknown>[];
+	profile: Record<string, unknown> | null;
+	saved_tracks: Record<string, unknown>[];
 }
 
-interface SpotifyPlayHistory {
-	context?: { type?: string | null };
-	played_at: string;
-	track: SpotifyTrack;
-}
-
-interface PagedResponse<T> {
-	items: T[];
-	next?: string | null;
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function parseSpotifyPage<T>(value: unknown): PagedResponse<T> {
-	if (!isObjectRecord(value)) {
-		throw new Error("spotify_response_malformed: page must be an object");
-	}
-	if (!Array.isArray(value.items)) {
-		throw new Error("spotify_response_malformed: items must be an array");
-	}
-	if (
-		value.next !== undefined &&
-		value.next !== null &&
-		typeof value.next !== "string"
-	) {
-		throw new Error(
-			"spotify_response_malformed: next must be a string or null",
-		);
-	}
-	return {
-		items: value.items as T[],
-		...(value.next === undefined ? {} : { next: value.next as string | null }),
-	};
+interface BrowserCollectResult extends BrowserData {
+	warnings: string[];
 }
 
 /**
@@ -196,9 +122,7 @@ export function spotifyNextPath(
 	next: string | null | undefined,
 	currentPath: string,
 ): string | null {
-	if (!next) {
-		return null;
-	}
+	if (!next) return null;
 	let nextUrl: URL;
 	try {
 		nextUrl = new URL(next, API);
@@ -213,9 +137,8 @@ export function spotifyNextPath(
 		throw new Error("spotify_pagination_invalid_next");
 	}
 	const nextPath = `${nextUrl.pathname.slice(apiUrl.pathname.length)}${nextUrl.search}`;
-	if (nextPath === currentPath) {
+	if (nextPath === currentPath)
 		throw new Error("spotify_pagination_no_progress");
-	}
 	return nextPath;
 }
 
@@ -225,10 +148,6 @@ export interface SpotifyCycleDetectorState {
 	tortoise: string;
 }
 
-/**
- * Brent's online cycle detector for normalized cursor paths. It consumes each
- * observed path once and retains only fixed-size detector state.
- */
 export function createSpotifyCycleDetector(initialPath: string): {
 	observe: (path: string) => boolean;
 	state: () => SpotifyCycleDetectorState;
@@ -239,9 +158,7 @@ export function createSpotifyCycleDetector(initialPath: string): {
 	return {
 		observe: (path) => {
 			lambda += 1n;
-			if (tortoise === path) {
-				return true;
-			}
+			if (tortoise === path) return true;
 			if (power === lambda) {
 				tortoise = path;
 				power *= 2n;
@@ -253,11 +170,6 @@ export function createSpotifyCycleDetector(initialPath: string): {
 	};
 }
 
-/**
- * Web API image objects arrive as `[{url, width, height}]`; forwarded
- * verbatim (nullable dimensions preserved), empty array when the API sends
- * none at all.
- */
 function spotifyImages(
 	images: SpotifyImage[] | null | undefined,
 ): Array<{ height: number | null; url: string; width: number | null }> {
@@ -268,12 +180,6 @@ function spotifyImages(
 			width: img.width ?? null,
 			height: img.height ?? null,
 		}));
-}
-
-function nonnegativeCount(value: unknown): number | null {
-	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-		? value
-		: null;
 }
 
 export function spotifyPlaylistRecord(
@@ -295,12 +201,6 @@ export function spotifyPlaylistRecord(
 	};
 }
 
-/**
- * playlist_items child stream (D3): one record per track-in-playlist, keyed
- * by `<playlist_id>:<position>` so the id stays stable across runs as long
- * as the playlist's own ordering does not change (matching the API's own
- * offset-based pagination contract).
- */
 export function spotifyPlaylistItemRecord(
 	playlistId: string,
 	position: number,
@@ -335,594 +235,533 @@ export function spotifyProfileRecord(
 	};
 }
 
-interface SpotifyRawResponse {
-	body: string;
-	headers?: Record<string, string | undefined>;
-	status: number;
+async function openSpotify(page: BrowserCollectContext["page"]): Promise<void> {
+	await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "domcontentloaded" });
 }
 
-async function sp<T>(
-	path: string,
-	token: string,
-	progress?: (message: string, extra?: ProgressExtra) => Promise<void>,
-	extra?: ProgressExtra,
-): Promise<T> {
-	let raw: SpotifyRawResponse;
-	try {
-		const r = await httpGovernor.request<
-			SpotifyRawResponse,
-			SpotifyRawResponse
-		>(
-			async () => {
-				const res = await fetch(`${API}${path}`, {
-					headers: { Authorization: `Bearer ${token}` },
-				});
-				const retryAfter = res.headers.get("retry-after");
-				return {
-					body: await res.text().catch((): string => ""),
-					...(retryAfter === null
-						? {}
-						: { headers: { "retry-after": retryAfter } }),
-					status: res.status,
-				};
-			},
-			(resp) => ({
-				status: resp.status,
-				...(resp.headers === undefined ? {} : { headers: resp.headers }),
-				value: resp,
-			}),
-		);
-		raw = r.value;
-	} catch (error) {
-		if (error instanceof Error && error.message === "spotify_rate_limited") {
-			await progress?.("Spotify request rate limited", {
-				...extra,
-				phase: "rate_limit",
-				rate_limit_pressure: 1,
-			});
-		}
-		throw error;
-	}
-	if (raw.status === 401) {
-		throw new Error("spotify_auth_failed");
-	}
-	if (raw.status < 200 || raw.status >= 300) {
-		throw new Error(
-			`spotify_http_${String(raw.status)}: ${raw.body.slice(0, 200)}`,
-		);
-	}
-	return JSON.parse(raw.body) as T;
-}
-
-async function paginate<T, Accumulator extends PaginationTally>(
-	path: string,
-	token: string,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-	stream: string,
-	initial: Accumulator,
-	fold: (
-		accumulator: Accumulator,
-		item: T,
-	) => Promise<Accumulator> | Accumulator,
-): Promise<Accumulator> {
-	let accumulator = initial;
-	let next: string | null = path;
-	let pageIndex = 0;
-	const cycleDetector = createSpotifyCycleDetector(path);
-	while (next) {
-		const pageExtra = {
-			stream,
-			phase: "fetch",
-			page_index: pageIndex,
-			offset_ordinal: pageIndex,
-			total_seen: accumulator.totalSeen,
-			cursor_present: pageIndex > 0,
-		};
-		await progress("Fetching Spotify page", pageExtra);
-		const json = parseSpotifyPage<T>(
-			await sp<unknown>(next, token, progress, pageExtra),
-		);
-		for (const item of json.items) {
-			accumulator = await fold(accumulator, item);
-		}
-		await progress("Fetched Spotify page", {
-			stream,
-			phase: "page",
-			page_index: pageIndex,
-			offset_ordinal: pageIndex,
-			item_count: json.items.length,
-			total_seen: accumulator.totalSeen,
-			cursor_present: Boolean(json.next),
-		});
-		next = spotifyNextPath(json.next, next);
-		if (next !== null && cycleDetector.observe(next)) {
-			throw new Error("spotify_pagination_cycle");
-		}
-		pageIndex += 1;
-	}
-	return accumulator;
-}
-
-interface PaginationTally {
-	covered: number;
-	totalSeen: number;
-}
-
-/**
- * GET /me/playlists returns the Simplified Playlist Object, which has no
- * `followers` field (only the full Playlist Object from GET /playlists/{id}
- * carries `followers.total`) — mirroring what the legacy connector did with
- * its own per-playlist `fetchPlaylist` call
- * (connectors/spotify/spotify-playwright.js:737-757, `pl.followers`). One
- * extra per-playlist fetch closes that gap; `images`/`uri` are already on the
- * simplified object and pass through unchanged regardless of this fetch's
- * outcome. A fetch failure (rate limit, deleted playlist, transient error)
- * still emits the playlist record with `followers: null` — the record is not
- * withheld — but coverage excludes it so the run reports partial detail.
- */
-async function fetchPlaylistFollowers(
-	playlistId: string,
-	token: string,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<number | null> {
-	try {
-		const detail = await sp<SpotifyPlaylist>(
-			`/playlists/${encodeURIComponent(playlistId)}?fields=followers.total`,
-			token,
-			progress,
-			{ stream: "playlists", phase: "followers" },
-		);
-		return nonnegativeCount(detail.followers?.total);
-	} catch {
-		return null;
-	}
-}
-
-async function collectPlaylists(
-	token: string,
-	emit: (msg: EmittedMessage) => Promise<void>,
-	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	await progress("Fetching playlists", { stream: "playlists", phase: "start" });
-	const requiredKeys: string[] = [];
-	const hydratedKeys: string[] = [];
-	const tally = await paginate<SpotifyPlaylist, PaginationTally>(
-		"/me/playlists?limit=50",
-		token,
-		progress,
-		"playlists",
-		{ totalSeen: 0, covered: 0 },
-		async (current, p) => {
-			requiredKeys.push(p.id);
-			// Sequential through the shared, rate-paced governor: one in-flight
-			// followers fetch at a time, same pacing ceiling as every other
-			// Spotify request (see httpGovernor / spotifyPacingProfile above) — no
-			// separate concurrency primitive needed.
-			const followers = await fetchPlaylistFollowers(
-				p.id,
-				token,
-				progress,
-			);
-			const record = spotifyPlaylistRecord({
-				...p,
-				followers: { total: followers },
-			});
-			const detailCovered =
-				followers !== null && validateRecord("playlists", record).ok;
-			if (detailCovered) {
-				hydratedKeys.push(p.id);
-			}
-			const covered = current.covered + (detailCovered ? 1 : 0);
-			await emitRecord("playlists", record);
-			return { totalSeen: current.totalSeen + 1, covered };
-		},
-	);
-	// Every playlist is emitted, but coverage requires a valid follower count.
-	// A failed detail fetch therefore leaves considered > covered.
-	await emit(
-		buildDetailCoverageMessage({
-			stream: "playlists",
-			stateStream: "playlists",
-			requiredKeys,
-			hydratedKeys,
-			considered: tally.totalSeen,
-			covered: tally.covered,
-		}),
+async function hasSpotifySession(
+	page: BrowserCollectContext["page"],
+): Promise<boolean> {
+	await openSpotify(page);
+	return await page.evaluate(
+		() =>
+			window.location.hostname === "open.spotify.com" &&
+			!document.body.textContent?.toLowerCase().includes("log in"),
 	);
 }
 
-/**
- * playlist_items (D3 child stream): enumerates every playlist the account
- * owns/follows, then paginates each playlist's own /tracks endpoint. The
- * playlist id list is re-fetched here rather than threaded from
- * collectPlaylists so this stream stands alone when only playlist_items (not
- * playlists) is requested — mirroring how order_items independently walks
- * Amazon's order list rather than depending on the orders stream having run
- * this turn.
- */
-async function collectPlaylistItems(
-	token: string,
-	emit: (msg: EmittedMessage) => Promise<void>,
-	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	await progress("Fetching playlist ids for playlist_items", {
-		stream: "playlist_items",
-		phase: "start",
+async function ensureSpotifySession({
+	assist,
+	capture,
+	completeAssistance,
+	page,
+	sendInteraction,
+}: EnsureSessionArgs): Promise<void> {
+	if (await hasSpotifySession(page)) return;
+	await page.goto(
+		"https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F",
+		{ waitUntil: "domcontentloaded" },
+	);
+	const ready = await manualBrowserLogin({
+		assist,
+		capture,
+		completeAssistance,
+		isProbeSuccessful: (ok) => ok === true,
+		message:
+			"Sign in to Spotify in the secure browser, then continue. PDPP will verify the session before collecting.",
+		page,
+		probe: () => hasSpotifySession(page),
+		readinessProbe: hasSpotifySession,
+		sendInteraction,
+		timeoutSeconds: 30 * 60,
 	});
-	const playlistIds: string[] = [];
-	await paginate<SpotifyPlaylist, PaginationTally>(
-		"/me/playlists?limit=50",
-		token,
-		progress,
-		"playlist_items",
-		{ totalSeen: 0, covered: 0 },
-		(current, p) => {
-			if (p.id) {
-				playlistIds.push(p.id);
-			}
-			return { totalSeen: current.totalSeen + 1, covered: current.covered };
-		},
-	);
+	if (!ready) throw new Error("spotify_session_dead");
+}
 
-	let totalSeen = 0;
-	let covered = 0;
-	for (const playlistId of playlistIds) {
-		const tally = await paginate<SpotifyPlaylistItem, PaginationTally>(
-			`/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100`,
-			token,
-			progress,
-			"playlist_items",
-			{ totalSeen: 0, covered: 0 },
-			async (current, item) => {
-				const record = spotifyPlaylistItemRecord(
-					playlistId,
-					current.totalSeen,
-					item,
+async function collectSpotifyWebData(
+	page: BrowserCollectContext["page"],
+	requestedStreams: string[],
+): Promise<BrowserCollectResult> {
+	await openSpotify(page);
+	return await page.evaluate(async (requested) => {
+		const wanted = new Set(requested);
+		const warnings: string[] = [];
+		const result: BrowserData = {
+			profile: null,
+			playlists: [],
+			playlist_items: [],
+			saved_tracks: [],
+		};
+		const webVersion = "1.2.56.244.g7bfe3dc8";
+		let clientId: string | null = null;
+
+		function idFromUri(uri: unknown): string | null {
+			if (typeof uri !== "string") return null;
+			const parts = uri.split(":");
+			return parts.length >= 3 ? parts[parts.length - 1] || null : null;
+		}
+
+		function imageRecords(
+			images: any,
+		): Array<{ height: null; url: string; width: null }> {
+			return (images?.items || [])
+				.map((img: any) => img?.sources?.[0]?.url)
+				.filter(
+					(url: unknown): url is string =>
+						typeof url === "string" && url.length > 0,
+				)
+				.map((url: string) => ({ url, width: null, height: null }));
+		}
+
+		function count(value: unknown): number | null {
+			return Number.isSafeInteger(value) && Number(value) >= 0
+				? Number(value)
+				: null;
+		}
+
+		async function accessToken(): Promise<string> {
+			let serverTime: number | null = null;
+			try {
+				const stResp = await fetch("/api/server-time");
+				const stData = await stResp.json();
+				const parsed = Number(stData.serverTime);
+				serverTime = Number.isFinite(parsed) ? parsed : null;
+			} catch {}
+			const totpSecret = ',7/*F("rLJ2oxaKL^f+E1xvP@N';
+			const xored = totpSecret
+				.split("")
+				.map((c, i) => c.charCodeAt(0) ^ ((i % 33) + 9));
+			const joined = xored.join("");
+			const secretHex = Array.from(new TextEncoder().encode(joined))
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			async function genTOTP(
+				hexSecret: string,
+				timestampMs: number,
+			): Promise<string> {
+				const counter = Math.floor(timestampMs / 1000 / 30);
+				const buf = new ArrayBuffer(8);
+				const v = new DataView(buf);
+				v.setUint32(0, Math.floor(counter / 0x100000000));
+				v.setUint32(4, counter & 0xffffffff);
+				const bytes = hexSecret.match(/.{1,2}/g) || [];
+				const kb = new Uint8Array(bytes.map((b) => Number.parseInt(b, 16)));
+				const key = await crypto.subtle.importKey(
+					"raw",
+					kb,
+					{ name: "HMAC", hash: "SHA-1" },
+					false,
+					["sign"],
 				);
-				const recordCovered =
-					current.covered +
-					(validateRecord("playlist_items", record).ok ? 1 : 0);
-				await emitRecord("playlist_items", record);
-				return { totalSeen: current.totalSeen + 1, covered: recordCovered };
-			},
-		);
-		totalSeen += tally.totalSeen;
-		covered += tally.covered;
-	}
-	// Full re-walk of every in-scope playlist's tracks each run, so the
-	// considered/covered denominator spans every playlist enumerated above.
-	await emitDetailCoverage(
-		{ emit },
-		{
-			stream: "playlist_items",
-			stateStream: "playlist_items",
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: totalSeen,
-			covered,
-		},
-	);
-}
-
-/**
- * The Web API has no following-COUNT field on /me; the closest documented
- * signal is the total on GET /me/following?type=artist (the "artists you
- * follow" list endpoint's own paging envelope), which is one extra call.
- * `type=user` is not a supported value for this endpoint (Spotify only
- * supports following artists and Spotify-curated users/playlists via this
- * surface for a normal account), so this is the followed-ARTISTS total, not
- * an all-following total — an honest, narrower signal, not a fabricated one.
- * A fetch failure leaves `following` null rather than guessing.
- */
-async function fetchFollowingCount(
-	token: string,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<number | null> {
-	try {
-		const resp = await sp<SpotifyFollowingArtistsResponse>(
-			"/me/following?type=artist&limit=1",
-			token,
-			progress,
-			{ stream: "profile", phase: "following" },
-		);
-		return nonnegativeCount(resp.artists?.total);
-	} catch {
-		return null;
-	}
-}
-
-async function collectProfile(
-	token: string,
-	emit: (msg: EmittedMessage) => Promise<void>,
-	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	await progress("Fetching profile", { stream: "profile", phase: "start" });
-	const profile = await sp<SpotifyProfile>("/me", token, progress, {
-		stream: "profile",
-	});
-	const following = await fetchFollowingCount(token, progress);
-	const record = spotifyProfileRecord(profile, following);
-	const covered =
-		following !== null && validateRecord("profile", record).ok ? 1 : 0;
-	await emitRecord("profile", record);
-	await emitDetailCoverage(
-		{ emit },
-		{
-			stream: "profile",
-			stateStream: "profile",
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: 1,
-			covered,
-		},
-	);
-}
-
-interface SavedTracksState {
-	last_added_at?: string;
-}
-
-async function collectSavedTracks(
-	token: string,
-	state: Record<string, unknown>,
-	emit: (msg: EmittedMessage) => Promise<void>,
-	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	await progress("Fetching saved tracks", {
-		stream: "saved_tracks",
-		phase: "start",
-	});
-	const savedState = state.saved_tracks as SavedTracksState | undefined;
-	const tally = await paginate<
-		SpotifySavedTrack,
-		PaginationTally & { latest: string | undefined }
-	>(
-		"/me/tracks?limit=50",
-		token,
-		progress,
-		"saved_tracks",
-		{ totalSeen: 0, covered: 0, latest: savedState?.last_added_at },
-		async (current, item) => {
-			const t = item.track;
-			if (!t) {
-				return { ...current, totalSeen: current.totalSeen + 1 };
+				const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, buf));
+				const o = (sig.at(-1) ?? 0) & 0x0f;
+				const code =
+					((((sig[o] ?? 0) & 0x7f) << 24) |
+						(((sig[o + 1] ?? 0) & 0xff) << 16) |
+						(((sig[o + 2] ?? 0) & 0xff) << 8) |
+						((sig[o + 3] ?? 0) & 0xff)) %
+					1000000;
+				return String(code).padStart(6, "0");
 			}
-			const addedAt = item.added_at;
-			const record = {
-				id: t.id ?? null,
-				name: t.name,
-				artist_names: (t.artists || []).map((a) => a.name),
-				album_name: t.album?.name ?? null,
-				duration_ms: t.duration_ms ?? null,
-				popularity: t.popularity ?? null,
-				added_at: addedAt,
-				isrc: t.external_ids?.isrc ?? null,
-				uri: t.uri ?? null,
-				explicit: t.explicit ?? null,
-				album_artist_names: (t.album?.artists || []).map((a) => a.name),
-			};
-			const recordValid = validateRecord("saved_tracks", record).ok;
-			const covered = current.covered + (recordValid ? 1 : 0);
-			if (savedState?.last_added_at && addedAt < savedState.last_added_at) {
-				return { ...current, totalSeen: current.totalSeen + 1, covered };
+			const now = Date.now();
+			const params = new URLSearchParams({
+				reason: "init",
+				productType: "web_player",
+				totp: await genTOTP(secretHex, now),
+				totpServer: serverTime
+					? await genTOTP(secretHex, serverTime * 1000)
+					: "unavailable",
+				totpVer: "61",
+			});
+			const tokenResp = await fetch(`/api/token?${params.toString()}`, {
+				credentials: "include",
+			});
+			const tokenData = await tokenResp.json();
+			if (!tokenResp.ok || !tokenData.accessToken || tokenData.isAnonymous) {
+				throw new Error(`spotify_access_token_${tokenResp.status}`);
 			}
-			await emitRecord("saved_tracks", record);
-			const latest =
-				recordValid && addedAt && (!current.latest || addedAt > current.latest)
-					? addedAt
-					: current.latest;
-			return { totalSeen: current.totalSeen + 1, covered, latest };
-		},
-	);
-	await emit({
-		type: "STATE",
-		stream: "saved_tracks",
-		cursor: { last_added_at: tally.latest || null },
-	});
-	await emitDetailCoverage(
-		{ emit },
-		{
-			stream: "saved_tracks",
-			stateStream: "saved_tracks",
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: tally.totalSeen,
-			covered: tally.covered,
-		},
-	);
-}
-
-async function collectTopArtists(
-	token: string,
-	emit: (msg: EmittedMessage) => Promise<void>,
-	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	await progress("Fetching top artists", {
-		stream: "top_artists",
-		phase: "start",
-	});
-	const ranges = ["short_term", "medium_term", "long_term"] as const;
-	let totalSeen = 0;
-	let covered = 0;
-	for (let i = 0; i < ranges.length; i += 1) {
-		const range = ranges[i];
-		if (!range) {
-			continue;
+			clientId = tokenData.clientId || null;
+			return tokenData.accessToken;
 		}
-		const pageExtra = {
-			stream: "top_artists",
-			phase: "fetch",
-			page_index: i,
-			offset_ordinal: i,
-			total_seen: totalSeen,
-			cursor_present: i > 0,
-		};
-		await progress("Fetching Spotify top artists window", pageExtra);
-		const windowTally = await paginate<SpotifyArtist, PaginationTally>(
-			`/me/top/artists?time_range=${range}&limit=50`,
-			token,
-			progress,
-			"top_artists",
-			{ totalSeen: 0, covered: 0 },
-			async (current, a) => {
-				const record = {
-					id: a.id ?? null,
-					name: a.name,
-					genres: a.genres || [],
-					popularity: a.popularity ?? null,
-					followers: a.followers?.total ?? null,
-					time_range: range,
-				};
-				const nextTally = {
-					totalSeen: current.totalSeen + 1,
-					covered:
-						current.covered +
-						(validateRecord("top_artists", record).ok ? 1 : 0),
-				};
-				await emitRecord("top_artists", record);
-				return nextTally;
-			},
-		);
-		totalSeen += windowTally.totalSeen;
-		covered += windowTally.covered;
-		await progress("Fetched Spotify top artists window", {
-			stream: "top_artists",
-			phase: "page",
-			page_index: i,
-			offset_ordinal: i,
-			item_count: windowTally.totalSeen,
-			total_seen: totalSeen,
-			cursor_present: i < ranges.length - 1,
-		});
-	}
-	// `top_artists` fans out across 3 fixed time-range windows. Count the API
-	// boundary separately from valid emitted records so a malformed source row
-	// cannot be mistaken for complete coverage.
-	await emitDetailCoverage(
-		{ emit },
-		{
-			stream: "top_artists",
-			stateStream: "top_artists",
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: totalSeen,
-			covered,
-		},
-	);
+
+		async function clientToken(): Promise<string> {
+			const resp = await fetch(
+				"https://clienttoken.spotify.com/v1/clienttoken",
+				{
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						accept: "application/json",
+					},
+					body: JSON.stringify({
+						client_data: {
+							client_version: webVersion,
+							client_id: clientId,
+							js_sdk_data: {
+								device_brand: "unknown",
+								device_model: "unknown",
+								device_type: "computer",
+								os: "macos",
+								os_version: "unknown",
+							},
+						},
+					}),
+				},
+			);
+			const data = await resp.json();
+			if (!resp.ok || !data.granted_token?.token)
+				throw new Error(`spotify_client_token_${resp.status}`);
+			return data.granted_token.token;
+		}
+
+		async function queryHashes(): Promise<Record<string, string>> {
+			const needed = [
+				"fetchLibraryTracks",
+				"fetchPlaylist",
+				"libraryV3",
+				"profileAttributes",
+			];
+			const found: Record<string, string> = {};
+			const hashPattern =
+				/new\s+\w+\.\w+\("(\w+)","(?:query|mutation)","([a-f0-9]{64})"/g;
+			const extract = (text: string) => {
+				const re = new RegExp(hashPattern.source, "g");
+				let m = re.exec(text);
+				while (m !== null) {
+					const operation = m[1];
+					const hash = m[2];
+					if (operation && hash && needed.includes(operation))
+						found[operation] = hash;
+					m = re.exec(text);
+				}
+			};
+			const complete = () => needed.every((name) => found[name]);
+			try {
+				const names = await caches.keys();
+				const pcName = names.find((name) => name.includes("workbox-precache"));
+				if (pcName) {
+					const cache = await caches.open(pcName);
+					for (const req of (await cache.keys())
+						.filter((req) => req.url.endsWith(".js"))
+						.slice(0, 20)) {
+						const resp = await cache.match(req);
+						if (resp) extract(await resp.text());
+						if (complete()) return found;
+					}
+				}
+			} catch {}
+			const scripts = [
+				...Array.from(document.querySelectorAll("script[src]")).map(
+					(s) => (s as HTMLScriptElement).src,
+				),
+				...performance
+					.getEntriesByType("resource")
+					.filter(
+						(e) =>
+							(e as PerformanceResourceTiming).initiatorType === "script" &&
+							e.name.endsWith(".js"),
+					)
+					.map((e) => e.name),
+			].filter(
+				(url, index, all) =>
+					url.includes("spotify") && all.indexOf(url) === index,
+			);
+			for (const url of scripts) {
+				try {
+					const resp = await fetch(url);
+					if (resp.ok) extract(await resp.text());
+					if (complete()) return found;
+				} catch {}
+			}
+			const missing = needed.filter((name) => !found[name]);
+			if (missing.length > 0)
+				warnings.push(`missing query hashes: ${missing.join(", ")}`);
+			return found;
+		}
+
+		const access = await accessToken();
+		const client = await clientToken();
+		const hashes = await queryHashes();
+		async function gql(
+			operationName: string,
+			variables: Record<string, unknown>,
+		): Promise<any> {
+			const hash = hashes[operationName];
+			if (!hash) throw new Error(`spotify_missing_hash_${operationName}`);
+			const resp = await fetch(
+				"https://api-partner.spotify.com/pathfinder/v2/query",
+				{
+					method: "POST",
+					headers: {
+						authorization: `Bearer ${access}`,
+						"client-token": client,
+						"content-type": "application/json",
+						accept: "application/json",
+						"app-platform": "WebPlayer",
+						"spotify-app-version": webVersion,
+					},
+					body: JSON.stringify({
+						operationName,
+						variables,
+						extensions: { persistedQuery: { version: 1, sha256Hash: hash } },
+					}),
+				},
+			);
+			if (!resp.ok)
+				throw new Error(`spotify_graphql_${operationName}_${resp.status}`);
+			const data = await resp.json();
+			if (data.errors)
+				throw new Error(`spotify_graphql_${operationName}_errors`);
+			return data;
+		}
+
+		if (wanted.has("profile")) {
+			const attrs = await gql("profileAttributes", {});
+			const pa = attrs?.data?.me?.profile;
+			if (!pa?.username) throw new Error("spotify_profile_unavailable");
+			const identityUri = pa.uri || `spotify:user:${pa.username}`;
+			let enrichment: any = null;
+			try {
+				const enriched = await fetch(
+					`https://spclient.wg.spotify.com/user-profile-view/v3/profile/${encodeURIComponent(pa.username)}`,
+					{
+						headers: {
+							authorization: `Bearer ${access}`,
+							"client-token": client,
+							accept: "application/json",
+							"app-platform": "WebPlayer",
+						},
+					},
+				);
+				enrichment = await enriched.json();
+			} catch {}
+			const sameAccount = enrichment?.uri === identityUri;
+			const imageUrl =
+				pa.imageUrl || (sameAccount ? enrichment?.image_url : null);
+			result.profile = {
+				id: pa.username,
+				display_name: pa.name ?? null,
+				followers: sameAccount ? count(enrichment?.followers_count) : null,
+				uri: identityUri,
+				images: imageUrl ? [{ url: imageUrl, width: null, height: null }] : [],
+				following: sameAccount ? count(enrichment?.following_count) : null,
+			};
+		}
+
+		if (wanted.has("playlists") || wanted.has("playlist_items")) {
+			const libData = await gql("libraryV3", {
+				filters: [],
+				order: null,
+				textFilter: "",
+				features: ["LIKED_SONGS", "YOUR_EPISODES"],
+				limit: 200,
+				offset: 0,
+				flatten: false,
+				expandedFolders: [],
+				folderUri: null,
+				includeFoldersWhenFlattening: true,
+				withCuration: false,
+			});
+			const playlistUris = (libData?.data?.me?.libraryV3?.items || [])
+				.filter((item: any) => item.item?.data?.__typename === "Playlist")
+				.map((item: any) => item.item?.data?._uri || item.item?.data?.uri || "")
+				.filter(Boolean);
+			for (const uri of playlistUris) {
+				let offset = 0;
+				let position = 0;
+				let playlistId = idFromUri(uri);
+				while (true) {
+					const plData = await gql("fetchPlaylist", {
+						uri,
+						offset,
+						limit: 100,
+						enableWatchFeedEntrypoint: false,
+					});
+					const pl = plData?.data?.playlistV2;
+					if (!pl) break;
+					playlistId = idFromUri(pl.uri) || playlistId;
+					if (!playlistId) break;
+					const items = pl.content?.items || [];
+					if (offset === 0 && wanted.has("playlists")) {
+						result.playlists.push({
+							id: playlistId,
+							name: pl.name ?? undefined,
+							owner_id: idFromUri(pl.ownerV2?.data?.uri),
+							owner_name: pl.ownerV2?.data?.name ?? null,
+							public: null,
+							collaborative: null,
+							track_count: count(pl.content?.totalCount),
+							snapshot_id: null,
+							description: pl.description ?? null,
+							uri: pl.uri ?? uri,
+							followers: count(pl.followers),
+							images: imageRecords(pl.images),
+						});
+					}
+					if (wanted.has("playlist_items")) {
+						for (const item of items) {
+							const t = item.itemV2?.data;
+							if (t?.__typename !== "Track") continue;
+							result.playlist_items.push({
+								id: `${playlistId}:${position}`,
+								playlist_id: playlistId,
+								track_id: idFromUri(t.uri),
+								position,
+								added_at: item.addedAt?.isoString ?? null,
+								added_by: item.addedBy?.data?.name ?? null,
+								name: t.name ?? undefined,
+								artist_names: (t.artists?.items || []).map(
+									(a: any) => a.profile?.name ?? "",
+								),
+								album_name: t.albumOfTrack?.name ?? null,
+								duration_ms: count(t.trackDuration?.totalMilliseconds),
+							});
+							position += 1;
+						}
+					}
+					const total = count(pl.content?.totalCount) ?? items.length;
+					if (items.length < 100 || position >= total) break;
+					offset += 100;
+				}
+			}
+		}
+
+		if (wanted.has("saved_tracks")) {
+			let offset = 0;
+			while (true) {
+				const data = await gql("fetchLibraryTracks", {
+					uri: "spotify:user:me:collection",
+					offset,
+					limit: 100,
+				});
+				const tracks = data?.data?.me?.library?.tracks;
+				const items = tracks?.items || [];
+				for (const item of items) {
+					const t = item.track?.data;
+					const id = idFromUri(item.track?._uri || item.track?.uri);
+					if (!t || !id) continue;
+					result.saved_tracks.push({
+						id,
+						name: t.name ?? undefined,
+						artist_names: (t.artists?.items || []).map(
+							(a: any) => a.profile?.name ?? "",
+						),
+						album_name: t.albumOfTrack?.name ?? null,
+						duration_ms: count(t.duration?.totalMilliseconds),
+						popularity: null,
+						added_at: item.addedAt?.isoString ?? new Date(0).toISOString(),
+						isrc: null,
+						uri: item.track?._uri || item.track?.uri || null,
+						explicit: t.contentRating?.label === "EXPLICIT" ? true : null,
+						album_artist_names: (t.albumOfTrack?.artists?.items || []).map(
+							(a: any) => a.profile?.name ?? "",
+						),
+					});
+				}
+				const total = count(tracks?.totalCount) ?? items.length;
+				if (items.length < 100 || result.saved_tracks.length >= total) break;
+				offset += 100;
+			}
+		}
+
+		return { ...result, warnings };
+	}, requestedStreams);
 }
 
-interface RecentlyPlayedState {
-	last_played_at_unix?: number;
-}
-
-async function collectRecentlyPlayed(
-	token: string,
-	state: Record<string, unknown>,
+async function emitRecordsWithCoverage(
+	stream: string,
+	records: Record<string, unknown>[],
 	emit: (msg: EmittedMessage) => Promise<void>,
 	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 ): Promise<void> {
-	await progress("Fetching recently played", {
-		stream: "recently_played",
-		phase: "start",
-	});
-	const rpState = state.recently_played as RecentlyPlayedState | undefined;
-	const after = recentlyPlayedAfterCursor(rpState?.last_played_at_unix);
-	const path = `/me/player/recently-played?limit=50${after === undefined ? "" : `&after=${String(after)}`}`;
-	const tally = await paginate<
-		SpotifyPlayHistory,
-		PaginationTally & { latest: number | null }
-	>(
-		path,
-		token,
-		progress,
-		"recently_played",
-		{ totalSeen: 0, covered: 0, latest: rpState?.last_played_at_unix ?? null },
-		async (current, p) => {
-			const playedAt = p.played_at;
-			const id = `${String(p.track.id)}:${String(new Date(playedAt).getTime())}`;
-			const record = {
-				id,
-				track_id: p.track.id,
-				track_name: p.track.name,
-				artist_names: (p.track.artists || []).map((a) => a.name),
-				album_name: p.track.album?.name ?? null,
-				played_at: playedAt,
-				context_type: p.context?.type ?? null,
-			};
-			const covered =
-				current.covered +
-				(validateRecord("recently_played", record).ok ? 1 : 0);
-			await emitRecord("recently_played", record);
-			const ms = new Date(playedAt).getTime();
-			const latest =
-				Number.isFinite(ms) && (current.latest === null || ms > current.latest)
-					? ms
-					: current.latest;
-			return { totalSeen: current.totalSeen + 1, covered, latest };
-		},
-	);
-	await emit({
-		type: "STATE",
-		stream: "recently_played",
-		cursor: { last_played_at_unix: tally.latest },
-	});
+	let covered = 0;
+	for (const record of records) {
+		if (validateRecord(stream, record).ok) covered += 1;
+		await emitRecord(stream, record);
+	}
 	await emitDetailCoverage(
 		{ emit },
 		{
-			stream: "recently_played",
-			stateStream: "recently_played",
+			stream,
+			stateStream: stream,
 			requiredKeys: [],
 			hydratedKeys: [],
-			considered: tally.totalSeen,
-			covered: tally.covered,
+			considered: records.length,
+			covered,
 		},
 	);
 }
 
 export async function spotifyCollect({
-	state,
-	requested,
-	credentials,
 	emit,
 	emitRecord,
+	page,
 	progress,
+	requested,
 }: Pick<
-	CollectContext,
-	"state" | "requested" | "credentials" | "emit" | "emitRecord" | "progress"
+	BrowserCollectContext,
+	"emit" | "emitRecord" | "page" | "progress" | "requested"
 >): Promise<void> {
-	const token = credentials.SPOTIFY_ACCESS_TOKEN;
-	if (!token) {
-		throw new Error("spotify_auth_failed");
-	}
+	const requestedNames = [...requested.keys()];
+	await progress("Fetching Spotify data");
+	const data = await collectSpotifyWebData(page, requestedNames);
 
+	if (requested.has("profile") && data.profile) {
+		await emitRecord("profile", data.profile);
+		await emitDetailCoverage(
+			{ emit },
+			{
+				stream: "profile",
+				stateStream: "profile",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: 1,
+				covered: validateRecord("profile", data.profile).ok ? 1 : 0,
+			},
+		);
+	}
 	if (requested.has("playlists")) {
-		await collectPlaylists(token, emit, emitRecord, progress);
+		await emitRecordsWithCoverage(
+			"playlists",
+			data.playlists,
+			emit,
+			emitRecord,
+		);
 	}
-
 	if (requested.has("playlist_items")) {
-		await collectPlaylistItems(token, emit, emitRecord, progress);
+		await emitRecordsWithCoverage(
+			"playlist_items",
+			data.playlist_items,
+			emit,
+			emitRecord,
+		);
 	}
-
 	if (requested.has("saved_tracks")) {
-		await collectSavedTracks(token, state, emit, emitRecord, progress);
+		await emitRecordsWithCoverage(
+			"saved_tracks",
+			data.saved_tracks,
+			emit,
+			emitRecord,
+		);
+		await emit({
+			type: "STATE",
+			stream: "saved_tracks",
+			cursor: { full_scan_at: new Date().toISOString() },
+		});
 	}
-
-	if (requested.has("top_artists")) {
-		await collectTopArtists(token, emit, emitRecord, progress);
+	for (const warning of data.warnings) {
+		await progress(warning);
 	}
-
-	if (requested.has("recently_played")) {
-		await collectRecentlyPlayed(token, state, emit, emitRecord, progress);
-	}
-
-	if (requested.has("profile")) {
-		await collectProfile(token, emit, emitRecord, progress);
+	for (const stream of ["top_artists", "recently_played"] as const) {
+		if (requested.has(stream)) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_browser_stage1_deferred",
+				message:
+					"Spotify browser connector stage 1 preserves profile, playlists, playlist items, and saved tracks; this Web API-only stream is deferred.",
+			});
+		}
 	}
 }
 
@@ -931,7 +770,10 @@ if (isMainModule(import.meta.url)) {
 		name: "spotify",
 		validateRecord,
 		retryablePattern: /rate_limited|ECONN|fetch failed|retryable status \d+/i,
-		auth: { kind: "env", required: ["SPOTIFY_ACCESS_TOKEN"] },
+		browser: { profileName: "spotify" },
+		ensureSession: ensureSpotifySession,
+		probeSession: ({ page }) => hasSpotifySession(page),
+		probeSessionIsAuthoritative: true,
 		collect: spotifyCollect,
 	});
 }
