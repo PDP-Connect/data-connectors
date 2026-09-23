@@ -14,6 +14,7 @@ import {
 	nullIfEmpty,
 	postLikeRecords,
 	postRecord,
+	profileCountsFromGraphQL,
 	profileRecord,
 	stableAdId,
 } from "./parsers.ts";
@@ -148,6 +149,92 @@ test("profileRecord: normalizes empty-string bio/full_name/external_url/profile_
 		profile_pic_url: null,
 		username: "example_user",
 	});
+});
+
+test("profileRecord: fills counts from the second arg when provided", () => {
+	const user: InstagramWebInfoUser = { id: "1", username: "janedoe" };
+	const record = profileRecord(user, {
+		follower_count: 1234,
+		following_count: 56,
+		post_count: 78,
+	});
+	assert.equal(record?.follower_count, 1234);
+	assert.equal(record?.following_count, 56);
+	assert.equal(record?.post_count, 78);
+});
+
+// ─── profileCountsFromGraphQL ───────────────────────────────────────────
+// Synthetic fixture shaped like the legacy connector's captured
+// `profileData.data.data.user` (instagram-playwright.js:656-679), with
+// invented values — not derived from a real capture.
+
+test("profileCountsFromGraphQL: maps follower_count/following_count/media_count->post_count", () => {
+	const counts = profileCountsFromGraphQL({
+		data: {
+			data: {
+				user: {
+					follower_count: 4200,
+					following_count: 310,
+					media_count: 88,
+				},
+			},
+		},
+	});
+	assert.deepEqual(counts, {
+		follower_count: 4200,
+		following_count: 310,
+		post_count: 88,
+	});
+});
+
+test("profileCountsFromGraphQL: all-null when the envelope is null", () => {
+	assert.deepEqual(profileCountsFromGraphQL(null), {
+		follower_count: null,
+		following_count: null,
+		post_count: null,
+	});
+});
+
+test("profileCountsFromGraphQL: all-null when undefined", () => {
+	assert.deepEqual(profileCountsFromGraphQL(undefined), {
+		follower_count: null,
+		following_count: null,
+		post_count: null,
+	});
+});
+
+test("profileCountsFromGraphQL: all-null when data.data.user is missing", () => {
+	assert.deepEqual(profileCountsFromGraphQL({ data: {} }), {
+		follower_count: null,
+		following_count: null,
+		post_count: null,
+	});
+});
+
+test("profileCountsFromGraphQL: null for individual fields that are absent, not zero", () => {
+	const counts = profileCountsFromGraphQL({
+		data: { data: { user: { follower_count: 10 } } },
+	});
+	assert.equal(counts.follower_count, 10);
+	assert.equal(counts.following_count, null);
+	assert.equal(counts.post_count, null);
+});
+
+test("profileCountsFromGraphQL: rejects negative or non-finite counts as null (never guessed)", () => {
+	const counts = profileCountsFromGraphQL({
+		data: {
+			data: {
+				user: {
+					follower_count: -1,
+					following_count: Number.NaN,
+					media_count: 0,
+				},
+			},
+		},
+	});
+	assert.equal(counts.follower_count, null);
+	assert.equal(counts.following_count, null);
+	assert.equal(counts.post_count, 0);
 });
 
 // ─── nullIfEmpty ────────────────────────────────────────────────────────

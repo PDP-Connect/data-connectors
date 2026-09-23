@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP GitHub Connector (v0.2.0)
+ * PDPP GitHub Connector (v0.2.1)
  *
  * Auth: Personal Access Token via GITHUB_PERSONAL_ACCESS_TOKEN env var.
  * Create at https://github.com/settings/tokens (fine-grained or classic).
@@ -34,6 +34,20 @@
  * `contributions` and `pinned_repositories` use the GraphQL v4 endpoint
  * (`/graphql`) instead of REST; both share the same governor and primary
  * rate-limit bucket as every REST call.
+ *
+ * `user.achievements` (nullable): no REST or GraphQL field exists for GitHub
+ * achievement badges. Ported from legacy
+ * `connectors/github/github-playwright.js:309-316`'s DOM scrape of the public
+ * profile page (`.js-achievement-card img` / `a[href*="/achievements/"]
+ * img`). One bounded, unauthenticated GET of `https://github.com/{login}` per
+ * run (`fetchProfileAchievements`), outside the REST governor (different host,
+ * no auth). `null` when that fetch fails or returns a non-2xx status; `[]`
+ * when the page was read and has zero badges — the two are deliberately
+ * distinguished, never conflated.
+ *
+ * CHANGES
+ *   v0.2.1 (2026-09-22) — added `user.achievements` (see above); no other
+ *     field on `user`/`repositories`/`starred` changed.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -66,6 +80,7 @@ import {
 	issueRecord,
 	laterIso,
 	organizationRecord,
+	parseAchievementsHtml,
 	parseNextLink,
 	pinnedRepositoryRecord,
 	pullRequestRecord,
@@ -79,6 +94,7 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	GhFetchOptions,
 	GhResult,
+	GitHubAchievement,
 	GitHubEvent,
 	GitHubGist,
 	GitHubGraphQlResponse,
@@ -334,6 +350,37 @@ async function gh<T>(
 	const data = JSON.parse(raw.body) as T;
 	const nextUrl = parseNextLink(raw.link);
 	return { data, nextUrl };
+}
+
+const GITHUB_WEB_ORIGIN = "https://github.com";
+
+/**
+ * Achievement badges have no REST or GraphQL field (confirmed: GitHub's API
+ * surfaces nothing under this name). Legacy
+ * `connectors/github/github-playwright.js:309-316` scraped them from the
+ * public profile page DOM instead. This is one bounded, unauthenticated GET
+ * of `https://github.com/{login}` per run (the public profile page needs no
+ * token) followed by the pure `parseAchievementsHtml`. Returns `null` (not
+ * `[]`) on a non-2xx response or a request failure — distinguishes "the page
+ * was not read" from "the page was read and has zero badges" per the
+ * nullable-enrichment contract on `userSchema.achievements`.
+ */
+async function fetchProfileAchievements(
+	login: string,
+): Promise<GitHubAchievement[] | null> {
+	let res: Response;
+	try {
+		res = await fetch(`${GITHUB_WEB_ORIGIN}/${encodeURIComponent(login)}`, {
+			headers: { "User-Agent": USER_AGENT },
+		});
+	} catch {
+		return null;
+	}
+	if (!res.ok) {
+		return null;
+	}
+	const html = await res.text();
+	return parseAchievementsHtml(html);
 }
 
 const GRAPHQL_BASE = "https://api.github.com/graphql";
@@ -614,7 +661,11 @@ export async function collectUser(ctx: StreamCtx): Promise<void> {
 	if (ctx.requested.has("user")) {
 		// Entity record: stable identity fields only. Gate on fingerprint so
 		// re-fetches that find no profile changes do not create new entity versions.
-		const entityRec = userRecord(u);
+		// `achievements` is a bounded, best-effort enrichment fetched separately
+		// from `/user` (see fetchProfileAchievements) — merged onto the record
+		// without touching userRecord()'s existing fields.
+		const achievements = await fetchProfileAchievements(u.login);
+		const entityRec = { ...userRecord(u), achievements };
 		const userFpCursor = openFingerprintCursor(ctx.state.user, {
 			excludeFromFingerprint: [],
 		});

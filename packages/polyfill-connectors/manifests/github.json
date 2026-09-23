@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/github",
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"display_name": "GitHub",
 	"brand": {
 		"icon": "icons/github.svg",
@@ -72,7 +72,7 @@
 			"compaction_class_note": "follower/repo/gist counts are point-in-time samples carried on this record; retained history is never compactable.",
 			"display": {
 				"label": "Your GitHub profile",
-				"detail": "Username, display name, bio, email if public, company, location, blog, twitter_username, avatar, created_at and updated_at. Follower/following/repo counts are in user_stats."
+				"detail": "Username, display name, bio, email if public, company, location, blog, twitter_username, avatar, created_at and updated_at, achievement badges. Follower/following/repo counts are in user_stats."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -118,6 +118,21 @@
 					},
 					"avatar_url": {
 						"type": ["string", "null"]
+					},
+					"achievements": {
+						"type": ["array", "null"],
+						"items": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"icon_url": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["name"]
+						}
 					}
 				},
 				"required": ["id", "login"]

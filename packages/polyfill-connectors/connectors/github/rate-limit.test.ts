@@ -34,8 +34,22 @@ after(() => {
 	globalThis.setTimeout = ORIGINAL_SET_TIMEOUT;
 });
 
+/**
+ * Only counts/routes calls to the GitHub REST API host — these tests assert
+ * exact call counts for the REST governor's retry sequence. `collectUser`
+ * also makes one unauthenticated, ungoverned fetch to the public profile
+ * page (`https://github.com/{login}`, achievements scrape); that call must
+ * not perturb the REST retry-count assertions below, so it's answered with a
+ * neutral empty-body 200 outside the counted `response()` callback.
+ */
 function mockFetch(t: TestContext, response: () => Response): void {
-	t.mock.method(globalThis, "fetch", async () => response());
+	t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+		const url = typeof input === "string" ? input : input.toString();
+		if (!url.startsWith("https://api.github.com")) {
+			return new Response("<html></html>", { status: 200 });
+		}
+		return response();
+	});
 }
 
 function userResponse(): Response {

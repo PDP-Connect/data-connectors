@@ -20,6 +20,7 @@ import {
 	labelNames,
 	laterIso,
 	organizationRecord,
+	parseAchievementsHtml,
 	parseNextLink,
 	pinnedRepositoryRecord,
 	pullRequestRecord,
@@ -267,11 +268,114 @@ test("userRecord: maps fixture fields with id stringified (no stat fields)", () 
 	assert.equal("public_gists" in r, false);
 });
 
+test("userRecord: output is unchanged by the achievements enrichment — exact object, no achievements key", () => {
+	// Proves userRecord() itself was not touched when achievements was added:
+	// index.ts merges achievements onto the record separately
+	// (`{ ...userRecord(u), achievements }`), so this pure function's own
+	// output must be byte-identical to its pre-enrichment shape.
+	const r = userRecord(readScrubbedUserFixture());
+	assert.deepEqual(r, {
+		id: "424242",
+		login: "[REDACTED_LOGIN]",
+		name: "[REDACTED_NAME]",
+		email: "redacted@example.com",
+		bio: r.bio,
+		company: r.company,
+		location: r.location,
+		blog: r.blog,
+		twitter_username: r.twitter_username,
+		created_at: r.created_at,
+		updated_at: r.updated_at,
+		avatar_url: r.avatar_url,
+	});
+	assert.equal("achievements" in r, false);
+});
+
 test("userRecord: missing optional fields → null", () => {
 	const r = userRecord({ id: 1, login: "x" });
 	assert.equal(r.name, null);
 	assert.equal(r.email, null);
 	assert.equal(r.avatar_url, null);
+});
+
+// ─── parseAchievementsHtml ───────────────────────────────────────────────
+// Synthetic fixture shaped like a real GitHub profile page's achievement
+// badge markup (`.js-achievement-card img` / `a[href*="/achievements/"] img`,
+// alt="Achievement: <Name>"), per legacy
+// connectors/github/github-playwright.js:309-316. Invented names/URLs, not
+// derived from a real capture.
+
+test("parseAchievementsHtml: extracts name/icon_url from .js-achievement-card img", () => {
+	const html = `
+		<html><body>
+			<div class="js-achievement-card">
+				<img alt="Achievement: Pull Shark" src="https://example.com/pull-shark.png" />
+			</div>
+		</body></html>
+	`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Pull Shark", icon_url: "https://example.com/pull-shark.png" },
+	]);
+});
+
+test("parseAchievementsHtml: extracts from a[href*='/achievements/'] img", () => {
+	const html = `
+		<html><body>
+			<a href="/achievements/starstruck">
+				<img alt="Achievement: Starstruck" src="https://example.com/starstruck.png" />
+			</a>
+		</body></html>
+	`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Starstruck", icon_url: "https://example.com/starstruck.png" },
+	]);
+});
+
+test("parseAchievementsHtml: strips the 'Achievement: ' alt prefix case-insensitively", () => {
+	const html = `<div class="js-achievement-card"><img alt="achievement:   Quickdraw  " src="x.png" /></div>`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Quickdraw", icon_url: "x.png" },
+	]);
+});
+
+test("parseAchievementsHtml: multiple distinct badges, in document order", () => {
+	const html = `
+		<div class="js-achievement-card"><img alt="Achievement: Pull Shark" src="a.png" /></div>
+		<div class="js-achievement-card"><img alt="Achievement: Pair Extraordinaire" src="b.png" /></div>
+	`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Pull Shark", icon_url: "a.png" },
+		{ name: "Pair Extraordinaire", icon_url: "b.png" },
+	]);
+});
+
+test("parseAchievementsHtml: dedupes repeated badge names (e.g. tiered badges rendered twice)", () => {
+	const html = `
+		<div class="js-achievement-card"><img alt="Achievement: Pull Shark" src="a.png" /></div>
+		<a href="/achievements/pull-shark"><img alt="Achievement: Pull Shark" src="a.png" /></a>
+	`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Pull Shark", icon_url: "a.png" },
+	]);
+});
+
+test("parseAchievementsHtml: [] (not null) when the page has no achievement badges", () => {
+	assert.deepEqual(
+		parseAchievementsHtml("<html><body>no badges here</body></html>"),
+		[],
+	);
+});
+
+test("parseAchievementsHtml: skips images with a blank alt/name", () => {
+	const html = `<div class="js-achievement-card"><img alt="" src="a.png" /></div>`;
+	assert.deepEqual(parseAchievementsHtml(html), []);
+});
+
+test("parseAchievementsHtml: null src becomes null icon_url, not a missing field", () => {
+	const html = `<div class="js-achievement-card"><img alt="Achievement: Galaxy Brain" /></div>`;
+	assert.deepEqual(parseAchievementsHtml(html), [
+		{ name: "Galaxy Brain", icon_url: null },
+	]);
 });
 
 // ─── userStatsRecord ─────────────────────────────────────────────────────
@@ -325,6 +429,37 @@ test("repoRecord: maps fixture + size→size_kb + license.key→license_key", ()
 	assert.deepEqual(rec.topics, ["demo", "test"]);
 });
 
+test("repoRecord: fields unchanged by the github achievements enrichment — exact object", () => {
+	// repoRecord() was not touched by this change; the achievements enrichment
+	// only merges onto userRecord()'s output in index.ts. Proves the
+	// repositories stream (a Desktop curated-projection field) is byte-identical.
+	assert.deepEqual(repoRecord(REPO_FIXTURE), {
+		id: "1001",
+		name: "hello",
+		full_name: "octocat/hello",
+		owner_login: "octocat",
+		description: "a demo",
+		private: false,
+		fork: false,
+		archived: false,
+		disabled: false,
+		default_branch: "main",
+		language: "TypeScript",
+		topics: ["demo", "test"],
+		stargazers_count: 3,
+		forks_count: 1,
+		open_issues_count: 0,
+		watchers_count: 3,
+		size_kb: 128,
+		license_key: "mit",
+		html_url: "https://github.com/octocat/hello",
+		homepage: null,
+		created_at: "2024-01-01T00:00:00Z",
+		updated_at: "2026-04-01T12:00:00Z",
+		pushed_at: "2026-04-22T10:00:00Z",
+	});
+});
+
 // ─── starredRecord ───────────────────────────────────────────────────────
 
 test("starredRecord: returns record when repo present", () => {
@@ -335,6 +470,21 @@ test("starredRecord: returns record when repo present", () => {
 	assert.ok(r);
 	assert.equal(r?.id, "1001");
 	assert.equal(r?.starred_at, "2026-04-22T00:00:00Z");
+});
+
+test("starredRecord: fields unchanged by the github achievements enrichment — exact object", () => {
+	assert.deepEqual(
+		starredRecord({ repo: REPO_FIXTURE, starred_at: "2026-04-22T00:00:00Z" }),
+		{
+			id: "1001",
+			full_name: "octocat/hello",
+			description: "a demo",
+			language: "TypeScript",
+			stargazers_count: 3,
+			html_url: "https://github.com/octocat/hello",
+			starred_at: "2026-04-22T00:00:00Z",
+		},
+	);
 });
 
 test("starredRecord: missing repo → null", () => {

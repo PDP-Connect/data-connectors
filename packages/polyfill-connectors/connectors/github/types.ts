@@ -33,6 +33,16 @@ export interface GitHubUser {
 	updated_at?: string | null;
 }
 
+/** One achievement badge scraped from a public GitHub profile page DOM.
+ *  There is no REST or GraphQL field for these — legacy
+ *  `connectors/github/github-playwright.js:309-316` scraped them from
+ *  `.js-achievement-card img` / `a[href*="/achievements/"] img` alt text
+ *  (`"Achievement: <Name>"`) and `src`. */
+export interface GitHubAchievement {
+	icon_url: string | null;
+	name: string;
+}
+
 export interface GitHubRepo {
 	archived: boolean;
 	created_at?: string | null;

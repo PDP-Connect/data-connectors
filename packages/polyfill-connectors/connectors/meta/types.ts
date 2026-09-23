@@ -96,6 +96,29 @@ export interface InstagramFetchResult<T> {
 	status: number;
 }
 
+/** The subset of the profile-page GraphQL user node
+ * (`PolarisProfilePageContentQuery` / `ProfilePageQuery` /
+ * `UserByUsernameQuery`) this connector reads: follower/following/media
+ * counts that `/accounts/web_info/` does not carry. Legacy
+ * `connectors/meta/instagram-playwright.js:656-679` mapped these same three
+ * fields from this query's captured response. */
+export interface InstagramProfilePageUser {
+	follower_count?: number | null;
+	following_count?: number | null;
+	media_count?: number | null;
+}
+
+/** Envelope wrapping {@link InstagramProfilePageUser} as observed live:
+ * `{ data: { data: { user: {...} } } }` (legacy capture shape, confirmed by
+ * `instagram-playwright.js:656` reading `profileData?.data?.data?.user`). */
+export interface InstagramProfilePageEnvelope {
+	data?: {
+		data?: {
+			user?: InstagramProfilePageUser | null;
+		} | null;
+	} | null;
+}
+
 // ─── Emitted record shapes ──────────────────────────────────────────────
 
 /** `profile` stream record — one per run, the owner's own profile. */

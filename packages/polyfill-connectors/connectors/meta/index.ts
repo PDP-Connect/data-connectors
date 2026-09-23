@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.3.1)
+ * PDPP Meta (Instagram) Connector (v0.3.3)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -27,6 +27,10 @@
  *                data-sjs>` PolarisViewer tuple. Does NOT carry
  *                follower_count/following_count/media_count (confirmed
  *                absent) — see `types.ts`'s `InstagramWebInfoUser` doc.
+ *                Those three counts are filled separately from a passively
+ *                observed profile-page GraphQL response
+ *                (`fetchProfileCounts`/`profileCountsFromGraphQL`), null when
+ *                that response isn't observed within the timeout.
  *   posts        the owner's own timeline feed connection
  *                (`xdt_api__v1__feed__user_timeline_graphql_connection`),
  *                observed passively off the real `POST /graphql/query`
@@ -93,6 +97,11 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.3.3 (2026-09-22) — fills profile.follower_count/following_count/
+ *     post_count from a passively observed profile-page GraphQL response
+ *     (`fetchProfileCounts`), the same query the legacy connector captured
+ *     for these fields; null when the response isn't observed within the
+ *     timeout, never guessed.
  *   v0.3.1 (2026-09-22) — fixed two live-only defects found on first live
  *     run: (1) `about:blank` origin on the session-cookie-already-live fast
  *     path made every in-page fetch fail closed (`ensureInstagramOrigin`,
@@ -132,12 +141,14 @@ import {
 	followingRecord,
 	postLikeRecords,
 	postRecord,
+	profileCountsFromGraphQL,
 	profileRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	InstagramFollowingPage,
 	InstagramFollowingUser,
+	InstagramProfilePageEnvelope,
 	InstagramTimelineConnection,
 	InstagramTimelineEdge,
 	InstagramWebInfoUser,
@@ -351,6 +362,61 @@ export async function fetchWebInfoUser(
 			return null;
 		}
 	}, INSTAGRAM_ORIGIN)) as InstagramWebInfoUser | null;
+}
+
+// ─── Profile counts (profile-page GraphQL) ────────────────────────────────
+
+function isProfilePageGraphQLResponse(response: {
+	request: () => { method: () => string };
+	url: () => string;
+}): boolean {
+	return (
+		response.url().includes("/graphql/") &&
+		response.request().method() === "POST"
+	);
+}
+
+/**
+ * `follower_count`/`following_count`/`media_count` are not on `web_info`
+ * (see {@link fetchWebInfoUser}) but the profile page's own render issues a
+ * `PolarisProfilePageContentQuery`/`ProfilePageQuery`/`UserByUsernameQuery`
+ * GraphQL request carrying them (legacy
+ * `connectors/meta/instagram-playwright.js:614-619` captured this same
+ * request by URL/body pattern). Passively observed the same way
+ * {@link fetchAllPosts} observes the posts timeline query: navigate to the
+ * profile page and race a `waitForResponse` against the navigation. Returns
+ * all-null counts (via {@link profileCountsFromGraphQL}) rather than
+ * guessing when the request is not observed within the timeout — a
+ * best-effort enrichment, not a required source.
+ */
+export async function fetchProfileCounts(
+	page: Page,
+	username: string,
+	capture: CaptureSession | null,
+): Promise<ReturnType<typeof profileCountsFromGraphQL>> {
+	const responsePromise = page
+		.waitForResponse(isProfilePageGraphQLResponse, { timeout: 15_000 })
+		.catch(() => null);
+	await page
+		.goto(`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`, {
+			timeout: 30_000,
+			waitUntil: "domcontentloaded",
+		})
+		.catch((): undefined => undefined);
+	const response = await responsePromise;
+	if (!response) {
+		return profileCountsFromGraphQL(null);
+	}
+	let envelope: InstagramProfilePageEnvelope | null = null;
+	try {
+		envelope = (await response.json()) as InstagramProfilePageEnvelope;
+	} catch {
+		envelope = null;
+	}
+	capture?.captureHttp("profile-counts", envelope, {
+		status: response.status(),
+	});
+	return profileCountsFromGraphQL(envelope);
 }
 
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
@@ -731,13 +797,17 @@ export async function collectAllStreams(
 			"meta_profile_unavailable: Instagram web_info returned no logged-in user",
 		);
 	}
-	const profile = profileRecord(user);
-	if (!profile) {
+	const identity = profileRecord(user);
+	if (!identity) {
 		throw new Error("meta_profile_unavailable: profile missing id/username");
 	}
-	const userId = profile.id;
+	const userId = identity.id;
 
+	let profile = identity;
 	if (wantsProfile) {
+		await progress("Fetching Instagram profile counts");
+		const counts = await fetchProfileCounts(page, identity.username, capture);
+		profile = profileRecord(user, counts) ?? identity;
 		await emitRecord("profile", profile as RecordData);
 	}
 

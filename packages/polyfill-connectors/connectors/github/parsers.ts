@@ -5,7 +5,9 @@
 // they can be unit-tested in isolation (see parsers.test.ts). The HTTP
 // client and pagination loops live in index.ts.
 
+import { parseHTML } from "linkedom";
 import type {
+	GitHubAchievement,
 	GitHubContributionsCollection,
 	GitHubEvent,
 	GitHubGist,
@@ -118,6 +120,35 @@ export function userRecord(u: GitHubUser): Record<string, unknown> {
 		updated_at: u.updated_at ?? null,
 		avatar_url: u.avatar_url ?? null,
 	};
+}
+
+const ACHIEVEMENT_ALT_PREFIX_RE = /^Achievement:\s*/i;
+
+/**
+ * Achievement badges scraped from a public GitHub profile page
+ * (`https://github.com/{login}`) DOM. There is no REST or GraphQL field for
+ * these; ported from legacy `connectors/github/github-playwright.js:309-316`,
+ * which read the same two selectors' `img[alt]`/`img[src]` (alt text is
+ * `"Achievement: <Name>"`). Returns `[]` (not null) when the page has no
+ * achievement badges — a real, common state, not a parse failure.
+ */
+export function parseAchievementsHtml(html: string): GitHubAchievement[] {
+	const { document } = parseHTML(html);
+	const images = document.querySelectorAll<HTMLImageElement>(
+		'.js-achievement-card img, a[href*="/achievements/"] img',
+	);
+	const seen = new Set<string>();
+	const out: GitHubAchievement[] = [];
+	for (const img of images) {
+		const alt = img.getAttribute("alt") ?? "";
+		const name = alt.replace(ACHIEVEMENT_ALT_PREFIX_RE, "").trim();
+		if (!name || seen.has(name)) {
+			continue;
+		}
+		seen.add(name);
+		out.push({ icon_url: img.getAttribute("src"), name });
+	}
+	return out;
 }
 
 /**

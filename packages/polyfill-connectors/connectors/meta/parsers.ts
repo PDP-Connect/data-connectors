@@ -11,6 +11,7 @@ import type {
 	AdRecord,
 	FollowingRecord,
 	InstagramFollowingUser,
+	InstagramProfilePageEnvelope,
 	InstagramTimelineEdge,
 	InstagramWebInfoUser,
 	PostLikeRecord,
@@ -103,17 +104,57 @@ export function mediaTypeOf(node: {
 
 // ─── Record builders ────────────────────────────────────────────────────
 
+/** A non-negative finite integer from the profile-page GraphQL counts, or
+ *  null. Guards against the field being absent, non-numeric, or negative —
+ *  never guessed, never coerced from a different shape. */
+function nonNegativeIntOrNull(value: number | null | undefined): number | null {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+		return null;
+	}
+	return Math.trunc(value);
+}
+
 /**
- * `/accounts/web_info/` (the only observed source for this record) does not
- * carry follower_count, following_count, or media_count — confirmed absent
- * from a live payload 2026-09-22. These are declared in the manifest and
- * schema as nullable, and are honestly `null` here rather than guessed;
- * see the connector header's "Known limitations" for a live source that
- * could fill them in (the profile-page GraphQL query the legacy connector
- * captured, not yet ported — see the posts-endpoint gap noted there too).
+ * Extracts follower/following/post counts from the passively-observed
+ * profile-page GraphQL response (`PolarisProfilePageContentQuery` /
+ * `ProfilePageQuery` / `UserByUsernameQuery`). `/accounts/web_info/` (the
+ * `profileRecord` source below) does not carry these fields — confirmed
+ * absent from a live payload 2026-09-22 — but legacy
+ * `connectors/meta/instagram-playwright.js:656-679,1068-1075` mapped them
+ * directly from this same query. Returns all-null when the envelope is
+ * absent or malformed rather than guessing; never treats a missing field as
+ * zero.
+ */
+export function profileCountsFromGraphQL(
+	envelope: InstagramProfilePageEnvelope | null | undefined,
+): {
+	follower_count: number | null;
+	following_count: number | null;
+	post_count: number | null;
+} {
+	const user = envelope?.data?.data?.user;
+	return {
+		follower_count: nonNegativeIntOrNull(user?.follower_count),
+		following_count: nonNegativeIntOrNull(user?.following_count),
+		post_count: nonNegativeIntOrNull(user?.media_count),
+	};
+}
+
+/**
+ * `/accounts/web_info/` (the only observed source for identity fields) does
+ * not carry follower_count, following_count, or media_count — confirmed
+ * absent from a live payload 2026-09-22. `counts` comes from a separate,
+ * passively-observed source (the profile-page GraphQL query; see
+ * {@link profileCountsFromGraphQL}) and defaults to all-null when that
+ * response was not observed, never guessed.
  */
 export function profileRecord(
 	user: InstagramWebInfoUser,
+	counts: {
+		follower_count: number | null;
+		following_count: number | null;
+		post_count: number | null;
+	} = { follower_count: null, following_count: null, post_count: null },
 ): ProfileRecord | null {
 	const id = user.id ?? user.fbid ?? null;
 	const username = user.username ?? null;
@@ -127,9 +168,9 @@ export function profileRecord(
 		bio: nullIfEmpty(user.biography),
 		profile_pic_url: nullIfEmpty(user.profile_pic_url),
 		external_url: nullIfEmpty(user.external_url),
-		follower_count: null,
-		following_count: null,
-		post_count: null,
+		follower_count: counts.follower_count,
+		following_count: counts.following_count,
+		post_count: counts.post_count,
 		is_private: user.is_private ?? null,
 		is_verified: user.is_verified ?? null,
 		is_business: user.is_business_account ?? null,

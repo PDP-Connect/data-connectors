@@ -36,8 +36,19 @@ const booleanNullableSchema = z.boolean().nullable();
 const ISO_DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * One achievement badge scraped from the public profile page DOM (no
+ * REST/GraphQL equivalent exists). See parsers.ts `parseAchievementsHtml`.
+ */
+const achievementSchema = z.object({
+	name: pdppSafeText.max(255),
+	icon_url: urlSchema,
+});
+
+/**
  * user stream: stable identity and profile fields only.
  * Sampled metrics (followers, following, public_repos, public_gists) moved to user_stats.
+ * `achievements` is a nullable enrichment (null when the profile-page fetch
+ * was not attempted or not observed) — never guessed.
  */
 export const userSchema = z.object({
 	id: idSchema,
@@ -52,6 +63,7 @@ export const userSchema = z.object({
 	created_at: isoDateSchema,
 	updated_at: isoDateSchema,
 	avatar_url: urlSchema,
+	achievements: z.array(achievementSchema).nullable().optional(),
 });
 
 /**

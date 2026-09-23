@@ -80,25 +80,34 @@ function mockFetch(t: TestContext, implementation: GithubFetch): void {
 	t.mock.method(globalThis, "fetch", implementation);
 }
 
+/**
+ * `collectUser` also makes one unauthenticated, ungoverned fetch to the
+ * public profile page (`https://github.com/{login}`, achievements scrape) in
+ * addition to the REST `/user` call. Route by host so that call gets a
+ * neutral empty-body 200 (no achievement badges) rather than the REST fixture
+ * — keeps it from perturbing tests that assert on the `/user` response shape.
+ */
 function installUserFetch(t: TestContext): void {
-	mockFetch(
-		t,
-		async () =>
-			new Response(
-				JSON.stringify({
-					id: 42,
-					login: "octocat",
-					name: "Octo Cat",
-					public_repos: 10,
-					public_gists: 2,
-					followers: 100,
-					following: 5,
-					created_at: "2020-01-01T00:00:00Z",
-					updated_at: "2026-06-03T00:00:00Z",
-				}),
-				{ status: 200 },
-			),
-	);
+	mockFetch(t, async (input: string | URL | Request) => {
+		const url = typeof input === "string" ? input : input.toString();
+		if (!url.startsWith("https://api.github.com")) {
+			return new Response("<html></html>", { status: 200 });
+		}
+		return new Response(
+			JSON.stringify({
+				id: 42,
+				login: "octocat",
+				name: "Octo Cat",
+				public_repos: 10,
+				public_gists: 2,
+				followers: 100,
+				following: 5,
+				created_at: "2020-01-01T00:00:00Z",
+				updated_at: "2026-06-03T00:00:00Z",
+			}),
+			{ status: 200 },
+		);
+	});
 }
 
 interface CapturedSkip {
