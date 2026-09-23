@@ -629,12 +629,13 @@
       "contributionsLastYear": "derivation: SUM(contributions.contribution_count) over the returned window (see github.contributions)"
     },
     "not_derivable": [
-      "achievements: CONFIRMED PERMANENT deliberate_break. No REST or GraphQL field exists for GitHub achievement badges; grep for 'achievement' across the connector returns zero matches. This is settled, not pending."
+      "achievements: CONFIRMED PERMANENT deliberate_break. No REST or GraphQL field exists for GitHub achievement badges; grep for 'achievement' across the connector returns zero matches. This is settled, not pending.",
+      "organizations[].label: NOT a hard loss, a small named-fix gap. Legacy `label` was the org's display name. The modern `GitHubOrgMembership` type (types.ts:184-189) only declares `avatar_url`, `description`, `id`, `login` — `organizationRecord` (parsers.ts:400-409) maps `organizations.description` (GitHub's org bio text) as the closest field, not a display name. GitHub's real `GET /user/orgs` response does return a `name` field distinct from `description`; the type simply doesn't capture it today. One-line fix: add `name?: string | null` to `GitHubOrgMembership` and map it to `organizations.name` (or reuse `label`)."
     ],
     "semantic_notes": [
       "lead_decision status: pinned_repositories and organizations streams have LANDED, resolving the split legacy aggregate into 4 modern streams per D3."
     ],
-    "status": "derivable"
+    "status": "loss"
   },
   {
     "scope": "github.repositories",
