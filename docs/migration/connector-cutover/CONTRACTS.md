@@ -68,7 +68,7 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 
 ## Layout during the parallel phase
 
-Connector lanes work in the current layout: `packages/polyfill-connectors/connectors/<key>/` and `manifests/<key>.json`. The `cut-mechanics` lane owns the scripted, re-runnable move to root `connectors/<key>/`. The move runs once at the hard cut, after every replacement is proven. This avoids a moving target for the connector lanes and keeps the move reviewable as one deterministic diff.
+During parallel porting, connector lanes used `packages/polyfill-connectors/connectors/<key>/` and `manifests/<key>.json`. The hard cut moved each implementation and manifest to root `connectors/<key>/`. That root directory is the current source layout.
 
 ## Per-connector proof gate
 

@@ -239,7 +239,7 @@ test("emitTransactionsDetailCoverage: zero outcomes still emits an explicit cons
 	// non-empty enumeration to zero eligible accounts: a proven 0/0, not an
 	// unknown denominator. Suppressing this case would leave a real, completed
 	// scoped run permanently unmeasured — the same defect class fixed for
-	// Chase `balances` (packages/polyfill-connectors/connectors/chase/index.ts,
+	// Chase `balances` (connectors/chase/index.ts,
 	// accountDetailCoverageKeys).
 	const { deps, messages } = makeHarness();
 	await emitTransactionsDetailCoverage(deps, []);
