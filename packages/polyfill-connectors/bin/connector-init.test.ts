@@ -29,9 +29,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import {
 	findCollisions,
 	InitArgsError,
@@ -39,9 +39,6 @@ import {
 	planTargets,
 	writeScaffold,
 } from "./connector-init.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";

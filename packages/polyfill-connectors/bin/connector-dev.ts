@@ -126,6 +126,10 @@ import type {
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
 import {
+	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
+} from "../src/connector-paths.ts";
+import {
 	handleInteraction,
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
@@ -135,10 +139,6 @@ import {
 	readManifest,
 } from "../src/orchestrator.ts";
 import { buildRunSummary, type RunSummary } from "../src/run-summary.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
-const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 
