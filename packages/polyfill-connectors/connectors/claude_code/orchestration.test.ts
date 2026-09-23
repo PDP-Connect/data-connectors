@@ -288,6 +288,11 @@ test("scanProjectDirs: full two-pass — sessions emit BEFORE messages (parent-f
 			SYNTHETIC_SESSION_ID,
 			"recursive subagent folds into parent session",
 		);
+		// Session-level `kind`/`parent_session_id` don't exist in the source (see
+		// capability-map.json claude_code.sessions CONTRACT-CHANGE-REQUEST): the
+		// real replacement for subagent lineage is per-message is_sidechain/agent_id.
+		assert.equal(sidechain?.data.is_sidechain, true);
+		assert.equal(sidechain?.data.agent_id, "agent-1");
 	} finally {
 		await cleanup();
 	}

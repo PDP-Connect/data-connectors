@@ -98,6 +98,9 @@ export const memorySchema = z.object({
 	content: largeText,
 	created_at: looseTimestamp.nullable(),
 	updated_at: looseTimestamp.nullable(),
+	// Legacy classification tag (e.g. "memory", "user_provided"); live API
+	// returns it inconsistently, so it's nullable rather than defaulted.
+	type: pdppSafeText.max(80).nullable(),
 });
 
 // ─── custom_gpts ────────────────────────────────────────────────────────

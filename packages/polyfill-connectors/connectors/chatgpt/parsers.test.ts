@@ -437,6 +437,20 @@ test("buildMemoryRecord: falls back from content to name", () => {
 	assert.equal(rec?.updated_at, "2024-01-01T00:00:00Z");
 });
 
+test("buildMemoryRecord: carries type through when present", () => {
+	const rec = buildMemoryRecord({
+		id: "m1",
+		content: "remember this",
+		type: "user_provided",
+	});
+	assert.equal(rec?.type, "user_provided");
+});
+
+test("buildMemoryRecord: type is null when absent", () => {
+	const rec = buildMemoryRecord({ id: "m1", content: "x" });
+	assert.equal(rec?.type, null);
+});
+
 test("unwrapGizmo: handles {resource:{gizmo:{}}}, {resource:{}}, {gizmo:{}} and flat", () => {
 	assert.equal(unwrapGizmo(null), null);
 	assert.equal(unwrapGizmo("not obj"), null);

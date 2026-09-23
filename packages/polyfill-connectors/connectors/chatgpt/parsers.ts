@@ -462,6 +462,7 @@ export function buildMemoryRecord(m: RawMemoryEntry): RecordData | null {
 		content: m.content || m.name || "",
 		created_at: m.created_at || null,
 		updated_at: m.updated_at || null,
+		type: m.type || null,
 	};
 }
 

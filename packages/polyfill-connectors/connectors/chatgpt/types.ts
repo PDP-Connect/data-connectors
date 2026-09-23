@@ -144,6 +144,7 @@ export interface RawMemoryEntry {
 	created_at?: string | null;
 	id?: string;
 	name?: string;
+	type?: string | null;
 	updated_at?: string | null;
 }
 

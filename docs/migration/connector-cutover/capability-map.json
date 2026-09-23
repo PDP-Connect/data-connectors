@@ -807,15 +807,12 @@
             "memories[].id": "memories.id",
             "memories[].content": "memories.content",
             "memories[].created_at": "memories.created_at",
-            "memories[].updated_at": "memories.updated_at"
+            "memories[].updated_at": "memories.updated_at",
+            "memories[].type": "memories.type"
           },
-          "dropped": [
-            {
-              "field": "memories[].type",
-              "reason": "optional legacy classification tag not used for filtering; modern schema treats memory content uniformly"
-            }
-          ],
-          "status": "contracted"
+          "dropped": [],
+          "status": "contracted",
+          "note": "type re-added (nullable): confirmed available on the live /memories?include_memory_entries=true response and read by legacy chatgpt-playwright.js buildResult(); prior audit's 'unused low-value' rationale did not check availability."
         }
       ]
     },
@@ -845,10 +842,6 @@
           },
           "dropped": [
             {
-              "field": "kind, parentSessionId",
-              "reason": "subagent lineage not modeled at session level; per-message agent_id on messages stream is the presumed replacement, needs confirmation"
-            },
-            {
               "field": "title",
               "reason": "AI-generated session title; no modern field"
             },
@@ -859,11 +852,15 @@
             {
               "field": "models",
               "reason": "derivable via join against messages stream; not stored redundantly on session"
+            },
+            {
+              "field": "kind, parentSessionId",
+              "reason": "irretrievable at session level: verified against real ~/.claude/projects/**/*.jsonl (15140 files, full key-name scan, no content). Neither session-record lines nor per-line JSONL objects ever carry a top-level `kind` field for lineage (the only `kind` occurrences found anywhere are unrelated, nested under `origin.kind` / `attachment.origin.kind` / `toolUseResult.gitOperation.commit.kind`). `parentSessionId` occurs 185 times total, always on a distinct, rare `type: \"fork-context-ref\"` line (context-fork bookkeeping), never as a subagent-lineage marker and never alongside a session-identity record. Subagent transcripts under <project>/<sessionId>/subagents/*.jsonl carry the SAME `sessionId` as their parent (confirmed: dir name == first-line sessionId in every sampled file) plus per-message `isSidechain: true` and a stable per-file `agentId` (present on 24155/83472 sampled lines). There is no separate subagent session identity to surface as `kind`/`parent_session_id` at the session level \u2014 lineage is real but lives on messages (`is_sidechain`, `agent_id`), both already implemented on the messages stream (schemas.ts messagesSchema)."
             }
           ],
-          "status": "needs_parity_audit",
-          "question": "Confirm kind/parentSessionId (subagent lineage) is fully recoverable from messages.agent_id, and whether session title is worth adding as a stored field vs. re-derived.",
-          "lead_decision": "ADD fields sessions.kind, sessions.parent_session_id, sessions.title when the source provides them. Do not make consumers re-derive lineage."
+          "status": "contracted",
+          "question": null,
+          "lead_decision": "SUPERSEDED by CONTRACT-CHANGE-REQUEST in cut-loss-offline lane report (2026-09-22): do not add sessions.kind / sessions.parent_session_id \u2014 the source has no session-level lineage identity to add. `title` is already implemented (sessions.title, see schemas.ts). Lineage is captured today via messages.is_sidechain and messages.agent_id."
         },
         {
           "legacy_scope": "claude_code.prompts",
