@@ -22,12 +22,9 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CONNECTORS_DIR = resolve(__dirname, "..", "connectors");
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 
 /**
  * Connectors allowed to reference `homedir()`, each with the reason. Every

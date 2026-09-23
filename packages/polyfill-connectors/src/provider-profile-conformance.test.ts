@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createConnectorHttpGovernor } from "./connector-http-governor.ts";
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 import type { ProviderPacingProfile } from "./provider-profile.ts";
 
 /**
@@ -47,7 +48,6 @@ import type { ProviderPacingProfile } from "./provider-profile.ts";
  */
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const CONNECTORS_DIR = join(THIS_DIR, "..", "connectors");
 
 // Hand-maintained roster of governor-using (API) connectors. Each MUST declare a
 // ProviderProfile. This list is NOT the source of truth — it is cross-checked

@@ -36,8 +36,7 @@ import { test } from "node:test";
 
 import { discoverClaudeJsonlSources } from "../connectors/claude_code/index.ts";
 import { walkRollouts } from "../connectors/codex/index.ts";
-
-const CONNECTORS_DIR = join(import.meta.dirname, "..", "connectors");
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 
 /**
  * Malformed content for codex's excluded rollout. `walkRollouts` prunes whole

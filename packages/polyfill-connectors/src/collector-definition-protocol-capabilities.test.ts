@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
 	CONNECTOR_PROTOCOL_CAPABILITIES,
@@ -12,6 +11,7 @@ import {
 } from "@pdpp/connector-protocol";
 
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 
 /**
  * Capability-declaration compatibility for connector-protocol 0.0.2.
@@ -30,8 +30,6 @@ import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
  * that starts emitting STREAM_EVIDENCE without declaring the capability fails
  * here instead of failing closed at runtime on an owner's machine.
  */
-
-const CONNECTORS_DIR = fileURLToPath(new URL("../connectors", import.meta.url));
 
 /**
  * Every capability in the 0.0.2 vocabulary, paired with the emission the
