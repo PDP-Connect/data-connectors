@@ -3,9 +3,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 /**
  * Proves the OpenSpec acceptance check for `complete-connector-query-affordances`:
@@ -29,8 +28,7 @@ import { fileURLToPath } from "node:url";
  * these declarations.
  */
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 interface JsonSchema {
 	format?: string;

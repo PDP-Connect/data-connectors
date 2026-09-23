@@ -22,9 +22,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 interface ManifestStream {
 	consent_time_field?: string;
@@ -39,8 +38,7 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 // Streams that correspond to NO moment in the owner's life. Each entry records
 // why, because "we couldn't find a date" and "there is no date" are different

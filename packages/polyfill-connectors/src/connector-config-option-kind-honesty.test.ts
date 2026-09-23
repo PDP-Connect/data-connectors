@@ -16,13 +16,11 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { platformOptionKind } from "./connector-config-option-kind-registry.ts";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 interface OptionsSchemaProperty {
 	declared_option_kind?: string;

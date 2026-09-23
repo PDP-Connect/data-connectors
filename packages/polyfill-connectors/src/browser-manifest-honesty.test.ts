@@ -3,13 +3,10 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 function connectorUsesBrowserRuntime(source: string): boolean {
 	return /\brunConnector\s*\(/u.test(source) && /\bbrowser\s*:/u.test(source);
