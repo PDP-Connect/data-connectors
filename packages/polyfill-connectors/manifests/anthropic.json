@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Claude (Anthropic)",
 	"brand": {
 		"icon": "icons/anthropic.svg",
@@ -78,27 +78,27 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "update_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["title"],
 					"semantic_fields": ["title"]
 				},
 				"range_filters": {
-					"create_time": ["gte", "gt", "lte", "lt"]
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"update_time": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
 					"group_by_time": ["create_time"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -152,13 +152,12 @@
 				"required": ["id", "conversation_id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "create_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"relationships": [
 				{
 					"name": "conversation",
@@ -181,7 +180,7 @@
 					"group_by_time": ["create_time"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -225,20 +224,20 @@
 				"required": ["id", "name"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "update_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["name", "description"],
 					"semantic_fields": ["description"]
 				},
 				"range_filters": {
-					"create_time": ["gte", "gt", "lte", "lt"]
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"update_time": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
