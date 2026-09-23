@@ -5,6 +5,10 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
@@ -13,8 +17,7 @@ import {
 } from "./fixtures.ts";
 import { photosSchema } from "./schemas.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "apple_photos", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("apple_photos");
 
 function records(
 	messages: readonly EmittedMessage[],

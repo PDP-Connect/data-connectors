@@ -22,6 +22,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
@@ -29,8 +33,7 @@ import {
 	syntheticExportStartYear,
 } from "./__fixtures__/synthetic-export.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "apple_health", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("apple_health");
 
 function records(
 	messages: readonly EmittedMessage[],

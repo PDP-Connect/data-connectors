@@ -18,11 +18,14 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "apple_photos", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("apple_photos");
 
 // Bounded fixture bytes: small deterministic buffers, never real photo data.
 const TINY_JPEG_A = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);

@@ -16,12 +16,16 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorEntrypoint,
+	manifestPath as manifestPathFor,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { appleSecFromUnixMs, buildChatDbFixture } from "./fixtures.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "imessage", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("imessage");
 
 function records(
 	messages: readonly EmittedMessage[],
@@ -1409,7 +1413,7 @@ test("iMessage re-emits the full attachments set every run, matching manifest in
 });
 
 test("imessage.json declares incremental:false for attachments and participants, matching full-resnapshot code", async () => {
-	const manifestPath = join(PACKAGE_ROOT, "manifests", "imessage.json");
+	const manifestPath = manifestPathFor("imessage");
 	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
 		streams: Array<{ name: string; incremental: boolean; semantics: string }>;
 	};

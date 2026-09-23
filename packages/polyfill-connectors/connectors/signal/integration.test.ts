@@ -18,13 +18,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorEntrypoint,
+	manifestPath as manifestPathFor,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { SIGNAL_DEFAULT_STREAMS } from "./collector-definition.ts";
 import { buildSignalExportFixture, setupMockSigtop } from "./fixtures.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "signal", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("signal");
 
 function records(
 	messages: readonly EmittedMessage[],
@@ -566,7 +570,7 @@ test("signal: a bounded pass across every default stream reaches an accepted ter
 
 test("signal.json declares tier=preview and no consent_time_field claim beyond messages.sent_at", async () => {
 	const { readFile } = await import("node:fs/promises");
-	const manifestPath = join(PACKAGE_ROOT, "manifests", "signal.json");
+	const manifestPath = manifestPathFor("signal");
 	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
 		capabilities?: { public_listing?: { tier?: string } };
 		streams: Array<{ name: string; consent_time_field?: string }>;
