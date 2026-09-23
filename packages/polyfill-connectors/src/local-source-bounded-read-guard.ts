@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { packageRoot } from "./connector-paths.ts";
 
 export type BoundedReadPattern = "readFile" | "readFileSync" | "all";
 
@@ -110,12 +110,8 @@ const MATCHERS: readonly PatternMatcher[] = [
 
 export const EXPLICIT_LOCAL_CLASS_CONNECTORS: readonly string[] = [];
 
-function packageRoot(): string {
-	return fileURLToPath(new URL("..", import.meta.url));
-}
-
 export function discoverLocalSourceConnectors(
-	root: string = packageRoot(),
+	root: string = packageRoot,
 ): string[] {
 	const manifestsDir = new URL("manifests/", new URL(`${root}/`, "file:"));
 	const discovered = new Set<string>(EXPLICIT_LOCAL_CLASS_CONNECTORS);
@@ -214,7 +210,7 @@ export interface FindUnapprovedBoundedReadsOptions {
 export function findUnapprovedBoundedReads(
 	options: FindUnapprovedBoundedReadsOptions = {},
 ): BoundedReadFinding[] {
-	const root = options.root ?? packageRoot();
+	const root = options.root ?? packageRoot;
 	const connectorsRoot = new URL("connectors/", new URL(`${root}/`, "file:"));
 	const exceptions = options.exceptions ?? BOUNDED_READ_EXCEPTIONS;
 	const findings: BoundedReadFinding[] = [];

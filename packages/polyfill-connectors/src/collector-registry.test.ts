@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
+import { manifestPath as manifestPathFor } from "./connector-paths.ts";
 
 /**
  * Contract for the connector-owned local-collector definitions.
@@ -66,10 +66,9 @@ test("bundled default streams request coverage_diagnostics whenever the connecto
 	// `coverage_diagnostics` stream to request at all — this check only applies
 	// when the manifest declares one.
 	for (const def of LOCAL_COLLECTOR_DEFINITIONS) {
-		const manifestPath = fileURLToPath(
-			new URL(`../manifests/${def.connector_id}.json`, import.meta.url),
+		const manifest = JSON.parse(
+			await readFile(manifestPathFor(def.connector_id), "utf8"),
 		);
-		const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 		const declaresCoverageDiagnostics = manifest.streams.some(
 			(stream: { name: string }) => stream.name === "coverage_diagnostics",
 		);
@@ -85,10 +84,9 @@ test("bundled default streams request coverage_diagnostics whenever the connecto
 
 test("every default stream is declared in the connector's manifest (no undeclared stream requested)", async () => {
 	for (const def of LOCAL_COLLECTOR_DEFINITIONS) {
-		const manifestPath = fileURLToPath(
-			new URL(`../manifests/${def.connector_id}.json`, import.meta.url),
+		const manifest = JSON.parse(
+			await readFile(manifestPathFor(def.connector_id), "utf8"),
 		);
-		const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 		const declared = new Set(
 			manifest.streams.map((stream: { name: string }) => stream.name),
 		);

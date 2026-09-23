@@ -31,6 +31,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { connectorEntrypoint } from "./connector-paths.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -264,10 +265,7 @@ test("the chatgpt connector opts in — the production connection that failed is
 	// Guards the wiring, not just the seam: if `authOptional: true` is dropped
 	// from the chatgpt runConnector config, the prod defect silently returns.
 	const source = await import("node:fs/promises").then((fs) =>
-		fs.readFile(
-			new URL("../connectors/chatgpt/index.ts", import.meta.url),
-			"utf8",
-		),
+		fs.readFile(connectorEntrypoint("chatgpt"), "utf8"),
 	);
 	assert.match(
 		source,

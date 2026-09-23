@@ -3,16 +3,16 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
+import { connectorDir } from "./connector-paths.ts";
 import {
 	BOUNDED_READ_EXCEPTIONS,
 	type BoundedReadException,
 	discoverLocalSourceConnectors,
 	findUnapprovedBoundedReads,
 } from "./local-source-bounded-read-guard.ts";
-
-const CONNECTORS_ROOT = new URL("../connectors/", import.meta.url);
 
 test("filesystem/local-DB connectors are discovered by manifest binding", () => {
 	const discovered = discoverLocalSourceConnectors();
@@ -54,7 +54,7 @@ test("no unapproved whole-file reads or unbounded .all() in local-source connect
 
 test("the codex collector streams SQLite thread rows with iterate()", () => {
 	const codexSource = readFileSync(
-		new URL("codex/index.ts", CONNECTORS_ROOT),
+		join(connectorDir("codex"), "index.ts"),
 		"utf8",
 	);
 	assert.match(
@@ -66,7 +66,7 @@ test("the codex collector streams SQLite thread rows with iterate()", () => {
 
 test("iMessage message collection streams chat.db rows with iterate()", () => {
 	const imessageSource = readFileSync(
-		new URL("imessage/index.ts", CONNECTORS_ROOT),
+		join(connectorDir("imessage"), "index.ts"),
 		"utf8",
 	);
 	assert.doesNotMatch(
@@ -88,8 +88,7 @@ test("every exception names a real connector, file, pattern, line fragment, and 
 		"all",
 	]);
 	for (const exception of BOUNDED_READ_EXCEPTIONS) {
-		const connectorDir = new URL(`${exception.connector}/`, CONNECTORS_ROOT);
-		const files = readdirSync(connectorDir);
+		const files = readdirSync(connectorDir(exception.connector));
 		assert.ok(
 			files.includes(exception.file),
 			`exception for ${exception.connector}/${exception.file} points at a file that does not exist`,
@@ -112,7 +111,7 @@ test("every exception names a real connector, file, pattern, line fragment, and 
 test("exceptions are live and line-specific", () => {
 	for (const exception of BOUNDED_READ_EXCEPTIONS) {
 		const source = readFileSync(
-			new URL(`${exception.connector}/${exception.file}`, CONNECTORS_ROOT),
+			join(connectorDir(exception.connector), exception.file),
 			"utf8",
 		);
 		assert.ok(
@@ -126,7 +125,7 @@ test("exceptions are live and line-specific", () => {
 
 test("twitter_archive streams its JS archive instead of whole-file reading", () => {
 	const indexSource = readFileSync(
-		new URL("twitter_archive/index.ts", CONNECTORS_ROOT),
+		join(connectorDir("twitter_archive"), "index.ts"),
 		"utf8",
 	);
 	assert.doesNotMatch(
@@ -135,7 +134,7 @@ test("twitter_archive streams its JS archive instead of whole-file reading", () 
 		"twitter_archive must not import or await readFile; it streams the archive via archive-stream.ts",
 	);
 	const streamSource = readFileSync(
-		new URL("twitter_archive/archive-stream.ts", CONNECTORS_ROOT),
+		join(connectorDir("twitter_archive"), "archive-stream.ts"),
 		"utf8",
 	);
 	assert.match(
@@ -152,7 +151,7 @@ test("twitter_archive streams its JS archive instead of whole-file reading", () 
 
 test("google_maps streams Timeline JSON instead of whole-file reading", () => {
 	const indexSource = readFileSync(
-		new URL("../connectors/google_maps/index.ts", import.meta.url),
+		join(connectorDir("google_maps"), "index.ts"),
 		"utf8",
 	);
 	assert.doesNotMatch(
@@ -161,7 +160,7 @@ test("google_maps streams Timeline JSON instead of whole-file reading", () => {
 		"google_maps must not whole-file read Timeline artifacts",
 	);
 	const streamSource = readFileSync(
-		new URL("../connectors/google_maps/archive-stream.ts", import.meta.url),
+		join(connectorDir("google_maps"), "archive-stream.ts"),
 		"utf8",
 	);
 	assert.match(
