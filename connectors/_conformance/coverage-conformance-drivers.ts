@@ -1339,8 +1339,6 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"slack.canvases",
 	"spotify.playlists",
 	"spotify.saved_tracks",
-	"spotify.top_artists",
-	"spotify.recently_played",
 	// Twitter archive (REAL_UNLISTED_CONNECTORS): zip-import snapshot receipts,
 	// no driver yet.
 	"twitter_archive.tweets",

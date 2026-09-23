@@ -63,7 +63,6 @@ const GOVERNOR_USING_CONNECTORS = [
 	"jellyfin",
 	"notion",
 	"oura",
-	"spotify",
 	"steam",
 	"ynab",
 ] as const;

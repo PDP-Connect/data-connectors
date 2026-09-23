@@ -198,14 +198,17 @@ test("counterweight: a brand-new static-secret manifest is picked up by the gene
 	}
 });
 
-test("Spotify setup and runtime injection share the manifest-declared access-token mapping", () => {
-	assert.equal(isStaticSecretConnectorForInjection("spotify"), true);
-	assert.deepEqual(
-		buildConnectionScopedSecretEnv("spotify", {
-			credentialKind: "access_token",
-			secret: "synthetic-spotify-token",
-		}),
-		{ SPOTIFY_ACCESS_TOKEN: "synthetic-spotify-token" },
+test("Spotify browser authentication does not accept a legacy static access token", () => {
+	assert.equal(isStaticSecretConnectorForInjection("spotify"), false);
+	assert.throws(
+		() =>
+			buildConnectionScopedSecretEnv("spotify", {
+				credentialKind: "access_token",
+				secret: "synthetic-spotify-token",
+			}),
+		(error: unknown) =>
+			error instanceof StaticSecretInjectionError &&
+			error.code === "not_a_static_secret_connector",
 	);
 });
 

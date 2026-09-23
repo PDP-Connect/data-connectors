@@ -32,7 +32,7 @@ import {
 test("static-secret registry knows static-secret connectors and rejects non-static-secret connectors", () => {
 	assert.equal(isStaticSecretConnector("amazon"), true);
 	assert.equal(isStaticSecretConnector("chase"), true);
-	assert.equal(isStaticSecretConnector("chatgpt"), true);
+	assert.equal(isStaticSecretConnector("chatgpt"), false);
 	assert.equal(isStaticSecretConnector("heb"), true);
 	assert.equal(isStaticSecretConnector("gmail"), true);
 	assert.equal(isStaticSecretConnector("github"), true);
@@ -294,18 +294,20 @@ test("browser username/password connectors inject their stored credential bundle
 	}
 });
 
-test("chatgpt injection maps a sealed username/password credential bundle", () => {
-	const env = buildConnectionScopedSecretEnv("chatgpt", {
-		credentialKind: "username_password",
-		secret: JSON.stringify({
-			password: "synthetic-password",
-			username: "owner@example.com",
-		}),
-	});
-	assert.deepEqual(env, {
-		CHATGPT_PASSWORD: "synthetic-password",
-		CHATGPT_USERNAME: "owner@example.com",
-	});
+test("ChatGPT browser sign-in rejects static-secret injection", () => {
+	assert.throws(
+		() =>
+			buildConnectionScopedSecretEnv("chatgpt", {
+				credentialKind: "username_password",
+				secret: JSON.stringify({
+					password: "synthetic-password",
+					username: "owner@example.com",
+				}),
+			}),
+		(error: unknown) =>
+			error instanceof StaticSecretInjectionError &&
+			error.code === "not_a_static_secret_connector",
+	);
 });
 
 test("gmail injection sets both app-password aliases to the recovered secret", () => {
@@ -621,11 +623,9 @@ test("registry is frozen so the env var ground truth cannot be mutated at runtim
 	const { github } = STATIC_SECRET_CONNECTOR_REGISTRY;
 	const { slack } = STATIC_SECRET_CONNECTOR_REGISTRY;
 	const { reddit } = STATIC_SECRET_CONNECTOR_REGISTRY;
-	const { chatgpt } = STATIC_SECRET_CONNECTOR_REGISTRY;
 	const { usaa } = STATIC_SECRET_CONNECTOR_REGISTRY;
 	assert.ok(amazon);
 	assert.ok(chase);
-	assert.ok(chatgpt);
 	assert.ok(gmail);
 	assert.ok(github);
 	assert.ok(slack);
@@ -639,10 +639,6 @@ test("registry is frozen so the env var ground truth cannot be mutated at runtim
 	assert.ok(Object.isFrozen(chase.secretFieldEnvVars));
 	assert.ok(Object.isFrozen(chase.secretFieldEnvVars?.password));
 	assert.ok(Object.isFrozen(chase.secretFieldEnvVars?.username));
-	assert.ok(Object.isFrozen(chatgpt));
-	assert.ok(Object.isFrozen(chatgpt.secretFieldEnvVars));
-	assert.ok(Object.isFrozen(chatgpt.secretFieldEnvVars?.password));
-	assert.ok(Object.isFrozen(chatgpt.secretFieldEnvVars?.username));
 	assert.ok(Object.isFrozen(gmail));
 	assert.ok(Object.isFrozen(gmail.secretEnvVars));
 	assert.ok(Object.isFrozen(github));
