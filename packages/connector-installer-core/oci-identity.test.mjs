@@ -484,9 +484,14 @@ function dsseRekorInclusionEntry(signatureB64, payloadBytes) {
  * calling test) private key, with a Rekor inclusion promise from the
  * synthetic log this file already trusts.
  */
-function realBundleSignatureFactory(signer) {
+function realBundleSignatureFactory(signer, { statementDigestOverride = null } = {}) {
   return ({ digest }) => {
-    const digestHex = digest.replace(/^sha256:/, "");
+    // Normally the same digest the manifest-level `subject` names — the two
+    // claims agree by construction, the way a real cosign publish would.
+    // `statementDigestOverride` breaks that agreement deliberately, so a
+    // test can prove the DSSE-payload check (assertBundlePayloadNamesDigest)
+    // fires on its own even when the outer manifest's `subject` is honest.
+    const digestHex = (statementDigestOverride ?? digest).replace(/^sha256:/, "");
     const statement = {
       _type: "https://in-toto.io/Statement/v1",
       subject: [{ digest: { sha256: digestHex }, annotations: {} }],
@@ -583,13 +588,51 @@ test("cosign v3 bundle format refuses a foreign identity the same way the legacy
   );
 });
 
-test("cosign v3 bundle format refuses a bundle naming a different digest", async () => {
+test("cosign v3 bundle format refuses a bundle manifest whose subject names a different digest", async () => {
+  // The referrer MANIFEST's own `subject` field is the first claim checked
+  // (fetchCandidateBundleManifest), before the bundle layer is even fetched
+  // — a referrer for a different artifact that happens to sit in the same
+  // repository is refused as misidentified at the cheapest possible point,
+  // not treated as this artifact's signature.
   const registry = await new FixtureRegistry({}).start();
   try {
     const signer = realSigner(PINNED_IDENTITY);
     const { digest } = publishArtifact(registry, {
       bundleSignatureFactory: realBundleSignatureFactory(signer),
       payloadDigestOverride: `sha256:${"0".repeat(64)}`,
+    });
+    await assert.rejects(
+      () =>
+        verifyOciSignature({
+          registry: registry.registry,
+          repository: "pdp-connect/connector/ynab",
+          digest,
+          scheme: "http",
+          certificateIdentityResolver: () => PINNED_IDENTITY,
+          sigstoreVerifier: realSigstoreVerifier,
+        }),
+      /names subject .*, not/,
+    );
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("cosign v3 bundle format refuses a bundle whose DSSE payload names a different digest than its manifest's subject", async () => {
+  // A stricter attack than the one above: the referrer MANIFEST's `subject`
+  // is honest (this digest), but the SIGNED STATEMENT inside the bundle
+  // claims a different one. assertBundlePayloadNamesDigest exists precisely
+  // because the manifest-level subject and the cryptographically-signed
+  // claim are two independent things — cosign writes them to agree, but
+  // this consumer checks the one the signature actually covers rather than
+  // trusting the manifest that merely carries it.
+  const registry = await new FixtureRegistry({}).start();
+  try {
+    const signer = realSigner(PINNED_IDENTITY);
+    const { digest } = publishArtifact(registry, {
+      bundleSignatureFactory: realBundleSignatureFactory(signer, {
+        statementDigestOverride: `sha256:${"0".repeat(64)}`,
+      }),
     });
     await assert.rejects(
       () =>
@@ -616,6 +659,46 @@ test("an artifact with only a legacy signature still verifies (no bundle tag pre
 test("an artifact with only a cosign v3 bundle signature still verifies (no legacy tag present)", async () => {
   const result = await verifyBundlePublishedBy(realSigner(PINNED_IDENTITY));
   assert.equal(result.certificateIdentityURI, PINNED_IDENTITY);
+});
+
+test("cosign v3 bundle format verifies via the referrers API, when the registry supports it", async () => {
+  // Neither real registry this consumer talks to (a local registry:3.1.1,
+  // ghcr.io) implements `/referrers/` as of this writing, which is why the
+  // live network test against the real scratch GHCR artifact exercises the
+  // tag-schema fallback and not this path. This test is the only place the
+  // referrers-API discovery code runs at all, so it has to prove the path
+  // works rather than merely exist: the fixture registry is configured to
+  // answer the SAME index `publishArtifact` wrote for the tag fallback, at
+  // the referrers endpoint instead, and `discoverCosignBundleReferrers` is
+  // proven to find and use it WITHOUT ever falling back to the tag — by
+  // deleting the tag before verifying.
+  const signer = realSigner(PINNED_IDENTITY);
+  const registry = await new FixtureRegistry({}).start();
+  try {
+    const { digest, bundleReferrer } = publishArtifact(registry, {
+      bundleSignatureFactory: realBundleSignatureFactory(signer),
+    });
+    assert.ok(bundleReferrer, "publishArtifact did not build a bundle referrer");
+
+    // Serve the same index at the referrers endpoint...
+    registry.referrersIndex = bundleReferrer.index;
+    // ...and remove the fallback tag, so a pass here can only mean the
+    // referrers-API branch ran, not that it silently fell through to the
+    // tag this same index also happens to sit at.
+    registry.tags.delete(digest.replace(":", "-"));
+
+    const result = await verifyOciSignature({
+      registry: registry.registry,
+      repository: "pdp-connect/connector/ynab",
+      digest,
+      scheme: "http",
+      certificateIdentityResolver: () => PINNED_IDENTITY,
+      sigstoreVerifier: realSigstoreVerifier,
+    });
+    assert.equal(result.certificateIdentityURI, PINNED_IDENTITY);
+  } finally {
+    await registry.stop();
+  }
 });
 
 test("an artifact with BOTH a legacy and a cosign v3 bundle signature verifies (neither format is required to be absent)", async () => {
