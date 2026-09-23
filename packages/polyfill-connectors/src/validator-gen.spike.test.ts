@@ -32,18 +32,15 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { z } from "zod";
 import { validateRecord as jellyfinValidateRecord } from "../connectors/jellyfin/schemas.ts";
 import {
 	itemsSchema as itemsSchemaGen,
 	librariesSchema as librariesSchemaGen,
 } from "../generated/jellyfin.schemas.gen.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
+import { fixturesDir } from "./connector-paths.ts";
 
 type Verdict = { ok: true } | { ok: false; reason: string };
 
@@ -84,9 +81,7 @@ const GENERATED_SCHEMAS: Record<string, z.ZodTypeAny> = {
 
 function readJsonlRecords(stream: string): Record<string, unknown>[] {
 	const path = join(
-		PKG_ROOT,
-		"fixtures",
-		"jellyfin",
+		fixturesDir("jellyfin"),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",

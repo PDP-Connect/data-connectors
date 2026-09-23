@@ -19,13 +19,14 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	fixturesDir,
+	manifestPath as manifestPathFor,
+} from "./connector-paths.ts";
 import type { ValidateRecord } from "./connector-runtime.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
 const JSONL_EXT_RE = /\.jsonl$/;
 
 export interface PilotFixtureTestArgs {
@@ -55,7 +56,7 @@ interface PilotManifest {
 }
 
 function readManifestStreamNames(connector: string): string[] {
-	const manifestPath = join(PKG_ROOT, "manifests", `${connector}.json`);
+	const manifestPath = manifestPathFor(connector);
 	const manifest = JSON.parse(
 		readFileSync(manifestPath, "utf8"),
 	) as PilotManifest;
@@ -106,9 +107,7 @@ export function registerPilotFixtureTests(
 		);
 	}
 	const recordsDir = join(
-		PKG_ROOT,
-		"fixtures",
-		connector,
+		fixturesDir(connector),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",
