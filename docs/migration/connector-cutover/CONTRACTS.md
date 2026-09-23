@@ -4,7 +4,13 @@ Status: lead decisions for the cutover integration branch. The per-scope mapping
 
 Base: `main` at `20bba85`.
 
-## End state
+## Release phasing (Tim, 2026-09-22): no Vana data regression
+
+- **Phase 1 (the next data-connectors PR):** additive only. It ships the PDPP connector implementations, runtime fixes, and docs in the current layout. Every published public scope, `scope-catalog.json`, `registry.json`, and legacy Playwright fulfillment stay available and unchanged. It does not wait for full PDPP conformance.
+- **Phase 2 (the hard cut below):** runs only after replacement parity is proven per protected scope AND the Vana-owned adapter exists. This repo coordinates with that adapter but does not own it. The root `connectors/` layout move and legacy deletion belong to Phase 2, because 13 legacy directories share names with PDPP connector keys.
+- YouTube stays at `development` and does not block Phase 1.
+
+## End state (Phase 2)
 
 - `connectors/<key>/` at the repository root is the only home of PDPP Collection Profile implementations. It holds the code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures.
 - `packages/polyfill-connectors` holds only the reusable runtime, libraries, and dev tools. It holds no connector-specific code.
