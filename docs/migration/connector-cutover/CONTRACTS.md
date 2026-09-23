@@ -4,13 +4,14 @@ Status: lead decisions for the cutover integration branch. The per-scope mapping
 
 Base: `main` at `20bba85`.
 
-## Release phasing (Tim, 2026-09-22): no Vana data regression
+## Release model (Tim, 2026-09-22): one coordinated hard cut
 
-- **Phase 1 (the next data-connectors PR):** additive only. It ships the PDPP connector implementations, runtime fixes, and docs in the current layout. Every published public scope, `scope-catalog.json`, `registry.json`, and legacy Playwright fulfillment stay available and unchanged. It does not wait for full PDPP conformance.
-- **Phase 2 (the hard cut below):** runs only after replacement parity is proven per protected scope AND the Vana-owned adapter exists. This repo coordinates with that adapter but does not own it. The root `connectors/` layout move and legacy deletion belong to Phase 2, because 13 legacy directories share names with PDPP connector keys.
-- YouTube stays at `development` and does not block Phase 1.
+- This branch is the review and prep branch for ONE final cut. There is no additive intermediate merge.
+- Until the cut lands, main keeps legacy fulfillment and every published public scope. The cut lands only after connector-side data parity is finite (feasible gaps fixed, irretrievable source omissions documented) and the Vana-owned adapter exists.
+- Release order: (1) the Vana adapter release; (2) the data-connect vendored-sources and generated-definitions update merges first, pinned to this branch's final sources; (3) the hard-cut merge here (a merge commit), which publishes artifacts; (4) one Vana Desktop smoke. Publishing changed artifacts before the vendor update merges is not allowed.
+- YouTube stays at `development` and does not block the cut.
 
-## End state (Phase 2)
+## End state
 
 - `connectors/<key>/` at the repository root is the only home of PDPP Collection Profile implementations. It holds the code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures.
 - `packages/polyfill-connectors` holds only the reusable runtime, libraries, and dev tools. It holds no connector-specific code.
