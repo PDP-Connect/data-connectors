@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "666b324e385219ff3466097a6eaaa98210919790",
-      "branch": "main",
-      "note": "Head of PDP-Connect/data-connect main after data-connect#130 merged (test temp-dir cleanup) and #126 (client mutation runner); supersedes 590b9a1e8. Backs drift jobs (a) collector-definitions, (b) connector-sources, (e) collector-packaging-manifest; pin-only, no vendored bytes change."
+      "sha": "54c42f3858f782c14be250bf5b9d16a999713c8e",
+      "branch": "vendor/data-connectors-hardcut-prep",
+      "note": "Coordinated hard cut: tracks the unmerged data-connect draft PR #238 (vendored claude_code/google_takeout sources, the shared youtube-watch-history module, and regenerated collector definitions from this branch). Must return to data-connect main after #238 merges, before this PR merges. Backs drift jobs (a) collector-definitions, (b) connector-sources, (e) collector-packaging-manifest."
     },
     "pdpp": {
       "owner": "PDP-Connect",
