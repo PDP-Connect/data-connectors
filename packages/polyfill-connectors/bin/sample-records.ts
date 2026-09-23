@@ -9,12 +9,10 @@
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import Database from "better-sqlite3";
+import { packageRoot as PKG_ROOT } from "../src/connector-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
 const DB_PATH = join(PKG_ROOT, ".pdpp-data", "pdpp.sqlite");
 const OUT_DIR = join(PKG_ROOT, "local", "samples");
 

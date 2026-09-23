@@ -36,12 +36,13 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
+import {
+	connectorDir as connectorDirFor,
+	fixturesDir,
+	manifestPath,
+} from "../src/connector-paths.ts";
 
 const NAME_RE = /^[a-z][a-z0-9_]*$/;
 const STREAM_RE = /^[a-z][a-z0-9_]*$/;
@@ -130,20 +131,14 @@ interface TargetPlan {
 }
 
 function planTargets(name: string, stream: string): TargetPlan {
-	const connectorDir = join(PKG_ROOT, "connectors", name);
-	const fixtureDir = join(
-		PKG_ROOT,
-		"fixtures",
-		name,
-		"scrubbed",
-		"pilot-real-shape",
-	);
+	const connectorDir = connectorDirFor(name);
+	const fixtureDir = join(fixturesDir(name), "scrubbed", "pilot-real-shape");
 	const fixtureRecordsDir = join(fixtureDir, "records");
 	return {
 		connectorDir,
 		fixtureRecordsDir,
 		files: {
-			manifestJson: join(PKG_ROOT, "manifests", `${name}.json`),
+			manifestJson: manifestPath(name),
 			indexTs: join(connectorDir, "index.ts"),
 			schemasTs: join(connectorDir, "schemas.ts"),
 			typesTs: join(connectorDir, "types.ts"),
