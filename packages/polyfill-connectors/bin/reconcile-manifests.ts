@@ -17,17 +17,17 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestFileNames,
+	manifestPath as shippedManifestPath,
+} from "../src/connector-paths.ts";
 import {
 	type ReconcileReport,
 	reconcileFromDisk,
 } from "../src/manifest-reconcile.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PKG_ROOT, "manifests");
-const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 const JSON_EXT_RE = /\.json$/;
 
 /** Map manifest filename (without .json) to the connectors/ dir. They
@@ -46,7 +46,7 @@ function emitSourcePathsFor(connectorDir: string): string[] {
 }
 
 function listManifestNames(): string[] {
-	return readdirSync(MANIFEST_DIR)
+	return manifestFileNames()
 		.filter((f) => f.endsWith(".json"))
 		.map((f) => f.replace(JSON_EXT_RE, ""))
 		.sort();
@@ -66,7 +66,7 @@ function buildReport(name: string): ReconcileReport | null {
 	const schemaPath = join(dir, "schemas.ts");
 	return reconcileFromDisk({
 		connector: name,
-		manifestPath: join(MANIFEST_DIR, `${name}.json`),
+		manifestPath: shippedManifestPath(name),
 		schemaPath: existsSync(schemaPath) ? schemaPath : null,
 		emitSourcePaths: emitSourcePathsFor(dir),
 	});

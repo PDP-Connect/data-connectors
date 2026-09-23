@@ -19,10 +19,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+	fixturesDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SOURCE_EXTENSION = import.meta.filename.endsWith(".js") ? "js" : "ts";
 
 process.env.PDPP_CAPTURE_FIXTURES = "1";
@@ -33,7 +36,7 @@ const { createCaptureSession } = await import(
 );
 
 const CONNECTOR = "_capture_smoke";
-const fixturesRoot = join(PACKAGE_ROOT, "fixtures", CONNECTOR);
+const fixturesRoot = fixturesDir(CONNECTOR);
 
 // Clean prior runs of the smoke connector.
 if (existsSync(fixturesRoot)) {

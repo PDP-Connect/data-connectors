@@ -11,12 +11,15 @@
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot,
+	manifestPath as seamManifestPath,
+} from "./connector-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const REFERENCE_IMPL_DIR = join(
-	PACKAGE_ROOT,
+	packageRoot,
 	"..",
 	"..",
 	"reference-implementation",
@@ -40,9 +43,6 @@ export const DEFAULT_RS_URL = process.env.RS_URL || "http://localhost:7663";
 export const DEFAULT_SUBJECT_ID = process.env.PDPP_SUBJECT_ID || "owner_local";
 const OWNER_BOOTSTRAP_CLIENT = "pdpp-polyfill-owner-bootstrap";
 
-export const MANIFEST_DIR = join(PACKAGE_ROOT, "manifests");
-export const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-
 export interface ConnectorPaths {
 	connectorPath: string;
 	manifestPath: string;
@@ -50,8 +50,8 @@ export interface ConnectorPaths {
 
 function c(name: string): ConnectorPaths {
 	return {
-		connectorPath: join(CONNECTORS_DIR, name, "index.ts"),
-		manifestPath: join(MANIFEST_DIR, `${name}.json`),
+		connectorPath: connectorEntrypoint(name),
+		manifestPath: seamManifestPath(name),
 	};
 }
 
@@ -76,33 +76,18 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	whatsapp: c("whatsapp"),
 	slack: c("slack"),
 	pocket: c("pocket"),
-	google_takeout: {
-		connectorPath: join(CONNECTORS_DIR, "google_takeout", "index.ts"),
-		manifestPath: join(MANIFEST_DIR, "google_takeout.json"),
-	},
-	google_maps: {
-		connectorPath: join(CONNECTORS_DIR, "google_maps", "index.ts"),
-		manifestPath: join(MANIFEST_DIR, "google_maps.json"),
-	},
+	google_takeout: c("google_takeout"),
+	google_maps: c("google_maps"),
 	google_maps_data_portability: c("google_maps_data_portability"),
-	twitter_archive: {
-		connectorPath: join(CONNECTORS_DIR, "twitter_archive", "index.ts"),
-		manifestPath: join(MANIFEST_DIR, "twitter_archive.json"),
-	},
+	twitter_archive: c("twitter_archive"),
 	imessage: c("imessage"),
 	strava: c("strava"),
 	notion: c("notion"),
 	reddit: c("reddit"),
 	whoop: c("whoop"),
-	claude_code: {
-		connectorPath: join(CONNECTORS_DIR, "claude_code", "index.ts"),
-		manifestPath: join(MANIFEST_DIR, "claude_code.json"),
-	},
+	claude_code: c("claude_code"),
 	codex: c("codex"),
-	apple_health: {
-		connectorPath: join(CONNECTORS_DIR, "apple_health", "index.ts"),
-		manifestPath: join(MANIFEST_DIR, "apple_health.json"),
-	},
+	apple_health: c("apple_health"),
 	apple_photos: c("apple_photos"),
 	ical: c("ical"),
 	chase: c("chase"),
@@ -116,6 +101,8 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	steam: c("steam"),
 	venmo: c("venmo"),
 	signal: c("signal"),
+	youtube: c("youtube"),
+	icloud_notes: c("icloud_notes"),
 };
 
 export const KNOWN_CONNECTOR_NAMES: string[] = Object.keys(KNOWN_CONNECTORS);
@@ -291,7 +278,7 @@ export interface StartEmbeddedServerOptions {
 }
 
 export async function startEmbeddedServer({
-	dbPath = join(PACKAGE_ROOT, ".pdpp-data/pdpp.sqlite"),
+	dbPath = join(packageRoot, ".pdpp-data/pdpp.sqlite"),
 }: StartEmbeddedServerOptions = {}): Promise<unknown> {
 	const { startServer } = (await import(
 		moduleSpecifier(REFERENCE_IMPL_DIR, "server/index.ts")

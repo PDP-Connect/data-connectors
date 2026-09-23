@@ -29,13 +29,11 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { manifestPath } from "../connector-paths.ts";
 import { VENMO_DECLARED_REASON_TOKENS } from "./venmo.ts";
 
-const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const VENMO_MANIFEST_PATH = join(PACKAGE_ROOT, "manifests", "venmo.json");
+const VENMO_MANIFEST_PATH = manifestPath("venmo");
 
 interface VenmoManifest {
 	capabilities?: { declared_reason_tokens?: unknown };

@@ -56,6 +56,7 @@ export const LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR = {
 		{ store: "cache", stream: "cache_inventory" },
 		{ store: "backups", stream: "backup_inventory" },
 		{ store: "config", stream: "config_inventory" },
+		{ store: "stats_cache", stream: "usage" },
 		{ store: "auth", stream: null },
 	],
 	codex: [

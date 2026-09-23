@@ -15,13 +15,13 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	fixturesDir,
+} from "../src/connector-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const FIXTURES_DIR = join(PKG_ROOT, "fixtures");
-const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 const JSONL_EXT_RE = /\.jsonl$/;
 
 interface ValidatorResult {
@@ -60,8 +60,7 @@ async function replayConnector(
 	connector: string,
 ): Promise<Record<string, StreamReplay> | null> {
 	const recordsDir = join(
-		FIXTURES_DIR,
-		connector,
+		fixturesDir(connector),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",
@@ -156,9 +155,9 @@ async function main(): Promise<void> {
 	const targets =
 		argv.length > 0
 			? argv
-			: readdirSync(FIXTURES_DIR).filter((d) =>
+			: readdirSync(CONNECTORS_DIR).filter((d) =>
 					existsSync(
-						join(FIXTURES_DIR, d, "scrubbed", "pilot-real-shape", "records"),
+						join(fixturesDir(d), "scrubbed", "pilot-real-shape", "records"),
 					),
 				);
 	let totalDrift = 0;

@@ -31,18 +31,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
+import { packageRoot } from "./connector-paths.ts";
+import { readPolyfillManifests } from "./manifest-registry.ts";
 import {
 	buildConnectionScopedSecretEnv,
 	isStaticSecretConnector as isStaticSecretConnectorForInjection,
@@ -50,7 +44,7 @@ import {
 	StaticSecretInjectionError,
 } from "./static-secret-injection.ts";
 
-const packageDir = fileURLToPath(new URL("..", import.meta.url));
+const packageDir = packageRoot;
 const generatorScript = join(
 	packageDir,
 	"scripts/generate-static-secret-registry.ts",
@@ -59,7 +53,6 @@ const trackedRegistryPath = join(
 	packageDir,
 	"src/generated/static-secret-registry.generated.ts",
 );
-const realManifestsDir = join(packageDir, "manifests");
 
 test("static-secret-registry.generated.ts has not drifted from what regenerating from the manifests on disk would produce", () => {
 	const scratchDir = mkdtempSync(
@@ -92,13 +85,8 @@ function writeScratchManifests(
 	scratchDir: string,
 	extra: Record<string, unknown>,
 ): void {
-	for (const file of readdirSync(realManifestsDir)) {
-		if (file.endsWith(".json")) {
-			writeFileSync(
-				join(scratchDir, file),
-				readFileSync(join(realManifestsDir, file)),
-			);
-		}
+	for (const { file, manifest } of readPolyfillManifests()) {
+		writeFileSync(join(scratchDir, file), JSON.stringify(manifest, null, 2));
 	}
 	for (const [file, manifest] of Object.entries(extra)) {
 		writeFileSync(join(scratchDir, file), JSON.stringify(manifest, null, 2));

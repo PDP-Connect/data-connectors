@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Locator, Page } from "playwright";
-import { VENMO_RETRYABLE_PATTERN } from "../../connectors/venmo/index.ts";
-import { API_BASE } from "../../connectors/venmo/parsers.ts";
+import { VENMO_RETRYABLE_PATTERN } from "../../../../connectors/venmo/index.ts";
+import { API_BASE } from "../../../../connectors/venmo/parsers.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,

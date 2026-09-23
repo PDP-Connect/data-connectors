@@ -26,25 +26,23 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { manifestPath } from "../src/connector-paths.ts";
 import {
 	KNOWN_CONNECTOR_NAMES,
-	MANIFEST_DIR,
 	selectRegisterAllConnectors,
 } from "../src/orchestrator.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function manifestTier(name: string): string | undefined {
-	const manifest = JSON.parse(
-		readFileSync(join(MANIFEST_DIR, `${name}.json`), "utf8"),
-	) as {
+	const manifest = JSON.parse(readFileSync(manifestPath(name), "utf8")) as {
 		capabilities?: { public_listing?: { tier?: string } };
 	};
 	return manifest.capabilities?.public_listing?.tier;
 }
 
 function readManifestStub(name: string) {
-	return JSON.parse(readFileSync(join(MANIFEST_DIR, `${name}.json`), "utf8"));
+	return JSON.parse(readFileSync(manifestPath(name), "utf8"));
 }
 
 test("selectRegisterAllConnectors equals KNOWN_CONNECTOR_NAMES minus deprecated_upstream manifests", () => {

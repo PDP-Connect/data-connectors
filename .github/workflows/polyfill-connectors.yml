@@ -16,6 +16,7 @@ on:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
+      - "connectors/**"
       - ".github/workflows/polyfill-connectors.yml"
   pull_request: {}
   workflow_dispatch: {}
@@ -56,7 +57,7 @@ jobs:
 
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -69,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,16 +84,12 @@ jobs:
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
           node-version: "24"
 
-      - name: Install polyfill-connectors dependencies
-        # Scoped to the package, not the repo root: this repo has no npm
-        # workspaces wiring for packages/polyfill-connectors (see
-        # packages/polyfill-connectors/vendor/README.md for why its two
-        # @pdpp/* dependencies install from a checked-in tarball instead of a
-        # workspace/registry entry). --ignore-scripts skips patchright's
+      - name: Install workspace dependencies
+        # Root connector files resolve dependencies from the root workspace.
+        # --ignore-scripts skips patchright's
         # postinstall browser download; the browser the tests DO need is
         # installed explicitly in the next step, so the skip stays deliberate
         # rather than accidental.
-        working-directory: packages/polyfill-connectors
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
@@ -103,8 +100,7 @@ jobs:
         # thing under test is what Playwright WRITES to disk (trace zips,
         # screenshots, DOM snapshots), so a stub cannot prove the redaction.
         # `--with-deps` because the runner image carries no shared libs for it.
-        # Run from the package: `playwright` is a dependency of
-        # polyfill-connectors, not of the repo root.
+        # The root workspace install provides `playwright` to the package.
         #
         # Ported from PDP-Connect/pdpp's own polyfill-connectors workflow,
         # which already installs exactly this for exactly this suite. Move A

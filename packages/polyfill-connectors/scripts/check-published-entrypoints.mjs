@@ -130,28 +130,16 @@ await Promise.all(
 );
 
 await Promise.all(
-	[
-		"bin/local-device-exporter.js",
-		"bin/test-fixture-capture.js",
-		"src/local-device-runtime.js",
-	].map(async (target) => {
-		const source = await readFile(path.join(packageRoot, target), "utf8");
-		assert.doesNotMatch(
-			source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ""),
-			/(["'])[^"']+\.ts\1/,
-			`${target} must not spawn or import a raw TypeScript file in the published package`,
-		);
-	}),
-);
-
-const staticSecretGenerator = await readFile(
-	path.join(packageRoot, "scripts/generate-static-secret-registry.js"),
-	"utf8",
-);
-assert.doesNotMatch(
-	staticSecretGenerator,
-	/manifest-registry\.ts/,
-	"the static-secret generator must import the published manifest registry JavaScript",
+	["bin/test-fixture-capture.js", "src/local-device-runtime.js"].map(
+		async (target) => {
+			const source = await readFile(path.join(packageRoot, target), "utf8");
+			assert.doesNotMatch(
+				source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ""),
+				/(["'])[^"']+\.ts\1/,
+				`${target} must not spawn or import a raw TypeScript file in the published package`,
+			);
+		},
+	),
 );
 
 console.log(

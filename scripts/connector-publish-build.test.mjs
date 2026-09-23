@@ -28,7 +28,7 @@ test("C-T1 every allowlist entry builds and verifies", async (t) => {
       for (const [script, args] of [
         ["build-connector-oci-artifact.mjs", [
           "--connector", manifest, "--out", artifact,
-          "--esbuild", join(repoRoot, "packages/polyfill-connectors/node_modules/esbuild/lib/main.js"),
+          "--esbuild", join(repoRoot, "node_modules/esbuild/lib/main.js"),
         ]],
         ["verify-connector-oci-artifact.mjs", ["--artifact", artifact]],
       ]) {

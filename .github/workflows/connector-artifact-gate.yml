@@ -65,7 +65,7 @@ jobs:
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors
+        run: npm ci --ignore-scripts
 
       - name: Build and verify every connector in this shard
         env:
@@ -96,7 +96,7 @@ jobs:
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors
+        run: npm ci --ignore-scripts
 
       - name: Publish allowlist and workflow contract tests
         run: node --test scripts/connector-publish-allowlist.test.mjs scripts/select-publish-target.test.mjs scripts/select-publish-connectors.test.mjs

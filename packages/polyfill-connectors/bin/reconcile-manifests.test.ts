@@ -21,15 +21,13 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestPath as MANIFEST_DIR,
+} from "../src/connector-paths.ts";
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PKG_ROOT, "manifests");
-const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 
 function listSchemaConnectors(): string[] {
 	return readdirSync(CONNECTORS_DIR)
@@ -52,7 +50,7 @@ assert.ok(
 
 for (const name of connectors) {
 	test(`reconcile/${name}: manifest, schema, and emit literals align`, () => {
-		const manifestPath = join(MANIFEST_DIR, `${name}.json`);
+		const manifestPath = MANIFEST_DIR(name);
 		assert.ok(
 			existsSync(manifestPath),
 			`${name}: schemas.ts exists but no matching manifest`,

@@ -2,23 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync } from "node:fs";
 import {
 	createServer,
 	type IncomingMessage,
 	type ServerResponse,
 } from "node:http";
 import test from "node:test";
-import {
-	getConnectorPaths,
-	issueOwnerToken,
-	MANIFEST_DIR,
-} from "./orchestrator.ts";
+import { readPolyfillManifests } from "./manifest-registry.ts";
+import { getConnectorPaths, issueOwnerToken } from "./orchestrator.ts";
 
 test("every manifest-declared connector is reachable via getConnectorPaths (registered in KNOWN_CONNECTORS)", () => {
-	const manifestKeys = readdirSync(MANIFEST_DIR)
-		.filter((f) => f.endsWith(".json"))
-		.map((f) => f.replace(/\.json$/, ""))
+	const manifestKeys = readPolyfillManifests()
+		.map(({ file }) => file.replace(/\.json$/, ""))
 		.sort();
 
 	const unreachable = manifestKeys.filter((key) => {

@@ -7,7 +7,7 @@ import type { BrowserContext, Locator, Page } from "playwright";
 import {
 	REDDIT_RETRYABLE_PATTERN,
 	redditEnsureSession,
-} from "../../connectors/reddit/index.ts";
+} from "../../../../connectors/reddit/index.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,

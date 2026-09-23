@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "666b324e385219ff3466097a6eaaa98210919790",
+      "sha": "819aca1c6694ad7f2ec87f313c1ad092458297eb",
       "branch": "main",
-      "note": "Head of PDP-Connect/data-connect main after data-connect#130 merged (test temp-dir cleanup) and #126 (client mutation runner); supersedes 590b9a1e8. Backs drift jobs (a) collector-definitions, (b) connector-sources, (e) collector-packaging-manifest; pin-only, no vendored bytes change."
+      "note": "Tracks data-connect main after PR #238 merged. The connector-source gate compares its transitional vendored copy with the recorded data-connectors source revision, while the collector-definitions and packaging gates check the current runner. Data Connect remains on the old package/runtime surface until its separate migration."
     },
     "pdpp": {
       "owner": "PDP-Connect",

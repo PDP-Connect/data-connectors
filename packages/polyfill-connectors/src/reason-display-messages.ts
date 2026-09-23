@@ -38,7 +38,7 @@
  * one-way).
  */
 
-import { readPolyfillManifests } from "./manifest-registry.ts";
+import { readPolyfillLibraryMetadata } from "./manifest-registry.ts";
 
 interface ManifestLike {
 	connector_id?: unknown;
@@ -80,7 +80,7 @@ export function connectorReasonDisplayMessages(): Readonly<
 > {
 	const byConnector: Record<string, Record<string, string>> = {};
 
-	for (const { file, manifest } of readPolyfillManifests()) {
+	for (const { file, manifest } of readPolyfillLibraryMetadata()) {
 		const raw = (manifest as ManifestLike).reason_display_messages;
 		if (raw === undefined) {
 			continue;

@@ -39,6 +39,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["google_takeout", "google-takeout"],
     ["groupme", "groupme"],
     ["heb", "heb"],
+    ["icloud_notes", "icloud-notes", "New connector on the hard-cut review branch; it publishes with the coordinated hard cut, not before, so Desktop auto-update does not receive it early."],
     ["ical", "ical"],
     ["imessage", "imessage"],
     ["jellyfin", "jellyfin"],
@@ -72,6 +73,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["wholefoods", "wholefoods"],
     ["whoop", "whoop"],
     ["ynab", "ynab"],
+    ["youtube", "youtube", "New connector on the hard-cut review branch; it publishes with the coordinated hard cut, not before, so Desktop auto-update does not receive it early."],
   ].map(([manifest, connectorKey, exclusionReason = null]) =>
     Object.freeze({ manifest, connectorKey, exclusionReason }),
   ),

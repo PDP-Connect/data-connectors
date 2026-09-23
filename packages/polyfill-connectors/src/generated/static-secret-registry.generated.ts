@@ -65,6 +65,13 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			username: ["CHATGPT_USERNAME"],
 		},
 	},
+	doordash: {
+		credentialKind: "username_password",
+		secretFieldEnvVars: {
+			password: ["DOORDASH_PASSWORD"],
+			username: ["DOORDASH_USERNAME"],
+		},
+	},
 	github: {
 		credentialKind: "personal_access_token",
 		secretEnvVars: ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"],
@@ -147,6 +154,10 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			password: ["VENMO_PASSWORD"],
 			username: ["VENMO_USERNAME"],
 		},
+	},
+	wholefoods: {
+		credentialKind: "api_key",
+		secretEnvVars: ["USDA_API_KEY"],
 	},
 	ynab: {
 		credentialKind: "personal_access_token",

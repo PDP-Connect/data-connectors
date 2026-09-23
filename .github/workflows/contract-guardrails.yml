@@ -21,20 +21,14 @@ jobs:
       - name: Install contract tooling dependencies
         run: npm ci
 
-      - name: Validate manifests (HC-MANIFEST-CONTRACT-001/002/003, HC-VERSIONING-INDEPENDENT-001, HC-WHAT-NOT-TO-DO-002)
-        run: node scripts/validate-manifests.mjs
+      - name: Check frozen historical scope, fixture, and artifact contracts
+        run: npm run historical-contract:check
 
-      - name: Check manifests normalized
-        run: node scripts/normalize-manifests.mjs --check
+      - name: Check packed library manifest projection
+        run: npm run polyfill-library-metadata:check
 
-      - name: Validate scope-schema coverage (HC-RESULT-CONTRACT-001)
-        run: node scripts/validate-scope-schemas.mjs
-
-      - name: Test catalog and connector artifact contracts
-        run: node --test scripts/connector-artifact-contract.test.mjs scripts/generate-scope-catalog.test.mjs
-
-      - name: Test schema health check gate
-        run: node --test scripts/schema-health-gate.test.mjs
+      - name: Test historical artifact contracts
+        run: npm run historical-contract:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test
@@ -47,28 +41,6 @@ jobs:
 
       - name: Test manifest lookup classifier
         run: node --test scripts/lookup-manifest.test.mjs
-
-      - name: Check source/scope catalog generated files
-        run: node scripts/generate-scope-catalog.mjs --check
-
-      - name: Validate connector fixtures
-        run: node scripts/generate-fixture-index.mjs --validate-only
-
-      - name: Check fixture index
-        run: node scripts/generate-fixture-index.mjs --check
-
-      - name: Check connector index and artifacts
-        run: node scripts/generate-connector-index.mjs --check
-
-      - name: Check page API additive-only (HC-PHASE4-PAGE-API-ADDITIVE-001)
-        env:
-          BASE_REF: origin/${{ github.base_ref || 'main' }}
-        run: node scripts/check-page-api-additive.mjs
-
-      - name: Check source_id stability (HC-COMPAT-SOURCE-ID-001)
-        env:
-          BASE_REF: origin/${{ github.base_ref || 'main' }}
-        run: node scripts/check-source-id-stability.mjs
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
         env:

@@ -15,21 +15,20 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestPath as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 import { SCHEMALESS_CONNECTOR_ALLOWLIST } from "./connector-schema-allowlist.ts";
-
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
 
 interface ManifestShape {
 	streams?: Array<{ name?: unknown }>;
 }
 
 function manifestDeclaresStreams(name: string): boolean {
-	const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+	const manifestPath = MANIFESTS_DIR(name);
 	if (!existsSync(manifestPath)) {
 		return false;
 	}

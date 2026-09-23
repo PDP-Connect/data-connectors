@@ -1,26 +1,10 @@
 # Connector authoring
 
-This repository is the single home of PDPP connector content. Keep connector source and the canonical Collection Profile here, under `packages/polyfill-connectors/`.
+Create and maintain PDPP Collection Profile implementations in this repository under `connectors/<key>/`. Keep the connector's code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures together. Use the shared runtime in `packages/polyfill-connectors/src/`.
 
-`PDP-Connect/pdpp` keeps a copy of `packages/polyfill-connectors`, but production does not build from it. DataConnect builds the production package from this repository, and pdpp's copy does not own the primary implementation of a new connector.
+1. Add or change the connector under `connectors/<key>/` and update its manifest version when the implementation or manifest contract changes.
+2. Follow the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) for collection, schema, coverage, and fixture evidence.
+3. Install dependencies from the repository root with `npm ci`, then run the package verify gate and focused connector tests.
+4. Build and verify its OCI artifact with `scripts/build-connector-oci-artifact.mjs` and `scripts/verify-connector-oci-artifact.mjs`. Publication is selected by `scripts/select-publish-connectors.mjs` and signed from the protected main workflow.
 
-## Default workflow
-
-1. Add or change the collector here, in this repository, under `packages/polyfill-connectors/connectors/<key>/`.
-
-2. Add or update its manifest at `packages/polyfill-connectors/manifests/<key>.json`.
-
-3. Test the connector and its Collection Profile here. Work through the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md).
-
-4. Publish the connector as an OCI artifact. `scripts/build-connector-oci-artifact.mjs` produces the layer bytes, `scripts/connector-publish-allowlist.mjs` decides which connectors a run publishes, and `.github/workflows/publish-polyfill-connectors.yml` pushes and Cosign-signs them from `main` as `ghcr.io/pdp-connect/connector/<key>`.
-
-## OCI entrypoint contract
-
-The OCI config sets `entrypoint` to `code/collection-profile.mjs`; installation writes that module to `dist/collection-profile.mjs`.
-An OCI config entrypoint has the form `<layer-kind>/<member>`: the first segment selects the `code` layer, and the remainder must exactly match a layer-relative tar member, with no absolute paths, traversal, or empty segments.
-
-## Legacy Playwright exception
-
-Use the legacy Playwright path to maintain an existing `*-playwright` connector. A new legacy connector requires an explicit exception.
-
-The legacy creation tools require `--legacy-exception`. That flag confirms the caller chose the older format on purpose. It does not make a legacy connector a PDPP Collection Profile.
+The historical Playwright scope catalog is frozen. A new Collection Profile stream does not automatically replace a Desktop scope or authorize writing raw records under a legacy scope ID. Such a replacement needs a separately reviewed projection and consumer activation.

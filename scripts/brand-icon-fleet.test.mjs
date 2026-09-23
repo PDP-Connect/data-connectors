@@ -7,15 +7,15 @@ import { dirname, join, normalize } from "node:path";
 import test from "node:test";
 
 const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..");
-const manifestsDir = join(repoRoot, "packages", "polyfill-connectors", "manifests");
+const manifestsDir = join(repoRoot, "connectors");
 const indexPath = join(repoRoot, "connector-index.json");
 const expectedUrlPrefix = "https://raw.githubusercontent.com/PDP-Connect/data-connectors/";
 const drawableElementPattern = /<(?:path|rect|circle|ellipse|line|polygon|polyline)\b[^>]*>/g;
 
 function iconPathFromUrl(url) {
-  const match = url.match(/\/packages\/polyfill-connectors\/manifests\/(icons\/[^?#]+)$/);
-  assert.ok(match, `${url}: must resolve to a package-local manifest icon`);
-  return match[1];
+  const match = url.match(/\/(?:packages\/polyfill-connectors\/manifests\/icons\/([^/?#]+)\.svg|connectors\/([^/?#]+)\/icon\.svg)$/);
+  assert.ok(match, `${url}: must resolve to a pinned connector icon`);
+  return `connectors/${match[1] ?? match[2]}/icon.svg`;
 }
 
 function parseSquareViewBox(source, filename) {
@@ -89,8 +89,15 @@ function assertRealBrandMarkShape(source, filename) {
 }
 
 function readManifest(filename) {
-  const path = join(manifestsDir, filename);
+  const path = join(manifestsDir, filename.replace(/\.json$/, ""), "manifest.json");
   return { path, manifest: JSON.parse(readFileSync(path, "utf8")) };
+}
+
+function manifestFiles() {
+  return readdirSync(manifestsDir)
+    .filter((key) => existsSync(join(manifestsDir, key, "manifest.json")))
+    .map((key) => `${key}.json`)
+    .sort();
 }
 
 function assertLocalAsset(manifestPath, assetPath, field) {
@@ -106,7 +113,7 @@ function assertLocalAsset(manifestPath, assetPath, field) {
 }
 
 test("every shipped polyfill manifest either declares a local brand icon or has none (monogram fallback)", () => {
-  const files = readdirSync(manifestsDir).filter((file) => file.endsWith(".json")).sort();
+  const files = manifestFiles();
   assert.ok(files.length > 0, "expected shipped polyfill manifests");
   for (const filename of files) {
     const { path, manifest } = readManifest(filename);
@@ -127,7 +134,7 @@ test("every shipped polyfill manifest either declares a local brand icon or has 
 
 test("connector index resolves every shipped polyfill brand icon, and omits connectors with none", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
-  for (const filename of readdirSync(manifestsDir).filter((file) => file.endsWith(".json"))) {
+  for (const filename of manifestFiles()) {
     const { manifest } = readManifest(filename);
     if (manifest.brand === undefined) {
       assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: has no brand but connector-index.json still has a brandIcons entry`);
@@ -137,13 +144,13 @@ test("connector index resolves every shipped polyfill brand icon, and omits conn
     assert.ok(icon, `${filename}: connector-index.json is missing brandIcons.${manifest.connector_id}`);
     assert.match(
       icon.url,
-      new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/packages/polyfill-connectors/manifests/${manifest.brand.icon}$`),
+      new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.icon})$`),
       `${filename}: resolved icon URL`,
     );
     if (manifest.brand.dark_icon !== undefined) {
       assert.match(
         icon.darkUrl,
-        new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/packages/polyfill-connectors/manifests/${manifest.brand.dark_icon}$`),
+        new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.dark_icon})$`),
         `${filename}: resolved dark icon URL`,
       );
     }
@@ -154,18 +161,18 @@ test("connector index resolves every shipped polyfill brand icon, and omits conn
 test("every indexed brand icon is a self-contained, intentionally inked SVG mark", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   const referenced = Object.values(index.brandIcons ?? {});
-  const expectedCount = readdirSync(manifestsDir).filter((file) => file.endsWith(".json")).length - CONNECTORS_WITHOUT_A_BRAND_MARK.size;
+  const expectedCount = manifestFiles().length - CONNECTORS_WITHOUT_A_BRAND_MARK.size;
   assert.equal(referenced.length, expectedCount, "expected every shipped connector with a brand mark to be indexed, and no others");
 
   for (const icon of referenced) {
     assert.equal(typeof icon?.url, "string", "brand icon URL is required");
     const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(manifestsDir, relativePath), "utf8");
+    const source = readFileSync(join(repoRoot, relativePath), "utf8");
     assertSafeRecognisableSvg(source, relativePath);
     if (icon.darkUrl !== undefined) {
       assert.equal(typeof icon.darkUrl, "string", `${relativePath}: darkUrl must be a string`);
       const darkPath = iconPathFromUrl(icon.darkUrl);
-      assertSafeRecognisableSvg(readFileSync(join(manifestsDir, darkPath), "utf8"), darkPath);
+      assertSafeRecognisableSvg(readFileSync(join(repoRoot, darkPath), "utf8"), darkPath);
     }
   }
 });
@@ -180,7 +187,7 @@ test("every indexed brand icon is a real brand mark, not a hand-drawn glyph", ()
 
   for (const icon of referenced) {
     const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(manifestsDir, relativePath), "utf8");
+    const source = readFileSync(join(repoRoot, relativePath), "utf8");
     assertRealBrandMarkShape(source, relativePath);
   }
 });

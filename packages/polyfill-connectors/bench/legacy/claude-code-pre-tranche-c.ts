@@ -46,12 +46,12 @@ import {
 	TOOL_RESULT_PREVIEW_CHARS,
 	textPreview,
 	widenSessionTimeRange,
-} from "../../connectors/claude_code/parsers.ts";
+} from "../../../../connectors/claude_code/parsers.ts";
 import type {
 	ClaudeCodeState,
 	JsonlObject,
 	SessionAccumulator,
-} from "../../connectors/claude_code/types.ts";
+} from "../../../../connectors/claude_code/types.ts";
 import {
 	type CollectContext,
 	type RecordData,
@@ -450,11 +450,19 @@ function updateSessionAccumulator(
 	}
 	const acc =
 		sessionAccumulators.get(sessionId) ??
-		makeEmptySessionAccumulator(sessionId, projectDir);
+		// This frozen pre-tranche-c benchmark snapshot predates sessions.kind /
+		// sessions.parent_session_id; it never reads them (also frozen), so
+		// this is a type-compat shim, not a behavior claim — same treatment
+		// as the `title` shim below.
+		makeEmptySessionAccumulator(sessionId, projectDir, "session", null);
 	mergeSessionObservations(acc, {
 		cwd: obs.cwd,
 		entrypoint: obs.entrypoint,
 		gitBranch: obs.gitBranch,
+		// This frozen pre-tranche-c benchmark snapshot predates the `title`
+		// field; it never reads `obs.title` (also frozen), so this is a
+		// type-compat shim, not a behavior claim.
+		title: null,
 		userType: obs.userType,
 		version: obs.version,
 	});

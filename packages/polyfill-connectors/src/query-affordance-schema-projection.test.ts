@@ -3,9 +3,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 /**
  * Proves the OpenSpec acceptance check for `complete-connector-query-affordances`:
@@ -29,8 +28,7 @@ import { fileURLToPath } from "node:url";
  * these declarations.
  */
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 
 interface JsonSchema {
 	format?: string;
@@ -101,7 +99,7 @@ function projectFieldCapabilities(
 
 function loadStream(connectorKey: string, streamName: string): ManifestStream {
 	const manifest = JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connectorKey}.json`), "utf8"),
+		readFileSync(MANIFEST_PATH(connectorKey), "utf8"),
 	) as ConnectorManifest;
 	const stream = (manifest.streams ?? []).find((s) => s.name === streamName);
 	assert.ok(stream, `${connectorKey}.${streamName} not found`);

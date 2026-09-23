@@ -42,7 +42,7 @@ const ADAPTER_MODULES: readonly (() => Promise<{
 			GOOGLE_DATA_PORTABILITY_EXCHANGER_KIND,
 			googleDataPortabilityAdapter,
 		} = await import(
-			"../connectors/google_maps_data_portability/provider-auth.ts"
+			"../../../connectors/google_maps_data_portability/provider-auth.ts"
 		);
 		return {
 			adapter: googleDataPortabilityAdapter,

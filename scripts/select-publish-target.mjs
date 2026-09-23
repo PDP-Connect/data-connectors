@@ -107,10 +107,9 @@ export function readManifestVersion(connectorKey, { cwd = process.cwd() } = {}) 
   }
   const path = join(
     cwd,
-    "packages",
-    "polyfill-connectors",
-    "manifests",
-    `${connector.manifest}.json`,
+    "connectors",
+    connector.manifest,
+    "manifest.json",
   );
   let parsed;
   try {

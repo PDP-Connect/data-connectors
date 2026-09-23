@@ -25,9 +25,12 @@ import {
 	rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 import type { RunSummary } from "../src/run-summary.ts";
 import {
 	type CheckpointEvidence,
@@ -36,8 +39,6 @@ import {
 	resolveCaptureOnFailureEnv,
 } from "./connector-dev.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const CLI_PATH = join(PACKAGE_ROOT, "bin", "connector-dev.ts");
 const fixturePath = (name: string): string =>
 	join(PACKAGE_ROOT, "src", "test-fixtures", name);
@@ -78,7 +79,7 @@ after(() => {
 		});
 		// Only this suite's own fixture ids are removed, never `fixtures/`
 		// itself — that directory holds checked-in connector fixtures.
-		rmSync(join(PACKAGE_ROOT, "fixtures", connector), {
+		rmSync(connectorDir(connector), {
 			force: true,
 			recursive: true,
 		});

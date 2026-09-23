@@ -15,13 +15,14 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import test from "node:test";
+
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 const VALID_COVERAGE_POLICIES = new Set([
 	"collect",
@@ -55,11 +56,11 @@ interface ConnectorManifest {
 test("connector manifest streams: coverage_policy uses only valid enum values", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -108,11 +109,11 @@ test("connector manifest streams: coverage_policy uses only valid enum values", 
 test("connector manifest streams: coverage_policy must not be the permanently-unkeepable 'deferred'", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -142,11 +143,11 @@ test("connector manifest streams: coverage_policy must not be the permanently-un
 test("connector manifest streams: accepted-coverage policy must not combine with required: true", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -246,7 +247,6 @@ function fingerprintSemanticStream(stream: ManifestStream): string {
  */
 const KNOWN_MISSING_REQUIRED = new Map([
 	["amazon.orders", "0f982754cdbd3515"],
-	["amazon.order_items", "4ebc04ded1936f87"],
 	["anthropic.conversations", "30ae75cafa437b1a"],
 	["anthropic.messages", "20d62f1a0c2f2052"],
 	["anthropic.projects", "415dccf66dc5c874"],
@@ -257,7 +257,9 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["chase.balances", "15c21df9a8a9c805"],
 	["chatgpt.conversations", "d657ca4397289582"],
 	["chatgpt.messages", "cc672810cdb9d950"],
-	["chatgpt.memories", "b5c37dda48682901"],
+	// The already-integrated memories.type schema changed this fingerprint before
+	// the root move; the stream still has the same implicit required default.
+	["chatgpt.memories", "6b3a868a27e1e75e"],
 	["chatgpt.custom_gpts", "2fd94123f1988a58"],
 	["chatgpt.custom_instructions", "c3fab122ae6242c0"],
 	["chatgpt.shared_conversations", "e78a424f4991a12e"],
@@ -274,8 +276,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["codex.prompts", "b46d9879df70b604"],
 	["codex.skills", "bd5a65644fcfe045"],
 	["codex.coverage_diagnostics", "fb67ab5be18229ef"],
-	["doordash.orders", "3f7608fe62440cad"],
-	["doordash.order_items", "3c8fd340d907545c"],
 	["github.user", "b6ec1e77b0c49ac1"],
 	["github.user_stats", "ad44e77cf37957c5"],
 	["github.repositories", "a281334e68e1a5f6"],
@@ -326,7 +326,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["reddit.upvoted", "33f9037aa1ea6d85"],
 	["reddit.downvoted", "1a9026c2bead89eb"],
 	["reddit.hidden", "a4178a68b917c4c1"],
-	["shopify.orders", "82e53111c3127073"],
 	["slack.workspace", "2b5e89d561548e8a"],
 	["slack.channels", "b7ef731906d7805a"],
 	["slack.channel_stats", "ef2a59153d6fef45"],
@@ -379,11 +378,11 @@ test("connector manifest streams: required must be declared explicitly (ratchet 
 	const newOmissions: string[] = [];
 	const editedGrandfatheredStreams: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}

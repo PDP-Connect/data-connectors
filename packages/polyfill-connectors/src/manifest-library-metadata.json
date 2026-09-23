@@ -1,0 +1,616 @@
+[
+	{
+		"file": "amazon.json",
+		"manifest": {
+			"connector_key": "amazon",
+			"reason_display_messages": {
+				"amazon_empty_history_after_prior_orders": "Amazon reported no order history for a year in which we previously collected orders. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove those orders are gone",
+				"empty_first_page_without_diagnostics": "The first page came back empty and we couldn't tell why",
+				"item_count_shortfall": "An order lists more items than we could save",
+				"list_page_order_id_not_found": "We skipped some order cards on this page because we couldn't find their order IDs",
+				"empty_first_page_without_terminal_signal": "The first page came back empty with no sign it was really the end",
+				"list_page_navigation_failed": "We couldn't load an orders page, so we stopped before advancing",
+				"list_page_shape_check_failed": "The page didn't look like we expected",
+				"no_orders_text": "This account shows no orders to import",
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
+				"pagination_exhausted": "We reached the end of the available pages",
+				"profile_page_read_failed": "We couldn't read the page to get your account profile",
+				"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
+				"selector_drift": "The page layout changed and we couldn't find what we needed",
+				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
+				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+			}
+		}
+	},
+	{
+		"file": "anthropic.json",
+		"manifest": {
+			"connector_key": "anthropic",
+			"reason_display_messages": {
+				"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
+				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
+				"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically.",
+				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically."
+			}
+		}
+	},
+	{
+		"file": "apple_contacts.json",
+		"manifest": {
+			"connector_key": "apple-contacts",
+			"reason_display_messages": {
+				"group_inventory_short": "Your address book has contact groups we couldn't save"
+			}
+		}
+	},
+	{
+		"file": "apple_health.json",
+		"manifest": {
+			"connector_key": "apple-health",
+			"reason_display_messages": {
+				"export_not_found": "We couldn't find an export to import",
+				"export_extraction_failed": "We couldn't read the uploaded export"
+			}
+		}
+	},
+	{
+		"file": "apple_photos.json",
+		"manifest": {
+			"connector_key": "apple-photos",
+			"reason_display_messages": {
+				"export_not_found": "We couldn't find an export to import"
+			}
+		}
+	},
+	{
+		"file": "chase.json",
+		"manifest": {
+			"connector_key": "chase",
+			"reason_display_messages": {
+				"account_no_longer_discovered": "An account we tracked before is no longer listed on your dashboard",
+				"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
+				"qfx_download_failed": "We couldn't download the transactions file",
+				"qfx_parse_failed": "We couldn't read the transactions file",
+				"row_exception": "Something went wrong reading one of the rows",
+				"selectors_pending": "Support for this part of the connector isn't complete yet",
+				"statements_scrape_failed": "We couldn't read your statements page"
+			}
+		}
+	},
+	{
+		"file": "chatgpt.json",
+		"manifest": {
+			"connector_key": "chatgpt",
+			"reason_display_messages": {
+				"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
+				"branch_truncated": "A conversation is missing earlier messages from its current thread",
+				"empty_detail": "We opened this conversation but found no messages to import",
+				"http_error": "We hit a network problem talking to the service",
+				"missing_mapping": "We opened this conversation but it had no message data to read",
+				"not_available": "This data isn't available through the current connection",
+				"pagination_cap_truncated": "There were more ChatGPT results than we could safely page through in one run, so we stopped early",
+				"parse_error": "ChatGPT sent back a response we couldn't read",
+				"shape_check_failed": "The data didn't look like we expected"
+			}
+		}
+	},
+	{
+		"file": "claude_code.json",
+		"manifest": {
+			"connector_key": "claude-code",
+			"options_schema": {
+				"type": "object",
+				"description": "Owner tuning knobs for the Claude Code connector, resolved from the connector_instance_config_revisions spine. declared_option_kind is this connector's CLAIM only; the platform registry in packages/polyfill-connectors/src/connector-config-option-kind-registry.ts decides what actually gates self-activation, and an option the registry does not classify is enforced as collection_scope.",
+				"properties": {
+					"CLAUDE_CODE_PROJECT_INCLUDE": {
+						"type": "array",
+						"items": { "type": "string" },
+						"description": "Substrings of project folder paths to include. A folder is collected if it contains any of these. Empty list means every project folder is eligible.",
+						"default": [],
+						"declared_option_kind": "collection_scope"
+					},
+					"CLAUDE_CODE_PROJECT_EXCLUDE": {
+						"type": "array",
+						"items": { "type": "string" },
+						"description": "Substrings of project folder paths to exclude. A folder is dropped if it contains any of these, even when the include list matched it.",
+						"default": [],
+						"declared_option_kind": "collection_scope"
+					}
+				}
+			},
+			"reason_display_messages": {
+				"claude_dir_not_found": "We couldn't find your Claude Code data folder",
+				"malformed_jsonl_line": "A line in this Claude Code session log contains invalid JSON and was skipped",
+				"non_object_jsonl_record": "A line in this Claude Code session log has an unexpected format and was skipped",
+				"scope_matched_no_sources": "None of your configured project folders matched any Claude Code projects",
+				"source_directory_read_error": "We couldn't read this Claude Code folder. It will be checked again on the next run",
+				"source_read_error": "This Claude Code session log could not be collected and will be retried on the next run",
+				"source_unreadable": "We couldn't read this folder, so we don't know what's in it",
+				"symlink_skipped": "A symbolic link was skipped without reading its target. The skipped path is listed in the source diagnostics",
+				"truncated_jsonl_tail": "The last line of this Claude Code session log is incomplete and will be checked again on the next run"
+			}
+		}
+	},
+	{
+		"file": "codex.json",
+		"manifest": {
+			"connector_key": "codex",
+			"reason_display_messages": {
+				"symlink_skipped": "A symbolic link in your Codex data was skipped without reading its target",
+				"malformed_jsonl_line": "Part of this session's log file couldn't be read, so those entries were skipped. Nothing was lost on your machine — the original file is unchanged",
+				"non_object_jsonl_record": "A line in this Codex session log has an unexpected format and was skipped",
+				"rollout_source_read_error": "We couldn't read part of your Codex data. It will be checked again on the next run",
+				"shape_check_failed": "The data didn't look like we expected",
+				"truncated_jsonl_tail": "The last line of this Codex session log is incomplete and will be checked again on the next run"
+			}
+		}
+	},
+	{
+		"file": "doordash.json",
+		"manifest": {
+			"connector_key": "doordash",
+			"reason_display_messages": {
+				"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
+				"shape_check_failed": "The data didn't look like we expected"
+			}
+		}
+	},
+	{
+		"file": "github.json",
+		"manifest": {
+			"connector_key": "github",
+			"reason_display_messages": {
+				"github_event_missing_fields": "We skipped some activity events that were missing required details",
+				"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
+				"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
+				"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
+				"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
+				"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
+				"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"
+			}
+		}
+	},
+	{
+		"file": "gmail.json",
+		"manifest": {
+			"connector_key": "gmail",
+			"reason_display_messages": {
+				"historical_backfill_pending": "This bounded sync page completed; more historical Gmail data remains and will be collected automatically",
+				"historical_message_unaccounted": "A historical message could not be represented; its UID was recorded as a permanent coverage gap",
+				"schema_validation_failed": "Some data didn't match the expected format and was skipped"
+			}
+		}
+	},
+	{
+		"file": "google_calendar.json",
+		"manifest": {
+			"connector_key": "google-calendar",
+			"reason_display_messages": {
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of this calendar, so older events haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "google_contacts.json",
+		"manifest": {
+			"connector_key": "google-contacts",
+			"reason_display_messages": {
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your contacts, so some contacts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "google_maps.json",
+		"manifest": {
+			"connector_key": "google-maps",
+			"reason_display_messages": {
+				"element_unaccounted": "Some Timeline entries had no usable time or ID, so we couldn't save them",
+				"invalid_json": "We couldn't read one of your Google Maps Timeline export files",
+				"record_too_large": "This Google Maps Timeline record is too large; re-export your Timeline and try again",
+				"timeline_points_not_found": "We couldn't find any location points to import",
+				"timeline_segments_not_found": "We couldn't find any timeline segments to import",
+				"unsupported_shape": "Your Google Maps Timeline export has an unsupported structure; re-export it as a supported JSON file"
+			}
+		}
+	},
+	{
+		"file": "google_messages.json",
+		"manifest": {
+			"connector_key": "google-messages",
+			"options_schema": {
+				"type": "object",
+				"description": "Owner tuning knobs for the Google Messages connector, resolved from the connector_instance_config_revisions spine. declared_option_kind is this connector's CLAIM only; the platform registry in packages/polyfill-connectors/src/connector-config-option-kind-registry.ts decides what actually gates self-activation, and an option the registry does not classify is enforced as collection_scope.",
+				"properties": {
+					"GMCLI_MAX_CHATS": {
+						"type": "integer",
+						"description": "How many conversations to scan per run. Chats are sorted most-recently-active first, so a lower value collects fewer conversations.",
+						"default": 200,
+						"minimum": 1,
+						"declared_option_kind": "collection_scope"
+					},
+					"GMCLI_MESSAGES_PER_CHAT_LIMIT": {
+						"type": "integer",
+						"description": "How many messages to fetch from each conversation per run. A lower value collects less history per chat.",
+						"default": 500,
+						"minimum": 1,
+						"declared_option_kind": "collection_scope"
+					},
+					"GMCLI_TIMEOUT_MS": {
+						"type": "integer",
+						"description": "How long to wait for a single helper-tool invocation before giving up (does not change which chats or messages are collected).",
+						"default": 120000,
+						"minimum": 1000,
+						"declared_option_kind": "transport"
+					}
+				}
+			},
+			"reason_display_messages": {
+				"gmcli_chat_scan_limit_reached": "You have more conversations than we could scan in this run; the most recently active ones were kept",
+				"gmcli_not_installed": "The Google Messages helper tool isn't installed on this device",
+				"gmcli_not_paired": "Your Android device isn't paired with the Google Messages helper tool",
+				"gmcli_per_chat_limit_reached": "Some conversations had more messages than we could fetch in this run",
+				"gmcli_query_failed": "We couldn't read your Google Messages data from the helper tool",
+				"gmcli_schema_drift": "The Google Messages helper tool returned data in a format we didn't expect"
+			}
+		}
+	},
+	{
+		"file": "google_takeout.json",
+		"manifest": {
+			"connector_key": "google-takeout",
+			"reason_display_messages": {
+				"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
+				"history_not_found": "We couldn't find any history to import",
+				"photos_not_found": "We couldn't find your Google Photos export",
+				"records_not_found": "We didn't find any records to import"
+			}
+		}
+	},
+	{
+		"file": "groupme.json",
+		"manifest": {
+			"connector_key": "groupme",
+			"reason_display_messages": {
+				"group_message_count_unanchored": "GroupMe didn't report a message count for some groups, so we can't confirm their history is complete",
+				"provider_reports_more_messages_than_walked": "GroupMe reports more messages than we collected, so some group history may be missing",
+				"history_ended_before_provider_count": "Some older group conversations stop partway: GroupMe's total for the group is higher than the history it will actually hand back, which usually means the oldest messages are no longer stored on GroupMe's side. Everything we did collect is saved. There is nothing for you to do, and we retry in case the rest becomes available."
+			}
+		}
+	},
+	{
+		"file": "heb.json",
+		"manifest": {
+			"connector_key": "heb",
+			"reason_display_messages": {
+				"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
+				"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
+				"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
+				"list_page_navigation_failed": "We couldn't load a page of your H-E-B order history and didn't want to assume that meant the end",
+				"list_page_shape_check_failed": "The page didn't look like we expected",
+				"nutrition_lookup_incomplete": "We couldn't look up nutrition facts for every product in your orders this run",
+				"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
+				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+				"pagination_exhausted": "We reached the end of the available pages",
+				"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
+				"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
+				"profile_navigation_failed": "We couldn't load your H-E-B account profile page",
+				"profile_shape_check_failed": "Your H-E-B account profile page didn't look like we expected",
+				"scope_not_supported": "This can't be collected with the streams you selected",
+				"selector_drift": "The page layout changed and we couldn't find what we needed",
+				"session_repair_required": "We need you to sign in or pass a verification check to continue",
+				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
+				"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
+				"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
+				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+			}
+		}
+	},
+	{
+		"file": "ical.json",
+		"manifest": {
+			"connector_key": "ical",
+			"reason_display_messages": {
+				"ics_fetch_failed": "We couldn't download the calendar feed",
+				"no_calendar_sources": "No calendars are configured to import from"
+			}
+		}
+	},
+	{
+		"file": "icloud_notes.json",
+		"manifest": {
+			"connector_key": "icloud-notes",
+			"reason_display_messages": {
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "imessage.json",
+		"manifest": {
+			"connector_key": "imessage",
+			"reason_display_messages": {
+				"attachment_tables_missing": "Your Messages database is missing attachment data we need",
+				"chat_handle_join_table_missing": "Your Messages database is missing chat-participant data we need",
+				"message_date_unusable": "We skipped a message with a date we couldn't read"
+			}
+		}
+	},
+	{
+		"file": "jellyfin.json",
+		"manifest": {
+			"connector_key": "jellyfin",
+			"reason_display_messages": {
+				"jellyfin_auth_failed": "Your Jellyfin API key or token was rejected",
+				"jellyfin_error": "We hit a problem talking to your Jellyfin server",
+				"jellyfin_http_error": "We hit a network problem talking to your Jellyfin server",
+				"jellyfin_missing_credentials": "Jellyfin needs a server URL and API key to connect"
+			}
+		}
+	},
+	{
+		"file": "linkedin.json",
+		"manifest": {
+			"connector_key": "linkedin",
+			"reason_display_messages": {
+				"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+			}
+		}
+	},
+	{
+		"file": "loom.json",
+		"manifest": {
+			"connector_key": "loom",
+			"reason_display_messages": {
+				"loom_apollo_wiring_pending": "Loom support isn't wired up yet"
+			}
+		}
+	},
+	{
+		"file": "meta.json",
+		"manifest": {
+			"connector_key": "meta",
+			"reason_display_messages": {
+				"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
+				"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "netflix_export.json",
+		"manifest": {
+			"connector_key": "netflix-export",
+			"reason_display_messages": {
+				"ambiguous_date_order": "We couldn't tell whether the dates in that file are day-first or month-first",
+				"archive_security_violation": "We couldn't safely read that export archive",
+				"csv_parse_error": "We couldn't read the viewing history file",
+				"import_exceeds_bounded_read_policy": "That export was too large to safely read in one run",
+				"records_not_found": "We didn't find any records to import",
+				"unrecognized_csv_schema": "That file didn't match a Netflix viewing history format we recognize"
+			}
+		}
+	},
+	{
+		"file": "oura.json",
+		"manifest": {
+			"connector_key": "oura",
+			"reason_display_messages": {
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history, so some earlier days haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "reddit.json",
+		"manifest": {
+			"connector_key": "reddit",
+			"reason_display_messages": {
+				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of this Reddit listing, so older posts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "shopify.json",
+		"manifest": {
+			"connector_key": "shopify",
+			"reason_display_messages": {
+				"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
+				"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
+			}
+		}
+	},
+	{
+		"file": "signal.json",
+		"manifest": {
+			"connector_key": "signal",
+			"reason_display_messages": {
+				"backfill_check_unproven_legacy_cursor": "We couldn't check for older messages this run; the next run will check properly",
+				"message_date_unusable": "We skipped a message with a date we couldn't read",
+				"no_attachments_exported": "sigtop found no attachments to export for this account",
+				"source_rows_below_watermark_unreachable": "Signal has older messages we haven't saved — run a full refresh to collect them"
+			}
+		}
+	},
+	{
+		"file": "slack.json",
+		"manifest": {
+			"connector_key": "slack",
+			"options_schema": {
+				"type": "object",
+				"description": "Operator/owner tuning knobs for the Slack connector, resolved from the connector_instance_config_revisions spine (see reference-implementation/server/stores/connector-instance-config-store.ts). declared_option_kind here is the connector's CLAIM about whether a knob shapes collection scope or only transport -- it is advisory, not authoritative: the platform-owned classification in packages/polyfill-connectors/src/connector-config-option-kind-registry.ts decides what actually gates self-activation, and connector-config-option-kind-honesty.test.ts rejects a manifest that claims 'transport' for a key the platform classifies as 'collection_scope'. A connector cannot widen its own eligibility by mislabeling a knob.",
+				"properties": {
+					"CHANNEL_ALLOWLIST": {
+						"type": "array",
+						"items": { "type": "string" },
+						"description": "Explicit list of channel IDs to include. Empty list means every accessible channel (subject to MEMBER_ONLY/CHANNEL_TYPES).",
+						"default": [],
+						"declared_option_kind": "collection_scope"
+					},
+					"CHANNEL_TYPES": {
+						"type": "array",
+						"items": { "type": "string" },
+						"description": "Channel types to export. Allowed values: public, private, im, mpim.",
+						"enum": ["public", "private", "im", "mpim"],
+						"default": ["public", "private", "im", "mpim"],
+						"declared_option_kind": "collection_scope"
+					},
+					"MEMBER_ONLY": {
+						"type": "boolean",
+						"description": "When true, export only channels the authenticated user is a member of. When false, includes channels left and channels Slack has archived.",
+						"default": true,
+						"declared_option_kind": "collection_scope"
+					},
+					"LOOKBACK_DAYS": {
+						"type": "integer",
+						"description": "How many days of message history to fetch per channel on a full refresh.",
+						"default": 7,
+						"declared_option_kind": "collection_scope"
+					},
+					"SKIP_FILES": {
+						"type": "boolean",
+						"description": "When true, skip file attachment metadata (reduces export size; does not change which messages are collected).",
+						"default": true,
+						"declared_option_kind": "transport"
+					},
+					"RECLAIM_UPLOADS": {
+						"type": "boolean",
+						"description": "When true, attempt to reclaim previously-failed file uploads on retry (does not change which channels/messages are collected).",
+						"default": false,
+						"declared_option_kind": "transport"
+					}
+				}
+			},
+			"reason_display_messages": {
+				"channel_history_never_requested": "Some channels you're in have never been collected at all, because the archive stopped before reaching them",
+				"channel_history_not_finalized": "Some channels you're in have unproven history, so their messages may be incomplete",
+				"channel_history_out_of_member_scope": "Some public channels weren't collected because you're not a member of them. Set the Slack option MEMBER_ONLY to false to collect every channel your workspace lists, including ones you've left and ones that are archived",
+				"optional_stream_failed": "We couldn't collect one part of your Slack data, so we skipped it",
+				"source_partition_missing": "Some previously seen Slack channels are missing from this export, so message coverage is incomplete"
+			}
+		}
+	},
+	{
+		"file": "steam.json",
+		"manifest": {
+			"connector_key": "steam",
+			"reason_display_messages": {
+				"steam_optional_resource_unavailable": "Steam did not make this optional account data available"
+			}
+		}
+	},
+	{
+		"file": "strava.json",
+		"manifest": {
+			"connector_key": "strava",
+			"reason_display_messages": {
+				"awaiting_upload": "Nothing to read yet. Ask Strava for a copy of your data, and they'll email you an archive — usually within a day, sometimes longer. Upload it here when it arrives.",
+				"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
+				"covered_in_full": "Everything in your export was imported.",
+				"nothing_in_range": "Your export didn't contain any activities in this period. That's not a problem — there was simply nothing to read.",
+				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
+				"sign_in_required": "Strava needs you to sign in again before this can continue.",
+				"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
+				"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
+				"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
+				"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it.",
+				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+			}
+		}
+	},
+	{
+		"file": "twitter_archive.json",
+		"manifest": {
+			"connector_key": "twitter-archive",
+			"reason_display_messages": {
+				"archive_not_found": "We couldn't find an export archive to read"
+			}
+		}
+	},
+	{
+		"file": "uber.json",
+		"manifest": {
+			"connector_key": "uber",
+			"reason_display_messages": {
+				"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
+				"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
+			}
+		}
+	},
+	{
+		"file": "usaa.json",
+		"manifest": {
+			"connector_key": "usaa",
+			"reason_display_messages": {
+				"credit_card_export_unverified": "We couldn't confirm the credit card export",
+				"csv_no_data_rows": "The transactions file had no rows to import",
+				"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
+				"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
+				"export_error": "The export couldn't be downloaded",
+				"export_no_download": "The export didn't produce a downloadable file",
+				"hydrate_crashed": "Something went wrong while loading the page",
+				"inbox_rows_unresolved": "We found inbox messages but couldn't read them — the site may have changed",
+				"pdf_download_click_failed": "We couldn't click the download option for a statement PDF",
+				"pdf_download_direct_link_failed": "We couldn't download a statement PDF from its direct link",
+				"pdf_download_empty": "A statement PDF download didn't produce any file",
+				"pdf_download_no_download_menuitem": "We couldn't find the download option for a statement",
+				"pdf_download_no_options_affordance": "We couldn't find any way to download a statement",
+				"pdf_download_options_click_failed": "We couldn't open the options menu for a statement",
+				"pdf_download_persist_failed": "We downloaded a statement PDF but couldn't save it",
+				"pdf_download_row_missing": "A statement row disappeared before we could download it",
+				"pdf_download_timeout": "A statement PDF download took too long and was skipped",
+				"pdf_parse_failed": "We couldn't read one of the statement PDFs",
+				"pdf_template_unknown": "We don't recognize the format of this statement yet",
+				"scrape_failed": "We couldn't read the page contents",
+				"selectors_pending": "Support for this part of the connector isn't complete yet",
+				"session_dead_reauth_failed": "Your sign-in expired and we couldn't refresh it",
+				"statement_unreconciled": "A statement's transactions don't add up to its printed balances"
+			}
+		}
+	},
+	{
+		"file": "venmo.json",
+		"manifest": {
+			"connector_key": "venmo",
+			"reason_display_messages": {
+				"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+				"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+			}
+		}
+	},
+	{
+		"file": "whatsapp.json",
+		"manifest": {
+			"connector_key": "whatsapp",
+			"reason_display_messages": {
+				"empty_export": "That WhatsApp export did not contain any messages to import",
+				"import_exceeds_bounded_read_policy": "That export was too large to safely read in one run",
+				"media_exceeds_bounded_read_policy": "Some media files in that WhatsApp export were too large to safely import",
+				"no_exports_found": "We couldn't find any exports yet",
+				"unsupported_export": "We could not read that WhatsApp export format yet"
+			}
+		}
+	},
+	{
+		"file": "wholefoods.json",
+		"manifest": {
+			"connector_key": "wholefoods",
+			"reason_display_messages": {
+				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet"
+			}
+		}
+	},
+	{
+		"file": "youtube.json",
+		"manifest": {
+			"connector_key": "youtube",
+			"reason_display_messages": {
+				"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
+				"covered_in_full": "Everything this export carries for this stream was imported.",
+				"nothing_in_range": "Your export didn't contain any records for this stream. That's not a problem — there was simply nothing to read.",
+				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
+				"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
+				"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Coverage for this stream is unverified — Google's Takeout export contents can vary; report this if you expected data here."
+			}
+		}
+	}
+]

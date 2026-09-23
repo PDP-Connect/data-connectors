@@ -19,13 +19,14 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	fixturesDir,
+	manifestPath as manifestPathFor,
+} from "./connector-paths.ts";
 import type { ValidateRecord } from "./connector-runtime.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
 const JSONL_EXT_RE = /\.jsonl$/;
 
 export interface PilotFixtureTestArgs {
@@ -34,6 +35,18 @@ export interface PilotFixtureTestArgs {
 	connector: string;
 	/** Pilot fixtures lock record shape only; behavioral evidence belongs in focused connector tests. */
 	evidence?: "shape-only";
+	/**
+	 * Manifest streams deliberately excluded from the exact-inventory check,
+	 * each with a one-line reason (surfaced in the assertion message so an
+	 * empty or lazy reason is visible in review). Use ONLY when a stream has
+	 * no reviewed real-derived capture yet — a synthetic fixture must not be
+	 * placed under `pilot-real-shape/` to fake this check green (that
+	 * directory is reserved for reviewed real captures). The connector's own
+	 * test suite should cover the excluded stream's shape with a clearly
+	 * labeled SYNTHETIC fixture elsewhere until a real capture lands, at
+	 * which point the exemption should be removed.
+	 */
+	exemptStreams?: Record<string, string>;
 	/** Validator from the connector's `schemas.ts`. */
 	validateRecord: ValidateRecord;
 }
@@ -43,7 +56,7 @@ interface PilotManifest {
 }
 
 function readManifestStreamNames(connector: string): string[] {
-	const manifestPath = join(PKG_ROOT, "manifests", `${connector}.json`);
+	const manifestPath = manifestPathFor(connector);
 	const manifest = JSON.parse(
 		readFileSync(manifestPath, "utf8"),
 	) as PilotManifest;
@@ -85,11 +98,16 @@ export function registerPilotFixtureTests(
 		evidence = "shape-only",
 		validateRecord,
 		expectMissing = false,
+		exemptStreams = {},
 	} = args;
+	for (const [stream, reason] of Object.entries(exemptStreams)) {
+		assert.ok(
+			reason.trim().length > 0,
+			`${connector}: exemptStreams["${stream}"] needs a non-empty reason`,
+		);
+	}
 	const recordsDir = join(
-		PKG_ROOT,
-		"fixtures",
-		connector,
+		fixturesDir(connector),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",
@@ -114,15 +132,16 @@ export function registerPilotFixtureTests(
 		.filter((f) => f.endsWith(".jsonl"))
 		.map((filename) => filename.replace(JSONL_EXT_RE, ""))
 		.sort((left, right) => left.localeCompare(right));
-	const declaredStreams = readManifestStreamNames(connector).sort(
-		(left, right) => left.localeCompare(right),
-	);
+	const exemptStreamNames = new Set(Object.keys(exemptStreams));
+	const declaredStreams = readManifestStreamNames(connector)
+		.filter((name) => !exemptStreamNames.has(name))
+		.sort((left, right) => left.localeCompare(right));
 
 	test(`pilot-real-shape/${connector}/${evidence}: fixture inventory matches manifest`, () => {
 		assert.deepEqual(
 			fixtureStreams,
 			declaredStreams,
-			`${connector}: ${evidence} fixtures must contain exactly one .jsonl file for every manifest stream`,
+			`${connector}: ${evidence} fixtures must contain exactly one .jsonl file for every non-exempt manifest stream`,
 		);
 		assert.equal(
 			new Set(declaredStreams).size,
@@ -130,6 +149,15 @@ export function registerPilotFixtureTests(
 			`${connector}: manifest stream names must be unique for an exact fixture inventory`,
 		);
 	});
+
+	for (const [stream, reason] of Object.entries(exemptStreams)) {
+		test(`pilot-real-shape/${connector}/${stream}: exemption is declared, not silently missing (${reason})`, () => {
+			assert.ok(
+				!fixtureStreams.includes(stream),
+				`${connector}: "${stream}" is both exempted and present in pilot-real-shape/records/ — remove the exemption`,
+			);
+		});
+	}
 
 	if (fixtureStreams.length === 0) {
 		test(`pilot-real-shape/${connector}/${evidence}: at least one stream fixture exists`, () => {

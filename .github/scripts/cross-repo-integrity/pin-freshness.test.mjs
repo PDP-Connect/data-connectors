@@ -74,12 +74,13 @@ function runComparator(fixture, { eventName, prTouches, pinnedSha = fixture.pinn
 	return { outputs, stdout };
 }
 
-test("the data-connect matrix is parsed from the workflow as nine newline-delimited paths", () => {
+test("data-connect freshness tracks the vendored-source revision and compared connector inputs", () => {
 	assert.equal(dataConnectMatrix.paths.includes("\n"), true);
 	assert.deepEqual(pathspecs(dataConnectMatrix), [
 		"packages/local-collector/scripts/generate-collector-definitions-snapshot.ts",
 		"packages/local-collector/src/generated/collector-definitions.generated.ts",
 		"packages/local-collector/tsconfig.build.json",
+		"packages/polyfill-connectors/vendor-source.json",
 		"packages/polyfill-connectors/connectors/claude_code",
 		"packages/polyfill-connectors/connectors/codex",
 		"packages/polyfill-connectors/connectors/google_takeout",

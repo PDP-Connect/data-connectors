@@ -104,6 +104,7 @@ import {
 	buildArtifactCaptureEnv,
 } from "../src/artifact-capture-env.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/collector-registry.ts";
+import { connectorEntrypoint } from "../src/connector-paths.ts";
 import { resolveExecutionRoot } from "../src/execution-root.ts";
 
 const DEFAULT_QUEUE_PATH = join(
@@ -156,7 +157,7 @@ interface ConnectorDefaults {
 const NON_LOCAL_DEVICE_CONNECTOR_DEFAULTS: Record<string, ConnectorDefaults> = {
 	gmail: {
 		command: "tsx",
-		args: ["connectors/gmail/index.ts"],
+		args: [connectorEntrypoint("gmail")],
 		protocolCapabilities: [],
 		streams: ["messages", "message_bodies", "attachments", "threads", "labels"],
 		bindings: { network: { required: true } },
@@ -184,7 +185,7 @@ const KNOWN_CONNECTOR_DEFAULTS: Record<string, ConnectorDefaults> = {
 			definition.connector_id,
 			{
 				command: "tsx",
-				args: [`connectors/${definition.entry}/index.ts`],
+				args: [connectorEntrypoint(definition.entry)],
 				protocolCapabilities: definition.protocol_capabilities,
 				streams: [...definition.streams],
 				bindings: { ...definition.bindings },
@@ -388,7 +389,7 @@ export function buildConnectorSpec(
 	const defaults = KNOWN_CONNECTOR_DEFAULTS[options.connector];
 	const command = options.entrypointCommand ?? defaults?.command ?? "tsx";
 	const args = options.args ??
-		defaults?.args ?? [`connectors/${options.connector}/index.ts`];
+		defaults?.args ?? [connectorEntrypoint(options.connector)];
 	const streams = options.streams ?? defaults?.streams ?? [];
 	const customCommand =
 		options.entrypointCommand !== undefined || options.args !== undefined;

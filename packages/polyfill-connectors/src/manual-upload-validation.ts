@@ -1,23 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { validateAppleHealthExportArtifactFromFile } from "../connectors/apple_health/validation.ts";
+import { validateAppleHealthExportArtifactFromFile } from "../../../connectors/apple_health/validation.ts";
 import {
 	validateGoogleMapsTimelineArtifact,
 	validateGoogleMapsTimelineArtifactFromFile,
-} from "../connectors/google_maps/validation.ts";
+} from "../../../connectors/google_maps/validation.ts";
 import {
 	validateNetflixExportArtifact,
 	validateNetflixExportArtifactFromFile,
-} from "../connectors/netflix_export/validation.ts";
+} from "../../../connectors/netflix_export/validation.ts";
 import {
 	validateStravaAccountExportArtifact,
 	validateStravaAccountExportArtifactFromFile,
-} from "../connectors/strava/validation.ts";
+} from "../../../connectors/strava/validation.ts";
 import {
 	validateWhatsAppChatExportArtifact,
 	validateWhatsAppChatExportArtifactFromFile,
-} from "../connectors/whatsapp/validation.ts";
+} from "../../../connectors/whatsapp/validation.ts";
 
 export type ManualUploadValidationResult =
 	| Awaited<ReturnType<typeof validateAppleHealthExportArtifactFromFile>>

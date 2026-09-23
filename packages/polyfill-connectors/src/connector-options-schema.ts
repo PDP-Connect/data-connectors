@@ -42,7 +42,7 @@ import {
 	platformOptionKind,
 	resolveEnforcedOptionKind,
 } from "./connector-config-option-kind-registry.ts";
-import { readPolyfillManifests } from "./manifest-registry.ts";
+import { readPolyfillLibraryMetadata } from "./manifest-registry.ts";
 
 /** The control a form renders, and how `readOptions` will coerce the value. */
 export type ConfigOptionType =
@@ -347,7 +347,7 @@ export function connectorOptionsSchemas(): Readonly<
 	Record<string, ResolvedConnectorOptionsSchema>
 > {
 	const out: Record<string, ResolvedConnectorOptionsSchema> = {};
-	for (const { file, manifest } of readPolyfillManifests()) {
+	for (const { file, manifest } of readPolyfillLibraryMetadata()) {
 		const resolved = resolveOptionsSchemaFromManifest(manifest, file);
 		if (resolved) {
 			out[resolved.connectorKey] = resolved;

@@ -9,14 +9,14 @@
  * fleet's build-time guardrails (manifest-honesty suite, pilot-fixture
  * shape lock, manifest/schema/emit reconciliation) on day one:
  *
- *   manifests/<name>.json              — one stream, honest minimal schema
+ *   connectors/<name>/manifest.json    — one stream, honest minimal schema
  *   connectors/<name>/index.ts         — runConnector wiring, one TODO endpoint
  *   connectors/<name>/schemas.ts       — makeValidateRecord over the manifest schema
  *   connectors/<name>/types.ts         — upstream API response shape stub
  *   connectors/<name>/parsers.ts       — pure record builder stub
  *   connectors/<name>/pilot-fixture.test.ts — wired via the shared helper
- *   fixtures/<name>/scrubbed/pilot-real-shape/records/<stream>.jsonl
- *   fixtures/<name>/scrubbed/pilot-real-shape/provenance.json
+ *   connectors/<name>/fixtures/scrubbed/pilot-real-shape/records/<stream>.jsonl
+ *   connectors/<name>/fixtures/scrubbed/pilot-real-shape/provenance.json
  *
  * Usage:
  *   pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>]
@@ -36,12 +36,13 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
+import {
+	connectorDir as connectorDirFor,
+	fixturesDir,
+	manifestPath,
+} from "../src/connector-paths.ts";
 
 const NAME_RE = /^[a-z][a-z0-9_]*$/;
 const STREAM_RE = /^[a-z][a-z0-9_]*$/;
@@ -130,20 +131,14 @@ interface TargetPlan {
 }
 
 function planTargets(name: string, stream: string): TargetPlan {
-	const connectorDir = join(PKG_ROOT, "connectors", name);
-	const fixtureDir = join(
-		PKG_ROOT,
-		"fixtures",
-		name,
-		"scrubbed",
-		"pilot-real-shape",
-	);
+	const connectorDir = connectorDirFor(name);
+	const fixtureDir = join(fixturesDir(name), "scrubbed", "pilot-real-shape");
 	const fixtureRecordsDir = join(fixtureDir, "records");
 	return {
 		connectorDir,
 		fixtureRecordsDir,
 		files: {
-			manifestJson: join(PKG_ROOT, "manifests", `${name}.json`),
+			manifestJson: manifestPath(name),
 			indexTs: join(connectorDir, "index.ts"),
 			schemasTs: join(connectorDir, "schemas.ts"),
 			typesTs: join(connectorDir, "types.ts"),
@@ -311,7 +306,7 @@ function buildParsersTs(name: string, stream: string): string {
 // loop live in index.ts (see connectors/github/parsers.ts for the pattern
 // this scaffold follows).
 
-import type { RecordData } from "../../src/connector-runtime.ts";
+import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { ${typeName} } from "./types.ts";
 
 // TODO: fill in the record builder once the real upstream shape is known.
@@ -346,7 +341,7 @@ function buildIndexTs(name: string, stream: string): string {
  * connectors/strava/index.ts or connectors/github/index.ts.
  */
 
-import { type RecordData, runConnector } from "../../src/connector-runtime.ts";
+import { type RecordData, runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { ${recordFn} } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -432,7 +427,7 @@ function buildSchemasTs(name: string, stream: string): string {
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
-import { makeValidateRecord } from "../../src/schema-registry.ts";
+import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
 
 // Module-scoped regex (Biome useTopLevelRegex).
 const ISO_DT_RE = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}/;
@@ -462,7 +457,7 @@ function buildPilotFixtureTestTs(name: string): string {
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { registerPilotFixtureTests } from "../../src/pilot-fixture-test-helper.ts";
+import { registerPilotFixtureTests } from "../../packages/polyfill-connectors/src/pilot-fixture-test-helper.ts";
 import { validateRecord } from "./schemas.ts";
 
 registerPilotFixtureTests({ connector: "${name}", validateRecord });

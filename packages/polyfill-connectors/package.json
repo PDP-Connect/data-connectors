@@ -6,37 +6,18 @@
 	"license": "Apache-2.0",
 	"type": "module",
 	"files": [
-		"bin/local-device-exporter.js",
-		"bin/local-device-exporter.d.ts",
-		"bin/local-device-exporter.d.ts.map",
-		"connectors/**/*.js",
-		"connectors/**/*.d.ts",
-		"connectors/**/*.d.ts.map",
-		"fixtures/**/*.jsonl",
-		"manifests/",
-		"scripts/generate-static-secret-registry.js",
-		"scripts/generate-static-secret-registry.d.ts",
-		"scripts/generate-static-secret-registry.d.ts.map",
 		"scripts/install-patchright-browser.mjs",
 		"src/**/*.js",
 		"src/**/*.d.ts",
 		"src/**/*.d.ts.map",
+		"src/manifest-library-metadata.json",
 		"vendor/",
-		"config/slackdump-api-config.toml",
-		"connector-index.json"
+		"config/slackdump-api-config.toml"
 	],
 	"engines": {
 		"node": ">=24.15.0 <25"
 	},
 	"exports": {
-		"./collectors": {
-			"types": "./src/collector-registry.d.ts",
-			"default": "./src/collector-registry.js"
-		},
-		"./manifests": {
-			"types": "./src/manifest-registry.d.ts",
-			"default": "./src/manifest-registry.js"
-		},
 		"./reason-display-messages": {
 			"types": "./src/reason-display-messages.d.ts",
 			"default": "./src/reason-display-messages.js"
@@ -121,10 +102,6 @@
 			"types": "./src/credential-probe-transport.d.ts",
 			"default": "./src/credential-probe-transport.js"
 		},
-		"./manual-upload-validation": {
-			"types": "./src/manual-upload-validation.d.ts",
-			"default": "./src/manual-upload-validation.js"
-		},
 		"./ntfy": {
 			"types": "./src/ntfy.d.ts",
 			"default": "./src/ntfy.js"
@@ -137,10 +114,6 @@
 			"types": "./src/provider-auth-adapter.d.ts",
 			"default": "./src/provider-auth-adapter.js"
 		},
-		"./provider-auth-adapters": {
-			"types": "./src/provider-auth-adapters.d.ts",
-			"default": "./src/provider-auth-adapters.js"
-		},
 		"./static-secret-credential-capture": {
 			"types": "./src/static-secret-credential-capture.d.ts",
 			"default": "./src/static-secret-credential-capture.js"
@@ -152,205 +125,10 @@
 		"./static-secret-registry": {
 			"types": "./src/generated/static-secret-registry.generated.d.ts",
 			"default": "./src/generated/static-secret-registry.generated.js"
-		},
-		"./fixture-samples": {
-			"types": "./src/fixture-samples.d.ts",
-			"default": "./src/fixture-samples.js"
-		},
-		"./connectors/claude_code": {
-			"types": "./connectors/claude_code/index.d.ts",
-			"default": "./connectors/claude_code/index.js"
-		},
-		"./connectors/codex": {
-			"types": "./connectors/codex/index.d.ts",
-			"default": "./connectors/codex/index.js"
-		},
-		"./connectors/imessage": {
-			"types": "./connectors/imessage/index.d.ts",
-			"default": "./connectors/imessage/index.js"
-		},
-		"./connectors/apple_health": {
-			"types": "./connectors/apple_health/index.d.ts",
-			"default": "./connectors/apple_health/index.js"
-		},
-		"./connectors/google_maps": {
-			"types": "./connectors/google_maps/index.d.ts",
-			"default": "./connectors/google_maps/index.js"
-		},
-		"./connectors/google_maps_data_portability": {
-			"types": "./connectors/google_maps_data_portability/index.d.ts",
-			"default": "./connectors/google_maps_data_portability/index.js"
-		},
-		"./connectors/netflix_export": {
-			"types": "./connectors/netflix_export/index.d.ts",
-			"default": "./connectors/netflix_export/index.js"
-		},
-		"./connectors/whatsapp": {
-			"types": "./connectors/whatsapp/index.d.ts",
-			"default": "./connectors/whatsapp/index.js"
-		},
-		"./connectors/github": {
-			"types": "./connectors/github/index.d.ts",
-			"default": "./connectors/github/index.js"
-		},
-		"./connectors/github/schemas": {
-			"types": "./connectors/github/schemas.d.ts",
-			"default": "./connectors/github/schemas.js"
-		},
-		"./resolve": {
-			"types": "./src/resolve.d.ts",
-			"default": "./src/resolve.js"
-		},
-		"./connectors/amazon": {
-			"types": "./connectors/amazon/index.d.ts",
-			"default": "./connectors/amazon/index.js"
-		},
-		"./connectors/anthropic": {
-			"types": "./connectors/anthropic/index.d.ts",
-			"default": "./connectors/anthropic/index.js"
-		},
-		"./connectors/apple_contacts": {
-			"types": "./connectors/apple_contacts/index.d.ts",
-			"default": "./connectors/apple_contacts/index.js"
-		},
-		"./connectors/apple_photos": {
-			"types": "./connectors/apple_photos/index.d.ts",
-			"default": "./connectors/apple_photos/index.js"
-		},
-		"./connectors/chase": {
-			"types": "./connectors/chase/index.d.ts",
-			"default": "./connectors/chase/index.js"
-		},
-		"./connectors/chatgpt": {
-			"types": "./connectors/chatgpt/index.d.ts",
-			"default": "./connectors/chatgpt/index.js"
-		},
-		"./connectors/doordash": {
-			"types": "./connectors/doordash/index.d.ts",
-			"default": "./connectors/doordash/index.js"
-		},
-		"./connectors/gmail": {
-			"types": "./connectors/gmail/index.d.ts",
-			"default": "./connectors/gmail/index.js"
-		},
-		"./connectors/google_calendar": {
-			"types": "./connectors/google_calendar/index.d.ts",
-			"default": "./connectors/google_calendar/index.js"
-		},
-		"./connectors/google_contacts": {
-			"types": "./connectors/google_contacts/index.d.ts",
-			"default": "./connectors/google_contacts/index.js"
-		},
-		"./connectors/google_messages": {
-			"types": "./connectors/google_messages/index.d.ts",
-			"default": "./connectors/google_messages/index.js"
-		},
-		"./connectors/google_takeout": {
-			"types": "./connectors/google_takeout/index.d.ts",
-			"default": "./connectors/google_takeout/index.js"
-		},
-		"./connectors/groupme": {
-			"types": "./connectors/groupme/index.d.ts",
-			"default": "./connectors/groupme/index.js"
-		},
-		"./connectors/heb": {
-			"types": "./connectors/heb/index.d.ts",
-			"default": "./connectors/heb/index.js"
-		},
-		"./connectors/ical": {
-			"types": "./connectors/ical/index.d.ts",
-			"default": "./connectors/ical/index.js"
-		},
-		"./connectors/jellyfin": {
-			"types": "./connectors/jellyfin/index.d.ts",
-			"default": "./connectors/jellyfin/index.js"
-		},
-		"./connectors/linkedin": {
-			"types": "./connectors/linkedin/index.d.ts",
-			"default": "./connectors/linkedin/index.js"
-		},
-		"./connectors/loom": {
-			"types": "./connectors/loom/index.d.ts",
-			"default": "./connectors/loom/index.js"
-		},
-		"./connectors/meta": {
-			"types": "./connectors/meta/index.d.ts",
-			"default": "./connectors/meta/index.js"
-		},
-		"./connectors/notion": {
-			"types": "./connectors/notion/index.d.ts",
-			"default": "./connectors/notion/index.js"
-		},
-		"./connectors/oura": {
-			"types": "./connectors/oura/index.d.ts",
-			"default": "./connectors/oura/index.js"
-		},
-		"./connectors/pocket": {
-			"types": "./connectors/pocket/index.d.ts",
-			"default": "./connectors/pocket/index.js"
-		},
-		"./connectors/reddit": {
-			"types": "./connectors/reddit/index.d.ts",
-			"default": "./connectors/reddit/index.js"
-		},
-		"./connectors/shopify": {
-			"types": "./connectors/shopify/index.d.ts",
-			"default": "./connectors/shopify/index.js"
-		},
-		"./connectors/signal": {
-			"types": "./connectors/signal/index.d.ts",
-			"default": "./connectors/signal/index.js"
-		},
-		"./connectors/slack": {
-			"types": "./connectors/slack/index.d.ts",
-			"default": "./connectors/slack/index.js"
-		},
-		"./connectors/spotify": {
-			"types": "./connectors/spotify/index.d.ts",
-			"default": "./connectors/spotify/index.js"
-		},
-		"./connectors/steam": {
-			"types": "./connectors/steam/index.d.ts",
-			"default": "./connectors/steam/index.js"
-		},
-		"./connectors/strava": {
-			"types": "./connectors/strava/index.d.ts",
-			"default": "./connectors/strava/index.js"
-		},
-		"./connectors/twitter_archive": {
-			"types": "./connectors/twitter_archive/index.d.ts",
-			"default": "./connectors/twitter_archive/index.js"
-		},
-		"./connectors/uber": {
-			"types": "./connectors/uber/index.d.ts",
-			"default": "./connectors/uber/index.js"
-		},
-		"./connectors/usaa": {
-			"types": "./connectors/usaa/index.d.ts",
-			"default": "./connectors/usaa/index.js"
-		},
-		"./connectors/venmo": {
-			"types": "./connectors/venmo/index.d.ts",
-			"default": "./connectors/venmo/index.js"
-		},
-		"./connectors/wholefoods": {
-			"types": "./connectors/wholefoods/index.d.ts",
-			"default": "./connectors/wholefoods/index.js"
-		},
-		"./connectors/whoop": {
-			"types": "./connectors/whoop/index.d.ts",
-			"default": "./connectors/whoop/index.js"
-		},
-		"./connectors/ynab": {
-			"types": "./connectors/ynab/index.d.ts",
-			"default": "./connectors/ynab/index.js"
 		}
 	},
-	"bin": {
-		"pdpp-local-device-exporter": "./bin/local-device-exporter.js"
-	},
 	"scripts": {
-		"build": "npm run check:connector-index && tsc --project tsconfig.build.json && npm run check:published-entrypoints",
+		"build": "tsc --project tsconfig.build.json && npm run check:published-entrypoints",
 		"check": "node --import tsx ./scripts/check-biome.ts",
 		"check:published-entrypoints": "node ./scripts/check-published-entrypoints.mjs",
 		"check:noAwaitInLoops-conformance": "node --import tsx ./scripts/check-no-await-in-loops-conformance.ts",
@@ -362,11 +140,9 @@
 		"test": "node scripts/run-tests.mjs",
 		"test:related": "node --import tsx scripts/related-tests/run.ts",
 		"typecheck": "tsc --noEmit",
-		"verify": "npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
+		"verify": "npm --prefix ../.. run polyfill-library-metadata:check && npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
-		"prepack": "npm run build",
-		"generate:connector-index": "node ./scripts/generate-connector-implementation-index.mjs",
-		"check:connector-index": "node ./scripts/generate-connector-implementation-index.mjs --check"
+		"prepack": "npm --prefix ../.. run polyfill-library-metadata:check && npm run build"
 	},
 	"dependencies": {
 		"@pdpp/collector-runtime": "2.3.0",

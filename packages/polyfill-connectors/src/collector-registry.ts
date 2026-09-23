@@ -17,12 +17,12 @@
  */
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
-import { applePhotosCollectorDefinition } from "../connectors/apple_photos/collector-definition.ts";
-import { claudeCodeCollectorDefinition } from "../connectors/claude_code/collector-definition.ts";
-import { codexCollectorDefinition } from "../connectors/codex/collector-definition.ts";
-import { googleMessagesCollectorDefinition } from "../connectors/google_messages/collector-definition.ts";
-import { googleTakeoutCollectorDefinition } from "../connectors/google_takeout/collector-definition.ts";
-import { imessageCollectorDefinition } from "../connectors/imessage/collector-definition.ts";
+import { applePhotosCollectorDefinition } from "../../../connectors/apple_photos/collector-definition.ts";
+import { claudeCodeCollectorDefinition } from "../../../connectors/claude_code/collector-definition.ts";
+import { codexCollectorDefinition } from "../../../connectors/codex/collector-definition.ts";
+import { googleMessagesCollectorDefinition } from "../../../connectors/google_messages/collector-definition.ts";
+import { googleTakeoutCollectorDefinition } from "../../../connectors/google_takeout/collector-definition.ts";
+import { imessageCollectorDefinition } from "../../../connectors/imessage/collector-definition.ts";
 
 export type {
 	LocalCollectorBinding,
@@ -47,7 +47,7 @@ export type {
  * for slackdump.
  *
  * Signal is intentionally NOT included here yet. Its connector source
- * lives at `../connectors/signal/`, imported into this canonical registry
+ * lives at `../../../connectors/signal/`, imported into this canonical registry
  * from pdpp's history, but `data-connect`'s `packages/local-collector`
  * consumer does not vendor it yet (its committed
  * `collector-definitions.generated.ts` snapshot stops at Google Messages).

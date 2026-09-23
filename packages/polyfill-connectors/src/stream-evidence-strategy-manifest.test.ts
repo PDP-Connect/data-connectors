@@ -10,18 +10,19 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	manifestFileNames,
+	manifestPath,
+	repoRoot,
+} from "./connector-paths.ts";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const REPO_ROOT = dirname(dirname(PACKAGE_ROOT));
 const MANIFEST_DIRS = [
-	{ label: "polyfill", path: join(PACKAGE_ROOT, "manifests") },
 	{
 		label: "reference",
 		path: join(
-			REPO_ROOT,
+			repoRoot,
 			"reference-implementation",
 			"fixtures",
 			"seed-manifests",
@@ -65,6 +66,15 @@ function readManifests(): Array<{
 		connectorKey: string;
 		manifest: ConnectorManifest;
 	}> = [];
+	for (const filename of manifestFileNames()) {
+		const key = filename.replace(/\.json$/, "");
+		manifests.push({
+			connectorKey: `polyfill/${key}`,
+			manifest: JSON.parse(
+				readFileSync(manifestPath(key), "utf8"),
+			) as ConnectorManifest,
+		});
+	}
 	for (const dir of MANIFEST_DIRS) {
 		if (!existsSync(dir.path)) {
 			continue;

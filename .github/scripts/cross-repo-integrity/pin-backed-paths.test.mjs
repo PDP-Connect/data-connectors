@@ -21,22 +21,22 @@ const fixtures = [
 	},
 	{
 		name: "a compared bundled connector source backs data-connect freshness",
-		paths: ["packages/polyfill-connectors/connectors/codex/parsers.ts"],
+		paths: ["connectors/codex/parsers.ts"],
 		dataConnect: true,
 		pdpp: false,
 	},
 	{
 		name: "test-only and fixture-only connector changes do not back the drift job",
 		paths: [
-			"packages/polyfill-connectors/connectors/codex/parsers.test.ts",
-			"packages/polyfill-connectors/connectors/codex/__fixtures__/sample.json",
+			"connectors/codex/parsers.test.ts",
+			"connectors/codex/__fixtures__/sample.json",
 		],
 		dataConnect: false,
 		pdpp: false,
 	},
 	{
 		name: "an unbundled connector does not back data-connect freshness",
-		paths: ["packages/polyfill-connectors/connectors/signal/parsers.ts"],
+		paths: ["connectors/signal/parsers.ts"],
 		dataConnect: false,
 		pdpp: false,
 	},
@@ -69,5 +69,5 @@ for (const fixture of fixtures) {
 
 test("single-path predicate is strict about non-path inputs", () => {
 	assert.equal(isPinBackedPath("packages/polyfill-connectors/vendor/README.md", "data-connect"), false);
-	assert.equal(isPinBackedPath("packages/polyfill-connectors/connectors/codex/fixtures.ts", "data-connect"), true);
+	assert.equal(isPinBackedPath("connectors/codex/fixtures.ts", "data-connect"), true);
 });

@@ -50,19 +50,18 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestPath as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import {
 	DETAIL_GAP_MESSAGE_REASON_LITERALS,
 	scanConnectorForReasonEmissions,
 } from "./reason-emission-scan.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "./reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
-
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
 
 const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
 
@@ -76,7 +75,7 @@ const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
  * they're identical strings.
  */
 function manifestKeyForDirName(dirName: string): string {
-	const manifestPath = join(MANIFESTS_DIR, `${dirName}.json`);
+	const manifestPath = MANIFESTS_DIR(dirName);
 	if (!existsSync(manifestPath)) {
 		return dirName;
 	}

@@ -62,11 +62,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
 const TEST_TIMEOUT_MS = 20_000;
 
 // Matches the request-path-matcher shapes actually used across this repo's

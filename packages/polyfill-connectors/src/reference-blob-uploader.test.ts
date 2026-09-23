@@ -6,8 +6,8 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import test from "node:test";
 
-import { makeAttachmentHydrator } from "../connectors/gmail/index.ts";
-import type { AttachmentRecord } from "../connectors/gmail/types.ts";
+import { makeAttachmentHydrator } from "../../../connectors/gmail/index.ts";
+import type { AttachmentRecord } from "../../../connectors/gmail/types.ts";
 import {
 	makeReferenceBlobUploader,
 	ReferenceBlobUploadFailure,

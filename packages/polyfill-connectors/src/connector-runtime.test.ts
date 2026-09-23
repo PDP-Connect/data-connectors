@@ -1697,7 +1697,7 @@ test("ChatGPT's real normalizeChatGptTerminalError (which destructures only mess
 	// (no auth/manual-action match) returns { message, retryable } with no
 	// `code` — exactly the drop shape this test guards against.
 	const { normalizeChatGptTerminalError } = await import(
-		"../connectors/chatgpt/index.ts"
+		"../../../connectors/chatgpt/index.ts"
 	);
 	const result = composeNormalizedTerminalError({
 		message:

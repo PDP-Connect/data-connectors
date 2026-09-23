@@ -54,12 +54,11 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PACKAGE_ROOT, "manifests");
+import { basename, join } from "node:path";
+import {
+	fixturesDir,
+	manifestPath as shippedManifestPath,
+} from "../src/connector-paths.ts";
 
 const SAMPLE_CAP = 10_000;
 const JSONL_EXTENSION_RE = /\.jsonl$/;
@@ -157,8 +156,7 @@ export function readManifest(
 	connector: string,
 	manifestPathOverride?: string,
 ): Manifest {
-	const manifestPath =
-		manifestPathOverride ?? join(MANIFEST_DIR, `${connector}.json`);
+	const manifestPath = manifestPathOverride ?? shippedManifestPath(connector);
 	if (!existsSync(manifestPath)) {
 		throw new Error(
 			`no manifest found for connector "${connector}" (expected ${manifestPath})`,
@@ -169,9 +167,7 @@ export function readManifest(
 
 export function defaultRecordsDir(connector: string): string {
 	return join(
-		PACKAGE_ROOT,
-		"fixtures",
-		connector,
+		fixturesDir(connector),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",
@@ -693,7 +689,7 @@ function main(): void {
 
 	console.log(`observe-schema: ${args.connector}`);
 	console.log(
-		`manifest: ${args.manifestPath ?? join(MANIFEST_DIR, `${args.connector}.json`)}`,
+		`manifest: ${args.manifestPath ?? shippedManifestPath(args.connector)}`,
 	);
 	console.log(`record sources: ${sources.join(", ")}`);
 

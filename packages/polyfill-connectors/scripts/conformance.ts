@@ -38,15 +38,16 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../src/connector-conformance-roster.ts";
-
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
-const FIXTURES_DIR = join(PACKAGE_ROOT, "fixtures");
+import {
+	connectorsDir as CONNECTORS_DIR,
+	fixturesDir,
+	packageRoot as PACKAGE_ROOT,
+	repoRoot,
+	manifestPath as seamManifestPath,
+} from "../src/connector-paths.ts";
 
 type Verdict = "PASS" | "FAIL" | "UNKNOWN" | "ADVISORY" | "WEAK";
 
@@ -60,7 +61,7 @@ interface Step {
 }
 
 function manifestPath(connector: string): string {
-	return join(MANIFESTS_DIR, `${connector}.json`);
+	return seamManifestPath(connector);
 }
 
 export function checkManifest(connector: string): Step {
@@ -154,7 +155,7 @@ function checkTests(connector: string): Step {
 }
 
 function checkPilotFixture(connector: string): Step {
-	const dir = join(FIXTURES_DIR, connector, "scrubbed", "pilot-real-shape");
+	const dir = join(fixturesDir(connector), "scrubbed", "pilot-real-shape");
 	if (!existsSync(dir)) {
 		return {
 			detail:
@@ -236,13 +237,7 @@ function checkMockMutation(connector: string): Step {
 }
 
 function checkReachability(connector: string): Step {
-	const script = join(
-		PACKAGE_ROOT,
-		"..",
-		"..",
-		"scripts",
-		"connector-reachability.mjs",
-	);
+	const script = join(repoRoot, "scripts", "connector-reachability.mjs");
 	if (!existsSync(script)) {
 		return {
 			advisory: true,

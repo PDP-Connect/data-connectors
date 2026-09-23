@@ -22,9 +22,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 interface ManifestStream {
 	consent_time_field?: string;
@@ -39,8 +38,7 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 
 // Streams that correspond to NO moment in the owner's life. Each entry records
 // why, because "we couldn't find a date" and "there is no date" are different
@@ -52,6 +50,8 @@ const DELIBERATELY_TIMELESS: Record<string, string> = {
 		"a label is a folder, not an event; Gmail exposes no created/applied time",
 	"spotify/playlists":
 		"playlist rows carry no owner-scoped created/followed time",
+	"spotify/profile":
+		"a standing account snapshot (id, display name, follower count), not an event",
 	"spotify/top_artists":
 		"a computed ranking over a window, not a moment the owner lived",
 	"steam/profile": "a standing profile snapshot",
@@ -76,7 +76,7 @@ const AUDITED_CONNECTORS = [
 
 function readManifest(connector: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connector}.json`), "utf8"),
+		readFileSync(MANIFEST_PATH(connector), "utf8"),
 	) as ConnectorManifest;
 }
 

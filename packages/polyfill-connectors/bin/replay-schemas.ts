@@ -25,14 +25,16 @@
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
+import {
+	connectorDir as connectorDirFor,
+	packageRoot as PKG_ROOT,
+} from "../src/connector-paths.ts";
 
 const CONNECTOR_ID_TAIL_RE = /\/([^/]+)$/;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
 const DB_PATH = join(PKG_ROOT, ".pdpp-data", "pdpp.sqlite");
 const REPORT_DIR = join(PKG_ROOT, "local");
 
@@ -92,7 +94,7 @@ async function loadValidator(
 	  ) => { ok: true } | { ok: false; issues: ReplayIssue[] })
 	| null
 > {
-	const schemaPath = join(PKG_ROOT, "connectors", dirName, "schemas.ts");
+	const schemaPath = join(connectorDirFor(dirName), "schemas.ts");
 	try {
 		const mod = (await import(pathToFileURL(schemaPath).href)) as {
 			validateRecord?: (

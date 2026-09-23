@@ -9,10 +9,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { packageRoot as PACKAGE_ROOT } from "../../src/connector-paths.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI_PATH = join(PACKAGE_ROOT, "scripts", "related-tests", "cli.ts");
 
 function main(): void {

@@ -3,13 +3,13 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestPath as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 
 const KNOWN_EXTERNAL_TOOLS = ["slackdump", "gmcli"] as const;
 
@@ -29,7 +29,7 @@ test("connectors that reference known external tools declare them in manifests",
 			continue;
 		}
 
-		const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+		const manifestPath = MANIFESTS_DIR(name);
 		assert.equal(
 			existsSync(manifestPath),
 			true,

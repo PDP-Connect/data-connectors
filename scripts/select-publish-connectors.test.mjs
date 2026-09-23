@@ -23,7 +23,7 @@ const CONNECTORS = [
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "select-publish-connectors-"));
-  const manifests = join(dir, "packages", "polyfill-connectors", "manifests");
+  const manifests = join(dir, "connectors");
   mkdirSync(manifests, { recursive: true });
   const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
   git("init", "--quiet", "--initial-branch=main");
@@ -38,16 +38,16 @@ function makeRepo() {
   function writeState(versions) {
     for (const connector of CONNECTORS) {
       write(
-        `packages/polyfill-connectors/manifests/${connector.manifest}.json`,
+        `connectors/${connector.manifest}/manifest.json`,
         JSON.stringify({
           connector_key: connector.connectorKey,
           version: versions[connector.connectorKey],
-          brand: { icon: `icons/${connector.manifest}.svg` },
+          brand: { icon: "icon.svg" },
         }),
       );
     }
     write(
-      "packages/polyfill-connectors/connector-index.json",
+      "connector-implementation-index.json",
       JSON.stringify({
         version: 1,
         connectors: CONNECTORS.map((connector) => ({
@@ -74,12 +74,12 @@ function makeRepo() {
   write("scripts/connector-host-runtime-contract.mjs", "contract\n");
   write("packages/polyfill-connectors/package.json", "{}\n");
   write("packages/polyfill-connectors/package-lock.json", "{}\n");
-  write("packages/polyfill-connectors/manifests/icons/oura.svg", "oura icon\n");
-  write("packages/polyfill-connectors/manifests/icons/github.svg", "github icon\n");
+  write("connectors/oura/icon.svg", "oura icon\n");
+  write("connectors/github/icon.svg", "github icon\n");
   write("packages/polyfill-connectors/src/runtime.ts", "export const runtime = 'before';\n");
   write("packages/polyfill-connectors/src/setup.ts", "globalThis.__publishSelectionFixture = 'before';\n");
-  write("packages/polyfill-connectors/connectors/oura/index.ts", "import { runtime } from '../../src/runtime.ts'; export { runtime };\n");
-  write("packages/polyfill-connectors/connectors/github/index.ts", "import '../../src/setup.ts'; export const github = true;\n");
+  write("connectors/oura/index.ts", "import { runtime } from '../../packages/polyfill-connectors/src/runtime.ts'; export { runtime };\n");
+  write("connectors/github/index.ts", "import '../../packages/polyfill-connectors/src/setup.ts'; export const github = true;\n");
   writeState({ oura: "0.1.0", github: "0.5.1" });
   const before = commit("before");
   writeState({ oura: "0.2.0", github: "0.5.1" });
@@ -178,7 +178,7 @@ test("an unrelated root file does not select a connector", () => {
 test("an unreachable connector test does not select its connector", () => {
   const repo = makeRepo();
   try {
-    repo.write("packages/polyfill-connectors/connectors/oura/index.test.ts", "throw new Error('test only');\n");
+    repo.write("connectors/oura/index.test.ts", "throw new Error('test only');\n");
     const after = repo.commit("change unreachable test");
     assert.deepEqual(
       selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
@@ -197,6 +197,30 @@ test("a shared source change selects only its importing connector when versioned
     const after = repo.commit("version shipped oura source");
     assert.deepEqual(
       selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+      [{ connector: "oura", manifest: "oura", version: "0.3.0" }],
+    );
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("the layout transition skips once and later versioned releases select normally", () => {
+  const repo = makeRepo();
+  try {
+    const oldIndex = "packages/polyfill-connectors/connector-index.json";
+    repo.write(oldIndex, JSON.stringify({ connectors: [] }));
+    const beforeMove = repo.commit("old layout still present");
+    rmSync(join(repo.dir, oldIndex));
+    const cut = repo.commit("remove old layout");
+    assert.deepEqual(
+      selectChangedConnectors({ before: beforeMove, after: cut, cwd: repo.dir, connectors: CONNECTORS }),
+      [],
+    );
+
+    repo.writeState({ oura: "0.3.0", github: "0.5.1" });
+    const later = repo.commit("version oura after layout cut");
+    assert.deepEqual(
+      selectChangedConnectors({ before: cut, after: later, cwd: repo.dir, connectors: CONNECTORS }),
       [{ connector: "oura", manifest: "oura", version: "0.3.0" }],
     );
   } finally {

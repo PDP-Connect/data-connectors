@@ -24,14 +24,16 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
 	buildCollectorStartMessage,
 	resolveScopedStreamTimeRanges,
 } from "@pdpp/collector-runtime";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
+import {
+	connectorEntrypoint,
+	manifestPath as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 
 interface ManifestStream {
 	consent_time_field?: string;
@@ -42,12 +44,9 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "..", "manifests");
-
 function readManifest(connectorId: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connectorId}.json`), "utf8"),
+		readFileSync(MANIFESTS_DIR(connectorId), "utf8"),
 	) as ConnectorManifest;
 }
 
@@ -109,10 +108,7 @@ test("a root-enforcing connector's source actually consults the shared containme
 	// Pins the flag to the implementation rather than to a comment: a connector
 	// that drops the pruning call must fail this, not silently keep the claim.
 	for (const connectorId of ROOT_ENFORCING_CONNECTORS) {
-		const source = readFileSync(
-			join(PACKAGE_ROOT, "..", "connectors", connectorId, "index.ts"),
-			"utf8",
-		);
+		const source = readFileSync(connectorEntrypoint(connectorId), "utf8");
 		assert.match(
 			source,
 			/shouldDescendIntoDirectory|isPathWithinSourceRoots|projectDirMatchesSourceRoots/,

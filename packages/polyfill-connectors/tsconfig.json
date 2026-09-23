@@ -46,7 +46,7 @@
 	},
 	"include": [
 		"src/**/*.ts",
-		"connectors/**/*.ts",
+		"../../connectors/**/*.ts",
 		"bin/**/*.ts",
 		"bench/**/*.ts",
 		"types/**/*.d.ts"
@@ -88,7 +88,7 @@
 		"node_modules",
 		"fixtures",
 		"**/__fixtures__",
-		"connectors/github/index.test.ts",
+		"../../connectors/github/index.test.ts",
 		"bin/orchestrate.ts"
 	]
 }

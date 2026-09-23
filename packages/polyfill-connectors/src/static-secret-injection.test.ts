@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCollectorConnector } from "@pdpp/collector-runtime";
+import { manifestPath } from "./connector-paths.ts";
 import { resolveExecutionRoot } from "./execution-root.ts";
 import {
 	buildConnectionScopedSecretEnv,
@@ -179,10 +180,7 @@ test("steam/apple-contacts/groupme registry env vars match their connector manif
 		const manifestName =
 			connectorId === "apple-contacts" ? "apple_contacts" : connectorId;
 		const manifest = JSON.parse(
-			readFileSync(
-				new URL(`../manifests/${manifestName}.json`, import.meta.url),
-				"utf8",
-			),
+			readFileSync(manifestPath(manifestName), "utf8"),
 		);
 		const fields = manifest.setup.credential_capture.fields as Array<{
 			name: string;
@@ -212,12 +210,7 @@ test("steam/apple-contacts/groupme registry env vars match their connector manif
 });
 
 test("jellyfin registry secret-bundle and setup-field env vars match its connector manifest", () => {
-	const manifest = JSON.parse(
-		readFileSync(
-			new URL("../manifests/jellyfin.json", import.meta.url),
-			"utf8",
-		),
-	);
+	const manifest = JSON.parse(readFileSync(manifestPath("jellyfin"), "utf8"));
 	const fields = manifest.setup.credential_capture.fields as Array<{
 		name: string;
 		env: string[];
@@ -350,9 +343,7 @@ test("gmail injection maps connector-owned non-secret setup fields to runtime en
 });
 
 test("gmail runtime setup-field env mapping matches the connector manifest", () => {
-	const manifest = JSON.parse(
-		readFileSync(new URL("../manifests/gmail.json", import.meta.url), "utf8"),
-	);
+	const manifest = JSON.parse(readFileSync(manifestPath("gmail"), "utf8"));
 	const accountEmailField = manifest.setup.credential_capture.fields.find(
 		(field: { name?: unknown }) => field.name === "account_email",
 	);
@@ -499,9 +490,7 @@ test("venmo injection FAILS CLOSED on an empty bundle — silently injecting not
 });
 
 test("venmo registry secret-bundle env vars match its connector manifest — capture is REQUIRED and both fields stay required", () => {
-	const manifest = JSON.parse(
-		readFileSync(new URL("../manifests/venmo.json", import.meta.url), "utf8"),
-	);
+	const manifest = JSON.parse(readFileSync(manifestPath("venmo"), "utf8"));
 	const fields = manifest.setup.credential_capture.fields as Array<{
 		name: string;
 		env: string[];

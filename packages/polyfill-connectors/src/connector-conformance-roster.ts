@@ -17,8 +17,8 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (anthropic, doordash, linkedin, loom, meta, shopify, uber,
- *      wholefoods) — all of which MUST remain Development until they collect.
+ *      (loom, uber, wholefoods) — all
+ *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
  * the behavioral oracle for whether it really collects real data. This
@@ -60,12 +60,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
  * the owner-selectable listing until they actually collect.
  */
 export const KNOWN_SCAFFOLD_CONNECTORS = [
-	"anthropic",
-	"doordash",
-	"linkedin",
 	"loom",
-	"meta",
-	"shopify",
 	"uber",
 	"wholefoods",
 ] as const;
@@ -79,7 +74,10 @@ export const KNOWN_SCAFFOLD_CONNECTORS = [
  * or Supported; the conformance test keeps the rosters disjoint.
  */
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
+	anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
+	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
 	google_contacts: { testFile: "connectors/google_contacts/index.test.ts" },
 	google_maps_data_portability: {
@@ -90,6 +88,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
+	meta: { testFile: "connectors/meta/integration.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
@@ -97,7 +96,10 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
+	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
 	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
+	shopify: { testFile: "connectors/shopify/index.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
+	youtube: { testFile: "connectors/youtube/index.test.ts" },
 };

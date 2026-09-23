@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { repoRoot } from "./connector-paths.ts";
 
 export type BoundedReadPattern = "readFile" | "readFileSync" | "all";
 
@@ -61,6 +61,30 @@ export const BOUNDED_READ_EXCEPTIONS: readonly BoundedReadException[] = [
 		reason:
 			"Reviewed safeAll helper for bounded lookup tables such as workspace, users, channels, files, and canvases. The unbounded MESSAGE table now uses iterateMessageRows.",
 	},
+	{
+		connector: "youtube",
+		file: "index.ts",
+		pattern: "readFile",
+		lineIncludes: 'import { readFile } from "node:fs/promises";',
+		reason:
+			"Imports readFile for reviewed Takeout JSON/CSV sidecar reads below.",
+	},
+	{
+		connector: "youtube",
+		file: "index.ts",
+		pattern: "readFile",
+		lineIncludes: 'JSON.parse(await readFile(path, "utf8"))',
+		reason:
+			"Reads one Takeout JSON sidecar per call, same reviewed pattern as google_takeout; streaming migration is deferred until large fixtures justify it.",
+	},
+	{
+		connector: "youtube",
+		file: "index.ts",
+		pattern: "readFile",
+		lineIncludes: 'return await readFile(path, "utf8");',
+		reason:
+			"Reads one Takeout text/CSV sidecar per call, same reviewed pattern as google_takeout; streaming migration is deferred until large fixtures justify it.",
+	},
 ];
 
 interface PatternMatcher {
@@ -73,7 +97,6 @@ const READ_FILE_IMPORT =
 	/import\s+\{[^}]*\breadFile\b[^}]*\}\s+from\s+["']node:fs\/promises["']/;
 const READ_FILE_SYNC = /\breadFileSync\s*\(/;
 const DOT_ALL = /\.all\s*\(/;
-const MANIFEST_JSON_SUFFIX = /\.json$/;
 
 const MATCHERS: readonly PatternMatcher[] = [
 	{
@@ -86,24 +109,19 @@ const MATCHERS: readonly PatternMatcher[] = [
 
 export const EXPLICIT_LOCAL_CLASS_CONNECTORS: readonly string[] = [];
 
-function packageRoot(): string {
-	return fileURLToPath(new URL("..", import.meta.url));
-}
-
 export function discoverLocalSourceConnectors(
-	root: string = packageRoot(),
+	root: string = repoRoot,
 ): string[] {
-	const manifestsDir = new URL("manifests/", new URL(`${root}/`, "file:"));
+	const connectorsDir = new URL("connectors/", new URL(`${root}/`, "file:"));
 	const discovered = new Set<string>(EXPLICIT_LOCAL_CLASS_CONNECTORS);
-	for (const entry of readdirSync(manifestsDir)) {
-		if (!entry.endsWith(".json")) {
+	for (const entry of readdirSync(connectorsDir)) {
+		const manifestUrl = new URL(`${entry}/manifest.json`, connectorsDir);
+		if (!existsSync(manifestUrl)) {
 			continue;
 		}
-		const manifest = JSON.parse(
-			readFileSync(new URL(entry, manifestsDir), "utf8"),
-		) as unknown;
+		const manifest = JSON.parse(readFileSync(manifestUrl, "utf8")) as unknown;
 		if (declaresFilesystemBinding(manifest)) {
-			discovered.add(entry.replace(MANIFEST_JSON_SUFFIX, ""));
+			discovered.add(entry);
 		}
 	}
 	return [...discovered].sort();
@@ -190,7 +208,7 @@ export interface FindUnapprovedBoundedReadsOptions {
 export function findUnapprovedBoundedReads(
 	options: FindUnapprovedBoundedReadsOptions = {},
 ): BoundedReadFinding[] {
-	const root = options.root ?? packageRoot();
+	const root = options.root ?? repoRoot;
 	const connectorsRoot = new URL("connectors/", new URL(`${root}/`, "file:"));
 	const exceptions = options.exceptions ?? BOUNDED_READ_EXCEPTIONS;
 	const findings: BoundedReadFinding[] = [];

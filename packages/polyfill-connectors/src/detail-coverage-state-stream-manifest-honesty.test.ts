@@ -35,13 +35,14 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
+import {
+	connectorDir as connectorDirFor,
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+	packageRoot,
+} from "./connector-paths.ts";
 
 interface ManifestStream {
 	name?: unknown;
@@ -199,12 +200,12 @@ function coverageStreamNames(source: string): Set<string> {
 test("fleet: no manifest state_stream-parented stream constructs a DETAIL_COVERAGE", () => {
 	const parentedByConnector = new Map<string, Set<string>>();
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
 		const manifest = JSON.parse(
-			readFileSync(join(MANIFESTS_DIR, filename), "utf8"),
+			readFileSync(MANIFEST_PATH(filename.replace(/\.json$/, "")), "utf8"),
 		) as ConnectorManifest;
 		const parented = stateStreamParentedStreams(manifest);
 		if (parented.size) {
@@ -242,18 +243,18 @@ test("fleet: no manifest state_stream-parented stream constructs a DETAIL_COVERA
 
 	const violations: string[] = [];
 	for (const [connectorKey, parented] of [...parentedByConnector].sort()) {
-		const connectorDir = join(CONNECTORS_DIR, connectorKey);
-		if (!existsSync(connectorDir)) {
+		const connectorDirPath = connectorDirFor(connectorKey);
+		if (!existsSync(connectorDirPath)) {
 			continue;
 		}
-		for (const file of connectorSourceFiles(connectorDir)) {
+		for (const file of connectorSourceFiles(connectorDirPath)) {
 			const emitted = coverageStreamNames(readFileSync(file, "utf8"));
 			for (const stream of [...emitted].sort()) {
 				if (!parented.has(stream)) {
 					continue;
 				}
 				violations.push(
-					`${connectorKey}.${stream} (${file.slice(PACKAGE_ROOT.length + 1)}): names this stream at a ` +
+					`${connectorKey}.${stream} (${file.slice(packageRoot.length + 1)}): names this stream at a ` +
 						"DETAIL_COVERAGE construction, but the manifest declares it with a static state_stream parent. The " +
 						"runtime rejects that emission and fails the whole run with runtime_error. Withhold it — the parent's " +
 						"considered/covered were never this stream's to claim.",

@@ -469,7 +469,7 @@ Live runs are the only opportunity to snapshot real DOM/API shapes. Every live r
 
 **How it works**
 
-Every connector using `runConnector()` gets capture automatically when `PDPP_CAPTURE_FIXTURES=1` is set. Captures go to `packages/polyfill-connectors/fixtures/<connector>/raw/<runId>/`:
+Every connector using `runConnector()` gets capture automatically when `PDPP_CAPTURE_FIXTURES=1` is set. Captures go to `connectors/<connector>/fixtures/raw/<runId>/`:
 
 - `records/<stream>.jsonl` — every emitted RECORD.data (free, auto-captured by the runtime's wrapped emit)
 - `dom/<label>.html` — Playwright DOM snapshots, when the connector calls `capture.captureDom(page, label)` at parse checkpoints

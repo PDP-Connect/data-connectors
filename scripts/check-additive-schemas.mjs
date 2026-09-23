@@ -18,15 +18,15 @@
 //   node scripts/check-additive-schemas.mjs
 //   BASE_REF=origin/main node scripts/check-additive-schemas.mjs
 
-import { readFileSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
-function schemaDocsFromPdppManifest(connector, manifestPath, manifest) {
+function schemaDocsFromPdppManifest(manifestPath, manifest) {
   const relManifestPath = manifestPath.replace(repoRoot + "/", "");
   return (manifest.streams ?? [])
     .filter((stream) => stream?.name && stream?.schema)
@@ -36,7 +36,9 @@ function schemaDocsFromPdppManifest(connector, manifestPath, manifest) {
       version: manifest.version,
       schema: stream.schema,
       baseSchemaAtRef(ref) {
-        const baseManifest = getJsonAtRef(ref, relManifestPath);
+        const connectorKey = relManifestPath.split("/")[1];
+        const baseManifest = getJsonAtRef(ref, relManifestPath)
+          ?? getJsonAtRef(ref, `packages/polyfill-connectors/manifests/${connectorKey}.json`);
         const baseStream = baseManifest?.streams?.find((entry) => entry?.name === stream.name);
         if (!baseStream?.schema) return null;
         return {
@@ -58,49 +60,14 @@ function getJsonAtRef(ref, relPath) {
 }
 
 function listSchemas() {
-  const registryPath = join(repoRoot, "registry.json");
-  if (!existsSync(registryPath)) {
-    return [];
-  }
-
-  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
   const schemaDocs = [];
-
-  for (const connector of registry.connectors ?? []) {
-    if (connector.artifactKind === "pdpp-collection-profile") {
-      const manifestPath = join(repoRoot, "connectors", connector.files?.manifest ?? "");
-      if (!existsSync(manifestPath)) {
-        continue;
-      }
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      schemaDocs.push(...schemaDocsFromPdppManifest(connector, manifestPath, manifest));
-      continue;
-    }
-
-    const metadataPath = join(repoRoot, "connectors", connector.files?.metadata ?? "");
-    if (!existsSync(metadataPath)) {
-      continue;
-    }
-
-    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-    const manifestDir = dirname(metadataPath);
-    for (const entry of metadata.scopes ?? []) {
-      const scope = typeof entry === "string" ? entry : entry?.scope;
-      if (!scope) {
-        continue;
-      }
-      const schemaPath = join(manifestDir, "schemas", `${scope}.json`);
-      if (existsSync(schemaPath)) {
-        schemaDocs.push({
-          path: schemaPath,
-          rel: schemaPath.replace(repoRoot + "/", ""),
-          ...JSON.parse(readFileSync(schemaPath, "utf8")),
-          baseSchemaAtRef(ref) {
-            return getJsonAtRef(ref, this.rel);
-          },
-        });
-      }
-    }
+  const connectorsDir = join(repoRoot, "connectors");
+  for (const entry of readdirSync(connectorsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const manifestPath = join(connectorsDir, entry.name, "manifest.json");
+    if (!existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    schemaDocs.push(...schemaDocsFromPdppManifest(manifestPath, manifest));
   }
 
   return schemaDocs;
@@ -108,7 +75,7 @@ function listSchemas() {
 
 function getFileAtRef(ref, relPath) {
   try {
-    return execSync(`git show ${ref}:${relPath}`, {
+    return execFileSync("git", ["show", `${ref}:${relPath}`], {
       cwd: repoRoot,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],

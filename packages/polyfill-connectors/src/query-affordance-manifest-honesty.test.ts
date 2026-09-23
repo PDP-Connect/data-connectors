@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { QUERY_AFFORDANCE_ALLOWLIST } from "./query-affordance-allowlist.ts";
 
 interface JsonSchema {
@@ -40,8 +39,10 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 /**
  * Field-name fragments that mark a timestamp as an ingest / sync / telemetry
@@ -79,14 +80,14 @@ const EVENT_TIME_FIELD =
 	/^(created_at|created_utc|create_time|created_time|start|start_date|start_time|started_at|taken_at|sent_at|date|order_date|day|time_added|played_at|watched_at|first_message_date|posted_date|occurred_at|published_at)$/;
 
 function manifestFiles(): string[] {
-	return readdirSync(MANIFESTS_DIR)
+	return manifestFileNames()
 		.filter((name) => name.endsWith(".json"))
 		.sort();
 }
 
 function readManifest(file: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, file), "utf8"),
+		readFileSync(MANIFEST_PATH(file.replace(/\.json$/, "")), "utf8"),
 	) as ConnectorManifest;
 }
 

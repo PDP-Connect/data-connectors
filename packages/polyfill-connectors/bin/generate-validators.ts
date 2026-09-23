@@ -33,14 +33,14 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+	manifestPath as MANIFESTS_DIR,
+	packageRoot as PKG_ROOT,
+} from "../src/connector-paths.ts";
 
 const GENERATOR_VERSION = "validator-gen/1";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const MANIFESTS_DIR = join(PKG_ROOT, "manifests");
 const OUT_DIR = join(PKG_ROOT, "generated");
 
 // ─── JSON Schema (manifest subset) types ────────────────────────────────
@@ -315,7 +315,7 @@ function manifestDigest(raw: string): string {
 }
 
 function generateForConnector(connector: string): void {
-	const manifestPath = join(MANIFESTS_DIR, `${connector}.json`);
+	const manifestPath = MANIFESTS_DIR(connector);
 	const raw = readFileSync(manifestPath, "utf8");
 	const manifest = JSON.parse(raw) as Manifest;
 

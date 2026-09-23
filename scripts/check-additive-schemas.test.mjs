@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("additive schema check reports the registry schemas it compared", () => {
+test("additive schema check runs over root Collection Profile manifests", () => {
   const stdout = execFileSync(process.execPath, ["scripts/check-additive-schemas.mjs"], {
     cwd: repoRoot,
     encoding: "utf8",

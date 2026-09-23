@@ -3,9 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Drift job (b): vendored connector sources in data-connect vs this repo's canonical
- * connector files, for whichever connectors data-connect's local-collector bundle currently
- * duplicates.
+ * Drift job (b): data-connect's transitional source copy vs the exact
+ * data-connectors revision from which it was vendored.
  *
  * The bundled-connector set is derived from this repo's own canonical registry
  * (packages/polyfill-connectors/src/collector-registry.ts's LOCAL_COLLECTOR_DEFINITIONS),
@@ -17,10 +16,9 @@
  * a mismatch (registry added/removed a connector but the vendored bundle didn't follow, or
  * vice versa) is itself a drift failure, not silently ignored.
  *
- * data-connect carries a transitional copy of each connector's non-test source files at
- * packages/polyfill-connectors/connectors/<id>/ (finding S1's "transitional selected
- * connector-content copy"). This compares every such file byte-for-byte (SHA-256) against
- * this repo's canonical copy at the same relative path.
+ * data-connect records its source revision in vendor-source.json. This checks every
+ * non-test file and its path at that revision. A later connector revision is reported
+ * as lag, not as byte parity with the current tree.
  *
  * Deliberately excluded from comparison: `*.test.ts` (data-connect does not carry this
  * repo's test suite) and anything under a `fixtures/` or `__fixtures__/` directory (test
@@ -32,7 +30,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -49,7 +48,7 @@ if (!existsSync(registryPath)) {
   process.exit(1);
 }
 
-// The registry module's own relative imports (../connectors/<id>/collector-definition.ts)
+// The registry module's own relative imports (../../../connectors/<id>/collector-definition.ts)
 // resolve correctly as long as we import it from its real on-disk location, so no scratch
 // tree is needed here (unlike check-collector-definitions-drift.mjs, which must run
 // data-connect's generator against a synthetic sibling layout). Every value these modules
@@ -57,6 +56,45 @@ if (!existsSync(registryPath)) {
 // --experimental-strip-types erases it without needing that package installed.
 const registryModule = await import(pathToFileURL(registryPath).href);
 const BUNDLED_CONNECTORS = registryModule.LOCAL_COLLECTOR_DEFINITIONS.map((d) => d.connector_id);
+
+const provenancePath = resolve(dataConnectDir, "packages/polyfill-connectors/vendor-source.json");
+if (!existsSync(provenancePath)) {
+  console.error(`FAIL: vendored source provenance missing at ${provenancePath}`);
+  process.exit(1);
+}
+let provenance;
+try {
+  provenance = JSON.parse(readFileSync(provenancePath, "utf8"));
+} catch (error) {
+  console.error(`FAIL: invalid vendored source provenance: ${error.message}`);
+  process.exit(1);
+}
+if (provenance.repository !== "PDP-Connect/data-connectors" || !/^[0-9a-f]{40}$/.test(provenance.revision)) {
+  console.error("FAIL: vendored source provenance needs the data-connectors repository and a full commit SHA");
+  process.exit(1);
+}
+
+function git(args, options = {}) {
+  try {
+    return execFileSync("git", ["-C", dataConnectorsDir, ...args], {
+      encoding: options.buffer ? undefined : "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    throw new Error(`git ${args[0]} failed: ${error.stderr?.toString().trim() || error.message}`);
+  }
+}
+
+let currentRevision;
+try {
+  git(["cat-file", "-e", `${provenance.revision}^{commit}`]);
+  git(["merge-base", "--is-ancestor", provenance.revision, "HEAD"]);
+  currentRevision = git(["rev-parse", "HEAD"]).trim();
+} catch (error) {
+  console.error(`FAIL: vendored source revision must be available and an ancestor of this checkout: ${error.message}`);
+  process.exit(1);
+}
 
 if (BUNDLED_CONNECTORS.length === 0) {
   console.error(`FAIL: canonical collector-registry.ts's LOCAL_COLLECTOR_DEFINITIONS is empty at ${registryPath}`);
@@ -115,41 +153,49 @@ const results = [];
 
 for (const connectorId of BUNDLED_CONNECTORS) {
   const vendoredDir = join(dataConnectDir, "packages/polyfill-connectors/connectors", connectorId);
-  const canonicalDir = join(dataConnectorsDir, "packages/polyfill-connectors/connectors", connectorId);
+  const canonicalPrefix = `packages/polyfill-connectors/connectors/${connectorId}/`;
 
   if (!existsSync(vendoredDir)) {
     console.error(`FAIL: ${connectorId} — vendored directory not found at ${vendoredDir}`);
     failed = true;
     continue;
   }
-  if (!existsSync(canonicalDir)) {
-    console.error(`FAIL: ${connectorId} — canonical directory not found at ${canonicalDir}`);
+  const vendoredFiles = new Set(listComparableFiles(vendoredDir));
+  const canonicalFiles = new Set(
+    git(["ls-tree", "-r", "--name-only", provenance.revision, "--", canonicalPrefix])
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((path) => path.slice(canonicalPrefix.length))
+      .filter((path) => !path.endsWith(".test.ts") && !path.split("/").some((part) => part === "fixtures" || part === "__fixtures__")),
+  );
+  if (canonicalFiles.size === 0) {
+    console.error(`FAIL: ${connectorId} — no source files at ${provenance.revision}:${canonicalPrefix}`);
     failed = true;
     continue;
   }
-
-  const vendoredFiles = new Set(listComparableFiles(vendoredDir));
-  const canonicalFiles = new Set(listComparableFiles(canonicalDir));
 
   const onlyInVendored = [...vendoredFiles].filter((f) => !canonicalFiles.has(f));
   const onlyInCanonical = [...canonicalFiles].filter((f) => !vendoredFiles.has(f));
 
   for (const f of onlyInVendored) {
-    console.error(`FAIL: ${connectorId}/${f} — present in data-connect's vendored copy but not in the canonical repo`);
+    console.error(`FAIL: ${connectorId}/${f} — present in data-connect's vendored copy but not at the recorded source revision`);
     failed = true;
   }
   for (const f of onlyInCanonical) {
-    console.error(`FAIL: ${connectorId}/${f} — present in the canonical repo but missing from data-connect's vendored copy`);
+    console.error(`FAIL: ${connectorId}/${f} — present at the recorded source revision but missing from data-connect's vendored copy`);
     failed = true;
   }
 
   for (const f of [...vendoredFiles].filter((x) => canonicalFiles.has(x))) {
     const vendoredHash = sha256(join(vendoredDir, f));
-    const canonicalHash = sha256(join(canonicalDir, f));
+    const canonicalHash = createHash("sha256")
+      .update(git(["show", `${provenance.revision}:${canonicalPrefix}${f}`], { buffer: true }))
+      .digest("hex");
     if (vendoredHash !== canonicalHash) {
       console.error(`FAIL: ${connectorId}/${f} — byte mismatch`);
       console.error(`  vendored (data-connect):  ${vendoredHash}`);
-      console.error(`  canonical (data-connectors): ${canonicalHash}`);
+      console.error(`  source (${provenance.revision}): ${canonicalHash}`);
       failed = true;
     } else {
       results.push(`${connectorId}/${f}`);
@@ -162,4 +208,7 @@ if (failed) {
   process.exit(1);
 }
 
-console.log(`OK: ${results.length} vendored connector source files across ${BUNDLED_CONNECTORS.length} connectors are byte-identical to canonical.`);
+console.log(`OK: ${results.length} vendored source files across ${BUNDLED_CONNECTORS.length} connectors match data-connectors@${provenance.revision}.`);
+if (currentRevision !== provenance.revision) {
+  console.log(`NOTICE: vendored source lags data-connectors@${currentRevision}; current connector parity is not claimed.`);
+}

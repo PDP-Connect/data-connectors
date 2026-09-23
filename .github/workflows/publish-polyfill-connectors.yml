@@ -231,13 +231,8 @@ jobs:
         # to today. --ignore-scripts skips patchright's browser download, which
         # the bundle does not need.
         #
-        # BOTH trees are installed, because they are separate installs and the
-        # BUILD step needs the second one. The root `workspaces` list is
-        # `packages/connector-installer-core` alone and the root manifest never
-        # names packages/polyfill-connectors, so a root `npm ci` does not create
-        # that package's node_modules. scripts/build-connector-oci-artifact.mjs
-        # needs that tree because esbuild resolves the connector's dependencies
-        # from it in order to bundle their bytes into the artifact.
+        # The root workspace install supplies both the runtime package and
+        # root connector sources. esbuild resolves their dependencies from it.
         #
         # The VERIFY step deliberately does NOT use it. It builds an empty host
         # with no node_modules and no path back into this checkout, because an
@@ -246,15 +241,11 @@ jobs:
         # asserts this step is still here and still precedes the build.
         if: steps.target.outputs.selected == 'true' || inputs.catalog-only
         env:
-          CATALOG_ONLY: ${{ inputs.catalog-only }}
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
-          if [ "$CATALOG_ONLY" != true ]; then
-            npm ci --ignore-scripts --prefix packages/polyfill-connectors
-          fi
 
       - name: Build the artifact layers
         if: steps.target.outputs.selected == 'true'

@@ -2,16 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
-const MANIFESTS_DIR = join(
-	dirname(dirname(fileURLToPath(import.meta.url))),
-	"manifests",
-);
-const names = readdirSync(MANIFESTS_DIR)
+import test from "node:test";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
+
+const names = manifestFileNames()
 	.filter((name) => name.endsWith(".json"))
 	.sort();
 const tiers = new Set(["supported", "preview", "development"]);
@@ -27,14 +26,14 @@ function isManifest(value: unknown): value is Manifest {
 
 function manifest(name: string): Manifest {
 	const value: unknown = JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, name), "utf8"),
+		readFileSync(MANIFEST_PATH(name.replace(/\.json$/, "")), "utf8"),
 	);
 	assert.ok(isManifest(value), `${name} must contain a manifest object`);
 	return value;
 }
 
 test("every shipped manifest declares exactly one typed public lifecycle tier", () => {
-	assert.equal(names.length, 45);
+	assert.equal(names.length, 47);
 	for (const name of names) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};

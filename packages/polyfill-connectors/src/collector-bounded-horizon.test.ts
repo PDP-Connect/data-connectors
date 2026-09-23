@@ -57,9 +57,9 @@ import {
 } from "@pdpp/collector-runtime";
 import type { TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/reference-contract/common";
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 import { resolveExecutionRoot } from "./execution-root.ts";
 
-const CONNECTORS_DIR = join(import.meta.dirname, "..", "connectors");
 const SINCE = "2026-06-01T00:00:00.000Z";
 const CLAUDE_SOURCE_ROOT = "/home/u/code/recent";
 
