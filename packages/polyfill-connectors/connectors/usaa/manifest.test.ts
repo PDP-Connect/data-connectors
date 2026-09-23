@@ -4,8 +4,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 
-const MANIFEST_PATH = new URL("../../manifests/usaa.json", import.meta.url);
+const MANIFEST_PATH = manifestPath("usaa");
 
 interface UsaaManifest {
 	capabilities?: {

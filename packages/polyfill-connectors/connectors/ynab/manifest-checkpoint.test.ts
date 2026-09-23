@@ -4,13 +4,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 
 interface Manifest {
 	streams: Array<{ coverage_strategy?: string; name: string }>;
 }
 
 const manifest = JSON.parse(
-	readFileSync(new URL("../../manifests/ynab.json", import.meta.url), "utf8"),
+	readFileSync(manifestPath("ynab"), "utf8"),
 ) as Manifest;
 
 test("YNAB delta streams preserve checkpoint-window coverage", () => {

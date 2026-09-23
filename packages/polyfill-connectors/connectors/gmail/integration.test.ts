@@ -44,6 +44,7 @@ import type {
 	MessageEnvelopeObject,
 	MessageStructureObject,
 } from "imapflow";
+import { manifestPath } from "../../src/connector-paths.ts";
 import type {
 	DetailGapMessage,
 	DetailGapStartEntry,
@@ -2334,10 +2335,7 @@ test("runAllMailPasses: first historical page is bounded, durable only at page e
  */
 test("runAllMailPasses: no stream the manifest declares with a state_stream parent may emit DETAIL_COVERAGE", async () => {
 	const manifest = JSON.parse(
-		await readFile(
-			new URL("../../manifests/gmail.json", import.meta.url),
-			"utf8",
-		),
+		await readFile(manifestPath("gmail"), "utf8"),
 	) as {
 		streams?: Array<{ name: string; state_stream?: string }>;
 	};

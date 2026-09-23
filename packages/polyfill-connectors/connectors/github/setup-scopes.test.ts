@@ -4,11 +4,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 
-const manifest = readFileSync(
-	new URL("../../manifests/github.json", import.meta.url),
-	"utf8",
-);
+const manifest = readFileSync(manifestPath("github"), "utf8");
 
 test("GitHub setup copy names the profile, repository, and gist read capabilities", () => {
 	for (const scope of ["read:user", "public_repo", "repo", "gist"]) {

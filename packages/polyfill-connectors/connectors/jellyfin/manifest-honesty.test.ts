@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 
 interface Manifest {
 	capabilities: {
@@ -17,10 +18,7 @@ interface Manifest {
 }
 
 const manifest = JSON.parse(
-	readFileSync(
-		new URL("../../manifests/jellyfin.json", import.meta.url),
-		"utf8",
-	),
+	readFileSync(manifestPath("jellyfin"), "utf8"),
 ) as Manifest;
 
 test("Jellyfin remains Preview until live version capability is proven", () => {
