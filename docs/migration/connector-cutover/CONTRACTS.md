@@ -81,4 +81,4 @@ Connector lanes work in the current layout: `packages/polyfill-connectors/connec
 
 ## Private data
 
-Raw captures, HAR files, export archives, and browser profiles stay under `/home/tnunamak/.tmp/connector-cutover-0922/private/` (mode 700, outside git). Header redaction does not make a HAR body safe. Commit only reviewed, scrubbed fixtures under the existing `fixtures/<key>/scrubbed/pilot-real-shape/` convention.
+Raw captures, HAR files, export archives, and browser profiles stay in a private directory outside git (mode 700) on the operator's machine. Header redaction does not make a HAR body safe. Commit only reviewed, scrubbed fixtures under the existing `fixtures/<key>/scrubbed/pilot-real-shape/` convention.

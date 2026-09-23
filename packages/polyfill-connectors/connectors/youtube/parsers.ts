@@ -6,8 +6,7 @@
  * orchestration (file-existence checks and the emit loop live in index.ts)
  * so they can be unit-tested in isolation.
  *
- * COVERAGE STATUS (see report at
- * /home/tnunamak/.tmp/connector-cutover-0922/reports/cut-youtube.md):
+ * COVERAGE STATUS (verified against a real Takeout only for watch_history):
  *
  *   - watch_history: VERIFIED. Delegates to the shared
  *     src/youtube-watch-history.ts module, whose file path and shape were

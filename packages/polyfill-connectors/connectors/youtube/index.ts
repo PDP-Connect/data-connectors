@@ -33,8 +33,7 @@
  * are written from Google's documented Takeout conventions and are
  * defensive (null the field rather than guess), but every one of these
  * streams reports itself honestly via coverage_diagnostics — see
- * docs/inbox/report-connector-coverage.md classification and the report at
- * /home/tnunamak/.tmp/connector-cutover-0922/reports/cut-youtube.md.
+ * docs/inbox/report-connector-coverage.md classification.
  *
  * Accepts either a .zip archive (as downloaded from Takeout) or an
  * already-extracted directory in YOUTUBE_TAKEOUT_DIR, following the
