@@ -1,1 +1,0 @@
-skills/pdp-connect/scripts/run-connector.cjs

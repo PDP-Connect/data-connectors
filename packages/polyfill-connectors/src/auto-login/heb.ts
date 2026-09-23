@@ -26,7 +26,7 @@ import type { Locator, Page } from "playwright";
 import {
 	isIncapsulaBlocked,
 	looksLoggedOut,
-} from "../../connectors/heb/parsers.ts";
+} from "../../../../connectors/heb/parsers.ts";
 import { manualAction } from "../browser-handoff.ts";
 import type {
 	InteractionRequest,

@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import test from "node:test";
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import { readFileSync } from "node:fs";
 
-const names = readdirSync(MANIFESTS_DIR)
+import test from "node:test";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
+
+const names = manifestFileNames()
 	.filter((name) => name.endsWith(".json"))
 	.sort();
 const tiers = new Set(["supported", "preview", "development"]);
@@ -23,7 +26,7 @@ function isManifest(value: unknown): value is Manifest {
 
 function manifest(name: string): Manifest {
 	const value: unknown = JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, name), "utf8"),
+		readFileSync(MANIFEST_PATH(name.replace(/\.json$/, "")), "utf8"),
 	);
 	assert.ok(isManifest(value), `${name} must contain a manifest object`);
 	return value;

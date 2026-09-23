@@ -54,7 +54,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 } from "./connector-paths.ts";
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import {
@@ -75,7 +75,7 @@ const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
  * they're identical strings.
  */
 function manifestKeyForDirName(dirName: string): string {
-	const manifestPath = join(MANIFESTS_DIR, `${dirName}.json`);
+	const manifestPath = MANIFESTS_DIR(dirName);
 	if (!existsSync(manifestPath)) {
 		return dirName;
 	}

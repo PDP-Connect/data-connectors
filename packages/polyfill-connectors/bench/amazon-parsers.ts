@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import {
 	parseOrderDetailDom,
 	parseOrdersListDom,
-} from "../connectors/amazon/parsers.ts";
+} from "../../../connectors/amazon/parsers.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SYNTHETIC_DIR = join(

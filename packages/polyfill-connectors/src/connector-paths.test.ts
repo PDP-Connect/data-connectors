@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import test from "node:test";
 import {
@@ -10,11 +10,9 @@ import {
 	connectorEntrypoint,
 	connectorsDir,
 	fixturesDir,
-	fixturesRootDir,
 	iconPath,
-	iconsDir,
+	manifestFileNames,
 	manifestPath,
-	manifestsDir,
 	packageRoot,
 	repoRoot,
 } from "./connector-paths.ts";
@@ -31,15 +29,16 @@ test("repoRoot is the repository root, containing the root package.json", () => 
 	);
 });
 
-test("manifestsDir and connectorsDir point at the real, current-layout directories", () => {
-	assert.ok(existsSync(manifestsDir));
+test("connectorsDir holds shipped manifests", () => {
 	assert.ok(existsSync(connectorsDir));
-	assert.ok(readdirSync(manifestsDir).some((f) => f.endsWith(".json")));
+	assert.ok(manifestFileNames().includes("amazon.json"));
 });
 
-test("iconsDir is manifestsDir/icons", () => {
-	assert.ok(existsSync(iconsDir));
-	assert.equal(iconsDir, `${manifestsDir}/icons`);
+test("each connector icon is beside its manifest", () => {
+	assert.equal(
+		iconPath("amazon", "icon.svg"),
+		`${connectorDir("amazon")}/icon.svg`,
+	);
 });
 
 test("connectorDir(key) and connectorEntrypoint(key) resolve a real connector", () => {
@@ -51,11 +50,10 @@ test("manifestPath(key) resolves a real shipped manifest", () => {
 	assert.ok(existsSync(manifestPath("amazon")));
 });
 
-test("iconPath resolves both a bare filename and a manifest-style 'icons/x.svg' value the same way", () => {
-	assert.equal(iconPath("amazon.svg"), iconPath("icons/amazon.svg"));
-	assert.ok(existsSync(iconPath("amazon.svg")));
+test("iconPath resolves the manifest's icon filename", () => {
+	assert.ok(existsSync(iconPath("amazon", "icon.svg")));
 });
 
-test("fixturesDir(key) and fixturesRootDir agree", () => {
-	assert.equal(fixturesDir("amazon"), `${fixturesRootDir}/amazon`);
+test("fixturesDir(key) is within the connector directory", () => {
+	assert.equal(fixturesDir("amazon"), `${connectorDir("amazon")}/fixtures`);
 });

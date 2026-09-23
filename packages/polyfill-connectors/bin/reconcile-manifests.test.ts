@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFEST_DIR,
+	manifestPath as MANIFEST_DIR,
 } from "../src/connector-paths.ts";
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 
@@ -50,7 +50,7 @@ assert.ok(
 
 for (const name of connectors) {
 	test(`reconcile/${name}: manifest, schema, and emit literals align`, () => {
-		const manifestPath = join(MANIFEST_DIR, `${name}.json`);
+		const manifestPath = MANIFEST_DIR(name);
 		assert.ok(
 			existsSync(manifestPath),
 			`${name}: schemas.ts exists but no matching manifest`,

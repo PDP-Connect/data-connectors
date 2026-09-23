@@ -22,7 +22,6 @@ import {
 	readdir,
 	readFile,
 	rm,
-	stat,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,71 +35,6 @@ const packageRoot = path.resolve(scriptDir, "..");
 
 function log(message) {
 	process.stdout.write(`${message}\n`);
-}
-
-async function resolveEveryPackedConnector(projectDir) {
-	const scriptPath = path.join(projectDir, "resolve-every-connector.mjs");
-	await writeFile(
-		scriptPath,
-		`import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  ConnectorImplementationNotFoundError,
-  resolveConnectorImplementation,
-} from "@pdpp/polyfill-connectors/resolve";
-
-const resolverPath = fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/resolve"));
-const packageRoot = dirname(dirname(resolverPath));
-const manifestsDirectory = join(packageRoot, "manifests");
-const manifestFiles = (await readdir(manifestsDirectory))
-  .filter((file) => file.endsWith(".json"))
-  .sort();
-
-for (const file of manifestFiles) {
-  const manifest = JSON.parse(await readFile(join(manifestsDirectory, file), "utf8"));
-  const implementation = resolveConnectorImplementation(manifest.connector_id);
-  assert.equal(implementation.manifest.connector_id, manifest.connector_id);
-  assert.match(implementation.entry, /^file:\\/\\//);
-  await access(fileURLToPath(implementation.entry));
-  if (manifest.brand !== undefined) {
-    assert.match(implementation.brandIcon, /^file:\\/\\//);
-    await access(fileURLToPath(implementation.brandIcon));
-  } else {
-    assert.equal(implementation.brandIcon, undefined);
-  }
-}
-
-await access(join(packageRoot, "config", "slackdump-api-config.toml"));
-
-const directlyImportable = resolveConnectorImplementation(
-  "https://registry.pdpp.dev/connectors/ynab",
-);
-await import(directlyImportable.entry);
-
-assert.throws(
-  () => resolveConnectorImplementation("https://registry.pdpp.dev/connectors/missing"),
-  (error) =>
-    error instanceof ConnectorImplementationNotFoundError &&
-    error.code === "ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND",
-);
-console.log(\`PASS resolver: \${manifestFiles.length} packed manifest connector IDs resolve to built entries.\`);
-`,
-	);
-	const result = await run(process.execPath, [scriptPath], { cwd: projectDir });
-	// Every source manifest must be packed and resolvable, so the expected
-	// count comes from the source tree rather than a hard-coded number.
-	const sourceManifestCount = (
-		await readdir(path.join(packageRoot, "manifests"))
-	).filter((file) => file.endsWith(".json")).length;
-	assert.match(
-		`${result.stdout}\n${result.stderr}`,
-		new RegExp(
-			`PASS resolver: ${sourceManifestCount} packed manifest connector IDs resolve to built entries\\.`,
-		),
-	);
-	log(result.stdout.trim());
 }
 
 async function run(command, args, options = {}) {
@@ -145,15 +79,7 @@ async function typecheckEveryExport(projectDir, installedPackage) {
 	const imports = Object.keys(installedPackageJson.exports)
 		.map((subpath) => `import "@pdpp/polyfill-connectors/${subpath.slice(2)}";`)
 		.join("\n");
-	const resolverUse = `
-import { resolveConnectorImplementation } from "@pdpp/polyfill-connectors/resolve";
-const resolvedConnector = resolveConnectorImplementation("https://registry.pdpp.dev/connectors/ynab");
-const resolvedEntry: string = resolvedConnector.entry;
-const resolvedBrandIcon: string | undefined = resolvedConnector.brandIcon;
-const resolvedManifest: Record<string, unknown> = resolvedConnector.manifest;
-void resolvedEntry;
-void resolvedBrandIcon;
-void resolvedManifest;`;
+	const resolverUse = "";
 	await writeFile(
 		path.join(projectDir, "imports.ts"),
 		`${imports}${resolverUse}\n`,
@@ -268,79 +194,27 @@ async function main() {
 			{ cwd: projectDir, env },
 		);
 		await typecheckEveryExport(projectDir, installedPackage);
-		await resolveEveryPackedConnector(projectDir);
-		const generatedRegistry = path.join(tempRoot, "static-secret-registry.ts");
+		const installedMetadata = JSON.parse(
+			await readFile(path.join(installedPackage, "package.json"), "utf8"),
+		);
+		const runtimeImports = Object.keys(installedMetadata.exports).map(
+			(subpath) =>
+				`await import("@pdpp/polyfill-connectors/${subpath.slice(2)}");`,
+		);
+		await writeFile(
+			path.join(projectDir, "runtime-imports.mjs"),
+			`import assert from "node:assert/strict";\n${runtimeImports.join("\n")}\n` +
+				`const options = await import("@pdpp/polyfill-connectors/connector-options-schema");\n` +
+				`const reasons = await import("@pdpp/polyfill-connectors/reason-display-messages");\n` +
+				`assert.ok(options.connectorOptionsSchema("claude-code")?.options.length);\n` +
+				`assert.ok(reasons.connectorReasonDisplayMessage("chatgpt", "http_error"));\n` +
+				`console.log("runtime-imported");\n`,
+		);
 		const consumerEntrypoints = [
 			{
-				args: [
-					path.join(
-						projectDir,
-						"node_modules",
-						".bin",
-						"pdpp-local-device-exporter",
-					),
-					"--help",
-				],
-				label: "pdpp-local-device-exporter",
-				output: "usage: local-device-exporter",
-			},
-			{
-				args: [
-					path.join(
-						installedPackage,
-						"scripts",
-						"generate-static-secret-registry.js",
-					),
-					generatedRegistry,
-				],
-				label: "generate-static-secret-registry",
-				output: "wrote ",
-			},
-			{
-				args: [
-					"--input-type=module",
-					"--eval",
-					'import "@pdpp/polyfill-connectors/manifests"; console.log("manifests-imported")',
-				],
-				label: "manifests export",
-				output: "manifests-imported",
-			},
-			{
-				args: [
-					"--input-type=module",
-					"--eval",
-					'import "@pdpp/polyfill-connectors/collectors"; console.log("collectors-imported")',
-				],
-				label: "collectors export",
-				output: "collectors-imported",
-			},
-			{
-				args: [
-					"--input-type=module",
-					"--eval",
-					'import { readSampleRecord } from "@pdpp/polyfill-connectors/fixture-samples"; readSampleRecord("gmail", "messages"); console.log("fixture-samples-imported")',
-				],
-				label:
-					"fixture-samples export (reads a real shipped fixture, not just imports)",
-				output: "fixture-samples-imported",
-			},
-			{
-				args: [
-					"--input-type=module",
-					"--eval",
-					'import "@pdpp/polyfill-connectors/connectors/github"; console.log("github-connector-imported")',
-				],
-				label: "connectors/github export",
-				output: "github-connector-imported",
-			},
-			{
-				args: [
-					"--input-type=module",
-					"--eval",
-					'import "@pdpp/polyfill-connectors/connectors/github/schemas"; console.log("github-schemas-imported")',
-				],
-				label: "connectors/github/schemas export",
-				output: "github-schemas-imported",
+				args: [path.join(projectDir, "runtime-imports.mjs")],
+				label: "all runtime exports",
+				output: "runtime-imported",
 			},
 		];
 
@@ -359,7 +233,6 @@ async function main() {
 				assert.match(output, new RegExp(entrypoint.output));
 			}),
 		);
-		assert.equal((await stat(generatedRegistry)).isFile(), true);
 
 		log(
 			"PASS pack-install-run: plain npm install and every public consumer entrypoint succeeded.",

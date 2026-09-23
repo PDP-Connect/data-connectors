@@ -22,9 +22,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import {
+	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
+} from "../src/connector-paths.ts";
 
-const BIOME_BIN = join(PACKAGE_ROOT, "node_modules", ".bin", "biome");
+const BIOME_BIN = join(REPO_ROOT, "node_modules", ".bin", "biome");
 
 const REPRO_SOURCE = `
 function contentType(headers: Record<string, string>): string {

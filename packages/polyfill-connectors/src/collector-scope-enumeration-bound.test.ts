@@ -34,8 +34,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { discoverClaudeJsonlSources } from "../connectors/claude_code/index.ts";
-import { walkRollouts } from "../connectors/codex/index.ts";
+import { discoverClaudeJsonlSources } from "../../../connectors/claude_code/index.ts";
+import { walkRollouts } from "../../../connectors/codex/index.ts";
 import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 
 /**

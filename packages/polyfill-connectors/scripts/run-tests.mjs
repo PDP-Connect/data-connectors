@@ -20,11 +20,11 @@ import { glob } from "node:fs/promises";
 // bridged with a minimal stand-in without misrepresenting what it tests. Its
 // closure is the required cross-repository semantic CI job (Gate B findings
 // B2/B5), not a local vendor addition.
-const EXCLUDED = new Set(["connectors/github/index.test.ts"]);
+const EXCLUDED = new Set(["../../connectors/github/index.test.ts"]);
 
 const patterns = [
 	"bin/**/*.test.ts",
-	"connectors/**/*.test.ts",
+	"../../connectors/**/*.test.ts",
 	"scripts/related-tests/*.test.ts",
 	"scripts/**/*.test.mjs",
 	"src/**/*.test.ts",

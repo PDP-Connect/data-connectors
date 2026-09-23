@@ -49,7 +49,7 @@ if (!existsSync(registryPath)) {
   process.exit(1);
 }
 
-// The registry module's own relative imports (../connectors/<id>/collector-definition.ts)
+// The registry module's own relative imports (../../../connectors/<id>/collector-definition.ts)
 // resolve correctly as long as we import it from its real on-disk location, so no scratch
 // tree is needed here (unlike check-collector-definitions-drift.mjs, which must run
 // data-connect's generator against a synthetic sibling layout). Every value these modules
@@ -104,6 +104,9 @@ function listComparableFiles(dir) {
         continue;
       }
       if (entry.name.endsWith(".test.ts")) continue;
+      // Root-only profile presentation files were never part of the vendored
+      // local-collector source copy; its own package keeps the old artifact pin.
+      if (current === dir && (entry.name === "manifest.json" || entry.name === "icon.svg")) continue;
       out.push(relative(dir, full));
     }
   }
@@ -115,7 +118,7 @@ const results = [];
 
 for (const connectorId of BUNDLED_CONNECTORS) {
   const vendoredDir = join(dataConnectDir, "packages/polyfill-connectors/connectors", connectorId);
-  const canonicalDir = join(dataConnectorsDir, "packages/polyfill-connectors/connectors", connectorId);
+  const canonicalDir = join(dataConnectorsDir, "connectors", connectorId);
 
   if (!existsSync(vendoredDir)) {
     console.error(`FAIL: ${connectorId} — vendored directory not found at ${vendoredDir}`);

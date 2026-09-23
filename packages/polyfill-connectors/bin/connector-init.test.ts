@@ -31,7 +31,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import {
+	fixturesDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 import {
 	findCollisions,
 	InitArgsError,
@@ -126,7 +129,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 		TEMP_STREAM,
 	]);
 	const plan = planTargets(args.name, args.stream);
-	const fixtureDir = join(PACKAGE_ROOT, "fixtures", args.name);
+	const fixtureDir = fixturesDir(args.name);
 
 	// Precondition: nothing pre-existing for this temp name (would falsely
 	// pass "collisions are refused" and also risk clobbering real state).
@@ -231,7 +234,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 test("connector-init: refuses to overwrite an existing target and lists every collision", () => {
 	const args = parseArgs([TEMP_NAME, "--stream", TEMP_STREAM]);
 	const plan = planTargets(args.name, args.stream);
-	const fixtureDir = join(PACKAGE_ROOT, "fixtures", args.name);
+	const fixtureDir = fixturesDir(args.name);
 	assert.deepEqual(
 		findCollisions(plan),
 		[],

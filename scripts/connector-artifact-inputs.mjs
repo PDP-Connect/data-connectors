@@ -100,7 +100,7 @@ export function artifactInputHash({ commit, manifest, cwd = process.cwd() }) {
     files.set(path, content);
   }
 
-  const manifestPath = `${PACKAGE_ROOT}/manifests/${manifest}.json`;
+  const manifestPath = `connectors/${manifest}/manifest.json`;
   const manifestBytes = readFileAtCommit(commit, manifestPath, options);
   if (manifestBytes === null) {
     throw new ArtifactInputError(`cannot read manifest ${manifestPath} at ${commit}`);
@@ -113,14 +113,14 @@ export function artifactInputHash({ commit, manifest, cwd = process.cwd() }) {
     throw new ArtifactInputError(`cannot parse manifest ${manifestPath} at ${commit}: ${error.message}`);
   }
   if (profile.brand?.icon) {
-    const iconPath = `${PACKAGE_ROOT}/manifests/${profile.brand.icon}`;
+    const iconPath = `connectors/${manifest}/${profile.brand.icon}`;
     const iconBytes = readFileAtCommit(commit, iconPath, options);
     if (iconBytes === null) {
       throw new ArtifactInputError(`cannot read manifest-declared icon ${iconPath} at ${commit}`);
     }
     files.set(iconPath, iconBytes);
   }
-  addLocalImportClosure(commit, `${PACKAGE_ROOT}/connectors/${manifest}/index.ts`, files, options);
+  addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options);
 
   const hash = createHash("sha256");
   for (const [path, content] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {

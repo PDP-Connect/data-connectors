@@ -19,7 +19,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 } from "./connector-paths.ts";
 import { SCHEMALESS_CONNECTOR_ALLOWLIST } from "./connector-schema-allowlist.ts";
 
@@ -28,7 +28,7 @@ interface ManifestShape {
 }
 
 function manifestDeclaresStreams(name: string): boolean {
-	const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+	const manifestPath = MANIFESTS_DIR(name);
 	if (!existsSync(manifestPath)) {
 		return false;
 	}

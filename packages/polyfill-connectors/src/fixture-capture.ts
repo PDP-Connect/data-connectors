@@ -24,7 +24,7 @@
  *
  * Active sessions write under `PDPP_CAPTURE_ROOT_DIR/<connector>/raw/<runId>/`.
  * When `PDPP_CAPTURE_ROOT_DIR` is unset, local development defaults to
- * `packages/polyfill-connectors/fixtures/<connector>/raw/<runId>/`.
+ * `connectors/<connector>/fixtures/raw/<runId>/`.
  * Captured raw kinds:
  *
  *   records/<stream>.jsonl     one JSON per emitted RECORD.data (generic,
@@ -68,10 +68,9 @@ import {
 	redactDomHtml,
 	redactKnownSecrets,
 } from "./capture-redaction.ts";
-import { fixturesRootDir } from "./connector-paths.ts";
+import { fixturesDir } from "./connector-paths.ts";
 import type { RecordData } from "./connector-runtime.ts";
 
-const DEFAULT_CAPTURE_ROOT = fixturesRootDir;
 const ARIA_SNAPSHOT_TIMEOUT_MS = 2000;
 const LOCATOR_PROBE_TIMEOUT_MS = 1000;
 const LOCATOR_PROBE_ARIA_DEPTH = 2;
@@ -536,11 +535,10 @@ export function createCaptureSession(
 	const keepOnSuccess = alwaysRetain;
 	const runId = new Date().toISOString().replace(/[:.]/g, "-");
 	const configuredRoot = process.env.PDPP_CAPTURE_ROOT_DIR?.trim();
-	const captureRoot =
+	const baseDir =
 		configuredRoot && configuredRoot.length > 0
-			? configuredRoot
-			: DEFAULT_CAPTURE_ROOT;
-	const baseDir = join(captureRoot, connectorName, "raw", runId);
+			? join(configuredRoot, connectorName, "raw", runId)
+			: join(fixturesDir(connectorName), "raw", runId);
 	try {
 		mkdirSync(join(baseDir, "records"), { recursive: true });
 		mkdirSync(join(baseDir, "aria"), { recursive: true });

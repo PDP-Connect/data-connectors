@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -12,10 +12,10 @@ import {
 } from "./connector-publish-allowlist.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const manifests = join(repoRoot, "packages/polyfill-connectors/manifests");
+const manifests = join(repoRoot, "connectors");
 
 test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () => {
-  const files = readdirSync(manifests).filter((name) => name.endsWith(".json"));
+  const files = readdirSync(manifests).filter((name) => existsSync(join(manifests, name, "manifest.json"))).map((name) => `${name}.json`);
   assert.deepEqual(
     CONNECTOR_PUBLISH_INVENTORY.map(({ manifest }) => `${manifest}.json`).sort(),
     files.sort(), "every manifest must be classified exactly once; no unknown entries",
@@ -23,7 +23,7 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
   assert.equal(new Set(CONNECTOR_PUBLISH_INVENTORY.map((row) => row.connectorKey)).size,
     CONNECTOR_PUBLISH_INVENTORY.length, "two manifests must never target the same repository");
   for (const row of CONNECTOR_PUBLISH_INVENTORY) {
-    const profile = JSON.parse(readFileSync(join(manifests, `${row.manifest}.json`), "utf8"));
+    const profile = JSON.parse(readFileSync(join(manifests, row.manifest, "manifest.json"), "utf8"));
     assert.equal(row.connectorKey, profile.connector_key, row.manifest);
     assert.ok(profile.connector_id.endsWith(`/${row.connectorKey}`), row.manifest);
     assert.match(row.manifest, /^[a-z0-9][a-z0-9_]*$/);

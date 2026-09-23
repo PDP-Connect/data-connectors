@@ -313,13 +313,11 @@ test("a dry run cannot reach the push-and-sign step", () => {
   );
 });
 
-test("the workflow installs packages/polyfill-connectors before it builds", () => {
+test("the workflow installs the root workspace before it builds", () => {
   // Not a security claim like the rest of this file — a can-it-run-at-all one,
   // kept here because this is the only suite that reads the publish workflow.
   //
-  // The root `workspaces` list is `packages/connector-installer-core` alone and
-  // the root manifest never names packages/polyfill-connectors, so a root
-  // `npm ci` leaves that package with no node_modules.
+  // Root connectors resolve their dependencies from the root workspace install.
   // scripts/verify-connector-oci-artifact.mjs resolves the built bundle's
   // externals against exactly that tree and refuses when it is absent, so
   // installing only the root makes the workflow fail its own verify step on
@@ -329,13 +327,13 @@ test("the workflow installs packages/polyfill-connectors before it builds", () =
 
   const installIndex = steps.findIndex((step) =>
     step.lines.some((line) =>
-      /npm ci\b.*--prefix packages\/polyfill-connectors/.test(line),
+      /npm ci\b.*--ignore-scripts/.test(line),
     ),
   );
   assert.notEqual(
     installIndex,
     -1,
-    "the publish workflow must run `npm ci` for packages/polyfill-connectors — the verify step resolves the bundle's externals against that tree and refuses without it",
+    "the publish workflow must run root `npm ci --ignore-scripts` before bundling connectors",
   );
 
   const buildIndex = steps.findIndex((step) =>
@@ -344,17 +342,16 @@ test("the workflow installs packages/polyfill-connectors before it builds", () =
   assert.notEqual(buildIndex, -1, "expected a step that builds the artifact layers");
   assert.ok(
     installIndex < buildIndex,
-    "the polyfill-connectors install must precede the artifact build",
+    "the root workspace install must precede the artifact build",
   );
 
-  // --ignore-scripts on this install too, for the reason the root one carries
-  // it: patchright's postinstall downloads a browser the bundle never uses.
+  // --ignore-scripts skips patchright's browser download, which the bundle does not use.
   const installStep = steps[installIndex];
   assert.ok(
     installStep.lines.some((line) =>
-      /npm ci\b.*--ignore-scripts.*--prefix packages\/polyfill-connectors/.test(line),
+      /npm ci\b.*--ignore-scripts/.test(line),
     ),
-    "the polyfill-connectors install must pass --ignore-scripts, as the root install does",
+    "the root workspace install must pass --ignore-scripts",
   );
 });
 

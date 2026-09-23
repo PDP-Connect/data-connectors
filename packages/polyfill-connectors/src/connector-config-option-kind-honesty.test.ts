@@ -15,12 +15,15 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+
 import test from "node:test";
 import { platformOptionKind } from "./connector-config-option-kind-registry.ts";
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 interface OptionsSchemaProperty {
 	declared_option_kind?: string;
@@ -33,7 +36,7 @@ interface ManifestWithOptionsSchema {
 }
 
 function listManifestNames(): string[] {
-	return readdirSync(MANIFESTS_DIR)
+	return manifestFileNames()
 		.filter((name) => name.endsWith(".json"))
 		.map((name) => name.replace(/\.json$/, ""))
 		.sort();
@@ -41,7 +44,7 @@ function listManifestNames(): string[] {
 
 function readManifest(name: string): ManifestWithOptionsSchema {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8"),
+		readFileSync(MANIFEST_PATH(name), "utf8"),
 	) as ManifestWithOptionsSchema;
 }
 

@@ -8,7 +8,7 @@ import test from "node:test";
 
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 } from "./connector-paths.ts";
 
 const KNOWN_EXTERNAL_TOOLS = ["slackdump", "gmcli"] as const;
@@ -29,7 +29,7 @@ test("connectors that reference known external tools declare them in manifests",
 			continue;
 		}
 
-		const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+		const manifestPath = MANIFESTS_DIR(name);
 		assert.equal(
 			existsSync(manifestPath),
 			true,

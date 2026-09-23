@@ -8,7 +8,7 @@ import test from "node:test";
 
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 } from "./connector-paths.ts";
 
 function connectorUsesBrowserRuntime(source: string): boolean {
@@ -27,7 +27,7 @@ test("browser-backed connectors declare the browser runtime binding", () => {
 		if (!connectorUsesBrowserRuntime(source)) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, `${name}.json`);
+		const manifestPath = MANIFESTS_DIR(name);
 		assert.equal(
 			existsSync(manifestPath),
 			true,

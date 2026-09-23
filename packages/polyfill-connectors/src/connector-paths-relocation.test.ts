@@ -11,9 +11,7 @@
  * loading, and connector-entrypoint resolution.
  *
  * The alternate layout mirrors the real one one level down:
- * `<tmp>/connectors/<key>/` and `<tmp>/manifests/<key>.json`, so a future
- * real layout move (root `connectors/<key>/`) is exactly the shape this test
- * already exercises.
+ * `<tmp>/connectors/<key>/`, including its manifest.
  */
 
 import assert from "node:assert/strict";
@@ -79,9 +77,8 @@ function makeAlternateLayout(): string {
 			"",
 		].join("\n"),
 	);
-	mkdirSync(join(root, "manifests"), { recursive: true });
 	writeFileSync(
-		join(root, "manifests", "probe_connector.json"),
+		join(probeDir, "manifest.json"),
 		JSON.stringify({ key: "probe_connector", streams: [] }, null, 2),
 	);
 	return root;
@@ -101,7 +98,7 @@ test("connectorDir/connectorEntrypoint/manifestPath resolve under a relocated ro
 			);
 			assert.equal(
 				manifestPath("probe_connector"),
-				join(root, "manifests", "probe_connector.json"),
+				join(root, "connectors", "probe_connector", "manifest.json"),
 			);
 		});
 	} finally {

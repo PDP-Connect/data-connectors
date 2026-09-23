@@ -39,7 +39,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	connectorDir as connectorDirFor,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
 	packageRoot,
 } from "./connector-paths.ts";
 
@@ -199,12 +200,12 @@ function coverageStreamNames(source: string): Set<string> {
 test("fleet: no manifest state_stream-parented stream constructs a DETAIL_COVERAGE", () => {
 	const parentedByConnector = new Map<string, Set<string>>();
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
 		const manifest = JSON.parse(
-			readFileSync(join(MANIFESTS_DIR, filename), "utf8"),
+			readFileSync(MANIFEST_PATH(filename.replace(/\.json$/, "")), "utf8"),
 		) as ConnectorManifest;
 		const parented = stateStreamParentedStreams(manifest);
 		if (parented.size) {

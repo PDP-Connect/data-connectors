@@ -106,22 +106,27 @@ try {
     stdio: "inherit",
   });
 
-  // Mirror only what the generator's import graph needs: collector-registry.ts and every
-  // connector's collector-definition.ts it imports, preserving data-connectors' real directory
-  // layout so relative imports inside collector-registry.ts resolve unchanged.
+  // Mirror the registry and the root connector definitions at their real relative paths.
   execFileSync(
     "rsync",
     [
       "-a",
       "--include=*/",
       "--include=collector-registry.ts",
-      "--include=collector-definition.ts",
       "--exclude=*",
       join(dataConnectorsDir, "packages/polyfill-connectors/") + "/",
       scratchPolyfillConnectors + "/",
     ],
     { stdio: "inherit" },
   );
+  execFileSync("rsync", [
+    "-a",
+    "--include=*/",
+    "--include=collector-definition.ts",
+    "--exclude=*",
+    join(dataConnectorsDir, "connectors/") + "/",
+    join(scratchRoot, "connectors/") + "/",
+  ], { stdio: "inherit" });
 
   // Copy the whole scripts/ directory, not just the generator file: data-connect PR #36
   // split part of the generator into a sibling module (collector-definitions-literal.ts)

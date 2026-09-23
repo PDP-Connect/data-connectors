@@ -31,10 +31,14 @@ const scriptPath = join(repoRoot, "scripts", "select-publish-target.mjs");
 /** A checkout-shaped tree with one real manifest, plus a marker path nothing should write. */
 function makeTree() {
   const dir = mkdtempSync(join(tmpdir(), "select-publish-"));
-  const manifests = join(dir, "packages", "polyfill-connectors", "manifests");
-  mkdirSync(manifests, { recursive: true });
-  writeFileSync(join(manifests, "oura.json"), JSON.stringify({ version: "0.1.0" }));
-  writeFileSync(join(manifests, "slack.json"), JSON.stringify({ version: "2.0.0" }));
+  const manifests = join(dir, "connectors");
+  mkdirSync(join(manifests, "oura"), { recursive: true });
+  mkdirSync(join(manifests, "slack"), { recursive: true });
+  mkdirSync(join(manifests, "apple_health"), { recursive: true });
+  mkdirSync(join(dir, "packages", "polyfill-connectors", "manifests"), { recursive: true });
+  writeFileSync(join(manifests, "oura", "manifest.json"), JSON.stringify({ version: "0.1.0" }));
+  writeFileSync(join(manifests, "slack", "manifest.json"), JSON.stringify({ version: "2.0.0" }));
+  writeFileSync(join(dir, "packages", "polyfill-connectors", "manifests", "oura.json"), JSON.stringify({ version: "0.1.0" }));
   return { dir, marker: join(dir, "MARKER") };
 }
 
@@ -239,7 +243,7 @@ test("an excluded target refuses even when the matrix leg names it", () => {
     const tree = makeTree();
     try {
       // A malformed manifest makes an accidental read observable.
-      writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/slack.json"), "not JSON");
+      writeFileSync(join(tree.dir, "connectors/slack/manifest.json"), "not JSON");
       const result = run(tree, { ...BASE, MATRIX_CONNECTOR: matrix,
         EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "slack" });
       assert.equal(result.status, 1);
@@ -255,7 +259,7 @@ test("an excluded target refuses even when the matrix leg names it", () => {
 test("canonical hyphenated keys select underscored manifest files", () => {
   const tree = makeTree();
   try {
-    writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/apple_health.json"),
+    writeFileSync(join(tree.dir, "connectors/apple_health/manifest.json"),
       JSON.stringify({ connector_key: "apple-health", version: "0.2.0" }));
     for (const trigger of [
       { EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "apple-health" },
@@ -276,7 +280,7 @@ test("canonical hyphenated keys select underscored manifest files", () => {
 test("a manifest with a conflicting publish identity refuses", () => {
   const tree = makeTree();
   try {
-    writeFileSync(join(tree.dir, "packages/polyfill-connectors/manifests/oura.json"),
+    writeFileSync(join(tree.dir, "connectors/oura/manifest.json"),
       JSON.stringify({ connector_key: "ynab", version: "0.1.0" }));
     const result = run(tree, { ...BASE, EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "oura" });
     assert.equal(result.status, 1);

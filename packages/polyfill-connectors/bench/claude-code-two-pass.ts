@@ -46,8 +46,8 @@ import { performance } from "node:perf_hooks";
 import {
 	emitSessionsFromAccumulators,
 	scanProjectDirs,
-} from "../connectors/claude_code/index.ts";
-import type { SessionAccumulator } from "../connectors/claude_code/types.ts";
+} from "../../../connectors/claude_code/index.ts";
+import type { SessionAccumulator } from "../../../connectors/claude_code/types.ts";
 import type {
 	EmittedMessage,
 	RecordData,

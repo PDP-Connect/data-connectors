@@ -27,7 +27,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import {
+	connectorDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 import type { RunSummary } from "../src/run-summary.ts";
 import {
 	type CheckpointEvidence,
@@ -76,7 +79,7 @@ after(() => {
 		});
 		// Only this suite's own fixture ids are removed, never `fixtures/`
 		// itself — that directory holds checked-in connector fixtures.
-		rmSync(join(PACKAGE_ROOT, "fixtures", connector), {
+		rmSync(connectorDir(connector), {
 			force: true,
 			recursive: true,
 		});

@@ -147,7 +147,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "bin/replay-pilot-fixtures.ts",
-			line: 166,
+			line: 165,
 			column: 13,
 			category: "dependent_pagination",
 			note: "replayConnector(): next request depends on the prior page's cursor/offset/response",
@@ -749,14 +749,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/claude_code/local-jsonl-incremental.test.ts",
-			line: 586,
+			line: 588,
 			column: 5,
 			category: "test_assertion_sequencing",
 			note: "import(): test drives/asserts an ordered per-case side effect",
 		},
 		{
 			path: "connectors/claude_code/local-jsonl-incremental.test.ts",
-			line: 1168,
+			line: 1170,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "makeAttachmentSource(): test drives/asserts an ordered per-case side effect",

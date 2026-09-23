@@ -20,7 +20,8 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFEST_DIR,
+	manifestFileNames,
+	manifestPath as shippedManifestPath,
 } from "../src/connector-paths.ts";
 import {
 	type ReconcileReport,
@@ -45,7 +46,7 @@ function emitSourcePathsFor(connectorDir: string): string[] {
 }
 
 function listManifestNames(): string[] {
-	return readdirSync(MANIFEST_DIR)
+	return manifestFileNames()
 		.filter((f) => f.endsWith(".json"))
 		.map((f) => f.replace(JSON_EXT_RE, ""))
 		.sort();
@@ -65,7 +66,7 @@ function buildReport(name: string): ReconcileReport | null {
 	const schemaPath = join(dir, "schemas.ts");
 	return reconcileFromDisk({
 		connector: name,
-		manifestPath: join(MANIFEST_DIR, `${name}.json`),
+		manifestPath: shippedManifestPath(name),
 		schemaPath: existsSync(schemaPath) ? schemaPath : null,
 		emitSourcePaths: emitSourcePathsFor(dir),
 	});

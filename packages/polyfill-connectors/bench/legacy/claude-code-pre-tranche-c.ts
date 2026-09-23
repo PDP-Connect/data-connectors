@@ -46,12 +46,12 @@ import {
 	TOOL_RESULT_PREVIEW_CHARS,
 	textPreview,
 	widenSessionTimeRange,
-} from "../../connectors/claude_code/parsers.ts";
+} from "../../../../connectors/claude_code/parsers.ts";
 import type {
 	ClaudeCodeState,
 	JsonlObject,
 	SessionAccumulator,
-} from "../../connectors/claude_code/types.ts";
+} from "../../../../connectors/claude_code/types.ts";
 import {
 	type CollectContext,
 	type RecordData,

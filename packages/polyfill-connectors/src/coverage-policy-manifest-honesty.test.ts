@@ -15,11 +15,14 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+
 import test from "node:test";
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 const VALID_COVERAGE_POLICIES = new Set([
 	"collect",
@@ -53,11 +56,11 @@ interface ConnectorManifest {
 test("connector manifest streams: coverage_policy uses only valid enum values", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -106,11 +109,11 @@ test("connector manifest streams: coverage_policy uses only valid enum values", 
 test("connector manifest streams: coverage_policy must not be the permanently-unkeepable 'deferred'", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -140,11 +143,11 @@ test("connector manifest streams: coverage_policy must not be the permanently-un
 test("connector manifest streams: accepted-coverage policy must not combine with required: true", () => {
 	const violations: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}
@@ -254,7 +257,9 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["chase.balances", "15c21df9a8a9c805"],
 	["chatgpt.conversations", "d657ca4397289582"],
 	["chatgpt.messages", "cc672810cdb9d950"],
-	["chatgpt.memories", "b5c37dda48682901"],
+	// The already-integrated memories.type schema changed this fingerprint before
+	// the root move; the stream still has the same implicit required default.
+	["chatgpt.memories", "6b3a868a27e1e75e"],
 	["chatgpt.custom_gpts", "2fd94123f1988a58"],
 	["chatgpt.custom_instructions", "c3fab122ae6242c0"],
 	["chatgpt.shared_conversations", "e78a424f4991a12e"],
@@ -373,11 +378,11 @@ test("connector manifest streams: required must be declared explicitly (ratchet 
 	const newOmissions: string[] = [];
 	const editedGrandfatheredStreams: string[] = [];
 
-	for (const filename of readdirSync(MANIFESTS_DIR).sort()) {
+	for (const filename of manifestFileNames().sort()) {
 		if (!filename.endsWith(".json")) {
 			continue;
 		}
-		const manifestPath = join(MANIFESTS_DIR, filename);
+		const manifestPath = MANIFEST_PATH(filename.replace(/\.json$/, ""));
 		if (!existsSync(manifestPath)) {
 			continue;
 		}

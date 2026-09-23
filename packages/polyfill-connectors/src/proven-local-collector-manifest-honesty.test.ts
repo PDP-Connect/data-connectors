@@ -22,11 +22,14 @@
 // it ships.
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+
 import test from "node:test";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 interface ConnectorManifest {
 	capabilities?: {
@@ -36,13 +39,13 @@ interface ConnectorManifest {
 	};
 }
 
-const manifestNames = readdirSync(MANIFESTS_DIR)
+const manifestNames = manifestFileNames()
 	.filter((name) => name.endsWith(".json"))
 	.sort();
 
 function readManifest(name: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, name), "utf8"),
+		readFileSync(MANIFEST_PATH(name.replace(/\.json$/, "")), "utf8"),
 	) as ConnectorManifest;
 }
 

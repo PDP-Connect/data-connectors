@@ -12,10 +12,13 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { manifestsDir, repoRoot } from "./connector-paths.ts";
+import {
+	manifestFileNames,
+	manifestPath,
+	repoRoot,
+} from "./connector-paths.ts";
 
 const MANIFEST_DIRS = [
-	{ label: "polyfill", path: manifestsDir },
 	{
 		label: "reference",
 		path: join(
@@ -63,6 +66,15 @@ function readManifests(): Array<{
 		connectorKey: string;
 		manifest: ConnectorManifest;
 	}> = [];
+	for (const filename of manifestFileNames()) {
+		const key = filename.replace(/\.json$/, "");
+		manifests.push({
+			connectorKey: `polyfill/${key}`,
+			manifest: JSON.parse(
+				readFileSync(manifestPath(key), "utf8"),
+			) as ConnectorManifest,
+		});
+	}
 	for (const dir of MANIFEST_DIRS) {
 		if (!existsSync(dir.path)) {
 			continue;

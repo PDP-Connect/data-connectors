@@ -43,10 +43,10 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../src/connector-conformance-roster.ts";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	fixturesRootDir as FIXTURES_DIR,
-	manifestsDir as MANIFESTS_DIR,
+	fixturesDir,
 	packageRoot as PACKAGE_ROOT,
 	repoRoot,
+	manifestPath as seamManifestPath,
 } from "../src/connector-paths.ts";
 
 type Verdict = "PASS" | "FAIL" | "UNKNOWN" | "ADVISORY" | "WEAK";
@@ -61,7 +61,7 @@ interface Step {
 }
 
 function manifestPath(connector: string): string {
-	return join(MANIFESTS_DIR, `${connector}.json`);
+	return seamManifestPath(connector);
 }
 
 export function checkManifest(connector: string): Step {
@@ -155,7 +155,7 @@ function checkTests(connector: string): Step {
 }
 
 function checkPilotFixture(connector: string): Step {
-	const dir = join(FIXTURES_DIR, connector, "scrubbed", "pilot-real-shape");
+	const dir = join(fixturesDir(connector), "scrubbed", "pilot-real-shape");
 	if (!existsSync(dir)) {
 		return {
 			detail:

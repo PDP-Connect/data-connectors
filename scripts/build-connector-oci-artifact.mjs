@@ -242,11 +242,8 @@ async function main() {
 		throw new Error(`Invalid connector directory name ${connectorDirectoryName}`);
 	}
 
-	const manifestPath = join(
-		packageRoot,
-		"manifests",
-		`${connectorDirectoryName}.json`,
-	);
+	const connectorDirectory = join(repoRoot, "connectors", connectorDirectoryName);
+	const manifestPath = join(connectorDirectory, "manifest.json");
 	if (!existsSync(manifestPath)) {
 		throw new Error(`No Collection Profile manifest at ${manifestPath}`);
 	}
@@ -268,11 +265,6 @@ async function main() {
 		);
 	}
 
-	const connectorDirectory = join(
-		packageRoot,
-		"connectors",
-		connectorDirectoryName,
-	);
 	const entrySource = join(connectorDirectory, "index.ts");
 	if (!existsSync(entrySource)) {
 		throw new Error(`No connector entrypoint at ${entrySource}`);
@@ -319,7 +311,7 @@ async function main() {
 	// the entrypoint can reach is bundled, so the code layer carries the bytes
 	// it needs instead of expecting to find them in the publisher's node_modules.
 	const build = await esbuild.build({
-		absWorkingDir: packageRoot,
+		absWorkingDir: repoRoot,
 		banner: {
 			js: `/* GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-connector-oci-artifact.mjs --connector ${connectorDirectoryName}. */\nimport { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);`,
 		},
@@ -403,7 +395,7 @@ async function main() {
 	let assetsTarball = null;
 	const iconRelative = profile.brand?.icon;
 	if (iconRelative) {
-		const iconSource = join(packageRoot, "manifests", iconRelative);
+		const iconSource = join(connectorDirectory, iconRelative);
 		if (!existsSync(iconSource)) {
 			throw new Error(`Manifest declares brand.icon ${iconRelative}, missing at ${iconSource}`);
 		}
@@ -450,7 +442,7 @@ async function main() {
 		.sort()
 		.map((input) => ({
 			path: input,
-			sha256: sha256(readFileSync(join(packageRoot, input))),
+			sha256: sha256(readFileSync(join(repoRoot, input))),
 		}));
 
 	const provenance = {
@@ -463,7 +455,7 @@ async function main() {
 		source: {
 			repository: "https://github.com/PDP-Connect/data-connectors",
 			revision,
-			package: "packages/polyfill-connectors",
+			package: `connectors/${connectorDirectoryName}`,
 		},
 		source_inventory: inputInventory,
 		build: {

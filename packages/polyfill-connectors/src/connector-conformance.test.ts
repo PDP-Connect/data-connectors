@@ -25,7 +25,7 @@
  * listing state agree, and that the named oracle file exists.
  */
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -34,12 +34,13 @@ import {
 	REAL_UNLISTED_CONNECTORS,
 } from "./connector-conformance-roster.ts";
 import {
-	manifestsDir as MANIFESTS_DIR,
-	packageRoot,
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+	repoRoot,
 } from "./connector-paths.ts";
 
 function readManifest(connectorKey: string): Record<string, unknown> | null {
-	const manifestPath = join(MANIFESTS_DIR, `${connectorKey}.json`);
+	const manifestPath = MANIFEST_PATH(connectorKey);
 	if (!existsSync(manifestPath)) {
 		return null;
 	}
@@ -63,7 +64,7 @@ function isOwnerVisible(connectorKey: string): boolean {
 }
 
 function allManifestConnectorKeys(): string[] {
-	return readdirSync(MANIFESTS_DIR)
+	return manifestFileNames()
 		.filter((f) => f.endsWith(".json"))
 		.map((f) => f.replace(/\.json$/, ""))
 		.sort();
@@ -101,7 +102,7 @@ test("every publicly-listed connector is in the production-ready roster, and vic
 
 test("every production-ready roster entry names a test file that exists", () => {
 	const missing = Object.entries(PRODUCTION_READY_CONNECTORS)
-		.filter(([, { testFile }]) => !existsSync(join(packageRoot, testFile)))
+		.filter(([, { testFile }]) => !existsSync(join(repoRoot, testFile)))
 		.map(([key, { testFile }]) => `${key} -> ${testFile}`);
 
 	assert.deepEqual(
@@ -133,7 +134,7 @@ test("known scaffold connectors are not publicly listed", () => {
 
 test("every REAL_UNLISTED_CONNECTORS entry names a test file that exists", () => {
 	const missing = Object.entries(REAL_UNLISTED_CONNECTORS)
-		.filter(([, { testFile }]) => !existsSync(join(packageRoot, testFile)))
+		.filter(([, { testFile }]) => !existsSync(join(repoRoot, testFile)))
 		.map(([key, { testFile }]) => `${key} -> ${testFile}`);
 
 	assert.deepEqual(

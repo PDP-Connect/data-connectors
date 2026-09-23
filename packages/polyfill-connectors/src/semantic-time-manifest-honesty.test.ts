@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+
 import test from "node:test";
 
 interface ManifestStream {
@@ -38,7 +38,7 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 
 // Streams that correspond to NO moment in the owner's life. Each entry records
 // why, because "we couldn't find a date" and "there is no date" are different
@@ -76,7 +76,7 @@ const AUDITED_CONNECTORS = [
 
 function readManifest(connector: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connector}.json`), "utf8"),
+		readFileSync(MANIFEST_PATH(connector), "utf8"),
 	) as ConnectorManifest;
 }
 

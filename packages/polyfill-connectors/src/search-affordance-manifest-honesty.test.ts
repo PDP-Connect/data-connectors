@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+
 import test from "node:test";
 
 interface JsonSchema {
@@ -30,7 +30,10 @@ interface ConnectorManifest {
 	streams?: ManifestStream[];
 }
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 const LEXICAL_FIELD_NAMES = new Set([
 	"about",
@@ -106,14 +109,14 @@ const NON_TEXT_FIELD_NAME =
 	/(^id$|_id$|id$|url|uri|href|link|path|sha|hash|email|phone|address|type$|status|code|token|currency|locale|timezone|mime|content_type|created|updated|date|time|ts$|at$|count|bytes|size|ordinal|index|version|etag|key$|ref$|fingerprint)/i;
 
 function manifestFiles(): string[] {
-	return readdirSync(MANIFESTS_DIR)
+	return manifestFileNames()
 		.filter((name) => name.endsWith(".json"))
 		.sort();
 }
 
 function readManifest(file: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, file), "utf8"),
+		readFileSync(MANIFEST_PATH(file.replace(/\.json$/, "")), "utf8"),
 	) as ConnectorManifest;
 }
 

@@ -126,6 +126,7 @@ import type {
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
 import {
+	fixturesDir,
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
@@ -1388,11 +1389,10 @@ export function findLatestCaptureDir(
 	env: Record<string, string | undefined>,
 ): string | undefined {
 	const configuredRoot = env.PDPP_CAPTURE_ROOT_DIR?.trim();
-	const captureRoot =
+	const rawDir =
 		configuredRoot && configuredRoot.length > 0
-			? configuredRoot
-			: join(PACKAGE_ROOT, "fixtures");
-	const rawDir = join(captureRoot, connector, "raw");
+			? join(configuredRoot, connector, "raw")
+			: join(fixturesDir(connector), "raw");
 	let entries: string[];
 	try {
 		entries = readdirSync(rawDir).filter((name) => {

@@ -57,7 +57,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
 	fixturesDir,
-	manifestsDir as MANIFEST_DIR,
+	manifestPath as shippedManifestPath,
 } from "../src/connector-paths.ts";
 
 const SAMPLE_CAP = 10_000;
@@ -156,8 +156,7 @@ export function readManifest(
 	connector: string,
 	manifestPathOverride?: string,
 ): Manifest {
-	const manifestPath =
-		manifestPathOverride ?? join(MANIFEST_DIR, `${connector}.json`);
+	const manifestPath = manifestPathOverride ?? shippedManifestPath(connector);
 	if (!existsSync(manifestPath)) {
 		throw new Error(
 			`no manifest found for connector "${connector}" (expected ${manifestPath})`,
@@ -690,7 +689,7 @@ function main(): void {
 
 	console.log(`observe-schema: ${args.connector}`);
 	console.log(
-		`manifest: ${args.manifestPath ?? join(MANIFEST_DIR, `${args.connector}.json`)}`,
+		`manifest: ${args.manifestPath ?? shippedManifestPath(args.connector)}`,
 	);
 	console.log(`record sources: ${sources.join(", ")}`);
 

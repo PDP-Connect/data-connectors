@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+
 import test from "node:test";
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	manifestPath as MANIFEST_PATH,
+	manifestFileNames,
+} from "./connector-paths.ts";
 
 const LIVE_STATE_PATTERNS: readonly RegExp[] = [
 	/\bcurrently\s+(?:logged in|logged out|valid|invalid|healthy|degraded|broken|blocked|expired|available|unavailable)\b/iu,
@@ -53,16 +56,14 @@ interface Manifest {
 }
 
 function listManifestNames(): string[] {
-	return readdirSync(MANIFESTS_DIR)
+	return manifestFileNames()
 		.filter((name) => name.endsWith(".json"))
 		.map((name) => name.replace(/\.json$/u, ""))
 		.sort();
 }
 
 function readManifest(name: string): Manifest {
-	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8"),
-	) as Manifest;
+	return JSON.parse(readFileSync(MANIFEST_PATH(name), "utf8")) as Manifest;
 }
 
 function setupAndPolicyText(

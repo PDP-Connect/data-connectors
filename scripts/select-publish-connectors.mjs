@@ -26,8 +26,8 @@ import { artifactInputHash, ArtifactInputError } from "./connector-artifact-inpu
 import { PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 import { lookupManifest } from "./lookup-manifest.mjs";
 
-const MANIFEST_ROOT = "packages/polyfill-connectors/manifests";
-const INDEX_PATH = "packages/polyfill-connectors/connector-index.json";
+const MANIFEST_ROOT = "connectors";
+const INDEX_PATH = "connector-implementation-index.json";
 const ZERO_SHA = /^0{40}$/;
 const SHA = /^[0-9a-f]{40}$/i;
 
@@ -98,7 +98,7 @@ function readCommitVersions(commit, connectors, { cwd = process.cwd() } = {}) {
   const index = readJsonAtCommit(commit, INDEX_PATH, { cwd });
   return new Map(
     connectors.map(({ manifest, connectorKey }) => {
-      const manifestPath = `${MANIFEST_ROOT}/${manifest}.json`;
+      const manifestPath = `${MANIFEST_ROOT}/${manifest}/manifest.json`;
       const manifestDoc = readJsonAtCommit(commit, manifestPath, { cwd });
       const manifestVersion = versionFromManifest(manifestDoc, `${manifestPath} at ${commit}`);
       const indexVersion = versionFromIndex(
@@ -122,6 +122,12 @@ function readCommitVersions(commit, connectors, { cwd = process.cwd() } = {}) {
  * change that would overwrite an existing version. The index is still a
  * consistency gate, not an artifact input.
  */
+function isFirstRootLayoutTransition(before, after, cwd) {
+  return Boolean(before && before !== after &&
+    readJsonAtCommit(before, "packages/polyfill-connectors/connector-index.json", { cwd }) !== null &&
+    readJsonAtCommit(after, INDEX_PATH, { cwd }) !== null);
+}
+
 export function selectChangedConnectors({
   before,
   after,
@@ -129,6 +135,12 @@ export function selectChangedConnectors({
   connectors = PUBLISHABLE_CONNECTORS,
 }) {
   if (!after) throw new PublishSelectionError("after commit is not set");
+  if (isFirstRootLayoutTransition(before, after, cwd)) {
+    // Exactly one main transition can satisfy this: subsequent commits have
+    // no old package index at `before`. Keep the layout move green without
+    // silently publishing every moved connector as a new release.
+    return [];
+  }
   const beforeVersions = readCommitVersions(before ?? null, connectors, { cwd });
   const afterVersions = readCommitVersions(after, connectors, { cwd });
 
@@ -232,15 +244,19 @@ function notice(message) {
 }
 
 async function main() {
+  const firstLayoutTransition = isFirstRootLayoutTransition(
+    process.env.BEFORE_SHA ?? null,
+    process.env.AFTER_SHA,
+    process.cwd(),
+  );
   const candidates = selectChangedConnectors({
     before: process.env.BEFORE_SHA ?? null,
     after: process.env.AFTER_SHA,
   });
   if (candidates.length === 0) {
-    notice(
-      `No connector version changed and no shipped connector content changed between ${process.env.BEFORE_SHA} and ${process.env.AFTER_SHA}; ` +
-        "nothing to publish.",
-    );
+    notice(firstLayoutTransition
+      ? "First root-layout move: automatic connector publication is skipped. Release individual versioned connectors explicitly after consumer activation review."
+      : `No connector version changed and no shipped connector content changed between ${process.env.BEFORE_SHA} and ${process.env.AFTER_SHA}; nothing to publish.`);
     emit({
       matrix: JSON.stringify({ include: [] }),
       "has-version-changes": "false",

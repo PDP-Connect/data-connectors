@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 	packageRoot as PKG_ROOT,
 } from "../src/connector-paths.ts";
 
@@ -315,7 +315,7 @@ function manifestDigest(raw: string): string {
 }
 
 function generateForConnector(connector: string): void {
-	const manifestPath = join(MANIFESTS_DIR, `${connector}.json`);
+	const manifestPath = MANIFESTS_DIR(connector);
 	const raw = readFileSync(manifestPath, "utf8");
 	const manifest = JSON.parse(raw) as Manifest;
 

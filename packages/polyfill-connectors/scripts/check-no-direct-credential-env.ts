@@ -46,6 +46,7 @@ import { join, relative } from "node:path";
 import {
 	connectorsDir,
 	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
 
 const SCAN_ROOTS = [join(PACKAGE_ROOT, "src", "auto-login"), connectorsDir];
@@ -120,7 +121,10 @@ function scan(): { violations: Violation[]; seenAllowlisted: Set<string> } {
 	const violations: Violation[] = [];
 	const seenAllowlisted = new Set<string>();
 	for (const file of files.sort((a, b) => a.localeCompare(b))) {
-		const rel = relative(PACKAGE_ROOT, file);
+		const rel = relative(
+			file.startsWith(connectorsDir) ? REPO_ROOT : PACKAGE_ROOT,
+			file,
+		);
 		const lines = readFileSync(file, "utf8").split("\n");
 		for (const [index, text] of lines.entries()) {
 			// Skip comments: this file and login-credentials.ts NAME these variables

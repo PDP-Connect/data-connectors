@@ -35,7 +35,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { z } from "zod";
-import { validateRecord as jellyfinValidateRecord } from "../connectors/jellyfin/schemas.ts";
+import { validateRecord as jellyfinValidateRecord } from "../../../connectors/jellyfin/schemas.ts";
 import {
 	itemsSchema as itemsSchemaGen,
 	librariesSchema as librariesSchemaGen,

@@ -54,10 +54,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
-import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import { repoRoot as REPO_ROOT } from "../src/connector-paths.ts";
 import { NO_AWAIT_IN_LOOPS_ALLOWLIST } from "./no-await-in-loops-allowlist.ts";
 
-const BIOME_BIN = join(PACKAGE_ROOT, "node_modules", ".bin", "biome");
+const BIOME_BIN = join(REPO_ROOT, "node_modules", ".bin", "biome");
 const RULE_CATEGORY = "lint/performance/noAwaitInLoops";
 
 interface BiomeLocation {
@@ -125,7 +125,7 @@ export function countByLocationKey<
  */
 function collectLiveFindings(): LiveFinding[] {
 	const scratchConfigPath = join(
-		PACKAGE_ROOT,
+		REPO_ROOT,
 		`.biome-noAwaitInLoops-conformance.${process.pid}.jsonc`,
 	);
 	const reportPath = join(
@@ -137,9 +137,10 @@ function collectLiveFindings(): LiveFinding[] {
 		overrides: [
 			{
 				includes: [
-					"src/**/*.ts",
-					"bin/**/*.ts",
-					"bench/**/*.ts",
+					"packages/polyfill-connectors/src/**/*.ts",
+					"packages/polyfill-connectors/bin/**/*.ts",
+					"packages/polyfill-connectors/bench/**/*.ts",
+					"packages/polyfill-connectors/scripts/**/*.{ts,mjs}",
 					"connectors/**/*.ts",
 				],
 				linter: {
@@ -164,9 +165,13 @@ function collectLiveFindings(): LiveFinding[] {
 					"--max-diagnostics=2000",
 					"--reporter=json",
 					`--reporter-file=${reportPath}`,
-					".",
+					"packages/polyfill-connectors/src",
+					"packages/polyfill-connectors/bin",
+					"packages/polyfill-connectors/bench",
+					"packages/polyfill-connectors/scripts",
+					"connectors",
 				],
-				{ cwd: PACKAGE_ROOT, stdio: "pipe" },
+				{ cwd: REPO_ROOT, stdio: "pipe" },
 			);
 		} catch {
 			// Biome exits non-zero whenever it reports ANY diagnostic (including
@@ -177,7 +182,10 @@ function collectLiveFindings(): LiveFinding[] {
 		return report.diagnostics
 			.filter((d) => d.category === RULE_CATEGORY && d.location)
 			.map((d) => ({
-				path: d.location?.path ?? "",
+				path: (d.location?.path ?? "").replace(
+					/^packages\/polyfill-connectors\//,
+					"",
+				),
 				line: d.location?.start.line ?? 0,
 				column: d.location?.start.column ?? 0,
 			}));

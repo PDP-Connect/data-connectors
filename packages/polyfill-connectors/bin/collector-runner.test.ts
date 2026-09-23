@@ -12,6 +12,7 @@ import {
 	LocalDeviceOutbox,
 } from "@pdpp/collector-runtime";
 import { definitionStreams } from "../src/collector-registry.ts";
+import { connectorEntrypoint } from "../src/connector-paths.ts";
 import {
 	buildConnectorSpec,
 	parseArgs,
@@ -91,7 +92,7 @@ test("CLI run --connector gmail uses bundled defaults so operators don't need --
 	const spec = buildConnectorSpec(options);
 	assert.equal(spec.connector_id, "gmail");
 	assert.equal(spec.command, "tsx");
-	assert.deepEqual(spec.args, ["connectors/gmail/index.ts"]);
+	assert.deepEqual(spec.args, [connectorEntrypoint("gmail")]);
 	// Gmail streams must include attachments so the connector hydrates
 	// new-UID attachments on every incremental run; backfill is opt-in.
 	assert.ok(spec.streams.includes("attachments"));
@@ -283,7 +284,7 @@ test("CLI run --connector google_takeout uses its own LocalCollectorDefinition s
 	const spec = buildConnectorSpec(options);
 	assert.equal(spec.connector_id, "google_takeout");
 	assert.equal(spec.command, "tsx");
-	assert.deepEqual(spec.args, ["connectors/google_takeout/index.ts"]);
+	assert.deepEqual(spec.args, [connectorEntrypoint("google_takeout")]);
 	assert.deepEqual(spec.streams, [...definitionStreams("google_takeout")]);
 	assert.equal(spec.runtime_requirements?.bindings?.filesystem?.required, true);
 });

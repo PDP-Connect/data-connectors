@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+
 import test from "node:test";
 
 /**
@@ -28,7 +28,7 @@ import test from "node:test";
  * these declarations.
  */
 
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 
 interface JsonSchema {
 	format?: string;
@@ -99,7 +99,7 @@ function projectFieldCapabilities(
 
 function loadStream(connectorKey: string, streamName: string): ManifestStream {
 	const manifest = JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connectorKey}.json`), "utf8"),
+		readFileSync(MANIFEST_PATH(connectorKey), "utf8"),
 	) as ConnectorManifest;
 	const stream = (manifest.streams ?? []).find((s) => s.name === streamName);
 	assert.ok(stream, `${connectorKey}.${streamName} not found`);

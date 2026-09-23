@@ -30,7 +30,7 @@ export const EXCLUDED_PATH_SEGMENTS = ["node_modules", "dist", "build"];
 export const EXCLUDED_FILES = new Map([
   // Captured/synthetic fixture data — not first-party logic.
   [
-    "packages/polyfill-connectors/fixtures/codex/source-home/deviceA/codex-home/shell-snapshots/snapshot-1.sh",
+    "connectors/codex/fixtures/source-home/deviceA/codex-home/shell-snapshots/snapshot-1.sh",
     "captured/synthetic fixture data, not first-party source",
   ],
 ]);

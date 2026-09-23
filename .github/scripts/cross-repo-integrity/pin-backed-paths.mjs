@@ -12,12 +12,12 @@
 const PIN_FILE = ".github/cross-repo-pins.json";
 
 const BUNDLED_CONNECTOR_DIRS = [
-	"packages/polyfill-connectors/connectors/apple_photos",
-	"packages/polyfill-connectors/connectors/claude_code",
-	"packages/polyfill-connectors/connectors/codex",
-	"packages/polyfill-connectors/connectors/google_messages",
-	"packages/polyfill-connectors/connectors/google_takeout",
-	"packages/polyfill-connectors/connectors/imessage",
+	"connectors/apple_photos",
+	"connectors/claude_code",
+	"connectors/codex",
+	"connectors/google_messages",
+	"connectors/google_takeout",
+	"connectors/imessage",
 ];
 
 const PIN_BACKED_ARTIFACTS = {

@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { readdirSync, readFileSync } from "node:fs";
-import { packageRoot } from "./connector-paths.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { repoRoot } from "./connector-paths.ts";
 
 export type BoundedReadPattern = "readFile" | "readFileSync" | "all";
 
@@ -97,7 +97,6 @@ const READ_FILE_IMPORT =
 	/import\s+\{[^}]*\breadFile\b[^}]*\}\s+from\s+["']node:fs\/promises["']/;
 const READ_FILE_SYNC = /\breadFileSync\s*\(/;
 const DOT_ALL = /\.all\s*\(/;
-const MANIFEST_JSON_SUFFIX = /\.json$/;
 
 const MATCHERS: readonly PatternMatcher[] = [
 	{
@@ -111,19 +110,18 @@ const MATCHERS: readonly PatternMatcher[] = [
 export const EXPLICIT_LOCAL_CLASS_CONNECTORS: readonly string[] = [];
 
 export function discoverLocalSourceConnectors(
-	root: string = packageRoot,
+	root: string = repoRoot,
 ): string[] {
-	const manifestsDir = new URL("manifests/", new URL(`${root}/`, "file:"));
+	const connectorsDir = new URL("connectors/", new URL(`${root}/`, "file:"));
 	const discovered = new Set<string>(EXPLICIT_LOCAL_CLASS_CONNECTORS);
-	for (const entry of readdirSync(manifestsDir)) {
-		if (!entry.endsWith(".json")) {
+	for (const entry of readdirSync(connectorsDir)) {
+		const manifestUrl = new URL(`${entry}/manifest.json`, connectorsDir);
+		if (!existsSync(manifestUrl)) {
 			continue;
 		}
-		const manifest = JSON.parse(
-			readFileSync(new URL(entry, manifestsDir), "utf8"),
-		) as unknown;
+		const manifest = JSON.parse(readFileSync(manifestUrl, "utf8")) as unknown;
 		if (declaresFilesystemBinding(manifest)) {
-			discovered.add(entry.replace(MANIFEST_JSON_SUFFIX, ""));
+			discovered.add(entry);
 		}
 	}
 	return [...discovered].sort();
@@ -210,7 +208,7 @@ export interface FindUnapprovedBoundedReadsOptions {
 export function findUnapprovedBoundedReads(
 	options: FindUnapprovedBoundedReadsOptions = {},
 ): BoundedReadFinding[] {
-	const root = options.root ?? packageRoot;
+	const root = options.root ?? repoRoot;
 	const connectorsRoot = new URL("connectors/", new URL(`${root}/`, "file:"));
 	const exceptions = options.exceptions ?? BOUNDED_READ_EXCEPTIONS;
 	const findings: BoundedReadFinding[] = [];

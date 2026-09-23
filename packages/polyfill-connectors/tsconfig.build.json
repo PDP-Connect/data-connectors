@@ -8,7 +8,6 @@
 	},
 	"include": [
 		"src/**/*.ts",
-		"connectors/**/*.ts",
 		"types/**/*.d.ts",
 		"bin/local-device-exporter.ts",
 		"bin/scrub-fixtures.ts",

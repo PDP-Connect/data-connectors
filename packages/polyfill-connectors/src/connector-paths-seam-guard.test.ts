@@ -172,9 +172,10 @@ function listTsFiles(dir: string, out: string[]): void {
 }
 
 test("no file outside connector-paths.ts computes a manifests/ or connectors/ path itself", () => {
-	const roots = ["bin", "connectors", "scripts", "src"].map((r) =>
-		join(packageRoot, r),
-	);
+	const roots = [
+		...["bin", "scripts", "src"].map((r) => join(packageRoot, r)),
+		connectorsDir,
+	];
 	const files: string[] = [];
 	for (const root of roots) {
 		listTsFiles(root, files);
@@ -200,7 +201,7 @@ test("no file outside connector-paths.ts computes a manifests/ or connectors/ pa
 });
 
 test("the seam module itself resolves the real, current-layout directories", () => {
-	assert.ok(connectorsDir.startsWith(packageRoot));
+	assert.equal(connectorsDir, join(repoRoot, "connectors"));
 	assert.ok(packageRoot.startsWith(repoRoot));
 });
 

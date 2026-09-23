@@ -24,7 +24,6 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 import {
 	buildCollectorStartMessage,
@@ -33,7 +32,7 @@ import {
 import { LOCAL_COLLECTOR_DEFINITIONS } from "./collector-registry.ts";
 import {
 	connectorEntrypoint,
-	manifestsDir as MANIFESTS_DIR,
+	manifestPath as MANIFESTS_DIR,
 } from "./connector-paths.ts";
 
 interface ManifestStream {
@@ -47,7 +46,7 @@ interface ConnectorManifest {
 
 function readManifest(connectorId: string): ConnectorManifest {
 	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${connectorId}.json`), "utf8"),
+		readFileSync(MANIFESTS_DIR(connectorId), "utf8"),
 	) as ConnectorManifest;
 }
 

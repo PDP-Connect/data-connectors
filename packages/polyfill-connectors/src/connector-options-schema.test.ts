@@ -24,12 +24,13 @@ import {
 	connectorOptionsSchemas,
 	resolveOptionsSchemaFromManifest,
 } from "./connector-options-schema.ts";
-import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 
 function readRealManifest(key: string): Record<string, unknown> {
-	return JSON.parse(
-		readFileSync(join(MANIFESTS_DIR, `${key}.json`), "utf8"),
-	) as Record<string, unknown>;
+	return JSON.parse(readFileSync(MANIFEST_PATH(key), "utf8")) as Record<
+		string,
+		unknown
+	>;
 }
 
 function optionOf(

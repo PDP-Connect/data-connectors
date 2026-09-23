@@ -38,7 +38,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	connectorsDir as CONNECTORS_DIR,
-	manifestsDir as MANIFEST_DIR,
+	manifestPath as MANIFEST_DIR,
 } from "./connector-paths.ts";
 import { GENERATED_STATIC_SECRET_REGISTRY } from "./generated/static-secret-registry.generated.ts";
 
@@ -52,7 +52,7 @@ import { GENERATED_STATIC_SECRET_REGISTRY } from "./generated/static-secret-regi
  * than assuming directory name === registry key.
  */
 function registryKeyForDirectory(directoryName: string): string {
-	const manifestPath = join(MANIFEST_DIR, `${directoryName}.json`);
+	const manifestPath = MANIFEST_DIR(directoryName);
 	if (!existsSync(manifestPath)) {
 		return directoryName;
 	}

@@ -33,7 +33,6 @@ import { fileURLToPath } from "node:url";
 import { classifyExternals } from "./connector-host-runtime-contract.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
 const builder = join(repoRoot, "scripts", "build-connector-oci-artifact.mjs");
 const verifier = join(repoRoot, "scripts", "verify-connector-oci-artifact.mjs");
 
@@ -41,7 +40,7 @@ const verifier = join(repoRoot, "scripts", "verify-connector-oci-artifact.mjs");
 // environments, so the platform package may be present while the wrapper is not
 // executable. Resolving the library path explicitly keeps the gate runnable in
 // CI and locally without depending on that.
-const esbuildLib = join(packageRoot, "node_modules", "esbuild", "lib", "main.js");
+const esbuildLib = join(repoRoot, "node_modules", "esbuild", "lib", "main.js");
 
 let workspace;
 let ouraArtifact;
@@ -101,7 +100,7 @@ function artifactWithCode(name, source) {
 before(() => {
 	assert.ok(
 		existsSync(esbuildLib),
-		`esbuild is not installed at ${esbuildLib} — run \`npm ci\` in packages/polyfill-connectors first.`,
+		`esbuild is not installed at ${esbuildLib} — run \`npm ci\` at the repository root first.`,
 	);
 	workspace = mkdtempSync(join(tmpdir(), "pdpp-artifact-gate-"));
 	ouraArtifact = join(workspace, "oura");
@@ -398,7 +397,7 @@ describe("P2-1 — version agreement", () => {
 
 	it("still accepts an override that restates the canonical version", () => {
 		const profile = JSON.parse(
-			readFileSync(join(packageRoot, "manifests", "oura.json"), "utf8"),
+			readFileSync(join(repoRoot, "connectors", "oura", "manifest.json"), "utf8"),
 		);
 		const result = build([
 			"--connector",
