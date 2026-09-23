@@ -983,7 +983,7 @@
             },
             {
               "field": "achievements",
-              "reason": "deliberate_break: legacy scraped achievement badges from the profile DOM (.js-achievement-card img); GitHub exposes no REST or GraphQL field for a user's achievement badges. No scrape fallback is authorized (lead_decision restricts contributions/profile gaps to REST-first, GraphQL-when-REST-cannot-supply; no field means no path). This is a permanent capability loss versus the legacy connector, not a bug to fix later."
+              "reason": "unported recovery, feasible (lead red-team correction, superseding the deliberate_break framing below): legacy connectors/github/github-playwright.js:309-316 extracts achievement badge images from the public profile page DOM (`.js-achievement-card img` / `a[href*=\"/achievements/\"] img`), not from the REST/GraphQL API. GitHub indeed exposes no REST or GraphQL field for this, but the modern connector already resolves the account's own login via `/user` (index.ts:612 `gh<GitHubUser>(ctx, \"/user\")`), so a profile-page fetch/parse (mirroring the legacy DOM-scrape approach against `github.com/{login}`) is feasible and unimplemented — not a confirmed permanent loss. Not a deliberate_break; needs a named lead_decision on whether to port the profile-page scrape (implementation is out of scope for this correction, tracked as a separate lane)."
             },
             {
               "field": "contributionsLastYear (aggregate)",

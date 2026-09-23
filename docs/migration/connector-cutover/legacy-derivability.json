@@ -274,12 +274,13 @@
       "is_business": "profile.is_business (parsers.ts:135)"
     },
     "not_derivable": [
-      "follower_count: CONFIRMED NOT DERIVABLE today. profileRecord() hardcodes follower_count: null (parsers.ts:130) because the connector's sole profile source, /accounts/web_info/, does not carry it (confirmed absent live 2026-09-22, index.ts:276-286). The connector's own 'Known limitations' comment (index.ts:63-93) names a possible future source (a profile-page GraphQL query the legacy connector used, not yet ported) — tracked, but unresolved.",
-      "following_count: same as follower_count — hardcoded null (parsers.ts:131), confirmed absent from the only live-fetched source.",
-      "media_count (-> post_count): same — hardcoded null (parsers.ts:132), confirmed absent live."
+      "follower_count: FEASIBLE NAMED ENRICHMENT, IMPLEMENTATION PENDING (lead red-team correction; NOT accepted as a permanent loss). profileRecord() hardcodes follower_count: null today (parsers.ts:130) because the connector's only currently-wired profile source, /accounts/web_info/, does not carry it (confirmed absent live 2026-09-22, index.ts:276-286). But legacy connectors/meta/instagram-playwright.js:656-679,1068-1075 captured this from the profile-page GraphQL response and mapped it directly — and the modern connector already observes profile GraphQL responses for other purposes (index.ts:363-374, the posts-timeline capture pattern), and the parser's own header comment (parsers.ts:106-113) names this exact GraphQL query as a viable fill source. This is feasible, unimplemented enrichment, not a confirmed API limitation.",
+      "following_count: same as follower_count — feasible via the same profile GraphQL response the legacy connector already parsed; hardcoded null today (parsers.ts:131), implementation pending, not accepted as permanent.",
+      "media_count (-> post_count): same — feasible via the same GraphQL response; hardcoded null today (parsers.ts:132), implementation pending, not accepted as permanent."
     ],
     "semantic_notes": [
-      "All three not-derivable fields are optional in the legacy schema (only username/full_name are required), so this is a field-level loss, not a scope-breaking one."
+      "All three not-derivable fields are optional in the legacy schema (only username/full_name are required), so this is a field-level loss, not a scope-breaking one.",
+      "Classification (lead red-team correction, superseding prior framing): 'feasible named enrichment, implementation pending' — not an accepted or permanent loss. Implementation (wiring the profile GraphQL observation already used elsewhere in this connector into profileRecord()) is out of scope for this correction and belongs to a separate lane."
     ],
     "status": "loss"
   },
@@ -629,7 +630,7 @@
       "contributionsLastYear": "derivation: SUM(contributions.contribution_count) over the returned window (see github.contributions)"
     },
     "not_derivable": [
-      "achievements: CONFIRMED PERMANENT deliberate_break. No REST or GraphQL field exists for GitHub achievement badges; grep for 'achievement' across the connector returns zero matches. This is settled, not pending.",
+      "achievements: UNPORTED RECOVERY, FEASIBLE (lead red-team correction; supersedes the prior 'confirmed permanent' framing). No REST or GraphQL field exists for GitHub achievement badges, but legacy connectors/github/github-playwright.js:309-316 never used the API for this — it scraped the badge images from the public profile page DOM (`.js-achievement-card img` / `a[href*=\"/achievements/\"] img`). The modern connector already resolves the account's own login via `/user` (index.ts:612), so a profile-page fetch/parse mirroring that DOM-scrape approach is feasible and simply unimplemented. NOT a confirmed permanent loss or deliberate_break; needs a named lead_decision on whether to port the scrape. Implementation is a separate lane, not this correction's job.",
       "organizations[].label: NOT a hard loss, a small named-fix gap. Legacy `label` was the org's display name. The modern `GitHubOrgMembership` type (types.ts:184-189) only declares `avatar_url`, `description`, `id`, `login` — `organizationRecord` (parsers.ts:400-409) maps `organizations.description` (GitHub's org bio text) as the closest field, not a display name. GitHub's real `GET /user/orgs` response does return a `name` field distinct from `description`; the type simply doesn't capture it today. One-line fix: add `name?: string | null` to `GitHubOrgMembership` and map it to `organizations.name` (or reuse `label`)."
     ],
     "semantic_notes": [
