@@ -48,14 +48,18 @@
  * gets is presumably server-controlled, not something this connector
  * chooses.
  *
- * The INNER layout of each multi-part category ZIP is UNVERIFIED — no part
- * was ever successfully downloaded and inspected this session (both known
- * job identifiers, the predecessor's completed nonce and this lane's
- * attempted re-fetch of the same two jobs, returned a Cloudflare bot
- * challenge; see the report). `parsers.ts`'s `classifyManifestPartEntries`
- * therefore classifies each part's JSON entries by CONTENT SHAPE, not by
- * assumed filename, and flags anything it can't classify instead of
- * silently dropping it.
+ * The INNER layout of each multi-part category ZIP is now VERIFIED — this
+ * lane read Tim's real, already-downloaded local part ZIPs offline (never
+ * an export_url) and confirmed every category's exact entry names and
+ * top-level JSON keys; see `parsers.ts`'s module comment above
+ * `classifyManifestPartEntries` for the full per-category layout and the
+ * report for the driver used. `classifyManifestPartEntries` classifies each
+ * `conversations`/`projects` part's JSON entries by CONTENT SHAPE (matching
+ * the verified real keys), and treats any other category (`memories`,
+ * `design_chats`, `light_metadata`) as out-of-scope by category before
+ * content inspection — those categories have no capability-map stream (see
+ * report's CONTRACT-CHANGE-REQUEST) and are downloaded-but-not-parsed,
+ * reported via PROGRESS rather than silently dropped.
  *
  * ── RESUMABILITY: OLD vs NEW FORMAT DIFFERS ─────────────────────────────
  *
@@ -99,24 +103,27 @@
  *
  * Tested surfaces: process-level protocol tests against a fake page/context
  * (integration.test.ts) for both formats, and pure-parser tests against
- * SYNTHETIC fixtures for both formats. NO live account run has ever
- * completed a parse against a real multi-part manifest's part bytes — see
- * the cut-anthropic-export report for exactly what was and wasn't proven.
+ * SYNTHETIC fixtures for both formats, PLUS an offline driver run against
+ * the real local part ZIPs (see report) exercising the actual
+ * parse/classify/validate path end-to-end — the manifest-format's real
+ * record counts and schema validation are now proven (see report). NO live
+ * BROWSER run (request export -> poll -> download) has completed against a
+ * real account this format was never observed to originate from a live
+ * connector run, only from Tim's own UI-driven export already on disk.
  *
  * Known untested / unconfirmed against a real account:
  *   - The exact `/api/organizations` capability field used to select the
  *     chat-capable org (mirrors legacy: `capabilities.includes('chat')`,
  *     falling back to `capabilities.includes('claude_max')`, then the
  *     first org).
- *   - The exact `docs[]` sub-field names inside a project's detail (see
- *     parsers.ts header comment).
- *   - The INNER layout of a multi-part category ZIP (see above).
  *   - Whether claude.ai's download endpoints still gate on
  *     `Sec-Fetch-Dest: document` (the legacy connector's documented reason
  *     for needing a real navigation/download event rather than in-page
  *     `fetch()`) — this connector navigates via `page.goto` on each
  *     download URL and captures the resulting `download` event via
  *     `attachDownloadQueue`, matching that constraint.
+ *   - `docs[]` sub-field names and the multi-part category ZIP layout are
+ *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
  */
 
 import { closeSync, openSync, statSync } from "node:fs";
@@ -443,7 +450,10 @@ interface ProjectZipFile {
 	json: unknown;
 }
 
-function readExportZip(zipPath: string): {
+/** Exported for the offline real-export driver (see report) and tests only
+ * — never called from a network/network-adjacent code path outside index.ts
+ * itself. Reads local ZIP bytes; no I/O beyond the given file descriptor. */
+export function readExportZip(zipPath: string): {
 	conversationsJson: unknown;
 	projectFiles: ProjectZipFile[];
 } {
@@ -471,12 +481,16 @@ function readExportZip(zipPath: string): {
 
 /**
  * Read every `.json` entry out of one downloaded multi-part manifest ZIP.
- * Unlike `readExportZip` (old format), this does NOT assume a specific
- * entry name — the inner layout of a category ZIP is UNVERIFIED (see
- * module header). Every `.json` entry is returned for
- * `classifyManifestPartEntries` to sort by content shape.
+ * Unlike `readExportZip` (old format), this does not assume a single fixed
+ * entry name — a category ZIP holds one or more `.json` entries (verified
+ * layout per category in parsers.ts's module comment). Every `.json` entry
+ * is returned for `classifyManifestPartEntries` to sort by category and
+ * content shape.
+ *
+ * Exported for the offline real-export driver (see report) and tests only
+ * — see readExportZip's note above.
  */
-function readManifestPartZip(zipPath: string): ManifestPartFile[] {
+export function readManifestPartZip(zipPath: string): ManifestPartFile[] {
 	const fd = openSync(zipPath, "r");
 	try {
 		const fileSize = statSync(zipPath).size;
@@ -826,6 +840,7 @@ export async function collectAnthropic({
 		const rawConversations: unknown[] = [];
 		const rawProjects: unknown[] = [];
 		const unclassified: string[] = [];
+		const outOfScopeByCategory = new Map<string, number>();
 		for (const result of results) {
 			const classified = classifyManifestPartEntries(
 				result.category,
@@ -834,6 +849,37 @@ export async function collectAnthropic({
 			rawConversations.push(...classified.conversations);
 			rawProjects.push(...classified.projects);
 			unclassified.push(...classified.unclassifiedEntryNames);
+			if (classified.outOfScopeEntryNames.length > 0) {
+				outOfScopeByCategory.set(
+					result.category,
+					(outOfScopeByCategory.get(result.category) ?? 0) +
+						classified.outOfScopeEntryNames.length,
+				);
+			}
+		}
+
+		// Categories this connector declares no stream for (memories,
+		// design_chats, light_metadata, or any other future category) are
+		// downloaded (the manifest offers no selective fetch) but never
+		// classified for content — reported here so the run's PROGRESS log
+		// names exactly which categories were out of scope, rather than
+		// silently discarding them with no trace. Per CONTRACTS.md's
+		// ownership boundary, this connector does not invent a stream for an
+		// out-of-scope category on its own; see the report's
+		// CONTRACT-CHANGE-REQUEST for the proposed `memories`/`design_chats`
+		// field maps.
+		if (outOfScopeByCategory.size > 0) {
+			const summary = [...outOfScopeByCategory.entries()]
+				.map(
+					([category, count]) =>
+						`${category} (${count} entr${count === 1 ? "y" : "ies"})`,
+				)
+				.join(", ");
+			await progress(
+				`This export includes categories this connector does not yet ` +
+					`declare a stream for — downloaded but not parsed: ${summary}.`,
+				{ stream: CONVERSATIONS_STREAM },
+			);
 		}
 
 		if (unclassified.length > 0) {

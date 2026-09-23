@@ -25,15 +25,16 @@
  * each a raw project object. Both are read directly from the export archive
  * by index.ts via bounded-zip-archive.ts and passed here as parsed JSON.
  *
- * UNCONFIRMED (real-fixture proof pending — see cut-anthropic report):
- * the exact field names inside a project's `docs[]` array. The legacy test
- * fixture (`exportProject.docs: [{ uuid: 'd1' }]`) only proves a `uuid` key
- * exists; `CLAUDE_CONNECTOR_PLAN.md` names a `project_files_list` API
- * endpoint (suggesting docs carry a filename) but no captured payload names
- * the exact keys. This parser reads a defensive superset of candidate key
- * names (documented per-field below) and leaves a field `null` when none of
- * its candidates are present, rather than guessing a value (D4: unparseable
- * -> null, never guessed).
+ * VERIFIED against a real account's export (this lane, offline, against the
+ * local part ZIPs already on disk at $PRIV/exports/anthropic/ — never
+ * against an export_url; see report for the driver used and the "Multi-part
+ * manifest export" section below for the full per-category layout):
+ * `docs[]` elements carry exactly `uuid`, `filename`, `content`,
+ * `created_at` — this parser's first-priority candidates for each field.
+ * The other defensive candidates (`file_name`, `name`, `title`, `text`,
+ * `body`, `filedata`) were never observed in this account's export; kept as
+ * fallbacks in case a differently-shaped account surfaces them, but no
+ * longer the primary evidence for this field mapping.
  */
 
 import {
@@ -52,12 +53,22 @@ function str(v: unknown): string | null {
 	return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+/**
+ * Sanitize an extracted nullable text field. A control-rich payload (a real
+ * conversation was observed, this lane, with a message body zod's
+ * pdppSafeText rejects) becomes null rather than throwing and aborting the
+ * whole export — matching connectors/chatgpt/parsers.ts's established
+ * `toSafeFullContent` convention (D4: unparseable -> null, never guessed,
+ * never a crash).
+ */
 function safeText(v: unknown, max: number): PdppSafeText | null {
 	const s = str(v);
 	if (s === null) {
 		return null;
 	}
-	return nullablePdppSafeText.parse(s.length > max ? s.slice(0, max) : s);
+	const truncated = s.length > max ? s.slice(0, max) : s;
+	const result = nullablePdppSafeText.safeParse(truncated);
+	return result.success ? result.data : null;
 }
 
 function bool(v: unknown): boolean | null {
@@ -341,10 +352,22 @@ export function parseProject(raw: unknown): {
 		.map((d) => parseProjectDocument(d, id))
 		.filter((d): d is ProjectDocumentRecord => d !== null);
 
+	// `name` is required (non-nullable in schemas.ts) — a control-rich name
+	// cannot become null like an optional field. Fall back to the same
+	// "Untitled project" sentinel already used for a missing name, rather
+	// than crash the whole export over one project's unsafe title (D4-
+	// adjacent: a required field that fails sanitization degrades to a safe
+	// placeholder, never a thrown error).
+	const safeName = pdppSafeText.safeParse(
+		name.length > 2000 ? name.slice(0, 2000) : name,
+	);
+
 	return {
 		project: {
 			id,
-			name: pdppSafeText.parse(name.length > 2000 ? name.slice(0, 2000) : name),
+			name: safeName.success
+				? safeName.data
+				: pdppSafeText.parse("Untitled project"),
 			description: safeText(str(raw.description), 65_000),
 			create_time: isoOrNull(raw.created_at),
 			update_time: isoOrNull(raw.updated_at),
@@ -369,23 +392,74 @@ export function parseProject(raw: unknown): {
 // `design_chats`, `conversations`, each `export_url` usable exactly once,
 // downloading one ZIP per category (e.g. `conversations-000.zip`).
 //
-// The INNER layout of each category ZIP is UNVERIFIED — no part was ever
-// successfully downloaded and inspected (the two known job nonces returned
-// a Cloudflare bot challenge on re-fetch; see the cut-anthropic-export
-// report). `classifyManifestPartEntries` below does NOT assume a specific
-// filename inside a part ZIP (unlike the old format's hardcoded
-// `conversations.json`/`projects/*.json` names) — it scans every `.json`
-// entry in the part and classifies each by CONTENT SHAPE (a bare array of
-// objects carrying `chat_messages` -> conversations-shaped; a bare array or
-// per-file object carrying `docs`/`prompt_template` -> project-shaped),
-// reusing the same `parseConversation`/`parseProject` field mapping either
-// way. A part whose entries match no known shape is reported to the caller
-// as unclassified rather than silently dropped, so index.ts can emit an
-// honest SKIP_RESULT instead of a false "0 records".
+// VERIFIED inner layout (this lane, offline, against the real part ZIPs at
+// $PRIV/exports/anthropic/{category}-000.zip — never against export_url,
+// only the already-downloaded local files; see report for the driver used):
+//
+//   conversations-000.zip -> ONE entry `conversations.json`, a bare array of
+//     raw conversation objects. Top-level keys observed on every element:
+//     `uuid`, `name`, `summary`, `created_at`, `updated_at`, `account` (an
+//     `{uuid}` object, NOT `project_uuid` — no account ever had a
+//     `project_uuid` key in this export), `chat_messages[]`. `is_starred`
+//     was NOT observed as a key on any element in this export (the field
+//     the capability map's `starred` maps from does not appear at all here;
+//     see CONTRACT-CHANGE-REQUEST candidate below — kept nullable, never
+//     guessed). Each `chat_messages[]` element: `uuid`, `text`, `content[]`,
+//     `sender` (`"human"`/`"assistant"`), `created_at`, `updated_at`,
+//     `attachments`, `files` (unmapped, D3 dropped — not in the capability
+//     map's field_map), `parent_message_uuid`. Exactly matches this parser's
+//     pre-existing `chat_messages`/`sender`/`parent_message_uuid` field
+//     names — no parser change required for this category.
+//   projects-000.zip -> one JSON entry per project at
+//     `projects/<uuid>.json`, each a bare top-level object (NOT wrapped in a
+//     `detail` sub-object): `uuid`, `name`, `description`, `created_at`,
+//     `updated_at`, `creator` ({uuid, full_name} — not in the capability
+//     map's field_map, D3 dropped), `is_private`, `is_starter_project`,
+//     `prompt_template`, `docs[]`. No project in this export ever carried an
+//     `archived_at` key. `docs[]` elements: `uuid`, `filename`, `content`,
+//     `created_at` — these are the exact first-priority candidates
+//     `parseProjectDocument` already reads; the other defensive candidates
+//     (`file_name`, `name`, `title`, `text`, `body`, `filedata`) were never
+//     observed and can be treated as dead fallbacks pending a differently-
+//     shaped account.
+//   memories-000.zip -> ONE entry per account at `memories/<uuid>.json`, a
+//     bare object `{ account_uuid, conversations_memory, memory_files[] }`.
+//     `conversations_memory` is a single free-text markdown string (not an
+//     array of discrete memory items); `memory_files[]` elements are
+//     `{ path, content, updated_at }` (a virtual file tree of memory notes).
+//     This shape has NO capability-map stream — see CONTRACT-CHANGE-REQUEST.
+//   design_chats-000.zip -> one JSON entry per design chat at
+//     `design_chats/<uuid>.json`: `uuid`, `title`, `created_at`,
+//     `updated_at`, `project` ({uuid, name}), `messages[]` (NOT
+//     `chat_messages` — a different key name from the conversations
+//     category). `messages[]` elements: `uuid`, `role` (NOT `sender`),
+//     `content`, `created_at`. This is conversation-SHAPED but uses
+//     different field names than `conversations`/`chat_messages`, so
+//     `looksLikeConversation`'s `chat_messages` check correctly does NOT
+//     match it — these are a distinct sub-product (Claude's Artifacts/
+//     "design" chat surface) with no capability-map stream. See
+//     CONTRACT-CHANGE-REQUEST.
+//   light_metadata-000.zip -> `users.json`, `login_history.json`. Account
+//     roster / auth-audit data, never a candidate for any content stream —
+//     per the task's hard rule, nothing from this category may reach a
+//     record, a fixture, or a log line.
+//
+// Because `memories` and `design_chats` have no capability-map stream,
+// `classifyManifestPartEntries` below classifies by MANIFEST CATEGORY
+// first (an out-of-scope category never enters the conversation/project
+// content-shape classifier at all, so its real per-item field names can
+// never accidentally satisfy `looksLikeConversation`/`looksLikeProject` by
+// coincidence), then applies content-shape classification only to
+// `conversations` and `projects` category parts. `light_metadata` is always
+// out-of-scope. Every out-of-scope category's entries are reported back
+// via `outOfScopeEntryNames` (grouped by category) so index.ts can log an
+// honest "N entries in category X are out of this connector's declared
+// scope" PROGRESS line — never silently dropped without a trace, but also
+// never miscategorized as an unexplained parse failure.
 
 export interface ManifestPartFile {
 	/** Entry name inside the part ZIP (e.g. "conversations.json" or
-	 * something else — UNVERIFIED, kept for diagnostics only). */
+	 * "projects/<uuid>.json" — verified, see module note above). */
 	name: string;
 	json: unknown;
 }
@@ -394,10 +468,21 @@ export interface ClassifiedManifestPart {
 	category: string;
 	conversations: unknown[];
 	projects: unknown[];
-	/** Entries that parsed as JSON but matched no known conversation/project
-	 * shape — evidence for a SKIP_RESULT, never silently dropped. */
+	/** Entries whose manifest category has no capability-map stream
+	 * (`memories`, `design_chats`, `light_metadata`, or any other category
+	 * this connector does not declare) — expected, not an anomaly. */
+	outOfScopeEntryNames: string[];
+	/** Entries from an in-scope category (`conversations`, `projects`) whose
+	 * content matched neither known shape — a real anomaly, surfaced via
+	 * PROGRESS, never silently dropped. */
 	unclassifiedEntryNames: string[];
 }
+
+/** Manifest `category` values this connector has a stream for. Any other
+ * category (including ones not yet observed) is out-of-scope by default —
+ * an allowlist, not a denylist, so a new unrecognized category never
+ * silently flows into content-shape classification. */
+const IN_SCOPE_CATEGORIES = new Set(["conversations", "projects"]);
 
 function looksLikeConversation(v: unknown): boolean {
 	return isRecord(v) && Array.isArray(v.chat_messages);
@@ -410,10 +495,12 @@ function looksLikeProject(v: unknown): boolean {
 }
 
 /**
- * Classify one manifest part's extracted JSON entries by content shape
- * (see module note above for why: the inner filename convention is
- * UNVERIFIED). A bare array is treated as a list of same-shaped items; a
- * bare object is treated as one item of whichever shape it matches.
+ * Classify one manifest part's extracted JSON entries. Category first
+ * (`memories`/`design_chats`/`light_metadata`/anything else undeclared ->
+ * out-of-scope, never inspected for content shape), then content shape for
+ * `conversations`/`projects` categories (see module note above for why
+ * content shape, not filename, is still the dispatch within an in-scope
+ * category — an in-scope category ZIP can, in principle, mix shapes).
  */
 export function classifyManifestPartEntries(
 	category: string,
@@ -421,7 +508,21 @@ export function classifyManifestPartEntries(
 ): ClassifiedManifestPart {
 	const conversations: unknown[] = [];
 	const projects: unknown[] = [];
+	const outOfScopeEntryNames: string[] = [];
 	const unclassifiedEntryNames: string[] = [];
+
+	if (!IN_SCOPE_CATEGORIES.has(category)) {
+		for (const entry of entries) {
+			outOfScopeEntryNames.push(entry.name);
+		}
+		return {
+			category,
+			conversations,
+			projects,
+			outOfScopeEntryNames,
+			unclassifiedEntryNames,
+		};
+	}
 
 	for (const entry of entries) {
 		const items = Array.isArray(entry.json) ? entry.json : [entry.json];
@@ -440,7 +541,13 @@ export function classifyManifestPartEntries(
 		}
 	}
 
-	return { category, conversations, projects, unclassifiedEntryNames };
+	return {
+		category,
+		conversations,
+		projects,
+		outOfScopeEntryNames,
+		unclassifiedEntryNames,
+	};
 }
 
 // ─── Whole-archive parse ─────────────────────────────────────────────────

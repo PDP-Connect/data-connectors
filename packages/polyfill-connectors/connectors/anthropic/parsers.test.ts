@@ -115,6 +115,28 @@ test("parseMessage: unparseable/absent timestamp is null, never guessed", () => 
 	assert.equal(record?.create_time, null);
 });
 
+// Real-account regression (found by this lane's offline run against Tim's
+// actual export, connectors/anthropic/index.ts's offline driver — see
+// report): a message body containing a raw control character (observed on
+// a real message this lane's driver parsed) previously threw out of
+// safeText's throwing `.parse()` and aborted the ENTIRE export (all 481
+// conversations, not just the one offending message). content must degrade
+// to null instead, matching connectors/chatgpt/parsers.ts's established
+// toSafeFullContent convention.
+test("parseMessage: a control character in content degrades content to null instead of throwing and aborting the whole export", () => {
+	const record = parseMessage(
+		{
+			uuid: "m1",
+			text: "line one\x00line two",
+			created_at: "2026-01-01T00:00:00.000Z",
+		},
+		"conv-1",
+	);
+	assert.ok(record);
+	assert.equal(record.content, null);
+	assert.equal(record.id, "m1");
+});
+
 // ─── parseConversation ───────────────────────────────────────────────────
 
 test("parseConversation: messages sorted by created_at, stable on out-of-order input", () => {
@@ -246,6 +268,17 @@ test("parseProject: a project with no uuid/id is dropped", () => {
 	assert.equal(parseProject({ name: "no id" }), null);
 });
 
+// name is required (non-nullable in schemas.ts) unlike the optional text
+// fields safeText covers, so a control character can't degrade it to null —
+// it must degrade to a safe placeholder instead of throwing and aborting
+// the whole export (same class of real-account regression as parseMessage's
+// content test above).
+test("parseProject: a control character in name degrades to the same 'Untitled project' placeholder used for a missing name, instead of throwing", () => {
+	const parsed = parseProject({ uuid: "p1", name: "line one\x00line two" });
+	assert.ok(parsed);
+	assert.equal(parsed.project.name, "Untitled project");
+});
+
 // ─── parseExport (whole-archive) ────────────────────────────────────────
 
 test("parseExport: filters non-array conversations.json and non-project entries defensively", () => {
@@ -362,22 +395,87 @@ test("classifyManifestPartEntries: a single bare project object (not wrapped in 
 	assert.equal(result.projects.length, 1);
 });
 
-test("classifyManifestPartEntries: an unrecognized shape is reported as unclassified, never silently dropped", () => {
-	const result = classifyManifestPartEntries("light_metadata", [
-		{ name: "light_metadata-000.json", json: { some_unknown_field: 1 } },
+test("classifyManifestPartEntries: an unrecognized shape within an in-scope category is reported as unclassified, never silently dropped", () => {
+	const result = classifyManifestPartEntries("conversations", [
+		{ name: "conversations.json", json: { some_unknown_field: 1 } },
 	]);
 	assert.equal(result.conversations.length, 0);
 	assert.equal(result.projects.length, 0);
-	assert.deepEqual(result.unclassifiedEntryNames, ["light_metadata-000.json"]);
+	assert.deepEqual(result.unclassifiedEntryNames, ["conversations.json"]);
+	assert.deepEqual(result.outOfScopeEntryNames, []);
 });
 
-test("classifyManifestPartEntries: a bare array containing only unrecognized items is fully unclassified", () => {
-	const result = classifyManifestPartEntries("memories", [
-		{ name: "memories-000.json", json: [{ text: "some memory" }] },
+test("classifyManifestPartEntries: a bare array containing only unrecognized items within an in-scope category is fully unclassified", () => {
+	const result = classifyManifestPartEntries("projects", [
+		{ name: "projects-000.json", json: [{ text: "some unrecognized item" }] },
 	]);
 	assert.equal(result.conversations.length, 0);
 	assert.equal(result.projects.length, 0);
-	assert.deepEqual(result.unclassifiedEntryNames, ["memories-000.json"]);
+	assert.deepEqual(result.unclassifiedEntryNames, ["projects-000.json"]);
+});
+
+test("classifyManifestPartEntries: light_metadata is out-of-scope by category, never entered into content-shape classification", () => {
+	const result = classifyManifestPartEntries("light_metadata", [
+		{ name: "users.json", json: { some_field: 1 } },
+		{ name: "login_history.json", json: [{ some_field: 2 }] },
+	]);
+	assert.equal(result.conversations.length, 0);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, []);
+	assert.deepEqual(result.outOfScopeEntryNames, [
+		"users.json",
+		"login_history.json",
+	]);
+});
+
+test("classifyManifestPartEntries: memories is out-of-scope by category, even though memory_files[] could coincidentally resemble other shapes", () => {
+	const result = classifyManifestPartEntries("memories", [
+		{
+			name: "memories/syn-account.json",
+			json: {
+				account_uuid: "syn-account-1",
+				conversations_memory: "some synthetic memory text",
+				memory_files: [
+					{
+						path: "/areas/example.md",
+						content: "x",
+						updated_at: "2026-01-01T00:00:00.000Z",
+					},
+				],
+			},
+		},
+	]);
+	assert.equal(result.conversations.length, 0);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, []);
+	assert.deepEqual(result.outOfScopeEntryNames, ["memories/syn-account.json"]);
+});
+
+test("classifyManifestPartEntries: design_chats is out-of-scope by category (uses messages[]/role, not chat_messages[]/sender, so it would not classify as a conversation anyway, but category gating is the actual guarantee)", () => {
+	const result = classifyManifestPartEntries("design_chats", [
+		{
+			name: "design_chats/syn-chat.json",
+			json: {
+				uuid: "syn-chat-1",
+				title: "Synthetic design chat",
+				created_at: "2026-01-01T00:00:00.000Z",
+				updated_at: "2026-01-01T00:00:00.000Z",
+				project: { uuid: "syn-proj-1", name: "Synthetic Project" },
+				messages: [
+					{
+						uuid: "syn-msg-1",
+						role: "human",
+						content: "hi",
+						created_at: "2026-01-01T00:00:00.000Z",
+					},
+				],
+			},
+		},
+	]);
+	assert.equal(result.conversations.length, 0);
+	assert.equal(result.projects.length, 0);
+	assert.deepEqual(result.unclassifiedEntryNames, []);
+	assert.deepEqual(result.outOfScopeEntryNames, ["design_chats/syn-chat.json"]);
 });
 
 test("parseClassifiedExport: pools classified raw items across parts through the same field mapping as parseExport", () => {
