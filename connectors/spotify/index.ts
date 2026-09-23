@@ -243,11 +243,72 @@ async function hasSpotifySession(
 	page: BrowserCollectContext["page"],
 ): Promise<boolean> {
 	await openSpotify(page);
-	return await page.evaluate(
-		() =>
-			window.location.hostname === "open.spotify.com" &&
-			!document.body.textContent?.toLowerCase().includes("log in"),
-	);
+	return await page.evaluate(async () => {
+		if (window.location.hostname !== "open.spotify.com") return false;
+		try {
+			let serverTime: number | null = null;
+			try {
+				const stResp = await fetch("/api/server-time");
+				const stData = await stResp.json();
+				const parsed = Number(stData.serverTime);
+				serverTime = Number.isFinite(parsed) ? parsed : null;
+			} catch {}
+			const totpSecret = ',7/*F("rLJ2oxaKL^f+E1xvP@N';
+			const xored = totpSecret
+				.split("")
+				.map((c, i) => c.charCodeAt(0) ^ ((i % 33) + 9));
+			const secretHex = Array.from(new TextEncoder().encode(xored.join("")))
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			async function genTOTP(
+				hexSecret: string,
+				timestampMs: number,
+			): Promise<string> {
+				const counter = Math.floor(timestampMs / 1000 / 30);
+				const buf = new ArrayBuffer(8);
+				const v = new DataView(buf);
+				v.setUint32(0, Math.floor(counter / 0x100000000));
+				v.setUint32(4, counter & 0xffffffff);
+				const bytes = hexSecret.match(/.{1,2}/g) || [];
+				const kb = new Uint8Array(bytes.map((b) => Number.parseInt(b, 16)));
+				const key = await crypto.subtle.importKey(
+					"raw",
+					kb,
+					{ name: "HMAC", hash: "SHA-1" },
+					false,
+					["sign"],
+				);
+				const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, buf));
+				const o = (sig.at(-1) ?? 0) & 0x0f;
+				const code =
+					((((sig[o] ?? 0) & 0x7f) << 24) |
+						(((sig[o + 1] ?? 0) & 0xff) << 16) |
+						(((sig[o + 2] ?? 0) & 0xff) << 8) |
+						((sig[o + 3] ?? 0) & 0xff)) %
+					1000000;
+				return String(code).padStart(6, "0");
+			}
+			const now = Date.now();
+			const params = new URLSearchParams({
+				reason: "init",
+				productType: "web_player",
+				totp: await genTOTP(secretHex, now),
+				totpServer: serverTime
+					? await genTOTP(secretHex, serverTime * 1000)
+					: "unavailable",
+				totpVer: "61",
+			});
+			const tokenResp = await fetch(`/api/token?${params.toString()}`, {
+				credentials: "include",
+			});
+			const tokenData = await tokenResp.json();
+			return Boolean(
+				tokenResp.ok && tokenData.accessToken && !tokenData.isAnonymous,
+			);
+		} catch {
+			return false;
+		}
+	});
 }
 
 async function ensureSpotifySession({
@@ -549,23 +610,45 @@ async function collectSpotifyWebData(
 		}
 
 		if (wanted.has("playlists") || wanted.has("playlist_items")) {
-			const libData = await gql("libraryV3", {
-				filters: [],
-				order: null,
-				textFilter: "",
-				features: ["LIKED_SONGS", "YOUR_EPISODES"],
-				limit: 200,
-				offset: 0,
-				flatten: false,
-				expandedFolders: [],
-				folderUri: null,
-				includeFoldersWhenFlattening: true,
-				withCuration: false,
-			});
-			const playlistUris = (libData?.data?.me?.libraryV3?.items || [])
-				.filter((item: any) => item.item?.data?.__typename === "Playlist")
-				.map((item: any) => item.item?.data?._uri || item.item?.data?.uri || "")
-				.filter(Boolean);
+			const playlistUris: string[] = [];
+			let libraryOffset = 0;
+			const libraryLimit = 200;
+			while (true) {
+				const libData = await gql("libraryV3", {
+					filters: [],
+					order: null,
+					textFilter: "",
+					features: ["LIKED_SONGS", "YOUR_EPISODES"],
+					limit: libraryLimit,
+					offset: libraryOffset,
+					flatten: false,
+					expandedFolders: [],
+					folderUri: null,
+					includeFoldersWhenFlattening: true,
+					withCuration: false,
+				});
+				const library = libData?.data?.me?.libraryV3;
+				const pageItems = library?.items || [];
+				playlistUris.push(
+					...pageItems
+						.filter((item: any) => item.item?.data?.__typename === "Playlist")
+						.map(
+							(item: any) =>
+								item.item?.data?._uri || item.item?.data?.uri || "",
+						)
+						.filter(
+							(uri: unknown): uri is string =>
+								typeof uri === "string" && uri.length > 0,
+						),
+				);
+				const total = count(library?.totalCount);
+				if (
+					pageItems.length < libraryLimit ||
+					(total !== null && libraryOffset + pageItems.length >= total)
+				)
+					break;
+				libraryOffset += libraryLimit;
+			}
 			for (const uri of playlistUris) {
 				let offset = 0;
 				let position = 0;
@@ -640,6 +723,11 @@ async function collectSpotifyWebData(
 					const t = item.track?.data;
 					const id = idFromUri(item.track?._uri || item.track?.uri);
 					if (!t || !id) continue;
+					const addedAt = item.addedAt?.isoString;
+					if (!addedAt) {
+						warnings.push(`saved track ${id} missing added_at; skipped`);
+						continue;
+					}
 					result.saved_tracks.push({
 						id,
 						name: t.name ?? undefined,
@@ -649,10 +737,10 @@ async function collectSpotifyWebData(
 						album_name: t.albumOfTrack?.name ?? null,
 						duration_ms: count(t.duration?.totalMilliseconds),
 						popularity: null,
-						added_at: item.addedAt?.isoString ?? new Date(0).toISOString(),
+						added_at: addedAt,
 						isrc: null,
 						uri: item.track?._uri || item.track?.uri || null,
-						explicit: t.contentRating?.label === "EXPLICIT" ? true : null,
+						explicit: t.contentRating?.label === "EXPLICIT",
 						album_artist_names: (t.albumOfTrack?.artists?.items || []).map(
 							(a: any) => a.profile?.name ?? "",
 						),
