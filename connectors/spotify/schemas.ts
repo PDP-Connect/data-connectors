@@ -143,8 +143,9 @@ export const profileSchema = z.object({
 
 /**
  * playlist_items stream: one record per track in a playlist, from
- * GET /playlists/{id}/tracks. Child of `playlists` via `playlist_id` (D3).
- * `position` is the zero-based index of the item within the API's paginated
+ * Spotify web-player playlist entries. Child of `playlists` via `playlist_id` (D3).
+ * `added_by` is the display name exposed by the web-player GraphQL shape.
+ * `position` is the zero-based index of the item within Spotify's paginated
  * ordering, so the id stays unique and stable across runs as long as the
  * playlist's ordering does not change (a Spotify-side reorder invalidates
  * positions the same way it would any offset-based list).
@@ -155,7 +156,7 @@ export const playlistItemsSchema = z.object({
 	track_id: spotifyIdSchema.nullable(),
 	position: z.number().int().min(0),
 	added_at: isoDateTimeSchema.nullable(),
-	added_by: spotifyIdSchema.nullable(),
+	added_by: pdppSafeText.max(1000).nullable(),
 	name: nameSchema,
 	artist_names: artistNamesSchema,
 	album_name: pdppSafeText.max(1000).nullable(),

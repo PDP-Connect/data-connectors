@@ -2,193 +2,155 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { createSpotifyCycleDetector, spotifyCollect } from "./index.ts";
-
-const ORIGINAL_FETCH = globalThis.fetch;
-
-afterEach(() => {
-	globalThis.fetch = ORIGINAL_FETCH;
-});
-
-function jsonResponse(body: unknown): Response {
-	return new Response(JSON.stringify(body), { status: 200 });
-}
+import {
+	createSpotifyCycleDetector,
+	spotifyCollect,
+	spotifyRetryablePattern,
+} from "./index.ts";
 
 function makeContext(
-	state: Record<string, unknown> = {},
-	requestedNames: string[] = ["saved_tracks"],
-	emitRecord: (
-		stream: string,
-		data: Record<string, unknown>,
-	) => Promise<void> = () => Promise.resolve(),
-	progress: () => Promise<void> = () => Promise.resolve(),
+	webResult: Record<string, unknown>,
+	requestedNames: string[] = ["profile", "playlists", "playlist_items"],
 ): {
+	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
 	ctx: Parameters<typeof spotifyCollect>[0];
+	visited: string[];
 } {
+	const emittedRecords: Array<{
+		stream: string;
+		data: Record<string, unknown>;
+	}> = [];
 	const messages: EmittedMessage[] = [];
+	const visited: string[] = [];
 	const requested = new Map<string, StreamScope>(
 		requestedNames.map((name) => [name, { name }]),
 	);
 	return {
+		emittedRecords,
 		messages,
+		visited,
 		ctx: {
-			credentials: { SPOTIFY_ACCESS_TOKEN: "test-token" },
 			emit: (message) => {
 				messages.push(message);
 				return Promise.resolve();
 			},
-			emitRecord,
-			progress,
+			emitRecord: (stream, data) => {
+				emittedRecords.push({ stream, data });
+				return Promise.resolve();
+			},
+			page: {
+				goto: (url: string) => {
+					visited.push(url);
+					return Promise.resolve(null);
+				},
+				evaluate: () => Promise.resolve(webResult),
+			} as never,
+			progress: () => Promise.resolve(),
 			requested,
-			state,
 		},
 	};
 }
 
-function savedTrack(id: string, addedAt = "2026-01-01T00:00:00Z") {
-	return {
-		added_at: addedAt,
-		track: {
-			id,
-			name: `Track ${id}`,
-			artists: [{ name: "Artist" }],
-			album: { name: "Album" },
-			duration_ms: 1,
-			popularity: 1,
-			external_ids: { isrc: null },
+const webFixture = {
+	profile: {
+		id: "spotify_user_id",
+		display_name: "Real Person",
+		followers: 12,
+		uri: "spotify:user:spotify_user_id",
+		images: [
+			{ url: "https://i.scdn.co/image/ab5678", width: null, height: null },
+		],
+		following: 7,
+	},
+	playlists: [
+		{
+			id: "pl1",
+			name: "Playlist One",
+			owner_id: "owner1",
+			owner_name: "Owner One",
+			public: null,
+			collaborative: null,
+			track_count: 1,
+			snapshot_id: null,
+			description: "",
+			uri: "spotify:playlist:pl1",
+			followers: 42,
+			images: [
+				{ url: "https://i.scdn.co/image/p1", width: null, height: null },
+			],
 		},
-	};
-}
+	],
+	playlist_items: [
+		{
+			id: "pl1:0",
+			playlist_id: "pl1",
+			track_id: "trackA",
+			position: 0,
+			added_at: "2024-01-01T00:00:00Z",
+			added_by: "Display Name",
+			name: "Track A",
+			artist_names: ["Artist A"],
+			album_name: "Album A",
+			duration_ms: 1000,
+		},
+	],
+	saved_tracks: [],
+	warnings: [],
+};
 
-test("spotify: a 200 page without items fails before saved-track coverage or cursor advancement", async () => {
-	globalThis.fetch = async () => jsonResponse({ next: null });
-	const { ctx, messages } = makeContext({
-		saved_tracks: { last_added_at: "2026-01-01T00:00:00Z" },
-	});
-
-	await assert.rejects(() => spotifyCollect(ctx), /spotify_response_malformed/);
-	assert.equal(
-		messages.some(
-			(message) =>
-				message.type === "STATE" && message.stream === "saved_tracks",
-		),
-		false,
-		"an absent items array must not advance the saved-track cursor",
-	);
-	assert.equal(
-		messages.some(
-			(message) =>
-				message.type === "DETAIL_COVERAGE" && message.stream === "saved_tracks",
-		),
-		false,
-		"an absent items array must not prove an empty saved-track boundary",
-	);
-});
-
-test("spotify: an explicit empty items array remains a valid zero boundary", async () => {
-	globalThis.fetch = async () => jsonResponse({ items: [], next: null });
-	const { ctx, messages } = makeContext();
+test("spotify browser collect emits modern profile, playlists, and playlist_items schemas", async () => {
+	const { ctx, emittedRecords, messages, visited } = makeContext(webFixture);
 
 	await spotifyCollect(ctx);
+
+	assert.deepEqual(visited, ["https://open.spotify.com/"]);
+	assert.deepEqual(
+		emittedRecords.map((record) => record.stream),
+		["profile", "playlists", "playlist_items"],
+	);
+	assert.equal(emittedRecords[2]?.data.added_by, "Display Name");
 	assert.equal(
-		messages.filter(
+		messages.filter((message) => message.type === "DETAIL_COVERAGE").length,
+		3,
+	);
+	assert.equal(
+		messages.every(
 			(message) =>
-				message.type === "STATE" && message.stream === "saved_tracks",
-		).length,
-		1,
+				message.type !== "DETAIL_COVERAGE" ||
+				message.considered === message.covered,
+		),
+		true,
 	);
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "saved_tracks",
-	);
-	assert.ok(coverage);
-	assert.equal(coverage.considered, 0);
-	assert.equal(coverage.covered, 0);
 });
 
-test("spotify: emits the first page before fetching the next page", {
-	concurrency: false,
-}, async () => {
-	const events: string[] = [];
-	let fetchCount = 0;
-	globalThis.fetch = (input) => {
-		fetchCount += 1;
-		const path = String(input);
-		if (fetchCount === 1) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [savedTrack("first")],
-					next: "https://api.spotify.com/v1/me/tracks?offset=50",
-				}),
-			);
-		}
-		events.push(`fetch:${path}`);
-		return Promise.resolve(
-			jsonResponse({ items: [savedTrack("second")], next: null }),
-		);
-	};
+test("spotify browser collect skips Web API-only streams during stage 1", async () => {
 	const { ctx, messages } = makeContext(
-		{},
-		["saved_tracks"],
-		(_stream, data) => {
-			events.push(`emit:${String(data.id)}`);
-			return Promise.resolve();
-		},
+		{ ...webFixture, profile: null, playlists: [], playlist_items: [] },
+		["top_artists", "recently_played"],
 	);
 
 	await spotifyCollect(ctx);
 
-	assert.deepEqual(events.slice(0, 2), [
-		"emit:first",
-		"fetch:https://api.spotify.com/v1/me/tracks?offset=50",
-	]);
-	assert.equal(events.length, 3);
-	const coverage = messages.find(
-		(message) => message.type === "DETAIL_COVERAGE",
+	assert.deepEqual(
+		messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.stream)
+			.sort(),
+		["recently_played", "top_artists"],
 	);
-	assert.equal(coverage?.considered, 2);
-	assert.equal(coverage?.covered, 2);
 });
 
-test("spotify: completes beyond the former 200-page cap with exact totals", {
-	concurrency: false,
-}, async () => {
-	let fetchCount = 0;
+test("spotify cycle detector still catches repeated cursor paths", () => {
 	const detector = createSpotifyCycleDetector("/me/tracks?limit=50");
-	globalThis.fetch = () => {
-		fetchCount += 1;
-		const next =
-			fetchCount < 201
-				? `https://api.spotify.com/v1/me/tracks?offset=${fetchCount * 50}`
-				: null;
-		if (next !== null) {
-			assert.equal(
-				detector.observe(new URL(next).pathname + new URL(next).search),
-				false,
-			);
-		}
-		return Promise.resolve(
-			jsonResponse({ items: [savedTrack(String(fetchCount))], next }),
-		);
-	};
-	const { ctx, messages } = makeContext();
-
-	await spotifyCollect(ctx);
-
-	assert.equal(fetchCount, 201);
-	const coverage = messages.find(
-		(message) => message.type === "DETAIL_COVERAGE",
-	);
-	assert.equal(coverage?.considered, 201);
-	assert.equal(coverage?.covered, 201);
+	assert.equal(detector.observe("/me/tracks?offset=50"), false);
+	assert.equal(detector.observe("/me/tracks?offset=100"), false);
+	assert.equal(detector.observe("/me/tracks?offset=50"), true);
 	assert.deepEqual(Object.keys(detector.state()).sort(), [
 		"lambda",
 		"power",
@@ -196,378 +158,474 @@ test("spotify: completes beyond the former 200-page cap with exact totals", {
 	]);
 });
 
-test("spotify: playlists enriches each playlist with its own followers.total via a per-playlist detail fetch", {
-	concurrency: false,
-}, async () => {
-	const requestedPaths: string[] = [];
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		requestedPaths.push(path);
-		if (path.includes("/me/playlists")) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [
-						{
-							id: "pl1",
-							name: "Playlist One",
-							uri: "spotify:playlist:pl1",
-							images: [
-								{ url: "https://i.scdn.co/image/p1", width: 300, height: 300 },
-							],
+test("spotify browser parser paginates library, skips undated saved tracks, and preserves explicit false", async () => {
+	const emittedRecords: Array<{
+		stream: string;
+		data: Record<string, unknown>;
+	}> = [];
+	const messages: EmittedMessage[] = [];
+	const progressMessages: string[] = [];
+	const operations: Array<{
+		operationName: string;
+		variables: Record<string, unknown>;
+	}> = [];
+	const originalFetch = globalThis.fetch;
+	const originalWindow = globalThis.window;
+	const originalDocument = globalThis.document;
+	const originalCaches = globalThis.caches;
+	const originalPerformance = globalThis.performance;
+	const hashes = {
+		fetchLibraryTracks: "a".repeat(64),
+		fetchPlaylist: "b".repeat(64),
+		libraryV3: "c".repeat(64),
+		profileAttributes: "d".repeat(64),
+	};
+	const bundle = Object.entries(hashes)
+		.map(([name, hash]) => `new a.b("${name}","query","${hash}"`)
+		.join(";");
+	try {
+		(globalThis as unknown as { window: unknown }).window = {
+			location: { hostname: "open.spotify.com" },
+		};
+		(globalThis as unknown as { document: unknown }).document = {
+			querySelectorAll: () => [
+				{ src: "https://open.spotifycdn.com/bundle.js" },
+			],
+		};
+		(globalThis as unknown as { caches: unknown }).caches = {
+			keys: () => Promise.resolve([]),
+		};
+		(globalThis as unknown as { performance: unknown }).performance = {
+			getEntriesByType: () => [],
+		};
+		globalThis.fetch = async (input, init) => {
+			const url = String(input);
+			if (url.startsWith("/api/server-time")) {
+				return new Response(JSON.stringify({ serverTime: 1_700_000_000 }), {
+					status: 200,
+				});
+			}
+			if (url.startsWith("/api/token")) {
+				return new Response(
+					JSON.stringify({
+						accessToken: "access-token",
+						clientId: "client-id",
+						isAnonymous: false,
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url === "https://clienttoken.spotify.com/v1/clienttoken") {
+				return new Response(
+					JSON.stringify({ granted_token: { token: "client-token" } }),
+					{ status: 200 },
+				);
+			}
+			if (url === "https://open.spotifycdn.com/bundle.js") {
+				return new Response(bundle, { status: 200 });
+			}
+			if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
+				const body = JSON.parse(String(init?.body)) as {
+					operationName: string;
+					variables: Record<string, unknown>;
+				};
+				operations.push(body);
+				if (body.operationName === "libraryV3") {
+					const offset = Number(body.variables.offset);
+					const playlist = (id: string) => ({
+						item: {
+							data: { __typename: "Playlist", uri: `spotify:playlist:${id}` },
 						},
-					],
-					next: null,
-				}),
-			);
-		}
-		if (path.includes("/playlists/pl1")) {
-			return Promise.resolve(jsonResponse({ followers: { total: 42 } }));
-		}
-		throw new Error(`unexpected fetch: ${path}`);
-	};
-	const emittedRecords: Array<{
-		stream: string;
-		data: Record<string, unknown>;
-	}> = [];
-	const { ctx, messages } = makeContext({}, ["playlists"], (stream, data) => {
-		emittedRecords.push({ stream, data });
-		return Promise.resolve();
-	});
+					});
+					const filler = { item: { data: { __typename: "Album" } } };
+					const items =
+						offset === 0
+							? [playlist("pl1"), ...Array.from({ length: 199 }, () => filler)]
+							: [playlist("pl2")];
+					return new Response(
+						JSON.stringify({
+							data: { me: { libraryV3: { items, totalCount: 201 } } },
+						}),
+						{ status: 200 },
+					);
+				}
+				if (body.operationName === "fetchPlaylist") {
+					const id = String(body.variables.uri).split(":").pop();
+					return new Response(
+						JSON.stringify({
+							data: {
+								playlistV2: {
+									uri: `spotify:playlist:${id}`,
+									name: `Playlist ${id}`,
+									ownerV2: {
+										data: { uri: "spotify:user:owner1", name: "Owner" },
+									},
+									content: { totalCount: 0, items: [] },
+									followers: 1,
+									images: { items: [] },
+								},
+							},
+						}),
+						{ status: 200 },
+					);
+				}
+				if (body.operationName === "fetchLibraryTracks") {
+					return new Response(
+						JSON.stringify({
+							data: {
+								me: {
+									library: {
+										tracks: {
+											totalCount: 3,
+											items: [
+												{
+													track: {
+														uri: "spotify:track:missingDate",
+														data: { name: "No Date" },
+													},
+												},
+												{
+													addedAt: { isoString: "2024-02-01T00:00:00Z" },
+													track: {
+														uri: "spotify:track:goodTrack",
+														data: {
+															name: "Good Track",
+															artists: {
+																items: [{ profile: { name: "Artist" } }],
+															},
+															albumOfTrack: {
+																name: "Album",
+																artists: { items: [] },
+															},
+															duration: { totalMilliseconds: 12 },
+															contentRating: { label: "NONE" },
+														},
+													},
+												},
+												{
+													addedAt: { isoString: "2024-02-02T00:00:00Z" },
+													track: {
+														uri: "spotify:track:unknownExplicit",
+														data: {
+															name: "Unknown Explicit",
+															artists: { items: [] },
+															albumOfTrack: { artists: { items: [] } },
+														},
+													},
+												},
+											],
+										},
+									},
+								},
+							},
+						}),
+						{ status: 200 },
+					);
+				}
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		};
+		const requested = new Map<string, StreamScope>([
+			["playlists", { name: "playlists" }],
+			["saved_tracks", { name: "saved_tracks" }],
+		]);
+		await spotifyCollect({
+			emit: (message) => {
+				messages.push(message);
+				return Promise.resolve();
+			},
+			emitRecord: (stream, data) => {
+				emittedRecords.push({ stream, data });
+				return Promise.resolve();
+			},
+			page: {
+				goto: () => Promise.resolve(null),
+				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
+					fn(arg),
+			} as never,
+			progress: (message) => {
+				progressMessages.push(message);
+				return Promise.resolve();
+			},
+			requested,
+		});
+	} finally {
+		globalThis.fetch = originalFetch;
+		(globalThis as unknown as { window: unknown }).window = originalWindow;
+		(globalThis as unknown as { document: unknown }).document =
+			originalDocument;
+		(globalThis as unknown as { caches: unknown }).caches = originalCaches;
+		(globalThis as unknown as { performance: unknown }).performance =
+			originalPerformance;
+	}
 
-	await spotifyCollect(ctx);
-
-	assert.ok(
-		requestedPaths.some((p) =>
-			p.includes("/playlists/pl1?fields=followers.total"),
-		),
-		"must fetch the full playlist object for its followers.total",
-	);
-	assert.equal(emittedRecords.length, 1);
-	assert.deepEqual(emittedRecords[0]?.data, {
-		id: "pl1",
-		name: "Playlist One",
-		owner_id: null,
-		owner_name: null,
-		public: null,
-		collaborative: null,
-		track_count: null,
-		snapshot_id: null,
-		description: null,
-		uri: "spotify:playlist:pl1",
-		followers: 42,
-		images: [{ url: "https://i.scdn.co/image/p1", width: 300, height: 300 }],
-	});
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
-	);
-	assert.deepEqual(coverage?.required_keys, ["pl1"]);
-	assert.deepEqual(coverage?.hydrated_keys, ["pl1"]);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 1);
-});
-
-test("spotify: playlists still emits the record with followers null, and discloses partial hydration, when the per-playlist detail fetch fails", {
-	concurrency: false,
-}, async () => {
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		if (path.includes("/me/playlists")) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [{ id: "pl1", name: "Playlist One" }],
-					next: null,
-				}),
-			);
-		}
-		if (path.includes("/playlists/pl1")) {
-			return Promise.resolve(new Response("", { status: 500 }));
-		}
-		throw new Error(`unexpected fetch: ${path}`);
-	};
-	const emittedRecords: Array<{
-		stream: string;
-		data: Record<string, unknown>;
-	}> = [];
-	const { ctx, messages } = makeContext({}, ["playlists"], (stream, data) => {
-		emittedRecords.push({ stream, data });
-		return Promise.resolve();
-	});
-
-	await spotifyCollect(ctx);
-
-	assert.equal(
-		emittedRecords.length,
-		1,
-		"the playlist record is emitted despite the detail-fetch failure",
-	);
-	assert.equal(emittedRecords[0]?.data.followers, null);
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
-	);
-	assert.deepEqual(coverage?.required_keys, ["pl1"]);
 	assert.deepEqual(
-		coverage?.hydrated_keys,
-		[],
-		"a failed followers fetch must not be reported as hydrated",
+		operations
+			.filter((op) => op.operationName === "libraryV3")
+			.map((op) => op.variables.offset),
+		[0, 200],
 	);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 0);
+	assert.deepEqual(
+		emittedRecords
+			.filter((record) => record.stream === "playlists")
+			.map((record) => record.data.id),
+		["pl1", "pl2"],
+	);
+	const saved = emittedRecords.filter(
+		(record) => record.stream === "saved_tracks",
+	);
+	assert.equal(saved.length, 2);
+	assert.equal(saved[0]?.data.id, "goodTrack");
+	assert.equal(saved[0]?.data.added_at, "2024-02-01T00:00:00Z");
+	assert.equal(saved[0]?.data.explicit, false);
+	assert.equal(saved[1]?.data.id, "unknownExplicit");
+	assert.equal(saved[1]?.data.explicit, null);
+	assert.ok(
+		progressMessages.some((message) => message.includes("missing added_at")),
+	);
 });
 
-test("spotify: a playlist detail response without a follower count remains uncovered", {
-	concurrency: false,
-}, async () => {
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		if (path.includes("/me/playlists")) {
-			return Promise.resolve(
-				jsonResponse({ items: [{ id: "pl1", name: "Playlist One" }], next: null }),
-			);
-		}
-		if (path.includes("/playlists/pl1")) {
-			return Promise.resolve(jsonResponse({}));
-		}
-		throw new Error(`unexpected fetch: ${path}`);
+function installSpotifyBrowserGlobals(): () => void {
+	const originalWindow = globalThis.window;
+	const originalDocument = globalThis.document;
+	const originalCaches = globalThis.caches;
+	const originalPerformance = globalThis.performance;
+	(globalThis as unknown as { window: unknown }).window = {
+		location: { hostname: "open.spotify.com" },
 	};
-	const emittedRecords: Array<Record<string, unknown>> = [];
-	const { ctx, messages } = makeContext({}, ["playlists"], (_stream, data) => {
-		emittedRecords.push(data);
-		return Promise.resolve();
-	});
+	(globalThis as unknown as { document: unknown }).document = {
+		querySelectorAll: () => [{ src: "https://open.spotifycdn.com/bundle.js" }],
+	};
+	(globalThis as unknown as { caches: unknown }).caches = {
+		keys: () => Promise.resolve([]),
+	};
+	(globalThis as unknown as { performance: unknown }).performance = {
+		getEntriesByType: () => [],
+	};
+	return () => {
+		(globalThis as unknown as { window: unknown }).window = originalWindow;
+		(globalThis as unknown as { document: unknown }).document =
+			originalDocument;
+		(globalThis as unknown as { caches: unknown }).caches = originalCaches;
+		(globalThis as unknown as { performance: unknown }).performance =
+			originalPerformance;
+	};
+}
 
-	await spotifyCollect(ctx);
+function spotifyWebFixtureBundle(): string {
+	return [
+		["fetchLibraryTracks", "a".repeat(64)],
+		["fetchPlaylist", "b".repeat(64)],
+		["libraryV3", "c".repeat(64)],
+		["profileAttributes", "d".repeat(64)],
+	]
+		.map(([name, hash]) => `new a.b("${name}","query","${hash}"`)
+		.join(";");
+}
 
-	assert.equal(emittedRecords.length, 1);
-	assert.equal(emittedRecords[0]?.followers, null);
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
-	);
-	assert.deepEqual(coverage?.required_keys, ["pl1"]);
-	assert.deepEqual(coverage?.hydrated_keys, []);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 0);
+async function collectWithInPageFetch(
+	requestedNames: string[],
+	graphql: (
+		operationName: string,
+		variables: Record<string, unknown>,
+	) => unknown,
+): Promise<{
+	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
+	messages: EmittedMessage[];
+}> {
+	const restoreGlobals = installSpotifyBrowserGlobals();
+	const originalFetch = globalThis.fetch;
+	const emittedRecords: Array<{
+		stream: string;
+		data: Record<string, unknown>;
+	}> = [];
+	const messages: EmittedMessage[] = [];
+	try {
+		globalThis.fetch = async (input, init) => {
+			const url = String(input);
+			if (url.startsWith("/api/server-time")) {
+				return new Response(JSON.stringify({ serverTime: 1_700_000_000 }), {
+					status: 200,
+				});
+			}
+			if (url.startsWith("/api/token")) {
+				return new Response(
+					JSON.stringify({
+						accessToken: "access-token",
+						clientId: "client-id",
+						isAnonymous: false,
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url === "https://clienttoken.spotify.com/v1/clienttoken") {
+				return new Response(
+					JSON.stringify({ granted_token: { token: "client-token" } }),
+					{ status: 200 },
+				);
+			}
+			if (url === "https://open.spotifycdn.com/bundle.js") {
+				return new Response(spotifyWebFixtureBundle(), { status: 200 });
+			}
+			if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
+				const body = JSON.parse(String(init?.body)) as {
+					operationName: string;
+					variables: Record<string, unknown>;
+				};
+				const result = graphql(body.operationName, body.variables);
+				return result instanceof Response
+					? result
+					: new Response(JSON.stringify(result), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		};
+		await spotifyCollect({
+			emit: (message) => {
+				messages.push(message);
+				return Promise.resolve();
+			},
+			emitRecord: (stream, data) => {
+				emittedRecords.push({ stream, data });
+				return Promise.resolve();
+			},
+			page: {
+				goto: () => Promise.resolve(null),
+				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
+					fn(arg),
+			} as never,
+			progress: () => Promise.resolve(),
+			requested: new Map<string, StreamScope>(
+				requestedNames.map((name) => [name, { name }]),
+			),
+		});
+		return { emittedRecords, messages };
+	} finally {
+		globalThis.fetch = originalFetch;
+		restoreGlobals();
+	}
+}
+
+test("spotify browser GraphQL retries 429 using Retry-After and classifies exhausted 5xx", async () => {
+	const originalSetTimeout = globalThis.setTimeout;
+	const retryDelays: number[] = [];
+	globalThis.setTimeout = ((
+		callback: (...args: unknown[]) => void,
+		delay = 0,
+	) => {
+		retryDelays.push(Number(delay));
+		return originalSetTimeout(callback, 0);
+	}) as typeof globalThis.setTimeout;
+	try {
+		let rateLimitAttempts = 0;
+		await collectWithInPageFetch(["saved_tracks"], () => {
+			rateLimitAttempts += 1;
+			if (rateLimitAttempts === 1) {
+				return new Response(null, {
+					status: 429,
+					headers: { "retry-after": "2" },
+				});
+			}
+			return {
+				data: {
+					me: { library: { tracks: { items: [], totalCount: 0 } } },
+				},
+			};
+		});
+		assert.equal(rateLimitAttempts, 2);
+		assert.deepEqual(retryDelays, [2000]);
+
+		let serverErrorAttempts = 0;
+		await assert.rejects(
+			() =>
+				collectWithInPageFetch(["saved_tracks"], () => {
+					serverErrorAttempts += 1;
+					return new Response(null, { status: 503 });
+				}),
+			(error: unknown) => {
+				assert.match(String(error), /spotify_retryable_status_503/);
+				assert.equal(spotifyRetryablePattern.test(String(error)), true);
+				return true;
+			},
+		);
+		assert.equal(serverErrorAttempts, 3);
+		assert.deepEqual(retryDelays, [2000, 1000, 2000]);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
 });
 
-test("spotify: playlist_items paginates each playlist's own tracks endpoint and keys by position", {
-	concurrency: false,
-}, async () => {
-	const requestedPaths: string[] = [];
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		requestedPaths.push(path);
-		if (path.includes("/me/playlists")) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [{ id: "pl1" }, { id: "pl2" }],
-					next: null,
-				}),
-			);
-		}
-		if (path.includes("/playlists/pl1/tracks")) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [
-						{
-							added_at: "2024-01-01T00:00:00Z",
-							added_by: { id: "someone" },
-							track: {
-								id: "trackA",
-								name: "Track A",
-								artists: [{ name: "Artist A" }],
-								album: { name: "Album A" },
-								duration_ms: 1000,
+test("spotify browser parser rejects repeated full library pages", async () => {
+	const items = Array.from({ length: 200 }, (_, i) => ({
+		item: { data: { __typename: "Playlist", uri: `spotify:playlist:pl${i}` } },
+	}));
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(["playlists"], (operationName) => {
+				assert.equal(operationName, "libraryV3");
+				return { data: { me: { libraryV3: { items, totalCount: 500 } } } };
+			}),
+		/spotify_library_pagination_no_progress/,
+	);
+});
+
+test("spotify browser parser rejects repeated full playlist pages", async () => {
+	const playlistItem = {
+		addedAt: { isoString: "2024-01-01T00:00:00Z" },
+		itemV2: {
+			data: { __typename: "Track", uri: "spotify:track:t", name: "Track" },
+		},
+	};
+	const items = Array.from({ length: 100 }, () => playlistItem);
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(["playlist_items"], (operationName) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+									],
+									totalCount: 1,
+								},
 							},
 						},
-					],
-					next: null,
-				}),
-			);
-		}
-		if (path.includes("/playlists/pl2/tracks")) {
-			return Promise.resolve(jsonResponse({ items: [], next: null }));
-		}
-		throw new Error(`unexpected fetch: ${path}`);
-	};
-	const emittedRecords: Array<{
-		stream: string;
-		data: Record<string, unknown>;
-	}> = [];
-	const { ctx, messages } = makeContext(
-		{},
-		["playlist_items"],
-		(stream, data) => {
-			emittedRecords.push({ stream, data });
-			return Promise.resolve();
-		},
+					};
+				}
+				assert.equal(operationName, "fetchPlaylist");
+				return {
+					data: {
+						playlistV2: {
+							uri: "spotify:playlist:pl1",
+							content: { items, totalCount: 500 },
+						},
+					},
+				};
+			}),
+		/spotify_playlist_pagination_no_progress/,
 	);
-
-	await spotifyCollect(ctx);
-
-	assert.ok(
-		requestedPaths.some((p) => p.includes("/playlists/pl1/tracks")),
-		"must paginate playlist pl1's own tracks endpoint",
-	);
-	assert.ok(
-		requestedPaths.some((p) => p.includes("/playlists/pl2/tracks")),
-		"must paginate playlist pl2's own tracks endpoint even when empty",
-	);
-	assert.equal(emittedRecords.length, 1);
-	assert.deepEqual(emittedRecords[0], {
-		stream: "playlist_items",
-		data: {
-			id: "pl1:0",
-			playlist_id: "pl1",
-			track_id: "trackA",
-			position: 0,
-			added_at: "2024-01-01T00:00:00Z",
-			added_by: "someone",
-			name: "Track A",
-			artist_names: ["Artist A"],
-			album_name: "Album A",
-			duration_ms: 1000,
-		},
-	});
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
-	);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 1);
 });
 
-test("spotify: profile emits a singleton record from GET /me, enriched with GET /me/following's artist total", async () => {
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		if (path.includes("/me/following")) {
-			return Promise.resolve(jsonResponse({ artists: { total: 7 } }));
-		}
-		return Promise.resolve(
-			jsonResponse({
-				id: "spotify_user_id",
-				display_name: "Real Person",
-				followers: { total: 12 },
-				uri: "spotify:user:spotify_user_id",
-				images: [
-					{ url: "https://i.scdn.co/image/ab5678", width: 300, height: 300 },
-				],
+test("spotify browser parser rejects repeated full saved-track pages even when every row is skipped", async () => {
+	const items = Array.from({ length: 100 }, (_, i) => ({
+		track: { uri: `spotify:track:t${i}`, data: { name: `Track ${i}` } },
+	}));
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(["saved_tracks"], (operationName) => {
+				assert.equal(operationName, "fetchLibraryTracks");
+				return {
+					data: { me: { library: { tracks: { items, totalCount: 500 } } } },
+				};
 			}),
-		);
-	};
-	const emittedRecords: Array<{
-		stream: string;
-		data: Record<string, unknown>;
-	}> = [];
-	const { ctx, messages } = makeContext({}, ["profile"], (stream, data) => {
-		emittedRecords.push({ stream, data });
-		return Promise.resolve();
-	});
-
-	await spotifyCollect(ctx);
-
-	assert.equal(emittedRecords.length, 1);
-	assert.deepEqual(emittedRecords[0], {
-		stream: "profile",
-		data: {
-			id: "spotify_user_id",
-			display_name: "Real Person",
-			followers: 12,
-			uri: "spotify:user:spotify_user_id",
-			images: [
-				{ url: "https://i.scdn.co/image/ab5678", width: 300, height: 300 },
-			],
-			following: 7,
-		},
-	});
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+		/spotify_saved_tracks_pagination_no_progress/,
 	);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 1);
-});
-
-test("spotify: profile.following is null when GET /me/following fails, without failing the whole profile record", async () => {
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		if (path.includes("/me/following")) {
-			return Promise.resolve(new Response("", { status: 500 }));
-		}
-		return Promise.resolve(
-			jsonResponse({
-				id: "spotify_user_id",
-				display_name: "Real Person",
-				followers: { total: 12 },
-			}),
-		);
-	};
-	const emittedRecords: Array<{
-		stream: string;
-		data: Record<string, unknown>;
-	}> = [];
-	const { ctx, messages } = makeContext({}, ["profile"], (stream, data) => {
-		emittedRecords.push({ stream, data });
-		return Promise.resolve();
-	});
-
-	await spotifyCollect(ctx);
-
-	assert.equal(emittedRecords.length, 1);
-	assert.equal(emittedRecords[0]?.data.following, null);
-	const coverage = messages.find(
-		(
-			message,
-		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
-	);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 0);
-});
-
-test("spotify: fails a non-adjacent cursor cycle before refetching the repeated path", {
-	concurrency: false,
-}, async () => {
-	const requested: string[] = [];
-	globalThis.fetch = (input) => {
-		const path = String(input);
-		requested.push(path);
-		if (requested.length === 1) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [savedTrack("first")],
-					next: "https://api.spotify.com/v1/me/tracks?offset=50",
-				}),
-			);
-		}
-		if (requested.length === 2) {
-			return Promise.resolve(
-				jsonResponse({
-					items: [savedTrack("second")],
-					next: "https://api.spotify.com/v1/me/tracks?offset=100",
-				}),
-			);
-		}
-		return Promise.resolve(
-			jsonResponse({
-				items: [savedTrack("third")],
-				next: "https://api.spotify.com/v1/me/tracks?offset=50",
-			}),
-		);
-	};
-	const { ctx } = makeContext();
-
-	await assert.rejects(() => spotifyCollect(ctx), /spotify_pagination_cycle/);
-	assert.equal(requested.length, 3);
 });
