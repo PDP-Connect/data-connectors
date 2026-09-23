@@ -367,6 +367,7 @@ export function publishArtifact(
     signer = null,
     signers = null,
     omitRekorBundle = false,
+    bundleSignatureFactory = null,
     payloadDigestOverride = null,
     extraLayers = [],
     codeFiles = null,
@@ -501,6 +502,46 @@ export function publishArtifact(
         layers: sigLayers,
       },
       `${digest.replace(":", "-")}.sig`
+    );
+  }
+
+  // The cosign v3-default bundle: a referring-artifact manifest at
+  // `sha256-<hex>` (no `.sig` suffix — that suffix is the legacy tag's own
+  // naming, observed only on the pre-v3 shape) wrapping ONE layer that is the
+  // bundle JSON itself. `bundleSignatureFactory`, when given, receives the
+  // repository coordinate and the digest and returns a ready-to-serialize
+  // bundle object (`{ mediaType, verificationMaterial, dsseEnvelope }`) — the
+  // caller owns minting the DSSE envelope and tlog entry, because doing that
+  // with a REAL certificate and a REAL synthetic Rekor log is exactly what
+  // oci-identity.test.mjs's machinery already does for the legacy path, and
+  // duplicating a second minting scheme here would test this fixture's idea
+  // of a bundle rather than cosign's.
+  if (bundleSignatureFactory) {
+    const bundle = bundleSignatureFactory({
+      repository: `pdp-connect/connector/${connectorKey}`,
+      digest: payloadDigestOverride ?? digest,
+    });
+    const bundleBytes = canonicalJson(bundle);
+    registry.putManifest(
+      {
+        schemaVersion: 2,
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        artifactType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+        config: {
+          mediaType: "application/vnd.oci.empty.v1+json",
+          digest: registry.putBlob(Buffer.from("{}")),
+          size: 2,
+        },
+        layers: [
+          {
+            mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+            digest: registry.putBlob(bundleBytes),
+            size: bundleBytes.length,
+          },
+        ],
+        subject: { mediaType: "application/vnd.oci.image.manifest.v1+json", digest, size: 0 },
+      },
+      digest.replace(":", "-")
     );
   }
 

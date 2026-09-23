@@ -91,17 +91,43 @@ export function sha256Digest(buffer) {
 }
 
 /**
- * The cosign tag that holds the signature for a manifest digest.
+ * The cosign tag that holds the LEGACY-format signature for a manifest digest.
  *
  * `sha256:<hex>` is not a legal tag — `:` is a separator — so cosign rewrites
  * the separator and suffixes `.sig`. Observed against cosign v2.4.3, which is
- * the version the publish workflow pins.
+ * the version the publish workflow pinned through 2026-09.
  */
 export function cosignSignatureTag(digest) {
   if (!isValidDigest(digest)) {
     throw new Error(`Cannot derive a cosign signature tag from "${digest}"`);
   }
   return `${digest.trim().replace(":", "-")}.sig`;
+}
+
+/**
+ * The cosign tag that holds a NEW-format (cosign v3-default) signature bundle
+ * for a manifest digest.
+ *
+ * Cosign v3 makes the Sigstore protobuf bundle format the default and stores
+ * it as an OCI 1.1 referring artifact (a manifest carrying `subject`). Where
+ * the registry supports the `/referrers/` API that artifact is discoverable
+ * without a tag at all — but cosign ALSO writes a fallback tag for registries
+ * that do not, and this consumer reads that fallback rather than the
+ * referrers API, for the same reason `fetchSignatureManifest` already reads a
+ * tag for the legacy format: a tag lookup works against any OCI-compliant
+ * registry, referrers-capable or not, with one code path.
+ *
+ * The fallback tag is `sha256-<hex>`, WITHOUT the legacy path's `.sig`
+ * suffix — observed against cosign v3.1.3 pushing to both a local registry
+ * and ghcr.io. Do not derive this by appending anything to
+ * `cosignSignatureTag`'s output; the two tags name different objects in
+ * different shapes, and the missing suffix is not a typo.
+ */
+export function cosignBundleTag(digest) {
+  if (!isValidDigest(digest)) {
+    throw new Error(`Cannot derive a cosign bundle tag from "${digest}"`);
+  }
+  return digest.trim().replace(":", "-");
 }
 
 /**
@@ -996,6 +1022,56 @@ export async function fetchSignatureManifest({
   } catch (error) {
     throw new OciRegistryError(
       `The cosign signature manifest at ${registry}/${repository}:${tag} is not JSON: ${error.message}`,
+      "tampered"
+    );
+  }
+}
+
+/**
+ * Fetch the cosign NEW-format (v3-default) bundle manifest for a digest, if
+ * one is published.
+ *
+ * Same three-outcome contract as {@link fetchSignatureManifest}, at the
+ * different tag {@link cosignBundleTag} derives. The manifest this returns is
+ * an OCI 1.1 referring artifact (image manifest with a `subject` field and
+ * `artifactType: application/vnd.dev.sigstore.bundle.v0.3+json`) wrapping a
+ * single layer that is the actual bundle JSON — that layer is what
+ * {@link fetchOciSignatureBundle} fetches next, this function only resolves
+ * whether the referrer exists and what its layer digest is.
+ */
+export async function fetchBundleManifest({
+  registry,
+  repository,
+  digest,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+}) {
+  const tag = cosignBundleTag(digest);
+  const result = await lookupManifest({
+    registry,
+    repository,
+    reference: tag,
+    scheme,
+    timeoutMs,
+    fetchImpl,
+    retryOptions,
+  });
+
+  if (result.outcome === "absent") return null;
+  if (result.outcome === "unknown") {
+    throw new OciRegistryError(
+      `Could not determine whether ${registry}/${repository}:${tag} exists: ${result.reason}`,
+      "unverifiable"
+    );
+  }
+
+  try {
+    return { manifest: JSON.parse(result.body), digest: result.digest };
+  } catch (error) {
+    throw new OciRegistryError(
+      `The cosign bundle manifest at ${registry}/${repository}:${tag} is not JSON: ${error.message}`,
       "tampered"
     );
   }
