@@ -10,18 +10,16 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { manifestsDir, repoRoot } from "./connector-paths.ts";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const REPO_ROOT = dirname(dirname(PACKAGE_ROOT));
 const MANIFEST_DIRS = [
-	{ label: "polyfill", path: join(PACKAGE_ROOT, "manifests") },
+	{ label: "polyfill", path: manifestsDir },
 	{
 		label: "reference",
 		path: join(
-			REPO_ROOT,
+			repoRoot,
 			"reference-implementation",
 			"fixtures",
 			"seed-manifests",
