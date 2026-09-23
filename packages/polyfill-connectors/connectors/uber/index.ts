@@ -11,9 +11,17 @@
  *     requested_at, completed_at, pickup/dropoff addresses, product_type,
  *     driver, distance, duration, fare_total). The Activities list feed
  *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
- *     its own hydration, so it is self-mapped: `coverage_strategy:
- *     "checkpoint_window"` with no `state_stream`/`parent_streams` in
- *     manifests/uber.json, and it emits its own DETAIL_COVERAGE.
+ *     its own hydration, so it is self-mapped, and it emits its own
+ *     DETAIL_COVERAGE. It declares `incremental: false` /
+ *     `coverage_strategy: "full_inventory"` in manifests/uber.json: the
+ *     Activities list has no date/status field to filter or stop on (only a
+ *     trip UUID; see parsers.ts), so `fetchAllActivities` walks the full
+ *     feed every run with no STATE-consulted cursor. A stop-at-seen boundary
+ *     keyed on trip id is plausible (the audit's cut-semantics-pass report
+ *     item #1) but assumes the Activities feed is fetched newest-first,
+ *     which no code or fixture in this connector confirms — that requires a
+ *     live-account run to verify before implementing; tracked as a
+ *     follow-up, not implemented here.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
  *     totals), fetched from `GetReceipt` only. Declared `state_stream:
  *     "trips"` in the manifest — it rides trips' checkpoint rather than
@@ -480,8 +488,12 @@ export async function collectAllStreams(
 				},
 			});
 		}
-		await emit({ type: "STATE", stream: "trips", cursor: {} });
-		// `trips` does its own hydration (GetTrip per id), so it is
+		// `trips` is full_inventory / incremental: false (no source-side date
+		// or stop-at-seen filter is proven — see the manifest and this
+		// connector's header comment): it emits no STATE, matching the
+		// fleet's full_inventory convention (e.g. meta's `following`), rather
+		// than a `cursor: {}` that claimed a bookkeeping cursor with nothing
+		// in it. `trips` does its own hydration (GetTrip per id), so it is
 		// self-mapped and emits its own DETAIL_COVERAGE. `receipts` is
 		// declared `state_stream: "trips"` in the manifest and must NEVER
 		// construct one — see the fleet-wide

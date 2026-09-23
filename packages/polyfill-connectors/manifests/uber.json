@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/uber",
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icons/uber.svg",
@@ -96,13 +96,12 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "completed_at",
 			"consent_time_field": "requested_at",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["driver_name"]
@@ -117,7 +116,7 @@
 					"group_by": ["status", "product_type"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{

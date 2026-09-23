@@ -321,9 +321,9 @@ test("collectAllStreams: a page with no nextPageToken stops even with a full pag
 	assert.equal(calls.filter((c) => c === "Activities").length, 1);
 });
 
-// ─── Records-before-STATE ordering ──────────────────────────────────────────
+// ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
 
-test("collectAllStreams: records emit before STATE and DETAIL_COVERAGE for trips", async () => {
+test("collectAllStreams: records emit before DETAIL_COVERAGE for trips", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
 		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
@@ -334,12 +334,29 @@ test("collectAllStreams: records emit before STATE and DETAIL_COVERAGE for trips
 		(acc, e, i) => (e.kind === "record" ? i : acc),
 		-1,
 	);
-	const stateIdx = events.findIndex(
-		(e) => e.kind === "message" && e.message.type === "STATE",
+	const coverageIdx = events.findIndex(
+		(e) => e.kind === "message" && e.message.type === "DETAIL_COVERAGE",
 	);
 	assert.ok(lastRecordIdx !== -1);
-	assert.ok(stateIdx !== -1);
-	assert.ok(stateIdx > lastRecordIdx, "STATE must land after the last RECORD");
+	assert.ok(coverageIdx !== -1);
+	assert.ok(
+		coverageIdx > lastRecordIdx,
+		"DETAIL_COVERAGE must land after the last RECORD",
+	);
+});
+
+test("collectAllStreams: trips (full_inventory) emits no STATE", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
+	});
+	const { ctx, messages } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.equal(
+		messages.some((m) => m.type === "STATE"),
+		false,
+		"trips is incremental: false / full_inventory — it must not claim a cursor via STATE",
+	);
 });
 
 // ─── No raw fetch anywhere in the collect path ──────────────────────────────
