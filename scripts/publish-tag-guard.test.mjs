@@ -637,12 +637,22 @@ test("a first publish of a new version tags and signs the digest it pushed", () 
     assert.ok(reported, `expected the step to report a published digest\n${result.output}`);
     assert.equal(tagged, reported, "the tag must resolve to the digest the push reported");
 
+    // Two signatures during the cosign v3 transition: the default bundle
+    // format and the legacy `.sig` format that data-connect desktop builds
+    // still read. When the legacy bridge is removed, this becomes one call.
     const signed = result.calls.filter((call) => call[0] === "cosign");
-    assert.equal(signed.length, 1, "a publish signs exactly once");
-    assert.ok(
-      signed[0].some((arg) => arg.endsWith(`@${tagged}`)),
-      `cosign must sign the published digest by digest, not by tag: ${signed[0].join(" ")}`,
+    assert.equal(signed.length, 2, "a publish signs once per signature format");
+    assert.equal(
+      signed.filter((call) => call.includes("--new-bundle-format=false")).length,
+      1,
+      "exactly one of the signatures is the legacy format",
     );
+    for (const call of signed) {
+      assert.ok(
+        call.some((arg) => arg.endsWith(`@${tagged}`)),
+        `cosign must sign the published digest by digest, not by tag: ${call.join(" ")}`,
+      );
+    }
   });
 });
 
@@ -894,7 +904,8 @@ test("the push that precedes the guard writes no tag", () => {
   // signing first, an interruption leaves an unreferenced signed manifest that
   // nothing resolves by name; tagging first, it leaves a resolvable version on
   // unsigned bytes, which a consumer can install and cannot verify.
-  const signLine = lines.findIndex((line) => /^\s*cosign sign\b/.test(line));
+  // The LAST signature line, so every signature format precedes the tag.
+  const signLine = lines.findLastIndex((line) => /^\s*cosign sign\b/.test(line));
   assert.notEqual(signLine, -1, "expected the publish to sign");
   assert.ok(
     signLine < tagLine,
