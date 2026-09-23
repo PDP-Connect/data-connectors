@@ -1498,21 +1498,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/meta/index.ts",
-			line: 771,
+			line: 765,
 			column: 6,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emitRecord() for post_likes requires in-order Collection Profile emission",
 		},
 		{
 			path: "connectors/meta/index.ts",
-			line: 813,
+			line: 803,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emitRecord() for following requires in-order Collection Profile emission",
 		},
 		{
 			path: "connectors/meta/index.ts",
-			line: 839,
+			line: 829,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emitRecord() for ads requires in-order Collection Profile emission",
@@ -1813,7 +1813,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 429,
+			line: 437,
 			column: 15,
 			category: "provider_pacing_backpressure",
 			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
