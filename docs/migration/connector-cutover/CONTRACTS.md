@@ -14,7 +14,8 @@ Base: `main` at `20bba85`.
 
 - `connectors/<key>/` at the repository root is the only home of PDPP Collection Profile implementations. It holds the code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures.
 - `packages/polyfill-connectors` holds only the reusable runtime, libraries, and dev tools. It holds no connector-specific code.
-- The legacy Playwright format is removed: `*-playwright.{js,json}`, `registry.json`, the legacy runner, skills, scripts, and workflows. `scope-catalog.json` is generated from PDPP manifests.
+- The legacy Playwright format is removed: `*-playwright.{js,json}`, `registry.json`, the legacy runner, skills, scripts, and workflows. This happens only for scopes whose replacement parity is proven and whose Vana-owned binding exists.
+- `scope-catalog.json` and `SCOPES.md` are Vana DPv2 contracts. They are NEVER regenerated from PDPP manifests, in any phase: they are frozen with their exact IDs and shapes, or handed over to the Vana owner. Public bindings and projectors are Vana-owned.
 - No alias loader, dual discovery, or compatibility runtime exists. A legacy identifier that changed is recorded only as data in the capability map.
 
 ## Decisions
