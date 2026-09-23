@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
@@ -83,7 +83,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["name"]
@@ -129,7 +129,6 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "order_date",
 			"consent_time_field": "order_date",
 			"selection": {
 				"fields": true,
@@ -194,7 +193,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["name"]
