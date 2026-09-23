@@ -46,6 +46,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import type { BodyResponseDiagnostics } from "../../src/browser-artifact-response.ts";
+import { manifestPath } from "../../src/connector-paths.ts";
 import type {
 	EmittedMessage,
 	StreamScope,
@@ -98,10 +99,7 @@ interface RecordingHarness {
 	messages: EmittedMessage[];
 }
 
-const USAA_MANIFEST_PATH = new URL(
-	"../../manifests/usaa.json",
-	import.meta.url,
-);
+const USAA_MANIFEST_PATH = manifestPath("usaa");
 const FROZEN_EMITTED_AT = "2026-04-22T12:00:00.000Z";
 
 /** Build an EmitDeps that records every emit() + emitRecord() call

@@ -16,15 +16,15 @@
  *
  * `PDPP_POLYFILL_MANIFESTS_DIR` overrides the directory read, for tests that
  * need to inject a synthetic/probe manifest without writing into the real,
- * shared `manifests/` directory. Unset in normal use.
+ * shared `manifests/` directory. Unset in normal use. Checked before
+ * `connector-paths.ts`'s own `PDPP_CONNECTOR_PATHS_TEST_ROOT` (a full
+ * connectors+manifests layout relocation for seam-relocation tests); the two
+ * overrides serve different tests and are not expected to be set together.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const packageDir = dirname(fileURLToPath(import.meta.url));
-const realManifestsDir = join(packageDir, "..", "manifests");
+import { join } from "node:path";
+import { resolvedManifestsDir } from "./connector-paths.ts";
 
 export interface PolyfillManifestEntry {
 	file: string;
@@ -37,6 +37,7 @@ function readManifestFile(manifestPath: string): unknown {
 
 /** Every `*.json` file directly under this package's real, shipped `manifests/` directory, parsed. */
 function readRealPolyfillManifests(): PolyfillManifestEntry[] {
+	const realManifestsDir = resolvedManifestsDir();
 	const out: PolyfillManifestEntry[] = [];
 	for (const file of readdirSync(realManifestsDir)) {
 		if (!file.endsWith(".json")) {

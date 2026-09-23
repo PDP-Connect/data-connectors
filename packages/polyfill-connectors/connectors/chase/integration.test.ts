@@ -49,6 +49,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
 import { buildBrowserSurfaceDiagnostic } from "../../src/browser-surface-diagnostic.ts";
+import { manifestPath } from "../../src/connector-paths.ts";
 import type {
 	EmittedMessage,
 	StreamScope,
@@ -106,13 +107,7 @@ interface RecordingHarness {
 const FROZEN_EMITTED_AT = "2026-04-22T12:00:00.000Z";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
-const CHASE_MANIFEST_PATH = join(
-	__dirname,
-	"..",
-	"..",
-	"manifests",
-	"chase.json",
-);
+const CHASE_MANIFEST_PATH = manifestPath("chase");
 
 interface HarnessOverrides {
 	maxSeenByAccount?: Record<string, TransactionCursor>;

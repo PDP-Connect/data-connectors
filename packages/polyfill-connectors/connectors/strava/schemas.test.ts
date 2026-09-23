@@ -15,9 +15,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { manifestPath } from "../../src/connector-paths.ts";
 import {
 	activitiesSchema,
 	COVERAGE_REASONS,
@@ -25,8 +24,7 @@ import {
 	validateRecord,
 } from "./schemas.ts";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const MANIFEST_PATH = join(HERE, "..", "..", "manifests", "strava.json");
+const MANIFEST_PATH = manifestPath("strava");
 
 interface ManifestStream {
 	name: string;

@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 import { validateRecord } from "./schemas.ts";
 
 const RECORDS_DIR = join(
@@ -29,13 +30,7 @@ const RECORDS_DIR = join(
 	"synthetic",
 	"records",
 );
-const MANIFEST_PATH = join(
-	import.meta.dirname,
-	"..",
-	"..",
-	"manifests",
-	"claude_code.json",
-);
+const MANIFEST_PATH = manifestPath("claude_code");
 
 const streamFiles = readdirSync(RECORDS_DIR)
 	.filter((f) => f.endsWith(".jsonl"))

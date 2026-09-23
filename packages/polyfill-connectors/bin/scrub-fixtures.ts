@@ -31,7 +31,10 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import {
+	fixturesDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 import {
 	applyScrubRules,
 	applyStructuredRedactionPlan,
@@ -137,8 +140,8 @@ async function main(): Promise<void> {
 	}
 
 	const { connector, llmRedactionsDir, runId: runIdArg } = args;
-	const rawRoot = join(PACKAGE_ROOT, "fixtures", connector, "raw");
-	const scrubbedRoot = join(PACKAGE_ROOT, "fixtures", connector, "scrubbed");
+	const rawRoot = join(fixturesDir(connector), "raw");
+	const scrubbedRoot = join(fixturesDir(connector), "scrubbed");
 
 	if (!existsSync(rawRoot)) {
 		console.error(`No raw fixtures for '${connector}' at ${rawRoot}`);
@@ -153,7 +156,7 @@ async function main(): Promise<void> {
 	)) as {
 		defaultScrubRules: ScrubRule[];
 	};
-	const connectorRules = await loadConnectorScrubRules(PACKAGE_ROOT, connector);
+	const connectorRules = await loadConnectorScrubRules(connector);
 	const allRules: ScrubRule[] = [...defaultScrubRules, ...connectorRules];
 
 	console.log(

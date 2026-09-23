@@ -33,6 +33,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import { manifestPath } from "../../src/connector-paths.ts";
 import type { BrowserCollectContext } from "../../src/connector-runtime.ts";
 import {
 	openFingerprintCursor,
@@ -83,10 +84,7 @@ import type {
 	OrderDetail,
 } from "./types.ts";
 
-const AMAZON_MANIFEST_PATH = new URL(
-	"../../manifests/amazon.json",
-	import.meta.url,
-);
+const AMAZON_MANIFEST_PATH = manifestPath("amazon");
 const AMAZON_INDEX_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const AMAZON_FOPO_DETAIL_FIXTURE = new URL(
 	"./__fixtures__/order-detail-fopo-minimal.html",

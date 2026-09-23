@@ -41,8 +41,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
+import { manifestsDir, packageRoot } from "./connector-paths.ts";
 import {
 	buildConnectionScopedSecretEnv,
 	isStaticSecretConnector as isStaticSecretConnectorForInjection,
@@ -50,7 +49,7 @@ import {
 	StaticSecretInjectionError,
 } from "./static-secret-injection.ts";
 
-const packageDir = fileURLToPath(new URL("..", import.meta.url));
+const packageDir = packageRoot;
 const generatorScript = join(
 	packageDir,
 	"scripts/generate-static-secret-registry.ts",
@@ -59,7 +58,7 @@ const trackedRegistryPath = join(
 	packageDir,
 	"src/generated/static-secret-registry.generated.ts",
 );
-const realManifestsDir = join(packageDir, "manifests");
+const realManifestsDir = manifestsDir;
 
 test("static-secret-registry.generated.ts has not drifted from what regenerating from the manifests on disk would produce", () => {
 	const scratchDir = mkdtempSync(

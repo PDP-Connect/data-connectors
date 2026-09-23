@@ -3,10 +3,12 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import type { Locator, Page } from "playwright";
 
+import { connectorDir } from "../connector-paths.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -21,89 +23,35 @@ interface InteractionHarness {
 	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
 }
 
-const LIVE_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/orders-list.html",
-		import.meta.url,
-	),
-	"utf8",
+function hebFixture(name: string): string {
+	return readFileSync(join(connectorDir("heb"), "__fixtures__", name), "utf8");
+}
+
+const LIVE_HTML = hebFixture("orders-list.html");
+const SIGNIN_HTML = hebFixture("sign-in-page.html");
+const OPTIONAL_LOGIN_HTML = hebFixture(
+	"sign-in-page-with-optional-passkey.html",
 );
-const SIGNIN_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/sign-in-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const OPTIONAL_LOGIN_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/sign-in-page-with-optional-passkey.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const INCAPSULA_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/incapsula-block.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const PASSKEY_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/passkey-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const PASSKEY_ENROLLMENT_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/passkey-enrollment-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const INCAPSULA_HTML = hebFixture("incapsula-block.html");
+const PASSKEY_HTML = hebFixture("passkey-page.html");
+const PASSKEY_ENROLLMENT_HTML = hebFixture("passkey-enrollment-page.html");
 /** The live shape observed in run_1787109487130. */
 const PASSKEY_ENROLLMENT_URL =
 	"https://accounts.heb.com/interaction/abc123xyz/passkey_registration";
 const LOADING_HTML =
 	"<html><body><main><p>Loading your orders...</p></main></body></html>";
-const VERIFICATION_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/verification-code-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const VERIFICATION_HTML = hebFixture("verification-code-page.html");
 /**
  * The live login-method chooser from run_1787109487130. Matches
  * VERIFICATION_CODE_RE via the radio label "Email me a one-time code" while
  * carrying no code input at all.
  */
-const LOGIN_METHOD_CHOOSER_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/login-method-chooser-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const LOGIN_METHOD_CHOOSER_HTML = hebFixture("login-method-chooser-page.html");
 /** The live chooser URL from run_1787109487130 — the `/login` interaction route. */
 const LOGIN_METHOD_CHOOSER_URL =
 	"https://accounts.heb.com/interaction/5iuOgIGpIH0ju9UJKtBiK/login";
-const CAPTCHA_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/captcha-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const UNKNOWN_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/unknown-ui-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const CAPTCHA_HTML = hebFixture("captcha-page.html");
+const UNKNOWN_HTML = hebFixture("unknown-ui-page.html");
 const PASSKEY_MSG_RE = /passkey/i;
 const VERIFICATION_MSG_RE = /verification code|security code/i;
 const CAPTCHA_MSG_RE = /captcha/i;
@@ -2333,30 +2281,12 @@ test("ensureHebSession reports a clear provider-rejected error when the split OT
 // therefore drive a linkedom-backed page against the captured HTML, so the
 // production selectors are exercised against the bytes H-E-B actually served.
 
-const WHATS_NEW_MODAL_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/whats-new-modal-over-orders.html",
-		import.meta.url,
-	),
-	"utf8",
-);
-const EMAIL_FIRST_LOGIN_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/email-first-login-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const WHATS_NEW_MODAL_HTML = hebFixture("whats-new-modal-over-orders.html");
+const EMAIL_FIRST_LOGIN_HTML = hebFixture("email-first-login-page.html");
 /** The live email-first login route observed in run_1787344095924. */
 const EMAIL_FIRST_LOGIN_URL =
 	"https://accounts.heb.com/interaction/synthetic-interaction-id/login";
-const OTP_ONLY_LOGIN_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/otp-only-login-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const OTP_ONLY_LOGIN_HTML = hebFixture("otp-only-login-page.html");
 /**
  * The live OTP-only login route observed in run_1787364399455. Same `/login`
  * interaction route as the email-first form; the difference is entirely in the
@@ -2364,22 +2294,12 @@ const OTP_ONLY_LOGIN_HTML = readFileSync(
  */
 const OTP_ONLY_LOGIN_URL =
 	"https://accounts.heb.com/interaction/synthetic-otp-only-id/login";
-const REGISTER_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/register-page.html",
-		import.meta.url,
-	),
-	"utf8",
-);
+const REGISTER_HTML = hebFixture("register-page.html");
 /** A sibling interaction route under the same `/interaction/<id>/` prefix. */
 const REGISTER_URL =
 	"https://accounts.heb.com/interaction/synthetic-otp-only-id/register";
-const OTP_ENTRY_ON_LOGIN_ROUTE_HTML = readFileSync(
-	new URL(
-		"../../connectors/heb/__fixtures__/otp-entry-on-login-route-page.html",
-		import.meta.url,
-	),
-	"utf8",
+const OTP_ENTRY_ON_LOGIN_ROUTE_HTML = hebFixture(
+	"otp-entry-on-login-route-page.html",
 );
 
 interface DomPageState {

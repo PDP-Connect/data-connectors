@@ -4,6 +4,7 @@
 import { existsSync } from "node:fs";
 import { extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { connectorDir } from "./connector-paths.ts";
 
 /** Which captured file type a rule applies to. */
 export type ScrubScope = "all" | "html" | "json";
@@ -100,10 +101,9 @@ export function applyStructuredRedactionPlan(
 }
 
 export async function loadConnectorScrubRules(
-	packageRoot: string,
 	connector: string,
 ): Promise<ScrubRule[]> {
-	const rulesFile = findConnectorRulesFile(packageRoot, connector);
+	const rulesFile = findConnectorRulesFile(connector);
 	if (!rulesFile) {
 		return [];
 	}
@@ -121,11 +121,8 @@ export async function loadConnectorScrubRules(
 	return rules.filter(isScrubRule);
 }
 
-function findConnectorRulesFile(
-	packageRoot: string,
-	connector: string,
-): string | null {
-	const connectorRoot = join(packageRoot, "connectors", connector);
+function findConnectorRulesFile(connector: string): string | null {
+	const connectorRoot = connectorDir(connector);
 	const candidates = [
 		join(connectorRoot, "scrub-rules.ts"),
 		join(connectorRoot, "scrub-rules.js"),
