@@ -7,21 +7,16 @@
  *
  * GROUND-TRUTH CAVEAT: doordash/index.ts now emits real RECORDs, parsed from
  * `getConsumerOrdersWithDetails`-shaped GraphQL responses captured on the
- * orders page (see parsers.ts). No live DoorDash session exists for this
- * lane yet ("PROFILE READY" has not been sent) — the parser's field-level
- * assumptions are derived from the legacy Playwright scraper's own response
- * walk (data-connectors/doordash/doordash-playwright.js) plus DoorDash's
- * known public GraphQL money-envelope convention, NOT a live capture. The
- * `__fixtures__/synthetic/` fixture used by synthetic-shape.test.ts is
- * therefore hand-authored synthetic-but-shape-real data, not a real capture
- * — `fixtures/doordash/scrubbed/pilot-real-shape/` does not exist yet (see
- * pilot-fixture.test.ts). See connectors/doordash/index.ts header for the
- * exact pending-live status. Whoever gets live access MUST re-verify these
- * field shapes against a real captured response and tighten anything that
- * drifts (especially `order_date` presence, the `orderUuid` id format, and
- * whether `payment_method_summary` is ever actually present on this
- * response — the parser currently always emits null for it because no
- * observed shape carries it).
+ * orders page (see parsers.ts). Live-verified 2026-09-22 (`cut-doordash-live`
+ * lane, two real runs against a real account — see connectors/doordash/
+ * index.ts's own header for the full evidence): the real response did not
+ * carry `deliveryStatus` or `orderItems` on any observed order, and no
+ * `payment_method_summary` source field was ever observed either, which is
+ * why the parser emits null for those fields — confirmed against a real
+ * capture, not assumed. `fixtures/doordash/scrubbed/pilot-real-shape/` is
+ * now populated from that capture. The `__fixtures__/synthetic/` fixture
+ * used by synthetic-shape.test.ts remains hand-authored synthetic-but-
+ * shape-real data for cases the live capture didn't happen to exercise.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
