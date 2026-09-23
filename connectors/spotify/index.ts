@@ -380,6 +380,14 @@ async function collectSpotifyWebData(
 				: null;
 		}
 
+		function pageSignature(items: unknown[]): string {
+			return JSON.stringify({
+				count: items.length,
+				first: items.slice(0, 3),
+				last: items.slice(-3),
+			});
+		}
+
 		async function accessToken(): Promise<string> {
 			let serverTime: number | null = null;
 			try {
@@ -613,6 +621,7 @@ async function collectSpotifyWebData(
 			const playlistUris: string[] = [];
 			let libraryOffset = 0;
 			const libraryLimit = 200;
+			const libraryPageSignatures = new Set<string>();
 			while (true) {
 				const libData = await gql("libraryV3", {
 					filters: [],
@@ -629,6 +638,14 @@ async function collectSpotifyWebData(
 				});
 				const library = libData?.data?.me?.libraryV3;
 				const pageItems = library?.items || [];
+				const signature = pageSignature(pageItems);
+				if (
+					pageItems.length >= libraryLimit &&
+					libraryPageSignatures.has(signature)
+				) {
+					throw new Error("spotify_library_pagination_no_progress");
+				}
+				libraryPageSignatures.add(signature);
 				playlistUris.push(
 					...pageItems
 						.filter((item: any) => item.item?.data?.__typename === "Playlist")
@@ -642,17 +659,25 @@ async function collectSpotifyWebData(
 						),
 				);
 				const total = count(library?.totalCount);
+				if (pageItems.length === 0 && total !== null && libraryOffset < total) {
+					throw new Error("spotify_library_pagination_no_progress");
+				}
+				const nextLibraryOffset = libraryOffset + pageItems.length;
 				if (
 					pageItems.length < libraryLimit ||
-					(total !== null && libraryOffset + pageItems.length >= total)
+					(total !== null && nextLibraryOffset >= total)
 				)
 					break;
-				libraryOffset += libraryLimit;
+				if (nextLibraryOffset <= libraryOffset) {
+					throw new Error("spotify_library_pagination_no_progress");
+				}
+				libraryOffset = nextLibraryOffset;
 			}
 			for (const uri of playlistUris) {
 				let offset = 0;
 				let position = 0;
 				let playlistId = idFromUri(uri);
+				const playlistPageSignatures = new Set<string>();
 				while (true) {
 					const plData = await gql("fetchPlaylist", {
 						uri,
@@ -665,6 +690,11 @@ async function collectSpotifyWebData(
 					playlistId = idFromUri(pl.uri) || playlistId;
 					if (!playlistId) break;
 					const items = pl.content?.items || [];
+					const signature = pageSignature(items);
+					if (items.length >= 100 && playlistPageSignatures.has(signature)) {
+						throw new Error("spotify_playlist_pagination_no_progress");
+					}
+					playlistPageSignatures.add(signature);
 					if (offset === 0 && wanted.has("playlists")) {
 						result.playlists.push({
 							id: playlistId,
@@ -703,14 +733,22 @@ async function collectSpotifyWebData(
 						}
 					}
 					const total = count(pl.content?.totalCount) ?? items.length;
-					if (items.length < 100 || position >= total) break;
-					offset += 100;
+					if (items.length === 0 && offset < total) {
+						throw new Error("spotify_playlist_pagination_no_progress");
+					}
+					const nextOffset = offset + items.length;
+					if (items.length < 100 || nextOffset >= total) break;
+					if (nextOffset <= offset) {
+						throw new Error("spotify_playlist_pagination_no_progress");
+					}
+					offset = nextOffset;
 				}
 			}
 		}
 
 		if (wanted.has("saved_tracks")) {
 			let offset = 0;
+			const savedTrackPageSignatures = new Set<string>();
 			while (true) {
 				const data = await gql("fetchLibraryTracks", {
 					uri: "spotify:user:me:collection",
@@ -719,6 +757,11 @@ async function collectSpotifyWebData(
 				});
 				const tracks = data?.data?.me?.library?.tracks;
 				const items = tracks?.items || [];
+				const signature = pageSignature(items);
+				if (items.length >= 100 && savedTrackPageSignatures.has(signature)) {
+					throw new Error("spotify_saved_tracks_pagination_no_progress");
+				}
+				savedTrackPageSignatures.add(signature);
 				for (const item of items) {
 					const t = item.track?.data;
 					const id = idFromUri(item.track?._uri || item.track?.uri);
@@ -740,15 +783,25 @@ async function collectSpotifyWebData(
 						added_at: addedAt,
 						isrc: null,
 						uri: item.track?._uri || item.track?.uri || null,
-						explicit: t.contentRating?.label === "EXPLICIT",
+						explicit:
+							typeof t.contentRating?.label === "string"
+								? t.contentRating.label === "EXPLICIT"
+								: null,
 						album_artist_names: (t.albumOfTrack?.artists?.items || []).map(
 							(a: any) => a.profile?.name ?? "",
 						),
 					});
 				}
 				const total = count(tracks?.totalCount) ?? items.length;
-				if (items.length < 100 || result.saved_tracks.length >= total) break;
-				offset += 100;
+				if (items.length === 0 && offset < total) {
+					throw new Error("spotify_saved_tracks_pagination_no_progress");
+				}
+				const nextOffset = offset + items.length;
+				if (items.length < 100 || nextOffset >= total) break;
+				if (nextOffset <= offset) {
+					throw new Error("spotify_saved_tracks_pagination_no_progress");
+				}
+				offset = nextOffset;
 			}
 		}
 
