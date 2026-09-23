@@ -28,13 +28,12 @@
 
 import { execFileSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { packageRoot as PACKAGE_ROOT } from "../../src/connector-paths.ts";
 import { buildDependencyGraph, UntrustworthyGraphError } from "./graph.ts";
 import { FULL_SUITE, selectRelatedTests } from "./select.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SOURCE_ROOTS = ["bin", "connectors", "src"];
 
 function listAllTsFiles(root: string, dir: string, out: string[]): void {
