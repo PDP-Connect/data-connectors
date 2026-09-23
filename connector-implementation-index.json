@@ -2164,7 +2164,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/chatgpt",
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.1.1",
+				"version": "0.2.0",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -2178,36 +2178,6 @@
 						"browser": {
 							"required": true
 						}
-					}
-				},
-				"setup": {
-					"modality": "static_secret",
-					"credential_capture": {
-						"kind": "username_password",
-						"label": "ChatGPT sign-in details",
-						"description": "Seal the ChatGPT sign-in details for this source. The connector may use them only during owner-mediated credential or session recovery for this connection; scheduled runs reuse current session evidence and do not prompt for credentials.",
-						"submit_label": "Save ChatGPT credential and start first sync",
-						"fields": [
-							{
-								"name": "username",
-								"label": "ChatGPT email",
-								"type": "email",
-								"required": true,
-								"secret": true,
-								"autocomplete": "username",
-								"placeholder": "you@example.com",
-								"env": ["CHATGPT_USERNAME"]
-							},
-							{
-								"name": "password",
-								"label": "ChatGPT password",
-								"type": "password",
-								"required": true,
-								"secret": true,
-								"autocomplete": "current-password",
-								"env": ["CHATGPT_PASSWORD"]
-							}
-						]
 					}
 				},
 				"capabilities": {
