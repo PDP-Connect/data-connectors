@@ -21,15 +21,13 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFEST_DIR,
+} from "../src/connector-paths.ts";
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PKG_ROOT, "manifests");
-const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 
 function listSchemaConnectors(): string[] {
 	return readdirSync(CONNECTORS_DIR)

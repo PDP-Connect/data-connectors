@@ -17,17 +17,16 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFEST_DIR,
+} from "../src/connector-paths.ts";
 import {
 	type ReconcileReport,
 	reconcileFromDisk,
 } from "../src/manifest-reconcile.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PKG_ROOT, "manifests");
-const CONNECTORS_DIR = join(PKG_ROOT, "connectors");
 const JSON_EXT_RE = /\.json$/;
 
 /** Map manifest filename (without .json) to the connectors/ dir. They

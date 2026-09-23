@@ -30,7 +30,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import {
 	applyScrubRules,
 	applyStructuredRedactionPlan,
@@ -39,8 +40,6 @@ import {
 	parseStructuredRedactionPlan,
 	type ScrubRule,
 } from "../src/scrubber.ts";
-
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 interface CliArgs {
 	connector: string;

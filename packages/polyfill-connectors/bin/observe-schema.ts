@@ -54,12 +54,11 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
-const MANIFEST_DIR = join(PACKAGE_ROOT, "manifests");
+import { basename, join } from "node:path";
+import {
+	fixturesDir,
+	manifestsDir as MANIFEST_DIR,
+} from "../src/connector-paths.ts";
 
 const SAMPLE_CAP = 10_000;
 const JSONL_EXTENSION_RE = /\.jsonl$/;
@@ -169,9 +168,7 @@ export function readManifest(
 
 export function defaultRecordsDir(connector: string): string {
 	return join(
-		PACKAGE_ROOT,
-		"fixtures",
-		connector,
+		fixturesDir(connector),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",
