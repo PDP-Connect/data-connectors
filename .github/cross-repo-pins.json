@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "74fbb4c76594232d0c986d639127737709e2c8e9",
-      "branch": "vendor/data-connectors-hardcut-prep",
-      "note": "Tracks data-connect draft PR #238 plus its recorded vendored-source revision. The connector-source gate compares that transitional copy with the recorded data-connectors commit, while the collector-definitions and packaging gates check the current runner. Return this pin to data-connect main after #238 merges and before this PR merges."
+      "sha": "819aca1c6694ad7f2ec87f313c1ad092458297eb",
+      "branch": "main",
+      "note": "Tracks data-connect main after PR #238 merged. The connector-source gate compares its transitional vendored copy with the recorded data-connectors source revision, while the collector-definitions and packaging gates check the current runner. Data Connect remains on the old package/runtime surface until its separate migration."
     },
     "pdpp": {
       "owner": "PDP-Connect",
