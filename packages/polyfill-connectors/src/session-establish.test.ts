@@ -65,6 +65,7 @@ test("live-profile path: probeSession live means resolveDeferredCredentials is n
 			},
 			resolveDeferredCredentials: async () => {
 				resolveCalls += 1;
+				return {};
 			},
 			retryablePattern: /never/,
 			sendInteraction: async (req) => {
@@ -125,6 +126,7 @@ test("dead-profile path: probeSession dead means resolveDeferredCredentials runs
 				resolveDeferredCredentials: async () => {
 					resolveCalls += 1;
 					credentialsAtManualAction = { ICLOUD_USERNAME: "resolved" };
+					return { ICLOUD_USERNAME: "resolved" };
 				},
 				retryablePattern: /never/,
 				sendInteraction: async (req) => {
@@ -207,7 +209,7 @@ test("secrets present (no deferral configured): resolveDeferredCredentials absen
 	);
 });
 
-test("ensureSession path is entirely unaffected: resolveDeferredCredentials is never consulted when ensureSession is present", async () => {
+test("ensureSession-only path (no probeSession) is unaffected: resolveDeferredCredentials is never consulted", async () => {
 	let resolveCalls = 0;
 	let ensureSessionCalls = 0;
 
@@ -236,6 +238,7 @@ test("ensureSession path is entirely unaffected: resolveDeferredCredentials is n
 			},
 			resolveDeferredCredentials: async () => {
 				resolveCalls += 1;
+				return {};
 			},
 			retryablePattern: /never/,
 			sendInteraction: async (req) => ({
@@ -250,6 +253,177 @@ test("ensureSession path is entirely unaffected: resolveDeferredCredentials is n
 	assert.equal(
 		resolveCalls,
 		0,
-		"ensureSession's priority over probeSession means resolveDeferredCredentials is dead code on this path",
+		"no probeSession means there is no probe result to defer credentials on, so this path is byte-for-byte unchanged",
 	);
+});
+
+// ─── Both hooks present (heb shape: auth + probeSession + ensureSession) ────
+//
+// Root cause fixed here: heb's probeSession used to be cookie-name-based and
+// missed real session cookies (sst, sat, HEB_AMP_SESSION_ID), so a genuinely
+// live seeded browser profile probed as dead. Separately, ensureSession's
+// unconditional priority over probeSession meant credentials resolved eagerly
+// before any probe ran at all, failing the run as `heb_credentials_missing`
+// even on a live session. Both are fixed together: probeSession now runs
+// FIRST when both hooks are declared; a live result skips ensureSession (and
+// credential resolution) entirely, and only a dead result falls through to
+// resolveDeferredCredentials + ensureSession, unchanged from the
+// ensureSession-only path from that point on.
+
+test("both hooks, live probe (heb shape): ensureSession never runs and credentials are never resolved", async () => {
+	let resolveCalls = 0;
+	let ensureSessionCalls = 0;
+	let probeCalls = 0;
+
+	await establishSession(
+		{
+			ensureSession: async () => {
+				ensureSessionCalls += 1;
+			},
+			probeSession: async () => {
+				probeCalls += 1;
+				return true;
+			},
+		},
+		{
+			assist: async () => "req-1",
+			capture: null,
+			checkpoint: async () => {
+				/* no-op */
+			},
+			completeAssistance: async () => {
+				/* no-op */
+			},
+			context: makeStubContext(),
+			credentials: {},
+			name: "heb",
+			page: makeStubPage(),
+			progress: async () => {
+				/* no-op */
+			},
+			resolveDeferredCredentials: async () => {
+				resolveCalls += 1;
+				return { HEB_USERNAME: "resolved", HEB_PASSWORD: "resolved" };
+			},
+			retryablePattern: /never/,
+			sendInteraction: async (req) => ({
+				request_id: req.request_id ?? "int-1",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+		},
+	);
+
+	assert.equal(probeCalls, 1);
+	assert.equal(
+		ensureSessionCalls,
+		0,
+		"a live probe on a connector with both hooks must skip ensureSession entirely",
+	);
+	assert.equal(
+		resolveCalls,
+		0,
+		"a live probe must never resolve or require credentials",
+	);
+});
+
+test("both hooks, dead probe (heb shape): credentials resolve before ensureSession, which then runs with the resolved values", async () => {
+	let resolveCalls = 0;
+	let ensureSessionCredentials: Readonly<Record<string, string>> | null = null;
+	let probeCalls = 0;
+
+	await establishSession(
+		{
+			ensureSession: async ({ credentials }) => {
+				ensureSessionCredentials = credentials;
+			},
+			probeSession: async () => {
+				probeCalls += 1;
+				return false;
+			},
+		},
+		{
+			assist: async () => "req-1",
+			capture: null,
+			checkpoint: async () => {
+				/* no-op */
+			},
+			completeAssistance: async () => {
+				/* no-op */
+			},
+			context: makeStubContext(),
+			credentials: {},
+			name: "heb",
+			page: makeStubPage(),
+			progress: async () => {
+				/* no-op */
+			},
+			resolveDeferredCredentials: async () => {
+				resolveCalls += 1;
+				return { HEB_USERNAME: "resolved", HEB_PASSWORD: "resolved" };
+			},
+			retryablePattern: /never/,
+			sendInteraction: async (req) => ({
+				request_id: req.request_id ?? "int-1",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+		},
+	);
+
+	assert.equal(
+		probeCalls,
+		1,
+		"the probe must run exactly once before ensureSession",
+	);
+	assert.equal(resolveCalls, 1);
+	assert.deepEqual(ensureSessionCredentials, {
+		HEB_USERNAME: "resolved",
+		HEB_PASSWORD: "resolved",
+	});
+});
+
+test("both hooks, no resolveDeferredCredentials supplied: dead probe still runs ensureSession with the eagerly-resolved credentials", async () => {
+	let ensureSessionCredentials: Readonly<Record<string, string>> | null = null;
+
+	await establishSession(
+		{
+			ensureSession: async ({ credentials }) => {
+				ensureSessionCredentials = credentials;
+			},
+			probeSession: async () => false,
+		},
+		{
+			assist: async () => "req-1",
+			capture: null,
+			checkpoint: async () => {
+				/* no-op */
+			},
+			completeAssistance: async () => {
+				/* no-op */
+			},
+			context: makeStubContext(),
+			credentials: {
+				HEB_USERNAME: "already-resolved",
+				HEB_PASSWORD: "already-resolved",
+			},
+			name: "heb",
+			page: makeStubPage(),
+			progress: async () => {
+				/* no-op */
+			},
+			// No resolveDeferredCredentials — every non-deferred caller shape.
+			retryablePattern: /never/,
+			sendInteraction: async (req) => ({
+				request_id: req.request_id ?? "int-1",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+		},
+	);
+
+	assert.deepEqual(ensureSessionCredentials, {
+		HEB_USERNAME: "already-resolved",
+		HEB_PASSWORD: "already-resolved",
+	});
 });

@@ -68,7 +68,6 @@ import type {
 	OrderDetail,
 } from "./types.ts";
 
-const SESSION_COOKIE_RE = /session|hebuser|heb-session/;
 const NAV_TIMEOUT_MS = 30_000;
 const LIST_PAGE_WAIT_MS = 10_000;
 // Site-knowledge doc "Politeness that worked": 1500-2500ms fixed waits after
@@ -2221,15 +2220,15 @@ if (isMainModule(import.meta.url)) {
 		// H-E-B is fronted by Incapsula, which fingerprints headless Chromium.
 		// Persistent profile keeps cookies + TLS fingerprint warm across runs.
 		browser: { profileName: "heb" },
-		async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-			const cookies = await context.cookies("https://www.heb.com/");
-			const hasSessionCookie = cookies.some(
-				(c) => SESSION_COOKIE_RE.test(c.name) && Boolean(c.value),
-			);
-			if (!hasSessionCookie) {
-				return false;
-			}
-			return true;
+		// Page-based, not cookie-name-based: a live-verified real session used
+		// cookies named `sst`, `sat`, and `HEB_AMP_SESSION_ID` — none matched the
+		// prior `SESSION_COOKIE_RE` heuristic, so a genuinely live seeded browser
+		// profile probed as dead every time (heb_credentials_missing even though
+		// no credential was ever needed). probeHebSession(page) loads the orders
+		// page and checks for the real logged-in signal instead of guessing from
+		// cookie names, which drift across Incapsula/HEB sessions.
+		async probeSession({ page }: ProbeSessionArgs): Promise<boolean> {
+			return probeHebSession(page);
 		},
 		async ensureSession({
 			page,

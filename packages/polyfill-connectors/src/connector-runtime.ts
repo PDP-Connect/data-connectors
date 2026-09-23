@@ -809,10 +809,24 @@ export const politeDelay = (ms: number): Promise<void> =>
 /**
  * Whether static-secret resolution waits for the session probe.
  *
- * Deferral applies only to browser connectors that declare `auth` and
- * `probeSession` but no `ensureSession`. An `ensureSession` connector runs
- * first in `establishSession` and may log in with the resolved credentials,
- * so its credentials stay eager (unchanged behavior).
+ * Deferral applies to any browser connector that declares `auth` and
+ * `probeSession` — whether or not it also declares `ensureSession`.
+ * `establishSession` now runs the probe FIRST whenever both `probeSession`
+ * and `ensureSession` are present (see its doc comment): a live probe skips
+ * `ensureSession` entirely, so a connector shaped this way (e.g. heb) must
+ * not pay for credential resolution — which can itself raise a `credentials`
+ * INTERACTION or fail the run — on a connection whose seeded browser profile
+ * already holds a live session. `ensureSession` still receives resolved
+ * credentials unchanged on the dead-probe path, exactly as before.
+ *
+ * Root cause this closes: heb's probeSession was cookie-name-based and
+ * missed the real session cookies (`sst`, `sat`, `HEB_AMP_SESSION_ID`), so a
+ * genuinely live profile probed as dead; separately, credentials resolved
+ * eagerly before the probe ever ran, so a missing HEB_USERNAME/HEB_PASSWORD
+ * failed the run as `heb_credentials_missing` even on a live session. Fixing
+ * only the probe (index.ts) without this deferral would still fail the run
+ * on eager credential resolution before the (now-correct) probe result could
+ * matter.
  */
 export function shouldDeferCredentialsToProbe(config: {
 	auth: unknown;
@@ -821,10 +835,7 @@ export function shouldDeferCredentialsToProbe(config: {
 	probeSession: unknown;
 }): boolean {
 	return Boolean(
-		config.browser &&
-			config.auth &&
-			typeof config.probeSession === "function" &&
-			typeof config.ensureSession !== "function",
+		config.browser && config.auth && typeof config.probeSession === "function",
 	);
 }
 
@@ -1258,7 +1269,7 @@ export function runConnector(config: RunConnectorConfig): void {
 
 		if (browser) {
 			const resolveDeferredCredentials = deferCredentialsToProbe
-				? async (): Promise<void> => {
+				? async (): Promise<Credentials> => {
 						credentials = await resolveCredentials(auth, {
 							authOptional,
 							sendInteraction,
@@ -1266,6 +1277,7 @@ export function runConnector(config: RunConnectorConfig): void {
 						});
 						capture?.registerSecrets(Object.values(credentials));
 						baseCtx.credentials = credentials;
+						return credentials;
 					}
 				: undefined;
 			await runInBrowser({
@@ -1583,7 +1595,7 @@ async function runInBrowser(args: {
 	ensureSession: BrowserConnectorConfig["ensureSession"];
 	probeSession: BrowserConnectorConfig["probeSession"];
 	/** See `run()`'s construction site and `session-establish.ts`'s doc comment. */
-	resolveDeferredCredentials?: () => Promise<void>;
+	resolveDeferredCredentials?: () => Promise<Credentials>;
 	collect: BrowserConnectorConfig["collect"];
 	baseCtx: BaseCollectContext;
 	retryablePattern: RegExp;
