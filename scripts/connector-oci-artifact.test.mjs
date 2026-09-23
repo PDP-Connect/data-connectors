@@ -411,16 +411,21 @@ describe("P2-1 — version agreement", () => {
 	});
 
 	it("refuses an artifact whose config version disagrees with its profile", () => {
-		// The reviewer's counterexample: profile 0.1.0 beside config 9.9.9.
 		const target = join(workspace, "version-skew");
 		rmSync(target, { recursive: true, force: true });
 		cpSync(ouraArtifact, target, { recursive: true });
+		const profile = JSON.parse(
+			readFileSync(join(target, "collection-profile.json"), "utf8"),
+		);
 		const config = JSON.parse(readFileSync(join(target, "config.json"), "utf8"));
 		config.version = "9.9.9";
 		writeFileSync(join(target, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
 
 		const result = verify(target);
 		assert.notEqual(result.status, 0, "a version-skewed artifact must not verify");
-		assert.match(result.stderr, /config\.version is '9\.9\.9' but the profile says '0\.1\.0'/);
+		assert.equal(
+			result.stderr.trim(),
+			`config.version is '9.9.9' but the profile says '${profile.version}'`,
+		);
 	});
 });

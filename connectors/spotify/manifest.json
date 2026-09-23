@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/spotify",
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -97,6 +97,15 @@
 					"description": {
 						"type": ["string", "null"],
 						"x_pdpp_role": "secondary"
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"followers": {
+						"type": ["integer", "null"]
+					},
+					"images": {
+						"type": "array"
 					}
 				},
 				"required": ["id", "name"]
@@ -106,6 +115,7 @@
 				"fields": true,
 				"resources": true
 			},
+			"required": true,
 			"incremental": false,
 			"query": {
 				"search": {
@@ -232,6 +242,15 @@
 					},
 					"isrc": {
 						"type": ["string", "null"]
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"explicit": {
+						"type": ["boolean", "null"]
+					},
+					"album_artist_names": {
+						"type": "array"
 					}
 				},
 				"required": ["id", "name"]
@@ -243,6 +262,7 @@
 				"fields": true,
 				"resources": true
 			},
+			"required": true,
 			"incremental": true,
 			"query": {
 				"search": {
@@ -387,6 +407,15 @@
 						"x_pdpp_role": "primary-title"
 					},
 					"followers": {
+						"type": ["integer", "null"]
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"images": {
+						"type": "array"
+					},
+					"following": {
 						"type": ["integer", "null"]
 					}
 				},
