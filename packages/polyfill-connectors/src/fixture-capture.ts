@@ -59,8 +59,7 @@
  */
 
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import type { Page } from "playwright";
 
@@ -69,10 +68,10 @@ import {
 	redactDomHtml,
 	redactKnownSecrets,
 } from "./capture-redaction.ts";
+import { fixturesRootDir } from "./connector-paths.ts";
 import type { RecordData } from "./connector-runtime.ts";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const DEFAULT_CAPTURE_ROOT = join(PACKAGE_ROOT, "fixtures");
+const DEFAULT_CAPTURE_ROOT = fixturesRootDir;
 const ARIA_SNAPSHOT_TIMEOUT_MS = 2000;
 const LOCATOR_PROBE_TIMEOUT_MS = 1000;
 const LOCATOR_PROBE_ARIA_DEPTH = 2;

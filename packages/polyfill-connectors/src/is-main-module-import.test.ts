@@ -21,12 +21,10 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "..");
+import { pathToFileURL } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
 
 // A generous per-import timeout. Cold tsx startup + the import's own
 // module-initialization is usually <1.5s; anything over this is a

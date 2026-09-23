@@ -5,7 +5,6 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import {
 	buildLocalDeviceRecordEnvelope,
 	type EnrollmentExchangeResponse,
@@ -22,6 +21,7 @@ import type {
 	StreamScope,
 } from "@pdpp/connector-protocol";
 import { definitionStreams } from "./collector-registry.ts";
+import { packageRoot, repoRoot } from "./connector-paths.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
 
 /**
@@ -53,8 +53,6 @@ export const DEFAULT_IMESSAGE_STREAMS = definitionStreams("imessage");
  * is its only consumer, not because it duplicates one.
  */
 export const DEFAULT_AMAZON_STREAMS = ["orders", "order_items"] as const;
-const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 const CONNECTOR_ENTRYPOINT_EXTENSION = import.meta.filename.endsWith(".js")
 	? "js"
 	: "ts";
@@ -493,15 +491,15 @@ function spawnConnector(
 	);
 	const args = config.connectorArgs ?? config.codexArgs ?? [profile.entrypoint];
 	return spawn(command, args, {
-		cwd: PACKAGE_ROOT,
+		cwd: packageRoot,
 		env,
 	});
 }
 
 function buildLocalDeviceChildPath(pathValue: string | undefined): string {
 	return [
-		join(PACKAGE_ROOT, "node_modules", ".bin"),
-		join(REPO_ROOT, "node_modules", ".bin"),
+		join(packageRoot, "node_modules", ".bin"),
+		join(repoRoot, "node_modules", ".bin"),
 		pathValue,
 	]
 		.filter((part): part is string => Boolean(part))

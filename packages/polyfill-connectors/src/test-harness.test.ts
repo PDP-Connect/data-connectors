@@ -17,17 +17,15 @@
  */
 
 import assert from "node:assert/strict";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
 import type { EmittedMessage, ValidateRecord } from "./connector-runtime.ts";
 import {
 	makeRecordingEmit,
 	runConnectorProtocolSubprocess,
 } from "./test-harness.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "..");
 const fixturePath = (name: string): string =>
 	join(PACKAGE_ROOT, "src", "test-fixtures", name);
 

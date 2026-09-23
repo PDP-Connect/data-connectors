@@ -10,10 +10,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { join } from "node:path";
+import { fixturesDir } from "./connector-paths.ts";
 
 /**
  * Read the first non-blank line of a connector's scrubbed pilot-shape sample
@@ -28,9 +26,7 @@ export function readSampleRecord(
 	stream: string,
 ): Record<string, unknown> {
 	const path = join(
-		PACKAGE_ROOT,
-		"fixtures",
-		connectorKey,
+		fixturesDir(connectorKey),
 		"scrubbed",
 		"pilot-real-shape",
 		"records",

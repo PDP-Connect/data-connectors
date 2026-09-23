@@ -7,14 +7,12 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
 import {
 	resolveConnectorCommand,
 	resolveTsxBinary,
 	TSX_MISSING_MESSAGE,
 } from "./resolve-tsx-binary.ts";
-
-const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 // packages/cli is a sibling package inside the PDP-Connect/pdpp monorepo
 // (@pdpp/local-collector) that this repository does not carry — only
