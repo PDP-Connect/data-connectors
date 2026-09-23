@@ -372,7 +372,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Claude (Anthropic)",
 				"brand": {
 					"icon": "icons/anthropic.svg",
@@ -447,27 +447,27 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "update_time",
 						"consent_time_field": "create_time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["title"],
 								"semantic_fields": ["title"]
 							},
 							"range_filters": {
-								"create_time": ["gte", "gt", "lte", "lt"]
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
 								"group_by_time": ["create_time"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -521,13 +521,12 @@
 							"required": ["id", "conversation_id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "create_time",
 						"consent_time_field": "create_time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"relationships": [
 							{
 								"name": "conversation",
@@ -550,7 +549,7 @@
 								"group_by_time": ["create_time"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -594,20 +593,20 @@
 							"required": ["id", "name"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "update_time",
 						"consent_time_field": "create_time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name", "description"],
 								"semantic_fields": ["description"]
 							},
 							"range_filters": {
-								"create_time": ["gte", "gt", "lte", "lt"]
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -10706,7 +10705,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/meta",
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.3.1",
+				"version": "0.3.2",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icons/meta.svg",
@@ -10851,20 +10850,26 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "taken_at",
 						"consent_time_field": "taken_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["caption", "location_name"],
 								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"taken_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["taken_at"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -10898,6 +10903,7 @@
 							"resources": true
 						},
 						"incremental": false,
+						"state_stream": "posts",
 						"query": {
 							"search": {
 								"lexical_fields": ["username"]
@@ -12368,7 +12374,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icons/shopify.svg",
@@ -12452,7 +12458,6 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "order_date",
 						"consent_time_field": "order_date",
 						"selection": {
 							"fields": true,
@@ -15688,7 +15693,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/uber",
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "0.4.0",
+				"version": "0.4.1",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icons/uber.svg",
@@ -15781,13 +15786,12 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "completed_at",
 						"consent_time_field": "requested_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["driver_name"]
@@ -15802,7 +15806,7 @@
 								"group_by": ["status", "product_type"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -17273,7 +17277,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.2.0",
+				"version": "0.2.1",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -17353,7 +17357,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name"]
@@ -17399,7 +17403,6 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "order_date",
 						"consent_time_field": "order_date",
 						"selection": {
 							"fields": true,
@@ -17464,7 +17467,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name"]
