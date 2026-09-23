@@ -21,10 +21,9 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BIOME_BIN = join(PACKAGE_ROOT, "node_modules", ".bin", "biome");
 
 const REPRO_SOURCE = `

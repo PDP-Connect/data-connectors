@@ -38,15 +38,16 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../src/connector-conformance-roster.ts";
-
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONNECTORS_DIR = join(PACKAGE_ROOT, "connectors");
-const MANIFESTS_DIR = join(PACKAGE_ROOT, "manifests");
-const FIXTURES_DIR = join(PACKAGE_ROOT, "fixtures");
+import {
+	connectorsDir as CONNECTORS_DIR,
+	fixturesRootDir as FIXTURES_DIR,
+	manifestsDir as MANIFESTS_DIR,
+	packageRoot as PACKAGE_ROOT,
+	repoRoot,
+} from "../src/connector-paths.ts";
 
 type Verdict = "PASS" | "FAIL" | "UNKNOWN" | "ADVISORY" | "WEAK";
 
@@ -236,13 +237,7 @@ function checkMockMutation(connector: string): Step {
 }
 
 function checkReachability(connector: string): Step {
-	const script = join(
-		PACKAGE_ROOT,
-		"..",
-		"..",
-		"scripts",
-		"connector-reachability.mjs",
-	);
+	const script = join(repoRoot, "scripts", "connector-reachability.mjs");
 	if (!existsSync(script)) {
 		return {
 			advisory: true,

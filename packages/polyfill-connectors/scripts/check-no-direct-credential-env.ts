@@ -42,14 +42,13 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative } from "node:path";
+import {
+	connectorsDir,
+	packageRoot as PACKAGE_ROOT,
+} from "../src/connector-paths.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SCAN_ROOTS = [
-	join(PACKAGE_ROOT, "src", "auto-login"),
-	join(PACKAGE_ROOT, "connectors"),
-];
+const SCAN_ROOTS = [join(PACKAGE_ROOT, "src", "auto-login"), connectorsDir];
 
 /**
  * Credential-shaped environment reads. Deliberately narrow: this bans the

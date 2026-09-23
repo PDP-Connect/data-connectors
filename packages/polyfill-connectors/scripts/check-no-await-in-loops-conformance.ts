@@ -53,11 +53,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import { NO_AWAIT_IN_LOOPS_ALLOWLIST } from "./no-await-in-loops-allowlist.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BIOME_BIN = join(PACKAGE_ROOT, "node_modules", ".bin", "biome");
 const RULE_CATEGORY = "lint/performance/noAwaitInLoops";
 
