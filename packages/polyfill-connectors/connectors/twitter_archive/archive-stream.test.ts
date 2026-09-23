@@ -6,6 +6,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { streamJsArchive, stripAssignmentPrefix } from "./archive-stream.ts";
@@ -16,13 +20,7 @@ const DM_FIXTURE = new URL("data/direct-messages.js", FIXTURE_DIR);
 const LEGACY_FIXTURE = new URL("legacy/data/tweet.js", FIXTURE_DIR);
 const EMPTY_FIXTURE = new URL("empty/data/tweets.js", FIXTURE_DIR);
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"twitter_archive",
-	"index.ts",
-);
+const ENTRYPOINT = connectorEntrypoint("twitter_archive");
 
 function fixturePath(url: URL): string {
 	return url.pathname;

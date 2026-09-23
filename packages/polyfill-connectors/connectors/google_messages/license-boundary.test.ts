@@ -11,16 +11,10 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
+import { connectorEntrypoint } from "../../src/connector-paths.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const INDEX_PATH = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"google_messages",
-	"index.ts",
-);
+const INDEX_PATH = connectorEntrypoint("google_messages");
 const SOURCE = readFileSync(INDEX_PATH, "utf8");
 
 const IMPORT_LINE_RE = /^\s*import\b.*$/gmu;

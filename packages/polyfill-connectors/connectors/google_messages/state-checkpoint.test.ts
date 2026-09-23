@@ -26,21 +26,18 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorDir,
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { messagesSchema } from "./schemas.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"google_messages",
-	"index.ts",
-);
+const ENTRYPOINT = connectorEntrypoint("google_messages");
 const FAKE_GMCLI = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"google_messages",
+	connectorDir("google_messages"),
 	"fixtures",
 	"fake-gmcli.mjs",
 );

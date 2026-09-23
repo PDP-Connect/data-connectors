@@ -13,21 +13,18 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorDir,
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { messagesSchema } from "./schemas.ts";
 
-const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
-const ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"google_messages",
-	"index.ts",
-);
+const ENTRYPOINT = connectorEntrypoint("google_messages");
 const FAKE_GMCLI = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"google_messages",
+	connectorDir("google_messages"),
 	"fixtures",
 	"fake-gmcli.mjs",
 );
@@ -138,9 +135,7 @@ test("empty archive: zero messages, coverage still collected", async () => {
 test("missing gmcli binary: SKIP_RESULT reason gmcli_not_installed, coverage=missing, zero records, clean run", async () => {
 	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
 		GMCLI_BIN: join(
-			PACKAGE_ROOT,
-			"connectors",
-			"google_messages",
+			connectorDir("google_messages"),
 			"does-not-exist-gmcli-binary",
 		),
 	});
