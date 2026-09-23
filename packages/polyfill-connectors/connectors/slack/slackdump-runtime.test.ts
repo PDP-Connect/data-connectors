@@ -14,12 +14,16 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveConnectorArtifactDir } from "../../src/connector-artifact-root.ts";
+import {
+	connectorEntrypoint,
+	manifestPath,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
@@ -35,8 +39,6 @@ import {
 } from "./index.ts";
 
 const execFileAsync = promisify(execFile);
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Where the connector will look for `<workspace>`'s archive, given an artifact
@@ -54,9 +56,8 @@ function seedArchiveRoot(artifactRoot: string, workspace: string): string {
 	}).root;
 }
 
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const SLACK_ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "slack", "index.ts");
-const SLACK_MANIFEST = join(PACKAGE_ROOT, "manifests", "slack.json");
+const SLACK_ENTRYPOINT = connectorEntrypoint("slack");
+const SLACK_MANIFEST = manifestPath("slack");
 const VALID_SLACK_TOKEN =
 	"xoxc-1-2-3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

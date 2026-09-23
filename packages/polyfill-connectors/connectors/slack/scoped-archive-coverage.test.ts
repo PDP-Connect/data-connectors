@@ -36,18 +36,20 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { resolveConnectorArtifactDir } from "../../src/connector-artifact-root.ts";
+import {
+	connectorEntrypoint,
+	manifestPath,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const SLACK_ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "slack", "index.ts");
-const SLACK_MANIFEST = join(PACKAGE_ROOT, "manifests", "slack.json");
+const SLACK_ENTRYPOINT = connectorEntrypoint("slack");
+const SLACK_MANIFEST = manifestPath("slack");
 
 function seedArchiveRoot(artifactRoot: string, workspace: string): string {
 	return resolveConnectorArtifactDir("slack", [workspace], {
