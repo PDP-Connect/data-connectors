@@ -24,6 +24,8 @@ import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.spotify.com/v1";
 const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
+export const spotifyRetryablePattern =
+	/rate_limited|ECONN|fetch failed|retryable status \d+|spotify_retryable_status_\d+/i;
 
 interface SpotifyImage {
 	height?: number | null;
@@ -557,31 +559,60 @@ async function collectSpotifyWebData(
 		): Promise<any> {
 			const hash = hashes[operationName];
 			if (!hash) throw new Error(`spotify_missing_hash_${operationName}`);
-			const resp = await fetch(
-				"https://api-partner.spotify.com/pathfinder/v2/query",
-				{
-					method: "POST",
-					headers: {
-						authorization: `Bearer ${access}`,
-						"client-token": client,
-						"content-type": "application/json",
-						accept: "application/json",
-						"app-platform": "WebPlayer",
-						"spotify-app-version": webVersion,
-					},
-					body: JSON.stringify({
-						operationName,
-						variables,
-						extensions: { persistedQuery: { version: 1, sha256Hash: hash } },
-					}),
+			const request = {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${access}`,
+					"client-token": client,
+					"content-type": "application/json",
+					accept: "application/json",
+					"app-platform": "WebPlayer",
+					"spotify-app-version": webVersion,
 				},
-			);
-			if (!resp.ok)
-				throw new Error(`spotify_graphql_${operationName}_${resp.status}`);
-			const data = await resp.json();
-			if (data.errors)
-				throw new Error(`spotify_graphql_${operationName}_errors`);
-			return data;
+				body: JSON.stringify({
+					operationName,
+					variables,
+					extensions: { persistedQuery: { version: 1, sha256Hash: hash } },
+				}),
+			};
+			const maxAttempts = 3;
+			const maxRetryDelayMs = 30_000;
+			for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+				const resp = await fetch(
+					"https://api-partner.spotify.com/pathfinder/v2/query",
+					request,
+				);
+				if (resp.ok) {
+					const data = await resp.json();
+					if (data.errors)
+						throw new Error(`spotify_graphql_${operationName}_errors`);
+					return data;
+				}
+				const retryable = resp.status === 429 || resp.status >= 500;
+				if (!retryable) {
+					throw new Error(`spotify_graphql_${operationName}_${resp.status}`);
+				}
+				if (attempt === maxAttempts - 1) {
+					throw new Error(`spotify_retryable_status_${resp.status}`);
+				}
+				const retryAfter = resp.headers.get("retry-after");
+				const retryAfterSeconds =
+					retryAfter === null ? NaN : Number(retryAfter);
+				const retryAfterDate =
+					retryAfter === null ? NaN : Date.parse(retryAfter);
+				const retryAfterMs = Number.isFinite(retryAfterSeconds)
+					? retryAfterSeconds * 1000
+					: retryAfterDate - Date.now();
+				const fallbackDelayMs = 1000 * 2 ** attempt;
+				const delayMs = Math.min(
+					maxRetryDelayMs,
+					Number.isFinite(retryAfterMs) && retryAfterMs >= 0
+						? retryAfterMs
+						: fallbackDelayMs,
+				);
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+			}
+			throw new Error("spotify_retryable_status_unknown");
 		}
 
 		if (wanted.has("profile")) {
@@ -910,7 +941,7 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "spotify",
 		validateRecord,
-		retryablePattern: /rate_limited|ECONN|fetch failed|retryable status \d+/i,
+		retryablePattern: spotifyRetryablePattern,
 		browser: { profileName: "spotify" },
 		ensureSession: ensureSpotifySession,
 		probeSession: ({ page }) => hasSpotifySession(page),

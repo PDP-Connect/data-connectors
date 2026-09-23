@@ -7,7 +7,11 @@ import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { createSpotifyCycleDetector, spotifyCollect } from "./index.ts";
+import {
+	createSpotifyCycleDetector,
+	spotifyCollect,
+	spotifyRetryablePattern,
+} from "./index.ts";
 
 function makeContext(
 	webResult: Record<string, unknown>,
@@ -468,10 +472,10 @@ async function collectWithInPageFetch(
 					operationName: string;
 					variables: Record<string, unknown>;
 				};
-				return new Response(
-					JSON.stringify(graphql(body.operationName, body.variables)),
-					{ status: 200 },
-				);
+				const result = graphql(body.operationName, body.variables);
+				return result instanceof Response
+					? result
+					: new Response(JSON.stringify(result), { status: 200 });
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		};
@@ -500,6 +504,55 @@ async function collectWithInPageFetch(
 		restoreGlobals();
 	}
 }
+
+test("spotify browser GraphQL retries 429 using Retry-After and classifies exhausted 5xx", async () => {
+	const originalSetTimeout = globalThis.setTimeout;
+	const retryDelays: number[] = [];
+	globalThis.setTimeout = ((
+		callback: (...args: unknown[]) => void,
+		delay = 0,
+	) => {
+		retryDelays.push(Number(delay));
+		return originalSetTimeout(callback, 0);
+	}) as typeof globalThis.setTimeout;
+	try {
+		let rateLimitAttempts = 0;
+		await collectWithInPageFetch(["saved_tracks"], () => {
+			rateLimitAttempts += 1;
+			if (rateLimitAttempts === 1) {
+				return new Response(null, {
+					status: 429,
+					headers: { "retry-after": "2" },
+				});
+			}
+			return {
+				data: {
+					me: { library: { tracks: { items: [], totalCount: 0 } } },
+				},
+			};
+		});
+		assert.equal(rateLimitAttempts, 2);
+		assert.deepEqual(retryDelays, [2000]);
+
+		let serverErrorAttempts = 0;
+		await assert.rejects(
+			() =>
+				collectWithInPageFetch(["saved_tracks"], () => {
+					serverErrorAttempts += 1;
+					return new Response(null, { status: 503 });
+				}),
+			(error: unknown) => {
+				assert.match(String(error), /spotify_retryable_status_503/);
+				assert.equal(spotifyRetryablePattern.test(String(error)), true);
+				return true;
+			},
+		);
+		assert.equal(serverErrorAttempts, 3);
+		assert.deepEqual(retryDelays, [2000, 1000, 2000]);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+});
 
 test("spotify browser parser rejects repeated full library pages", async () => {
 	const items = Array.from({ length: 200 }, (_, i) => ({
