@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 import {
 	CODEX_GATED_INVENTORY_STREAMS,
 	CODEX_KNOWN_LOCAL_STORES,
@@ -23,7 +24,7 @@ import {
  * NOT weaken a content-bearing `collect` stream to non-required.
  */
 
-const MANIFEST_PATH = join(import.meta.dirname, "../../manifests/codex.json");
+const MANIFEST_PATH = manifestPath("codex");
 
 const RUNTIME_CLASSIFICATION_TO_MANIFEST_POLICY: Record<string, string> = {
 	defer: "deferred",

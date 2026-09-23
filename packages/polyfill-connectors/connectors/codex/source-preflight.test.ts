@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
+import { manifestPath } from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 test("codex connector succeeds when requested local stores are absent", async () => {
@@ -268,8 +269,8 @@ test("codex memories and context_mode are diagnostics-only, not requestable stre
 });
 
 test("codex manifest does not expose memories or context_mode as consentable streams", async () => {
-	const manifestPath = join(import.meta.dirname, "../../manifests/codex.json");
-	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+	const manifestFile = manifestPath("codex");
+	const manifest = JSON.parse(await readFile(manifestFile, "utf8")) as {
 		streams: Array<{ name: string }>;
 	};
 	const streamNames = new Set(manifest.streams.map((stream) => stream.name));

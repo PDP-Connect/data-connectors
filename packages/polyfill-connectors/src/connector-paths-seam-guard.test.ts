@@ -95,7 +95,10 @@ function stripComments(source: string): string {
  * `PACKAGE_ROOT`, `PKG_ROOT`, `repoRoot`, or a `HERE`-named local).
  */
 const CALL_RE = /\b(?:path\.)?(join|resolve)\(([^;]*?)\)/gs;
-const CALL_HAS_LAYOUT_SEGMENT = /["'](manifests|connectors)["']/;
+// A quoted string whose path segments include `manifests` or `connectors`:
+// the bare word ("manifests") and relative strings ("../../manifests/x.json").
+const CALL_HAS_LAYOUT_SEGMENT =
+	/["'`](?:[^"'`\n]*\/)?(manifests|connectors)(?:\/[^"'`\n]*)?["'`]/;
 const CALL_HAS_PATH_ORIGIN =
 	/__dirname|import\.meta\.(dirname|url)|packageDir|packageRoot|PACKAGE_ROOT|PKG_ROOT|repoRoot|\bHERE\b/;
 
@@ -199,4 +202,30 @@ test("no file outside connector-paths.ts computes a manifests/ or connectors/ pa
 test("the seam module itself resolves the real, current-layout directories", () => {
 	assert.ok(connectorsDir.startsWith(packageRoot));
 	assert.ok(packageRoot.startsWith(repoRoot));
+});
+
+test("the guard detects relative layout strings joined to a file-location origin", () => {
+	const singleLine =
+		'const p = join(import.meta.dirname, "../../manifests/codex.json");\n';
+	const multiLine =
+		'const p = join(\n\timport.meta.dirname,\n\t"../../manifests/claude_code.json",\n);\n';
+	const bareWord = 'const p = join(packageRoot, "connectors", key);\n';
+	const seamCall = 'const p = manifestPath("codex");\n';
+	assert.ok(
+		findViolations("synthetic-single.ts", singleLine).length > 0,
+		"single-line relative string",
+	);
+	assert.ok(
+		findViolations("synthetic-multi.ts", multiLine).length > 0,
+		"multi-line relative string",
+	);
+	assert.ok(
+		findViolations("synthetic-bare.ts", bareWord).length > 0,
+		"bare layout segment",
+	);
+	assert.deepEqual(
+		findViolations("synthetic-seam.ts", seamCall),
+		[],
+		"a seam call is not a violation",
+	);
 });

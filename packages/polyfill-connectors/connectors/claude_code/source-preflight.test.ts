@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { manifestPath } from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
@@ -408,11 +409,8 @@ test("claude_code markdown-backed streams skip unchanged files from state", asyn
 });
 
 test("claude_code manifest does not expose context_mode as a consentable stream", async () => {
-	const manifestPath = join(
-		import.meta.dirname,
-		"../../manifests/claude_code.json",
-	);
-	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+	const manifestFile = manifestPath("claude_code");
+	const manifest = JSON.parse(await readFile(manifestFile, "utf8")) as {
 		streams: Array<{ name: string }>;
 	};
 
