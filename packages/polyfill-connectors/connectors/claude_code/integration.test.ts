@@ -388,7 +388,7 @@ function makeAccumulator(
 	overrides: Partial<SessionAccumulator> = {},
 ): SessionAccumulator {
 	return {
-		...makeEmptySessionAccumulator(id, `proj/${id}`),
+		...makeEmptySessionAccumulator(id, `proj/${id}`, "session", null),
 		...overrides,
 	};
 }

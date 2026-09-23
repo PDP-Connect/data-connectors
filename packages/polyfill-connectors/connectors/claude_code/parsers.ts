@@ -198,10 +198,14 @@ export function parseFrontmatter(text: string): ParsedFrontmatter {
 export function makeEmptySessionAccumulator(
 	id: string,
 	projectPath: string,
+	kind: "session" | "subagent",
+	parentSessionId: string | null,
 ): SessionAccumulator {
 	return {
 		id,
 		project_path: projectPath,
+		kind,
+		parent_session_id: parentSessionId,
 		cwd: null,
 		git_branch: null,
 		version: null,

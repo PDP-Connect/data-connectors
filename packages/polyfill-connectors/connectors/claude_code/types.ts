@@ -42,8 +42,15 @@ export interface SessionAccumulator {
 	entrypoint: string | null;
 	git_branch: string | null;
 	id: string;
+	/** 'session' for a top-level <sessionId>.jsonl file, 'subagent' for a file
+	 *  under <parentSessionId>/subagents/**. Mirrors legacy listTranscripts'
+	 *  kind derivation (connectors/anthropic/claude-code-local.js). */
+	kind: "session" | "subagent";
 	last_event_at: string | null;
 	message_count: number;
+	/** Enclosing session id for a subagent record; null for a top-level session.
+	 *  Mirrors legacy listTranscripts' parentSessionId. */
+	parent_session_id: string | null;
 	project_path: string;
 	started_at: string | null;
 	title: string | null;
@@ -60,6 +67,13 @@ export interface JsonlObservations {
 	lastTimestamp: string | null;
 	messageCount: number;
 	sessionId: string | null;
+	/** File-basename-derived subagent session id (e.g. "agent-abc") when this
+	 *  file is a <parentSessionId>/subagents/**\/*.jsonl transcript; null for a
+	 *  top-level <sessionId>.jsonl file. Distinct from `agentId`/`agent_id`,
+	 *  which is a per-message field read from the JSONL content and does not
+	 *  equal the file basename (verified: real files carry agentId as the
+	 *  basename's hex suffix without the "agent-" prefix). */
+	subagentSessionId: string | null;
 	title: string | null;
 	userType: string | null;
 	version: string | null;

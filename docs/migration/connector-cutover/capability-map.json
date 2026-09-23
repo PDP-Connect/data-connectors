@@ -838,7 +838,9 @@
             "cliVersion": "sessions.version",
             "firstTimestamp": "sessions.started_at",
             "lastTimestamp": "sessions.last_event_at",
-            "messageCount": "sessions.message_count"
+            "messageCount": "sessions.message_count",
+            "kind": "sessions.kind",
+            "parentSessionId": "sessions.parent_session_id"
           },
           "dropped": [
             {
@@ -852,15 +854,11 @@
             {
               "field": "models",
               "reason": "derivable via join against messages stream; not stored redundantly on session"
-            },
-            {
-              "field": "kind, parentSessionId",
-              "reason": "irretrievable at session level: verified against real ~/.claude/projects/**/*.jsonl (15140 files, full key-name scan, no content). Neither session-record lines nor per-line JSONL objects ever carry a top-level `kind` field for lineage (the only `kind` occurrences found anywhere are unrelated, nested under `origin.kind` / `attachment.origin.kind` / `toolUseResult.gitOperation.commit.kind`). `parentSessionId` occurs 185 times total, always on a distinct, rare `type: \"fork-context-ref\"` line (context-fork bookkeeping), never as a subagent-lineage marker and never alongside a session-identity record. Subagent transcripts under <project>/<sessionId>/subagents/*.jsonl carry the SAME `sessionId` as their parent (confirmed: dir name == first-line sessionId in every sampled file) plus per-message `isSidechain: true` and a stable per-file `agentId` (present on 24155/83472 sampled lines). There is no separate subagent session identity to surface as `kind`/`parent_session_id` at the session level \u2014 lineage is real but lives on messages (`is_sidechain`, `agent_id`), both already implemented on the messages stream (schemas.ts messagesSchema)."
             }
           ],
           "status": "contracted",
           "question": null,
-          "lead_decision": "SUPERSEDED by CONTRACT-CHANGE-REQUEST in cut-loss-offline lane report (2026-09-22): do not add sessions.kind / sessions.parent_session_id \u2014 the source has no session-level lineage identity to add. `title` is already implemented (sessions.title, see schemas.ts). Lineage is captured today via messages.is_sidechain and messages.agent_id."
+          "lead_decision": "REVERSED (cut-claude-lineage lane, 2026-09-22): the cut-loss-offline lane's 'irretrievable' finding was wrong \u2014 it only scanned per-line JSONL content and missed that legacy connectors/anthropic/claude-code-local.js listTranscripts derives kind/parentSessionId from the TRANSCRIPT FILE PATH, not from any field inside the JSONL. sessionId = file basename minus '.jsonl'; parentSessionId = the enclosing <parentSessionId>/subagents/ directory name (null for a top-level file); kind = 'subagent' when parentSessionId is set, else 'session'. This holds even though every line inside a subagent transcript repeats the PARENT's sessionId (confirmed against real ~/.claude/projects data) \u2014 the path is a stable identity independent of in-file content. connectors/anthropic/__tests__/claude-code-trajectories.test.cjs pins this exact derivation (agent-abc -> kind 'subagent', parent 'ses-main'). Implemented: packages/polyfill-connectors/connectors/claude_code/index.ts now derives a subagent's own session id from its file basename instead of discarding it into forcedSessionId, adds sessions.kind/sessions.parent_session_id, and adds messages.subagent_session_id so each message is attributable to its own subagent session even though messages.session_id still folds to the parent (matching the legacy fold semantics). See the field-by-field derivation table in reports/cut-claude-lineage.md."
         },
         {
           "legacy_scope": "claude_code.prompts",

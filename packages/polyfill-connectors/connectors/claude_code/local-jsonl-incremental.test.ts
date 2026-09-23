@@ -291,7 +291,7 @@ test("malformed middle line preserves later records and durable gap on rerun", a
 			.filter((r) => r.stream === "sessions")
 			.map((r) => r.data.id)
 			.sort(),
-		[SESSION_ID, laterSession],
+		[SESSION_ID, laterSession, "worker"].sort(),
 	);
 	assert.deepEqual(
 		first.records
@@ -380,9 +380,11 @@ test("M11: one changed contributor retains its unchanged contributor in the aggr
 		state: { messages: first.states.messages, sessions: first.states.sessions },
 	});
 	assert.equal(
-		appended.records.find((record) => record.stream === "sessions")?.data
-			.message_count,
-		3,
+		appended.records.find(
+			(record) => record.stream === "sessions" && record.data.id === SESSION_ID,
+		)?.data.message_count,
+		2,
+		"the top-level session's own accumulator only counts its own two lines; the subagent's line lives on its own session record",
 	);
 });
 
@@ -429,9 +431,17 @@ test("M13: a new contributor for an existing session folds into the existing agg
 		state: { messages: first.states.messages, sessions: first.states.sessions },
 	});
 	assert.equal(
-		changed.records.find((record) => record.stream === "sessions")?.data
-			.message_count,
-		3,
+		changed.records.find(
+			(record) => record.stream === "sessions" && record.data.id === "later",
+		)?.data.message_count,
+		1,
+		"a new subagent file is its own session, keyed by its own basename",
+	);
+	assert.equal(
+		changed.records.find(
+			(record) => record.stream === "sessions" && record.data.id === "later",
+		)?.data.parent_session_id,
+		SESSION_ID,
 	);
 });
 
@@ -549,7 +559,10 @@ test("M17 live legacy shape: 11,378 mtime entries baseline matching sources whil
 	);
 	assert.equal(
 		migrated.records.filter((record) => record.stream === "sessions").length,
-		1,
+		58,
+		"only the 58 forensic-changed subagent files are mtime-mismatched; each is " +
+			"now its own session record. The top-level session and the pre-existing " +
+			"worker.jsonl subagent session are both correctly baselined and do not replay",
 	);
 	for (const stream of ["messages", "sessions"] as const) {
 		const cursor = migrated.states[stream] as {
@@ -648,8 +661,8 @@ test("M17/C: messages-only legacy evidence never baselines sessions", async () =
 	});
 	assert.equal(
 		migrated.records.filter((record) => record.stream === "sessions").length,
-		1,
-		"a missing sessions state emits its complete current aggregate",
+		2,
+		"a missing sessions state emits its complete current aggregate: the top-level session plus the subagent's own session",
 	);
 });
 
@@ -818,12 +831,12 @@ test("incremental touch and append preserve parent-first session aggregation", a
 		"M10: tail inherits the prior session id",
 	);
 	const session = appended.records.find(
-		(record) => record.stream === "sessions",
+		(record) => record.stream === "sessions" && record.data.id === SESSION_ID,
 	);
 	assert.equal(
 		session?.data.message_count,
-		3,
-		"M11/M13: aggregate keeps unchanged subagent plus top-level tail",
+		2,
+		"M11/M13: the top-level session's own aggregate keeps only its own top-level tail; the subagent's line lives on its own session",
 	);
 	assert.equal(session?.data.last_event_at, "2026-07-21T00:02:00.000Z");
 
@@ -834,8 +847,8 @@ test("incremental touch and append preserve parent-first session aggregation", a
 	});
 	assert.equal(
 		sessionOnly.records.filter((record) => record.stream === "sessions").length,
-		1,
-		"M22: sessions backfill independently",
+		2,
+		"M22: sessions backfill independently — the top-level session plus the subagent's own session",
 	);
 	assert.ok(sessionOnly.states.sessions);
 });
@@ -859,10 +872,11 @@ test("source mutations, partial tails, and malformed terminated lines retain phy
 		"M4/M5: changed prefix rebuilds current file",
 	);
 	assert.equal(
-		rewritten.records.find((record) => record.stream === "sessions")?.data
-			.message_count,
-		3,
-		"M12: rebuilt aggregate is complete",
+		rewritten.records.find(
+			(record) => record.stream === "sessions" && record.data.id === SESSION_ID,
+		)?.data.message_count,
+		2,
+		"M12: rebuilt aggregate is complete for the top-level session's own two lines",
 	);
 
 	await writeFile(
@@ -997,7 +1011,11 @@ test("legacy baseline migration writes bounded private rich state", async () => 
 	};
 	assert.equal(childCursor.local_jsonl_cursor_version, 1);
 	assert.equal(Object.keys(childCursor.file_cursors ?? {}).length, 2);
-	assert.equal(Object.keys(sessionCursor.session_aggregates ?? {}).length, 1);
+	assert.equal(
+		Object.keys(sessionCursor.session_aggregates ?? {}).length,
+		2,
+		"the top-level session plus the subagent's own session",
+	);
 	const serialized = JSON.stringify(migrated.states.messages);
 	assert.ok(
 		!(serialized.includes("top-1") || serialized.includes("sub-1")),
@@ -1062,7 +1080,8 @@ test("M19: corrupt rich session cursor rebuilds every contributor instead of dou
 				session_aggregates: Record<string, { message_count: number }>;
 			}
 		).session_aggregates[SESSION_ID]?.message_count,
-		2,
+		1,
+		"the top-level session's own accumulator only counts its own line; the subagent's line lives on its own session",
 	);
 });
 
@@ -1083,7 +1102,8 @@ test("partial rich session cursor state rebuilds all current contributors", asyn
 				session_aggregates: Record<string, { message_count: number }>;
 			}
 		).session_aggregates[SESSION_ID]?.message_count,
-		2,
+		1,
+		"the top-level session's own accumulator only counts its own line; the subagent's line lives on its own session",
 	);
 });
 
@@ -1123,9 +1143,20 @@ test("M14: removed sources are pruned from rich and dual-written mtime state", a
 		assert.equal(Object.keys(cursor.file_mtimes).length, 1);
 	}
 	assert.equal(
-		second.records.find((record) => record.stream === "sessions")?.data
-			.message_count,
+		second.records.find(
+			(record) => record.stream === "sessions" && record.data.id === SESSION_ID,
+		),
+		undefined,
+		"the top-level session's own aggregate is unchanged by removing the subagent file, so it does not re-emit",
+	);
+	assert.equal(
+		(
+			second.states.sessions as {
+				session_aggregates: Record<string, { message_count: number }>;
+			}
+		).session_aggregates[SESSION_ID]?.message_count,
 		1,
+		"pruning the removed subagent contributor must not corrupt the surviving top-level aggregate",
 	);
 });
 
@@ -1563,7 +1594,11 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				const cursor = result.states.sessions as {
 					session_aggregates: Record<string, { message_count: number }>;
 				};
-				assert.equal(cursor.session_aggregates[SESSION_ID]?.message_count, 2);
+				assert.equal(
+					cursor.session_aggregates[SESSION_ID]?.message_count,
+					1,
+					"the top-level session's own accumulator only counts its own top-1 line",
+				);
 			}
 		}
 		await chmod(source.top, 0o600);
@@ -1579,7 +1614,8 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				recovered.records.find(
 					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
 				)?.data.message_count,
-				3,
+				2,
+				"the top-level session's own accumulator counts top-1 plus the recovered top-2 line",
 			);
 		}
 		assert.equal(
@@ -1634,7 +1670,8 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				freshRecovered.records.find(
 					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
 				)?.data.message_count,
-				3,
+				2,
+				"the top-level session's own accumulator counts top-1 plus top-2",
 			);
 		}
 		const replay = await run({ ...source, streams });
@@ -1833,7 +1870,8 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				recovered.records.find(
 					(r) => r.stream === "sessions" && r.data.id === SESSION_ID,
 				)?.data.message_count,
-				3,
+				2,
+				"the top-level session's own accumulator counts top-1 plus the recovered top-2 line",
 			);
 		const noop = await run({ ...source, streams, state: recovered.states });
 		assert.equal(noop.records.filter((r) => r.stream === "messages").length, 0);

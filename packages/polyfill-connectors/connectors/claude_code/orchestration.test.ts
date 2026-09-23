@@ -177,14 +177,28 @@ test("scanProjectDirs: pass 1 (buildOnly=true) populates accumulators but emits 
 			1,
 			"memory note emits on build pass",
 		);
-		assert.equal(sessionAccumulators.size, 1, "exactly one session observed");
+		assert.equal(
+			sessionAccumulators.size,
+			2,
+			"the top-level session plus its own subagent session, keyed separately",
+		);
 		const acc = sessionAccumulators.get(SYNTHETIC_SESSION_ID);
 		assert.ok(acc, "session accumulator present");
 		assert.equal(
 			acc.message_count,
-			3,
-			"accumulated top-level plus recursive subagent message lines",
+			2,
+			"top-level session's own accumulator only counts its own message lines",
 		);
+		assert.equal(acc.kind, "session");
+		assert.equal(acc.parent_session_id, null);
+		const subagentAcc = sessionAccumulators.get("side");
+		assert.ok(
+			subagentAcc,
+			"subagent session accumulator present, keyed by file basename",
+		);
+		assert.equal(subagentAcc.message_count, 1);
+		assert.equal(subagentAcc.kind, "subagent");
+		assert.equal(subagentAcc.parent_session_id, SYNTHETIC_SESSION_ID);
 	} finally {
 		await cleanup();
 	}
@@ -265,7 +279,11 @@ test("scanProjectDirs: full two-pass — sessions emit BEFORE messages (parent-f
 		const attachmentCount = harness.emitted.filter(
 			(r) => r.stream === "attachments",
 		).length;
-		assert.equal(sessionCount, 1);
+		assert.equal(
+			sessionCount,
+			2,
+			"the top-level session plus its own subagent session record",
+		);
 		const memoryNoteCount = harness.emitted.filter(
 			(r) => r.stream === "memory_notes",
 		).length;
@@ -273,26 +291,44 @@ test("scanProjectDirs: full two-pass — sessions emit BEFORE messages (parent-f
 		assert.equal(attachmentCount, 1);
 		assert.equal(memoryNoteCount, 1);
 
-		// Message_count on the session record is the correct count, not doubled.
+		// Message_count on the parent session record only counts its own lines,
+		// not doubled by pass 2 and not including the subagent's own lines.
 		const sessionRec = harness.emitted[firstSession];
+		assert.equal(sessionRec?.data.id, SYNTHETIC_SESSION_ID);
 		assert.equal(
 			sessionRec?.data.message_count,
-			3,
+			2,
 			"no accumulator double-count from pass 2",
 		);
+		assert.equal(sessionRec?.data.kind, "session");
+		assert.equal(sessionRec?.data.parent_session_id, null);
+
+		const subagentSessionRec = harness.emitted.find(
+			(r) => r.stream === "sessions" && r.data.id === "side",
+		);
+		assert.ok(subagentSessionRec, "subagent session record emitted");
+		assert.equal(subagentSessionRec?.data.kind, "subagent");
+		assert.equal(
+			subagentSessionRec?.data.parent_session_id,
+			SYNTHETIC_SESSION_ID,
+		);
+		assert.equal(subagentSessionRec?.data.message_count, 1);
+
 		const sidechain = harness.emitted.find(
 			(r) => r.stream === "messages" && r.data.id === "side-m1",
 		);
 		assert.equal(
 			sidechain?.data.session_id,
 			SYNTHETIC_SESSION_ID,
-			"recursive subagent folds into parent session",
+			"recursive subagent still folds its own session_id field to the parent",
 		);
-		// Session-level `kind`/`parent_session_id` don't exist in the source (see
-		// capability-map.json claude_code.sessions CONTRACT-CHANGE-REQUEST): the
-		// real replacement for subagent lineage is per-message is_sidechain/agent_id.
 		assert.equal(sidechain?.data.is_sidechain, true);
 		assert.equal(sidechain?.data.agent_id, "agent-1");
+		assert.equal(
+			sidechain?.data.subagent_session_id,
+			"side",
+			"message is attributable to its own subagent session via the file-basename id",
+		);
 	} finally {
 		await cleanup();
 	}
@@ -397,8 +433,8 @@ test("scanProjectDirs: session aggregation can backfill independently from messa
 
 		assert.equal(
 			sessionAccumulators.size,
-			1,
-			"empty session cursor reparses JSONL even when message cursor is current",
+			2,
+			"empty session cursor reparses JSONL even when message cursor is current, yielding the top-level session plus its own subagent session",
 		);
 		assert.equal(
 			Object.keys(sessionMtimes).length,
@@ -598,8 +634,8 @@ test("scanProjectDirs: an unchanged session does NOT re-emit a sessions record o
 		});
 		assert.equal(
 			run1.emitted.filter((r) => r.stream === "sessions").length,
-			1,
-			"run 1 emits the session once",
+			2,
+			"run 1 emits the top-level session plus its own subagent session, each once",
 		);
 
 		// Run 2: feed run 1's captured mtimes as the prior cursor. The file is
@@ -814,5 +850,202 @@ test("scanProjectDirs: three-stream bounded proof — messages + attachments + m
 		);
 	} finally {
 		await cleanup();
+	}
+});
+
+// ─── Legacy claude_code.sessions kind/parentSessionId derivability ──────────
+//
+// Legacy connectors/anthropic/claude-code-local.js listTranscripts derives,
+// per JSONL file (not per JSONL line):
+//   sessionId       = file basename minus ".jsonl"
+//   parentSessionId = the enclosing <parentSessionId>/subagents/ directory
+//                     name, or null for a top-level <sessionId>.jsonl file
+//   kind            = 'subagent' when parentSessionId is set, else 'session'
+// connectors/anthropic/__tests__/claude-code-trajectories.test.cjs pins
+// agent-abc -> kind 'subagent', parent 'ses-main' on exactly this shape.
+//
+// These tests prove the modern connector reconstructs the same fields from
+// the same real directory layout (synthetic fixtures below use invented ids,
+// mirroring the legacy test's own agent-abc/ses-main convention), even though
+// every JSONL line in the subagent file repeats the PARENT's sessionId (the
+// modern connector's forcedSessionId fold) rather than carrying its own.
+
+async function makeDerivabilityProjectTree(): Promise<{
+	baseDir: string;
+	cleanup: () => Promise<void>;
+}> {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-cc-derivability-"));
+	const projectDir = join(root, "-Users-test-derivability");
+	// Session directory names must match SESSION_DIR_PREFIX_RE (a UUID-looking
+	// prefix) for scanProjectDirs to treat them as holding a subagents/ dir —
+	// same real-world shape as ~/.claude/projects/<project>/<uuid>/subagents/.
+	const parentSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+	const subagentBasename = "agent-abc";
+	await mkdir(projectDir, { recursive: true });
+	await writeFile(
+		join(projectDir, `${parentSessionId}.jsonl`),
+		`${JSON.stringify({
+			sessionId: parentSessionId,
+			type: "user",
+			uuid: "parent-m1",
+			timestamp: "2026-04-23T10:00:00Z",
+			message: { content: "delegate to a subagent" },
+			cwd: "/Users/user/derivability",
+		})}\n`,
+		"utf8",
+	);
+	const subagentsDir = join(projectDir, parentSessionId, "subagents");
+	await mkdir(subagentsDir, { recursive: true });
+	await writeFile(
+		join(subagentsDir, `${subagentBasename}.jsonl`),
+		`${JSON.stringify({
+			// Every line in the subagent transcript repeats the PARENT's
+			// sessionId — this is the real-world shape verified in the legacy
+			// lane report: the subagent file has no session-identity field of
+			// its own, only its file path carries one.
+			sessionId: parentSessionId,
+			type: "assistant",
+			uuid: "sub-m1",
+			timestamp: "2026-04-23T10:00:01Z",
+			isSidechain: true,
+			agentId: "abc",
+			message: { content: "subagent reply" },
+		})}\n`,
+		"utf8",
+	);
+	return {
+		baseDir: root,
+		cleanup: () => rm(root, { recursive: true, force: true }),
+	};
+}
+
+test("legacy derivability: file-basename-derived subagent session reconstructs legacy kind/parentSessionId", async () => {
+	const { baseDir, cleanup } = await makeDerivabilityProjectTree();
+	try {
+		const harness = makeRecordingEmit();
+		const sessionAccumulators = new Map<string, SessionAccumulator>();
+		const requested = makeRequested(["sessions", "messages"]);
+
+		await scanProjectDirs({
+			baseDir,
+			buildOnly: true,
+			emit: silentEmit(),
+			emitRecord: harness.emitRecord,
+			fileMtimes: {},
+			newMtimes: {},
+			requested,
+			sessionAccumulators,
+		});
+		await emitSessionsFromAccumulators({
+			emitRecord: harness.emitRecord,
+			requested,
+			sessionAccumulators,
+		});
+		await scanProjectDirs({
+			baseDir,
+			buildOnly: false,
+			emit: silentEmit(),
+			emitRecord: harness.emitRecord,
+			fileMtimes: {},
+			newMtimes: {},
+			requested,
+			sessionAccumulators: new Map(sessionAccumulators),
+		});
+
+		const parentSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+		const parentSession = harness.emitted.find(
+			(r) => r.stream === "sessions" && r.data.id === parentSessionId,
+		);
+		const subagentSession = harness.emitted.find(
+			(r) => r.stream === "sessions" && r.data.id === "agent-abc",
+		);
+
+		// Legacy: top-level session -> kind 'session', parentSessionId null.
+		assert.ok(parentSession, "top-level session record emitted");
+		assert.equal(parentSession?.data.kind, "session");
+		assert.equal(parentSession?.data.parent_session_id, null);
+
+		// Legacy: subagent transcript -> kind 'subagent', parentSessionId is the
+		// enclosing session, sessionId is the file basename ("agent-abc"), not
+		// the parent id every line inside it repeats.
+		assert.ok(
+			subagentSession,
+			"subagent session record emitted, keyed by file basename",
+		);
+		assert.equal(subagentSession?.data.kind, "subagent");
+		assert.equal(subagentSession?.data.parent_session_id, parentSessionId);
+
+		// The subagent's message is attributable to its own subagent session
+		// even though its own session_id field folds to the parent (matches
+		// the legacy "sessionId equals parent" real-world shape).
+		const subagentMessage = harness.emitted.find(
+			(r) => r.stream === "messages" && r.data.id === "sub-m1",
+		);
+		assert.ok(subagentMessage, "subagent message emitted");
+		assert.equal(subagentMessage?.data.session_id, parentSessionId);
+		assert.equal(subagentMessage?.data.subagent_session_id, "agent-abc");
+		assert.equal(subagentMessage?.data.is_sidechain, true);
+		assert.equal(subagentMessage?.data.agent_id, "abc");
+
+		const parentMessage = harness.emitted.find(
+			(r) => r.stream === "messages" && r.data.id === "parent-m1",
+		);
+		assert.ok(parentMessage, "top-level message emitted");
+		assert.equal(
+			parentMessage?.data.subagent_session_id,
+			null,
+			"negative control: a top-level session's own message has no subagent_session_id",
+		);
+		assert.equal(parentMessage?.data.is_sidechain, null);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("legacy derivability negative control: a top-level session with no subagents never gets kind='subagent'", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-cc-no-subagent-"));
+	const projectDir = join(root, "-Users-test-no-subagent");
+	const sessionId = "ses-solo";
+	try {
+		await mkdir(projectDir, { recursive: true });
+		await writeFile(
+			join(projectDir, `${sessionId}.jsonl`),
+			`${JSON.stringify({
+				sessionId,
+				type: "user",
+				uuid: "solo-m1",
+				timestamp: "2026-04-23T10:00:00Z",
+				message: { content: "no subagents here" },
+				cwd: "/Users/user/no-subagent",
+			})}\n`,
+			"utf8",
+		);
+		const harness = makeRecordingEmit();
+		const sessionAccumulators = new Map<string, SessionAccumulator>();
+		const requested = makeRequested(["sessions", "messages"]);
+
+		await scanProjectDirs({
+			baseDir: root,
+			buildOnly: true,
+			emit: silentEmit(),
+			emitRecord: harness.emitRecord,
+			fileMtimes: {},
+			newMtimes: {},
+			requested,
+			sessionAccumulators,
+		});
+		await emitSessionsFromAccumulators({
+			emitRecord: harness.emitRecord,
+			requested,
+			sessionAccumulators,
+		});
+
+		const sessions = harness.emitted.filter((r) => r.stream === "sessions");
+		assert.equal(sessions.length, 1, "exactly one session, no subagents");
+		assert.equal(sessions[0]?.data.id, sessionId);
+		assert.equal(sessions[0]?.data.kind, "session");
+		assert.equal(sessions[0]?.data.parent_session_id, null);
+	} finally {
+		await rm(root, { recursive: true, force: true });
 	}
 });

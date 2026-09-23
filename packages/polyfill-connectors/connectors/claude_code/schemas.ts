@@ -32,6 +32,10 @@ const ISO_Z_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 // Shared field schemas.
 const uuidSchema = z.string().regex(UUID_RE, "must be valid UUID");
+// Session ids are UUIDs for top-level <sessionId>.jsonl files, but a subagent
+// session's id is its subagent-transcript file basename (e.g. "agent-abc"),
+// which is not a UUID — see the sessions.kind derivation in index.ts.
+const sessionIdSchema = pdppSafeText.min(1).max(256);
 const isoDateTimeSchema = z
 	.string()
 	.regex(ISO_Z_RE, "must be ISO-8601 with millis and Z suffix")
@@ -57,7 +61,7 @@ const blobRefSchema = z.object({
 });
 
 export const sessionsSchema = z.object({
-	id: uuidSchema,
+	id: sessionIdSchema,
 	project_path: pdppSafeText,
 	cwd: pathSchema,
 	git_branch: stringMaxSchema(256),
@@ -68,11 +72,17 @@ export const sessionsSchema = z.object({
 	title: stringMaxSchema(2048),
 	user_type: stringMaxSchema(40),
 	entrypoint: stringMaxSchema(256),
+	// 'session' for a top-level <sessionId>.jsonl file, 'subagent' for a file
+	// under <parentSessionId>/subagents/**. Mirrors legacy listTranscripts'
+	// kind derivation (connectors/anthropic/claude-code-local.js).
+	kind: z.enum(["session", "subagent"]),
+	// Enclosing session id for a subagent record; null for a top-level session.
+	parent_session_id: sessionIdSchema.nullable(),
 });
 
 export const messagesSchema = z.object({
 	id: uuidSchema,
-	session_id: uuidSchema,
+	session_id: sessionIdSchema,
 	parent_uuid: uuidSchema.nullable(),
 	role: stringMaxSchema(64),
 	type: stringMaxSchema(64),
@@ -81,6 +91,11 @@ export const messagesSchema = z.object({
 	is_sidechain: z.boolean(),
 	user_type: stringMaxSchema(40),
 	agent_id: stringMaxSchema(256).nullable(),
+	// File-basename-derived subagent session id (e.g. "agent-abc") when this
+	// message came from a <parentSessionId>/subagents/**\/*.jsonl transcript;
+	// null for a top-level session message. Joins to sessions.id for a
+	// subagent record. Distinct from agent_id (see JsonlObservations doc).
+	subagent_session_id: sessionIdSchema.nullable(),
 	has_pasted_content: z.boolean(),
 });
 

@@ -145,15 +145,28 @@ test("parseFrontmatter: skips malformed key/value lines", () => {
 // ─── makeEmptySessionAccumulator / mergeSessionObservations / widenSessionTimeRange ─
 
 test("makeEmptySessionAccumulator: nulls + zero count", () => {
-	const acc = makeEmptySessionAccumulator("s1", "proj/a");
+	const acc = makeEmptySessionAccumulator("s1", "proj/a", "session", null);
 	assert.equal(acc.id, "s1");
 	assert.equal(acc.project_path, "proj/a");
 	assert.equal(acc.cwd, null);
 	assert.equal(acc.message_count, 0);
+	assert.equal(acc.kind, "session");
+	assert.equal(acc.parent_session_id, null);
+});
+
+test("makeEmptySessionAccumulator: subagent kind + parent id", () => {
+	const acc = makeEmptySessionAccumulator(
+		"agent-abc",
+		"proj/a",
+		"subagent",
+		"s1",
+	);
+	assert.equal(acc.kind, "subagent");
+	assert.equal(acc.parent_session_id, "s1");
 });
 
 test("SessionAccumulator: stores only bounded scalar summary fields", () => {
-	const acc = makeEmptySessionAccumulator("s1", "proj/a");
+	const acc = makeEmptySessionAccumulator("s1", "proj/a", "session", null);
 	mergeSessionObservations(acc, {
 		cwd: "/home/user owner/project",
 		entrypoint: "claude",
@@ -174,8 +187,10 @@ test("SessionAccumulator: stores only bounded scalar summary fields", () => {
 		"entrypoint",
 		"git_branch",
 		"id",
+		"kind",
 		"last_event_at",
 		"message_count",
+		"parent_session_id",
 		"project_path",
 		"started_at",
 		"title",
@@ -210,7 +225,12 @@ test("SessionAccumulator: stores only bounded scalar summary fields", () => {
 });
 
 test("mergeSessionObservations: only non-null fields replace", () => {
-	const acc: SessionAccumulator = makeEmptySessionAccumulator("s1", "p");
+	const acc: SessionAccumulator = makeEmptySessionAccumulator(
+		"s1",
+		"p",
+		"session",
+		null,
+	);
 	mergeSessionObservations(acc, {
 		cwd: "/home",
 		gitBranch: "main",
@@ -225,7 +245,12 @@ test("mergeSessionObservations: only non-null fields replace", () => {
 });
 
 test("widenSessionTimeRange: picks min started, max last", () => {
-	const acc: SessionAccumulator = makeEmptySessionAccumulator("s1", "p");
+	const acc: SessionAccumulator = makeEmptySessionAccumulator(
+		"s1",
+		"p",
+		"session",
+		null,
+	);
 	widenSessionTimeRange(acc, "2026-02-01", "2026-02-10");
 	widenSessionTimeRange(acc, "2026-01-01", "2026-03-10");
 	assert.equal(acc.started_at, "2026-01-01");
@@ -233,7 +258,12 @@ test("widenSessionTimeRange: picks min started, max last", () => {
 });
 
 test("widenSessionTimeRange: nulls no-op", () => {
-	const acc: SessionAccumulator = makeEmptySessionAccumulator("s1", "p");
+	const acc: SessionAccumulator = makeEmptySessionAccumulator(
+		"s1",
+		"p",
+		"session",
+		null,
+	);
 	widenSessionTimeRange(acc, null, null);
 	assert.equal(acc.started_at, null);
 	assert.equal(acc.last_event_at, null);

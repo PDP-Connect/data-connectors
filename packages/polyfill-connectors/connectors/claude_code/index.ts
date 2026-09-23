@@ -216,9 +216,11 @@ async function* iterJsonlLines(path: string): AsyncGenerator<JsonlObject> {
  *  full observed file span. */
 export function makeJsonlObservations(
 	forcedSessionId: string | null,
+	subagentSessionId: string | null = null,
 ): JsonlObservations {
 	return {
 		sessionId: forcedSessionId || null,
+		subagentSessionId,
 		firstTimestamp: null,
 		lastTimestamp: null,
 		messageCount: 0,
@@ -328,6 +330,7 @@ export function buildMessageRecord(
 	obj: JsonlObject,
 	sessionId: string,
 	uuid: string,
+	subagentSessionId: string | null,
 ): RecordData {
 	return {
 		id: uuid,
@@ -343,6 +346,7 @@ export function buildMessageRecord(
 		is_sidechain: obj.isSidechain ?? null,
 		user_type: obj.userType ?? null,
 		agent_id: obj.agentId ?? null,
+		subagent_session_id: subagentSessionId,
 		has_pasted_content: hasPastedContent(obj),
 	};
 }
@@ -467,7 +471,7 @@ export async function processJsonlLine({
 		if (!buildOnly && deps.requested.has("messages") && uuid) {
 			await deps.emitRecord(
 				"messages",
-				buildMessageRecord(obj, sessionId, uuid),
+				buildMessageRecord(obj, sessionId, uuid, obs.subagentSessionId),
 			);
 		}
 		return;
@@ -809,13 +813,21 @@ function updateSessionAccumulator(
 	projectDir: string,
 	obs: JsonlObservations,
 ): void {
-	const { sessionId } = obs;
+	// A subagent transcript contributes to its OWN accumulator (keyed by the
+	// file-basename-derived subagentSessionId), not the parent's — the parent
+	// session's own accumulator is built from the parent's own top-level file.
+	const sessionId = obs.subagentSessionId ?? obs.sessionId;
 	if (!sessionId) {
 		return;
 	}
 	const acc =
 		sessionAccumulators.get(sessionId) ??
-		makeEmptySessionAccumulator(sessionId, projectDir);
+		makeEmptySessionAccumulator(
+			sessionId,
+			projectDir,
+			obs.subagentSessionId ? "subagent" : "session",
+			obs.subagentSessionId ? obs.sessionId : null,
+		);
 	mergeSessionObservations(acc, {
 		cwd: obs.cwd,
 		entrypoint: obs.entrypoint,
@@ -842,6 +854,8 @@ interface ParseJsonlFileArgs {
 	projectDir: string;
 	requested: Map<string, StreamScope>;
 	sessionAccumulators: Map<string, SessionAccumulator>;
+	/** File-basename-derived subagent session id (see JsonlObservations). */
+	subagentSessionId: string | null;
 }
 
 async function parseJsonlFile(
@@ -856,8 +870,12 @@ async function parseJsonlFile(
 		emitRecord,
 		sessionAccumulators,
 		forcedSessionId,
+		subagentSessionId,
 	} = args;
-	const obs: JsonlObservations = makeJsonlObservations(forcedSessionId);
+	const obs: JsonlObservations = makeJsonlObservations(
+		forcedSessionId,
+		subagentSessionId,
+	);
 	let lineCount = 0;
 
 	for await (const obj of iterJsonlLines(path)) {
@@ -1285,6 +1303,8 @@ export interface ScanProjectDirsArgs {
 	skipJsonl?: boolean;
 }
 
+const JSONL_SUFFIX_RE = /\.jsonl$/;
+
 interface ProcessJsonlFileArgs {
 	args: ScanProjectDirsArgs;
 	forcedSessionId: string | null;
@@ -1315,10 +1335,18 @@ async function processJsonlFile({
 			args.buildOnly ? "index" : "emit"
 		} file_size_mb=${(st.size / BYTES_PER_MB).toFixed(1)}`,
 	});
+	// A subagent file (forcedSessionId set) carries its own stable identity in
+	// its basename (e.g. "agent-abc.jsonl" -> "agent-abc"), independent of any
+	// sessionId value inside its JSONL lines — mirrors legacy listTranscripts'
+	// `entry.replace(/\.jsonl$/, '')`.
+	const subagentSessionId = forcedSessionId
+		? basename(path).replace(JSONL_SUFFIX_RE, "")
+		: null;
 	await parseJsonlFile({
 		buildOnly: args.buildOnly,
 		emit: args.emit,
 		emitRecord: args.emitRecord,
+		subagentSessionId,
 		forcedSessionId,
 		path,
 		projectDir,
@@ -1551,6 +1579,13 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 		return;
 	}
 	const sessionId = readStringOrNull(value.sessionId);
+	// `subagentSessionId` is undefined (not null) on a cursor written before
+	// this field existed; default to null (top-level session) rather than
+	// rejecting the cursor, same backward-compat rule as `title` below.
+	const subagentSessionId =
+		value.subagentSessionId === undefined
+			? null
+			: readStringOrNull(value.subagentSessionId);
 	const firstTimestamp = readStringOrNull(value.firstTimestamp);
 	const lastTimestamp = readStringOrNull(value.lastTimestamp);
 	const cwd = readStringOrNull(value.cwd);
@@ -1566,6 +1601,7 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 	const version = readStringOrNull(value.version);
 	if (
 		sessionId === undefined ||
+		subagentSessionId === undefined ||
 		firstTimestamp === undefined ||
 		lastTimestamp === undefined ||
 		cwd === undefined ||
@@ -1588,6 +1624,7 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 		lastTimestamp,
 		messageCount: value.messageCount,
 		sessionId,
+		subagentSessionId,
 		title,
 		userType,
 		version,
@@ -1616,9 +1653,23 @@ function readSessionAccumulator(
 	// older cursor doesn't force a full session rebuild over one added field.
 	const title =
 		value.title === undefined ? null : readStringOrNull(value.title);
+	// `kind`/`parent_session_id` are likewise undefined on a pre-existing
+	// aggregate; default to the top-level-session shape rather than rejecting.
+	const kind =
+		value.kind === "session" || value.kind === "subagent"
+			? value.kind
+			: value.kind === undefined
+				? "session"
+				: undefined;
+	const parentSessionId =
+		value.parent_session_id === undefined
+			? null
+			: readStringOrNull(value.parent_session_id);
 	if (
 		textFields.some((field) => readStringOrNull(value[field]) === undefined) ||
 		title === undefined ||
+		kind === undefined ||
+		parentSessionId === undefined ||
 		typeof value.id !== "string" ||
 		typeof value.project_path !== "string" ||
 		typeof value.message_count !== "number" ||
@@ -1632,8 +1683,10 @@ function readSessionAccumulator(
 		entrypoint: value.entrypoint as string | null,
 		git_branch: value.git_branch as string | null,
 		id: value.id,
+		kind,
 		last_event_at: value.last_event_at as string | null,
 		message_count: value.message_count,
+		parent_session_id: parentSessionId,
 		project_path: value.project_path,
 		started_at: value.started_at as string | null,
 		title,
@@ -1741,6 +1794,7 @@ function cloneObservations(
 	return {
 		...observation,
 		sessionId: forcedSessionId ?? observation.sessionId,
+		subagentSessionId: observation.subagentSessionId,
 	};
 }
 
@@ -2084,9 +2138,15 @@ async function scanSessionSource(input: {
 	rebuilt: boolean;
 	sessionIds: Set<string>;
 }> {
+	// A subagent source (forcedSessionId set) carries its own stable identity
+	// in its basename, independent of any sessionId value inside its JSONL
+	// lines — mirrors processJsonlFile's derivation and legacy listTranscripts.
+	const subagentSessionId = input.source.forcedSessionId
+		? basename(input.source.path).replace(JSONL_SUFFIX_RE, "")
+		: null;
 	const observation = input.cursor
 		? cloneObservations(input.cursor.observation, input.source.forcedSessionId)
-		: makeJsonlObservations(input.source.forcedSessionId);
+		: makeJsonlObservations(input.source.forcedSessionId, subagentSessionId);
 	const sessionIds = new Set<string>();
 	const pendingAggregates = new Map<string, SessionAccumulator>();
 	const result = await scanClaudeJsonl({
@@ -2106,12 +2166,11 @@ async function scanSessionSource(input: {
 				obj,
 				obs: observation,
 			});
-			if (
-				observation.sessionId &&
-				!pendingAggregates.has(observation.sessionId)
-			) {
-				const prior = input.sessionAccumulators.get(observation.sessionId);
-				if (prior) pendingAggregates.set(observation.sessionId, { ...prior });
+			const effectiveId =
+				observation.subagentSessionId ?? observation.sessionId;
+			if (effectiveId && !pendingAggregates.has(effectiveId)) {
+				const prior = input.sessionAccumulators.get(effectiveId);
+				if (prior) pendingAggregates.set(effectiveId, { ...prior });
 			}
 			updateSessionAccumulatorFromCurrentLine(
 				pendingAggregates,
@@ -2120,8 +2179,8 @@ async function scanSessionSource(input: {
 				obj,
 				observation.messageCount - before,
 			);
-			if (observation.sessionId) {
-				sessionIds.add(observation.sessionId);
+			if (effectiveId) {
+				sessionIds.add(effectiveId);
 			}
 		},
 	});
@@ -2138,9 +2197,12 @@ async function scanSessionSource(input: {
 					...(result.decision.kind === "rebuild"
 						? []
 						: (input.cursor?.session_ids ??
-							(input.cursor?.observation.sessionId
-								? [input.cursor.observation.sessionId]
-								: []))),
+							(() => {
+								const priorId =
+									input.cursor?.observation.subagentSessionId ??
+									input.cursor?.observation.sessionId;
+								return priorId ? [priorId] : [];
+							})())),
 					...sessionIds,
 				]),
 			],
@@ -2163,7 +2225,16 @@ async function scanChildSource(input: {
 	cursor: ClaudeChildFileCursorV1;
 	messagesExamined: number;
 }> {
-	const observation = makeJsonlObservations(input.source.forcedSessionId);
+	// A subagent source (forcedSessionId set) carries its own stable identity
+	// in its basename, independent of any sessionId value inside its JSONL
+	// lines — mirrors processJsonlFile's derivation and legacy listTranscripts.
+	const subagentSessionId = input.source.forcedSessionId
+		? basename(input.source.path).replace(JSONL_SUFFIX_RE, "")
+		: null;
+	const observation = makeJsonlObservations(
+		input.source.forcedSessionId,
+		subagentSessionId,
+	);
 	observation.sessionId =
 		input.cursor?.current_session_id ?? observation.sessionId;
 	let messagesExamined = 0;

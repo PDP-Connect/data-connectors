@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icons/claude_code.svg",
@@ -106,9 +106,16 @@
 					},
 					"entrypoint": {
 						"type": ["string", "null"]
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["session", "subagent"]
+					},
+					"parent_session_id": {
+						"type": ["string", "null"]
 					}
 				},
-				"required": ["id"]
+				"required": ["id", "kind"]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "last_event_at",
@@ -118,6 +125,14 @@
 				"resources": true
 			},
 			"incremental": true,
+			"relationships": [
+				{
+					"name": "parent_session",
+					"stream": "sessions",
+					"foreign_key": "parent_session_id",
+					"cardinality": "has_one"
+				}
+			],
 			"query": {
 				"search": {
 					"lexical_fields": [
@@ -193,6 +208,9 @@
 					"agent_id": {
 						"type": ["string", "null"]
 					},
+					"subagent_session_id": {
+						"type": ["string", "null"]
+					},
 					"has_pasted_content": {
 						"type": "boolean"
 					}
@@ -212,6 +230,12 @@
 					"name": "session",
 					"stream": "sessions",
 					"foreign_key": "session_id",
+					"cardinality": "has_one"
+				},
+				{
+					"name": "subagent_session",
+					"stream": "sessions",
+					"foreign_key": "subagent_session_id",
 					"cardinality": "has_one"
 				}
 			],

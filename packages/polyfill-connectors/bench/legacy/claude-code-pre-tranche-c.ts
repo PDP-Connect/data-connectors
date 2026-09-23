@@ -450,7 +450,11 @@ function updateSessionAccumulator(
 	}
 	const acc =
 		sessionAccumulators.get(sessionId) ??
-		makeEmptySessionAccumulator(sessionId, projectDir);
+		// This frozen pre-tranche-c benchmark snapshot predates sessions.kind /
+		// sessions.parent_session_id; it never reads them (also frozen), so
+		// this is a type-compat shim, not a behavior claim — same treatment
+		// as the `title` shim below.
+		makeEmptySessionAccumulator(sessionId, projectDir, "session", null);
 	mergeSessionObservations(acc, {
 		cwd: obs.cwd,
 		entrypoint: obs.entrypoint,
