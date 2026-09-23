@@ -3,7 +3,6 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 import { manifestPath } from "../../src/connector-paths.ts";
 import {
