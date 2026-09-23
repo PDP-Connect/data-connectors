@@ -1,0 +1,36 @@
+{
+	"data": {
+		"authSession": {
+			"user": {
+				"id": "user-01TESTTESTTESTTESTTESTTEST",
+				"name": "Ada Lovelace",
+				"email": "ada@example.com",
+				"roles": ["MEMBER"],
+				"enabledFeatureFlags": [
+					"whatsapp_channel",
+					"agent_mail",
+					"link_payments",
+					"agent_to_agent"
+				],
+				"onboardingStep": "done",
+				"profilePictureUrl": null,
+				"phoneNumber": "+15550101234",
+				"preferences": {
+					"trainingDataOptOut": false
+				}
+			}
+		},
+		"agentToAgentSettings": {
+			"enabled": true
+		},
+		"locationDataStatus": {
+			"hasData": false
+		},
+		"linkedProviders": [
+			{
+				"provider": "phone",
+				"sub": "+15550101234"
+			}
+		]
+	}
+}

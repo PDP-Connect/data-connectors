@@ -52,6 +52,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["icloud_notes", "icloud-notes"],
     ["ical", "ical"],
     ["imessage", "imessage"],
+    ["instinct", "instinct"],
     ["jellyfin", "jellyfin"],
     ["linkedin", "linkedin"],
     ["loom", "loom"],

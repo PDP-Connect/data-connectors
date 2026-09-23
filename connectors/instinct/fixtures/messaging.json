@@ -1,0 +1,11 @@
+{
+	"data": {
+		"whatsappChannelConnection": {
+			"userId": "user-01TESTTESTTESTTESTTESTTEST",
+			"phoneNumber": "+15550101234"
+		},
+		"imessageConnection": {
+			"icloudEmail": "ada@icloud.example"
+		}
+	}
+}
