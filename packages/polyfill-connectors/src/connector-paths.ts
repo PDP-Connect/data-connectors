@@ -19,6 +19,22 @@
  * layers that behavior on top for production manifest discovery; call this
  * module directly only when you need a real, on-disk path (a fixture path, a
  * subprocess entrypoint, a build script input).
+ *
+ * `PDPP_CONNECTOR_PATHS_TEST_ROOT` (test-only; unset in normal use) is an
+ * alternate root a test can point `connectorDir`, `connectorEntrypoint`,
+ * `manifestPath`, and `iconPath` at instead of this package's real
+ * `manifests/`/`connectors/` directories, so a test can prove the seam (and
+ * everything routed through it — manifest discovery, scrub-rule loading,
+ * connector-entrypoint resolution) still resolves correctly under a
+ * different on-disk layout — e.g. the eventual root `connectors/<key>/`
+ * move — without touching production defaults. It is read live (not cached
+ * at import time), each call, so a test can set it right before the call it
+ * affects.
+ *
+ * `manifestsDir`/`connectorsDir`/`iconsDir`/`packageRoot`/`repoRoot`/
+ * `fixturesRootDir` are NOT affected by this override — they always
+ * describe this package's real location on disk. Only the per-key/per-file
+ * derivation functions below honor it.
  */
 
 import { dirname, join } from "node:path";
@@ -41,23 +57,36 @@ export const iconsDir: string = join(manifestsDir, "icons");
 /** `packages/polyfill-connectors/connectors/`. */
 export const connectorsDir: string = join(packageRoot, "connectors");
 
-/** `packages/polyfill-connectors/connectors/<key>/`. */
-export function connectorDir(key: string): string {
-	return join(connectorsDir, key);
+/** `manifestsDir`, or `PDPP_CONNECTOR_PATHS_TEST_ROOT/manifests` under the test-only override (see module docstring). */
+export function resolvedManifestsDir(): string {
+	const testRoot = process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+	return testRoot ? join(testRoot, "manifests") : manifestsDir;
 }
 
-/** `packages/polyfill-connectors/connectors/<key>/index.ts`. */
+/** `connectorsDir`, or `PDPP_CONNECTOR_PATHS_TEST_ROOT/connectors` under the test-only override (see module docstring). */
+function resolvedConnectorsDir(): string {
+	const testRoot = process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+	return testRoot ? join(testRoot, "connectors") : connectorsDir;
+}
+
+/** `packages/polyfill-connectors/connectors/<key>/` (or the test-only relocation root, see module docstring). */
+export function connectorDir(key: string): string {
+	return join(resolvedConnectorsDir(), key);
+}
+
+/** `packages/polyfill-connectors/connectors/<key>/index.ts` (or the test-only relocation root, see module docstring). */
 export function connectorEntrypoint(key: string): string {
 	return join(connectorDir(key), "index.ts");
 }
 
-/** `packages/polyfill-connectors/manifests/<key>.json`. */
+/** `packages/polyfill-connectors/manifests/<key>.json` (or the test-only relocation root, see module docstring). */
 export function manifestPath(key: string): string {
-	return join(manifestsDir, `${key}.json`);
+	return join(resolvedManifestsDir(), `${key}.json`);
 }
 
 /**
- * `packages/polyfill-connectors/manifests/icons/<iconFile>`.
+ * `packages/polyfill-connectors/manifests/icons/<iconFile>` (or the
+ * test-only relocation root, see module docstring).
  *
  * Pass the manifest's own `brand.icon` value (for example `"icons/foo.svg"`)
  * or a bare filename (`"foo.svg"`) — both resolve under `iconsDir`.
@@ -66,7 +95,7 @@ export function iconPath(iconFileOrRelativePath: string): string {
 	const fileName = iconFileOrRelativePath.startsWith("icons/")
 		? iconFileOrRelativePath.slice("icons/".length)
 		: iconFileOrRelativePath;
-	return join(iconsDir, fileName);
+	return join(resolvedManifestsDir(), "icons", fileName);
 }
 
 /** `packages/polyfill-connectors/fixtures/`. */
