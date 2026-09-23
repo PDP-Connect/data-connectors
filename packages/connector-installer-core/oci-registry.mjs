@@ -91,17 +91,43 @@ export function sha256Digest(buffer) {
 }
 
 /**
- * The cosign tag that holds the signature for a manifest digest.
+ * The cosign tag that holds the LEGACY-format signature for a manifest digest.
  *
  * `sha256:<hex>` is not a legal tag — `:` is a separator — so cosign rewrites
  * the separator and suffixes `.sig`. Observed against cosign v2.4.3, which is
- * the version the publish workflow pins.
+ * the version the publish workflow pinned through 2026-09.
  */
 export function cosignSignatureTag(digest) {
   if (!isValidDigest(digest)) {
     throw new Error(`Cannot derive a cosign signature tag from "${digest}"`);
   }
   return `${digest.trim().replace(":", "-")}.sig`;
+}
+
+/**
+ * The cosign tag that holds a NEW-format (cosign v3-default) signature bundle
+ * for a manifest digest.
+ *
+ * Cosign v3 makes the Sigstore protobuf bundle format the default and stores
+ * it as an OCI 1.1 referring artifact (a manifest carrying `subject`). Where
+ * the registry supports the `/referrers/` API that artifact is discoverable
+ * without a tag at all — but cosign ALSO writes a fallback tag for registries
+ * that do not, and this consumer reads that fallback rather than the
+ * referrers API, for the same reason `fetchSignatureManifest` already reads a
+ * tag for the legacy format: a tag lookup works against any OCI-compliant
+ * registry, referrers-capable or not, with one code path.
+ *
+ * The fallback tag is `sha256-<hex>`, WITHOUT the legacy path's `.sig`
+ * suffix — observed against cosign v3.1.3 pushing to both a local registry
+ * and ghcr.io. Do not derive this by appending anything to
+ * `cosignSignatureTag`'s output; the two tags name different objects in
+ * different shapes, and the missing suffix is not a typo.
+ */
+export function cosignBundleTag(digest) {
+  if (!isValidDigest(digest)) {
+    throw new Error(`Cannot derive a cosign bundle tag from "${digest}"`);
+  }
+  return digest.trim().replace(":", "-");
 }
 
 /**
@@ -375,6 +401,63 @@ export function classifyManifestResponse(response) {
   return {
     outcome: "unknown",
     reason: `the manifest endpoint returned HTTP ${status}${said ? ` (registry said: ${said})` : ""}`,
+  };
+}
+
+/**
+ * Classify the response to a `/v2/<name>/referrers/<digest>` request.
+ *
+ * NOT the same three outcomes as {@link classifyManifestResponse}, on
+ * purpose, because a 404 means something different at this endpoint. The OCI
+ * distribution spec requires that a registry supporting the referrers API
+ * answer 200 even when there are zero matching referrers — "If a query
+ * results in no matching referrers, an empty manifest list MUST be
+ * returned" — and separately requires that a SUPPORTING registry "MUST NOT
+ * return a 404 Not Found to a referrers API request". So 404 here can only
+ * mean one thing: this registry does not implement the endpoint at all. It
+ * is never "no referrers exist", the way an absent tag can be; there is no
+ * absence outcome for this endpoint, only "supported" (with a list, possibly
+ * empty) and "unsupported".
+ *
+ * There is also no per-response digest self-check the way
+ * `classifyManifestResponse` has: the index this endpoint returns is a
+ * registry-synthesized query result, not a stable object addressed by the
+ * digest in the URL, so `Docker-Content-Digest` is not a claim about these
+ * bytes and checking it would test the wrong thing.
+ */
+export function classifyReferrersResponse(response) {
+  const { status, body = "" } = response;
+
+  if (status === 200) {
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch (error) {
+      return { outcome: "unknown", reason: `the referrers endpoint returned unparseable JSON: ${error.message}` };
+    }
+    if (parsed?.mediaType !== "application/vnd.oci.image.index.v1+json" || !Array.isArray(parsed?.manifests)) {
+      return {
+        outcome: "unknown",
+        reason: "the referrers endpoint returned 200 with a body that is not an OCI image index",
+      };
+    }
+    return { outcome: "supported", index: parsed };
+  }
+
+  if (status === 404) {
+    // Any 404 here — including one shaped like an absence code — means the
+    // ENDPOINT is unsupported, per the spec rule above. Reading a
+    // MANIFEST_UNKNOWN body as "no referrers" would be exactly the "absence
+    // read off prose instead of the response that was actually made" mistake
+    // `classifyManifestResponse`'s own header comment warns against, applied
+    // to a different endpoint.
+    return { outcome: "unsupported" };
+  }
+
+  const said = registryMessage(body);
+  return {
+    outcome: "unknown",
+    reason: `the referrers endpoint returned HTTP ${status}${said ? ` (registry said: ${said})` : ""}`,
   };
 }
 
@@ -775,6 +858,51 @@ export async function lookupManifest({
 }
 
 /**
+ * Query the OCI 1.1 referrers API: `GET /v2/<name>/referrers/<digest>`,
+ * filtered to one `artifactType`.
+ *
+ * Returns `{ outcome: "supported", index }` when the registry implements the
+ * endpoint (the index may legitimately have zero matching entries),
+ * `{ outcome: "unsupported" }` when it does not (observed against both a
+ * local `registry:3.1.1` and ghcr.io — neither implements this endpoint
+ * today, which is why the tag fallback below is not a legacy-compatibility
+ * nicety but the only path either of this consumer's real registries
+ * actually exercises), or `{ outcome: "unknown", reason }` when the response
+ * cannot be read as either.
+ */
+export async function lookupReferrers({
+  registry,
+  repository,
+  digest,
+  artifactType,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+}) {
+  let result;
+  try {
+    result = await registryGet({
+      registry,
+      repository,
+      path: `referrers/${encodeURIComponent(digest)}${artifactType ? `?artifactType=${encodeURIComponent(artifactType)}` : ""}`,
+      accept: "application/vnd.oci.image.index.v1+json",
+      scheme,
+      timeoutMs,
+      maxBytes: MAX_MANIFEST_BYTES,
+      fetchImpl,
+      retryOptions,
+    });
+  } catch (error) {
+    return { outcome: "unknown", reason: `referrers request failed: ${error.message}` };
+  }
+  if (result.tokenFailure) {
+    return { outcome: "unknown", reason: result.tokenFailure };
+  }
+  return classifyReferrersResponse(result.response);
+}
+
+/**
  * Resolve a version tag to the digest it currently names.
  *
  * C2.1/C2.2: `present` yields a digest, `absent` and `unknown` both refuse, and
@@ -999,4 +1127,164 @@ export async function fetchSignatureManifest({
       "tampered"
     );
   }
+}
+
+export const COSIGN_BUNDLE_ARTIFACT_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+/**
+ * Discover every cosign NEW-format (v3-default) bundle published for a
+ * digest, by BOTH mechanisms cosign v3 can use to publish one.
+ *
+ * WHY BOTH, AND WHY THE RESULT IS A LIST. Cosign v3's own behaviour, observed
+ * pushing to a local registry and to ghcr.io: the bundle is a real OCI 1.1
+ * referring artifact — an image manifest with `subject` set to the signed
+ * digest and `artifactType` set to {@link COSIGN_BUNDLE_ARTIFACT_TYPE} — and
+ * it is discoverable through the `/referrers/` API on a registry that
+ * implements it. Cosign ALSO writes a fallback tag, `sha256-<hex>` with no
+ * `.sig` suffix, for registries that do not. CRITICALLY, that fallback tag
+ * does not resolve to the bundle manifest directly: it resolves to an OCI
+ * IMAGE INDEX in the same shape the referrers API returns — a list of
+ * referrer descriptors — because that tag IS how the "tag schema" fallback
+ * of the OCI 1.1 spec represents a referrers query when there is no live API
+ * to ask. An earlier version of this function treated that tag's manifest as
+ * the bundle itself and it is not; every real v3-signed artifact was refused
+ * as unsigned as a result, caught by inspecting the real bytes a real
+ * `cosign sign` run produced rather than trusting the shape assumed from the
+ * command-line surface.
+ *
+ * Because a digest can be re-signed, more than one bundle can legitimately
+ * exist for it, and this returns all of them as candidate descriptors
+ * (`{ manifestDigest, subjectDigest }`) for the caller to fetch and verify
+ * independently — accepting the artifact once ANY one of them verifies
+ * under the pinned identity and names this exact digest, exactly like the
+ * legacy path already tries every signature layer in its own manifest before
+ * refusing (`extractCosignSignatures`).
+ *
+ * Returns `[]`, not `null`, when neither mechanism turns up a candidate —
+ * there is no single "the tag is absent" signal any more, since discovery
+ * can succeed via either path.
+ */
+export async function discoverCosignBundleReferrers({
+  registry,
+  repository,
+  digest,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+}) {
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+
+  const apiResult = await lookupReferrers({
+    ...shared,
+    digest,
+    artifactType: COSIGN_BUNDLE_ARTIFACT_TYPE,
+  });
+  if (apiResult.outcome === "unknown") {
+    throw new OciRegistryError(
+      `Could not query the referrers API for ${registry}/${repository}@${digest}: ${apiResult.reason}`,
+      "unverifiable"
+    );
+  }
+  if (apiResult.outcome === "supported") {
+    return candidatesFromReferrerIndex(apiResult.index, { registry, repository, digest });
+  }
+
+  // apiResult.outcome === "unsupported": this registry does not implement
+  // `/referrers/` at all (neither a local registry:3.1.1 nor ghcr.io does,
+  // as of this writing), so fall back to the tag. The tag ALSO resolves to
+  // an image index in the same shape, so the same parser applies.
+  const tag = cosignBundleTag(digest);
+  const tagResult = await lookupManifest({ ...shared, reference: tag });
+  if (tagResult.outcome === "absent") return [];
+  if (tagResult.outcome === "unknown") {
+    throw new OciRegistryError(
+      `Could not determine whether ${registry}/${repository}:${tag} exists: ${tagResult.reason}`,
+      "unverifiable"
+    );
+  }
+
+  let index;
+  try {
+    index = JSON.parse(tagResult.body);
+  } catch (error) {
+    throw new OciRegistryError(
+      `The cosign bundle tag ${registry}/${repository}:${tag} is not JSON: ${error.message}`,
+      "tampered"
+    );
+  }
+  return candidatesFromReferrerIndex(index, { registry, repository, digest });
+}
+
+/**
+ * Turn an OCI image index (from either the referrers API or the tag
+ * fallback — both return the same shape) into a list of candidate bundle
+ * descriptors, filtered to this artifact type and validated structurally.
+ *
+ * Filtering by `artifactType` here even though the referrers API call
+ * already asked for one: the tag-fallback path did not filter server-side
+ * (there is no query string on a tag lookup), and a future registry
+ * upgrade that starts answering the referrers API could return entries this
+ * consumer does not otherwise expect. Never assume a server-side filter was
+ * honoured; check what came back.
+ */
+function candidatesFromReferrerIndex(index, { repository }) {
+  if (index?.mediaType !== "application/vnd.oci.image.index.v1+json" || !Array.isArray(index?.manifests)) {
+    throw new OciRegistryError(
+      `Refusing ${repository}: the cosign bundle referrer lookup did not return an OCI image index`,
+      "tampered"
+    );
+  }
+  const candidates = [];
+  for (const entry of index.manifests) {
+    if (entry?.artifactType !== COSIGN_BUNDLE_ARTIFACT_TYPE) continue;
+    if (!isValidDigest(entry?.digest)) continue;
+    candidates.push({ manifestDigest: entry.digest });
+  }
+  return candidates;
+}
+
+/**
+ * Fetch one candidate bundle referrer's manifest by digest, and confirm its
+ * `subject` names the artifact digest being installed.
+ *
+ * This is the check the coordinator's fix requires and the index-level
+ * filtering above cannot do: `artifactType` on the referrer descriptor says
+ * WHAT KIND of thing this is, not what it is ABOUT. A referrer whose
+ * `subject.digest` does not equal the digest being installed is a bundle for
+ * a DIFFERENT artifact that happens to sit in the same repository — refused
+ * as misidentified, never treated as this artifact's signature (C3.3's
+ * pattern, applied at the referrer-selection layer instead of the payload
+ * layer, because for this format the manifest itself carries the claim).
+ */
+export async function fetchCandidateBundleManifest({
+  registry,
+  repository,
+  manifestDigest,
+  subjectDigest,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+}) {
+  const { manifest } = await fetchManifestByDigest({
+    registry,
+    repository,
+    digest: manifestDigest,
+    scheme,
+    timeoutMs,
+    fetchImpl,
+    retryOptions,
+  });
+
+  const subject = manifest?.subject?.digest;
+  if (typeof subject !== "string" || subject.trim() !== subjectDigest.trim()) {
+    throw new OciRegistryError(
+      `Refusing ${registry}/${repository}: bundle manifest ${manifestDigest} names subject ` +
+        `"${subject}", not ${subjectDigest}`,
+      "misidentified"
+    );
+  }
+
+  return manifest;
 }

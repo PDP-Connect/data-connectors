@@ -198,6 +198,12 @@ export class FixtureRegistry {
     this.requestHeaders = [];
     this.pathFaults = new Map();
     this.tagLists = new Map();
+    // Unset by default: neither real registry this consumer talks to
+    // implements the referrers API, so the default fixture behaviour is
+    // "unsupported" (falls through to the bare 404 below), not "supported
+    // with zero results". A test that needs the supported path sets this to
+    // a real OCI image index.
+    this.referrersIndex = null;
     this.server = null;
   }
 
@@ -315,6 +321,22 @@ export class FixtureRegistry {
         return;
       }
 
+      // Real distribution-spec behaviour, reproduced deliberately rather than
+      // left to fall through to the bare 404 below: a registry that
+      // implements `/referrers/` answers 200 with an image index — possibly
+      // empty — and NEVER 404s this endpoint. `referrersIndex`, set by a
+      // test, is that pre-built index; a fixture with none set falls through
+      // to the bare 404, which is how both real registries this consumer
+      // talks to (a local registry:3.1.1 and ghcr.io, neither implementing
+      // this endpoint as of this writing) actually answer, and is what
+      // proves the tag-schema fallback rather than assuming it.
+      const referrersMatch = /^\/v2\/(.+)\/referrers\/(.+)$/.exec(url.pathname);
+      if (referrersMatch && this.referrersIndex) {
+        res.writeHead(200, { "content-type": "application/vnd.oci.image.index.v1+json" });
+        res.end(JSON.stringify(this.referrersIndex));
+        return;
+      }
+
       const blobMatch = /^\/v2\/(.+)\/blobs\/(.+)$/.exec(url.pathname);
       if (blobMatch) {
         const buffer = this.blobs.get(decodeURIComponent(blobMatch[2]));
@@ -367,6 +389,7 @@ export function publishArtifact(
     signer = null,
     signers = null,
     omitRekorBundle = false,
+    bundleSignatureFactory = null,
     payloadDigestOverride = null,
     extraLayers = [],
     codeFiles = null,
@@ -504,7 +527,95 @@ export function publishArtifact(
     );
   }
 
-  return { digest, manifest, profile, profileBytes, config, configBytes, codeBytes, provenanceBytes };
+  // The cosign v3-default bundle. This is TWO objects, not one, matching the
+  // real shape captured off cosign v3.1.3 pushing to both a local registry
+  // and a scratch ghcr.io package:
+  //
+  //   1. A referring-artifact MANIFEST — `subject` pointing at the signed
+  //      digest, `artifactType` set to the bundle media type, wrapping ONE
+  //      layer that is the bundle JSON itself — stored at its own content
+  //      digest, not at any tag.
+  //   2. An OCI IMAGE INDEX — a `manifests[]` list of descriptors, each
+  //      naming a referrer manifest's digest and `artifactType` — stored at
+  //      the `sha256-<hex>` tag (no `.sig` suffix).
+  //
+  // An earlier version of this fixture wrote the bundle manifest directly at
+  // the tag, which is wrong: on a real registry that tag resolves to the
+  // INDEX, and a consumer has to fetch the manifest it points at as a
+  // separate request. That earlier fixture encoded the same misunderstanding
+  // the consumer code had, so the tests built on it could not catch the
+  // production bug — this shape is copied from the real captured bytes
+  // instead of re-derived.
+  //
+  // `bundleSignatureFactory`, when given, receives the repository coordinate
+  // and the digest and returns a ready-to-serialize bundle object
+  // (`{ mediaType, verificationMaterial, dsseEnvelope }`) — the caller owns
+  // minting the DSSE envelope and tlog entry, because doing that with a REAL
+  // certificate and a REAL synthetic Rekor log is exactly what
+  // oci-identity.test.mjs's machinery already does for the legacy path, and
+  // duplicating a second minting scheme here would test this fixture's idea
+  // of a bundle rather than cosign's.
+  let bundleReferrer = null;
+  if (bundleSignatureFactory) {
+    const subjectDigest = payloadDigestOverride ?? digest;
+    const bundle = bundleSignatureFactory({
+      repository: `pdp-connect/connector/${connectorKey}`,
+      digest: subjectDigest,
+    });
+    const bundleBytes = canonicalJson(bundle);
+    const bundleManifest = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      artifactType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+      config: {
+        mediaType: "application/vnd.oci.empty.v1+json",
+        digest: registry.putBlob(Buffer.from("{}")),
+        size: 2,
+      },
+      layers: [
+        {
+          mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+          digest: registry.putBlob(bundleBytes),
+          size: bundleBytes.length,
+        },
+      ],
+      subject: {
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        digest: subjectDigest,
+        size: 0,
+      },
+    };
+    // Stored by digest only (no tag) — this is what a referrer descriptor
+    // points at, whichever discovery mechanism found it.
+    const { digest: manifestDigest } = registry.putManifest(bundleManifest);
+
+    const index = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.index.v1+json",
+      manifests: [
+        {
+          mediaType: "application/vnd.oci.image.manifest.v1+json",
+          size: canonicalJson(bundleManifest).length,
+          digest: manifestDigest,
+          artifactType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+        },
+      ],
+    };
+    registry.putManifest(index, digest.replace(":", "-"));
+    bundleReferrer = { manifestDigest, index };
+  }
+
+  return {
+    digest,
+    manifest,
+    profile,
+    profileBytes,
+    config,
+    configBytes,
+    codeBytes,
+    provenanceBytes,
+    bundleReferrer,
+  };
 }
 
 /** A lock entry pointing at a published fixture artifact. */

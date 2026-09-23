@@ -58,6 +58,7 @@
 
 import {
   BUNDLE_V01_MEDIA_TYPE,
+  BUNDLE_V03_MEDIA_TYPE,
   bundleToJSON,
   toMessageSignatureBundle,
 } from "@sigstore/bundle";
@@ -65,7 +66,9 @@ import { verify as verifySigstoreBundle } from "sigstore";
 
 import {
   OciRegistryError,
+  discoverCosignBundleReferrers,
   fetchBlob,
+  fetchCandidateBundleManifest,
   fetchSignatureManifest,
   isValidDigest,
   sha256Digest,
@@ -308,36 +311,84 @@ function assembleBundle({ payloadBytes, signature, certificate, tlogEntry }) {
 }
 
 /**
- * Verify that a manifest digest was signed by the pinned identity.
+ * Pull the sigstore bundle layer's digest out of a cosign v3-default bundle
+ * manifest.
  *
- * Every refusal path here is a refusal, never a downgrade: a missing signature,
- * a signature that verifies under another identity, and a signature naming
- * another artifact all abort the install (C3.1, C3.3, C3.4). Returns the
- * identity that was proven, so a caller can log what it trusted rather than
- * what it hoped for.
+ * The manifest {@link fetchCandidateBundleManifest} returns is an OCI 1.1
+ * referring artifact: an image manifest whose `subject` points back at the
+ * signed digest, wrapping ONE layer that is the actual bundle JSON. There is
+ * exactly one layer in this shape by construction (cosign writes it, this
+ * consumer does not), so more or fewer than one is treated as a manifest
+ * this consumer does not understand rather than guessed at.
  */
-export async function verifyOciSignature({
-  registry,
-  repository,
-  digest,
-  scheme = "https",
-  timeoutMs = 30000,
-  fetchImpl = fetch,
-  retryOptions = {},
-  certificateIdentityResolver = defaultOciCertificateIdentityResolver,
-  certificateIssuer = DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
-  sigstoreVerifier = verifySigstoreBundle,
-}) {
-  // Resolved from the LOCK'S coordinates, before the artifact is consulted, so
-  // nothing the artifact carries can influence what it is checked against.
-  const certificateIdentityURI = await certificateIdentityResolver({ registry, repository });
-  if (typeof certificateIdentityURI !== "string" || certificateIdentityURI.length === 0) {
+export function extractBundleLayerDigest(bundleManifest) {
+  if (bundleManifest?.artifactType !== BUNDLE_V03_MEDIA_TYPE) return null;
+  const layers = Array.isArray(bundleManifest?.layers) ? bundleManifest.layers : [];
+  if (layers.length !== 1) return null;
+  const [layer] = layers;
+  if (layer?.mediaType !== BUNDLE_V03_MEDIA_TYPE) return null;
+  if (!isValidDigest(layer?.digest)) return null;
+  return layer.digest;
+}
+
+/**
+ * Check that a cosign v3-default bundle's DSSE payload is about the artifact
+ * being installed.
+ *
+ * The DSSE envelope wraps an in-toto Statement, and the claim about WHICH
+ * artifact is `subject[].digest.sha256` — bare hex, no `sha256:` prefix,
+ * per the in-toto attestation spec. This is the new format's version of
+ * {@link assertPayloadNamesDigest}'s check and exists for the same reason
+ * (C3.3): a valid signature over a statement naming a different artifact is
+ * not a signature for this one.
+ */
+export function assertBundlePayloadNamesDigest(bundleJson, manifestDigest) {
+  let payload;
+  try {
+    const encoded = bundleJson?.dsseEnvelope?.payload;
+    if (typeof encoded !== "string" || encoded.length === 0) {
+      throw new Error("bundle carries no DSSE payload");
+    }
+    payload = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  } catch (error) {
     throw new OciRegistryError(
-      `No trusted Sigstore certificate identity configured for ${registry}/${repository}`,
-      "misidentified"
+      `The cosign bundle DSSE payload is not readable: ${error.message}`,
+      "tampered"
     );
   }
 
+  const subjects = Array.isArray(payload?.subject) ? payload.subject : [];
+  const wantHex = manifestDigest.trim().replace(/^sha256:/, "");
+  const namesDigest = subjects.some((subject) => subject?.digest?.sha256 === wantHex);
+  if (!namesDigest) {
+    throw new OciRegistryError(
+      `The cosign bundle's in-toto statement does not name manifest ${manifestDigest.trim()}`,
+      "misidentified"
+    );
+  }
+  return payload;
+}
+
+/**
+ * Try the LEGACY (cosign v2-default) `.sig` tag path. Returns `{ ok: true,
+ * certificateIdentityURI, certificateIssuer }` on success, or `{ ok: false,
+ * signed, failures }` — `signed` distinguishes "the tag does not exist"
+ * (this era's artifact carries no legacy signature, which is expected once a
+ * publisher moves to cosign v3 defaults) from "the tag exists but nothing in
+ * it verified" (every candidate is a real failure worth reporting).
+ */
+async function tryLegacySignature({
+  registry,
+  repository,
+  digest,
+  scheme,
+  timeoutMs,
+  fetchImpl,
+  retryOptions,
+  certificateIdentityURI,
+  certificateIssuer,
+  sigstoreVerifier,
+}) {
   const signatureObject = await fetchSignatureManifest({
     registry,
     repository,
@@ -347,25 +398,21 @@ export async function verifyOciSignature({
     fetchImpl,
     retryOptions,
   });
-  if (signatureObject === null) {
-    throw new OciRegistryError(
-      `${registry}/${repository}@${digest} has no cosign signature`,
-      "unsigned"
-    );
-  }
+  if (signatureObject === null) return { ok: false, signed: false, failures: [] };
 
   const signatures = extractCosignSignatures(signatureObject.manifest);
   if (signatures.length === 0) {
-    throw new OciRegistryError(
-      `The cosign signature object for ${registry}/${repository}@${digest} carries no usable signature layer`,
-      "unsigned"
-    );
+    return {
+      ok: false,
+      signed: true,
+      failures: ["the legacy signature object carries no usable signature layer"],
+    };
   }
 
   const failures = [];
   for (const candidate of signatures) {
     if (!candidate.certificate) {
-      failures.push("a signature layer carries no Fulcio certificate");
+      failures.push("a legacy signature layer carries no Fulcio certificate");
       continue;
     }
 
@@ -378,8 +425,8 @@ export async function verifyOciSignature({
     if (!tlogEntry) {
       failures.push(
         candidate.rekorBundle
-          ? "a signature layer carries an unreadable Rekor inclusion promise"
-          : "a signature layer carries no Rekor inclusion promise"
+          ? "a legacy signature layer carries an unreadable Rekor inclusion promise"
+          : "a legacy signature layer carries no Rekor inclusion promise"
       );
       continue;
     }
@@ -422,12 +469,176 @@ export async function verifyOciSignature({
           certificateIdentityURI: toAnchoredIdentityPattern(certificateIdentityURI),
         }
       );
-      return { certificateIdentityURI, certificateIssuer };
+      return { ok: true, certificateIdentityURI, certificateIssuer };
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
     }
   }
 
+  return { ok: false, signed: true, failures };
+}
+
+/**
+ * Try the NEW-FORMAT (cosign v3-default) bundle path. Same three-way return
+ * shape as {@link tryLegacySignature}, for the same reason: "no candidate
+ * bundle found" and "a candidate bundle that does not verify" are different
+ * findings a caller needs to tell apart when both formats have been tried
+ * and refused.
+ *
+ * Tries every candidate {@link discoverCosignBundleReferrers} finds — via
+ * the referrers API where the registry supports it, the `sha256-<hex>` tag
+ * fallback where it does not — and accepts the digest once any one
+ * candidate verifies. More than one can legitimately exist (a re-signed
+ * digest), and this mirrors the legacy path's own "try every signature
+ * layer" loop (`extractCosignSignatures`) rather than assuming at most one.
+ */
+async function tryBundleSignature({
+  registry,
+  repository,
+  digest,
+  scheme,
+  timeoutMs,
+  fetchImpl,
+  retryOptions,
+  certificateIdentityURI,
+  certificateIssuer,
+  sigstoreVerifier,
+}) {
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+
+  const candidates = await discoverCosignBundleReferrers({ ...shared, digest });
+  if (candidates.length === 0) return { ok: false, signed: false, failures: [] };
+
+  const failures = [];
+  for (const candidate of candidates) {
+    try {
+      // Confirms `subject.digest` on the candidate's OWN manifest names this
+      // artifact before anything else about it is trusted — the referrer
+      // index's `artifactType` filter says WHAT KIND of referrer this is,
+      // not what it is ABOUT, and a referrer for a different artifact that
+      // happens to share this repository must never be accepted here.
+      const bundleManifest = await fetchCandidateBundleManifest({
+        ...shared,
+        manifestDigest: candidate.manifestDigest,
+        subjectDigest: digest,
+      });
+
+      const layerDigest = extractBundleLayerDigest(bundleManifest);
+      if (layerDigest === null) {
+        failures.push(
+          `bundle referrer ${candidate.manifestDigest} does not have the expected single sigstore-bundle layer`
+        );
+        continue;
+      }
+
+      const bundleBytes = await fetchBlob({ ...shared, digest: layerDigest });
+
+      let bundleJson;
+      try {
+        bundleJson = JSON.parse(bundleBytes.toString("utf8"));
+      } catch (error) {
+        failures.push(`bundle referrer ${candidate.manifestDigest}'s layer is not JSON: ${error.message}`);
+        continue;
+      }
+
+      // Checked BEFORE the cryptographic verification, for the same reason
+      // as the legacy path's equivalent check: a signature lifted from
+      // another artifact's bundle is refused as misidentified, not reported
+      // as a verification failure. Redundant with the manifest-level
+      // `subject` check above by construction — cosign writes both to name
+      // the same digest — but this is the claim the SIGNATURE covers, so it
+      // is checked on its own terms rather than trusted from the manifest.
+      assertBundlePayloadNamesDigest(bundleJson, digest);
+
+      // Unlike the legacy path, no reassembly: this bundle is already the
+      // shape `sigstore` verifies, because cosign v3 writes the library's
+      // own wire format rather than scattering pieces across annotations.
+      await sigstoreVerifier(bundleJson, {
+        certificateIssuer,
+        certificateIdentityURI: toAnchoredIdentityPattern(certificateIdentityURI),
+      });
+      return { ok: true, certificateIdentityURI, certificateIssuer };
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return { ok: false, signed: true, failures };
+}
+
+/**
+ * Verify that a manifest digest was signed by the pinned identity.
+ *
+ * Tries BOTH the new-format bundle tag (cosign v3 default) and the legacy
+ * `.sig` tag (cosign v2 default), because the catalog holds artifacts from
+ * both eras at once: everything published before the publish workflow moved
+ * to cosign v3 carries only a legacy signature, and this consumer has to
+ * keep installing those without asking anyone to re-sign history. The new
+ * format is tried first since it is expected to be the common case going
+ * forward and needs no reassembly, but the fallback is not a race — a
+ * digest carries a legacy signature XOR a new one in practice (a given
+ * publish run signs with one cosign version), and both being present is not
+ * treated specially: either one verifying is sufficient to trust the digest.
+ *
+ * Every refusal path here is a refusal, never a downgrade: a missing signature,
+ * a signature that verifies under another identity, and a signature naming
+ * another artifact all abort the install (C3.1, C3.3, C3.4). Returns the
+ * identity that was proven, so a caller can log what it trusted rather than
+ * what it hoped for.
+ */
+export async function verifyOciSignature({
+  registry,
+  repository,
+  digest,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+  certificateIdentityResolver = defaultOciCertificateIdentityResolver,
+  certificateIssuer = DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
+  sigstoreVerifier = verifySigstoreBundle,
+}) {
+  // Resolved from the LOCK'S coordinates, before the artifact is consulted, so
+  // nothing the artifact carries can influence what it is checked against.
+  const certificateIdentityURI = await certificateIdentityResolver({ registry, repository });
+  if (typeof certificateIdentityURI !== "string" || certificateIdentityURI.length === 0) {
+    throw new OciRegistryError(
+      `No trusted Sigstore certificate identity configured for ${registry}/${repository}`,
+      "misidentified"
+    );
+  }
+
+  const shared = {
+    registry,
+    repository,
+    digest,
+    scheme,
+    timeoutMs,
+    fetchImpl,
+    retryOptions,
+    certificateIdentityURI,
+    certificateIssuer,
+    sigstoreVerifier,
+  };
+
+  const bundleResult = await tryBundleSignature(shared);
+  if (bundleResult.ok) {
+    return { certificateIdentityURI, certificateIssuer };
+  }
+
+  const legacyResult = await tryLegacySignature(shared);
+  if (legacyResult.ok) {
+    return { certificateIdentityURI, certificateIssuer };
+  }
+
+  if (!bundleResult.signed && !legacyResult.signed) {
+    throw new OciRegistryError(
+      `${registry}/${repository}@${digest} has no cosign signature (checked both the new bundle tag and the legacy .sig tag)`,
+      "unsigned"
+    );
+  }
+
+  const failures = [...bundleResult.failures, ...legacyResult.failures];
   throw new OciRegistryError(
     `No cosign signature for ${registry}/${repository}@${digest} verifies as ` +
       `${certificateIdentityURI}: ${failures.join("; ")}`,
