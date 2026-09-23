@@ -35,9 +35,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function manifestTier(name: string): string | undefined {
-	const manifest = JSON.parse(
-		readFileSync(manifestPath(name), "utf8"),
-	) as {
+	const manifest = JSON.parse(readFileSync(manifestPath(name), "utf8")) as {
 		capabilities?: { public_listing?: { tier?: string } };
 	};
 	return manifest.capabilities?.public_listing?.tier;

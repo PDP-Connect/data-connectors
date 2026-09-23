@@ -6,7 +6,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 
 function connectorUsesBrowserRuntime(source: string): boolean {
 	return /\brunConnector\s*\(/u.test(source) && /\bbrowser\s*:/u.test(source);

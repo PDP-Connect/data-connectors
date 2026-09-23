@@ -52,14 +52,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import {
 	DETAIL_GAP_MESSAGE_REASON_LITERALS,
 	scanConnectorForReasonEmissions,
 } from "./reason-emission-scan.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "./reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
-
-import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
 

@@ -36,9 +36,11 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFEST_DIR,
+} from "./connector-paths.ts";
 import { GENERATED_STATIC_SECRET_REGISTRY } from "./generated/static-secret-registry.generated.ts";
-
-import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFEST_DIR } from "./connector-paths.ts";
 
 /**
  * `GENERATED_STATIC_SECRET_REGISTRY` is keyed by each manifest's own

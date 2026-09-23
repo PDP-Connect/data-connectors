@@ -26,7 +26,9 @@ test("packageRoot is this package's own root, containing package.json", () => {
 
 test("repoRoot is the repository root, containing the root package.json", () => {
 	assert.ok(existsSync(`${repoRoot}/package.json`));
-	assert.ok(existsSync(`${repoRoot}/packages/polyfill-connectors/package.json`));
+	assert.ok(
+		existsSync(`${repoRoot}/packages/polyfill-connectors/package.json`),
+	);
 });
 
 test("manifestsDir and connectorsDir point at the real, current-layout directories", () => {

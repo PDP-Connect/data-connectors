@@ -17,9 +17,11 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 import { SCHEMALESS_CONNECTOR_ALLOWLIST } from "./connector-schema-allowlist.ts";
-
-import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 interface ManifestShape {
 	streams?: Array<{ name?: unknown }>;

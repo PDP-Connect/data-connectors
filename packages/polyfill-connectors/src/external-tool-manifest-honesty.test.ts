@@ -6,7 +6,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { connectorsDir as CONNECTORS_DIR, manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
+import {
+	connectorsDir as CONNECTORS_DIR,
+	manifestsDir as MANIFESTS_DIR,
+} from "./connector-paths.ts";
 
 const KNOWN_EXTERNAL_TOOLS = ["slackdump", "gmcli"] as const;
 
