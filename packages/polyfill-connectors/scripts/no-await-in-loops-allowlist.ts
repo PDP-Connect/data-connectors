@@ -1757,14 +1757,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 415,
+			line: 421,
 			column: 3,
 			category: "dependent_pagination",
 			note: "paginate(): page progress follows the fetched page before advancing its cursor",
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 420,
+			line: 426,
 			column: 18,
 			category: "shared_mutable_accumulator",
 			note: "paginate(): fold accumulator from each item is the next iteration's input",
@@ -1778,7 +1778,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 764,
+			line: 765,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "progress(): top-artist time-range windows report in-order before the next window starts",

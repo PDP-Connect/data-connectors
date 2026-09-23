@@ -270,6 +270,12 @@ function spotifyImages(
 		}));
 }
 
+function nonnegativeCount(value: unknown): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: null;
+}
+
 export function spotifyPlaylistRecord(
 	p: SpotifyPlaylist,
 ): Record<string, unknown> {
@@ -452,14 +458,13 @@ interface PaginationTally {
  * simplified object and pass through unchanged regardless of this fetch's
  * outcome. A fetch failure (rate limit, deleted playlist, transient error)
  * still emits the playlist record with `followers: null` — the record is not
- * withheld — but the playlist id is left out of `hydratedKeys` so
- * DETAIL_COVERAGE reports the run as partial rather than silently complete.
+ * withheld — but coverage excludes it so the run reports partial detail.
  */
 async function fetchPlaylistFollowers(
 	playlistId: string,
 	token: string,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<{ followers: number | null; hydrated: boolean }> {
+): Promise<number | null> {
 	try {
 		const detail = await sp<SpotifyPlaylist>(
 			`/playlists/${encodeURIComponent(playlistId)}?fields=followers.total`,
@@ -467,9 +472,9 @@ async function fetchPlaylistFollowers(
 			progress,
 			{ stream: "playlists", phase: "followers" },
 		);
-		return { followers: detail.followers?.total ?? null, hydrated: true };
+		return nonnegativeCount(detail.followers?.total);
 	} catch {
-		return { followers: null, hydrated: false };
+		return null;
 	}
 }
 
@@ -494,32 +499,27 @@ async function collectPlaylists(
 			// followers fetch at a time, same pacing ceiling as every other
 			// Spotify request (see httpGovernor / spotifyPacingProfile above) — no
 			// separate concurrency primitive needed.
-			const { followers, hydrated } = await fetchPlaylistFollowers(
+			const followers = await fetchPlaylistFollowers(
 				p.id,
 				token,
 				progress,
 			);
-			if (hydrated) {
-				hydratedKeys.push(p.id);
-			}
 			const record = spotifyPlaylistRecord({
 				...p,
 				followers: { total: followers },
 			});
-			const covered =
-				current.covered + (validateRecord("playlists", record).ok ? 1 : 0);
+			const detailCovered =
+				followers !== null && validateRecord("playlists", record).ok;
+			if (detailCovered) {
+				hydratedKeys.push(p.id);
+			}
+			const covered = current.covered + (detailCovered ? 1 : 0);
 			await emitRecord("playlists", record);
 			return { totalSeen: current.totalSeen + 1, covered };
 		},
 	);
-	// `playlists` is a full_inventory list with no drop/filter path: the page
-	// scan enumerates every playlist, so considered === covered === the exact
-	// count fetched, every run (including a genuine zero-playlist account).
-	// The followers detail-fetch pass is a separate, honestly-reported
-	// coverage dimension (requiredKeys/hydratedKeys): every playlist is
-	// emitted even when its followers fetch fails, so record coverage and
-	// followers-detail coverage can diverge without either lying about the
-	// other.
+	// Every playlist is emitted, but coverage requires a valid follower count.
+	// A failed detail fetch therefore leaves considered > covered.
 	await emit(
 		buildDetailCoverageMessage({
 			stream: "playlists",
@@ -627,7 +627,7 @@ async function fetchFollowingCount(
 			progress,
 			{ stream: "profile", phase: "following" },
 		);
-		return resp.artists?.total ?? null;
+		return nonnegativeCount(resp.artists?.total);
 	} catch {
 		return null;
 	}
@@ -645,7 +645,8 @@ async function collectProfile(
 	});
 	const following = await fetchFollowingCount(token, progress);
 	const record = spotifyProfileRecord(profile, following);
-	const covered = validateRecord("profile", record).ok ? 1 : 0;
+	const covered =
+		following !== null && validateRecord("profile", record).ok ? 1 : 0;
 	await emitRecord("profile", record);
 	await emitDetailCoverage(
 		{ emit },

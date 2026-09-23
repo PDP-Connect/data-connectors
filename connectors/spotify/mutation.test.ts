@@ -265,6 +265,8 @@ test("spotify: playlists enriches each playlist with its own followers.total via
 	);
 	assert.deepEqual(coverage?.required_keys, ["pl1"]);
 	assert.deepEqual(coverage?.hydrated_keys, ["pl1"]);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 1);
 });
 
 test("spotify: playlists still emits the record with followers null, and discloses partial hydration, when the per-playlist detail fetch fails", {
@@ -314,6 +316,45 @@ test("spotify: playlists still emits the record with followers null, and disclos
 		[],
 		"a failed followers fetch must not be reported as hydrated",
 	);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+});
+
+test("spotify: a playlist detail response without a follower count remains uncovered", {
+	concurrency: false,
+}, async () => {
+	globalThis.fetch = (input) => {
+		const path = String(input);
+		if (path.includes("/me/playlists")) {
+			return Promise.resolve(
+				jsonResponse({ items: [{ id: "pl1", name: "Playlist One" }], next: null }),
+			);
+		}
+		if (path.includes("/playlists/pl1")) {
+			return Promise.resolve(jsonResponse({}));
+		}
+		throw new Error(`unexpected fetch: ${path}`);
+	};
+	const emittedRecords: Array<Record<string, unknown>> = [];
+	const { ctx, messages } = makeContext({}, ["playlists"], (_stream, data) => {
+		emittedRecords.push(data);
+		return Promise.resolve();
+	});
+
+	await spotifyCollect(ctx);
+
+	assert.equal(emittedRecords.length, 1);
+	assert.equal(emittedRecords[0]?.followers, null);
+	const coverage = messages.find(
+		(
+			message,
+		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
+	);
+	assert.deepEqual(coverage?.required_keys, ["pl1"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
 });
 
 test("spotify: playlist_items paginates each playlist's own tracks endpoint and keys by position", {
@@ -476,7 +517,7 @@ test("spotify: profile.following is null when GET /me/following fails, without f
 		stream: string;
 		data: Record<string, unknown>;
 	}> = [];
-	const { ctx } = makeContext({}, ["profile"], (stream, data) => {
+	const { ctx, messages } = makeContext({}, ["profile"], (stream, data) => {
 		emittedRecords.push({ stream, data });
 		return Promise.resolve();
 	});
@@ -485,6 +526,14 @@ test("spotify: profile.following is null when GET /me/following fails, without f
 
 	assert.equal(emittedRecords.length, 1);
 	assert.equal(emittedRecords[0]?.data.following, null);
+	const coverage = messages.find(
+		(
+			message,
+		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
 });
 
 test("spotify: fails a non-adjacent cursor cycle before refetching the repeated path", {
