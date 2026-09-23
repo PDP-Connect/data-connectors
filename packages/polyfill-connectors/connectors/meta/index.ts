@@ -34,9 +34,10 @@
  *                JS issues — that request requires page-minted
  *                `fb_dtsg`/`lsd`/`jazoest`/`doc_id` anti-bot tokens and
  *                cannot be constructed from a bare `fetch()` call (confirmed
- *                live; see `fetchAllPosts`'s header note). STATE tracks a
- *                max-taken_at high-water mark, but every run still walks the
- *                full timeline (no server-provided early-stop cursor is
+ *                live; see `fetchAllPosts`'s header note). Declared
+ *                `incremental: false` / `coverage_strategy: full_inventory`
+ *                (manifests/meta.json) and emits no STATE: every run walks
+ *                the full timeline (no server-provided early-stop cursor is
  *                confirmed) — a second run's re-emit of unchanged posts is
  *                an idempotent id-keyed upsert, not incremental savings yet.
  *   post_likes   child stream of posts (D3): (post, liker) pairs from each
@@ -750,18 +751,11 @@ export async function collectAllStreams(
 			delay,
 		);
 
-		let latestTakenAt: string | null = null;
 		if (wantsPosts) {
 			for (const edge of edges) {
 				const record = postRecord(edge);
 				if (record) {
 					await emitRecord("posts", record as RecordData);
-					if (
-						record.taken_at &&
-						(!latestTakenAt || record.taken_at > latestTakenAt)
-					) {
-						latestTakenAt = record.taken_at;
-					}
 				}
 			}
 		}
@@ -781,21 +775,17 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 			});
 		}
-		if (wantsPosts) {
-			// Every run walks the full timeline (scroll-triggered pagination has
-			// no server-provided early-stop cursor this connector has confirmed
-			// live — see the header's posts-endpoint note), so this STATE is a
-			// high-water mark for downstream consumers, not yet an early-stop
-			// optimization. `postRecord`'s id-keyed emit already makes a second
-			// run's re-emit of unchanged posts an idempotent upsert, not a
-			// duplicate — see the connector cutover report's second-run
-			// evidence.
-			await emit({
-				cursor: { last_taken_at: latestTakenAt },
-				stream: "posts",
-				type: "STATE",
-			});
-		}
+		// `posts` declares incremental: false / coverage_strategy:
+		// full_inventory (manifests/meta.json) and emits no STATE: every run
+		// walks the full timeline (scroll-triggered pagination has no
+		// server-provided early-stop cursor this connector has confirmed
+		// live — see the header's posts-endpoint note). A `taken_at`
+		// high-water mark could support a stop-at-seen boundary IF Instagram's
+		// timeline connection is confirmed newest-first, but no code or
+		// fixture here confirms that ordering — a live-account run is needed
+		// first. `postRecord`'s id-keyed emit already makes a second run's
+		// re-emit of unchanged posts an idempotent upsert, not a duplicate —
+		// see the connector cutover report's second-run evidence.
 	}
 
 	if (wantsFollowing) {

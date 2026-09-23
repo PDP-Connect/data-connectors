@@ -321,16 +321,14 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		user_id: "liker1",
 		username: "alice",
 	});
-	const state = harness.protocolMessages.find(
-		(m) => m.type === "STATE" && m.stream === "posts",
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+		"posts is incremental: false / full_inventory — it must not claim a cursor via STATE",
 	);
-	assert.ok(state, "posts STATE must be emitted when posts is requested");
-	assert.deepEqual((state as { cursor: unknown }).cursor, {
-		last_taken_at: "2023-11-14T22:13:20.000Z",
-	});
 });
 
-test("collectAllStreams: posts STATE is not emitted when posts is not requested", async () => {
+test("collectAllStreams: posts never emits STATE, requested or not", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},

@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/meta",
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"display_name": "Instagram (Meta)",
 	"brand": {
 		"icon": "icons/meta.svg",
@@ -148,20 +148,26 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "taken_at",
 			"consent_time_field": "taken_at",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["caption", "location_name"],
 					"semantic_fields": ["caption"]
+				},
+				"range_filters": {
+					"taken_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["taken_at"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -195,6 +201,7 @@
 				"resources": true
 			},
 			"incremental": false,
+			"state_stream": "posts",
 			"query": {
 				"search": {
 					"lexical_fields": ["username"]
