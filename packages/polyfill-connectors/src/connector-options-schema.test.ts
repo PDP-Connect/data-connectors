@@ -17,7 +17,6 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { platformOptionKind } from "./connector-config-option-kind-registry.ts";
 import {
 	ConnectorOptionsSchemaError,
@@ -25,13 +24,7 @@ import {
 	connectorOptionsSchemas,
 	resolveOptionsSchemaFromManifest,
 } from "./connector-options-schema.ts";
-
-const MANIFESTS_DIR = join(
-	fileURLToPath(import.meta.url),
-	"..",
-	"..",
-	"manifests",
-);
+import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
 function readRealManifest(key: string): Record<string, unknown> {
 	return JSON.parse(

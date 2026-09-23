@@ -3,14 +3,10 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { manifestsDir as MANIFESTS_DIR } from "./connector-paths.ts";
 
-const MANIFESTS_DIR = join(
-	dirname(dirname(fileURLToPath(import.meta.url))),
-	"manifests",
-);
 const names = readdirSync(MANIFESTS_DIR)
 	.filter((name) => name.endsWith(".json"))
 	.sort();
