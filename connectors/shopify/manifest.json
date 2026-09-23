@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "1.0.0",
+	"version": "0.2.0",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",
