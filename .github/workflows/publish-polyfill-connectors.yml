@@ -470,6 +470,13 @@ jobs:
           # of the ref restriction) refs/heads/main — and the signature is logged
           # to Rekor. There is no private key in this repo.
           cosign sign --yes "${REPOSITORY}@${DIGEST}"
+          # Bridge: also write the legacy `.sig` signature. cosign v3 signs with a
+          # Sigstore bundle stored as an OCI referrer by default. The data-connect
+          # desktop verifier (src-tauri/src/commands/oci_verify.rs) reads only the
+          # legacy `.sig` tag, so installed desktop builds would refuse bundle-only
+          # artifacts. Remove the legacy sign and verify lines when every supported
+          # data-connect release verifies bundles.
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false "${REPOSITORY}@${DIGEST}"
 
           # Step 3: the version identifier moves, to the digest the guard
           # cleared and the signature now covers. Tagging BY DIGEST — never by
@@ -531,9 +538,13 @@ jobs:
             exit 1
           fi
 
-          cosign verify "${REPOSITORY}@${DIGEST}" \
-            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          # Verify both formats while the legacy bridge in the publish step exists.
+          for bundle_format in true false; do
+            cosign verify "${REPOSITORY}@${DIGEST}" \
+              --new-bundle-format="${bundle_format}" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
 
   catalog:
     name: Publish and verify the connector catalog
@@ -638,7 +649,13 @@ jobs:
             --format json catalog.json:application/vnd.pdpp.connector-catalog.v1+json > push-result.json
           DIGEST="$(node -e 'const d = JSON.parse(require("fs").readFileSync("push-result.json", "utf8")).digest; if (!/^sha256:[0-9a-f]{64}$/.test(d)) process.exit(1); console.log(d)')"
           cosign sign --yes "ghcr.io/pdp-connect/connector-catalog@${DIGEST}"
-          cosign verify "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" \
-            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          # Legacy `.sig` bridge for data-connect desktop builds; same removal
+          # condition as the connector publish step.
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false "ghcr.io/pdp-connect/connector-catalog@${DIGEST}"
+          for bundle_format in true false; do
+            cosign verify "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" \
+              --new-bundle-format="${bundle_format}" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
           oras tag "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" latest
