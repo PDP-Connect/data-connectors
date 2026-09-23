@@ -8,9 +8,11 @@ import {
 	type IncomingMessage,
 	type ServerResponse,
 } from "node:http";
-import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
 	classifySteamHttpResponse,
@@ -21,13 +23,7 @@ import {
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-// Every sibling connector test computes this as two levels up
-// (connectors/<name>/ -> packages/polyfill-connectors/); this one used three,
-// which happened to still resolve tsx only because pnpm hoists devDependencies
-// above packages/ in the source monorepo. Fixed to match convention.
-const PACKAGE_ROOT = resolve(__dirname, "..", "..");
-const ENTRYPOINT = join(__dirname, "index.ts");
+const ENTRYPOINT = connectorEntrypoint("steam");
 
 // ─── Schema validation tests ───────────────────────────────────────────────
 

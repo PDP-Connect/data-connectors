@@ -10,9 +10,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
@@ -22,14 +25,7 @@ import {
 	validateArchivePath,
 } from "./parsers.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const NETFLIX_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"netflix_export",
-	"index.ts",
-);
+const NETFLIX_ENTRYPOINT = connectorEntrypoint("netflix_export");
 
 function zipHeader(signature: number, size: number): Buffer {
 	const header = Buffer.alloc(size);

@@ -41,19 +41,12 @@ import assert from "node:assert/strict";
 import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { connectorEntrypoint } from "../../src/connector-paths.ts";
 import { extractViewingActivityArtifactFromFile } from "./parsers.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const NETFLIX_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"netflix_export",
-	"index.ts",
-);
+const NETFLIX_ENTRYPOINT = connectorEntrypoint("netflix_export");
 
 test("static guard: index.ts's upload-loading path does not import readFile from node:fs/promises (whole-file read)", async () => {
 	const source = await readFileAsync(NETFLIX_ENTRYPOINT, "utf8");
