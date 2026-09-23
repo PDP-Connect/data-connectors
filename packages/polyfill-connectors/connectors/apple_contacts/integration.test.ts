@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	packageRoot as CWD,
+	connectorEntrypoint,
+} from "../../src/connector-paths.ts";
 import type {
 	EmittedMessage,
 	RecordData,
@@ -12,9 +14,7 @@ import type {
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import { buildVCard, startFakeCardDavServer } from "./test-carddav-server.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CWD = join(__dirname, "..", "..");
-const ENTRYPOINT = join(__dirname, "index.ts");
+const ENTRYPOINT = connectorEntrypoint("apple_contacts");
 const USERNAME = "owner@example.com";
 const PASSWORD = "app-specific-pw";
 

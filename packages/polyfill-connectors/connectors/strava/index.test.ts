@@ -15,14 +15,15 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(HERE, "../..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "strava", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("strava");
 
 /** Header in export order, including both repeated columns. */
 const HEADER =

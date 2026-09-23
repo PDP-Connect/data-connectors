@@ -3,13 +3,10 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { manifestPath } from "../../src/connector-paths.ts";
 
-const CONNECTOR_DIR = dirname(fileURLToPath(import.meta.url));
-const MANIFESTS_DIR = join(CONNECTOR_DIR, "..", "..", "manifests");
-const MANIFEST_PATH = join(MANIFESTS_DIR, "groupme.json");
+const MANIFEST_PATH = manifestPath("groupme");
 
 interface Manifest {
 	capabilities?: {

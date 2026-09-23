@@ -17,14 +17,15 @@ import {
 	writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(HERE, "../..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "connectors", "strava", "index.ts");
+const ENTRYPOINT = connectorEntrypoint("strava");
 const LARGE_FIXTURE_BASE_DIR =
 	process.env.PDPP_TEST_LARGE_FIXTURE_DIR ?? join(homedir(), ".tmp");
 
