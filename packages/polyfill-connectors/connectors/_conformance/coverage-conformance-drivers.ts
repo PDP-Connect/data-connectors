@@ -1229,9 +1229,6 @@ export const REDDIT_MALFORMED_DRIVER: ConnectorDriver = {
 // silent bypass: growing this list is a visible, reviewable diff, and
 // shrinking it is enforced automatically the moment a driver exists.
 export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
-	// Amazon: order_items (parent_detail_accounting) needs a browser detail-page
-	// stub distinct from the orders driver above; not yet built.
-	"amazon.order_items",
 	// Apple Health / Apple Photos (REAL_UNLISTED_CONNECTORS): filesystem/export
 	// snapshot-import receipts, no driver yet.
 	"apple_health.records",
