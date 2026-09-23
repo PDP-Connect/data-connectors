@@ -372,6 +372,7 @@
 		"manifest": {
 			"connector_key": "meta",
 			"reason_display_messages": {
+				"ads_surfaces_unavailable": "We reached only part of Meta Accounts Center's ad preferences screen, so this ads run is incomplete. Try again after opening Accounts Center in your browser.",
 				"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
 				"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
 			}

@@ -18,7 +18,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
-import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type {
+	BrowserCollectContext,
+	EmittedMessage,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -46,6 +49,8 @@ type ScriptedPostsPage = { json: unknown; status: number } | null;
  *  response resolves on the `goto` that follows, later pages resolve on the
  *  scroll-triggered `evaluate` call. */
 function makeFakePage(options: {
+	categoriesAvailable?: boolean;
+	categoryRows?: Array<{ description: string | null; name: string }>;
 	dialogScrapes?: string[][];
 	fetchScript: Record<string, ScriptedFetch[]>;
 	postsScript?: ScriptedPostsPage[];
@@ -122,17 +127,30 @@ function makeFakePage(options: {
 			// Dialog-scrape / close-dialog calls (no serializable arg). Distinguish
 			// "read listitems" from "click Close" by function length in source —
 			// simplest robust marker without parsing the closure body.
-			if (
-				fnSource.includes("querySelectorAll") &&
-				fnSource.includes("listitem")
-			) {
-				return Promise.resolve(dialogQueue.shift() ?? []);
-			}
 			if (fnSource.includes("aria-label") && fnSource.includes("advertiser")) {
 				return Promise.resolve(true);
 			}
 			if (fnSource.includes('role="tab"') || fnSource.includes("Manage info")) {
-				return Promise.resolve(false);
+				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (fnSource.includes("Categories used to reach you")) {
+				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (fnSource.includes("View all")) {
+				return Promise.resolve(undefined);
+			}
+			if (fnSource.includes("Removed categories")) {
+				return Promise.resolve(options.categoryRows ?? []);
+			}
+			if (
+				fnSource.includes("querySelectorAll") &&
+				fnSource.includes("listitem")
+			) {
+				const items = dialogQueue.shift();
+				return Promise.resolve({
+					items: items ?? [],
+					reached: items !== undefined,
+				});
 			}
 			return Promise.resolve(undefined);
 		},
@@ -485,6 +503,8 @@ test("collectAllStreams: following hitting the page ceiling emits an honest SKIP
 test("collectAllStreams: ads stream merges advertisers/topics/categories with kind discriminator", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [{ description: "Music affinity", name: "Music" }],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -517,8 +537,136 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
-	assert.deepEqual(kinds, ["ad_topic", "advertiser"]);
+	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
 	assert.equal(harness.skipped.length, 0);
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			considered: 3,
+			covered: 3,
+			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+});
+
+test("collectAllStreams: ads all reached with empty lists emits complete zero coverage", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [],
+		dialogScrapes: [[], []],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const requested = new Map([["ads", { name: "ads" }]]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			considered: 0,
+			covered: 0,
+			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: false,
+		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const requested = new Map([["ads", { name: "ads" }]]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			considered: 2,
+			covered: 2,
+			hydrated_keys: ["advertisers", "ad_topics"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	const skip = harness.protocolMessages.find(
+		(
+			m,
+		): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT" && m.stream === "ads",
+	);
+	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
+	assert.equal(skip.reason, "ads_surfaces_unavailable");
+	assert.deepEqual(skip.diagnostics, {
+		missing_surfaces: ["targeting_categories"],
+	});
 });
 
 // ─── Invariant 6: shape-check catches a drifted record ──────────────────
