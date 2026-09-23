@@ -1,0 +1,1106 @@
+[
+  {
+    "scope": "claude.conversations",
+    "connector_key": "anthropic",
+    "streams": ["conversations", "messages"],
+    "derivable": {
+      "conversations[].id": "conversations.id",
+      "conversations[].title": "conversations.title",
+      "conversations[].createdAt": "conversations.create_time",
+      "conversations[].updatedAt": "conversations.update_time",
+      "conversations[].projectId": "conversations.project_id",
+      "conversations[].messageCount": "conversations.message_count",
+      "conversations[].starred": "conversations.is_starred",
+      "conversations[].messages[].id": "messages.id",
+      "conversations[].messages[].sender": "messages.role",
+      "conversations[].messages[].parentId": "messages.parent_id",
+      "conversations[].messages[].createdAt": "messages.create_time",
+      "conversations[].messages[].updatedAt": "messages.update_time",
+      "conversations[].messages[].content": "messages.content (flattened text, matches legacy's own flattening)",
+      "conversations[].messages[].attachments": "messages.attachments",
+      "total": "D3 envelope: conversations.length at projection time",
+      "messageTotal": "D3 envelope: sum(message_count) at projection time",
+      "source": "constant at projection time (single acquisition path: official export)"
+    },
+    "not_derivable": [
+      "conversations[].messages[].rawContent: not preserved; messages.content is flattened text only, matching the legacy connector's own flattening (extractFromArrayPart in connectors/anthropic pattern) — rawContent was never a richer signal than what content already carries",
+      "conversations[].href: relative Claude UI route, no modern equivalent (no per-record UI navigation concept)",
+      "conversations[].fetchError: per-conversation scrape failure; modern export either has the conversation or the run reports SKIP_RESULT at the stream level, not per-record",
+      "profile.name, profile.plan, organizationId: per-run environment metadata captured by the legacy scraper's account chrome, not conversation entity data; no PDPP home, emit null",
+      "apiError: legacy top-level API error; no modern equivalent (export has no comparable failure surface)"
+    ],
+    "semantic_notes": [
+      "This repo does not implement the public-scope projection (Vana-owned per CONTRACTS.md); this row records connector-side derivability only."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "claude.projects",
+    "connector_key": "anthropic",
+    "streams": ["projects", "project_documents"],
+    "derivable": {
+      "projects[].id": "projects.id",
+      "projects[].title": "projects.name",
+      "projects[].createdAt": "projects.create_time",
+      "projects[].updatedAt": "projects.update_time",
+      "projects[].archived": "projects.is_archived",
+      "projects[].detail.prompt_template": "projects.prompt_template (connectors/anthropic/parsers.ts:355)",
+      "projects[].detail.docs[]": "project_documents, split per D3 (parsers.ts:287-310 parseProjectDocument)",
+      "projects[].detail.docs[].filename": "project_documents.filename — defensive candidate read: raw.filename ?? raw.file_name ?? raw.name ?? raw.title (parsers.ts:298-299)",
+      "projects[].detail.docs[].content": "project_documents.content — defensive candidate read: raw.content ?? raw.text ?? raw.body ?? raw.filedata (parsers.ts:300-301)"
+    },
+    "not_derivable": [
+      "projects[].label: accessible label for the sidebar entry, UI display artifact, no modern equivalent",
+      "projects[].href: relative Claude UI route, no modern equivalent",
+      "projects[].detail (raw blob): superseded field-by-field by prompt_template + project_documents; no consumer needs the raw blob once fields are typed",
+      "profile.name, profile.plan, organizationId, total, source: D3 envelope/per-run metadata, not entity data"
+    ],
+    "semantic_notes": [
+      "project_documents.filename/content field names were previously flagged UNCONFIRMED against a real export in a prior state of this codebase; that gap is closed at the code level (parsers.ts:280-310 reads a defensive multi-candidate key list and documents exactly which legacy field names it tries). Live-export proof (a real Claude data export ZIP with populated docs[]) is still pending — this is a live-evidence/proof-gate caveat, not a design or mapping gap."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "claude_code.sessions",
+    "connector_key": "claude_code",
+    "streams": ["sessions", "messages"],
+    "derivable": {
+      "sessionId": "sessions.id",
+      "project": "sessions.project_path",
+      "gitBranch": "sessions.git_branch",
+      "cliVersion": "sessions.version",
+      "title": "sessions.title (implemented; manifests/claude_code.json sessions.title, matches lead_decision 'ADD sessions.title')",
+      "firstTimestamp": "sessions.started_at",
+      "lastTimestamp": "sessions.last_event_at",
+      "messageCount": "sessions.message_count",
+      "userMessageCount": "derivation: COUNT(messages WHERE session_id=X AND role='user')",
+      "assistantMessageCount": "derivation: COUNT(messages WHERE session_id=X AND role='assistant')",
+      "models": "derivation: DISTINCT model per session — NOTE: no per-message model field currently exists on the messages stream (see semantic_notes); this derivation is not fully wired today"
+    },
+    "not_derivable": [
+      "kind (session vs subagent): the lead_decision explicitly says 'ADD fields sessions.kind, sessions.parent_session_id, sessions.title' but only title has landed — kind is NOT a stored sessions field (verified absent from manifests/claude_code.json and connectors/claude_code/index.ts/schemas.ts). It is PARTIALLY derivable via a join (EXISTS messages WHERE session_id=X AND is_sidechain=true, using messages.is_sidechain which does exist — index.ts:343), but this is a derivation gap versus the accepted lead_decision, not a genuine data absence.",
+      "parentSessionId: NOT reliably derivable. messages.agent_id (index.ts:345) identifies which subagent produced a message, but no field links a sidechain session back to the session_id that dispatched it — there is no dispatching-session pointer anywhere in the current schema. This is a genuine gap against the lead_decision's explicit 'ADD ... parent_session_id' instruction."
+    ],
+    "semantic_notes": [
+      "lead_decision status: PARTIALLY IMPLEMENTED. title landed; kind and parent_session_id did not, despite the lead_decision calling for all three. This needs either a code follow-up (thread a dispatching-session id through subagent transcript creation) or a lead re-confirmation that the join-based derivation for kind is acceptable and parent_session_id is an accepted loss."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "claude_code.prompts",
+    "connector_key": "claude_code",
+    "streams": ["messages"],
+    "derivable": {
+      "display": "messages.content (filtered to role=user)",
+      "timestamp": "messages.timestamp",
+      "sessionId": "messages.session_id",
+      "hasPastedContent": "messages.has_pasted_content (implemented; schemas.ts:196-198, index.ts:346 hasPastedContent(obj) — matches lead_decision 'ADD messages.has_pasted_content')",
+      "project": "derivation: JOIN sessions ON messages.session_id = sessions.id, read sessions.project_path"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision fully implemented: has_pasted_content is a required field on the messages schema, not merely optional-and-sometimes-present."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "claude_code.trajectories",
+    "connector_key": "claude_code",
+    "streams": ["messages", "attachments"],
+    "derivable": {
+      "sessions[].steps[] (array shape)": "reconstructable by joining messages + attachments on session_id, ordered by timestamp",
+      "step.index, step.role, step.type (required fields)": "derivable from messages.role/type + attachments.event_type, message/attachment ordering",
+      "step.text": "messages.content",
+      "step.sidechain": "messages.is_sidechain",
+      "tool_call.callId": "attachments.tool_use_id",
+      "tool_result.output (full body)": "attachments.blob_ref -> full-fidelity blob storage. IMPLEMENTED: captureAttachmentBody()/captureInlineArtifact (connectors/claude_code/index.ts:358-408) stores the complete tool-result body out-of-band; attachments.content_preview stays a bounded preview but artifact_capture/artifact_sha256/blob_ref (when captured) resolve to the full, untruncated body. This satisfies the lead_decision's 'add full-body fields ... when truncation has no documented rationale' by adding a full-body path alongside the preview, rather than removing the preview."
+    },
+    "not_derivable": [
+      "tool_call.input (tool arguments): CONFIRMED genuine loss, not merely truncated. extractFromArrayPart (connectors/claude_code/parsers.ts:61-75) flattens a tool_use content block to the literal placeholder string \"[tool_use: <name>]\" and explicitly discards the block's `input` object — no other field on messages or attachments carries it. The JsonlObject.attachment type (connectors/claude_code/types.ts:13-18) has no input-shaped field either. This is a genuine, code-confirmed data loss requiring a named implementation change: thread `part.input` through into a stored field (e.g. attachments.tool_input, JSON-stringified with the same blob-capture treatment as tool_result.output) before claude_code.trajectories can be called fully derivable.",
+      "step.model: no per-step model field exists; only session-level version is stored"
+    ],
+    "semantic_notes": [
+      "lead_decision status: SUBSTANTIALLY IMPLEMENTED for tool_result.output (full-fidelity blob capture landed), but NOT implemented for tool_call.input (arguments), which remains completely unrecorded rather than truncated. The lead_decision's framing ('add full-body fields... or cite a documented rationale') was written assuming both input and output were merely truncated; input is actually not captured in any form, which is a stronger gap than the lead_decision anticipated."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "claude_code.usage",
+    "connector_key": "claude_code",
+    "streams": ["usage"],
+    "derivable": {
+      "totals.sessions": "usage.total_sessions",
+      "totals.messages": "usage.total_messages",
+      "totals.firstSessionDate": "usage.first_session_date",
+      "totals.lastComputedDate": "usage.last_computed_date",
+      "totals.speculationTimeSavedMs": "usage.total_speculation_time_saved_ms",
+      "models[].*": "usage.models[] (model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, web_search_requests, context_window, max_output_tokens)",
+      "models[].costUSD": "usage.models[].cost_usd_cents (D4: integer minor units)",
+      "dailyActivity[]": "usage.daily_activity[] (date, message_count, session_count, tool_call_count)",
+      "dailyModelTokens[]": "usage.daily_model_tokens[] (date, tokens_by_model)",
+      "hourCounts": "usage.hour_counts",
+      "longestSession": "usage.longest_session (session_id, duration_seconds, message_count, timestamp)",
+      "totalCostUSD": "usage.total_cost_usd_cents (D4: integer minor units) + usage.currency"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision fully implemented: a dedicated usage stream exists sourced from stats-cache.json, matching every legacy field with D4-compliant cents/currency normalization for cost fields."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "chatgpt.conversations",
+    "connector_key": "chatgpt",
+    "streams": ["conversations", "messages"],
+    "derivable": {
+      "conversations[].id": "conversations.id",
+      "conversations[].title": "conversations.title",
+      "conversations[].create_time": "conversations.create_time",
+      "conversations[].update_time": "conversations.update_time",
+      "conversations[].message_count": "conversations.message_count_on_current_branch",
+      "conversations[].messages[].id": "messages.id",
+      "conversations[].messages[].role": "messages.role",
+      "conversations[].messages[].content": "messages.content",
+      "conversations[].messages[].content_type": "messages.content_type",
+      "conversations[].messages[].create_time": "messages.create_time",
+      "conversations[].messages[].model": "messages.model_slug",
+      "total": "D3 envelope: conversations.length"
+    },
+    "not_derivable": [],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "chatgpt.memories",
+    "connector_key": "chatgpt",
+    "streams": ["memories"],
+    "derivable": {
+      "memories[].id": "memories.id",
+      "memories[].content": "memories.content",
+      "memories[].created_at": "memories.created_at",
+      "memories[].updated_at": "memories.updated_at",
+      "total": "D3 envelope: memories.length"
+    },
+    "not_derivable": [
+      "memories[].type: optional legacy classification tag; no modern equivalent field. Modern schema treats memory content uniformly (verified: no type-like field on the memories stream)."
+    ],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "doordash.orders",
+    "connector_key": "doordash",
+    "streams": ["orders", "order_items"],
+    "derivable": {
+      "orders[].orderId": "orders.id (parsers.ts:101-103, reads node.orderUuid)",
+      "orders[].restaurant": "orders.restaurant_name (parsers.ts:93-97, store.name)",
+      "orders[].date": "orders.order_date (parsers.ts:66-77, normalizeOrderDate(node.createdAt), ISO-8601)",
+      "orders[].total": "orders.total_cents (parsers.ts:123-125, centsFromMonetary(node.totalCharged) ?? centsFromMonetary(node.grandTotal); D4 integer minor units replaces legacy display string)",
+      "orders[].itemCount": "orders.item_count (parsers.ts:132, items.length)",
+      "orders[].status": "orders.status (parsers.ts:117, node.deliveryStatus ?? null)",
+      "orders[].deliveryAddress": "orders.delivery_address (parsers.ts:79-91, printableAddress ?? formattedAddress ?? shortName)",
+      "orders[].items[].name": "order_items.name (parsers.ts:136-139,159, trimmed)",
+      "orders[].items[].quantity": "order_items.quantity (parsers.ts:163-167, rounded non-negative integer, defaults to 1 if missing)",
+      "orders[].items[].price": "order_items.unit_price_cents (parsers.ts:173, centsFromMonetary(item.price))"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "orders.total/itemCount were display-string typed in the legacy schema; modern total_cents/item_count are typed integers per D4 — same information, more precise representation, not a loss.",
+      "Live-verified 2026-09-22: deliveryStatus and orderItems were both absent (not empty) on all 3 real orders captured for the test account — a live-account data characteristic, not a code gap; the mapping path exists and populates correctly when DoorDash's response includes them."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "uber.trips",
+    "connector_key": "uber",
+    "streams": ["trips"],
+    "derivable": {
+      "trips[].id": "trips.id (the trip UUID, discovered from the Activities list, used as the GetTrip hydration key)",
+      "trips[].status": "trips.status (GetTrip trip.status, parsers.ts:178)",
+      "trips[].requestTime": "trips.requested_at (parsers.ts:179, parseIsoDateTime(trip.beginTripTime))",
+      "trips[].dropoffTime": "trips.completed_at (parsers.ts:180, parseIsoDateTime(trip.dropoffTime))",
+      "trips[].pickupAddress": "trips.pickup_address (parsers.ts:181, GetTrip trip.waypoints[0])",
+      "trips[].dropoffAddress": "trips.dropoff_address (parsers.ts:182-183, GetTrip trip.waypoints[last])",
+      "trips[].fare": "trips.fare_total (raw display string) + trips.fare_total_cents (parsers.ts:185-186, parsed via parseCurrencyCents)",
+      "trips[].vehicleType": "trips.product_type (parsers.ts:192-193, receiptSummary.vehicleType || trip.vehicleDisplayName)",
+      "trips[].isSurge": "trips.is_surge (parsers.ts:194, trip.isSurgeTrip ?? null)"
+    },
+    "not_derivable": [
+      "trips[].city: CONFIRMED NOT DERIVABLE. GetTrip exposes only an opaque numeric cityID/countryID (types.ts:56-58), with no lookup table in this codebase to resolve it to a name. No schema field, parser output, or test produces a city value — grep for city across the connector finds only the doc comment explaining the absence.",
+      "trips[].currencyCode: CONFIRMED NOT DERIVABLE on the trips stream. tripsSchema has no currency field at all (deliberate, tested: parsers.test.ts:166 asserts !(\"currency\" in record)). A code comment (schemas.ts:24-27) references an unfiled 'report's CONTRACT-CHANGE-REQUEST for trips's own currency field' that does not exist anywhere in docs/ — see CONTRACT-CHANGE-REQUEST section below."
+    ],
+    "semantic_notes": [
+      "MAJOR: the lead_decision_live follow-up (trips hydrated per-trip via GetTrip instead of an all-null list-only stream) HAS LANDED (connector v0.4.0, index.ts:56-62 CHANGES log; a real 22-trip scrubbed fixture shows fully-populated non-null records). The 'all-null trips stream is not acceptable' bar is cleared.",
+      "trips.driverName, trips.distance_meters, trips.duration_seconds are new fields with no legacy uber.trips equivalent (distance/duration lived on legacy uber.receipts) — additive, not in scope for this row's field list.",
+      "trips.fare is split into fare_total (display string, same as legacy) + fare_total_cents (parsed integer) per D4 — additive representation, not a loss."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "uber.receipts",
+    "connector_key": "uber",
+    "streams": ["receipts"],
+    "derivable": {
+      "receipts[].tripId": "receipts.trip_id (parsers.ts:242-243)",
+      "receipts[].fare": "receipts.fare_total (display string) + receipts.fare_total_cents (parsed) — parsers.ts:232-234,245-246, but see semantic_notes for a live coverage gap",
+      "receipts[].currencyCode": "receipts.currency (parsers.ts:36-43,69-80,244, parsed from the fare_total line's leading currency symbol via a closed symbol table; null if absent/ambiguous)",
+      "receipts[].distance": "moved to trips.distance_meters (same underlying GetTrip nested receipt object; see semantic_notes)",
+      "receipts[].duration": "moved to trips.duration_seconds",
+      "receipts[].vehicleType": "moved to trips.product_type",
+      "receipts[].fareBreakdown": "receipts.fare_breakdown[] {label, amount_cents} (parsers.ts:198-215,247-250, parsed from GetReceipt's receiptData HTML fare-line testids)"
+    },
+    "not_derivable": [
+      "receipts[].surgeMultiplier: CONFIRMED NOT DERIVABLE. GetReceipt's fare-breakdown HTML has no surge-multiplier field (types.ts:100-113; observed slugs: trip_fare, booking_fee, tip, promotion, currency_conversion_fee, fare_total — no surge_multiplier ever observed). The closest modern signal, trips.is_surge, is a boolean flag, not a ratio — a genuine shape degradation (multiplier -> yes/no), not a rename."
+    ],
+    "semantic_notes": [
+      "receipts[].distanceLabel/durationLabel were correctly dropped per capability-map (display strings of already-parsed numeric values); confirmed consistent with code.",
+      "STREAM-BOUNDARY RESHUFFLE (not a loss, but worth flagging): distance/duration/vehicleType moved from the receipts scope to the trips stream, sourced from GetTrip's own nested 'receipt' sub-object (UberReceiptSummary) — confusingly named the same as the separate GetReceipt operation the receipts stream is built from, but a distinct data source.",
+      "MATERIAL, PREVIOUSLY UNDOCUMENTED COVERAGE GAP: in the real live-derived fixture (fixtures/uber/scrubbed/pilot-real-shape/records/receipts.jsonl), 7 of 8 real receipts have currency/fare_total/fare_total_cents all null, because those trips' GetReceipt HTML has no line with slug 'fare_total' (only itemized lines like 'Trip fare', 'Tip', 'Booking Fee'). fare_breakdown[] is always populated (no cents lost), but the headline total + currency are absent for the large majority of real receipts observed. This is a live, current, material weak spot not captured in CONTRACTS.md, capability-map.json, or the connector's own docs."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "instagram.profile",
+    "connector_key": "meta",
+    "streams": ["profile"],
+    "derivable": {
+      "username": "profile.username (parsers.ts:117-126, required)",
+      "full_name": "profile.full_name (parsers.ts:126)",
+      "bio": "profile.bio (parsers.ts:127)",
+      "profile_pic_url": "profile.profile_pic_url (parsers.ts:128)",
+      "external_url": "profile.external_url (parsers.ts:129)",
+      "is_private": "profile.is_private (parsers.ts:133)",
+      "is_verified": "profile.is_verified (parsers.ts:134)",
+      "is_business": "profile.is_business (parsers.ts:135)"
+    },
+    "not_derivable": [
+      "follower_count: CONFIRMED NOT DERIVABLE today. profileRecord() hardcodes follower_count: null (parsers.ts:130) because the connector's sole profile source, /accounts/web_info/, does not carry it (confirmed absent live 2026-09-22, index.ts:276-286). The connector's own 'Known limitations' comment (index.ts:63-93) names a possible future source (a profile-page GraphQL query the legacy connector used, not yet ported) — tracked, but unresolved.",
+      "following_count: same as follower_count — hardcoded null (parsers.ts:131), confirmed absent from the only live-fetched source.",
+      "media_count (-> post_count): same — hardcoded null (parsers.ts:132), confirmed absent live."
+    ],
+    "semantic_notes": [
+      "All three not-derivable fields are optional in the legacy schema (only username/full_name are required), so this is a field-level loss, not a scope-breaking one."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "instagram.posts",
+    "connector_key": "meta",
+    "streams": ["posts", "post_likes"],
+    "derivable": {
+      "posts[].img_url": "posts.media_url (parsers.ts:70-87,149, image_versions2.candidates[0].url, falling back to first carousel slide)",
+      "posts[].caption": "posts.caption (parsers.ts:147)",
+      "posts[].num_of_likes": "posts.like_count (parsers.ts:150)",
+      "posts[].taken_at": "posts.taken_at (parsers.ts:54-64,153, isoFromTakenAt, unix seconds-or-ms -> ISO-8601)",
+      "posts[].who_liked[]": "post_likes {post_id, user_id, username} (parsers.ts:162-183, node.facepile_top_likers[])"
+    },
+    "not_derivable": [
+      "posts[].who_liked[].profile_pic_url: expiring signed CDN URL of a third party, correctly dropped by design (not durable data); confirmed no code path emits it."
+    ],
+    "semantic_notes": [
+      "COVERAGE DIFFERENCE: post_likes is a bounded 'top likers' sample (facepile_top_likers), not necessarily the full likers list the legacy who_liked[] name implies. Instagram's web surface has no full-likers-listing endpoint reachable from a logged-in session; the legacy scraper's own who_liked[] was presumably also bounded, but this cap is not disclosed by the legacy field name/description.",
+      "PROOF-GATE GAP: the live test account used to build this connector has zero posts, so posts/post_likes extraction is structurally proven but not proven against real post data yet (the committed fixture is synthetic-but-shape-calibrated). Does not change the field-mapping classification."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "instagram.following",
+    "connector_key": "meta",
+    "streams": ["following"],
+    "derivable": {
+      "accounts[].pk": "following.id (parsers.ts:188)",
+      "accounts[].username": "following.username (parsers.ts:189-196, required)",
+      "accounts[].full_name": "following.full_name (parsers.ts:196)",
+      "accounts[].is_private": "following.is_private (parsers.ts:197)",
+      "accounts[].is_verified": "following.is_verified (parsers.ts:198)",
+      "accounts[].profile_pic_url": "following.profile_pic_url (parsers.ts:199)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "total (D3 envelope) correctly dropped — followingSchema has no total field.",
+      "COVERAGE STATUS (resolves the prior stale blocked_decision): the legacy connector silently capped following at ~1000 accounts. The modern connector walks up to FOLLOWING_MAX_PAGES=200 * 50/page = a 10,000-account ceiling (parsers.ts:24-32), paginating until Instagram itself reports no next_max_id. Live-verified 2026-09-22 on a 19-account test account (below the legacy cap), stable and duplicate-free across two runs — full completeness at the new, much higher ceiling has NOT been proven live, only structurally.",
+      "There is still no in-band coverage/is_complete DATA field on the following stream itself; D6's 'report honest coverage' requirement is satisfied via a run-level SKIP_RESULT side channel (index.ts:816-829, reason following_pages_deferred_page_budget) rather than a queryable per-record/stream field. This is an honest (no silent truncation) but out-of-band resolution, not an ideal in-band one."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "instagram.ads",
+    "connector_key": "meta",
+    "streams": ["ads"],
+    "derivable": {
+      "advertisers[].name": "ads{kind:'advertiser'}.name (parsers.ts:232-258, index.ts:565-594)",
+      "ad_topics[].name": "ads{kind:'ad_topic'}.name (parsers.ts:245-250, index.ts:598-611)",
+      "categories[].name": "ads{kind:'ad_category'}.name (parsers.ts:251-256, index.ts:619-708)",
+      "categories[].description": "ads{kind:'ad_category'}.description (index.ts:702, second text node in each category listitem)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "ads.id is a new stable sha256(kind|name) field since neither Accounts Center surface exposes a native id; legacy had no id field on any of the three arrays — additive, not a loss.",
+      "RELIABILITY: the connector's own header (index.ts:75-84) documents the ads scrape as 'confirmed flaky live' (1 record on one run, 2 on a re-run of the same session), root cause not yet isolated. Field mapping is fully correct when the scrape succeeds; real-world yield is currently unproven/unstable — a proof-gate risk, not a mapping gap."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.profile",
+    "connector_key": "linkedin",
+    "streams": ["profile"],
+    "derivable": {
+      "profileUrl": "profile.public_url (parsers.ts:207-209,295, derived: https://www.linkedin.com/in/{publicIdentifier}/)",
+      "fullName": "profile.full_name (parsers.ts:198-203,289)",
+      "headline": "profile.headline (parsers.ts:290, falls back to /me's miniProfile.occupation)",
+      "location": "profile.location (parsers.ts:220-230,293)",
+      "connections": "profile.connection_count (index.ts:399-421,426 — sourced from a separate connections-listing paging.total, fetched proactively whenever profile or connections is requested; null if the walk was truncated with no reported total)",
+      "profilePictureUrl": "profile.profile_picture_url (parsers.ts:232-255,294)",
+      "about": "profile.summary (parsers.ts:296)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "connection_count is not present on any profile/`/me` Voyager payload; it requires a proactive fetch of the separate connections listing whenever profile is requested — a cross-stream dependency similar in spirit to Uber's trips/receipts checkpoint dependency.",
+      "connection_count can be null when the connections walk was truncated and the API reported no total — treated as 'a floor, not a fact' (index.ts:413-421) and refused rather than reported, a stricter honesty guarantee than legacy's bare '500+'-style string.",
+      "legacy connections was a string; modern connection_count is an integer — same fact, more precise representation."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.experience",
+    "connector_key": "linkedin",
+    "streams": ["experience"],
+    "derivable": {
+      "jobTitle": "experience.title (parsers.ts:326,340)",
+      "companyName": "experience.company (parsers.ts:319,333)",
+      "dates": "experience.start_date + experience.end_date (parsers.ts:61-91,322-323,336-337, D4 partial-date strings)",
+      "location": "experience.location (parsers.ts:324,338)",
+      "description": "experience.description (parsers.ts:320,334)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "D3 granularity increase: a multi-title tenure at one company expands to one experience record per sub-position (parsers.ts:306-345), which can raise the per-profile record count versus legacy's likely one-entry-per-company-block — no field is dropped, but consumers expecting legacy's granularity should be aware.",
+      "end_date: null now means 'current role' rather than a legacy 'Present' string — a D4-compliant representation change, not a loss."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.education",
+    "connector_key": "linkedin",
+    "streams": ["education"],
+    "derivable": {
+      "schoolName": "education.school (parsers.ts:370)",
+      "degree": "education.degree (parsers.ts:364)",
+      "years": "education.start_date + education.end_date (parsers.ts:365,371, same D4 partial-date logic as experience)",
+      "grade": "education.grade (parsers.ts:367)",
+      "logoUrl": "education.logo_url (parsers.ts:351-357,369, tries 3 known source shapes)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "legacy 'years' (one combined string) splits into two D4 partial-date fields — same information, different shape.",
+      "logo_url can be null when none of the 3 known source shapes are present on a given account's decoration version — documented honest null (manifests/linkedin.json:204), not a code gap."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.skills",
+    "connector_key": "linkedin",
+    "streams": ["skills"],
+    "derivable": {
+      "name": "skills.name (parsers.ts:381-417, handles both flat and categorized decoration shapes)",
+      "endorsements": "skills.endorsement_count (parsers.ts:419-426, validated non-negative finite number else null)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "legacy endorsements was a string; modern endorsement_count is an integer — same fact, more precise typed representation."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.languages",
+    "connector_key": "linkedin",
+    "streams": ["languages"],
+    "derivable": {
+      "name": "languages.name (parsers.ts:428-445)",
+      "proficiency": "languages.proficiency (parsers.ts:441)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "D7 new stream, live-verified against one real account; straightforward 1:1 mapping with no gaps."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "linkedin.connections",
+    "connector_key": "linkedin",
+    "streams": ["connections"],
+    "derivable": {
+      "fullName": "connections.full_name (parsers.ts:471, from batch-resolved profile per connection)",
+      "headline": "connections.headline (parsers.ts:472)",
+      "profileUrl": "connections.profile_url (parsers.ts:473-474)",
+      "dateConnected": "connections.connected_at (parsers.ts:447-458,470, epoch-ms -> ISO-8601)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "D7 second new stream. connections.id (connected member's URN) is a new field with no legacy equivalent — additive.",
+      "full_name/headline/profile_url can be null when the batch profile-resolution pass fails for a given member (rate limit or restricted profile) — an intentional 'fail null, never fail wrong' design (schemas.ts:104-110); the connection edge (id + connected_at) is never dropped even when enrichment fails."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "wholefoods.profile",
+    "connector_key": "wholefoods",
+    "streams": ["profile"],
+    "derivable": {
+      "name": "profile.name (index.ts:139, parseAmazonProfileDom)"
+    },
+    "not_derivable": [
+      "email: CONFIRMED NOT DERIVABLE. Hardcoded to null always (index.ts:139: `{ email: null, id: customerId, name }`). types.ts:8-11 documents that no safely-reachable Whole Foods/Amazon page exposes it; schemas.ts keeps the field nullable 'so it stays available if a future safe extraction path is found', but it has no value today."
+    ],
+    "semantic_notes": [
+      "NOT a SKIP_RESULT scaffold: wholefoods.profile is fully implemented (collectProfile() at index.ts:120-141, wired into collect() at index.ts:408-410, emitted via emitRecord). A prior implementation_note claiming this stream was still a scaffold is stale as of the current tree (confirmed by direct code read; git log shows 92fb1a4 'feat(wholefoods): squash-integrate harvest/cut-wholefoods lane' landed the real implementation).",
+      "profile.id is Amazon's opaque customerId (parsed from an inline analytics blob) — a new identity field with no legacy equivalent (legacy schema had no id at all); if customerId cannot be parsed, no profile record is emitted for that run (D3: no record without a real identity)."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "wholefoods.orders",
+    "connector_key": "wholefoods",
+    "streams": ["orders", "order_items"],
+    "derivable": {
+      "orders[].orderId": "orders.id (index.ts:186)",
+      "orders[].orderUrl": "orders.order_url (index.ts:189)",
+      "orders[].orderDate": "orders.order_date (index.ts:188, date-only per D4)",
+      "orders[].total": "orders.total_cents (index.ts:180-184,191, integer cents)",
+      "orders[].itemCount": "orders.item_count (index.ts:187)",
+      "orders[].status": "orders.status (index.ts:190) — see semantic_notes",
+      "orders[].items[].name": "order_items.name (index.ts:208)",
+      "orders[].items[].productId": "order_items.product_id (index.ts:210)",
+      "orders[].items[].productUrl": "order_items.product_url (index.ts:211)",
+      "orders[].items[].imageUrl": "order_items.image_url (index.ts:207)",
+      "orders[].items[].quantity": "order_items.quantity (index.ts:212, parsed to number via QTY_RE — legacy was string|null e.g. '2 ct')",
+      "orders[].items[].price": "order_items.unit_price_cents (index.ts:213, D4 integer minor units)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "orders.status is hardcoded to the literal 'Completed' (index.ts:190), not scraped — a real narrowing versus legacy's freeform scraped status text. A separate cancelled-order selector exists (index.ts:444) but it is not confirmed how (or whether) a cancelled order surfaces in the emitted status field; worth a follow-up check.",
+      "totalOrders/totalItems (D3 envelope) and the untyped order_items.nutrition (replaced by the typed nutrition stream) are correctly dropped."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "wholefoods.nutrition",
+    "connector_key": "wholefoods",
+    "streams": ["nutrition"],
+    "derivable": {
+      "items{id}": "nutrition.product_id (index.ts:319-337, keyed by ASIN)",
+      "name": "nutrition.name (index.ts:329)",
+      "source": "nutrition.source (index.ts:335) — narrowed enum, see semantic_notes",
+      "confidence": "nutrition.confidence (index.ts:326)",
+      "calories": "nutrition.calories (index.ts:324)",
+      "protein_g": "nutrition.protein_g (index.ts:331)",
+      "carbs_g": "nutrition.carbs_g (index.ts:325)",
+      "fat_g": "nutrition.fat_g (index.ts:327)",
+      "sodium_mg": "nutrition.sodium_mg (index.ts:334)",
+      "fiber_g": "nutrition.fiber_g (index.ts:328)",
+      "sugar_g": "nutrition.sugar_g (index.ts:336)",
+      "servingSize": "nutrition.serving_size (index.ts:332)",
+      "servingsPerContainer": "nutrition.servings_per_container (index.ts:333)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Legacy source enum had 7 values including negative/error states (not_found, error, blocked); modern nutrition.source (schemas.ts:106) is narrowed to only [wholefoods_product_page, usda_fdc] — a product with no match simply gets no record rather than a not_found/error/blocked row. A real, if reasonable, narrowing: legacy could represent 'we tried and failed', modern can only represent silence.",
+      "coverage{} (D3) correctly dropped, replaced by a PROGRESS event (index.ts:516-523) reporting lookedUpProductIds/consideredProductIds.",
+      "A new per-run cap of 25 nutrition lookups (index.ts:76) is honestly reported via PROGRESS, not silently truncated.",
+      "NOT a SKIP_RESULT scaffold — see wholefoods.profile's semantic_notes for the same correction."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "icloud_notes.notes",
+    "connector_key": "icloud_notes",
+    "streams": ["notes"],
+    "derivable": {
+      "notes[].recordName": "notes.id (parsers.ts:203)",
+      "notes[].title": "notes.title (parsers.ts:204, decodeBase64Text(TitleEncrypted))",
+      "notes[].snippet": "notes.snippet (parsers.ts:205)",
+      "notes[].isPinned": "notes.is_pinned (parsers.ts:207-209)",
+      "notes[].createdDate": "notes.created_at (parsers.ts:210-212)",
+      "notes[].modifiedDate": "notes.modified_at (parsers.ts:213-215)",
+      "notes[].hasAttachments": "notes.has_attachments (parsers.ts:216)",
+      "notes[].textContent": "notes.text_content (parsers.ts:217)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "notes[].folder (legacy: resolved folder TITLE STRING) -> notes.folder_id (modern: CloudKit recordName / foreign key). Deliberate, documented semantic difference (parsers.ts:190-193): a consumer must now join notes.folder_id -> folders.id to get the display name legacy gave directly.",
+      "total, userName (D3 envelope) correctly dropped."
+    ],
+    "status": "semantic_difference"
+  },
+  {
+    "scope": "icloud_notes.folders",
+    "connector_key": "icloud_notes",
+    "streams": ["folders"],
+    "derivable": {
+      "folders[].recordName": "folders.id (parsers.ts:227-235)",
+      "folders[].title|name": "folders.name (parsers.ts:231)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "total (D3 envelope) correctly dropped.",
+      "capability-map's note that 'the lane fills the full legacy folder field list' is verified moot: the legacy schema only declares recordName/title, and modern id/name covers exactly that — no additional legacy folder fields exist to fill."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "shop.orders",
+    "connector_key": "shopify",
+    "streams": ["orders"],
+    "derivable": {
+      "orders[].id": "orders.id (index.ts:151, Shopify GID from Apollo Order:<id> ref)",
+      "orders[].orderNumber": "orders.order_number (index.ts:152) — see semantic_notes",
+      "orders[].placedAt": "orders.order_date (index.ts:153, from Apollo order.createdAt)",
+      "orders[].merchantName": "orders.merchant_name (index.ts:154, resolveMerchantName via shop __ref)",
+      "orders[].total": "orders.total_cents (index.ts:156, Money-scalar amount x 100, D4 integer cents)",
+      "orders[].currency": "orders.currency (index.ts:157, Money-scalar currencyCode)",
+      "orders[].status": "orders.status (index.ts:155, order.displayStatus)",
+      "orders[].itemCount": "orders.item_count (index.ts:158, order.totalItemCount, falls back to lineItemTitles.length)",
+      "orders[].lineItemTitles[]": "orders.line_item_titles (index.ts:159, lineItems.nodes[].productTitle refs)",
+      "orders[].detailUrl": "orders.detail_url (index.ts:160) — see semantic_notes"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "CONFIRMED: the real field-complete Apollo-cache-based implementation IS in the current tree. git diff harvest/cut-shopify HEAD -- packages/polyfill-connectors/connectors/shopify/ is empty (byte-identical); merge commit fffbfdf 'feat(shopify): squash-integrate harvest/cut-shopify lane' landed it. A prior claim that the working tree held only a stale SKIP_RESULT scaffold is stale/incorrect as of this tree — the code's own header comment documents its own history (v0.1.0 scaffold -> v0.2.0 real Apollo-cache extraction wired 2026-09-22).",
+      "order_number reuses the same GID as id (index.ts:152/223) rather than a distinct customer-facing order number (e.g. '#1234') — the Apollo cache extraction has no separate human order-number field wired up. Not a dropped field (capability-map never specified a distinct source), but order_number today carries no more information than id.",
+      "detail_url is hardcoded to the static shop.app order-history URL for every order (parsers.ts:218), not a per-order deep link — likely because Shop app's SPA routing exposes no stable per-order URL. A real narrowing versus what the field name implies.",
+      "PROOF-GATE GAP, not a mapping gap: implemented from contract and prior art, not a live run (index.ts:15-23; manifest tier correctly stays 'development' per D10/D11; pilot-fixture.test.ts explicitly opts out with expectMissing: true rather than faking a pilot fixture)."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "amazon.orders",
+    "connector_key": "amazon",
+    "streams": ["orders", "order_items"],
+    "derivable": {
+      "orderId": "orders.id (schemas.ts:95)",
+      "orderDate": "orders.order_date (schemas.ts:96)",
+      "orderTotal": "orders.order_total (string, preserved verbatim, schemas.ts:97) + orders.order_total_cents (derived integer, schemas.ts:98)",
+      "deliveryStatus": "orders.delivery_status (schemas.ts:99)",
+      "items[].name": "order_items.name (schemas.ts:118)",
+      "items[].url": "order_items.url (schemas.ts:119)",
+      "items[].price": "order_items.unit_price (string, preserved, schemas.ts:120) + order_items.unit_price_cents (derived integer, schemas.ts:121)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Modern orders/order_items are considerably richer than legacy: status_detail, recipient_name, shipping_address_summary, payment_method_summary, gift_order, digital_order, fetched_at (orders); asin, seller, item_image_url, returned, refund_status (order_items) — all additive.",
+      "total (D3 envelope) correctly dropped."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "amazon.profile",
+    "connector_key": "amazon",
+    "streams": ["profile"],
+    "derivable": {
+      "name": "profile.name (parsers.ts:710-731 parseAmazonProfileDom, line 720, from #nav-link-accountList .nav-line-1)",
+      "isPrime": "profile.is_prime (parsers.ts:722-728, from #nav-prime-menu/#navbar-prime)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision FULLY IMPLEMENTED: manifests/amazon.json declares the profile stream (id/name/is_prime, required:false, singleton_presence); collectAmazonProfile() (index.ts:1128-1166) reads the nav bar off the already-loaded your-orders page, wired into collect() at index.ts:2188-2190; degrades to SKIP_RESULT (reason profile_page_read_failed) rather than failing the run.",
+      "profile.id is a documented placeholder literal 'me' (parsers.ts:730) since Amazon's nav bar carries no account id — a deliberate choice, not a defect.",
+      "Both name and is_prime are null-when-unobservable, never guessed, matching D4 exactly. Test coverage: parsers.test.ts:864,873; integration.test.ts:3651,3678."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.profile",
+    "connector_key": "github",
+    "streams": ["user", "user_stats", "pinned_repositories", "organizations"],
+    "derivable": {
+      "username": "user.login",
+      "fullName": "user.name",
+      "bio": "user.bio",
+      "company": "user.company",
+      "location": "user.location",
+      "website": "user.blog",
+      "avatarUrl": "user.avatar_url",
+      "followers": "user_stats.followers (daily snapshot)",
+      "following": "user_stats.following",
+      "repositoryCount": "user_stats.public_repos",
+      "profileUrl": "derivation: https://github.com/{user.login}",
+      "pinnedRepositories": "pinned_repositories.* — IMPLEMENTED: GraphQL user.pinnedItems (index.ts:1718 query, :1740-1789 fetch/emit; schemas.ts:235)",
+      "organizations": "organizations.* — IMPLEMENTED: REST GET /user/orgs (index.ts:1794-1836; schemas.ts:251)",
+      "contributionsLastYear": "derivation: SUM(contributions.contribution_count) over the returned window (see github.contributions)"
+    },
+    "not_derivable": [
+      "achievements: CONFIRMED PERMANENT deliberate_break. No REST or GraphQL field exists for GitHub achievement badges; grep for 'achievement' across the connector returns zero matches. This is settled, not pending."
+    ],
+    "semantic_notes": [
+      "lead_decision status: pinned_repositories and organizations streams have LANDED, resolving the split legacy aggregate into 4 modern streams per D3."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.repositories",
+    "connector_key": "github",
+    "streams": ["repositories"],
+    "derivable": {
+      "repositories[].name": "repositories.name",
+      "repositories[].url": "repositories.html_url",
+      "repositories[].description": "repositories.description",
+      "repositories[].language": "repositories.language",
+      "repositories[].stars": "repositories.stargazers_count",
+      "repositories[].forks": "repositories.forks_count",
+      "repositories[].visibility": "repositories.private (enum -> boolean, D4)",
+      "repositories[].topics": "repositories.topics",
+      "repositories[].updatedAt": "repositories.pushed_at (semantic correction: code-change time, not metadata-touch time)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "updatedAt maps to pushed_at (code-change time), a deliberate semantic correction versus legacy's looser 'updated' semantics — flag for any consumer expecting the original meaning."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.starred",
+    "connector_key": "github",
+    "streams": ["starred"],
+    "derivable": {
+      "starred[].fullName": "starred.full_name",
+      "starred[].url": "starred.html_url",
+      "starred[].description": "starred.description",
+      "starred[].language": "starred.language",
+      "starred[].stars": "starred.stargazers_count",
+      "starred[].updatedAt": "starred.starred_at (semantic correction: star-event time, not repo-update time)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "updatedAt maps to starred_at (event time), a deliberate semantic correction, not a straight rename."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.events",
+    "connector_key": "github",
+    "streams": ["events"],
+    "derivable": {
+      "id": "events.id (primary_key)",
+      "type": "events.type",
+      "createdAt": "events.created_at (cursor_field)",
+      "repo": "events.repository_full_name"
+    },
+    "not_derivable": [
+      "action, title, body, url, branch, commits: CONFIRMED ABSENT from the modern events schema (schemas.ts:211 eventsSchema; manifests/github.json events stream only declares id/type/created_at/repository_full_name/is_public). Not logged as a separate capability-map gap — flagged here as a genuine narrowing versus legacy's per-event detail that should get an explicit lead decision alongside the already-accepted 'ADD events stream' one."
+    ],
+    "semantic_notes": [
+      "lead_decision 'ADD github.events, 90-day rolling window' has LANDED (index.ts:1498-1566, manifest lines 813-870), but only at coarse granularity — the per-event payload fields legacy exposed are not carried."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "github.contributions",
+    "connector_key": "github",
+    "streams": ["contributions"],
+    "derivable": {
+      "days[].date + days[].count": "contributions.date + contributions.contribution_count, one record per day (GraphQL contributionsCollection; index.ts:1618 query, :1658-1710 fetch/emit; schemas.ts:223)",
+      "totalContributionsLastYear": "derivation: SUM(contributions.contribution_count) over the window",
+      "yearTotals / monthlyTotals / topDay": "derivation: aggregation over the daily contributions stream (group_by_time supported per manifest query.aggregations)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision 'ADD github.contributions via GraphQL' has LANDED. Legacy stored pre-aggregated yearTotals/monthlyTotals/topDay/level; modern stores only raw daily counts, expecting aggregation downstream — a shape/consumption-model change, not a data loss."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.history",
+    "connector_key": "github",
+    "streams": ["issues", "pull_requests"],
+    "derivable": {
+      "pullRequests[].id": "pull_requests.id",
+      "pullRequests[].number": "pull_requests.number",
+      "pullRequests[].title": "pull_requests.title",
+      "pullRequests[].body": "pull_requests.body",
+      "pullRequests[].state": "pull_requests.state",
+      "pullRequests[].createdAt": "pull_requests.created_at",
+      "pullRequests[].updatedAt": "pull_requests.updated_at",
+      "pullRequests[].closedAt": "pull_requests.closed_at",
+      "pullRequests[].mergedAt": "pull_requests.merged_at",
+      "pullRequests[].url": "pull_requests.html_url",
+      "pullRequests[].repo": "pull_requests.repository_full_name",
+      "pullRequests[].labels": "pull_requests.labels",
+      "pullRequests[].comments": "pull_requests.comments",
+      "pullRequests[].reactionsTotal": "pull_requests.reactions_total_count",
+      "pullRequests[].isDraft": "pull_requests.draft",
+      "issues[].*": "issues.* (same field pattern via /issues, is_pull_request flag splits PRs vs plain issues)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Legacy used the Search API for a one-shot full-lifetime snapshot (up to 1000/type); modern issues/pull_requests are incremental (checkpoint_window), a broader ongoing collection model rather than a snapshot. pull_requests explicitly excludes PRs the user only reviewed, matching legacy's author-only scope."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "oura.activity",
+    "connector_key": "oura",
+    "streams": ["activity"],
+    "derivable": {
+      "day": "activity.day",
+      "score": "activity.score",
+      "activeCalories": "activity.active_calories",
+      "totalCalories": "activity.total_calories",
+      "steps": "activity.steps",
+      "equivalentWalkingDistance": "activity.equivalent_walking_distance (meters, D4)"
+    },
+    "not_derivable": [
+      "highActivityTime, mediumActivityTime, lowActivityTime, sedentaryTime, restingTime, inactivityAlerts, contributors.*: absent from both manifests/oura.json and schemas.ts. STATUS UNCHANGED: no live v2 API capture evidence exists anywhere in the repo (only synthetic test fixtures; index.test.ts's OuraPageFixture explicitly sets capture: null). Remains 'suspected upstream removal, unconfirmed' per the lead_decision — NOT a settled documented break."
+    ],
+    "semantic_notes": [
+      "capability-map.json still records status: needs_parity_audit / lead_decision: PENDING EVIDENCE; nothing in the current tree closes this gap. git history for the oura connector shows only an unrelated page-cap bugfix and a Biome reformat since the initial contribution — no new capture evidence landed."
+    ],
+    "status": "in_progress"
+  },
+  {
+    "scope": "oura.readiness",
+    "connector_key": "oura",
+    "streams": ["readiness"],
+    "derivable": {
+      "day": "readiness.day",
+      "score": "readiness.score",
+      "temperatureDeviation": "readiness.temperature_deviation",
+      "temperatureTrendDeviation": "readiness.temperature_trend_deviation",
+      "contributors": "readiness.contributors (opaque map, forwarded verbatim, index.ts:223, schemas.ts:88)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "oura.sleep",
+    "connector_key": "oura",
+    "streams": ["sleep"],
+    "derivable": {
+      "sleepPeriods[].day": "sleep.day",
+      "sleepPeriods[].bedtimeStart": "sleep.bedtime_start",
+      "sleepPeriods[].bedtimeEnd": "sleep.bedtime_end",
+      "sleepPeriods[].totalSleepDuration": "sleep.total_sleep_duration (seconds, D4)",
+      "sleepPeriods[].deepSleepDuration": "sleep.deep_sleep_duration",
+      "sleepPeriods[].lightSleepDuration": "sleep.light_sleep_duration",
+      "sleepPeriods[].remSleepDuration": "sleep.rem_sleep_duration",
+      "sleepPeriods[].efficiency": "sleep.efficiency",
+      "sleepPeriods[].latency": "sleep.latency",
+      "sleepPeriods[].averageHeartRate": "sleep.average_heart_rate",
+      "sleepPeriods[].lowestHeartRate": "sleep.lowest_heart_rate",
+      "sleepPeriods[].averageHrv": "sleep.average_hrv",
+      "dailyScores[].score": "sleep.sleep_score (merged per D3 into one per-session record)"
+    },
+    "not_derivable": [
+      "averageBreath, restlessPeriods, timeInBed, type: absent from manifests/oura.json and schemas.ts. Same unconfirmed-evidence status as oura.activity — no real v2 capture exists in the repo.",
+      "contributors.* (7-field sleep contributors object): absent — modern only carries sleep_score. Same PENDING EVIDENCE status, not independently confirmed."
+    ],
+    "semantic_notes": [
+      "Modern adds temperature_delta at the sleep-period level with no legacy counterpart (legacy carried temperature only on activity/readiness) — an addition, not a loss."
+    ],
+    "status": "in_progress"
+  },
+  {
+    "scope": "spotify.playlists",
+    "connector_key": "spotify",
+    "streams": ["playlists", "playlist_items"],
+    "derivable": {
+      "name": "playlists.name",
+      "description": "playlists.description",
+      "owner": "playlists.owner_id + playlists.owner_name",
+      "tracks_total": "playlists.track_count",
+      "tracks[].added_at": "playlist_items.added_at",
+      "tracks[].added_by": "playlist_items.added_by",
+      "tracks[].name": "playlist_items.name",
+      "tracks[].artists[].name": "playlist_items.artist_names[]",
+      "tracks[].album": "playlist_items.album_name",
+      "tracks[].duration_ms": "playlist_items.duration_ms",
+      "tracks[].uri": "playlist_items.track_id (Spotify base-62 id; identity preserved, string format changes)"
+    },
+    "not_derivable": [
+      "playlists[].uri, playlists[].followers, playlists[].images: absent from playlistsSchema (schemas.ts:56-65). Matches capability-map's own note ('likely deprioritized, not confirmed as deliberate') — not a lead_decision item, remains an open, unresolved gap."
+    ],
+    "semantic_notes": [
+      "lead_decision 'ADD spotify.playlist_items' has LANDED (schemas.ts:107, index.ts:246-496), resolving the scope's prior blocked_decision. Keyed by <playlist_id>:<position> (index.ts:247-250) rather than by track_id+position as the lead_decision's literal field list implied — functionally equivalent, all 5 named fields present as record fields."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "spotify.savedTracks",
+    "connector_key": "spotify",
+    "streams": ["saved_tracks"],
+    "derivable": {
+      "added_at": "saved_tracks.added_at",
+      "name": "saved_tracks.name",
+      "artists[].name": "saved_tracks.artist_names[]",
+      "album.name": "saved_tracks.album_name",
+      "duration_ms": "saved_tracks.duration_ms"
+    },
+    "not_derivable": [
+      "uri: absent from savedTracksSchema (schemas.ts:72-83); confirmed via grep, no field named uri",
+      "explicit: absent from the same schema",
+      "album.artists (album-level artist list distinct from track artists): absent — only track-level artist_names carried"
+    ],
+    "semantic_notes": [
+      "Modern adds id, popularity, isrc beyond the legacy field set — additive, does not offset the 3 dropped fields above."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "spotify.profile",
+    "connector_key": "spotify",
+    "streams": ["profile"],
+    "derivable": {
+      "id": "profile.id (from GET /me)",
+      "display_name": "profile.display_name",
+      "followers": "profile.followers"
+    },
+    "not_derivable": [
+      "uri: absent from profileSchema (schemas.ts:90-96, fields: id/display_name/followers only)",
+      "following: absent. Spotify's /me endpoint has never exposed a following-COUNT field (only a separate /me/following list endpoint) — likely an upstream API limitation, not a connector choice, but not documented as such in capability-map",
+      "images: absent from the same schema"
+    ],
+    "semantic_notes": [
+      "lead_decision 'ADD spotify.profile from /me' has LANDED (index.ts:511-522, schemas.ts:90) — the stream itself was entirely absent before; the 3 remaining gaps above are narrower sub-field gaps not literally named in the lead_decision text."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "steam.profile",
+    "connector_key": "steam",
+    "streams": ["profile", "steam_level"],
+    "derivable": {
+      "steamId": "profile.steamid",
+      "personaName": "profile.personaname",
+      "profileUrl": "profile.profileurl",
+      "avatarUrl": "profile.avatar / profile.avatarmedium / profile.avatarfull",
+      "realName": "profile.realname",
+      "country": "profile.loccountrycode",
+      "state": "profile.loccstatecode",
+      "cityId": "profile.loccityid",
+      "steamLevel": "steam_level.player_level (schemas.ts:75)",
+      "accountCreated": "profile.timecreated (unix epoch seconds, intentionally not converted; index.ts:415, schemas.ts:22)",
+      "lastLogoff": "profile.lastlogoff (unix epoch seconds; index.ts:419, schemas.ts:26)",
+      "personaState": "profile.personastate",
+      "communityVisibilityState": "profile.communityvisibilitystate"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision 'KEEP raw-epoch field names' confirmed landed and unchanged: timecreated/lastlogoff remain integer epoch seconds (not renamed to *_at, not ISO-8601-converted), with the unit documented in the manifest description. Accepted, not a gap."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "steam.games",
+    "connector_key": "steam",
+    "streams": ["owned_games", "recently_played_games"],
+    "derivable": {
+      "owned[].appId": "owned_games.appid",
+      "owned[].name": "owned_games.name",
+      "owned[].playtimeMinutes": "owned_games.playtime_forever",
+      "owned[].iconUrl": "owned_games.img_icon_url",
+      "owned[].lastPlayed": "owned_games.rtime_last_played (unix seconds)",
+      "recentlyPlayed[].appId": "recently_played_games.appid",
+      "recentlyPlayed[].name": "recently_played_games.name",
+      "recentlyPlayed[].playtimeTwoWeeksMinutes": "recently_played_games.playtime_2weeks (schemas.ts:51)",
+      "recentlyPlayed[].playtimeForeverMinutes": "recently_played_games.playtime_forever"
+    },
+    "not_derivable": [
+      "owned[].playtimeTwoWeeksMinutes: confirmed absent from ownedGameSchema — only available via recently_played_games, which covers only recently-played titles, not the full owned library. A genuine partial loss for games owned but not played in the last two weeks."
+    ],
+    "semantic_notes": [
+      "playtimeHours (legacy computed field) is dropped but trivially re-derivable as playtime_forever / 60."
+    ],
+    "status": "loss"
+  },
+  {
+    "scope": "steam.friends",
+    "connector_key": "steam",
+    "streams": ["friends"],
+    "derivable": {
+      "steamId": "friends.steamid",
+      "friendSince": "friends.friend_since (unix epoch seconds, documented)",
+      "relationship": "friends.relationship",
+      "personaName": "friends.persona_name — IMPLEMENTED: batched GetPlayerSummaries, index.ts:473, chunked 100 ids/call at index.ts:725,732,748; schemas.ts:67",
+      "avatarUrl": "friends.avatar_url — index.ts:474 (avatarfull), schemas.ts:68",
+      "profileUrl": "friends.profile_url — index.ts:475, schemas.ts:69"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "lead_decision 'ADD persona_name/avatar_url/profile_url via batched GetPlayerSummaries' has LANDED, resolving the prior N+1 concern with a 100-id-per-call batch.",
+      "persona_name/avatar_url/profile_url are explicitly nullable when a friend's profile is private or omitted from the GetPlayerSummaries response — an honest, non-silent partial-coverage design, not a masked loss."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "heb.orders",
+    "connector_key": "heb",
+    "streams": [],
+    "derivable": {},
+    "not_derivable": [],
+    "semantic_notes": [
+      "Owned by the parallel lane cut-heb-gaps; not audited here per instruction. cut-heb-gaps is confirmed actively running (live peer session) as of this report."
+    ],
+    "status": "in_progress"
+  },
+  {
+    "scope": "heb.profile",
+    "connector_key": "heb",
+    "streams": [],
+    "derivable": {},
+    "not_derivable": [],
+    "semantic_notes": [
+      "Owned by the parallel lane cut-heb-gaps; not audited here per instruction."
+    ],
+    "status": "in_progress"
+  },
+  {
+    "scope": "heb.nutrition",
+    "connector_key": "heb",
+    "streams": [],
+    "derivable": {},
+    "not_derivable": [],
+    "semantic_notes": [
+      "Owned by the parallel lane cut-heb-gaps; not audited here per instruction."
+    ],
+    "status": "in_progress"
+  },
+  {
+    "scope": "youtube.profile",
+    "connector_key": "youtube",
+    "streams": ["profile"],
+    "derivable": {
+      "channelId": "profile.id",
+      "channelTitle": "profile.title",
+      "channelUrl": "profile.channel_url",
+      "handle": "profile.handle",
+      "email": "profile.email",
+      "joinedDate": "profile.joined_at",
+      "avatarUrl": "profile.avatar_url",
+      "description": "profile.description",
+      "country": "profile.country",
+      "subscriberCount": "profile.subscriber_count",
+      "viewCount": "profile.view_count",
+      "videoCount": "profile.video_count"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Sourced from Takeout CSV files whose exact presence/column names are UNVERIFIED against a real export (parsers.ts header notes only watch_history is verified); each parser is defensive (nulls on missing/renamed columns, never guesses). This is a live-evidence caveat, not a field-mapping gap — every legacy field has a coded destination."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.subscriptions",
+    "connector_key": "youtube",
+    "streams": ["subscriptions"],
+    "derivable": {
+      "channelId": "subscriptions.channel_id",
+      "channelTitle": "subscriptions.channel_title",
+      "channelUrl": "subscriptions.channel_url",
+      "handle": "subscriptions.handle",
+      "avatarUrl": "subscriptions.avatar_url",
+      "subscriberCount": "subscriptions.subscriber_count",
+      "description": "subscriptions.description",
+      "isVerified": "subscriptions.is_verified",
+      "isBellNotification": "subscriptions.notifications"
+    },
+    "not_derivable": [
+      "subscriberCountText: display string of subscriber_count, correctly dropped by design (D4: no display strings beside parsed values)"
+    ],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.playlists",
+    "connector_key": "youtube",
+    "streams": ["playlists"],
+    "derivable": {
+      "playlistId": "playlists.id",
+      "url": "playlists.url",
+      "title": "playlists.title",
+      "owner": "playlists.owner",
+      "ownerUrl": "playlists.owner_url",
+      "privacy": "playlists.visibility",
+      "videoCount": "playlists.video_count",
+      "views": "playlists.view_count"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Legacy capped at 50 playlists; modern is uncapped — a strict improvement, not a break."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.playlistItems",
+    "connector_key": "youtube",
+    "streams": ["playlist_items"],
+    "derivable": {
+      "playlists[].playlistId": "playlist_items.playlist_id",
+      "items[].videoId": "playlist_items.video_id",
+      "items[].videoUrl": "playlist_items.video_url",
+      "items[].videoTitle": "playlist_items.video_title",
+      "items[].channelTitle": "playlist_items.channel_title",
+      "items[].channelUrl": "playlist_items.channel_url",
+      "items[].durationText": "playlist_items.duration_seconds (D4: parsed to seconds, display string dropped)",
+      "items[].thumbnailUrl": "playlist_items.thumbnail_url"
+    },
+    "not_derivable": [],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.likes",
+    "connector_key": "youtube",
+    "streams": ["likes"],
+    "derivable": {
+      "videoId": "likes.video_id",
+      "videoUrl": "likes.video_url",
+      "videoTitle": "likes.video_title",
+      "channelTitle": "likes.channel_title",
+      "channelUrl": "likes.channel_url",
+      "durationText": "likes.duration_seconds (D4)",
+      "thumbnailUrl": "likes.thumbnail_url"
+    },
+    "not_derivable": [],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.watchLater",
+    "connector_key": "youtube",
+    "streams": ["watch_later"],
+    "derivable": {
+      "videoId": "watch_later.video_id",
+      "videoUrl": "watch_later.video_url",
+      "videoTitle": "watch_later.video_title",
+      "channelTitle": "watch_later.channel_title",
+      "channelUrl": "watch_later.channel_url",
+      "durationText": "watch_later.duration_seconds (D4)",
+      "thumbnailUrl": "watch_later.thumbnail_url"
+    },
+    "not_derivable": [],
+    "semantic_notes": [],
+    "status": "derivable"
+  },
+  {
+    "scope": "youtube.history",
+    "connector_key": "youtube",
+    "streams": ["watch_history"],
+    "derivable": {
+      "watchedAt": "watch_history.watched_at (full Takeout timestamp, strictly more precise than legacy's date-only resolution)",
+      "videoId": "watch_history.video_id (extractVideoId from video_url)",
+      "videoUrl": "watch_history.video_url",
+      "videoTitle": "watch_history.video_title",
+      "channelTitle": "watch_history.channel_title",
+      "timeWindow": "PROJECTION RULE (Tim, 2026-09-22, test-only, connectors/youtube/legacy-history-derivability.test.ts): slice youtube.watch_history to its latest 50 records by watched_at (descending); if the slice is non-empty, timeWindow = '<oldest watched_at in slice> to <newest watched_at in slice>' using the exact ISO watched_at strings, no reformatting; if empty, timeWindow = 'no watch history'. This replaces the legacy connector's hardcoded, always-identical constant 'top 50 most recent items' (connectors/google/youtube-playwright.js:1597, MAX_HISTORY_ITEMS=40), which never reflected the true span or shrank below 50 items."
+    },
+    "not_derivable": [
+      "views: CONFIRMED genuine loss, not fabricated. Legacy scraped the DOM metadata row (youtube-playwright.js:1062-1066, e.g. '349K views' text). Takeout's watch-history.json entries carry only {time, title, titleUrl, subtitles} (packages/polyfill-connectors/src/youtube-watch-history.ts:23-28, WatchHistoryEntry interface) — no view-count field exists in the export at all. connectors/youtube/parsers.ts:66 hardcodes view_count: null for exactly this reason.",
+      "description: CONFIRMED genuine loss. Legacy scraped a DOM snippet element (youtube-playwright.js:1069-1075). Takeout has no description field on a watch-history entry (same WatchHistoryEntry interface). parsers.ts:67 hardcodes description: null.",
+      "watchedAtText: genuine loss by design, not fabrication. Legacy's raw day-granularity section-header text (e.g. 'Yesterday', 'Jan 23, 2026') was used only to resolve watchedAt (youtube-playwright.js:901-950, resolveWatchedAt). watchedAtText is optional in the legacy schema; modern watched_at is a full Takeout timestamp, strictly more precise, with nothing left to reconstruct a display string from."
+    ],
+    "semantic_notes": [
+      "Test-only derivability evidence for this projection rule lives at packages/polyfill-connectors/connectors/youtube/legacy-history-derivability.test.ts (added this audit): 5 tests cover the 50-item slice + true-span timeWindow, an under-50-item account, an empty-history account, a NEGATIVE CONTROL proving the legacy connector's own hardcoded constant is schema-valid but semantically false (it claims 'top 50' when only 3 items/a 2-day span exist), and a NEGATIVE CONTROL for schema rejection of a malformed entry missing the required videoUrl field. All 5 pass. Per CONTRACTS.md's ownership boundary, this repo does not implement or ship the actual public-scope projection — Vana owns that; this test exists only to prove the accepted rule is mechanically sound before a Vana lane relies on it."
+    ],
+    "status": "loss"
+  }
+]
