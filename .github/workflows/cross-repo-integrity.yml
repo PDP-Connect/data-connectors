@@ -378,7 +378,8 @@ jobs:
             # two duplicate classes" (2026-08-18 final-v2 red-team), this must cover every
             # data-connect path those jobs actually compare: the definitions-snapshot
             # generator + its committed output back job (a), the six vendored connector
-            # directories back job (b), and local-collector/tsconfig.build.json backs job
+            # directories and their source revision back job (b), and
+            # local-collector/tsconfig.build.json backs job
             # (e) — without that last entry the pin could report fresh while job (e)
             # validates a packaging manifest data-connect's tracked ref has already changed.
             #
@@ -396,6 +397,7 @@ jobs:
               packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
               packages/local-collector/src/generated/collector-definitions.generated.ts
               packages/local-collector/tsconfig.build.json
+              packages/polyfill-connectors/vendor-source.json
               packages/polyfill-connectors/connectors/claude_code
               packages/polyfill-connectors/connectors/codex
               packages/polyfill-connectors/connectors/google_takeout
