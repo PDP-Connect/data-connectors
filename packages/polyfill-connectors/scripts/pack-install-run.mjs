@@ -89,9 +89,16 @@ console.log(\`PASS resolver: \${manifestFiles.length} packed manifest connector 
 `,
 	);
 	const result = await run(process.execPath, [scriptPath], { cwd: projectDir });
+	// Every source manifest must be packed and resolvable, so the expected
+	// count comes from the source tree rather than a hard-coded number.
+	const sourceManifestCount = (await readdir(path.join(packageRoot, "manifests"))).filter(
+		(file) => file.endsWith(".json"),
+	).length;
 	assert.match(
 		`${result.stdout}\n${result.stderr}`,
-		/PASS resolver: 45 packed manifest connector IDs resolve to built entries\./,
+		new RegExp(
+			`PASS resolver: ${sourceManifestCount} packed manifest connector IDs resolve to built entries\\.`,
+		),
 	);
 	log(result.stdout.trim());
 }
