@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icons/shopify.svg",
@@ -87,7 +87,6 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "order_date",
 			"consent_time_field": "order_date",
 			"selection": {
 				"fields": true,
