@@ -6,8 +6,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { manifestPath } from "../../src/connector-paths.ts";
+import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 test("codex connector succeeds when requested local stores are absent", async () => {
