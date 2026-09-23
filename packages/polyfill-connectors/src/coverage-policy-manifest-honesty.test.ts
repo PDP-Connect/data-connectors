@@ -246,7 +246,6 @@ function fingerprintSemanticStream(stream: ManifestStream): string {
  */
 const KNOWN_MISSING_REQUIRED = new Map([
 	["amazon.orders", "0f982754cdbd3515"],
-	["amazon.order_items", "4ebc04ded1936f87"],
 	["anthropic.conversations", "30ae75cafa437b1a"],
 	["anthropic.messages", "20d62f1a0c2f2052"],
 	["anthropic.projects", "415dccf66dc5c874"],

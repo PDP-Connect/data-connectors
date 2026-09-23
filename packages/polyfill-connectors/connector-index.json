@@ -9,7 +9,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/amazon",
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icons/amazon.svg",
@@ -257,13 +257,12 @@
 							"required": ["id", "order_id", "order_date", "name"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "order_date",
 						"consent_time_field": "order_date",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"relationships": [
 							{
 								"name": "order",
@@ -287,7 +286,8 @@
 							}
 						},
 						"coverage_strategy": "parent_detail_accounting",
-						"freshness_strategy": "manual_as_of"
+						"freshness_strategy": "manual_as_of",
+						"required": false
 					},
 					{
 						"name": "profile",
