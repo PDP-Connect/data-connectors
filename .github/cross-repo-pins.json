@@ -5,9 +5,9 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "54c42f3858f782c14be250bf5b9d16a999713c8e",
+      "sha": "74fbb4c76594232d0c986d639127737709e2c8e9",
       "branch": "vendor/data-connectors-hardcut-prep",
-      "note": "Coordinated hard cut: tracks the unmerged data-connect draft PR #238 (vendored claude_code/google_takeout sources, the shared youtube-watch-history module, and regenerated collector definitions from this branch). Must return to data-connect main after #238 merges, before this PR merges. Backs drift jobs (a) collector-definitions, (b) connector-sources, (e) collector-packaging-manifest."
+      "note": "Tracks data-connect draft PR #238 plus its recorded vendored-source revision. The connector-source gate compares that transitional copy with the recorded data-connectors commit, while the collector-definitions and packaging gates check the current runner. Return this pin to data-connect main after #238 merges and before this PR merges."
     },
     "pdpp": {
       "owner": "PDP-Connect",

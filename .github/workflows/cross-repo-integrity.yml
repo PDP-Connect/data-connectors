@@ -222,6 +222,7 @@ jobs:
         with:
           path: data-connectors
           persist-credentials: false
+          fetch-depth: 0 # source-copy gate reads the vendored revision from repository history
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
