@@ -122,15 +122,29 @@ export type MaxPageResolution =
 
 // ─── profile ────────────────────────────────────────────────────────────
 
+/** One delivery address on file, per legacy heb.profile's `deliveryAddresses[]`
+ *  (connectors/heb/schemas/heb.profile.json, D3: an array whose elements have
+ *  their own identity would be a child stream, but a delivery address has no
+ *  identity of its own beyond the parent profile — it stays an array field). */
+export interface DeliveryAddress {
+	address: string;
+	is_primary: boolean;
+	label: string | null;
+}
+
 /** Account profile scraped from /my-account/profile. Field names mirror the
  *  wholefoods.profile contract shape (capability-map.json lead_decision):
- *  {id, name, email}. `id` is synthesized (this connector has one account per
+ *  {id, name, email}, extended with `phone` and `delivery_addresses` to close
+ *  the legacy heb.profile parity gap (legacy connectors/heb/heb-playwright.js
+ *  scrapeProfile()). `id` is synthesized (this connector has one account per
  *  connection, so a fixed literal id is stable and unique within the stream). */
 export interface ProfileRecord {
+	delivery_addresses: DeliveryAddress[];
 	email: string | null;
 	fetched_at: string;
 	id: string;
 	name: string | null;
+	phone: string | null;
 	[field: string]: unknown;
 }
 
@@ -151,6 +165,16 @@ export type NutritionSource =
 
 export type NutritionConfidence = "high" | "medium" | "low";
 
+/** Product images, derived purely from `product_id` via H-E-B's CDN naming
+ *  convention (legacy connectors/heb/heb-playwright.js productImageUrl(),
+ *  lines 363-368) — never scraped, so this is always populated when
+ *  `product_id` resolves to a digits-only id and null otherwise (mirrors
+ *  parsers.ts productImageUrl's existing null-for-non-numeric-id contract). */
+export interface NutritionImages {
+	full: string;
+	thumbnail: string;
+}
+
 export interface NutritionRecord {
 	added_sugar_g: number | null;
 	allergens: string | null;
@@ -165,6 +189,7 @@ export interface NutritionRecord {
 	fiber_g: number | null;
 	highlights: string[] | null;
 	id: string;
+	images: NutritionImages | null;
 	ingredients: string | null;
 	iron_mg: number | null;
 	name: string;

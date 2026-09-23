@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -307,10 +307,10 @@
 		{
 			"name": "profile",
 			"required": false,
-			"description": "H-E-B account profile for this connection, scraped from My Account. Mirrors the wholefoods.profile shape (name, email) per the cutover capability map's lead_decision for heb.profile.",
+			"description": "H-E-B account profile for this connection, scraped from My Account. Mirrors the wholefoods.profile shape (name, email) per the cutover capability map's lead_decision for heb.profile, extended with phone and delivery_addresses to close the legacy heb.profile parity gap.",
 			"display": {
 				"label": "Your H-E-B profile",
-				"detail": "Name and email on file for your H-E-B account."
+				"detail": "Name, email, phone, and delivery addresses on file for your H-E-B account."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -325,6 +325,29 @@
 					},
 					"email": {
 						"type": ["string", "null"]
+					},
+					"phone": {
+						"type": ["string", "null"],
+						"description": "Legacy heb.profile parity field, ported from legacy connectors/heb/heb-playwright.js scrapeProfile()."
+					},
+					"delivery_addresses": {
+						"type": "array",
+						"description": "Legacy heb.profile parity field (deliveryAddresses[]), ported from legacy connectors/heb/heb-playwright.js scrapeProfile(). Not a child stream: an address has no identity beyond the parent profile record (D3).",
+						"items": {
+							"type": "object",
+							"properties": {
+								"address": {
+									"type": "string"
+								},
+								"is_primary": {
+									"type": "boolean"
+								},
+								"label": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["address", "is_primary", "label"]
+						}
 					},
 					"fetched_at": {
 						"type": "string",
@@ -463,6 +486,26 @@
 							"type": "string"
 						},
 						"description": "H-E-B-specific additional field, not in the shared wholefoods.nutrition contract."
+					},
+					"images": {
+						"description": "Legacy heb.nutrition parity field, derived purely from product_id via H-E-B's CDN naming convention (never scraped) — see legacy connectors/heb/heb-playwright.js productImageUrl().",
+						"oneOf": [
+							{
+								"type": "object",
+								"properties": {
+									"thumbnail": {
+										"type": "string"
+									},
+									"full": {
+										"type": "string"
+									}
+								},
+								"required": ["thumbnail", "full"]
+							},
+							{
+								"type": "null"
+							}
+						]
 					},
 					"fetched_at": {
 						"type": "string",

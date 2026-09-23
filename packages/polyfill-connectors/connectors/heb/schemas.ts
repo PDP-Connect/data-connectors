@@ -144,17 +144,31 @@ export const fetchedAtSchema = z
 	.regex(ISO_DATETIME_RE, "fetched_at must be an ISO-8601 datetime");
 
 /**
+ * A single delivery address on file (legacy heb.profile `deliveryAddresses[]`,
+ * connectors/heb/schemas/heb.profile.json D3). Not its own child stream: a
+ * delivery address carries no identity beyond the parent profile record.
+ */
+const deliveryAddressSchema = z.object({
+	address: pdppSafeText.min(1).max(500),
+	is_primary: z.boolean(),
+	label: pdppSafeText.max(200).nullable(),
+});
+
+/**
  * profile stream (manifest required: id). One record for the account tied to
  * this connection — {id, name, email}, mirroring the wholefoods.profile
- * contract shape (capability-map.json lead_decision for heb.profile). `id` is
- * a fixed literal ("profile"): this connector has exactly one account per
- * connection.
+ * contract shape (capability-map.json lead_decision for heb.profile), plus
+ * `phone` and `delivery_addresses` to close the legacy heb.profile parity gap
+ * (legacy connectors/heb/schemas/heb.profile.json). `id` is a fixed literal
+ * ("profile"): this connector has exactly one account per connection.
  */
 export const profileSchema = z.object({
+	delivery_addresses: deliveryAddressSchema.array(),
 	email: z.string().email("email must be a valid email address").nullable(),
 	fetched_at: z.string(),
 	id: z.literal("profile"),
 	name: pdppSafeText.max(200).nullable(),
+	phone: pdppSafeText.max(40).nullable(),
 });
 
 const NUTRITION_SOURCE_VALUES = [
@@ -167,13 +181,28 @@ const NUTRITION_SOURCE_VALUES = [
 
 const nonNegativeNutrientSchema = z.number().min(0).max(100_000).nullable();
 
+// HEB CDN image URLs, both derived from product_id (never scraped) — see
+// parsers.ts productImages(). https:// only; the CDN convention observed in
+// legacy connectors/heb/heb-playwright.js productImageUrl() is always https.
+const cdnImageUrlSchema = z
+	.string()
+	.url()
+	.startsWith("https://images.heb.com/");
+
+const nutritionImagesSchema = z
+	.object({
+		full: cdnImageUrlSchema,
+		thumbnail: cdnImageUrlSchema,
+	})
+	.nullable();
+
 /**
  * nutrition stream (manifest required: id, product_id, name). One record per
  * unique product ordered. Common nutrient field names (calories, protein_g,
  * carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size,
  * servings_per_container) are shared with wholefoods.nutrition's contracted
  * shape (capability-map.json). H-E-B keeps its extra legacy fields
- * (vitamins/minerals/upc/ingredients/allergens/category/highlights) as
+ * (vitamins/minerals/upc/ingredients/allergens/category/highlights/images) as
  * additional optional fields per the lead_decision — no shared-code superset.
  */
 export const nutritionSchema = z.object({
@@ -190,6 +219,7 @@ export const nutritionSchema = z.object({
 	fiber_g: nonNegativeNutrientSchema,
 	highlights: pdppSafeText.max(200).array().nullable(),
 	id: z.string().min(1).max(64),
+	images: nutritionImagesSchema,
 	ingredients: pdppSafeText.max(4000).nullable(),
 	iron_mg: nonNegativeNutrientSchema,
 	name: pdppSafeText.min(1).max(1024),

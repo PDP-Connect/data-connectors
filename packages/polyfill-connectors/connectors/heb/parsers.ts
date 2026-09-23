@@ -13,12 +13,14 @@
 
 import { parseHTML } from "linkedom";
 import type {
+	DeliveryAddress,
 	DetailItem,
 	FulfillmentMethod,
 	ListPageDiagnostics,
 	ListPageOrder,
 	MaxPageResolution,
 	NutritionDomExtraction,
+	NutritionImages,
 	NutritionRecord,
 	NutritionSource,
 	OrderDetail,
@@ -573,6 +575,27 @@ export function productImageUrl(productId: string | null): string | null {
 }
 
 /**
+ * Derive both H-E-B product image CDN URLs (thumbnail + full) from a product
+ * id, per legacy connectors/heb/heb-playwright.js productImageUrl() (lines
+ * 363-368): the thumbnail uses the same zero-padded convention as
+ * `productImageUrl()` above; the full-gallery image uses the plain
+ * (unpadded) product id with a `-1` suffix. Returns null under the same
+ * digits-only-id condition as `productImageUrl`.
+ */
+export function productImages(
+	productId: string | null,
+): NutritionImages | null {
+	const thumbnail = productImageUrl(productId);
+	if (!(thumbnail && productId)) {
+		return null;
+	}
+	return {
+		full: `https://images.heb.com/is/image/HEBGrocery/${productId}-1`,
+		thumbnail,
+	};
+}
+
+/**
  * Find the closest ancestor "row" for a product-detail link. LIVE-VERIFIED:
  * unlike the list page, real order-detail rows genuinely are
  * `<li data-qe-id="itemRow">` — `.closest("li")` is correct here as-is.
@@ -957,6 +980,11 @@ export function buildOrderItemRecord(
 // used (single account per connection) so the stream has a stable key.
 
 const HEB_PROFILE_RECORD_ID = "profile";
+// legacy connectors/heb/heb-playwright.js scrapeProfile(): an address card is
+// distinguished from other `main > div > div` cards by containing a US state
+// abbreviation + 5-digit zip (e.g. "Austin, TX 78701") — the only structural
+// signal available since address cards carry no data-qe-id/aria markers.
+const STATE_ZIP_RE = /[A-Z]{2}\s+\d{5}/;
 
 function labeledFieldValue(document: Document, label: string): string | null {
 	const labelEl = [...document.querySelectorAll("p")].find(
@@ -966,29 +994,71 @@ function labeledFieldValue(document: Document, label: string): string | null {
 	return value || null;
 }
 
+/** Delivery addresses on /my-account/profile. Mirrors legacy
+ *  connectors/heb/heb-playwright.js scrapeProfile()'s address-card scan:
+ *  each `main > div > div` card that contains a `<p>` and a state+zip pattern
+ *  is an address card; `isPrimary` comes from the literal word "Primary"
+ *  appearing anywhere in the card (legacy behavior, kept as-is). */
+function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
+	const addresses: DeliveryAddress[] = [];
+	for (const card of document.querySelectorAll("main > div > div")) {
+		const addrEl = card.querySelector("p");
+		if (!addrEl) {
+			continue;
+		}
+		const cardText = card.textContent ?? "";
+		if (!STATE_ZIP_RE.test(cardText)) {
+			continue;
+		}
+		const labelEl = card.querySelector("div");
+		const address = normText(addrEl).replace(WHITESPACE_RE, " ").trim();
+		if (!address) {
+			continue;
+		}
+		const label = (labelEl?.firstChild?.textContent ?? "").trim();
+		addresses.push({
+			address,
+			is_primary: cardText.includes("Primary"),
+			label: label || null,
+		});
+	}
+	return addresses;
+}
+
 /** Pure DOM extraction for /my-account/profile. Structural: matches a <p>
  *  whose text is exactly the field label, then reads its sibling's text —
  *  no free-text regex over concatenated innerText. */
 export function parseProfileDom(html: string): {
+	deliveryAddresses: DeliveryAddress[];
 	email: string | null;
 	name: string | null;
+	phone: string | null;
 } {
 	const { document } = parseHTML(html);
 	return {
+		deliveryAddresses: parseDeliveryAddresses(document),
 		email: labeledFieldValue(document, "Email"),
 		name: labeledFieldValue(document, "Name"),
+		phone: labeledFieldValue(document, "Mobile number"),
 	};
 }
 
 export function buildProfileRecord(
-	extraction: { email: string | null; name: string | null },
+	extraction: {
+		deliveryAddresses: DeliveryAddress[];
+		email: string | null;
+		name: string | null;
+		phone: string | null;
+	},
 	emittedAt: string,
 ): ProfileRecord {
 	return {
+		delivery_addresses: extraction.deliveryAddresses,
 		email: extraction.email,
 		fetched_at: emittedAt,
 		id: HEB_PROFILE_RECORD_ID,
 		name: extraction.name,
+		phone: extraction.phone,
 	};
 }
 
@@ -1274,6 +1344,7 @@ export function buildNutritionRecord(
 		fiber_g: extraction.fiberG,
 		highlights: extraction.highlights,
 		id: productId,
+		images: productImages(productId),
 		ingredients: extraction.ingredients,
 		iron_mg: extraction.ironMg,
 		name: extraction.name || fallbackName,

@@ -1135,18 +1135,17 @@
           "migration": "new stream",
           "field_map": {
             "name": "profile.name",
-            "email": "profile.email"
+            "email": "profile.email",
+            "phone": "profile.phone",
+            "deliveryAddresses[].address": "profile.delivery_addresses[].address",
+            "deliveryAddresses[].isPrimary": "profile.delivery_addresses[].is_primary",
+            "deliveryAddresses[].label": "profile.delivery_addresses[].label"
           },
-          "dropped": [
-            {
-              "field": "phone, deliveryAddresses[]",
-              "reason": "not part of the lead_decision shape ({id,name,email} mirroring wholefoods.profile); addresses stay out of scope as PII not advertised elsewhere"
-            }
-          ],
+          "dropped": [],
           "status": "implemented",
           "question": "Add a heb.profile stream mirroring wholefoods.profile (name, email only, per D8 pattern), or accept as deliberate break? Addresses likely stay out of scope regardless (PII, not advertised elsewhere).",
-          "lead_decision": "ADD stream heb.profile {id,name,email}, mirroring wholefoods.profile.",
-          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb lane, commit fb3ce21). Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists). heb has no browser profile under Tim's bootstrap, so a live run to promote to fixture_proven/live_proven is pending."
+          "lead_decision": "SUPERSEDED (2026-09-22, cut-heb-gaps lane): full legacy parity required — no permanent fallback, legacy connector deleted after this cutover. `phone` and `delivery_addresses[]` (D3: array field, no independent identity) ADDED to profile, ported from legacy connectors/heb/heb-playwright.js scrapeProfile(). The prior lead_decision recorded below is stale and no longer in effect.",
+          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb-gaps lane). Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists) plus connectors/heb/legacy-derivability.test.ts, which proves the full legacy heb.profile payload (including phone/deliveryAddresses) is reconstructable from PDPP profile records and validates against the frozen legacy JSON schema. heb has no browser profile under Tim's bootstrap as of this writing, so a live run to promote to fixture_proven/live_proven is pending."
         },
         {
           "legacy_scope": "heb.nutrition",
@@ -1180,13 +1179,10 @@
             "ingredients": "nutrition.ingredients",
             "allergens": "nutrition.allergens",
             "category": "nutrition.category",
-            "highlights": "nutrition.highlights"
+            "highlights": "nutrition.highlights",
+            "images": "nutrition.images ({thumbnail, full}, derived purely from product_id via H-E-B's CDN naming convention, per legacy heb-playwright.js productImageUrl())"
           },
           "dropped": [
-            {
-              "field": "images",
-              "reason": "legacy gallery-image scrape (product photo URLs); not part of the lead_decision's field set and order_items.image_url already carries the purchase-line product image"
-            },
             {
               "field": "coverage{}",
               "reason": "D3 aggregate; report as run PROGRESS, not a record"
@@ -1194,8 +1190,8 @@
           ],
           "status": "implemented",
           "question": "heb's legacy nutrition schema is richer than wholefoods.nutrition's contracted shape (extra vitamins/minerals/UPC/ingredients/allergens). Extend the shared nutrition contract to a superset, or truncate heb to match wholefoods and drop the extra fields?",
-          "lead_decision": "ADD stream heb.nutrition. Share field names with wholefoods.nutrition for the common nutrients. H-E-B keeps its extra legacy fields (vitamins, minerals, upc, ingredients, allergens) as additional optional fields in its own manifest. No shared-code superset is required.",
-          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb lane, commit fb3ce21). Sources product targets from order_items emitted in the same run, deduped by product_id, bounded to 50 lookups/run. Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists). heb has no browser profile under Tim's bootstrap, so a live run to promote to fixture_proven/live_proven is pending. NOTE: wholefoods.nutrition/wholefoods.profile, the shapes this entry mirrors, are themselves not yet implemented in code as of this writing (wholefoods/index.ts is still a SKIP_RESULT scaffold with only orders/order_items streams) \u2014 this lane followed the field names recorded in this capability-map.json entry for wholefoods, not a running wholefoods implementation."
+          "lead_decision": "ADD stream heb.nutrition. Share field names with wholefoods.nutrition for the common nutrients. H-E-B keeps its extra legacy fields (vitamins, minerals, upc, ingredients, allergens) as additional optional fields in its own manifest. No shared-code superset is required. SUPERSEDED IN PART (2026-09-22, cut-heb-gaps lane): `images` is no longer dropped \u2014 full legacy parity is required (no permanent fallback; legacy connector deleted after this cutover) and `images` is purely product_id-derived, so it is now an additional optional nutrition field like the other H-E-B-specific fields.",
+          "implementation_note": "Implemented in packages/polyfill-connectors/connectors/heb (cut-heb lane, commit fb3ce21; images field added in cut-heb-gaps lane). Sources product targets from order_items emitted in the same run, deduped by product_id, bounded to 50 lookups/run. Parser/schema tests use hand-authored synthetic fixtures (no real heb.com capture exists) plus connectors/heb/legacy-derivability.test.ts, which proves the full legacy heb.nutrition envelope (items keyed by product_id, each carrying images, plus the coverage envelope) is reconstructable from PDPP nutrition records and validates against the frozen legacy JSON schema. heb has no browser profile under Tim's bootstrap as of this writing, so a live run to promote to fixture_proven/live_proven is pending. NOTE: wholefoods.nutrition/wholefoods.profile, the shapes this entry mirrors, are themselves not yet implemented in code as of this writing (wholefoods/index.ts is still a SKIP_RESULT scaffold with only orders/order_items streams) \u2014 this lane followed the field names recorded in this capability-map.json entry for wholefoods, not a running wholefoods implementation."
         }
       ]
     },

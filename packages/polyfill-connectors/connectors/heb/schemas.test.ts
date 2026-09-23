@@ -24,10 +24,18 @@ import {
 // shapes are derived from the legacy connectors/heb/schemas/heb.profile.json
 // and heb.nutrition.json contracts, not a live capture.
 const PROFILE_RECORD = {
+	delivery_addresses: [
+		{
+			address: "123 Fictional Ave, Austin, TX 78701",
+			is_primary: true,
+			label: "Home",
+		},
+	],
 	email: "shopper@example.com",
 	fetched_at: "2026-07-14T12:00:00.000Z",
 	id: "profile",
 	name: "Jamie Shopper",
+	phone: "(512) 555-0100",
 };
 
 // SYNTHETIC: see PROFILE_RECORD note above.
@@ -45,6 +53,11 @@ const NUTRITION_RECORD = {
 	fiber_g: 0,
 	highlights: ["Organic"],
 	id: "123456789",
+	images: {
+		full: "https://images.heb.com/is/image/HEBGrocery/123456789-1",
+		thumbnail:
+			"https://images.heb.com/is/image/HEBGrocery/prd-small/123456789.jpg",
+	},
 	ingredients: "Grade A organic reduced fat milk, vitamin D3",
 	iron_mg: 0,
 	name: "H-E-B Organic 2% Reduced Fat Milk",
@@ -318,6 +331,25 @@ test("profile schema rejects an id other than the fixed literal", () => {
 	);
 });
 
+test("profile schema accepts null phone and an empty delivery_addresses array", () => {
+	const result = profileSchema.safeParse({
+		...PROFILE_RECORD,
+		delivery_addresses: [],
+		phone: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("profile schema rejects a delivery address missing required fields", () => {
+	assert.equal(
+		profileSchema.safeParse({
+			...PROFILE_RECORD,
+			delivery_addresses: [{ address: "123 Fictional Ave" }],
+		}).success,
+		false,
+	);
+});
+
 test("nutrition schema accepts a parser-shaped record", () => {
 	const result = nutritionSchema.safeParse(NUTRITION_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
@@ -337,6 +369,7 @@ test("nutrition schema accepts an all-null-macros not_found record", () => {
 		fat_g: null,
 		fiber_g: null,
 		highlights: null,
+		images: null,
 		ingredients: null,
 		iron_mg: null,
 		potassium_mg: null,
@@ -352,6 +385,19 @@ test("nutrition schema accepts an all-null-macros not_found record", () => {
 		vitamin_d_mcg: null,
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("nutrition schema rejects a non-heb-cdn images url", () => {
+	assert.equal(
+		nutritionSchema.safeParse({
+			...NUTRITION_RECORD,
+			images: {
+				full: "https://evil.example.com/1",
+				thumbnail: NUTRITION_RECORD.images.thumbnail,
+			},
+		}).success,
+		false,
+	);
 });
 
 test("nutrition schema rejects an unknown source", () => {

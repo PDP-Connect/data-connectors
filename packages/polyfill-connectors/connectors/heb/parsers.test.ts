@@ -38,6 +38,7 @@ import {
 	parseOrdersListDom,
 	parseOrdersListStructured,
 	parseProfileDom,
+	productImages,
 	productImageUrl,
 	resolveDomMaxPage,
 	resolveMaxPage,
@@ -686,6 +687,30 @@ test("productImageUrl returns null for a null product id", () => {
 	assert.equal(productImageUrl(null), null);
 });
 
+test("productImages derives both thumbnail and full CDN urls from a product id", () => {
+	assert.deepEqual(productImages("123456789"), {
+		full: "https://images.heb.com/is/image/HEBGrocery/123456789-1",
+		thumbnail:
+			"https://images.heb.com/is/image/HEBGrocery/prd-small/123456789.jpg",
+	});
+});
+
+test("productImages zero-pads only the thumbnail, never the full-image id", () => {
+	assert.deepEqual(productImages("2001"), {
+		full: "https://images.heb.com/is/image/HEBGrocery/2001-1",
+		thumbnail:
+			"https://images.heb.com/is/image/HEBGrocery/prd-small/000002001.jpg",
+	});
+});
+
+test("productImages returns null for a non-numeric product id", () => {
+	assert.equal(productImages("abc-123"), null);
+});
+
+test("productImages returns null for a null product id", () => {
+	assert.equal(productImages(null), null);
+});
+
 // ─── Incapsula block detection ────────────────────────────────────────────
 
 test("isIncapsulaBlocked detects the documented empty-shell heuristic", () => {
@@ -1103,6 +1128,17 @@ const SYNTHETIC_PROFILE_HTML = `
     <p>Email</p>
     <p>shopper@example.com</p>
   </div>
+  <div>
+    <p>Mobile number</p>
+    <p>(512) 555-0100</p>
+  </div>
+  <div>
+    <div>
+      <div>Home</div>
+      <p>123 Fictional Ave, Austin, TX 78701</p>
+      <span aria-label="Primary">Primary</span>
+    </div>
+  </div>
 </main></body></html>
 `;
 
@@ -1151,29 +1187,61 @@ const SYNTHETIC_NUTRITION_NOT_FOUND_HTML = `
 </main></body></html>
 `;
 
-test("parseProfileDom extracts name and email from labeled fields", () => {
+test("parseProfileDom extracts name, email, phone, and delivery addresses from labeled fields", () => {
 	const result = parseProfileDom(SYNTHETIC_PROFILE_HTML);
 	assert.deepEqual(result, {
+		deliveryAddresses: [
+			{
+				address: "123 Fictional Ave, Austin, TX 78701",
+				is_primary: true,
+				label: "Home",
+			},
+		],
 		email: "shopper@example.com",
 		name: "Jamie Shopper",
+		phone: "(512) 555-0100",
 	});
 });
 
-test("parseProfileDom returns nulls when labels are absent", () => {
+test("parseProfileDom returns nulls and an empty address list when labels are absent", () => {
 	const result = parseProfileDom("<html><body><main></main></body></html>");
-	assert.deepEqual(result, { email: null, name: null });
+	assert.deepEqual(result, {
+		deliveryAddresses: [],
+		email: null,
+		name: null,
+		phone: null,
+	});
 });
 
 test("buildProfileRecord builds the fixed-literal-id profile record", () => {
 	const record = buildProfileRecord(
-		{ email: "shopper@example.com", name: "Jamie Shopper" },
+		{
+			deliveryAddresses: [
+				{
+					address: "123 Fictional Ave, Austin, TX 78701",
+					is_primary: true,
+					label: "Home",
+				},
+			],
+			email: "shopper@example.com",
+			name: "Jamie Shopper",
+			phone: "(512) 555-0100",
+		},
 		"2026-07-14T12:00:00.000Z",
 	);
 	assert.deepEqual(record, {
+		delivery_addresses: [
+			{
+				address: "123 Fictional Ave, Austin, TX 78701",
+				is_primary: true,
+				label: "Home",
+			},
+		],
 		email: "shopper@example.com",
 		fetched_at: "2026-07-14T12:00:00.000Z",
 		id: "profile",
 		name: "Jamie Shopper",
+		phone: "(512) 555-0100",
 	});
 });
 
@@ -1221,6 +1289,11 @@ test("buildNutritionRecord uses heb_product_page source when a panel was found",
 	assert.equal(record.confidence, "high");
 	assert.equal(record.product_id, "123456789");
 	assert.equal(record.id, "123456789");
+	assert.deepEqual(record.images, {
+		full: "https://images.heb.com/is/image/HEBGrocery/123456789-1",
+		thumbnail:
+			"https://images.heb.com/is/image/HEBGrocery/prd-small/123456789.jpg",
+	});
 });
 
 test("buildNutritionRecord uses not_found source and the fallback name when no panel exists", () => {
@@ -1235,4 +1308,9 @@ test("buildNutritionRecord uses not_found source and the fallback name when no p
 	assert.equal(record.confidence, "low");
 	assert.equal(record.name, "Fallback Item Name");
 	assert.equal(record.calories, null);
+	assert.deepEqual(record.images, {
+		full: "https://images.heb.com/is/image/HEBGrocery/999-1",
+		thumbnail:
+			"https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg",
+	});
 });
