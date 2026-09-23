@@ -308,5 +308,8 @@
 			"coverage_strategy": "singleton_presence",
 			"freshness_strategy": "manual_as_of"
 		}
-	]
+	],
+	"reason_display_messages": {
+		"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+	}
 }

@@ -58,13 +58,6 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			username: ["CHASE_USERNAME"],
 		},
 	},
-	chatgpt: {
-		credentialKind: "username_password",
-		secretFieldEnvVars: {
-			password: ["CHATGPT_PASSWORD"],
-			username: ["CHATGPT_USERNAME"],
-		},
-	},
 	doordash: {
 		credentialKind: "username_password",
 		secretFieldEnvVars: {
@@ -129,10 +122,6 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			slack_token: ["SLACK_TOKEN"],
 			slack_workspace: ["SLACK_WORKSPACE"],
 		},
-	},
-	spotify: {
-		credentialKind: "access_token",
-		secretEnvVars: ["SPOTIFY_ACCESS_TOKEN"],
 	},
 	steam: {
 		credentialKind: "api_key",
