@@ -1,0 +1,14 @@
+{
+	"data": {
+		"agentContact": {
+			"smsPhoneNumber": "+15550119999",
+			"voicePhoneNumber": "+15550118888",
+			"voiceCallsEnabled": false,
+			"whatsAppChannelPhoneNumber": "+15550118888",
+			"email": "adalovelace@mail.instinct.com",
+			"agentMailStatus": "READY",
+			"agentPhoneNumber": null,
+			"agentPhoneStatus": "NOT_AVAILABLE"
+		}
+	}
+}

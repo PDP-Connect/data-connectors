@@ -42,6 +42,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["icloud_notes", "icloud-notes", "New connector on the hard-cut review branch; it publishes with the coordinated hard cut, not before, so Desktop auto-update does not receive it early."],
     ["ical", "ical"],
     ["imessage", "imessage"],
+    ["instinct", "instinct"],
     ["jellyfin", "jellyfin"],
     ["linkedin", "linkedin"],
     ["loom", "loom"],

@@ -67,6 +67,9 @@ function assertSafeRecognisableSvg(source, filename) {
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
   "google_takeout.json",
+  // Instinct: invite-only product launched 2026; no mark in the vendored
+  // offline sources yet, so it takes the monogram fallback like the rest.
+  "instinct.json",
   "oura.json",
   "pocket.json",
   "usaa.json",

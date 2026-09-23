@@ -1,0 +1,23 @@
+{
+	"data": {
+		"chats": {
+			"cursor": null,
+			"chats": [
+				{
+					"id": "chat-01TESTWHATSAPPTESTTESTTEST",
+					"title": "WhatsApp",
+					"source": "whatsapp_channel",
+					"status": "active",
+					"pendingTurnStartedAt": null
+				},
+				{
+					"id": "chat-01TESTMAINTESTTESTTESTTEST",
+					"title": "Main",
+					"source": "main",
+					"status": "active",
+					"pendingTurnStartedAt": 1789070100
+				}
+			]
+		}
+	}
+}

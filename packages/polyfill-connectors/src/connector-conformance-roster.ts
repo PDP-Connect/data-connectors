@@ -88,6 +88,11 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
+	// Real collector, Development tier: exercised live over CDP against an
+	// owner account, but Instinct is invite-only private beta and that account
+	// had no connections, devices, trusted people, or vault entries, so four of
+	// its eight streams are unproven against non-empty data.
+	instinct: { testFile: "connectors/instinct/integration.test.ts" },
 	meta: { testFile: "connectors/meta/integration.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a

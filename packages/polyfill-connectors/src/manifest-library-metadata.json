@@ -337,6 +337,18 @@
 		}
 	},
 	{
+		"file": "instinct.json",
+		"manifest": {
+			"connector_key": "instinct",
+			"reason_display_messages": {
+				"http_error": "We hit a network problem talking to Instinct",
+				"not_available": "Instinct did not return this part of your account",
+				"parse_error": "Instinct sent back a response we could not read",
+				"shape_check_failed": "The data from Instinct did not look like we expected"
+			}
+		}
+	},
+	{
 		"file": "jellyfin.json",
 		"manifest": {
 			"connector_key": "jellyfin",

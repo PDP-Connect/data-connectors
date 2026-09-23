@@ -1,0 +1,126 @@
+{
+	"data": {
+		"chatHistory": {
+			"cursor": null,
+			"events": [
+				{
+					"id": "00000000-0000-4000-8000-000000000091",
+					"type": "message",
+					"createdAt": 1789060000,
+					"message": {
+						"id": "msg-0091TEST",
+						"role": "user",
+						"content": "Here is my calendar for the week.",
+						"readAt": 1789060002,
+						"origin": null,
+						"attachments": [
+							{
+								"id": "att-01TEST",
+								"kind": "file",
+								"mimeType": "application/pdf",
+								"filename": "week.pdf",
+								"byteSize": 20480,
+								"signedUrl": "https://files.example.invalid/att-01TEST?sig=TESTSIGNATURE"
+							}
+						]
+					},
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000092",
+					"type": "action",
+					"createdAt": 1789060010,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": {
+						"actionType": "click",
+						"coordinate": [120, 340],
+						"text": null,
+						"key": null,
+						"scrollDirection": null,
+						"scrollAmount": null,
+						"command": null
+					},
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000093",
+					"type": "screenshot",
+					"createdAt": 1789060011,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": {
+						"url": "https://files.example.invalid/shot-01TEST.png?sig=TESTSIGNATURE"
+					},
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000094",
+					"type": "draft_field",
+					"createdAt": 1789060020,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": {
+						"label": "Party size",
+						"before": null,
+						"content": "2",
+						"userValue": "3",
+						"userEditedAt": 1789060025
+					}
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000095",
+					"type": "message",
+					"createdAt": 1789060030,
+					"message": {
+						"id": "msg-0095TEST",
+						"role": "assistant",
+						"content": "Your week looks open on Friday evening.",
+						"readAt": null,
+						"origin": {
+							"kind": "agent",
+							"agentDisplayName": "Instinct"
+						},
+						"attachments": []
+					},
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				}
+			]
+		}
+	}
+}

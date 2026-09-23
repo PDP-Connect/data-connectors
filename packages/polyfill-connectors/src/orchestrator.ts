@@ -75,6 +75,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	doordash: c("doordash"),
 	whatsapp: c("whatsapp"),
 	slack: c("slack"),
+	instinct: c("instinct"),
 	pocket: c("pocket"),
 	google_takeout: c("google_takeout"),
 	google_maps: c("google_maps"),

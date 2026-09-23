@@ -1,0 +1,2 @@
+{"battery_level":87,"created_at":"2026-09-10T19:24:19.000Z","device_type":"mac","hostname":"ada-mbp","id":"device-01TEST","is_charging":false,"is_connected":true,"name":"Ada's Laptop","observed_at":"2026-09-22T19:30:00.000Z","os_version":"15.6"}
+{"battery_level":null,"created_at":"2026-08-01T12:00:00.000Z","device_type":"iphone","hostname":null,"id":"device-02TEST","is_charging":null,"is_connected":false,"name":"Ada's Phone","observed_at":"2026-09-22T19:30:00.000Z","os_version":"18.2"}
