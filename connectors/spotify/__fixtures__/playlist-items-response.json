@@ -11,5 +11,16 @@
 		"total": 7
 	},
 	"snapshot_id": "fixture-snapshot",
-	"description": null
+	"description": null,
+	"uri": "spotify:playlist:fixtureplaylistitems",
+	"followers": {
+		"total": 3
+	},
+	"images": [
+		{
+			"url": "https://i.scdn.co/image/fixture",
+			"width": 640,
+			"height": 640
+		}
+	]
 }

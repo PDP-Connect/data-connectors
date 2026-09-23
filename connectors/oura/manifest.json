@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/oura",
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Oura",
 	"runtime_requirements": {
 		"bindings": {
@@ -114,6 +114,21 @@
 					"sleep_score": {
 						"type": ["integer", "null"],
 						"x_pdpp_role": "amount"
+					},
+					"average_breath": {
+						"type": ["number", "null"]
+					},
+					"restless_periods": {
+						"type": ["integer", "null"]
+					},
+					"time_in_bed": {
+						"type": ["integer", "null"]
+					},
+					"type": {
+						"type": ["string", "null"]
+					},
+					"contributors": {
+						"type": "object"
 					}
 				},
 				"required": ["id", "day"]
@@ -125,6 +140,7 @@
 				"fields": true,
 				"resources": true
 			},
+			"required": true,
 			"incremental": true,
 			"query": {
 				"range_filters": {
@@ -180,6 +196,7 @@
 				"fields": true,
 				"resources": true
 			},
+			"required": true,
 			"incremental": true,
 			"query": {
 				"range_filters": {
@@ -230,6 +247,27 @@
 					},
 					"equivalent_walking_distance": {
 						"type": ["integer", "null"]
+					},
+					"high_activity_time": {
+						"type": ["integer", "null"]
+					},
+					"medium_activity_time": {
+						"type": ["integer", "null"]
+					},
+					"low_activity_time": {
+						"type": ["integer", "null"]
+					},
+					"sedentary_time": {
+						"type": ["integer", "null"]
+					},
+					"resting_time": {
+						"type": ["integer", "null"]
+					},
+					"inactivity_alerts": {
+						"type": ["integer", "null"]
+					},
+					"contributors": {
+						"type": "object"
 					}
 				},
 				"required": ["id", "day"]
@@ -241,6 +279,7 @@
 				"fields": true,
 				"resources": true
 			},
+			"required": true,
 			"incremental": true,
 			"query": {
 				"range_filters": {

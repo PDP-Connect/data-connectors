@@ -33,7 +33,16 @@ function unpacedGovernor(): ReturnType<typeof createConnectorHttpGovernor> {
 }
 
 interface OuraPageFixture {
-	data: Array<{ day: string; id: string; score?: number }>;
+	data: Array<{
+		average_breath?: number;
+		contributors?: Record<string, number>;
+		day: string;
+		id: string;
+		restless_periods?: number;
+		score?: number;
+		time_in_bed?: number;
+		type?: string;
+	}>;
 	next_token?: string | null;
 }
 
@@ -52,6 +61,36 @@ function withOuraPages<T>(
 		requested.push(new URL(String(input)));
 		const page = pages[index] ?? { data: [] };
 		index += 1;
+		return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
+	}) as typeof globalThis.fetch;
+	return run(requested).finally(() => {
+		globalThis.fetch = original;
+	});
+}
+
+/**
+ * Endpoint-aware variant: `collectSleep` fetches /sleep and /daily_sleep in
+ * parallel (Promise.all), so a single shared page queue (indexed by request
+ * order) cannot deterministically serve both endpoints alongside another
+ * stream's own walk. Each endpoint gets its own independent page queue keyed
+ * by the last path segment (`sleep`, `daily_sleep`, `daily_readiness`,
+ * `daily_activity`).
+ */
+function withOuraEndpointPages<T>(
+	pagesByEndpoint: Record<string, OuraPageFixture[]>,
+	run: (requested: URL[]) => Promise<T>,
+): Promise<T> {
+	const original = globalThis.fetch;
+	const requested: URL[] = [];
+	const indexByEndpoint: Record<string, number> = {};
+	globalThis.fetch = ((input: URL | string) => {
+		const url = new URL(String(input));
+		requested.push(url);
+		const endpoint = url.pathname.split("/").at(-1) ?? "";
+		const queue = pagesByEndpoint[endpoint] ?? [];
+		const i = indexByEndpoint[endpoint] ?? 0;
+		indexByEndpoint[endpoint] = i + 1;
+		const page = queue[i] ?? { data: [] };
 		return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
 	}) as typeof globalThis.fetch;
 	return run(requested).finally(() => {
@@ -257,13 +296,21 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 		},
 		streams: [{ name: "sleep" }, { name: "activity" }],
 	});
-	await withOuraPages(
-		[
-			// sleep: one page, exhausted.
-			{ data: [{ id: "s1", day: "2026-08-05" }], next_token: null },
+	await withOuraEndpointPages(
+		{
+			// sleep: one page, exhausted (both the session and daily_sleep walks).
+			sleep: [{ data: [{ id: "s1", day: "2026-08-05" }], next_token: null }],
+			daily_sleep: [
+				{
+					data: [{ id: "ds1", day: "2026-08-05", score: 80 }],
+					next_token: null,
+				},
+			],
 			// activity: still advertising more when the 1-page budget runs out.
-			{ data: [{ id: "a1", day: "2026-08-06" }], next_token: "tok-2" },
-		],
+			daily_activity: [
+				{ data: [{ id: "a1", day: "2026-08-06" }], next_token: "tok-2" },
+			],
+		},
 		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
 	);
 
@@ -286,5 +333,120 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 		lastStateCursor(messages, "activity"),
 		{ last_day: "2026-07-31" },
 		"the capped stream holds its own cursor",
+	);
+});
+
+test("sleep joins its per-session document with the same day's daily_sleep score and contributors", async () => {
+	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
+	await withOuraEndpointPages(
+		{
+			sleep: [
+				{
+					data: [
+						{
+							id: "s1",
+							day: "2026-08-05",
+							average_breath: 14.2,
+							restless_periods: 12,
+							time_in_bed: 27_600,
+							type: "long_sleep",
+						},
+					],
+					next_token: null,
+				},
+			],
+			daily_sleep: [
+				{
+					data: [
+						{
+							id: "ds1",
+							day: "2026-08-05",
+							score: 80,
+							contributors: { deep_sleep: 75, efficiency: 90 },
+						},
+					],
+					next_token: null,
+				},
+			],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+
+	assert.equal(records.length, 1);
+	const record = records[0]?.data as Record<string, unknown>;
+	assert.equal(record.sleep_score, 80);
+	assert.deepEqual(record.contributors, { deep_sleep: 75, efficiency: 90 });
+	assert.equal(record.average_breath, 14.2);
+	assert.equal(record.restless_periods, 12);
+	assert.equal(record.time_in_bed, 27_600);
+	assert.equal(record.type, "long_sleep");
+});
+
+test("sleep tolerates a day with a session but no matching daily_sleep document", async () => {
+	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
+	await withOuraEndpointPages(
+		{
+			sleep: [{ data: [{ id: "s1", day: "2026-08-05" }], next_token: null }],
+			daily_sleep: [{ data: [], next_token: null }],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+
+	assert.equal(records.length, 1, "the session record is still emitted");
+	const record = records[0]?.data as Record<string, unknown>;
+	assert.equal(
+		record.sleep_score,
+		null,
+		"no daily_sleep match means null, not fabricated",
+	);
+	assert.deepEqual(record.contributors, {});
+});
+
+test("sleep emits no partial records when its daily_sleep helper walk is truncated", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { sleep: { last_day: "2026-07-01" } },
+		streams: [{ name: "sleep" }],
+	});
+	await withOuraEndpointPages(
+		{
+			sleep: [
+				{
+					data: [
+						{ id: "s1", day: "2026-08-05" },
+						{ id: "s2", day: "2026-08-06" },
+					],
+					next_token: null,
+				},
+			],
+			daily_sleep: [
+				{
+					data: [
+						{
+							id: "ds1",
+							day: "2026-08-05",
+							score: 80,
+							contributors: { deep_sleep: 75 },
+						},
+					],
+					next_token: "daily-sleep-next",
+				},
+			],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
+	);
+
+	assert.equal(
+		records.length,
+		0,
+		"a truncated helper join must not emit nullable partial sleep records",
+	);
+	assert.ok(
+		truncationSkip(messages, "sleep"),
+		"the truncated helper walk is still disclosed",
+	);
+	assert.deepEqual(
+		lastStateCursor(messages, "sleep"),
+		{ last_day: "2026-07-01" },
+		"the sleep cursor is held until both joined resources are complete",
 	);
 });

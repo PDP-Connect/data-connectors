@@ -3,15 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Oura Connector (v0.1.0)
+ * PDPP Oura Connector (v0.1.1)
  *
  * Auth: OURA_PERSONAL_ACCESS_TOKEN env var.
  * Generate at https://cloud.ouraring.com/personal-access-tokens
  *
  * Streams: sleep, readiness, activity. Incremental via day cursor.
  * API: https://api.ouraring.com/v2/usercollection/*
+ *   `sleep` joins two v2 resources by day: /usercollection/sleep (per-session
+ *   document) and /usercollection/daily_sleep (score + contributors
+ *   aggregate) — see collectSleep.
  * Rate limit: 5000 requests per 5-minute window (V1+V2 API).
  *   Doc: https://cloud.ouraring.com/docs/error-handling
+ *
+ * No live Oura token is available in this environment (no API access to
+ * verify the daily_activity/daily_sleep response shapes below against a
+ * real payload). Fields are named and typed per the documented v2 API
+ * surface; see legacy-derivability.json (oura.activity, oura.sleep) for the
+ * live-proof-pending caveat.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -55,6 +64,7 @@ const httpGovernor = createConnectorHttpGovernor({
 type OuraHttpGovernor = Pick<ConnectorHttpGovernor, "request">;
 
 interface OuraSleepSession {
+	average_breath?: number | null;
 	average_heart_rate?: number | null;
 	average_hrv?: number | null;
 	bedtime_end?: string | null;
@@ -66,10 +76,26 @@ interface OuraSleepSession {
 	latency?: number | null;
 	light_sleep_duration?: number | null;
 	lowest_heart_rate?: number | null;
-	readiness?: { score?: number | null } | null;
 	rem_sleep_duration?: number | null;
+	restless_periods?: number | null;
 	temperature_delta?: number | null;
+	time_in_bed?: number | null;
 	total_sleep_duration?: number | null;
+	type?: string | null;
+}
+
+/**
+ * GET /v2/usercollection/daily_sleep — the daily sleep-score aggregate,
+ * distinct from the per-session /v2/usercollection/sleep document above. Its
+ * `contributors` map and `score` are joined onto the sleep record by `day`
+ * (see collectSleep) because a nightly sleep session and its daily score are
+ * two separate v2 API resources sharing the same date key.
+ */
+interface OuraDailySleep {
+	contributors?: Record<string, unknown>;
+	day: string;
+	id: string;
+	score?: number | null;
 }
 
 interface OuraReadiness {
@@ -83,16 +109,23 @@ interface OuraReadiness {
 
 interface OuraActivity {
 	active_calories?: number | null;
+	contributors?: Record<string, unknown>;
 	day: string;
 	equivalent_walking_distance?: number | null;
+	high_activity_time?: number | null;
 	id: string;
+	inactivity_alerts?: number | null;
+	low_activity_time?: number | null;
+	medium_activity_time?: number | null;
+	resting_time?: number | null;
 	score?: number | null;
+	sedentary_time?: number | null;
 	steps?: number | null;
 	target_calories?: number | null;
 	total_calories?: number | null;
 }
 
-type OuraRow = OuraSleepSession | OuraReadiness | OuraActivity;
+type OuraRow = OuraSleepSession | OuraDailySleep | OuraReadiness | OuraActivity;
 
 interface OuraListResponse<T> {
 	data: T[];
@@ -193,7 +226,16 @@ async function fetchAll<T>(
 	return { rows: all, truncated: walk.truncated };
 }
 
-function sleepRecord(s: OuraSleepSession): RecordData {
+/**
+ * `dailySleep` is the same day's /v2/usercollection/daily_sleep document, when
+ * one was fetched and matched by day (see collectSleep) — absent for a day
+ * whose daily_sleep document is missing or unmatched, which contributes
+ * `sleep_score: null` / `contributors: {}` rather than failing the record.
+ */
+function sleepRecord(
+	s: OuraSleepSession,
+	dailySleep: OuraDailySleep | undefined,
+): RecordData {
 	return {
 		id: s.id,
 		day: s.day,
@@ -209,7 +251,12 @@ function sleepRecord(s: OuraSleepSession): RecordData {
 		lowest_heart_rate: s.lowest_heart_rate ?? null,
 		average_hrv: s.average_hrv ?? null,
 		temperature_delta: s.temperature_delta ?? null,
-		sleep_score: s.readiness?.score ?? null,
+		sleep_score: dailySleep?.score ?? null,
+		average_breath: s.average_breath ?? null,
+		restless_periods: s.restless_periods ?? null,
+		time_in_bed: s.time_in_bed ?? null,
+		type: s.type ?? null,
+		contributors: dailySleep?.contributors ?? {},
 	};
 }
 
@@ -234,6 +281,13 @@ function activityRecord(a: OuraActivity): RecordData {
 		steps: a.steps ?? null,
 		target_calories: a.target_calories ?? null,
 		equivalent_walking_distance: a.equivalent_walking_distance ?? null,
+		high_activity_time: a.high_activity_time ?? null,
+		medium_activity_time: a.medium_activity_time ?? null,
+		low_activity_time: a.low_activity_time ?? null,
+		sedentary_time: a.sedentary_time ?? null,
+		resting_time: a.resting_time ?? null,
+		inactivity_alerts: a.inactivity_alerts ?? null,
+		contributors: a.contributors ?? {},
 	};
 }
 
@@ -330,6 +384,90 @@ async function runStream<T extends OuraRow>(
 	});
 }
 
+/**
+ * `sleep` joins two v2 API resources by `day`: /usercollection/sleep (the
+ * per-session document — bedtime, durations, average_breath,
+ * restless_periods, time_in_bed, type) and /usercollection/daily_sleep (the
+ * daily score + contributors aggregate). Oura can emit more than one sleep
+ * session for a day (naps); every session for a day is joined against that
+ * same day's single daily_sleep document. The daily_sleep walk shares the
+ * sleep stream's own cursor/truncation state (`state.sleep`) rather than a
+ * separate `state.daily_sleep`, since daily_sleep is sleep's supporting
+ * fetch, not an independently-requestable stream.
+ */
+async function collectSleep(
+	args: Omit<RunStreamArgs<OuraSleepSession>, "config">,
+): Promise<void> {
+	const {
+		token,
+		state,
+		requested,
+		emit,
+		emitRecord,
+		progress,
+		maxPages,
+		governor,
+	} = args;
+	const streamName = "sleep";
+	await progress(`Fetching ${streamName}`, { stream: streamName });
+	const startDate = sinceFor(state, requested, streamName);
+
+	const [sessions, dailySleep] = await Promise.all([
+		fetchAll<OuraSleepSession>(governor, "sleep", token, startDate, maxPages),
+		fetchAll<OuraDailySleep>(
+			governor,
+			"daily_sleep",
+			token,
+			startDate,
+			maxPages,
+		),
+	]);
+	const truncated = sessions.truncated || dailySleep.truncated;
+	const streamState = state[streamName] as { last_day?: string } | undefined;
+	const priorDay: string | null = streamState?.last_day || null;
+	if (truncated) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: streamName,
+			reason: "older_pages_deferred_page_budget",
+			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			diagnostics: {
+				page_limit: maxPages,
+				total_seen: sessions.rows.length,
+				unread_pages: 1,
+			},
+		});
+		await emit({
+			type: "STATE",
+			stream: streamName,
+			cursor: { last_day: priorDay },
+		});
+		return;
+	}
+
+	const dailySleepByDay = new Map<string, OuraDailySleep>();
+	for (const d of dailySleep.rows) {
+		dailySleepByDay.set(d.day, d);
+	}
+
+	let lastDay: string | null = priorDay;
+	for (const row of sessions.rows) {
+		await emitRecord(
+			streamName,
+			sleepRecord(row, dailySleepByDay.get(row.day)),
+		);
+		if (row.day && (!lastDay || row.day > lastDay)) {
+			lastDay = row.day;
+		}
+	}
+
+	await emit({
+		type: "STATE",
+		stream: streamName,
+		cursor: { last_day: lastDay },
+	});
+}
+
 export interface OuraCollectOptions {
 	/** @see OuraHttpGovernor */
 	readonly httpGovernor?: OuraHttpGovernor;
@@ -351,12 +489,7 @@ export async function collectOura(
 	}
 
 	if (requested.has("sleep")) {
-		await runStream<OuraSleepSession>({
-			config: {
-				streamName: "sleep",
-				endpoint: "sleep",
-				toRecord: sleepRecord,
-			},
+		await collectSleep({
 			token,
 			state,
 			requested,

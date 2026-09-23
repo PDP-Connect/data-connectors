@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Spotify Connector (v0.1.0)
+ * PDPP Spotify Connector (v0.1.1)
  *
  * Auth: Spotify Web API OAuth token (user-provided). v1 expects a pre-issued
  *   token via SPOTIFY_ACCESS_TOKEN env var. Full OAuth loop deferred.
@@ -13,9 +13,13 @@
  *
  * Endpoints used:
  *   GET /v1/me/playlists?limit=50&offset=N
+ *   GET /v1/playlists/{id}?fields=followers.total (per playlist; the list
+ *     endpoint above returns the Simplified Playlist Object, which has no
+ *     `followers` field — only the full object does. See collectPlaylists.)
  *   GET /v1/me/tracks?limit=50&offset=N
  *   GET /v1/me/top/artists?time_range=short_term|medium_term|long_term&limit=50
  *   GET /v1/me/player/recently-played?limit=50&after=<unix_ms>
+ *   GET /v1/me/following?type=artist (profile.following; one call total)
  *
  * Rate limit: Spotify does not publish a fixed numeric limit. The Web API uses
  * a rolling window and returns Retry-After on 429 responses; the connector
@@ -25,6 +29,7 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
+	buildDetailCoverageMessage,
 	type CollectContext,
 	type EmittedMessage,
 	emitDetailCoverage,
@@ -59,6 +64,12 @@ interface ProgressExtra {
 	total_seen?: number;
 }
 
+interface SpotifyImage {
+	height?: number | null;
+	url?: string;
+	width?: number | null;
+}
+
 interface SpotifyArtist {
 	followers?: { total?: number | null };
 	genres?: string[];
@@ -67,26 +78,36 @@ interface SpotifyArtist {
 	popularity?: number | null;
 }
 
+interface SpotifyAlbum {
+	artists?: SpotifyArtist[];
+	name?: string | null;
+}
+
 interface SpotifyTrack {
-	album?: { name?: string | null };
+	album?: SpotifyAlbum | null;
 	artists?: SpotifyArtist[];
 	duration_ms?: number | null;
+	explicit?: boolean | null;
 	external_ids?: { isrc?: string | null };
 	id?: string;
 	name?: string;
 	popularity?: number | null;
+	uri?: string;
 }
 
 export interface SpotifyPlaylist {
 	collaborative?: boolean | null;
 	description?: string | null;
+	followers?: { total?: number | null } | null;
 	id: string;
+	images?: SpotifyImage[] | null;
 	items?: { total?: number | null };
 	name?: string;
 	owner?: { id?: string; display_name?: string };
 	public?: boolean | null;
 	snapshot_id?: string | null;
 	tracks?: { total?: number | null };
+	uri?: string;
 }
 
 interface SpotifySavedTrack {
@@ -104,6 +125,12 @@ interface SpotifyProfile {
 	display_name?: string | null;
 	followers?: { total?: number | null } | null;
 	id?: string;
+	images?: SpotifyImage[] | null;
+	uri?: string;
+}
+
+interface SpotifyFollowingArtistsResponse {
+	artists?: { total?: number | null };
 }
 
 interface SpotifyPlayHistory {
@@ -226,6 +253,23 @@ export function createSpotifyCycleDetector(initialPath: string): {
 	};
 }
 
+/**
+ * Web API image objects arrive as `[{url, width, height}]`; forwarded
+ * verbatim (nullable dimensions preserved), empty array when the API sends
+ * none at all.
+ */
+function spotifyImages(
+	images: SpotifyImage[] | null | undefined,
+): Array<{ height: number | null; url: string; width: number | null }> {
+	return (images || [])
+		.filter((img): img is SpotifyImage & { url: string } => Boolean(img.url))
+		.map((img) => ({
+			url: img.url,
+			width: img.width ?? null,
+			height: img.height ?? null,
+		}));
+}
+
 export function spotifyPlaylistRecord(
 	p: SpotifyPlaylist,
 ): Record<string, unknown> {
@@ -239,6 +283,9 @@ export function spotifyPlaylistRecord(
 		track_count: p.items?.total ?? p.tracks?.total ?? null,
 		snapshot_id: p.snapshot_id ?? null,
 		description: p.description ?? null,
+		uri: p.uri ?? null,
+		followers: p.followers?.total ?? null,
+		images: spotifyImages(p.images),
 	};
 }
 
@@ -270,11 +317,15 @@ export function spotifyPlaylistItemRecord(
 
 export function spotifyProfileRecord(
 	profile: SpotifyProfile,
+	following: number | null,
 ): Record<string, unknown> {
 	return {
 		id: profile.id,
 		display_name: profile.display_name ?? null,
 		followers: profile.followers?.total ?? null,
+		uri: profile.uri ?? null,
+		images: spotifyImages(profile.images),
+		following,
 	};
 }
 
@@ -391,6 +442,37 @@ interface PaginationTally {
 	totalSeen: number;
 }
 
+/**
+ * GET /me/playlists returns the Simplified Playlist Object, which has no
+ * `followers` field (only the full Playlist Object from GET /playlists/{id}
+ * carries `followers.total`) — mirroring what the legacy connector did with
+ * its own per-playlist `fetchPlaylist` call
+ * (connectors/spotify/spotify-playwright.js:737-757, `pl.followers`). One
+ * extra per-playlist fetch closes that gap; `images`/`uri` are already on the
+ * simplified object and pass through unchanged regardless of this fetch's
+ * outcome. A fetch failure (rate limit, deleted playlist, transient error)
+ * still emits the playlist record with `followers: null` — the record is not
+ * withheld — but the playlist id is left out of `hydratedKeys` so
+ * DETAIL_COVERAGE reports the run as partial rather than silently complete.
+ */
+async function fetchPlaylistFollowers(
+	playlistId: string,
+	token: string,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<{ followers: number | null; hydrated: boolean }> {
+	try {
+		const detail = await sp<SpotifyPlaylist>(
+			`/playlists/${encodeURIComponent(playlistId)}?fields=followers.total`,
+			token,
+			progress,
+			{ stream: "playlists", phase: "followers" },
+		);
+		return { followers: detail.followers?.total ?? null, hydrated: true };
+	} catch {
+		return { followers: null, hydrated: false };
+	}
+}
+
 async function collectPlaylists(
 	token: string,
 	emit: (msg: EmittedMessage) => Promise<void>,
@@ -398,6 +480,8 @@ async function collectPlaylists(
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 ): Promise<void> {
 	await progress("Fetching playlists", { stream: "playlists", phase: "start" });
+	const requiredKeys: string[] = [];
+	const hydratedKeys: string[] = [];
 	const tally = await paginate<SpotifyPlaylist, PaginationTally>(
 		"/me/playlists?limit=50",
 		token,
@@ -405,7 +489,23 @@ async function collectPlaylists(
 		"playlists",
 		{ totalSeen: 0, covered: 0 },
 		async (current, p) => {
-			const record = spotifyPlaylistRecord(p);
+			requiredKeys.push(p.id);
+			// Sequential through the shared, rate-paced governor: one in-flight
+			// followers fetch at a time, same pacing ceiling as every other
+			// Spotify request (see httpGovernor / spotifyPacingProfile above) — no
+			// separate concurrency primitive needed.
+			const { followers, hydrated } = await fetchPlaylistFollowers(
+				p.id,
+				token,
+				progress,
+			);
+			if (hydrated) {
+				hydratedKeys.push(p.id);
+			}
+			const record = spotifyPlaylistRecord({
+				...p,
+				followers: { total: followers },
+			});
 			const covered =
 				current.covered + (validateRecord("playlists", record).ok ? 1 : 0);
 			await emitRecord("playlists", record);
@@ -415,16 +515,20 @@ async function collectPlaylists(
 	// `playlists` is a full_inventory list with no drop/filter path: the page
 	// scan enumerates every playlist, so considered === covered === the exact
 	// count fetched, every run (including a genuine zero-playlist account).
-	await emitDetailCoverage(
-		{ emit },
-		{
+	// The followers detail-fetch pass is a separate, honestly-reported
+	// coverage dimension (requiredKeys/hydratedKeys): every playlist is
+	// emitted even when its followers fetch fails, so record coverage and
+	// followers-detail coverage can diverge without either lying about the
+	// other.
+	await emit(
+		buildDetailCoverageMessage({
 			stream: "playlists",
 			stateStream: "playlists",
-			requiredKeys: [],
-			hydratedKeys: [],
+			requiredKeys,
+			hydratedKeys,
 			considered: tally.totalSeen,
 			covered: tally.covered,
-		},
+		}),
 	);
 }
 
@@ -502,6 +606,33 @@ async function collectPlaylistItems(
 	);
 }
 
+/**
+ * The Web API has no following-COUNT field on /me; the closest documented
+ * signal is the total on GET /me/following?type=artist (the "artists you
+ * follow" list endpoint's own paging envelope), which is one extra call.
+ * `type=user` is not a supported value for this endpoint (Spotify only
+ * supports following artists and Spotify-curated users/playlists via this
+ * surface for a normal account), so this is the followed-ARTISTS total, not
+ * an all-following total — an honest, narrower signal, not a fabricated one.
+ * A fetch failure leaves `following` null rather than guessing.
+ */
+async function fetchFollowingCount(
+	token: string,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<number | null> {
+	try {
+		const resp = await sp<SpotifyFollowingArtistsResponse>(
+			"/me/following?type=artist&limit=1",
+			token,
+			progress,
+			{ stream: "profile", phase: "following" },
+		);
+		return resp.artists?.total ?? null;
+	} catch {
+		return null;
+	}
+}
+
 async function collectProfile(
 	token: string,
 	emit: (msg: EmittedMessage) => Promise<void>,
@@ -512,7 +643,8 @@ async function collectProfile(
 	const profile = await sp<SpotifyProfile>("/me", token, progress, {
 		stream: "profile",
 	});
-	const record = spotifyProfileRecord(profile);
+	const following = await fetchFollowingCount(token, progress);
+	const record = spotifyProfileRecord(profile, following);
 	const covered = validateRecord("profile", record).ok ? 1 : 0;
 	await emitRecord("profile", record);
 	await emitDetailCoverage(
@@ -568,6 +700,9 @@ async function collectSavedTracks(
 				popularity: t.popularity ?? null,
 				added_at: addedAt,
 				isrc: t.external_ids?.isrc ?? null,
+				uri: t.uri ?? null,
+				explicit: t.explicit ?? null,
+				album_artist_names: (t.album?.artists || []).map((a) => a.name),
 			};
 			const recordValid = validateRecord("saved_tracks", record).ok;
 			const covered = current.covered + (recordValid ? 1 : 0);

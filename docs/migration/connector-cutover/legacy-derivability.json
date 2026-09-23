@@ -748,15 +748,21 @@
       "activeCalories": "activity.active_calories",
       "totalCalories": "activity.total_calories",
       "steps": "activity.steps",
-      "equivalentWalkingDistance": "activity.equivalent_walking_distance (meters, D4)"
+      "equivalentWalkingDistance": "activity.equivalent_walking_distance (meters, D4)",
+      "highActivityTime": "activity.high_activity_time (Oura v2 GET /v2/usercollection/daily_activity, field high_activity_time; index.ts activityRecord, schemas.ts activitySchema)",
+      "mediumActivityTime": "activity.medium_activity_time (daily_activity.medium_activity_time)",
+      "lowActivityTime": "activity.low_activity_time (daily_activity.low_activity_time)",
+      "sedentaryTime": "activity.sedentary_time (daily_activity.sedentary_time)",
+      "restingTime": "activity.resting_time (daily_activity.resting_time)",
+      "inactivityAlerts": "activity.inactivity_alerts (daily_activity.inactivity_alerts)",
+      "contributors": "activity.contributors (daily_activity.contributors, opaque map forwarded verbatim, same treatment as oura.readiness.contributors)"
     },
-    "not_derivable": [
-      "highActivityTime, mediumActivityTime, lowActivityTime, sedentaryTime, restingTime, inactivityAlerts, contributors.*: absent from both manifests/oura.json and schemas.ts. STATUS UNCHANGED: no live v2 API capture evidence exists anywhere in the repo (only synthetic test fixtures; index.test.ts's OuraPageFixture explicitly sets capture: null). Remains 'suspected upstream removal, unconfirmed' per the lead_decision — NOT a settled documented break."
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "capability-map.json still records status: needs_parity_audit / lead_decision: PENDING EVIDENCE; nothing in the current tree closes this gap. git history for the oura connector shows only an unrelated page-cap bugfix and a Biome reformat since the initial contribution — no new capture evidence landed."
+      "IMPLEMENTED this cutover: all 7 previously-gapped fields are now mapped from the documented Oura v2 daily_activity response shape (https://cloud.ouraring.com/docs/daily-activity) — high_activity_time/medium_activity_time/low_activity_time/sedentary_time/resting_time/inactivity_alerts/contributors, matching the legacy field names 1:1 after camelCase->snake_case rename.",
+      "LIVE PROOF PENDING: no Oura personal access token is available in this environment. Field names/types are taken from Oura's published v2 API documentation, not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures only (connectors/oura/schemas.test.ts, connectors/oura/index.test.ts) — the next Oura-credentialed run should capture a real daily_activity response and diff it against these fixtures before this scope can be called live-verified."
     ],
-    "status": "in_progress"
+    "status": "derivable"
   },
   {
     "scope": "oura.readiness",
@@ -790,16 +796,20 @@
       "sleepPeriods[].averageHeartRate": "sleep.average_heart_rate",
       "sleepPeriods[].lowestHeartRate": "sleep.lowest_heart_rate",
       "sleepPeriods[].averageHrv": "sleep.average_hrv",
-      "dailyScores[].score": "sleep.sleep_score (merged per D3 into one per-session record)"
+      "sleepPeriods[].averageBreath": "sleep.average_breath (Oura v2 GET /v2/usercollection/sleep, field average_breath; index.ts sleepRecord, schemas.ts sleepSchema)",
+      "sleepPeriods[].restlessPeriods": "sleep.restless_periods (v2 sleep.restless_periods)",
+      "sleepPeriods[].timeInBed": "sleep.time_in_bed (v2 sleep.time_in_bed)",
+      "sleepPeriods[].type": "sleep.type (v2 sleep.type, e.g. long_sleep/sleep/late_nap/rest)",
+      "dailyScores[].score": "sleep.sleep_score (now sourced from the separate Oura v2 GET /v2/usercollection/daily_sleep resource, joined onto the per-session sleep record by day — see index.ts collectSleep; previously read from a non-existent s.readiness?.score field on the /sleep document)",
+      "dailyScores[].contributors": "sleep.contributors (daily_sleep.contributors, opaque map forwarded verbatim, joined by day alongside sleep_score)"
     },
-    "not_derivable": [
-      "averageBreath, restlessPeriods, timeInBed, type: absent from manifests/oura.json and schemas.ts. Same unconfirmed-evidence status as oura.activity — no real v2 capture exists in the repo.",
-      "contributors.* (7-field sleep contributors object): absent — modern only carries sleep_score. Same PENDING EVIDENCE status, not independently confirmed."
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "Modern adds temperature_delta at the sleep-period level with no legacy counterpart (legacy carried temperature only on activity/readiness) — an addition, not a loss."
+      "IMPLEMENTED this cutover: average_breath/restless_periods/time_in_bed/type are mapped from the documented Oura v2 /usercollection/sleep response shape (https://cloud.ouraring.com/docs/sleep). sleep_score and the 7-field contributors map are mapped from the separate /usercollection/daily_sleep resource (https://cloud.ouraring.com/docs/daily-sleep), joined onto each sleep session by its day — a genuine two-resource join, not a same-endpoint field addition. This also corrects a latent bug: the connector previously read sleep_score off `s.readiness?.score`, a field that does not exist on the real v2 /sleep document shape (readiness is not nested there); it now reads it from daily_sleep.score, matching the documented API.",
+      "Modern adds temperature_delta at the sleep-period level with no legacy counterpart (legacy carried temperature only on activity/readiness) — an addition, not a loss.",
+      "LIVE PROOF PENDING: no Oura personal access token is available in this environment. Field names/types (both /sleep and /daily_sleep) are taken from Oura's published v2 API documentation, not confirmed against a captured real response, including whether a given day reliably has exactly one matching daily_sleep document per sleep session (naps may complicate the join). Synthetic-but-shape-calibrated fixtures only — the next Oura-credentialed run should capture real /sleep and /daily_sleep responses and diff them against these fixtures."
     ],
-    "status": "in_progress"
+    "status": "derivable"
   },
   {
     "scope": "spotify.playlists",
@@ -810,6 +820,9 @@
       "description": "playlists.description",
       "owner": "playlists.owner_id + playlists.owner_name",
       "tracks_total": "playlists.track_count",
+      "uri": "playlists.uri (Spotify Web API Simplified Playlist Object, field `uri`, from the existing GET /me/playlists list call; index.ts spotifyPlaylistRecord, schemas.ts playlistsSchema)",
+      "followers": "playlists.followers (Spotify Web API full Playlist Object, field `followers.total` — NOT present on the Simplified Playlist Object the list endpoint returns, so this requires one additional GET /playlists/{id}?fields=followers.total call per playlist, mirroring legacy connectors/spotify/spotify-playwright.js:737-757's own per-playlist fetchPlaylist call that read pl.followers; index.ts fetchPlaylistFollowers)",
+      "images": "playlists.images (Simplified Playlist Object field `images`, [{url, width, height}], from the same GET /me/playlists list call as uri)",
       "tracks[].added_at": "playlist_items.added_at",
       "tracks[].added_by": "playlist_items.added_by",
       "tracks[].name": "playlist_items.name",
@@ -818,13 +831,13 @@
       "tracks[].duration_ms": "playlist_items.duration_ms",
       "tracks[].uri": "playlist_items.track_id (Spotify base-62 id; identity preserved, string format changes)"
     },
-    "not_derivable": [
-      "playlists[].uri, playlists[].followers, playlists[].images: absent from playlistsSchema (schemas.ts:56-65). Matches capability-map's own note ('likely deprioritized, not confirmed as deliberate') — not a lead_decision item, remains an open, unresolved gap."
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "lead_decision 'ADD spotify.playlist_items' has LANDED (schemas.ts:107, index.ts:246-496), resolving the scope's prior blocked_decision. Keyed by <playlist_id>:<position> (index.ts:247-250) rather than by track_id+position as the lead_decision's literal field list implied — functionally equivalent, all 5 named fields present as record fields."
+      "lead_decision 'ADD spotify.playlist_items' has LANDED (schemas.ts:107, index.ts:246-496), resolving the scope's prior blocked_decision. Keyed by <playlist_id>:<position> (index.ts:247-250) rather than by track_id+position as the lead_decision's literal field list implied — functionally equivalent, all 5 named fields present as record fields.",
+      "IMPLEMENTED this cutover: uri/followers/images closed. followers required a genuine per-playlist detail fetch (N+1 calls, one per playlist, sequential through the shared rate-paced governor — no separate concurrency primitive) since the Web API's list endpoint does not carry it; a failed per-playlist fetch still emits the playlist record with followers: null (never withheld) but is excluded from the playlists stream's DETAIL_COVERAGE hydrated_keys, so a partial run is honestly reported rather than silently read as complete.",
+      "PROOF-GATE GAP: no live Spotify token is available in this environment; the followers/images/uri field names are taken from the Spotify Web API's documented Playlist Object schema (developer.spotify.com/documentation/web-api/reference/get-playlist, get-a-list-of-current-users-playlists), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
     ],
-    "status": "loss"
+    "status": "derivable"
   },
   {
     "scope": "spotify.savedTracks",
@@ -835,17 +848,18 @@
       "name": "saved_tracks.name",
       "artists[].name": "saved_tracks.artist_names[]",
       "album.name": "saved_tracks.album_name",
-      "duration_ms": "saved_tracks.duration_ms"
+      "duration_ms": "saved_tracks.duration_ms",
+      "uri": "saved_tracks.uri (Spotify Web API Track Object field `uri`, from the existing GET /me/tracks call the connector already fetches; index.ts collectSavedTracks, schemas.ts savedTracksSchema)",
+      "explicit": "saved_tracks.explicit (Track Object field `explicit`, same GET /me/tracks response)",
+      "album.artists": "saved_tracks.album_artist_names[] (Track Object field `album.artists[].name` — the album-level artist list, distinct from the track-level `artists[].name` already mapped to artist_names; both arrays can differ for compilations/features)"
     },
-    "not_derivable": [
-      "uri: absent from savedTracksSchema (schemas.ts:72-83); confirmed via grep, no field named uri",
-      "explicit: absent from the same schema",
-      "album.artists (album-level artist list distinct from track artists): absent — only track-level artist_names carried"
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "Modern adds id, popularity, isrc beyond the legacy field set — additive, does not offset the 3 dropped fields above."
+      "Modern adds id, popularity, isrc beyond the legacy field set — additive, does not offset anything.",
+      "IMPLEMENTED this cutover: uri/explicit/album_artist_names closed, no additional API call required — all three fields are already present on the Track Object returned by the GET /me/tracks call the saved_tracks stream already makes.",
+      "PROOF-GATE GAP: no live Spotify token is available in this environment; field names are taken from the Spotify Web API's documented Track Object / Saved Track Object schema (developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
     ],
-    "status": "loss"
+    "status": "derivable"
   },
   {
     "scope": "spotify.profile",
@@ -854,17 +868,18 @@
     "derivable": {
       "id": "profile.id (from GET /me)",
       "display_name": "profile.display_name",
-      "followers": "profile.followers"
+      "followers": "profile.followers",
+      "uri": "profile.uri (Spotify Web API Private User Object field `uri`, from the existing GET /me call; index.ts spotifyProfileRecord, schemas.ts profileSchema)",
+      "images": "profile.images (Private User Object field `images`, [{url, width, height}], same GET /me call)",
+      "following": "profile.following (followed-ARTISTS total from GET /me/following?type=artist, `.artists.total` — one additional call. Spotify's /me endpoint has never exposed a following-COUNT field of any kind, confirmed by Spotify's own Web API reference; /me/following?type=artist is the closest documented signal, and only supports type=artist for a normal account, so this is the followed-artists total specifically, not an all-following total. An honest, narrower signal, not a fabricated one — see index.ts fetchFollowingCount.)"
     },
-    "not_derivable": [
-      "uri: absent from profileSchema (schemas.ts:90-96, fields: id/display_name/followers only)",
-      "following: absent. Spotify's /me endpoint has never exposed a following-COUNT field (only a separate /me/following list endpoint) — likely an upstream API limitation, not a connector choice, but not documented as such in capability-map",
-      "images: absent from the same schema"
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "lead_decision 'ADD spotify.profile from /me' has LANDED (index.ts:511-522, schemas.ts:90) — the stream itself was entirely absent before; the 3 remaining gaps above are narrower sub-field gaps not literally named in the lead_decision text."
+      "lead_decision 'ADD spotify.profile from /me' has LANDED (index.ts:511-522, schemas.ts:90) — the stream itself was entirely absent before; the 3 remaining gaps above are narrower sub-field gaps not literally named in the lead_decision text.",
+      "IMPLEMENTED this cutover: uri/images closed with no additional call (already on the GET /me response); following closed via one additional GET /me/following?type=artist call, honestly scoped to followed-artist count rather than a fabricated all-following total. A failed following fetch leaves the field null rather than guessing, and does not fail the profile record.",
+      "PROOF-GATE GAP: no live Spotify token is available in this environment; field names are taken from the Spotify Web API's documented Private User Object and Get Followed Artists schemas (developer.spotify.com/documentation/web-api/reference/get-current-users-profile, get-followed), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
     ],
-    "status": "loss"
+    "status": "derivable"
   },
   {
     "scope": "steam.profile",

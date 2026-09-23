@@ -19,14 +19,28 @@
  *     and walking-equivalent distance, and the builder passes them through
  *     unchanged. Durations/steps/calories happen to arrive as integers but are
  *     left as `z.number()` to follow the passthrough rather than over-constrain.
- *   - `contributors` (readiness) is the raw Oura contributors object, an opaque
- *     provider map the builder forwards verbatim (`r.contributors ?? {}`). It
- *     is genuinely opaque key→score data, so it is typed as a record of
- *     numbers/nulls rather than enumerated — see note on the schema.
+ *   - `contributors` (readiness, activity, sleep) is the raw Oura contributors
+ *     object, an opaque provider map the builder forwards verbatim
+ *     (`r.contributors ?? {}`). It is genuinely opaque key→score data, so it
+ *     is typed as a record of numbers/nulls rather than enumerated — see note
+ *     on the schema. On `sleep` it is joined in from the separate
+ *     /usercollection/daily_sleep resource by day (see index.ts collectSleep),
+ *     not the /usercollection/sleep session document itself.
+ *   - `sleep.type` is Oura's v2 session-type string (e.g. long_sleep, sleep,
+ *     late_nap, rest); bounded free text, not an enumerated union, since Oura
+ *     documents this as an evolving provider-defined set.
  *
  * No free-form human text fields exist on any Oura stream, so this module has
  * no `pdppSafeText` usage; every string is structurally constrained (UUID /
- * date / datetime).
+ * date / datetime / bounded session-type string).
+ *
+ * No live Oura token is available in this environment; the sleep/activity
+ * additions below are typed per the documented v2 API field names
+ * (average_breath, restless_periods, time_in_bed, type, high/medium/low_
+ * activity_time, sedentary_time, resting_time, inactivity_alerts) and are
+ * NOT yet confirmed against a real captured response — see
+ * legacy-derivability.json (oura.activity, oura.sleep) for the live-proof-
+ * pending caveat. Synthetic-but-shape-calibrated fixtures only.
  */
 
 import { z } from "zod";
@@ -70,6 +84,18 @@ export const sleepSchema = z.object({
 	average_hrv: metricSchema,
 	temperature_delta: metricSchema,
 	sleep_score: metricSchema,
+	average_breath: metricSchema,
+	restless_periods: metricSchema,
+	time_in_bed: metricSchema,
+	// Oura's v2 sleep `type` enum (long_sleep / sleep / late_nap / rest, etc.).
+	// Not enumerated here since Oura documents it as an evolving set of
+	// provider-defined session-type strings; bounded free text, not a fixed
+	// enum, same posture as readiness/activity's opaque `contributors` keys.
+	type: z.string().min(1).max(64).nullable(),
+	// The daily_sleep contributors map (same opaque key -> 0-100 sub-score
+	// shape as readiness.contributors); empty object when the joined
+	// daily_sleep document was absent or had none.
+	contributors: z.record(z.string(), z.number().nullable()),
 });
 
 /**
@@ -101,6 +127,13 @@ export const activitySchema = z.object({
 	steps: metricSchema,
 	target_calories: metricSchema,
 	equivalent_walking_distance: metricSchema,
+	high_activity_time: metricSchema,
+	medium_activity_time: metricSchema,
+	low_activity_time: metricSchema,
+	sedentary_time: metricSchema,
+	resting_time: metricSchema,
+	inactivity_alerts: metricSchema,
+	contributors: z.record(z.string(), z.number().nullable()),
 });
 
 /**

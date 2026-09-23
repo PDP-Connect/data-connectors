@@ -25,6 +25,19 @@
  *   - `time_range` (top_artists) is one of Spotify's three fixed windows.
  *   - recently_played `id` is the composite `"<trackId>:<playedAtMs>"` the
  *     builder constructs — validated by RECENTLY_PLAYED_ID_RE.
+ *   - `uri` fields are Spotify's `spotify:<type>:<id>` URIs, already present on
+ *     the same Web API objects the connector fetches (playlist/track/user).
+ *   - `images` is the Web API's own `[{url, width, height}]` array (width/height
+ *     nullable); forwarded verbatim, empty array when the API sends none.
+ *   - playlists.followers is `playlist.followers.total` from GET
+ *     /playlists/{id}?fields=followers.total, because GET /me/playlists
+ *     returns simplified playlist objects without follower counts.
+ *   - saved_tracks.album_artist_names is the *album's* artist list
+ *     (`track.album.artists[].name`), distinct from `artist_names` (the
+ *     track's own artists) — both arrays can differ for compilations/features.
+ *   - profile.following is the followed-artist total from GET
+ *     /me/following?type=artist (`.artists.total`) — the closest documented
+ *     "following" signal the Web API exposes; see index.ts collectProfile.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -48,6 +61,20 @@ const artistNamesSchema = z.array(pdppSafeText.max(1000));
 const isoDateTimeSchema = z
 	.string()
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+// Spotify URIs are `spotify:<type>:<base-62 id>` (spec: developer.spotify.com
+// /documentation/web-api/concepts/spotify-uris-ids).
+const SPOTIFY_URI_RE = /^spotify:[a-z]+:[0-9A-Za-z]{1,40}$/;
+const spotifyUriSchema = z
+	.string()
+	.regex(SPOTIFY_URI_RE, "must be a Spotify URI");
+// The Web API image object: { url, width, height } with width/height nullable
+// (some image sources omit dimensions).
+const spotifyImageSchema = z.object({
+	url: z.string().min(1).max(2000),
+	width: z.number().int().min(0).nullable(),
+	height: z.number().int().min(0).nullable(),
+});
+const spotifyImagesSchema = z.array(spotifyImageSchema);
 
 /**
  * playlists stream: one record per playlist the user owns/follows.
@@ -63,6 +90,9 @@ export const playlistsSchema = z.object({
 	track_count: z.number().int().min(0).nullable(),
 	snapshot_id: z.string().min(1).max(200).nullable(),
 	description: pdppSafeText.max(4000).nullable(),
+	uri: spotifyUriSchema.nullable(),
+	followers: z.number().int().min(0).nullable(),
+	images: spotifyImagesSchema,
 });
 
 /**
@@ -81,6 +111,9 @@ export const savedTracksSchema = z.object({
 		.string()
 		.regex(ISRC_RE, "isrc must be a 12-char ISRC code")
 		.nullable(),
+	uri: spotifyUriSchema.nullable(),
+	explicit: z.boolean().nullable(),
+	album_artist_names: artistNamesSchema,
 });
 
 /**
@@ -94,6 +127,18 @@ export const profileSchema = z.object({
 	id: z.string().min(1).max(80),
 	display_name: pdppSafeText.max(1000).nullable(),
 	followers: z.number().int().min(0).nullable(),
+	// `spotify:user:<id>` — GET /me's own uri does not require the base-62 id
+	// shape (see id's own comment), so this only checks the `spotify:user:`
+	// prefix rather than reusing spotifyUriSchema's stricter id segment.
+	uri: z
+		.string()
+		.regex(/^spotify:user:.+$/, "must be a Spotify user URI")
+		.nullable(),
+	images: spotifyImagesSchema,
+	// Followed-artist total from GET /me/following?type=artist — the closest
+	// documented "following" signal the Web API exposes (see index.ts comment
+	// on collectProfile). Null when the extra call fails or is skipped.
+	following: z.number().int().min(0).nullable(),
 });
 
 /**
