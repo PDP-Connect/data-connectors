@@ -9,14 +9,11 @@ import {
 	type ServerResponse,
 } from "node:http";
 import test from "node:test";
-import {
-	getConnectorPaths,
-	issueOwnerToken,
-	MANIFEST_DIR,
-} from "./orchestrator.ts";
+import { manifestsDir } from "./connector-paths.ts";
+import { getConnectorPaths, issueOwnerToken } from "./orchestrator.ts";
 
 test("every manifest-declared connector is reachable via getConnectorPaths (registered in KNOWN_CONNECTORS)", () => {
-	const manifestKeys = readdirSync(MANIFEST_DIR)
+	const manifestKeys = readdirSync(manifestsDir)
 		.filter((f) => f.endsWith(".json"))
 		.map((f) => f.replace(/\.json$/, ""))
 		.sort();
