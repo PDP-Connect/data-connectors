@@ -25,9 +25,9 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-
-const MANIFESTS_DIR = new URL("../../manifests/", import.meta.url);
+import { manifestsDir as MANIFESTS_DIR } from "../../src/connector-paths.ts";
 
 interface ManifestStream {
 	readonly coverage_strategy?: string;
@@ -43,13 +43,13 @@ interface Manifest {
 
 function readManifest(fileName: string): Manifest {
 	return JSON.parse(
-		readFileSync(new URL(fileName, MANIFESTS_DIR), "utf8"),
+		readFileSync(join(MANIFESTS_DIR, fileName), "utf8"),
 	) as Manifest;
 }
 
 /** Every connector whose setup modality is a manual file upload. */
 function manualUploadManifests(): { manifest: Manifest; name: string }[] {
-	return readdirSync(new URL(MANIFESTS_DIR))
+	return readdirSync(MANIFESTS_DIR)
 		.filter((file) => file.endsWith(".json"))
 		.map((file) => ({ manifest: readManifest(file), name: file }))
 		.filter(({ manifest }) => manifest.setup?.modality === "manual_or_upload");

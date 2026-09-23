@@ -21,14 +21,14 @@ import {
 	type IncomingMessage,
 	type ServerResponse,
 } from "node:http";
-import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "..", "..");
-const ENTRYPOINT = join(__dirname, "index.ts");
+const ENTRYPOINT = connectorEntrypoint("jellyfin");
 
 function startFakeServer(): Promise<{
 	stop: () => Promise<void>;

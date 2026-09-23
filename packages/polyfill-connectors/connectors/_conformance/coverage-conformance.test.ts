@@ -81,9 +81,8 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import {
 	type CoverageProofStrategy,
@@ -96,6 +95,7 @@ import {
 	PRODUCTION_READY_CONNECTORS,
 	REAL_UNLISTED_CONNECTORS,
 } from "../../src/connector-conformance-roster.ts";
+import { manifestsDir as MANIFESTS_DIR } from "../../src/connector-paths.ts";
 import {
 	AMAZON_ZERO_RESULT_DRIVER,
 	APPLE_CONTACTS_AUTH_FAILURE_DRIVER,
@@ -161,13 +161,6 @@ async function runParentDetailAccountingProbe(): Promise<{
 			"groupme.attachments: real boundary_shortfall reached (parent_detail_accounting)",
 	};
 }
-
-const MANIFESTS_DIR = join(
-	dirname(fileURLToPath(import.meta.url)),
-	"..",
-	"..",
-	"manifests",
-);
 
 /**
  * Every member of the shared `@pdpp/reference-contract` `CoverageProofStrategy`

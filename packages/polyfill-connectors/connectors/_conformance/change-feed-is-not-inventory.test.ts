@@ -50,17 +50,18 @@
  */
 
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 import {
 	buildVCard,
 	startFakeCardDavServer,
 } from "../apple_contacts/test-carddav-server.ts";
 
-const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const BOOK_URL_KEY_SOURCE = "/addressbooks/owner/card/";
 
 interface DetailCoverageLike {
@@ -150,7 +151,7 @@ async function runAppleContacts(args: {
 		const result = await runConnectorProtocolSubprocess({
 			allowFailedDone: true,
 			cwd: PACKAGE_ROOT,
-			entrypoint: join(PACKAGE_ROOT, "connectors/apple_contacts/index.ts"),
+			entrypoint: connectorEntrypoint("apple_contacts"),
 			env: {
 				APPLE_APP_SPECIFIC_PASSWORD: password,
 				APPLE_CARDDAV_ORIGIN: server.origin,

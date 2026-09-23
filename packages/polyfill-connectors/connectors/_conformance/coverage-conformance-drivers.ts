@@ -48,16 +48,18 @@
  */
 
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { REDDIT_JSON_ORIGIN } from "../../src/auto-login/reddit.ts";
+import {
+	connectorDir,
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { CollectContext } from "../../src/connector-runtime.ts";
 import {
 	makeRecordingEmit,
 	type RecordingEmit,
 } from "../../src/test-harness.ts";
-
-const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 /**
  * A record `emitRecord()` rejected via schema validation — the direct-call
@@ -417,7 +419,7 @@ async function driveJellyfin(): Promise<DriverResult> {
 		const result = await runConnectorProtocolSubprocess({
 			allowFailedDone: true,
 			cwd: PACKAGE_ROOT,
-			entrypoint: join(PACKAGE_ROOT, "connectors/jellyfin/index.ts"),
+			entrypoint: connectorEntrypoint("jellyfin"),
 			env: {
 				JELLYFIN_BASE_URL: `http://127.0.0.1:${port}`,
 				JELLYFIN_API_KEY: "test-key",
@@ -465,7 +467,7 @@ async function driveAppleContacts(): Promise<DriverResult> {
 		const result = await runConnectorProtocolSubprocess({
 			allowFailedDone: true,
 			cwd: PACKAGE_ROOT,
-			entrypoint: join(PACKAGE_ROOT, "connectors/apple_contacts/index.ts"),
+			entrypoint: connectorEntrypoint("apple_contacts"),
 			env: {
 				APPLE_ID: username,
 				APPLE_APP_SPECIFIC_PASSWORD: password,
@@ -515,7 +517,7 @@ async function driveAppleContactsAuthFailure(): Promise<DriverResult> {
 		const result = await runConnectorProtocolSubprocess({
 			allowFailedDone: true,
 			cwd: PACKAGE_ROOT,
-			entrypoint: join(PACKAGE_ROOT, "connectors/apple_contacts/index.ts"),
+			entrypoint: connectorEntrypoint("apple_contacts"),
 			env: {
 				APPLE_ID: username,
 				APPLE_APP_SPECIFIC_PASSWORD: "wrong-password",
@@ -553,13 +555,10 @@ export const APPLE_CONTACTS_AUTH_FAILURE_DRIVER: ConnectorDriver = {
 // (fixtures/fake-gmcli.mjs) selected via GMCLI_BIN + FAKE_GMCLI_MODE, so no
 // real gmcli install or paired Android device is needed here either.
 
-const GOOGLE_MESSAGES_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors/google_messages/index.ts",
-);
+const GOOGLE_MESSAGES_ENTRYPOINT = connectorEntrypoint("google_messages");
 const FAKE_GMCLI = join(
-	PACKAGE_ROOT,
-	"connectors/google_messages/fixtures/fake-gmcli.mjs",
+	connectorDir("google_messages"),
+	"fixtures/fake-gmcli.mjs",
 );
 
 async function driveGoogleMessagesWithMode(
