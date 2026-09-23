@@ -39,7 +39,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["google_takeout", "google-takeout"],
     ["groupme", "groupme"],
     ["heb", "heb"],
-    ["icloud_notes", "icloud-notes", "New connector on the hard-cut review branch; it publishes with the coordinated hard cut, not before, so Desktop auto-update does not receive it early."],
+    ["icloud_notes", "icloud-notes"],
     ["ical", "ical"],
     ["imessage", "imessage"],
     ["jellyfin", "jellyfin"],
