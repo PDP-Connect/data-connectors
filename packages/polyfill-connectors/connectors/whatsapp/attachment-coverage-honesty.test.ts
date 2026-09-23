@@ -16,15 +16,16 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "..", "..");
-const WHATSAPP_ENTRYPOINT = join(__dirname, "index.ts");
+const WHATSAPP_ENTRYPOINT = connectorEntrypoint("whatsapp");
 
 const CHAT_EXPORT = `[6/5/24, 9:15:22 AM] Alice: Hello
 [6/5/24, 9:16:00 AM] Bob: <attached: IMG-20240605-WA0001.jpg>

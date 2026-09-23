@@ -43,9 +43,12 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 // os.tmpdir() (/tmp) is typically RAM-backed (tmpfs) in this environment —
@@ -56,14 +59,7 @@ function largeFixtureBaseDir(): string {
 	return process.env.PDPP_TEST_LARGE_FIXTURE_DIR || tmpdir();
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const WHATSAPP_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"whatsapp",
-	"index.ts",
-);
+const WHATSAPP_ENTRYPOINT = connectorEntrypoint("whatsapp");
 
 test("static guard: index.ts's collection path does not import node:fs/promises readFile (whole-file read)", async () => {
 	const source = await readFile(WHATSAPP_ENTRYPOINT, "utf8");

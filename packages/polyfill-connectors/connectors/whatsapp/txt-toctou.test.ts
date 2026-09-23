@@ -32,9 +32,12 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
 function largeFixtureBaseDir(): string {
@@ -58,14 +61,7 @@ async function waitForBarrier(path: string, timeoutMs = 5000): Promise<void> {
 	}
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const WHATSAPP_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"whatsapp",
-	"index.ts",
-);
+const WHATSAPP_ENTRYPOINT = connectorEntrypoint("whatsapp");
 
 const ORIGINAL_EXPORT = `[6/5/24, 9:15:22 AM] Alice: Hello
 [6/5/24, 9:16:00 AM] Bob: Hi there`;

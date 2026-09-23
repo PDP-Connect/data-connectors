@@ -18,20 +18,16 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import {
+	connectorEntrypoint,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import type { EmittedMessage } from "../../src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = resolve(__dirname, "../..");
-const WHATSAPP_ENTRYPOINT = join(
-	PACKAGE_ROOT,
-	"connectors",
-	"whatsapp",
-	"index.ts",
-);
+const WHATSAPP_ENTRYPOINT = connectorEntrypoint("whatsapp");
 
 function chatRecords(
 	messages: readonly EmittedMessage[],
