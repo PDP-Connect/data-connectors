@@ -12459,7 +12459,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.1.1",
+				"version": "1.0.0",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -15778,7 +15778,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/uber",
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "0.4.1",
+				"version": "1.0.0",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -17362,7 +17362,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.2.1",
+				"version": "1.0.0",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
