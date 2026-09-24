@@ -17,13 +17,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Page } from "playwright";
+import type { BrowserContext, Cookie, Page } from "playwright";
 import type {
 	BrowserCollectContext,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectLinkedIn } from "./index.ts";
+import { collectLinkedIn, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -188,6 +188,34 @@ function makeFakePage(): Page {
 	} as unknown as Page;
 }
 
+interface TestGlobalWithBrowserShims {
+	document?: unknown;
+	fetch?: unknown;
+}
+
+const NO_LINKEDIN_COOKIES: Cookie[] = [];
+
+function evaluateVoyagerMe(liveSession: () => boolean) {
+	return async (fn: unknown, arg: unknown) => {
+		const g = globalThis as TestGlobalWithBrowserShims;
+		const priorDocument = g.document;
+		const priorFetch = g.fetch;
+		g.document = { cookie: 'JSESSIONID="ajax:1234567890"' };
+		g.fetch = async () => ({
+			json: async () => (liveSession() ? ME_RESPONSE : {}),
+			ok: liveSession(),
+			status: liveSession() ? 200 : 401,
+		});
+		try {
+			const boundFn = fn as (a: unknown) => unknown;
+			return await boundFn(arg);
+		} finally {
+			g.document = priorDocument;
+			g.fetch = priorFetch;
+		}
+	};
+}
+
 function buildCtx(
 	requestedNames: string[],
 	recording: ReturnType<typeof makeRecordingEmit>,
@@ -215,6 +243,107 @@ function buildCtx(
 		state: {},
 	};
 }
+
+
+// ─── Session establishment ────────────────────────────────────────────────
+
+test("ensureLinkedInSession: no session opens LinkedIn login before manual handoff", async () => {
+	const gotoUrls: string[] = [];
+	let manualPrompted = false;
+	let liveSession = false;
+	const context = {
+		cookies: async () => (liveSession ? [{ name: "li_at", value: "token" }] : []),
+	} as BrowserContext;
+	const page = {
+		context: () => context,
+		evaluate: evaluateVoyagerMe(() => liveSession),
+		goto: async (url: string) => {
+			gotoUrls.push(url);
+			return null;
+		},
+	} as Page;
+
+	await ensureLinkedInSession({
+		capture: null,
+		context,
+		manualLogin: async () => {
+			manualPrompted = true;
+			liveSession = true;
+		},
+		page,
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("manualAction should be injected in this test");
+		},
+	});
+
+	assert.equal(manualPrompted, true);
+	assert.deepEqual(gotoUrls, ["https://www.linkedin.com/login"]);
+});
+
+
+
+test("ensureLinkedInSession: login navigation failure rejects before manual handoff", async () => {
+	let manualPrompted = false;
+	const context = {
+		cookies: async () => NO_LINKEDIN_COOKIES,
+	} as BrowserContext;
+	const page = {
+		context: () => context,
+		evaluate: evaluateVoyagerMe(() => false),
+		goto: (async (_url: string) => {
+			throw new Error("navigation failed");
+		}) as Page["goto"],
+	} as Page;
+
+	await assert.rejects(
+		() =>
+			ensureLinkedInSession({
+				capture: null,
+				context,
+				manualLogin: async () => {
+					manualPrompted = true;
+				},
+				page,
+				sendInteraction: async (): Promise<never> => {
+					throw new Error("manualAction should be injected in this test");
+				},
+			}),
+		/linkedin_login_page_unreachable/,
+	);
+	assert.equal(manualPrompted, false);
+});
+
+
+test("ensureLinkedInSession: live session skips login handoff", async () => {
+	const gotoUrls: string[] = [];
+	let manualPrompted = false;
+	const context = {
+		cookies: async () => [{ name: "li_at", value: "token" }],
+	} as BrowserContext;
+	const page = {
+		context: () => context,
+		evaluate: evaluateVoyagerMe(() => true),
+		goto: async (url: string) => {
+			gotoUrls.push(url);
+			return null;
+		},
+	} as Page;
+
+	await ensureLinkedInSession({
+		capture: null,
+		context,
+		manualLogin: async () => {
+			manualPrompted = true;
+		},
+		page,
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("manualAction should be injected in this test");
+		},
+	});
+
+	assert.equal(manualPrompted, false);
+	assert.deepEqual(gotoUrls, ["https://www.linkedin.com/feed/"]);
+});
 
 // ─── Scope filtering ────────────────────────────────────────────────────
 

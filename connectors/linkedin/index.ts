@@ -3,14 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.1)
+ * PDPP LinkedIn Connector (v0.3.2)
  *
- * Session-cookie only: no automated login flow. LinkedIn is aggressively
+ * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
- * only ever probes an existing logged-in session (`li_at`/`JSESSIONID`
- * cookie) and fails with a manual-action-required terminal error when none
- * is live. The owner authenticates once, out of band, in the connector's
- * persistent browser profile.
+ * proves an existing browser session and, when absent, navigates to LinkedIn
+ * login before handing the page to the owner. The owner authenticates manually
+ * in the connector's persistent browser profile.
  *
  * All Voyager calls run inside the logged-in page context via
  * `page.evaluate(fetch)`, exactly as the legacy connector did — Voyager
@@ -47,6 +46,9 @@
  *     `profileEducations[].grade` value set.
  *
  * CHANGES
+ *   v0.3.2 (2026-09-24) — navigate to LinkedIn login before the manual
+ *     owner handoff when the profile has no live Voyager session, then verify
+ *     `/voyager/api/me` after the handoff before collection starts.
  *   v0.3.1 (2026-09-22) — live-verified against one real account; fixed two
  *     real-shape bugs the first pass got wrong from legacy-code inference
  *     alone: `profile.industry` reads Voyager's `industry.name` object (not
@@ -65,9 +67,11 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
 	buildFullScanCoverageMessage,
+	type EnsureSessionArgs,
 	type EmittedMessage,
 	type ProbeSessionArgs,
 	type ProgressExtra,
@@ -93,6 +97,8 @@ import type {
 	VoyagerResolvedProfile,
 } from "./types.ts";
 
+const LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/";
+const LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login";
 const SESSION_COOKIE = /li_at|JSESSIONID/;
 const CONNECTIONS_PAGE_SIZE = 40;
 const CONNECTIONS_MAX = 2000;
@@ -340,13 +346,75 @@ async function resolveConnectionProfiles(
 	return resolved;
 }
 
+export async function hasLinkedInSessionCookie(
+	context: ProbeSessionArgs["context"],
+): Promise<boolean> {
+	const cookies = await context.cookies("https://www.linkedin.com/");
+	return cookies.some(
+		(c) => SESSION_COOKIE.test(c.name) && Boolean(c.value),
+	);
+}
+
+export async function ensureLinkedInSession({
+	capture,
+	context,
+	page,
+	sendInteraction,
+	manualLogin,
+}: Pick<EnsureSessionArgs, "capture" | "context" | "page" | "sendInteraction"> & {
+	manualLogin?: () => Promise<void>;
+}): Promise<void> {
+	if (await hasLinkedInSessionCookie(context)) {
+		await page
+			.goto(LINKEDIN_FEED_URL, {
+				timeout: 30_000,
+				waitUntil: "domcontentloaded",
+			})
+			.catch((): undefined => undefined);
+		if (await checkApiAuth(page, capture)) {
+			return;
+		}
+	}
+
+	try {
+		await page.goto(LINKEDIN_LOGIN_URL, {
+			timeout: 30_000,
+			waitUntil: "domcontentloaded",
+		});
+	} catch (err) {
+		throw new Error("linkedin_login_page_unreachable", { cause: err });
+	}
+
+	if (manualLogin) {
+		await manualLogin();
+	} else {
+		await manualAction(
+			{
+				...(capture ? { capture } : {}),
+				message:
+					"Sign in to LinkedIn in the secure browser, then click Done. PDPP will verify the session before collecting.",
+				page,
+				reason: "login",
+				timeoutSeconds: 1800,
+			},
+			sendInteraction,
+		);
+	}
+
+	if (!(await checkApiAuth(page, capture))) {
+		throw new Error(
+			"linkedin_login_manual_incomplete: no live Voyager session after owner handoff",
+		);
+	}
+}
+
 export async function collectLinkedIn(
 	ctx: BrowserCollectContext,
 ): Promise<void> {
 	const { capture, emit, emitRecord, page, progress, requested } = ctx;
 
 	await page
-		.goto("https://www.linkedin.com/feed/", {
+		.goto(LINKEDIN_FEED_URL, {
 			timeout: 30_000,
 			waitUntil: "domcontentloaded",
 		})
@@ -516,11 +584,11 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		browser: { profileName: "linkedin" },
 		name: "linkedin",
+		async ensureSession(args: EnsureSessionArgs): Promise<void> {
+			await ensureLinkedInSession(args);
+		},
 		async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-			const cookies = await context.cookies("https://www.linkedin.com/");
-			return cookies.some(
-				(c) => SESSION_COOKIE.test(c.name) && Boolean(c.value),
-			);
+			return hasLinkedInSessionCookie(context);
 		},
 		validateRecord,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
