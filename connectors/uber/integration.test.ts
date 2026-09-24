@@ -247,19 +247,23 @@ test("collectAllStreams: receipts never constructs a DETAIL_COVERAGE of its own 
 	assert.equal(receiptsCoverage, undefined);
 });
 
-test("collectAllStreams: a GetReceipt failure is non-fatal — no receipts record is fabricated", async () => {
+test("collectAllStreams: a GetReceipt failure keeps the receipt row with GetTrip fare fallback", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
 		getTrip: {
 			"trip-1": { body: getTripBody({ status: "COMPLETED", fare: "$10.00" }) },
 		},
 		// No scripted GetReceipt response for trip-1 -> throws internally,
-		// caught as non-fatal; receiptRecord sees an empty fareBreakdown and
-		// returns null (no fabricated all-null record).
+		// caught as non-fatal. The receipt row mirrors legacy coverage and
+		// uses the observed GetTrip fare.
 	});
 	const { ctx, emitted } = makeCtx(["trips", "receipts"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
-	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 0);
+	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 1);
+	assert.equal(
+		emitted.find((r) => r.stream === "receipts")?.data.fare_total,
+		"$10.00",
+	);
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
 });
 

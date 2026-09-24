@@ -264,6 +264,12 @@ test("receiptRecord: uses the hydrated trip fare when the receipt has no total l
 	]);
 });
 
-test("receiptRecord: returns null with no fare-breakdown evidence at all", () => {
-	assert.equal(receiptRecord("trip-3", []), null);
+test("receiptRecord: keeps a receipt row when no fare-breakdown evidence is available", () => {
+	const record = receiptRecord("trip-3", []);
+	assert.equal(record.id, "trip-3");
+	assert.equal(record.trip_id, "trip-3");
+	assert.equal(record.fare_total, null);
+	assert.equal(record.fare_total_cents, null);
+	assert.equal(record.currency, null);
+	assert.deepEqual(record.fare_breakdown, []);
 });
