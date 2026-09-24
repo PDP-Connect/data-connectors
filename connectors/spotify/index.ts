@@ -213,6 +213,7 @@ export function spotifyPlaylistItemRecord(
 		id: `${playlistId}:${String(position)}`,
 		playlist_id: playlistId,
 		track_id: t?.id ?? null,
+		uri: t?.uri ?? null,
 		position,
 		added_at: item.added_at ?? null,
 		added_by: item.added_by?.id ?? null,
