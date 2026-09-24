@@ -150,16 +150,73 @@ test("a contribution cell without count evidence cannot become a zero or complet
 	assert.equal(buildContributionSnapshot(years, "2026-01-01T00:00:00Z"), null);
 });
 
-test("event detail additions reuse the PAT event parser and preserve nullable fields", () => {
-	const event = parseLegacyEvent({
+test("browser events recover legacy details from nested GitHub event payloads", () => {
+	const push = parseLegacyEvent({
 		id: "1",
 		type: "PushEvent",
 		created_at: "2026-01-01T00:00:00Z",
 		repo: { name: "sample-user/demo" },
-		payload: { ref: "refs/heads/main", size: 2 },
+		payload: {
+			commits: [{ message: "Fix parser\nMore details" }, { message: "Test" }],
+			ref: "refs/heads/main",
+			size: 2,
+		},
 		public: true,
 	});
-	assert.equal(event?.branch, "main");
-	assert.equal(event?.commits, 2);
-	assert.equal(event?.repoUrl, "https://github.com/sample-user/demo");
+	assert.equal(push?.action, "pushed");
+	assert.equal(push?.title, "Fix parser");
+	assert.equal(push?.branch, "main");
+	assert.equal(push?.commits, 2);
+	assert.equal(push?.repoUrl, "https://github.com/sample-user/demo");
+
+	const pullRequest = parseLegacyEvent({
+		id: "2",
+		type: "PullRequestEvent",
+		created_at: "2026-01-02T00:00:00Z",
+		repo: { name: "sample-user/demo" },
+		payload: {
+			action: "opened",
+			pull_request: {
+				body: "Description",
+				head: { ref: "feature/parity" },
+				html_url: "https://github.com/sample-user/demo/pull/4",
+				title: "Restore event details",
+			},
+		},
+		public: true,
+	});
+	assert.equal(pullRequest?.action, "opened");
+	assert.equal(pullRequest?.title, "Restore event details");
+	assert.equal(pullRequest?.body, "Description");
+	assert.equal(pullRequest?.url, "https://github.com/sample-user/demo/pull/4");
+	assert.equal(pullRequest?.branch, "feature/parity");
+	assert.equal(
+		validateRecord("events", {
+			id: "sample-user:events",
+			events: [pullRequest],
+			fetchedAt: "2026-01-02T00:00:00Z",
+			windowDescription: "Recent events",
+		}).ok,
+		true,
+	);
+
+	const issue = parseLegacyEvent({
+		id: "3",
+		type: "IssuesEvent",
+		created_at: "2026-01-03T00:00:00Z",
+		repo: { name: "sample-user/demo" },
+		payload: {
+			action: "closed",
+			issue: {
+				body: "Issue description",
+				html_url: "https://github.com/sample-user/demo/issues/8",
+				title: "Fix the report",
+			},
+		},
+		public: true,
+	});
+	assert.equal(issue?.action, "closed");
+	assert.equal(issue?.title, "Fix the report");
+	assert.equal(issue?.body, "Issue description");
+	assert.equal(issue?.url, "https://github.com/sample-user/demo/issues/8");
 });

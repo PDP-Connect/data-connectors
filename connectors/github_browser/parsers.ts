@@ -436,27 +436,150 @@ export function parseLegacyEvent(raw: unknown): LegacyEvent | null {
 		...(parsed.data.public === undefined ? {} : { public: parsed.data.public }),
 	});
 	if (!current) return null;
-	const payload =
-		parsed.data.payload && typeof parsed.data.payload === "object"
-			? (parsed.data.payload as Record<string, unknown>)
-			: {};
-	const ref = typeof payload.ref === "string" ? payload.ref : null;
+	const payload = objectValue(parsed.data.payload);
+	const pullRequest = objectValue(payload.pull_request);
+	const issue = objectValue(payload.issue);
+	const comment = objectValue(payload.comment);
+	const review = objectValue(payload.review);
+	const release = objectValue(payload.release);
+	const forkee = objectValue(payload.forkee);
+	const ref = stringValue(payload.ref);
+	const branch = (value: unknown): string | null => {
+		const rawRef = stringValue(value);
+		return rawRef?.startsWith("refs/heads/")
+			? rawRef.slice("refs/heads/".length)
+			: rawRef;
+	};
+	const firstCommit = Array.isArray(payload.commits)
+		? objectValue(payload.commits[0])
+		: {};
+	const pages = Array.isArray(payload.pages) ? payload.pages : [];
+	const firstPage = objectValue(pages[0]);
+	const extras: Partial<LegacyEvent> = {};
+	switch (parsed.data.type) {
+		case "PushEvent":
+			extras.action = "pushed";
+			extras.title = stringValue(firstCommit.message)?.split("\n")[0] ?? null;
+			extras.branch = branch(ref);
+			extras.commits = Array.isArray(payload.commits)
+				? payload.commits.length || numberValue(payload.size)
+				: numberValue(payload.size);
+			break;
+		case "PullRequestEvent": {
+			const head = objectValue(pullRequest.head);
+			const prBranch = stringValue(head.ref);
+			const number = numberValue(pullRequest.number);
+			extras.action = stringValue(payload.action);
+			extras.title =
+				stringValue(pullRequest.title) ??
+				(number === null
+					? null
+					: `PR #${number}${prBranch ? ` (${prBranch})` : ""}`);
+			extras.body = stringValue(pullRequest.body)?.slice(0, 280) ?? null;
+			extras.url =
+				stringValue(pullRequest.html_url) ??
+				stringValue(pullRequest.url)?.replace(
+					"api.github.com/repos",
+					"github.com",
+				) ??
+				null;
+			extras.branch = prBranch;
+			break;
+		}
+		case "PullRequestReviewEvent":
+			extras.action = stringValue(review.state)?.toLowerCase() ?? null;
+			extras.title = stringValue(pullRequest.title);
+			extras.body = stringValue(review.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(review.html_url);
+			break;
+		case "PullRequestReviewCommentEvent":
+			extras.action = "review_comment";
+			extras.body = stringValue(comment.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(comment.html_url);
+			break;
+		case "IssuesEvent": {
+			const number = numberValue(issue.number);
+			extras.action = stringValue(payload.action);
+			extras.title =
+				stringValue(issue.title) ??
+				(number === null ? null : `Issue #${number}`);
+			extras.body = stringValue(issue.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(issue.html_url);
+			break;
+		}
+		case "IssueCommentEvent":
+			extras.action = "commented";
+			extras.title = stringValue(issue.title);
+			extras.body = stringValue(comment.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(comment.html_url);
+			break;
+		case "CreateEvent":
+			extras.action = stringValue(payload.ref_type)
+				? `created_${stringValue(payload.ref_type)}`
+				: "created";
+			extras.title = ref;
+			extras.body = stringValue(payload.description);
+			extras.branch = payload.ref_type === "branch" ? ref : null;
+			break;
+		case "DeleteEvent":
+			extras.action = stringValue(payload.ref_type)
+				? `deleted_${stringValue(payload.ref_type)}`
+				: "deleted";
+			extras.title = ref;
+			extras.branch = payload.ref_type === "branch" ? ref : null;
+			break;
+		case "ForkEvent":
+			extras.action = "forked";
+			extras.title = stringValue(forkee.full_name);
+			extras.url = stringValue(forkee.html_url);
+			break;
+		case "WatchEvent":
+			extras.action = stringValue(payload.action) ?? "starred";
+			break;
+		case "ReleaseEvent":
+			extras.action = stringValue(payload.action);
+			extras.title = stringValue(release.name) ?? stringValue(release.tag_name);
+			extras.body = stringValue(release.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(release.html_url);
+			break;
+		case "GollumEvent":
+			extras.action = "wiki_edit";
+			extras.title = stringValue(firstPage.title);
+			extras.body = pages.length > 1 ? `${pages.length} pages edited` : null;
+			extras.url = stringValue(firstPage.html_url);
+			break;
+		case "CommitCommentEvent":
+			extras.action = "commit_comment";
+			extras.body = stringValue(comment.body)?.slice(0, 280) ?? null;
+			extras.url = stringValue(comment.html_url);
+			break;
+	}
+	if (Object.keys(extras).length === 0) {
+		extras.action = stringValue(payload.action);
+		extras.body = stringValue(payload.body);
+		extras.title = stringValue(payload.title);
+		extras.url = stringValue(payload.url);
+		extras.branch = branch(ref);
+		extras.commits = numberValue(payload.size);
+	}
 	return {
-		action: typeof payload.action === "string" ? payload.action : null,
-		body: typeof payload.body === "string" ? payload.body : null,
-		branch: ref?.startsWith("refs/heads/")
-			? ref.slice("refs/heads/".length)
-			: null,
-		commits: typeof payload.size === "number" ? payload.size : null,
+		action: extras.action ?? null,
+		body: extras.body ?? null,
+		branch: extras.branch ?? null,
+		commits: extras.commits ?? null,
 		createdAt: parsed.data.created_at,
 		id: parsed.data.id,
 		isPublic: current.is_public === true,
 		repo: parsed.data.repo.name,
 		repoUrl: `https://github.com/${parsed.data.repo.name}`,
-		title: typeof payload.title === "string" ? payload.title : null,
+		title: extras.title ?? null,
 		type: parsed.data.type,
-		url: typeof payload.url === "string" ? payload.url : null,
+		url: extras.url ?? null,
 	};
+}
+
+function numberValue(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
