@@ -2,686 +2,669 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * PDPP YouTube Connector (v0.1.0) — file-based, manual import.
- *
- * Auth: none. Per D9 in docs/migration/connector-cutover/CONTRACTS.md,
- * this connector is a manual import of a Google Takeout "YouTube and
- * YouTube Music" export. Google browser scraping is out of scope for this
- * source; the legacy `connectors/google/youtube-playwright.js` scraper is
- * NOT ported here and is read-only prior art (field lists, not code).
- *
- * User goes to https://takeout.google.com/, selects "YouTube and YouTube
- * Music", downloads the archive, and places the .zip (or the extracted
- * directory) into YOUTUBE_TAKEOUT_DIR (defaults to
- * ~/.pdpp/imports/youtube/).
- *
- * Streams (see docs/migration/connector-cutover/capability-map.json,
- * source "youtube"):
- *   - profile             channel.csv                       UNVERIFIED path/columns
- *   - subscriptions       subscriptions/subscriptions.csv   UNVERIFIED path/columns
- *   - playlists           playlists/playlists.csv           UNVERIFIED path/columns
- *   - playlist_items      playlists/<name>-videos.csv       UNVERIFIED path/columns
- *   - likes               playlists/Liked videos-videos.csv UNVERIFIED path/columns
- *   - watch_later         playlists/Watch later-videos.csv  UNVERIFIED path/columns
- *   - watch_history       history/watch-history.json        VERIFIED (shared parser,
- *                                                            same file format as
- *                                                            google_takeout.youtube_watch_history)
- *
- * "UNVERIFIED" means: no fixture or repo evidence confirms this file's
- * existence, path, or column names in a real Takeout export. The parsers
- * are written from Google's documented Takeout conventions and are
- * defensive (null the field rather than guess), but every one of these
- * streams reports itself honestly via coverage_diagnostics — see
- * docs/inbox/report-connector-coverage.md classification.
- *
- * Accepts either a .zip archive (as downloaded from Takeout) or an
- * already-extracted directory in YOUTUBE_TAKEOUT_DIR, following the
- * manual_or_upload pattern of connectors/strava and connectors/google_maps.
- */
-
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import type { WatchHistoryEntry } from "../../packages/polyfill-connectors/src/youtube-watch-history.ts";
+/** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
+import { createHash } from "node:crypto";
+import { isMainModule } from "@pdpp/connector-protocol";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
-	buildPlaylistItemRecordFromCsvRow,
-	buildPlaylistRecordFromCsvRow,
-	buildProfileRecordFromChannelCsvRow,
-	buildSubscriptionRecordFromCsvRow,
-	buildWatchHistoryRecordFromEntry,
-	hashId,
-	parseCsvRows,
-	parseLikesCsv,
-	parseWatchLaterCsv,
-} from "./parsers.ts";
-import { type COVERAGE_REASONS, validateRecord } from "./schemas.ts";
-import type { YoutubeState } from "./types.ts";
+	type BrowserCollectContext,
+	type EnsureSessionArgs,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	type BrowserVideo,
+	readChannelAbout,
+	readChannelPage,
+	readOwnAccount,
+	readPlaylistHeader,
+	readPlaylistLinks,
+	readSubscriptions,
+	readVideos,
+} from "./browser-dom.ts";
+import { validateRecord } from "./schemas.ts";
 
-const PROFILE_STREAM = "profile";
-const SUBSCRIPTIONS_STREAM = "subscriptions";
-const PLAYLISTS_STREAM = "playlists";
-const PLAYLIST_ITEMS_STREAM = "playlist_items";
-const LIKES_STREAM = "likes";
-const WATCH_LATER_STREAM = "watch_later";
-const WATCH_HISTORY_STREAM = "watch_history";
-const DIAGNOSTICS_STREAM = "coverage_diagnostics";
+const HOME = "https://www.youtube.com/";
+const HISTORY_LIMIT = 50;
+const SCROLLS = {
+	subscriptions: 3,
+	playlists: 5,
+	playlist_items: 20,
+	history: 4,
+} as const;
 
-type CoverageReason = (typeof COVERAGE_REASONS)[number];
+function id(value: string): string {
+	return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
 
-/**
- * A Takeout export can be handed over as the downloaded .zip, or already
- * extracted into a directory (the strava/google_maps convention — see
- * findUploadedArtifact in connectors/strava/index.ts). Only the extracted-
- * directory shape is implemented for v0.1.0: Takeout ZIPs are large,
- * multi-file archives, and streaming individual named members out of an
- * arbitrary-depth ZIP (rather than one flat CSV as Strava's archive is)
- * is real additional work this lane has not yet proven against a real
- * export. Until then, a .zip in the import dir is reported through
- * coverage_diagnostics as source_unreadable with remediation text telling
- * the owner to extract it — never silently ignored.
- */
-function resolveExportRoot(importDir: string): {
-	root: string | null;
-	sawZipOnly: boolean;
-} {
-	if (!existsSync(importDir)) {
-		return { root: null, sawZipOnly: false };
+function videoIdentity(video: BrowserVideo): string {
+	if (video.video_id) return video.video_id;
+	const url = new URL(video.video_url);
+	url.searchParams.delete("list");
+	url.searchParams.delete("index");
+	return url.href;
+}
+
+export function parseCount(value: string | null | undefined): number | null {
+	const match = value?.replace(/,/g, "").match(/([\d.]+)\s*([KkMmBb]?)/);
+	if (!match) return null;
+	const n =
+		Number(match[1]) *
+		({ K: 1e3, M: 1e6, B: 1e9 }[match[2]?.toUpperCase() as "K" | "M" | "B"] ??
+			1);
+	return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+/** A section label has at most day precision. Never infer a time of day. */
+export function resolveWatchedDate(
+	label: string | null,
+	now: Date,
+): string | null {
+	if (!label) return null;
+	const text = label.trim().toLowerCase();
+	const localDate = (date: Date) =>
+		`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+	if (text === "today") return localDate(now);
+	if (text === "yesterday")
+		return localDate(
+			new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1),
+		);
+	const weekdays = [
+		"sunday",
+		"monday",
+		"tuesday",
+		"wednesday",
+		"thursday",
+		"friday",
+		"saturday",
+	];
+	const weekday = weekdays.indexOf(text);
+	if (weekday >= 0) {
+		const delta = (now.getDay() - weekday + 7) % 7 || 7;
+		return localDate(
+			new Date(now.getFullYear(), now.getMonth(), now.getDate() - delta),
+		);
 	}
-	let entries: string[] = [];
-	try {
-		entries = readdirSync(importDir);
-	} catch {
-		return { root: null, sawZipOnly: false };
-	}
-	// The extracted export's own top-level folder is literally named this by
-	// Takeout; accept either the import dir itself (owner extracted directly
-	// into it) or one level of that named subfolder.
-	const named = entries.find((name) => name === "YouTube and YouTube Music");
-	if (named) {
-		return { root: join(importDir, named), sawZipOnly: false };
-	}
-	const looksExtracted =
-		existsSync(join(importDir, "history")) ||
-		existsSync(join(importDir, "subscriptions")) ||
-		existsSync(join(importDir, "playlists")) ||
-		existsSync(join(importDir, "Channel"));
-	if (looksExtracted) {
-		return { root: importDir, sawZipOnly: false };
-	}
-	const sawZipOnly = entries.some((name) =>
-		name.toLowerCase().endsWith(".zip"),
+	const match =
+		/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:,\s*(\d{4}))?$/.exec(
+			text,
+		);
+	if (!match) return null;
+	const month = [
+		"jan",
+		"feb",
+		"mar",
+		"apr",
+		"may",
+		"jun",
+		"jul",
+		"aug",
+		"sep",
+		"oct",
+		"nov",
+		"dec",
+	].indexOf(match[1]!);
+	const year = match[3] ? Number(match[3]) : now.getFullYear();
+	const date = new Date(year, month, Number(match[2]));
+	if (date.getMonth() !== month || date.getDate() !== Number(match[2]))
+		return null;
+	if (!match[3] && date > now) date.setFullYear(year - 1);
+	return localDate(date);
+}
+
+function videoFields(video: BrowserVideo) {
+	return {
+		video_id: video.video_id,
+		video_url: video.video_url,
+		video_title: video.video_title,
+		channel_title: video.channel_title,
+		channel_url: video.channel_url,
+		duration_text: video.duration_text,
+		duration_seconds:
+			video.duration_text &&
+			/^\d{1,2}(?::\d{2}){1,2}$/.test(video.duration_text)
+				? video.duration_text
+						.split(":")
+						.reduce((seconds, part) => seconds * 60 + Number(part), 0)
+				: null,
+		thumbnail_url: video.thumbnail_url,
+	};
+}
+
+async function hasYoutubeSession(
+	page: BrowserCollectContext["page"],
+): Promise<boolean> {
+	if (
+		(await waitForContent(
+			page,
+			'button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn, ytd-masthead button[aria-label*="Account"], a[href*="accounts.google.com/ServiceLogin"]',
+		)) !== "content"
+	)
+		return false;
+	return await page.evaluate(
+		() =>
+			Boolean(
+				document.querySelector(
+					'button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn, ytd-masthead button[aria-label*="Account"]',
+				),
+			) &&
+			!Boolean(
+				document.querySelector('a[href*="accounts.google.com/ServiceLogin"]'),
+			),
 	);
-	return { root: null, sawZipOnly };
 }
 
-function resolveExportedAt(root: string): string | null {
-	try {
-		return statSync(root).mtime.toISOString();
-	} catch {
-		return null;
-	}
+async function probeYoutubeSession(
+	page: BrowserCollectContext["page"],
+): Promise<boolean> {
+	await page.goto(HOME, { waitUntil: "domcontentloaded" });
+	return hasYoutubeSession(page);
 }
 
-async function readJsonIf(path: string): Promise<unknown> {
-	if (!existsSync(path)) {
-		return null;
-	}
-	try {
-		return JSON.parse(await readFile(path, "utf8")) as unknown;
-	} catch {
-		return null;
-	}
-}
-
-async function readTextIf(path: string): Promise<string | null> {
-	if (!existsSync(path)) {
-		return null;
-	}
-	try {
-		return await readFile(path, "utf8");
-	} catch {
-		return null;
-	}
-}
-
-interface Coverage {
-	readonly fieldsUnavailable: readonly string[];
-	readonly reason: CoverageReason;
-	readonly recordCount: number;
-	readonly status: "complete" | "partial" | "empty";
-}
-
-function emptyCoverage(reason: CoverageReason): Coverage {
-	return { reason, status: "empty", recordCount: 0, fieldsUnavailable: [] };
-}
-
-async function emitDiagnostics(
-	ctx: CollectContext,
-	stream: string,
-	coverage: Coverage,
-	exportedAt: string | null,
+export async function ensureYoutubeSession(
+	args: EnsureSessionArgs,
+	timeoutSeconds = 30 * 60,
 ): Promise<void> {
-	if (!ctx.requested.has(DIAGNOSTICS_STREAM)) {
-		return;
-	}
-	await ctx.emitRecord(DIAGNOSTICS_STREAM, {
-		id: hashId(`${stream}|${exportedAt ?? "unknown"}`),
-		stream,
-		status: coverage.status,
-		reason: coverage.reason,
-		record_count: coverage.recordCount,
-		fields_unavailable: [...coverage.fieldsUnavailable],
-		freshness: "snapshot",
-		exported_at: exportedAt,
+	if (await probeYoutubeSession(args.page)) return;
+	const ready = await manualBrowserLogin({
+		assist: args.assist,
+		capture: args.capture,
+		completeAssistance: args.completeAssistance,
+		isProbeSuccessful: (ok) => ok === true,
+		message:
+			"Sign in to YouTube in the secure browser, then continue. PDPP will verify the session before collecting.",
+		page: args.page,
+		probe: () => hasYoutubeSession(args.page),
+		readinessProbe: probeYoutubeSession,
+		sendInteraction: args.sendInteraction,
+		timeoutSeconds,
 	});
+	if (!ready) throw new Error("youtube_session_dead");
 }
 
-async function collectProfile(
-	ctx: CollectContext,
-	root: string,
-	exportedAt: string | null,
+async function scroll(
+	page: BrowserCollectContext["page"],
+	rounds: number,
 ): Promise<void> {
-	if (!ctx.requested.has(PROFILE_STREAM)) {
-		return;
+	for (let i = 0; i < rounds; i += 1) {
+		await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+		await page.waitForTimeout(500);
 	}
-	const path = join(root, "Channel", "channel.csv");
-	const text = await readTextIf(path);
-	if (!text) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: PROFILE_STREAM,
-			reason: "file_not_found_in_export",
-			message: `Channel export was not found at the expected path (${path}). Profile coverage for this Takeout export is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
-		});
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
-		return;
-	}
-	const rows = parseCsvRows(text);
-	const [header, ...body] = rows;
-	if (!header || body.length === 0) {
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
-		return;
-	}
-	const columns = new Map(header.map((name, i) => [name.trim(), i]));
-	const record = buildProfileRecordFromChannelCsvRow(
-		body[0] ?? [],
-		columns,
-		null,
-	);
-	if (!record) {
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
-		return;
-	}
-	await ctx.emitRecord(PROFILE_STREAM, { ...record });
-	await emitDiagnostics(
-		ctx,
-		PROFILE_STREAM,
-		{
-			reason: "covered_in_full",
-			status: "complete",
-			recordCount: 1,
-			fieldsUnavailable: [
-				"title",
-				"handle",
-				"email",
-				"joined_at",
-				"avatar_url",
-				"description",
-				"country",
-				"subscriber_count",
-				"view_count",
-				"video_count",
-			],
-		},
-		exportedAt,
-	);
 }
 
-async function collectSubscriptions(
-	ctx: CollectContext,
-	root: string,
-	exportedAt: string | null,
-): Promise<void> {
-	if (!ctx.requested.has(SUBSCRIPTIONS_STREAM)) {
-		return;
-	}
-	const path = join(root, "subscriptions", "subscriptions.csv");
-	const text = await readTextIf(path);
-	if (!text) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: SUBSCRIPTIONS_STREAM,
-			reason: "file_not_found_in_export",
-			message: `Subscriptions export was not found at the expected path (${path}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
-		});
-		await emitDiagnostics(
-			ctx,
-			SUBSCRIPTIONS_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
-		return;
-	}
-	const rows = parseCsvRows(text);
-	const [header, ...body] = rows;
-	if (!header) {
-		await emitDiagnostics(
-			ctx,
-			SUBSCRIPTIONS_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
-		return;
-	}
-	const columns = new Map(header.map((name, i) => [name.trim(), i]));
-	let emitted = 0;
-	for (const row of body) {
-		if (row.length === 1 && row[0]?.trim() === "") {
-			continue;
-		}
-		const record = buildSubscriptionRecordFromCsvRow(row, columns);
-		if (!record) {
-			continue;
-		}
-		await ctx.emitRecord(SUBSCRIPTIONS_STREAM, { ...record });
-		emitted += 1;
-	}
-	await emitDiagnostics(
-		ctx,
-		SUBSCRIPTIONS_STREAM,
-		{
-			reason: emitted > 0 ? "covered_in_full" : "nothing_in_range",
-			status: emitted > 0 ? "complete" : "empty",
-			recordCount: emitted,
-			fieldsUnavailable: [
-				"handle",
-				"avatar_url",
-				"subscriber_count",
-				"description",
-				"is_verified",
-				"notifications",
-			],
-		},
-		exportedAt,
-	);
-}
+const EMPTY_STATE =
+	"ytd-message-renderer, yt-message-renderer, ytd-background-promo-renderer";
 
-interface PlaylistFileEntry {
-	name: string;
-}
-
-function listPlaylistItemFiles(playlistsDir: string): PlaylistFileEntry[] {
+async function waitForContent(
+	page: BrowserCollectContext["page"],
+	selector: string,
+): Promise<"content" | "empty" | "unreadable"> {
 	try {
-		return readdirSync(playlistsDir)
-			.filter((name) => name.toLowerCase().endsWith("-videos.csv"))
-			.map((name) => ({ name }));
-	} catch {
-		return [];
-	}
-}
-
-async function collectPlaylists(
-	ctx: CollectContext,
-	root: string,
-	exportedAt: string | null,
-): Promise<void> {
-	const wantsPlaylists = ctx.requested.has(PLAYLISTS_STREAM);
-	const wantsItems = ctx.requested.has(PLAYLIST_ITEMS_STREAM);
-	if (!(wantsPlaylists || wantsItems)) {
-		return;
-	}
-	const playlistsDir = join(root, "playlists");
-	const indexPath = join(playlistsDir, "playlists.csv");
-	const text = await readTextIf(indexPath);
-	if (!text) {
-		const message = `Playlists export was not found at the expected path (${indexPath}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`;
-		if (wantsPlaylists) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream: PLAYLISTS_STREAM,
-				reason: "file_not_found_in_export",
-				message,
-			});
-			await emitDiagnostics(
-				ctx,
-				PLAYLISTS_STREAM,
-				emptyCoverage("file_not_found_in_export"),
-				exportedAt,
-			);
-		}
-		if (wantsItems) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream: PLAYLIST_ITEMS_STREAM,
-				reason: "file_not_found_in_export",
-				message,
-			});
-			await emitDiagnostics(
-				ctx,
-				PLAYLIST_ITEMS_STREAM,
-				emptyCoverage("file_not_found_in_export"),
-				exportedAt,
-			);
-		}
-		return;
-	}
-
-	const rows = parseCsvRows(text);
-	const [header, ...body] = rows;
-	const columns = new Map((header ?? []).map((name, i) => [name.trim(), i]));
-	let playlistCount = 0;
-	const playlistIds: string[] = [];
-	for (const row of body) {
-		if (row.length === 1 && row[0]?.trim() === "") {
-			continue;
-		}
-		const record = buildPlaylistRecordFromCsvRow(row, columns);
-		if (!record) {
-			continue;
-		}
-		playlistIds.push(record.id);
-		if (wantsPlaylists) {
-			await ctx.emitRecord(PLAYLISTS_STREAM, { ...record });
-		}
-		playlistCount += 1;
-	}
-	if (wantsPlaylists) {
-		await emitDiagnostics(
-			ctx,
-			PLAYLISTS_STREAM,
-			{
-				reason: playlistCount > 0 ? "covered_in_full" : "nothing_in_range",
-				status: playlistCount > 0 ? "complete" : "empty",
-				recordCount: playlistCount,
-				fieldsUnavailable: [
-					"url",
-					"owner",
-					"owner_url",
-					"video_count",
-					"view_count",
-				],
+		const handle = await page.waitForFunction(
+			({ content, empty }) => {
+				if (document.querySelector(content)) return "content";
+				if (document.querySelector(empty)) return "empty";
+				return false;
 			},
-			exportedAt,
+			{ content: selector, empty: EMPTY_STATE },
+			{ timeout: 10_000 },
 		);
+		const state = (await handle.jsonValue()) as "content" | "empty";
+		await handle.dispose();
+		return state;
+	} catch {
+		return "unreadable";
 	}
-
-	if (!wantsItems) {
-		return;
-	}
-	const itemFiles = listPlaylistItemFiles(playlistsDir);
-	let itemsEmitted = 0;
-	for (const file of itemFiles) {
-		const itemText = await readTextIf(join(playlistsDir, file.name));
-		if (!itemText) {
-			continue;
-		}
-		const itemRows = parseCsvRows(itemText);
-		const [itemHeader, ...itemBody] = itemRows;
-		const itemColumns = new Map(
-			(itemHeader ?? []).map((n, i) => [n.trim(), i]),
-		);
-		// The per-item file is named after the playlist, not keyed by its id;
-		// derive a stable playlist_id from the filename since the item rows
-		// carry no playlist identifier of their own.
-		const derivedPlaylistId = hashId(`playlist_file|${file.name}`);
-		for (const row of itemBody) {
-			if (row.length === 1 && row[0]?.trim() === "") {
-				continue;
-			}
-			const record = buildPlaylistItemRecordFromCsvRow(
-				row,
-				itemColumns,
-				derivedPlaylistId,
-			);
-			if (!record) {
-				continue;
-			}
-			await ctx.emitRecord(PLAYLIST_ITEMS_STREAM, { ...record });
-			itemsEmitted += 1;
-		}
-	}
-	await emitDiagnostics(
-		ctx,
-		PLAYLIST_ITEMS_STREAM,
-		{
-			reason:
-				itemFiles.length === 0
-					? "file_not_found_in_export"
-					: itemsEmitted > 0
-						? "covered_in_full"
-						: "nothing_in_range",
-			status: itemsEmitted > 0 ? "complete" : "empty",
-			recordCount: itemsEmitted,
-			fieldsUnavailable: [
-				"video_title",
-				"channel_title",
-				"channel_url",
-				"duration_seconds",
-				"thumbnail_url",
-			],
-		},
-		exportedAt,
-	);
 }
 
-/**
- * Liked videos and Watch later are Takeout's own playlist export files
- * (Google's documented naming: "Liked videos-videos.csv" and
- * "Watch later-videos.csv" under playlists/), read with the shared
- * per-item CSV parser but mapped to their own record shapes rather than
- * playlist_items — see D2/D3 in CONTRACTS.md on stream granularity.
- */
-async function collectNamedPlaylistStream(
-	ctx: CollectContext,
-	root: string,
-	exportedAt: string | null,
-	stream: typeof LIKES_STREAM | typeof WATCH_LATER_STREAM,
-	fileName: string,
-): Promise<void> {
-	if (!ctx.requested.has(stream)) {
-		return;
-	}
-	const path = join(root, "playlists", fileName);
-	const text = await readTextIf(path);
-	if (!text) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: "file_not_found_in_export",
-			message: `${fileName} was not found at the expected path (${path}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
-		});
-		await emitDiagnostics(
-			ctx,
-			stream,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
+async function waitForChannelIdentity(
+	page: BrowserCollectContext["page"],
+): Promise<"content" | "unreadable"> {
+	try {
+		const handle = await page.waitForFunction(
+			() => {
+				const title = document
+					.querySelector(
+						"ytd-channel-name yt-formatted-string, #channel-name yt-formatted-string, h1",
+					)
+					?.textContent?.trim();
+				const hasIdentity = Boolean(
+					document.querySelector(
+						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
+					) ||
+					/@[^/?#]+/.test(location.pathname),
+				);
+				const placeholderTitle =
+					/^(?:loading\b|please wait\b|home$|youtube$|channel$)/i.test(
+						title ?? "",
+					);
+				return title && !placeholderTitle && hasIdentity
+					? true
+					: false;
+			},
+			undefined,
+			{ timeout: 10_000 },
 		);
-		return;
+		await handle.dispose();
+		return "content";
+	} catch {
+		return "unreadable";
 	}
-	const records =
-		stream === LIKES_STREAM ? parseLikesCsv(text) : parseWatchLaterCsv(text);
-	for (const record of records) {
-		await ctx.emitRecord(stream, { ...record });
+}
+
+async function waitForChannelAbout(
+	page: BrowserCollectContext["page"],
+): Promise<"content" | "unreadable"> {
+	try {
+		const handle = await page.waitForFunction(
+			() => {
+				const about = document.querySelector(
+					"ytd-channel-about-metadata-renderer, yt-about-this-channel-renderer",
+				);
+				if (!about) return false;
+				const text = Array.from(
+					about.querySelectorAll("yt-formatted-string, span, td, dd"),
+				)
+					.filter((node) => node.children.length === 0)
+					.map((node) => node.textContent?.trim() ?? "")
+					.filter((value) => value && !/^(loading|please wait)$/i.test(value));
+				const hasSettledField = text.some(
+					(value) =>
+						/^joined\s+/i.test(value) ||
+						(/subscriber|view|video/i.test(value) && /\d/.test(value)),
+				);
+				const hasDescription = Boolean(
+					about
+						.querySelector(
+							"#description-container yt-formatted-string, #description yt-formatted-string, #description",
+						)
+						?.textContent?.trim(),
+				);
+				return hasSettledField || hasDescription ? "content" : false;
+			},
+			undefined,
+			{ timeout: 10_000 },
+		);
+		const state = (await handle.jsonValue()) as "content";
+		await handle.dispose();
+		return state;
+	} catch {
+		return "unreadable";
 	}
-	await emitDiagnostics(
-		ctx,
+}
+
+async function skipUnreadable(
+	ctx: BrowserContext,
+	stream: string,
+): Promise<void> {
+	await ctx.emit({
+		type: "SKIP_RESULT",
 		stream,
-		{
-			reason: records.length > 0 ? "covered_in_full" : "nothing_in_range",
-			status: records.length > 0 ? "complete" : "empty",
-			recordCount: records.length,
-			fieldsUnavailable: [
-				"video_title",
-				"channel_title",
-				"channel_url",
-				"duration_seconds",
-				"thumbnail_url",
-			],
-		},
-		exportedAt,
-	);
+		reason: "page_unreadable",
+		message: "YouTube content did not appear before the page-read deadline.",
+	});
 }
 
-async function collectWatchHistory(
-	ctx: CollectContext,
-	root: string,
-	exportedAt: string | null,
-	streamState: { last_timestamp?: string } | undefined,
+async function visibleVideos(
+	page: BrowserCollectContext["page"],
+	url: string,
+	rounds: number,
+	mode: "playlist" | "history",
+): Promise<BrowserVideo[]> {
+	await page.goto(url, { waitUntil: "domcontentloaded" });
+	const state = await waitForContent(
+		page,
+		mode === "history"
+			? "ytd-item-section-renderer yt-lockup-view-model"
+			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
+	);
+	if (state === "unreadable")
+		throw new Error(`youtube_${mode}_page_unreadable`);
+	if (state === "empty") return [];
+	const seen = new Set<string>();
+	const out: BrowserVideo[] = [];
+	for (let round = 0; round <= rounds; round += 1) {
+		const batch = await page.evaluate(readVideos, mode);
+		for (const video of batch) {
+			const key = videoIdentity(video);
+			if (!seen.has(key)) {
+				seen.add(key);
+				out.push(video);
+			}
+		}
+		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
+		if (round < rounds) await scroll(page, 1);
+	}
+	return mode === "history" ? out.slice(0, HISTORY_LIMIT) : out;
+}
+
+async function readableVideos(
+	ctx: BrowserContext,
+	url: string,
+	rounds: number,
+	mode: "playlist" | "history",
+	stream: string,
+): Promise<BrowserVideo[] | null> {
+	try {
+		return await visibleVideos(ctx.page, url, rounds, mode);
+	} catch {
+		await skipUnreadable(ctx, stream);
+		return null;
+	}
+}
+
+type BrowserContext = Pick<
+	BrowserCollectContext,
+	"page" | "requested" | "emitRecord" | "emit" | "progress"
+>;
+
+/** Exported so fixture/protocol tests can run without launching a browser. */
+export async function collectYoutubeBrowser(
+	ctx: BrowserContext,
 ): Promise<void> {
-	if (!ctx.requested.has(WATCH_HISTORY_STREAM)) {
-		return;
-	}
-	const path = join(root, "history", "watch-history.json");
-	const json = (await readJsonIf(path)) as WatchHistoryEntry[] | null;
-	if (!Array.isArray(json)) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: WATCH_HISTORY_STREAM,
-			reason: "file_not_found_in_export",
-			message: `Watch history was not found at the expected path (${path}).`,
+	const { page, requested } = ctx;
+	const capturedAt = new Date().toISOString();
+	const coverage = async (
+		stream: string,
+		count: number,
+		fieldsUnavailable: string[] = [],
+	) => {
+		if (!requested.has("coverage_diagnostics")) return;
+		await ctx.emitRecord("coverage_diagnostics", {
+			id: id(`${stream}|${capturedAt}`),
+			stream,
+			status: "partial",
+			reason: "bounded_browser_snapshot",
+			record_count: count,
+			fields_unavailable: fieldsUnavailable,
+			freshness: "live",
+			captured_at: capturedAt,
 		});
-		await emitDiagnostics(
-			ctx,
-			WATCH_HISTORY_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
+	};
+	const emit = async (stream: string, record: Record<string, unknown>) => {
+		await ctx.emitRecord(stream, record);
+	};
+	const missingVideoTitles = (videos: readonly BrowserVideo[]) =>
+		videos.some((video) => !video.video_title) ? ["video_title"] : [];
+	if (requested.has("profile")) {
+		await page.goto(HOME, { waitUntil: "domcontentloaded" });
+		const homeState = await waitForContent(
+			page,
+			"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
 		);
-		return;
-	}
-	const since = streamState?.last_timestamp;
-	let latest: string | undefined = since;
-	let emitted = 0;
-	await ctx.emit({
-		type: "PROGRESS",
-		stream: WATCH_HISTORY_STREAM,
-		message: `YouTube phase=emit pass=emit stream=watch_history total_items=${json.length}`,
-	});
-	for (const entry of json) {
-		const record = buildWatchHistoryRecordFromEntry(entry);
-		if (!record) {
-			continue;
-		}
-		if (since && record.watched_at <= since) {
-			continue;
-		}
-		await ctx.emitRecord(WATCH_HISTORY_STREAM, { ...record });
-		emitted += 1;
-		if (!latest || record.watched_at > latest) {
-			latest = record.watched_at;
-		}
-	}
-	await ctx.emit({
-		type: "STATE",
-		stream: WATCH_HISTORY_STREAM,
-		cursor: { last_timestamp: latest },
-	});
-	await emitDiagnostics(
-		ctx,
-		WATCH_HISTORY_STREAM,
-		{
-			reason: emitted > 0 ? "covered_in_full" : "nothing_in_range",
-			status: emitted > 0 ? "complete" : "empty",
-			recordCount: emitted,
-			fieldsUnavailable: ["view_count", "description"],
-		},
-		exportedAt,
-	);
-}
-
-runConnector({
-	name: "youtube",
-	validateRecord,
-	timeRangeField: "watched_at",
-	async collect(ctx) {
-		const importDir =
-			process.env.YOUTUBE_TAKEOUT_DIR ||
-			join(homedir(), ".pdpp", "imports", "youtube");
-
-		const { root, sawZipOnly } = resolveExportRoot(importDir);
-		if (!root) {
-			const message = sawZipOnly
-				? `Found a .zip in ${importDir} but this connector reads an extracted export directory. Extract the Takeout archive and place its contents (or the "YouTube and YouTube Music" folder) in ${importDir}.`
-				: `No Google Takeout "YouTube and YouTube Music" export found in ${importDir}. Request an export from https://takeout.google.com/, extract it, and place it there. Set YOUTUBE_TAKEOUT_DIR to use a different location.`;
-			for (const stream of [
-				PROFILE_STREAM,
-				SUBSCRIPTIONS_STREAM,
-				PLAYLISTS_STREAM,
-				PLAYLIST_ITEMS_STREAM,
-				LIKES_STREAM,
-				WATCH_LATER_STREAM,
-				WATCH_HISTORY_STREAM,
-			]) {
-				if (!ctx.requested.has(stream)) {
-					continue;
-				}
+		if (homeState !== "content") {
+			await skipUnreadable(ctx, "profile");
+		} else {
+			let profileEmitted = false;
+			await page
+				.locator(
+					"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
+				)
+				.first()
+				.click();
+			const headerState = await waitForContent(
+				page,
+				"ytd-active-account-header-renderer",
+			);
+			const own =
+				headerState === "content"
+					? await page.evaluate(
+							readOwnAccount as () => ReturnType<typeof readOwnAccount>,
+						)
+					: { channel_url: null, email: null };
+			if (!own.channel_url) {
 				await ctx.emit({
 					type: "SKIP_RESULT",
-					stream,
-					reason: sawZipOnly ? "source_unreadable" : "file_not_found_in_export",
-					message,
+					stream: "profile",
+					reason: "page_unreadable",
+					message:
+						"The signed-in account header did not expose an own-channel link.",
 				});
-				await emitDiagnostics(
-					ctx,
-					stream,
-					emptyCoverage(
-						sawZipOnly ? "source_unreadable" : "records_unreadable",
-					),
-					null,
-				);
+			} else {
+				await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
+				const channelState = await waitForChannelIdentity(page);
+				if (channelState !== "content") {
+					await skipUnreadable(ctx, "profile");
+				} else {
+					const channel = await page.evaluate(
+						readChannelPage as () => ReturnType<typeof readChannelPage>,
+					);
+					let about: ReturnType<typeof readChannelAbout> | null = null;
+					let aboutUnreadable = false;
+					try {
+						await page.goto(`${own.channel_url.replace(/\/$/, "")}/about`, {
+							waitUntil: "domcontentloaded",
+						});
+						const aboutState = await waitForChannelAbout(page);
+						if (aboutState === "unreadable") {
+							await skipUnreadable(ctx, "profile");
+							aboutUnreadable = true;
+						} else if (aboutState === "content")
+							about = await page.evaluate(
+								readChannelAbout as () => ReturnType<typeof readChannelAbout>,
+							);
+					} catch {
+						await skipUnreadable(ctx, "profile");
+						aboutUnreadable = true;
+					}
+					if (!aboutUnreadable) {
+						await emit("profile", {
+							id: channel.channel_id ?? own.channel_url,
+							channel_id: channel.channel_id,
+							channel_url: own.channel_url,
+							title: channel.title,
+							handle: channel.handle,
+							email: own.email,
+							joined_at: about?.joined_at ?? null,
+							avatar_url: channel.avatar_url,
+							description: about?.description ?? null,
+							country: about?.country ?? null,
+							subscriber_count: parseCount(about?.subscriber_count_text),
+							view_count: parseCount(about?.view_count_text),
+							video_count: parseCount(about?.video_count_text),
+						});
+						profileEmitted = true;
+					}
+				}
 			}
-			return;
+			await coverage("profile", profileEmitted ? 1 : 0);
 		}
-
-		let canonicalRoot: string;
-		try {
-			canonicalRoot = realpathSync(root);
-		} catch {
-			canonicalRoot = root;
+	}
+	if (requested.has("subscriptions")) {
+		await page.goto(`${HOME}feed/channels`, { waitUntil: "domcontentloaded" });
+		const state = await waitForContent(page, "ytd-channel-renderer");
+		if (state === "unreadable") await skipUnreadable(ctx, "subscriptions");
+		else {
+			await scroll(page, SCROLLS.subscriptions);
+			const subscriptions =
+				state === "empty"
+					? []
+					: await page.evaluate(
+							readSubscriptions as () => ReturnType<typeof readSubscriptions>,
+						);
+			for (const channel of subscriptions)
+				await emit("subscriptions", {
+					id: channel.channel_url,
+					channel_id: channel.channel_id,
+					channel_title: channel.channel_title,
+					channel_url: channel.channel_url,
+					handle: channel.handle,
+					avatar_url: channel.avatar_url,
+					subscriber_count: parseCount(channel.subscriber_count_text),
+					subscriber_count_text: channel.subscriber_count_text,
+					description: channel.description,
+					is_verified: channel.is_verified,
+					notifications: channel.notifications,
+				});
+			await coverage(
+				"subscriptions",
+				subscriptions.length,
+				subscriptions.some((channel) => channel.notifications === null)
+					? ["notifications"]
+					: [],
+			);
 		}
-		const exportedAt = resolveExportedAt(canonicalRoot);
-		const typedState = ctx.state as YoutubeState;
+	}
+	let playlistLinks: Array<{ id: string; url: string }> = [];
+	let playlistIndexReadable = true;
+	if (requested.has("playlists") || requested.has("playlist_items")) {
+		await page.goto(`${HOME}feed/playlists`, { waitUntil: "domcontentloaded" });
+		const state = await waitForContent(page, 'a[href*="playlist?list="]');
+		if (state === "unreadable") {
+			playlistIndexReadable = false;
+			for (const stream of ["playlists", "playlist_items"])
+				if (requested.has(stream)) await skipUnreadable(ctx, stream);
+		} else if (state === "content") {
+			await scroll(page, SCROLLS.playlists);
+			playlistLinks = await page.evaluate(
+				readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
+			);
+		}
+	}
+	if (
+		playlistIndexReadable &&
+		(requested.has("playlists") || requested.has("playlist_items"))
+	) {
+		let playlistCount = 0;
+		let itemCount = 0;
+		let itemTitlesMissing = false;
+		for (const playlist of playlistLinks) {
+			await page.goto(playlist.url, { waitUntil: "domcontentloaded" });
+			if (
+				(await waitForContent(
+					page,
+					"yt-dynamic-text-view-model h1 span, .yt-page-header-view-model__page-header-title h1 span, h1#title, h1 yt-formatted-string",
+				)) !== "content"
+			) {
+				for (const stream of ["playlists", "playlist_items"])
+					if (requested.has(stream)) await skipUnreadable(ctx, stream);
+				continue;
+			}
+			const header = await page.evaluate(
+				readPlaylistHeader as () => ReturnType<typeof readPlaylistHeader>,
+			);
+			if (requested.has("playlists")) {
+				await emit("playlists", {
+					id: playlist.id,
+					url: playlist.url,
+					title: header.title,
+					owner: header.owner,
+					owner_url: header.owner_url,
+					visibility: header.visibility,
+					video_count: parseCount(header.video_count_text),
+					view_count: /no views/i.test(header.view_count_text ?? "")
+						? 0
+						: parseCount(header.view_count_text),
+				});
+				playlistCount += 1;
+			}
+			if (requested.has("playlist_items")) {
+				const videos = await readableVideos(
+					ctx,
+					playlist.url,
+					SCROLLS.playlist_items,
+					"playlist",
+					"playlist_items",
+				);
+				if (videos) {
+					itemTitlesMissing ||= missingVideoTitles(videos).length > 0;
+					for (const video of videos) {
+						await emit("playlist_items", {
+							id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
+							playlist_id: playlist.id,
+							...videoFields(video),
+						});
+						itemCount += 1;
+					}
+				}
+			}
+		}
+		if (requested.has("playlists")) await coverage("playlists", playlistCount);
+		if (requested.has("playlist_items"))
+			await coverage(
+				"playlist_items",
+				itemCount,
+				itemTitlesMissing ? ["video_title"] : [],
+			);
+	}
+	for (const [stream, list] of [
+		["likes", "LL"],
+		["watch_later", "WL"],
+	] as const) {
+		if (!requested.has(stream)) continue;
+		const videos = await readableVideos(
+			ctx,
+			`${HOME}playlist?list=${list}`,
+			SCROLLS.playlist_items,
+			"playlist",
+			stream,
+		);
+		if (!videos) continue;
+		for (const video of videos)
+			await emit(stream, {
+				id: id(`${stream}|${videoIdentity(video)}`),
+				...videoFields(video),
+			});
+		await coverage(stream, videos.length, missingVideoTitles(videos));
+	}
+	if (requested.has("watch_history")) {
+		const videos = await readableVideos(
+			ctx,
+			`${HOME}feed/history`,
+			SCROLLS.history,
+			"history",
+			"watch_history",
+		);
+		if (videos) {
+			const browserDate = await page.evaluate(() => {
+				const now = new Date();
+				return [now.getFullYear(), now.getMonth(), now.getDate()];
+			});
+			const dateReference =
+				Array.isArray(browserDate) && browserDate.length === 3
+					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+					: new Date(capturedAt);
+			for (const [position, video] of videos.entries()) {
+				const watchedDate = resolveWatchedDate(
+					video.watched_date_label ?? null,
+					dateReference,
+				);
+				if (!watchedDate && requested.get("watch_history")?.time_range)
+					continue;
+				await emit("watch_history", {
+					id: id(`history|${videoIdentity(video)}`),
+					position,
+					watched_date: watchedDate,
+					watched_date_label: video.watched_date_label ?? null,
+					video_id: video.video_id,
+					video_url: video.video_url,
+					video_title: video.video_title,
+					channel_title: video.channel_title,
+					channel_url: video.channel_url,
+					view_count: parseCount(video.views_text),
+					views_text: video.views_text ?? null,
+					description: video.description,
+				});
+			}
+			await coverage("watch_history", videos.length, [
+				"watch_time_of_day",
+				...missingVideoTitles(videos),
+			]);
+		}
+	}
+}
 
-		await collectProfile(ctx, canonicalRoot, exportedAt);
-		await collectSubscriptions(ctx, canonicalRoot, exportedAt);
-		await collectPlaylists(ctx, canonicalRoot, exportedAt);
-		await collectNamedPlaylistStream(
-			ctx,
-			canonicalRoot,
-			exportedAt,
-			LIKES_STREAM,
-			"Liked videos-videos.csv",
-		);
-		await collectNamedPlaylistStream(
-			ctx,
-			canonicalRoot,
-			exportedAt,
-			WATCH_LATER_STREAM,
-			"Watch later-videos.csv",
-		);
-		await collectWatchHistory(
-			ctx,
-			canonicalRoot,
-			exportedAt,
-			typedState.watch_history,
-		);
-	},
-});
+export const youtubeConnectorConfig = {
+	name: "youtube",
+	validateRecord,
+	timeRangeField: (stream) =>
+		stream === "watch_history" ? "watched_date" : "date",
+	browser: { profileName: "youtube" },
+	ensureSession: ensureYoutubeSession,
+	probeSession: async ({ page }) => probeYoutubeSession(page),
+	probeSessionIsAuthoritative: true,
+	collect: collectYoutubeBrowser,
+} satisfies Parameters<typeof runConnector>[0];
+
+if (isMainModule(import.meta.url)) {
+	runConnector(youtubeConnectorConfig);
+}

@@ -63,6 +63,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	amazon: c("amazon"),
 	github: c("github"),
 	oura: c("oura"),
+	oura_browser: c("oura_browser"),
 	spotify: c("spotify"),
 	anthropic: c("anthropic"),
 	shopify: c("shopify"),
