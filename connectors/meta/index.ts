@@ -85,9 +85,10 @@
  *     but Desktop continuation logs do not include the connector's
  *     `missing_surfaces` diagnostics, so they cannot show which ad surface
  *     failed. v0.4.2 waits for each intended control/list; a live retest is
- *     still needed to confirm whether layout drift also contributes. An
- *     existing empty ARIA list counts as reached; absent controls or lists
- *     remain incomplete because no explicit empty-state marker is confirmed.
+ *     still needed to confirm whether layout drift also contributes.
+ *     A persistent empty ARIA list counts as reached after a 2.5s settle
+ *     window to preserve legacy empty-list behavior. Meta exposes no confirmed
+ *     empty-state marker, so content arriving after that window remains a risk.
  *   - Tested surface: single-account, EN locale, personal (non-business)
  *     account (see the connector cutover report's Live evidence section
  *     for exact per-stream counts and the two-run incremental proof).
@@ -664,6 +665,40 @@ async function scrapeDialogListItems(
 	});
 }
 
+/** A mounted list is only a shell. Prefer populated rows, but preserve empty
+ * lists after the same bounded settling window used by the legacy collector. */
+async function waitForAdsList(page: Page): Promise<boolean> {
+	const shellReady = await waitForAdsCondition(page, () =>
+		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
+	);
+	if (!shellReady) {
+		return false;
+	}
+
+	const itemsReady = await waitForAdsCondition(
+		page,
+		() => {
+			const list = document.querySelector('[role="dialog"] [role="list"]');
+			return Boolean(
+				list &&
+					Array.from(list.querySelectorAll('[role="listitem"]')).some((item) =>
+						(item.textContent ?? "").trim(),
+					),
+			);
+		},
+		ADS_EMPTY_LIST_SETTLE_MS,
+	);
+	if (itemsReady) {
+		return true;
+	}
+
+	// A list that remains mounted for the full settle window may be genuinely
+	// empty. Meta exposes no confirmed empty-state text for these surfaces.
+	return await page.evaluate(() =>
+		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
+	);
+}
+
 /** Wait for a DOM condition that identifies the intended Accounts Center
  * control or list. Navigation's `domcontentloaded` event only covers the
  * document shell; these surfaces are populated asynchronously afterward. */
@@ -723,9 +758,7 @@ export async function scrapeAdvertisers(
 	if (!clicked) {
 		return { items: [], reached: false, surface: "advertisers" };
 	}
-	const listReady = await waitForAdsCondition(page, () =>
-		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
-	);
+	const listReady = await waitForAdsList(page);
 	if (!listReady) {
 		await closeDialog(page);
 		return { items: [], reached: false, surface: "advertisers" };
@@ -736,6 +769,7 @@ export async function scrapeAdvertisers(
 }
 
 const NON_TOPIC_RE = /special topic|see less/i;
+const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
 
 export async function scrapeAdTopics(
 	page: Page,
@@ -746,15 +780,14 @@ export async function scrapeAdTopics(
 			waitUntil: "domcontentloaded",
 		})
 		.catch((): undefined => undefined);
-	const listReady = await waitForAdsCondition(page, () =>
-		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
-	);
+	const listReady = await waitForAdsList(page);
 	if (!listReady) {
 		return { items: [], reached: false, surface: "ad_topics" };
 	}
 	const result = await scrapeDialogListItems(page);
+	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
 	return {
-		items: result.items.filter((t) => !NON_TOPIC_RE.test(t)),
+		items,
 		reached: result.reached,
 		surface: "ad_topics",
 	};
@@ -825,9 +858,7 @@ export async function scrapeTargetingCategories(
 	if (!clickedCategories) {
 		return { items: [], reached: false, surface: "targeting_categories" };
 	}
-	const categoryListReady = await waitForAdsCondition(page, () =>
-		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
-	);
+	const categoryListReady = await waitForAdsList(page);
 	if (!categoryListReady) {
 		await closeDialog(page);
 		return { items: [], reached: false, surface: "targeting_categories" };
