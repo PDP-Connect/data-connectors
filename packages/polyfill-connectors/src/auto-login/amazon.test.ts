@@ -244,7 +244,10 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 			interactions.requests[0]?.message ?? "",
 			/No saved Amazon sign-in is available/u,
 		);
-		assert.doesNotMatch(interactions.requests[0]?.message ?? "", /AMAZON_USERNAME|AMAZON_PASSWORD/u);
+		assert.doesNotMatch(
+			interactions.requests[0]?.message ?? "",
+			/AMAZON_USERNAME|AMAZON_PASSWORD/u,
+		);
 		assert.match(interactions.requests[0]?.message ?? "", /secure browser/);
 		assert.doesNotMatch(
 			interactions.requests[0]?.message ?? "",

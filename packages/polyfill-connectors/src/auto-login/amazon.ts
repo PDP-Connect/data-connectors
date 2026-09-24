@@ -59,7 +59,10 @@ const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
  */
 const noopCheckpoint: SessionCheckpointFn = () => Promise.resolve();
 
-type ManualHandoffOptions = Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance">;
+type ManualHandoffOptions = Pick<
+	EnsureAmazonSessionArgs,
+	"assist" | "capture" | "completeAssistance"
+>;
 
 interface ManualHandoffInputs {
 	assist: EnsureAmazonSessionArgs["assist"] | undefined;
@@ -182,7 +185,10 @@ async function requestManualLoginForChallenge({
 	page,
 	reason,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureAmazonSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly reason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
@@ -205,7 +211,10 @@ async function requestManualLoginWithoutCredentials({
 	credentialReason,
 	page,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureAmazonSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly credentialReason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
@@ -227,7 +236,10 @@ async function waitForManualLogin({
 	message,
 	page,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureAmazonSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly handoffReason: "captcha" | "login";
 	readonly message: string;
 }): Promise<boolean> {
@@ -236,7 +248,12 @@ async function waitForManualLogin({
 		isProbeSuccessful: (ready) => ready,
 		message,
 		page,
-		probe: () => probeAmazonSession(page),
+		probe: async () => {
+			// Preserve the click-first fallback's former settle window. The streamed
+			// assistance path uses readinessProbe on a separate page instead.
+			await page.waitForTimeout(3000);
+			return await probeAmazonSession(page);
+		},
 		readinessProbe: probeAmazonSession,
 		reason: handoffReason,
 		sendInteraction,
@@ -298,7 +315,10 @@ async function fillOrHandleChallenge({
 	reason,
 	sendInteraction,
 	value,
-}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureAmazonSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly locator: Locator;
 	readonly fieldTimeoutMs?: number | undefined;
 	readonly reason: string;

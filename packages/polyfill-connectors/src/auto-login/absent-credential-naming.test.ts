@@ -82,7 +82,10 @@ for (const { connector, fields, password, username } of CASES) {
 		}
 		assert.deepEqual(resolved.missing, [username, password]);
 		assert.match(resolved.reason, /No saved .* sign-in is available/u);
-		assert.doesNotMatch(resolved.reason, new RegExp(`${username}|${password}`, "u"));
+		assert.doesNotMatch(
+			resolved.reason,
+			new RegExp(`${username}|${password}`, "u"),
+		);
 		assert.doesNotMatch(resolved.reason, PAGE_BLAMING);
 	});
 
@@ -100,7 +103,10 @@ for (const { connector, fields, password, username } of CASES) {
 			return;
 		}
 		assert.deepEqual(resolved.missing, [password]);
-		assert.doesNotMatch(resolved.reason, new RegExp(`${username}|${password}`, "u"));
+		assert.doesNotMatch(
+			resolved.reason,
+			new RegExp(`${username}|${password}`, "u"),
+		);
 		// Names only, never values.
 		assert.doesNotMatch(resolved.reason, /owner@example\.com/u);
 	});
