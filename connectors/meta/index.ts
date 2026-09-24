@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.3.3)
+ * PDPP Meta (Instagram) Connector (v0.4.0)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -97,6 +97,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.0 (2026-09-24) — preserves every legacy top-liker field, including
+ *     empty profile_pic_url values; adds required liker_ordinal and changes
+ *     the post_likes primary key to (post_id, liker_ordinal).
  *   v0.3.3 (2026-09-22) — fills profile.follower_count/following_count/
  *     post_count from a passively observed profile-page GraphQL response
  *     (`fetchProfileCounts`), the same query the legacy connector captured

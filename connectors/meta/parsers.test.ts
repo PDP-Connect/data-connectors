@@ -320,7 +320,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 		{
 			liker_ordinal: 1,
 			post_id: "post1",
-			profile_pic_url: null,
+			profile_pic_url: "",
 			pk: "u2",
 			id: "u2",
 			user_id: "u2",
@@ -341,7 +341,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 		{
 			liker_ordinal: 0,
 			post_id: "post1",
-			profile_pic_url: null,
+			profile_pic_url: "",
 			pk: "u1",
 			id: "u1",
 			user_id: "u1",
@@ -350,7 +350,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 		{
 			liker_ordinal: 1,
 			post_id: "post1",
-			profile_pic_url: null,
+			profile_pic_url: "",
 			pk: "",
 			id: "",
 			user_id: "",
@@ -359,7 +359,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 		{
 			liker_ordinal: 2,
 			post_id: "post1",
-			profile_pic_url: null,
+			profile_pic_url: "",
 			pk: "u3",
 			id: "u3",
 			user_id: "u3",

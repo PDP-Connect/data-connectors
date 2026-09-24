@@ -365,7 +365,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 			{
 				liker_ordinal: 1,
 				post_id: "p1",
-				profile_pic_url: null,
+				profile_pic_url: "",
 				pk: "liker2",
 				id: "liker2",
 				user_id: "liker2",
@@ -374,7 +374,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 			{
 				liker_ordinal: 2,
 				post_id: "p1",
-				profile_pic_url: null,
+				profile_pic_url: "",
 				pk: "",
 				id: "",
 				user_id: "",
