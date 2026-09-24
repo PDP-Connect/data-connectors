@@ -267,7 +267,7 @@ function sleepRecord(session: SleepSession, daily?: DailySleep): RecordData {
   };
 }
 
-function scoreOnlyRecord(daily: DailySleep): RecordData {
+function dailyScoreRecord(daily: DailySleep): RecordData {
   return {
     record_type: "daily_score",
     id: daily.id,
@@ -345,10 +345,9 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
     if (stream === "sleep") {
       const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
       const sessions = data.sleeps ?? [];
-      const sessionDays = new Set(sessions.map((row) => row.day));
       records = [
         ...sessions.map((row) => sleepRecord(row, scores.get(row.day))),
-        ...(data.daily_sleeps ?? []).filter((row) => !sessionDays.has(row.day)).map(scoreOnlyRecord),
+        ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
       ];
     } else if (stream === "readiness") {
       const rows = data.daily_readinesses ?? [];

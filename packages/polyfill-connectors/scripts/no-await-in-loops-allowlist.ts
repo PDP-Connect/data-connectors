@@ -2912,7 +2912,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 360,
+			line: 359,
 			column: 35,
 			category: "ordered_protocol_emission",
 			note: "Oura records are emitted in fetched stream order before the checkpoint.",

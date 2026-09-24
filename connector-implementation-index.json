@@ -12528,7 +12528,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/oura-browser",
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -12560,7 +12560,7 @@
 				"streams": [
 					{
 						"name": "sleep",
-						"description": "Daily sleep sessions and sleep scores, including score-only days. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
 						"display": {
 							"label": "Your sleep sessions",
 							"detail": "Per-night: total sleep duration, awake time, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing, and daily score contributors."

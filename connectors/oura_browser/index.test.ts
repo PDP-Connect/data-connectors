@@ -123,9 +123,9 @@ test("all three streams produce schema-valid UUID records and day checkpoints", 
   }, async () => {
     const h = harness(["sleep", "readiness", "activity"], page(HOME), {}, { since: today });
     await collectOuraBrowser(h.ctx);
-    assert.deepEqual(h.records.map((r) => r.stream), ["sleep", "readiness", "activity"]);
+    assert.deepEqual(h.records.map((r) => r.stream), ["sleep", "sleep", "readiness", "activity"]);
     assert.equal(h.records[0]?.data.sleep_score, 88);
-    assert.equal(h.records[2]?.data.steps, 7000);
+    assert.equal(h.records.find((record) => record.stream === "activity")?.data.steps, 7000);
     assert.deepEqual(h.failures, []);
     assert.deepEqual(h.messages.filter((m) => m.type === "STATE").map((m) => (m.cursor as { next_day: string }).next_day), [next(today), next(today), next(today)]);
   });
@@ -133,7 +133,7 @@ test("all three streams produce schema-valid UUID records and day checkpoints", 
   assert.ok(requests.every((url) => url.includes(`start=${today}`) && url.includes(`end=${today}`)));
 });
 
-test("browser schema accepts +00:00 timestamps on matched and score-only sleep rows", async () => {
+test("browser schema accepts offset timestamps and preserves every daily score document", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/sleep-score-parity.json", import.meta.url), "utf8")) as {
     sleeps: Array<Record<string, unknown>>;
     daily_sleeps: Array<Record<string, unknown>>;
@@ -141,12 +141,18 @@ test("browser schema accepts +00:00 timestamps on matched and score-only sleep r
   await withBrowser(async () => Response.json(fixture), async () => {
     const h = harness(["sleep"], page(HOME), {}, { since: "2026-09-22", until: "2026-09-24" });
     await collectOuraBrowser(h.ctx);
-    assert.equal(h.records.length, 2);
+    assert.equal(h.records.length, 4);
     const session = h.records.find((record) => record.data.id === UUID(101));
     assert.equal(session?.data.record_type, "sleep_session");
     assert.equal(session?.data.awake_time, 1200);
-    assert.equal(session?.data.daily_sleep_id, UUID(201));
-    assert.equal(session?.data.daily_sleep_timestamp, "2026-09-23T08:15:00+00:00");
+    assert.equal(session?.data.daily_sleep_id, UUID(203));
+    assert.equal(session?.data.daily_sleep_timestamp, "2026-09-23T09:15:00+00:00");
+    const sameDayScores = h.records.filter((record) => record.data.record_type === "daily_score" && record.data.day === "2026-09-23");
+    assert.deepEqual(sameDayScores.map((record) => record.data.id), [UUID(201), UUID(203)]);
+    assert.deepEqual(sameDayScores.map((record) => record.data.daily_sleep_timestamp), [
+      "2026-09-23T08:15:00+00:00",
+      "2026-09-23T09:15:00+00:00",
+    ]);
     const scoreOnly = h.records.find((record) => record.data.day === "2026-09-22");
     assert.equal(scoreOnly?.data.id, UUID(202));
     assert.equal(scoreOnly?.data.record_type, "daily_score");
