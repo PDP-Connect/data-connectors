@@ -6587,7 +6587,7 @@
 								},
 								"fetchedAt": {
 									"type": "string",
-									"x_pdpp_role": "event-time"
+									"x_pdpp_role": "secondary"
 								},
 								"windowDescription": {
 									"type": "string"
@@ -6685,7 +6685,7 @@
 								},
 								"fetchedAt": {
 									"type": "string",
-									"x_pdpp_role": "event-time"
+									"x_pdpp_role": "secondary"
 								}
 							},
 							"required": ["id", "days", "fetchedAt"],
@@ -6841,7 +6841,7 @@
 								},
 								"fetchedAt": {
 									"type": "string",
-									"x_pdpp_role": "event-time"
+									"x_pdpp_role": "secondary"
 								},
 								"windowDescription": {
 									"type": "string"

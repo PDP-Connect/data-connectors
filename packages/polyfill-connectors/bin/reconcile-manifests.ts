@@ -37,12 +37,11 @@ function connectorDirFor(manifestName: string): string {
 	return manifestName;
 }
 
-/** Return paths the emit-scanner should read for a connector. We include
- *  index.ts and parsers.ts when they exist; everything else under the
- *  connector dir is left out to keep the scan fast and predictable. */
+/** Return the same connector source paths scanned by the test gate. */
 function emitSourcePathsFor(connectorDir: string): string[] {
-	const candidates = ["index.ts", "parsers.ts"];
-	return candidates.map((f) => join(connectorDir, f)).filter(existsSync);
+	return readdirSync(connectorDir)
+		.filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+		.map((file) => join(connectorDir, file));
 }
 
 function listManifestNames(): string[] {
