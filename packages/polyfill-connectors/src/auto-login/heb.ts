@@ -6,9 +6,9 @@
  *
  * Strategy:
  *   1. Probe the live orders page first.
- *   2. If dead and stored sign-in details are present, fill the verified login
- *      form only, submit it, and wait for a bounded post-submit state change
- *      before re-checking the session.
+ *   2. If the host supplies sign-in details, fill the verified login form only,
+ *      submit it, and wait for a bounded post-submit state change before
+ *      re-checking the session.
  *   3. If H-E-B shows the post-authentication passkey-enrollment upsell,
  *      decline it automatically and keep waiting for the live session. This
  *      screen is not a challenge: sign-in has already succeeded behind it.
@@ -18,8 +18,8 @@
  *      UI, hand the browser to the owner and probe again.
  *
  * The runtime never logs or stores the provider password here. When the owner
- * has opted into credential capture, the connector receives it through the
- * existing connection-scoped secret injection path.
+ * receives sign-in details only through the connection-scoped credential
+ * input. First-time H-E-B setup uses the owner-present browser handoff.
  */
 
 import type { Locator, Page } from "playwright";
@@ -140,9 +140,7 @@ export type HebAuthSurface =
 	| "unknown";
 
 /**
- * Where H-E-B's sign-in pair lives in the runtime-resolved `credentials`
- * object. Must match the manifest's `credential_capture` env mapping (see
- * `src/generated/static-secret-registry.generated.ts`).
+ * Field names used if the host provides H-E-B sign-in details to the runtime.
  */
 const HEB_LOGIN_FIELDS: LoginCredentialFields = {
 	password: ["HEB_PASSWORD"],
@@ -155,7 +153,7 @@ interface EnsureHebSessionArgs {
 	/**
 	 * This connection's resolved sign-in pair, threaded from the runtime (see
 	 * `login-credentials.ts`). Optional so a direct, non-runtime caller can omit
-	 * it; an absent pair reports itself as absent rather than blaming the page.
+	 * it; without a pair, the owner signs in through the browser handoff.
 	 */
 	credentials?: Readonly<Record<string, string | undefined>> | undefined;
 	onCredentialSubmit?: () => void;
@@ -840,19 +838,11 @@ async function waitForPostSubmitAuthSurface(
 async function handOffToOwner({
 	capture,
 	checkpoint,
-	credentialReason,
 	page,
 	sendInteraction,
 	surface,
 }: Pick<EnsureHebSessionArgs, "capture" | "page" | "sendInteraction"> & {
 	readonly checkpoint?: SessionCheckpointFn | undefined;
-	/**
-	 * Set when this connection had no stored sign-in pair. It leads the message
-	 * because it is the ACTUAL cause: whatever H-E-B rendered, the run never had
-	 * a credential to submit, and the surface copy alone would misattribute that
-	 * to the page.
-	 */
-	readonly credentialReason?: string | undefined;
 	readonly surface: Exclude<HebAuthSurface, "live">;
 }): Promise<boolean> {
 	let message: string;
@@ -865,9 +855,6 @@ async function handOffToOwner({
 		message = unknownSurfaceMessage(observed);
 	} else {
 		message = manualLoginMessage(surface);
-	}
-	if (credentialReason) {
-		message = `${credentialReason} ${message}`;
 	}
 	await manualAction(
 		{
@@ -1284,13 +1271,6 @@ export async function ensureHebSession({
 	const recovered = await handOffToOwner({
 		...(capture ? { capture } : {}),
 		checkpoint,
-		// Names the CREDENTIAL, not the page. An owner reading this must be able to
-		// tell "no credential was stored for this connection" apart from "H-E-B's
-		// sign-in form failed to render" — the two need different remedies, and
-		// before this the surface copy claimed the latter for both.
-		...(resolved.kind === "absent"
-			? { credentialReason: resolved.reason }
-			: {}),
 		page,
 		sendInteraction,
 		surface: repairSurface,

@@ -9,6 +9,11 @@ import { manifestPath } from "../../packages/polyfill-connectors/src/connector-p
 const MANIFEST_PATH = manifestPath("heb");
 
 interface HebManifest {
+	setup?: {
+		credential_capture?: unknown;
+		modality?: unknown;
+	};
+	version?: unknown;
 	capabilities?: {
 		human_interaction?: unknown;
 		refresh_policy?: {
@@ -17,6 +22,15 @@ interface HebManifest {
 		};
 	};
 }
+
+test("heb first-time setup starts in browser login without requiring saved credentials", () => {
+	const manifest = JSON.parse(
+		readFileSync(MANIFEST_PATH, "utf8"),
+	) as HebManifest;
+	assert.equal(manifest.version, "0.5.3");
+	assert.equal(manifest.setup?.modality, null);
+	assert.equal(manifest.setup?.credential_capture, undefined);
+});
 
 test("heb manifest declares otp alongside manual_action and keeps the posture honest", () => {
 	const manifest = JSON.parse(

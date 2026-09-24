@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.5.2",
+	"version": "0.5.3",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -16,33 +16,7 @@
 		}
 	},
 	"setup": {
-		"modality": "static_secret",
-		"credential_capture": {
-			"kind": "username_password",
-			"label": "H-E-B sign-in details",
-			"description": "Save the H-E-B sign-in details for this source so the session can be repaired automatically later. If you do not want to save them, use the secure browser login path instead.",
-			"submit_label": "Save sign-in details and start first sync",
-			"fields": [
-				{
-					"name": "username",
-					"label": "H-E-B email or phone",
-					"type": "text",
-					"required": true,
-					"secret": true,
-					"autocomplete": "username",
-					"env": ["HEB_USERNAME"]
-				},
-				{
-					"name": "password",
-					"label": "H-E-B password",
-					"type": "password",
-					"required": true,
-					"secret": true,
-					"autocomplete": "current-password",
-					"env": ["HEB_PASSWORD"]
-				}
-			]
-		}
+		"modality": null
 	},
 	"capabilities": {
 		"human_interaction": ["manual_action", "otp"],

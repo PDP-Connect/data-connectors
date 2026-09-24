@@ -22,10 +22,9 @@
  * seconds, forever.
  *
  * Four connectors (`amazon`, `chase`, `heb`, `chatgpt`) shipped in exactly that
- * state. Each was individually plausible, which is why a per-connector review
- * did not catch it — the omission is only visible when you compare the two
- * declarations. This test does that comparison for every connector, so the
- * fifth one cannot repeat it.
+ * state. H-E-B no longer requests saved credentials: its browser sign-in path
+ * is the first-run path. The remaining credential-capture connectors are
+ * compared here so a missing runtime declaration cannot recur.
  *
  * See `src/auto-login/login-credentials.ts` for the credential-naming contract
  * and `scripts/check-no-direct-credential-env.ts` for the sibling gate that
@@ -175,15 +174,13 @@ test("every username/password connector declares an auth block naming its creden
 	);
 });
 
-test("the four connectors that shipped without an auth block now declare the right one", () => {
-	// Pinned by name because these are the regressions this change fixed. The
-	// general test above would catch a re-omission, but naming them keeps the
-	// specific defect legible to whoever reads this next.
+test("connectors that require saved sign-in pairs declare the right auth fields", () => {
+	// Pinned by name because the general test above protects all other
+	// manifest-declared username/password connectors.
 	const expected: Readonly<Record<string, readonly string[]>> = {
 		amazon: ["AMAZON_USERNAME", "AMAZON_PASSWORD"],
 		chase: ["CHASE_USERNAME", "CHASE_PASSWORD"],
 		chatgpt: ["CHATGPT_USERNAME", "CHATGPT_PASSWORD"],
-		heb: ["HEB_USERNAME", "HEB_PASSWORD"],
 	};
 
 	for (const [connectorKey, names] of Object.entries(expected)) {
