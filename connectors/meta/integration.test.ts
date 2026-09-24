@@ -58,13 +58,15 @@ function makeFakePage(options: {
 	fetchScript: Record<string, ScriptedFetch[]>;
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
-}): { calls: string[]; page: Page } {
+}): { calls: string[]; page: Page; waitConditions: string[] } {
 	const calls: string[] = [];
+	const waitConditions: string[] = [];
 	const cursors: Record<string, number> = {};
 	const dialogQueue = [...(options.dialogScrapes ?? [])];
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
+	let adsListWait = 0;
 
 	const resolveNextPostsPage = (): void => {
 		const next = pendingPostsResolve;
@@ -98,6 +100,31 @@ function makeFakePage(options: {
 			new Promise((resolve) => {
 				pendingPostsResolve = resolve;
 			}),
+		waitForFunction: (condition: unknown): Promise<unknown> => {
+			const source = String(condition);
+			waitConditions.push(source);
+			if (source.includes("Manage info")) {
+				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (source.includes("Categories used to reach you")) {
+				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (source.includes("View all")) {
+				return Promise.resolve(true);
+			}
+			if (source.includes("advertiser")) {
+				return Promise.resolve(true);
+			}
+			if (source.includes('[role="dialog"] [role="list"]')) {
+				const index = adsListWait++;
+				if (index < 2) {
+					const reached = dialogReachedQueue[index];
+					return Promise.resolve(reached ?? dialogQueue[index] !== undefined);
+				}
+				return Promise.resolve(options.categoryDestinationReached !== false);
+			}
+			return Promise.resolve(true);
+		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
 			if (fnSource.includes("scrollTo")) {
@@ -163,7 +190,7 @@ function makeFakePage(options: {
 		},
 	} as unknown as Page;
 
-	return { calls, page };
+	return { calls, page, waitConditions };
 }
 
 const WEB_INFO_USER = {
@@ -550,7 +577,7 @@ test("collectAllStreams: following hitting the page ceiling emits an honest SKIP
 
 test("collectAllStreams: ads stream merges advertisers/topics/categories with kind discriminator", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page } = makeFakePage({
+	const { page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
@@ -586,6 +613,18 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
 	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
+	assert.equal(waitConditions.length, 6);
+	assert.ok(
+		waitConditions.some((condition) => condition.includes("advertiser")),
+	);
+	assert.ok(
+		waitConditions.some((condition) => condition.includes("Manage info")),
+	);
+	assert.ok(
+		waitConditions.some((condition) =>
+			condition.includes("Categories used to reach you"),
+		),
+	);
 	assert.equal(harness.skipped.length, 0);
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),

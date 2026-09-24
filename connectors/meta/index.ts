@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.0)
+ * PDPP Meta (Instagram) Connector (v0.4.2)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -78,15 +78,16 @@
  *     live account has 0 posts. `pilot-real-shape/records/{posts,post_likes}.jsonl`
  *     are synthetic-but-shape-calibrated, not real-derived, for this reason.
  *   - ads scraping depends on Accounts Center's ARIA dialog structure
- *     (`[role="dialog"] [role="list"] [role="listitem"]`), ported verbatim
- *     from both legacy connectors. Confirmed flaky live: one run captured
- *     only 1 record (targeting categories; the advertisers button wasn't
- *     found), a second run on the same session captured 2 (targeting
- *     categories + 1 advertiser). Whether this is UI drift (Accounts
- *     Center's "Manage info" tab layout looked materially different from
- *     the legacy connector's screenshots) or a click-timing race is not yet
- *     isolated — needs a dedicated live investigation, not assumed to be
- *     either.
+ *     (`[role="dialog"] [role="list"] [role="listitem"]`), also used by
+ *     both legacy connectors. The signed v0.4.1 implementation used fixed
+ *     delays before reading these surfaces, while the legacy implementation
+ *     waited for matching selectors. A 2026-09-24 run left only ads missing,
+ *     but Desktop continuation logs do not include the connector's
+ *     `missing_surfaces` diagnostics, so they cannot show which ad surface
+ *     failed. v0.4.2 waits for each intended control/list; a live retest is
+ *     still needed to confirm whether layout drift also contributes. An
+ *     existing empty ARIA list counts as reached; absent controls or lists
+ *     remain incomplete because no explicit empty-state marker is confirmed.
  *   - Tested surface: single-account, EN locale, personal (non-business)
  *     account (see the connector cutover report's Live evidence section
  *     for exact per-stream counts and the two-run incremental proof).
@@ -97,6 +98,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.2 (2026-09-24) — waits for Accounts Center's interactive controls
+ *     and lists before scraping each ad surface; replaces fixed sleeps that
+ *     could sample the DOM before asynchronous dialog/tab content loaded.
  *   v0.4.0 (2026-09-24) — preserves every legacy top-liker field, including
  *     empty profile_pic_url values; adds required liker_ordinal and changes
  *     the post_likes primary key to (post_id, liker_ordinal).
@@ -660,6 +664,22 @@ async function scrapeDialogListItems(
 	});
 }
 
+/** Wait for a DOM condition that identifies the intended Accounts Center
+ * control or list. Navigation's `domcontentloaded` event only covers the
+ * document shell; these surfaces are populated asynchronously afterward. */
+async function waitForAdsCondition(
+	page: Page,
+	condition: () => boolean,
+	timeout = 8_000,
+): Promise<boolean> {
+	try {
+		await page.waitForFunction(condition, undefined, { timeout });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function closeDialog(page: Page): Promise<void> {
 	await page
 		.evaluate(() => {
@@ -674,7 +694,6 @@ async function closeDialog(page: Page): Promise<void> {
 
 export async function scrapeAdvertisers(
 	page: Page,
-	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<ReachedScrape<string>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
@@ -682,7 +701,14 @@ export async function scrapeAdvertisers(
 			waitUntil: "domcontentloaded",
 		})
 		.catch((): undefined => undefined);
-	await delay(2000);
+	const buttonReady = await waitForAdsCondition(page, () =>
+		Boolean(
+			document.querySelector('[role="button"][aria-label*="advertiser" i]'),
+		),
+	);
+	if (!buttonReady) {
+		return { items: [], reached: false, surface: "advertisers" };
+	}
 
 	const clicked = await page.evaluate(() => {
 		const btn = document.querySelector(
@@ -697,7 +723,13 @@ export async function scrapeAdvertisers(
 	if (!clicked) {
 		return { items: [], reached: false, surface: "advertisers" };
 	}
-	await delay(2000);
+	const listReady = await waitForAdsCondition(page, () =>
+		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
+	);
+	if (!listReady) {
+		await closeDialog(page);
+		return { items: [], reached: false, surface: "advertisers" };
+	}
 	const result = await scrapeDialogListItems(page);
 	await closeDialog(page);
 	return { ...result, surface: "advertisers" };
@@ -707,7 +739,6 @@ const NON_TOPIC_RE = /special topic|see less/i;
 
 export async function scrapeAdTopics(
 	page: Page,
-	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<ReachedScrape<string>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`, {
@@ -715,7 +746,12 @@ export async function scrapeAdTopics(
 			waitUntil: "domcontentloaded",
 		})
 		.catch((): undefined => undefined);
-	await delay(3000);
+	const listReady = await waitForAdsCondition(page, () =>
+		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
+	);
+	if (!listReady) {
+		return { items: [], reached: false, surface: "ad_topics" };
+	}
 	const result = await scrapeDialogListItems(page);
 	return {
 		items: result.items.filter((t) => !NON_TOPIC_RE.test(t)),
@@ -732,7 +768,6 @@ export async function scrapeAdTopics(
  */
 export async function scrapeTargetingCategories(
 	page: Page,
-	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<ReachedScrape<{ description: string | null; name: string }>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
@@ -740,7 +775,14 @@ export async function scrapeTargetingCategories(
 			waitUntil: "domcontentloaded",
 		})
 		.catch((): undefined => undefined);
-	await delay(2000);
+	const tabReady = await waitForAdsCondition(page, () =>
+		Array.from(document.querySelectorAll('[role="tab"]')).some((tab) =>
+			(tab.textContent ?? "").includes("Manage info"),
+		),
+	);
+	if (!tabReady) {
+		return { items: [], reached: false, surface: "targeting_categories" };
+	}
 
 	const clickedTab = await page.evaluate(() => {
 		const tabs = document.querySelectorAll('[role="tab"]');
@@ -755,7 +797,18 @@ export async function scrapeTargetingCategories(
 	if (!clickedTab) {
 		return { items: [], reached: false, surface: "targeting_categories" };
 	}
-	await delay(1000);
+	const panelLinkReady = await waitForAdsCondition(page, () =>
+		Array.from(
+			document.querySelectorAll(
+				'[role="tabpanel"] a, [role="tabpanel"] [role="link"]',
+			),
+		).some((link) =>
+			(link.textContent ?? "").includes("Categories used to reach you"),
+		),
+	);
+	if (!panelLinkReady) {
+		return { items: [], reached: false, surface: "targeting_categories" };
+	}
 
 	const clickedCategories = await page.evaluate(() => {
 		const links = document.querySelectorAll(
@@ -772,7 +825,13 @@ export async function scrapeTargetingCategories(
 	if (!clickedCategories) {
 		return { items: [], reached: false, surface: "targeting_categories" };
 	}
-	await delay(1500);
+	const categoryListReady = await waitForAdsCondition(page, () =>
+		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
+	);
+	if (!categoryListReady) {
+		await closeDialog(page);
+		return { items: [], reached: false, surface: "targeting_categories" };
+	}
 
 	const clickedViewAll = await page.evaluate(() => {
 		const btns = document.querySelectorAll('button, [role="button"]');
@@ -784,10 +843,9 @@ export async function scrapeTargetingCategories(
 		}
 		return false;
 	});
-	await delay(500);
 	const viewAllExpanded =
 		!clickedViewAll ||
-		(await page.evaluate(() => {
+		(await waitForAdsCondition(page, () => {
 			const btns = document.querySelectorAll('button, [role="button"]');
 			return !Array.from(btns).some(
 				(btn) => (btn.textContent ?? "").trim() === "View all",
@@ -956,9 +1014,9 @@ export async function collectAllStreams(
 
 	if (wantsAds) {
 		await progress("Fetching Instagram ad preferences");
-		const advertisers = await scrapeAdvertisers(page, delay);
-		const adTopics = await scrapeAdTopics(page, delay);
-		const categories = await scrapeTargetingCategories(page, delay);
+		const advertisers = await scrapeAdvertisers(page);
+		const adTopics = await scrapeAdTopics(page);
+		const categories = await scrapeTargetingCategories(page);
 		const reachedSurfaces = [advertisers, adTopics, categories]
 			.filter((surface) => surface.reached)
 			.map((surface) => surface.surface);
