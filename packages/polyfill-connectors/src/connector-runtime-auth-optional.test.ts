@@ -274,6 +274,17 @@ test("the chatgpt connector opts in — the production connection that failed is
 	);
 });
 
+test("the H-E-B connector keeps missing optional credentials from blocking its browser handoff", async () => {
+	const source = await import("node:fs/promises").then((fs) =>
+		fs.readFile(connectorEntrypoint("heb"), "utf8"),
+	);
+	assert.match(
+		source,
+		/authOptional:\s*true/u,
+		"connectors/heb/index.ts must allow first-run browser sign-in without saved credentials",
+	);
+});
+
 test("the INSTALLED protocol build honours authOptional — not just the source we intended to ship", async () => {
 	// The behavior lives in `@pdpp/connector-protocol`, which reaches this repo
 	// as a prebuilt tarball under vendor/. A correct upstream fix that was never
