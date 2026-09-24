@@ -722,7 +722,10 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
-	assert.ok(skip, "a dialog without its list must not count as a reached surface");
+	assert.ok(
+		skip,
+		"a dialog without its list must not count as a reached surface",
+	);
 	assert.deepEqual(skip.diagnostics, { missing_surfaces: ["advertisers"] });
 });
 
@@ -765,7 +768,10 @@ test("collectAllStreams: successful category clicks without a destination list e
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
-	assert.ok(skip, "clicking through without a destination list must not count as reached");
+	assert.ok(
+		skip,
+		"clicking through without a destination list must not count as reached",
+	);
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
 	});
