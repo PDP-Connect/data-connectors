@@ -1,80 +1,199 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Pure parsers for the Apple Health connector. Kept free of Node I/O so
-// they can be unit-tested in isolation (see parsers.test.ts). The
-// streaming XML reader and record emitter live in index.ts.
-//
-// The zip-extraction helpers below are the one exception: they need real
-// filesystem access (a manual-upload export.xml can legitimately be
-// hundreds of MB to multiple GB, so extraction must stream to disk, never
-// buffer in memory — see streamZipEntryToFile's own doc comment). Kept here
-// rather than index.ts so both index.ts (collect) and validation.ts
-// (manual-upload preview) share exactly one extraction implementation.
+// Pure parsers for the Apple Health connector, free of Node I/O so they can
+// be tested alone (parsers.test.ts). The streaming reader and emitter live in
+// index.ts, and finding and unpacking an upload in uploads.ts. The exception
+// is scanExportXmlSummary, the upload preview's count of an export, kept
+// beside the tag grammar it shares with the scanner.
 
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { isListedHealthType } from "./areas.ts";
 import {
-	closeSync,
-	createReadStream,
-	type Dirent,
-	existsSync,
-	openSync,
-	readdirSync,
-	statSync,
-} from "node:fs";
-import { join } from "node:path";
-import {
-	streamZipEntryToFile,
-	type ZipReadPolicy,
-} from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
+	MAX_TYPE_LENGTH,
+	MAX_UNIT_LENGTH,
+	MAX_UTC_OFFSET_MINUTES,
+} from "./schemas.ts";
 import type {
 	AppleHealthAttrs,
 	AppleHealthElement,
+	AppleHealthElementGaps,
 	AppleHealthGapCounts,
+	AppleHealthMetadataEntry,
+	AppleHealthProvenance,
 	AppleHealthWorkoutEvent,
+	AppleHealthWorkoutStatistics,
 	HealthRecordOut,
 	WorkoutRecordOut,
 } from "./types.ts";
 
 // ─── Module-scoped regexes (Biome useTopLevelRegex) ────────────────────
 
-// Matches the opening tag of any element the streaming scanner in index.ts
-// tracks: the two top-level record kinds (Record, Workout), their nested
-// children (MetadataEntry, WorkoutEvent, WorkoutStatistics), and the two
-// top-level close tags needed to know when a Record/Workout span ends.
-// Longest-name-first ordering matters: regex alternation is first-match, not
-// longest-match, so "Workout" would otherwise shadow "WorkoutStatistics"/
-// "WorkoutEvent" and fail the tag (no immediate whitespace/`>` after the
-// "Workout" prefix), silently losing those elements.
+// The tags the streaming scanners (nextTag below) track: the open tags of
+// Record and Workout and of their children (MetadataEntry, WorkoutEvent,
+// WorkoutStatistics), the close tags that end a Record or Workout, and
+// </HealthData>, without which a file is incomplete. WorkoutActivity (iOS 16
+// and later) is matched open and closed only so the scanner knows when it is
+// inside one; WorkoutRoute only open, so a GPS route is counted once and its
+// Location children are never read. Names are listed longest first, since
+// alternation takes the first match: "Workout" would otherwise shadow
+// "WorkoutStatistics" and "WorkoutEvent" and lose those elements.
 //
-// The attribute-span group matches only well-formed `key="value"` pairs
-// (`(?:\s+\w+="[^"]*")*`), NOT "any char but / or >". A prior version used
-// `[^/>]*`, which excludes literal `/` from attribute VALUES — but Apple
-// Health's own units routinely contain `/` (`count/min` for heart rate,
-// `mL/min·kg` for VO2max), so that version silently failed to match, and
-// silently dropped, every Record carrying such a unit. Matching only real
-// attribute syntax makes the tag boundary depend on quote structure, not on
-// which characters happen to appear inside a quoted value.
-// WorkoutRoute is matched only as an open tag (never captured as a full
-// element with children — see workoutRoutesUncaptured) so the scanner can
-// count it once per occurrence instead of it vanishing into the "any
-// other tag" fallthrough alongside its nested Location/MetadataEntry
-// children, which would double- or triple-count one GPS route.
-export const APPLE_HEALTH_TAG_RE =
-	/<(WorkoutStatistics|WorkoutEvent|MetadataEntry|WorkoutRoute|Workout|Record)((?:\s+[\w:-]+="[^"]*")*)\s*(\/?)>|<\/(Record|Workout)>/g;
-const APPLE_HEALTH_ATTR_RE = /([\w:-]+)="([^"]*)"/g;
+// Attributes are matched as well-formed pairs only, `key="value"` or
+// `key='value'`, with any whitespace XML allows around the `=`, so a tag's
+// end depends on quote structure and not on what a value holds: Apple's units
+// hold `/` (`count/min`, `mL/min·kg`), and an attribute span of `[^/>]*`
+// would fail to match, and so drop, every Record carrying one. A close tag
+// may hold whitespace before its `>`.
+//
+// The pairs are matched at most 64 at a time. The regex engine keeps a
+// backtracking entry per repetition of a group, so one unbounded repetition
+// would exhaust the stack on an element with a million or so attributes and
+// end the run with no receipt. nextTag reads on through
+// APPLE_HEALTH_MORE_ATTRS_RE only for an element with more than 64.
+const APPLE_HEALTH_TAG_RE =
+	/<(?:(WorkoutStatistics|WorkoutActivity|WorkoutEvent|MetadataEntry|WorkoutRoute|Workout|Record)((?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*')){0,64})(?:\s*(\/?)>)?|\/(WorkoutActivity|HealthData|Workout|Record)\s*>)/g;
+const APPLE_HEALTH_MORE_ATTRS_RE =
+	/(?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*')){1,64}/y;
+const APPLE_HEALTH_TAG_END_RE = /\s*(\/?)>/y;
+const APPLE_HEALTH_ATTR_RE = /([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 const XML_ENTITY_RE = /&(lt|gt|amp|quot|apos|#x[0-9a-fA-F]+|#\d+);/g;
 const APPLE_HEALTH_TYPE_PREFIX_RE =
 	/^HKQuantityTypeIdentifier|^HKCategoryTypeIdentifier|^HKDataType/;
-const APPLE_HEALTH_KNOWN_TYPE_RE =
-	/^HKQuantityTypeIdentifier|^HKCategoryTypeIdentifier|^HKDataType|^HKCorrelationTypeIdentifier/;
 const APPLE_HEALTH_WORKOUT_PREFIX_RE = /^HKWorkoutActivityType/;
+// Trailing UTC offset on an Apple Health timestamp: "2024-06-05 13:45:22 -0700".
+const APPLE_HEALTH_TZ_OFFSET_RE = /([+-])(\d{2}):?(\d{2})\s*$/;
+// The leading run of well-formed attributes of a pending tail, in the tag
+// regex's own grammar, so a dropped element can be range-checked, and a
+// Record assigned to its area's stream, before it is charged to a receipt.
+// It is read pair by pair (sniffLeadingAttrs), so text inside a value is
+// never taken for an attribute, and it stops at the first thing the scanner
+// would not accept: a startDate or type beyond that point, or past
+// LEADING_ATTRS_SNIFF_BYTES, is not found, and the drop counts as in scope.
+// The byte bound also bounds this pattern's repetition.
+const APPLE_HEALTH_LEADING_ATTRS_RE =
+	/^<[\w:-]+((?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)/;
+const LEADING_ATTRS_SNIFF_BYTES = 8192;
+// The element kind at the head of a pending tail the scanner is about to
+// drop as oversized. Longest-name-first for the same reason as the tag
+// regex, with a lookahead so "Workout" cannot match "WorkoutEvent".
+export const APPLE_HEALTH_PENDING_TAG_RE =
+	/^<(WorkoutStatistics|WorkoutActivity|WorkoutEvent|MetadataEntry|WorkoutRoute|Workout|Record)(?=[\s/>])/;
 const APPLE_HEALTH_WORKOUT_EVENT_PREFIX_RE = /^HKWorkoutEventType/;
+// Apple's HKDevice description, whole: `<<HKDevice: 0x…>, name:…, …>`,
+// its fields captured, ending at its own closing `>` with nothing after it.
+const HKDEVICE_RE = /^<<HKDevice: 0x[0-9A-Fa-f]+>((?:, [\s\S]*)?)>$/;
+// A `, key:` boundary in that description. Keys are words, `creation date`
+// among them, so a key is any run of letters and spaces.
+const HKDEVICE_FIELD_RE = /, ([A-Za-z][A-Za-z ]*):/g;
 
 // Bound nested-child accumulation per element so one pathological export
 // (e.g. thousands of MetadataEntry on a single Workout) cannot balloon
 // memory — the streaming design must survive a 500MB export.
-const MAX_TRACKED_CHILDREN_PER_ELEMENT = 500;
+export const MAX_TRACKED_CHILDREN_PER_ELEMENT = 500;
+
+/**
+ * Ceiling on the unparsed tail a scan holds between chunks, which in a
+ * well-formed export is one partial element. Generous, since a third-party
+ * writer may put a very large value in a MetadataEntry, and a ceiling that
+ * rejects a genuine export costs more than the memory it saves; it still
+ * bounds a document that never closes an element.
+ */
+export const MAX_PENDING_TAG_BYTES = 16 * 1_048_576;
+
+const EMPTY_BYTES = Buffer.alloc(0);
+const LT_BYTE = 0x3c;
+const GT_BYTE = 0x3e;
+const SLASH_BYTE = 0x2f;
+
+/**
+ * What a streaming scan has read and not yet finished with, for both
+ * scanners (streamParse in index.ts, scanExportXmlSummary below). Held as
+ * bytes and decoded only when scanned: appended to a string chunk by chunk,
+ * an element spanning many chunks would be held as that many strings,
+ * several times its size in heap.
+ *
+ * A scan is due once a '>' has arrived since the last one, as no tag ends
+ * without one, and what is held has doubled since that scan left some; or
+ * once it passes MAX_PENDING_TAG_BYTES. An element growing over many chunks
+ * is then scanned about twice its length in all, where a scan per chunk would
+ * cost time in the square of its length. A '<' is one byte in UTF-8 and no
+ * byte of a longer character, so the bytes from the last '<' decode to the
+ * text from it, and a character cut by a chunk boundary decodes whole later.
+ */
+export class ScanBuffer {
+	/** Bytes held. */
+	bytes = 0;
+	/** Whether a '>' has been read since the last scan. */
+	private closed = false;
+	private parts: Buffer[] = [];
+	/** Bytes the last scan left for the next. */
+	private unread = 0;
+
+	/** Hold a chunk. Returns whether a scan is due. */
+	push(chunk: Buffer): boolean {
+		this.parts.push(chunk);
+		this.bytes += chunk.length;
+		this.closed ||= chunk.includes(GT_BYTE);
+		return (
+			(this.closed && this.bytes >= 2 * this.unread) ||
+			this.bytes > MAX_PENDING_TAG_BYTES
+		);
+	}
+
+	/** Everything held, decoded, for a scan. */
+	text(): string {
+		const whole = Buffer.concat(this.parts, this.bytes);
+		this.parts = [whole];
+		return whole.toString("utf8");
+	}
+
+	/**
+	 * After a scan of `text` (the last text()) read tags up to `at`, keep only
+	 * what a later scan can need: from the last '<', unless a tag already read
+	 * holds it.
+	 */
+	keep(text: string, at: number): void {
+		const whole = this.parts[0] ?? EMPTY_BYTES;
+		const kept =
+			text.lastIndexOf("<") < at
+				? EMPTY_BYTES
+				: Buffer.from(whole.subarray(whole.lastIndexOf(LT_BYTE)));
+		this.parts = [kept];
+		this.bytes = kept.length;
+		this.unread = kept.length;
+		this.closed = false;
+	}
+
+	/** Let go of everything held. */
+	clear(): void {
+		this.parts = [];
+		this.bytes = 0;
+		this.unread = 0;
+		this.closed = false;
+	}
+
+	/** The start of what is held, decoded: enough to tell what element it is. */
+	head(): string {
+		return Buffer.concat(
+			this.parts,
+			Math.min(this.bytes, LEADING_ATTRS_SNIFF_BYTES),
+		).toString("utf8");
+	}
+
+	/** Whether what is held includes a '>'. */
+	hasClose(): boolean {
+		return this.parts.some((part) => part.includes(">"));
+	}
+
+	/** Whether what is held ends with a '/'. */
+	endsWithSlash(): boolean {
+		return (
+			this.parts.findLast((part) => part.length > 0)?.at(-1) === SLASH_BYTE
+		);
+	}
+}
 
 // Record ID length (hex). 24 chars = 96 bits of entropy — safe for a user's
 // personal health-event set.
@@ -82,11 +201,189 @@ const RECORD_ID_HASH_LENGTH = 24;
 
 // ─── Small pure helpers ────────────────────────────────────────────────
 
+/**
+ * A copy of `s` that shares no memory with the text it was cut from. V8 can
+ * represent a substring as a view of the string it came from, so a short
+ * value kept after the scan has moved on, such as a tally's names or a
+ * workout's statistics, would otherwise keep a scan buffer of up to
+ * MAX_PENDING_TAG_BYTES alive with it.
+ */
+export function detached(s: string): string {
+	return Buffer.from(s, "utf8").toString("utf8");
+}
+
+/**
+ * An element's attribute values as copies detached from the scan buffer, for
+ * a Record or Workout held open while its children are read, which may take
+ * many chunks. Attribute names need no copy: an object's property names are
+ * held as strings of their own.
+ */
+export function detachedAttrs(attrs: AppleHealthAttrs): AppleHealthAttrs {
+	const held: AppleHealthAttrs = {};
+	for (const [key, value] of Object.entries(attrs)) {
+		held[key] = value === undefined ? undefined : detached(value);
+	}
+	return held;
+}
+
+/**
+ * The one metadata entry a record keeps until it closes (see
+ * extractWasUserEntered), with its value detached from the scan buffer.
+ */
+export function wasUserEnteredEntry(
+	value: string | undefined,
+): AppleHealthMetadataEntry {
+	return { key: "HKWasUserEntered", value: detached(value ?? "") };
+}
+
+/**
+ * A published string held until its element closes: detached, and cut one
+ * character past `max`, the longest its schema accepts. It then holds at
+ * most that much memory, and a value the schema rejects for its length is
+ * still rejected.
+ */
+function heldForSchema(s: string, max: number): string {
+	return detached(s.slice(0, max + 1));
+}
+
+/**
+ * Name a published field on an element's gaps, once. An element can carry
+ * any number of children that fail the same way, so a list with an entry per
+ * failure would grow with the export rather than with the fields.
+ */
+export function noteField(
+	pending: AppleHealthElementGaps,
+	field: string,
+): void {
+	if (!pending.fields.includes(field)) {
+		pending.fields.push(field);
+	}
+}
+
+/**
+ * The fields of Apple's device description that are published, in the order
+ * they are published. They describe the hardware: what made it, what it is,
+ * and which firmware and software it ran.
+ */
+const PUBLISHED_DEVICE_FIELDS = [
+	"manufacturer",
+	"model",
+	"hardware",
+	"firmware",
+	"software",
+] as const;
+const PUBLISHED_DEVICE_FIELD_SET: ReadonlySet<string> = new Set(
+	PUBLISHED_DEVICE_FIELDS,
+);
+/**
+ * The published device fields a record's identity includes. Firmware and
+ * software are left out: an export that states a device's current versions
+ * rather than those it ran when it recorded would otherwise give every
+ * reading from it a new id after each update.
+ */
+const IDENTITY_DEVICE_FIELDS = ["manufacturer", "model", "hardware"] as const;
+
+/** A device description as published, and the part of it that identity includes. */
+export interface NormalisedDevice {
+	readonly identity: string | null;
+	readonly published: string | null;
+}
+
+const NO_DEVICE: NormalisedDevice = { identity: null, published: null };
+
+/**
+ * The published `device`: the hardware fields of the export's HKDevice
+ * description as `key:value` pairs in PUBLISHED_DEVICE_FIELDS order, or null
+ * when it has none; and its identity, the IDENTITY_DEVICE_FIELDS among them.
+ *
+ * Apple writes `<<HKDevice: 0x…>, name:…, manufacturer:…, model:…,
+ * hardware:…, firmware:…, software:…, localIdentifier:…,
+ * UDIDeviceIdentifier:…>`. The rest is left out: `0x…` is an in-memory
+ * address that differs between exports of one reading, and in an id would
+ * give the whole history a new id per export; `name` may be a name a person
+ * gave the device; the two identifiers identify the device itself.
+ *
+ * Fields are split at `, key:` boundaries and Apple does not escape values,
+ * so a name holding `, model:` could pass as a model. A description in which
+ * a published key appears twice, or that is not a whole HKDevice description
+ * closed by its own `>`, is not published, and `device` is named among the
+ * element's gaps. A key never published may repeat.
+ */
+export function normaliseDevice(
+	raw: string | undefined,
+	pending: AppleHealthElementGaps,
+): NormalisedDevice {
+	if (!raw) {
+		return NO_DEVICE;
+	}
+	const body = HKDEVICE_RE.exec(raw)?.[1];
+	if (body === undefined) {
+		noteField(pending, "device");
+		return NO_DEVICE;
+	}
+	const fields = new Map<string, string>();
+	const re = new RegExp(HKDEVICE_FIELD_RE.source, "g");
+	const marks = [...body.matchAll(re)];
+	for (const [index, mark] of marks.entries()) {
+		const key = mark[1] ?? "";
+		if (!PUBLISHED_DEVICE_FIELD_SET.has(key)) {
+			continue;
+		}
+		if (fields.has(key)) {
+			noteField(pending, "device");
+			return NO_DEVICE;
+		}
+		const start = (mark.index ?? 0) + mark[0].length;
+		const end = marks[index + 1]?.index ?? body.length;
+		fields.set(key, body.slice(start, end).trim());
+	}
+	const describe = (keys: readonly string[]): string | null =>
+		keys
+			.filter((key) => fields.get(key))
+			.map((key) => `${key}:${fields.get(key)}`)
+			.join(", ") || null;
+	return {
+		identity: describe(IDENTITY_DEVICE_FIELDS),
+		published: describe(PUBLISHED_DEVICE_FIELDS),
+	};
+}
+
+/**
+ * The startDate and type of an element the scanner could not read, taken raw
+ * from the leading run of well-formed attributes in its first
+ * LEADING_ATTRS_SNIFF_BYTES only. Either is undefined when it is not there:
+ * an unknown start counts as inside the window, and an unknown type as one
+ * the area table does not list, which belongs to `other`.
+ */
+export function sniffLeadingAttrs(head: string): {
+	startDate: string | undefined;
+	type: string | undefined;
+} {
+	const found: { startDate: string | undefined; type: string | undefined } = {
+		startDate: undefined,
+		type: undefined,
+	};
+	const leading =
+		APPLE_HEALTH_LEADING_ATTRS_RE.exec(
+			head.slice(0, LEADING_ATTRS_SNIFF_BYTES),
+		)?.[1] ?? "";
+	for (const [, key, double, single] of leading.matchAll(
+		APPLE_HEALTH_ATTR_RE,
+	)) {
+		if (key === "startDate" || key === "type") {
+			found[key] ??= double ?? single;
+		}
+	}
+	return found;
+}
+
+/** The first 96 bits of the SHA-256 of `s`, as 24 hex characters. */
 export function hashId(s: string): string {
 	return createHash("sha256")
 		.update(s)
-		.digest("hex")
-		.slice(0, RECORD_ID_HASH_LENGTH);
+		.digest()
+		.subarray(0, RECORD_ID_HASH_LENGTH / 2)
+		.toString("hex");
 }
 
 // Attribute values are XML text: real exports carry entity-escaped `<`,
@@ -95,8 +392,14 @@ export function hashId(s: string): string {
 // query params). Decoding here — the one place every attribute value
 // passes through — means every downstream consumer sees the real
 // character, not its escaped form.
-function decodeXmlEntities(s: string): string {
-	return s.replace(XML_ENTITY_RE, (_entity, name: string) => {
+//
+// Null when a numeric reference names no XML character (the XML 1.0 Char
+// production): String.fromCodePoint throws above U+10FFFF, which would end
+// the run with no receipt, and a surrogate or control character would
+// publish a string that is not text.
+function decodeXmlEntities(s: string): string | null {
+	let readable = true;
+	const decoded = s.replace(XML_ENTITY_RE, (_entity, name: string) => {
 		switch (name) {
 			case "lt":
 				return "<";
@@ -108,27 +411,155 @@ function decodeXmlEntities(s: string): string {
 				return '"';
 			case "apos":
 				return "'";
-			default:
-				if (name.startsWith("#x")) {
-					return String.fromCodePoint(Number.parseInt(name.slice(2), 16));
+			default: {
+				const codePoint = name.startsWith("#x")
+					? Number.parseInt(name.slice(2), 16)
+					: Number.parseInt(name.slice(1), 10);
+				if (!isXmlChar(codePoint)) {
+					readable = false;
+					return "";
 				}
-				return String.fromCodePoint(Number.parseInt(name.slice(1), 10));
+				return String.fromCodePoint(codePoint);
+			}
 		}
 	});
+	return readable ? decoded : null;
 }
 
-export function parseAttrs(tag: string): AppleHealthAttrs {
-	const attrs: AppleHealthAttrs = {};
-	const re = new RegExp(APPLE_HEALTH_ATTR_RE.source, "g");
-	let m: RegExpExecArray | null = re.exec(tag);
-	while (m !== null) {
-		const [, key, value] = m;
-		if (key) {
-			attrs[key] = decodeXmlEntities(value ?? "");
-		}
-		m = re.exec(tag);
+function isXmlChar(codePoint: number): boolean {
+	return (
+		codePoint === 0x9 ||
+		codePoint === 0xa ||
+		codePoint === 0xd ||
+		(codePoint >= 0x20 && codePoint <= 0xd7_ff) ||
+		(codePoint >= 0xe0_00 && codePoint <= 0xff_fd) ||
+		(codePoint >= 0x1_00_00 && codePoint <= 0x10_ff_ff)
+	);
+}
+
+/**
+ * The element's attributes, decoded. Null when they could not be read (see
+ * nextTag), or when any value carries a numeric character reference that
+ * names no XML character: the element is then unreadable as a whole, and the
+ * caller counts it rather than publishing a record built from the attributes
+ * that happened to decode. Null too if reading them throws, so one element
+ * never ends the run.
+ */
+export function parseAttrs(tag: string | null): AppleHealthAttrs | null {
+	if (tag === null) {
+		return null;
 	}
-	return attrs;
+	try {
+		const attrs: AppleHealthAttrs = {};
+		const re = new RegExp(APPLE_HEALTH_ATTR_RE.source, "g");
+		let m: RegExpExecArray | null = re.exec(tag);
+		while (m !== null) {
+			const [, key, double, single] = m;
+			if (key) {
+				const decoded = decodeXmlEntities(double ?? single ?? "");
+				if (decoded === null) {
+					return null;
+				}
+				attrs[key] = decoded;
+			}
+			m = re.exec(tag);
+		}
+		return attrs;
+	} catch {
+		return null;
+	}
+}
+
+// ─── Tag scanning ───────────────────────────────────────────────────────
+
+/** A tag the streaming scanners track, as read from their buffer. */
+export interface ScannedTag {
+	/** For an open tag, its attributes as written; null when they could not be read. */
+	readonly attrs: string | null;
+	/** For a close tag, the element it closes. */
+	readonly close: string | undefined;
+	/** Where the tag ends: the index in the buffer just past its `>`. */
+	readonly end: number;
+	/** For an open tag, the element it opens. */
+	readonly open: string | undefined;
+	readonly selfClosing: boolean;
+}
+
+/**
+ * The first complete tag the scanners track in `buf` at or after `from`, or
+ * null when there is none: the rest of `buf` then holds, at most, a tag
+ * still arriving. A tag with more than 64 attributes is read on 64 at a time
+ * (see APPLE_HEALTH_TAG_RE). Reading one tag should never throw; if it does,
+ * that tag is returned with null attributes, which the scanners count as an
+ * unreadable element, and the scan resumes at the next `<`, since a tag holds
+ * none.
+ */
+export function nextTag(buf: string, from: number): ScannedTag | null {
+	const re = APPLE_HEALTH_TAG_RE;
+	re.lastIndex = from;
+	for (let m = re.exec(buf); m !== null; m = re.exec(buf)) {
+		const [whole, open, attrs, selfClose, close] = m;
+		const headEnd = m.index + whole.length;
+		if (close !== undefined) {
+			return { attrs: null, close, end: headEnd, open, selfClosing: false };
+		}
+		if (selfClose !== undefined) {
+			return {
+				attrs: attrs ?? "",
+				close,
+				end: headEnd,
+				open,
+				selfClosing: selfClose === "/",
+			};
+		}
+		let tag: ScannedTag | null;
+		try {
+			tag = readLongTag(buf, open, m.index + 1 + (open ?? "").length, headEnd);
+		} catch {
+			const next = buf.indexOf("<", headEnd);
+			tag =
+				next === -1
+					? null
+					: { attrs: null, close, end: next, open, selfClosing: true };
+		}
+		if (tag !== null) {
+			return tag;
+		}
+		re.lastIndex = m.index + 1;
+	}
+	return null;
+}
+
+/**
+ * The rest of an open tag whose first 64 attributes end at `at`: its further
+ * attributes, then its `>` or `/>`. Null when no `>` follows the attributes
+ * in `buf`, because the tag is still arriving or is not one.
+ */
+function readLongTag(
+	buf: string,
+	open: string | undefined,
+	attrsStart: number,
+	at: number,
+): ScannedTag | null {
+	const more = APPLE_HEALTH_MORE_ATTRS_RE;
+	let attrsEnd = at;
+	more.lastIndex = attrsEnd;
+	while (more.test(buf)) {
+		attrsEnd = more.lastIndex;
+	}
+	const end = APPLE_HEALTH_TAG_END_RE;
+	end.lastIndex = attrsEnd;
+	const closing = end.exec(buf);
+	if (closing === null) {
+		return null;
+	}
+	return {
+		attrs: buf.slice(attrsStart, attrsEnd),
+		close: undefined,
+		end: end.lastIndex,
+		open,
+		selfClosing: closing[1] === "/",
+	};
 }
 
 export function healthTypeShort(t: string | undefined): string | null {
@@ -150,105 +581,531 @@ export function isoDate(v: string | undefined): string | null {
 	return null;
 }
 
-// ─── Metadata / nested-child helpers ────────────────────────────────────
-
-/** Build a `{key: value}` map from accumulated MetadataEntry children, bounded and null when empty. */
-function buildMetadataMap(
-	entries: readonly { key: string; value: string }[],
-): Record<string, string> | null {
-	if (entries.length === 0) {
+/**
+ * Minutes east of UTC from an Apple Health timestamp's trailing offset, or
+ * null when it states none. `isoDate` keeps the instant but not the wall
+ * clock the owner lived in, which for health data is often the fact: a sleep
+ * record at 23:00 local is not the same claim as one at 13:00 UTC.
+ */
+export function utcOffsetMinutes(v: string | undefined): number | null {
+	if (!v) {
 		return null;
 	}
-	const capped = entries.slice(0, MAX_TRACKED_CHILDREN_PER_ELEMENT);
-	const out: Record<string, string> = {};
-	for (const e of capped) {
-		out[e.key] = e.value;
+	const m = APPLE_HEALTH_TZ_OFFSET_RE.exec(v);
+	if (!m) {
+		return null;
 	}
-	return out;
+	const sign = m[1] === "-" ? -1 : 1;
+	const hours = Number(m[2]);
+	const minutes = Number(m[3]);
+	if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
+		return null;
+	}
+	return sign * (hours * 60 + minutes);
 }
 
-/** Build a WorkoutEvent record from its raw attrs (type, date, optional duration/durationUnit). */
-export function buildWorkoutEvent(
+/**
+ * An element's start offset as published. One beyond MAX_UTC_OFFSET_MINUTES,
+ * which no time zone uses, is null and named on the element's gaps: the
+ * schema would reject the whole record for it, and the reading is still
+ * good without it.
+ */
+function startOffsetMinutes(el: AppleHealthElement): number | null {
+	const offset = utcOffsetMinutes(el.attrs.startDate);
+	if (offset !== null && Math.abs(offset) > MAX_UTC_OFFSET_MINUTES) {
+		noteField(el.pending, "start_utc_offset_minutes");
+		return null;
+	}
+	return offset;
+}
+
+// ─── Unit handling ──────────────────────────────────────────────────────
+
+/**
+ * Apple states units per record, and they vary by locale: an imperial export
+ * carries `mi` and `Cal` where a metric one carries `km` and `kcal`. The
+ * published fields are named `_minutes`, `_km` and `_kcal`, so a figure is
+ * converted from the unit stated, and is null, with the gap named on the
+ * receipt, when that unit is absent or unknown: a 5 mile run published as
+ * 5 km would be wrong in the direction that flatters. A gap costs the field,
+ * never the record.
+ */
+const DURATION_TO_MINUTES: Readonly<Record<string, number>> = {
+	min: 1,
+	sec: 1 / 60,
+	s: 1 / 60,
+	hr: 60,
+	h: 60,
+	ms: 1 / 60000,
+};
+
+const DISTANCE_TO_KM: Readonly<Record<string, number>> = {
+	km: 1,
+	m: 0.001,
+	cm: 0.00001,
+	mi: 1.609344,
+	ft: 0.0003048,
+	yd: 0.0009144,
+};
+
+// Apple writes dietary/active energy as "kcal"; some locales and some
+// third-party writers use "Cal" (a food Calorie, i.e. one kilocalorie) or SI
+// joules. "cal" lowercase is a gram-calorie, a thousandth of a kcal — the case
+// distinction is real and getting it wrong is a factor-of-1000 error.
+const ENERGY_TO_KCAL: Readonly<Record<string, number>> = {
+	kcal: 1,
+	Cal: 1,
+	cal: 0.001,
+	kJ: 0.239006,
+	J: 0.000239006,
+};
+
+function convertQuantity(
+	raw: string | undefined,
+	unit: string | undefined,
+	table: Readonly<Record<string, number>>,
+	pending: AppleHealthElementGaps,
+	field: string,
+): number | null {
+	// Blank is absent: Number("") and Number(" ") are both 0.
+	if (raw === undefined || raw.trim() === "") {
+		return null;
+	}
+	// Present but not a finite number: the export stated a figure that cannot
+	// be read, which is a gap in the field, not an absence.
+	const n = Number(raw);
+	if (!Number.isFinite(n)) {
+		noteField(pending, field);
+		return null;
+	}
+	return convertNumber(n, unit, table, pending, field);
+}
+
+/** Convert a number from the unit the export states; see convertQuantity. */
+function convertNumber(
+	n: number,
+	unit: string | null | undefined,
+	table: Readonly<Record<string, number>>,
+	pending: AppleHealthElementGaps,
+	field: string,
+): number | null {
+	// The gap is named by the field it leaves null, so a marker with no
+	// duration unit never disowns a distance that is fine, and it reaches a
+	// receipt only if the element is emitted.
+	if (!unit) {
+		// No stated unit. Do not assume one: record the gap and emit null.
+		pending.units.push({ field, unit: "(absent)" });
+		return null;
+	}
+	const factor = table[unit];
+	if (factor === undefined) {
+		// Held until the element closes, so held as a bounded copy.
+		pending.units.push({
+			field,
+			unit: detached(unit.slice(0, MAX_TALLIED_NAME_LENGTH)),
+		});
+		return null;
+	}
+	return n * factor;
+}
+
+// ─── Workout totals ─────────────────────────────────────────────────────
+
+const DISTANCE_STATISTIC_RE = /^Distance/;
+
+/** A statistic of a workout's total distance: any HealthKit distance type (DistanceWalkingRunning, DistanceSwimming, ...). */
+function isDistanceStatistic(type: string | null): boolean {
+	return type !== null && DISTANCE_STATISTIC_RE.test(type);
+}
+
+/** A statistic of a workout's total energy, which is active energy only. */
+function isActiveEnergyStatistic(type: string | null): boolean {
+	return type === "ActiveEnergyBurned";
+}
+
+/** Whether a WorkoutStatistics of this (prefix-stripped) type can feed a workout total. */
+export function isTotalStatistic(type: string | null): boolean {
+	return isDistanceStatistic(type) || isActiveEnergyStatistic(type);
+}
+
+/**
+ * Whether a WorkoutStatistics states a sum or a unit, whatever its value, but
+ * no type to tell what it measures. It may be the distance or energy a total
+ * needs, so no total is summed beside it.
+ */
+export function isUntypedFigure(attrs: AppleHealthAttrs): boolean {
+	return (
+		!attrs.type?.trim() && (attrs.sum !== undefined || attrs.unit !== undefined)
+	);
+}
+
+/** Whether `level` has a statistic of every type that `other` has. */
+function hasEveryType(
+	level: readonly AppleHealthWorkoutStatistics[],
+	other: readonly AppleHealthWorkoutStatistics[],
+): boolean {
+	const types = new Set(level.map((s) => s.type));
+	return other.every((s) => types.has(s.type));
+}
+
+/**
+ * A workout's total distance or active energy.
+ *
+ * HealthKit deprecates the workout-level totals in favour of statistics per
+ * quantity type, and from iOS 16 a workout holds activities with statistics
+ * of their own:
+ *   https://developer.apple.com/documentation/healthkit/hkworkout/totalenergyburned
+ *   https://developer.apple.com/documentation/healthkit/hkworkout/totaldistance
+ *   https://developer.apple.com/documentation/healthkit/hkworkout/allstatistics
+ *   https://developer.apple.com/documentation/healthkit/hkworkout/workoutactivities
+ * An older export states the totals as Workout attributes; a newer one
+ * carries WorkoutStatistics under the Workout and under each WorkoutActivity.
+ *
+ * So: the Workout's own attribute where stated. Otherwise the sum of one
+ * level's statistics of this kind, so a swim, ride and run add up: the
+ * workout's own where they have every type its activities have, else the
+ * activities' where they have every type the workout's own have, and no
+ * total where each has a type the other lacks. Never both levels, since the
+ * activities divide the workout's statistics between them.
+ *
+ * Every statistic summed must state a sum and a unit this connector converts,
+ * and every statistic of both levels must have been kept, and have a type if
+ * it states a sum or unit: one lost, or of unknown type, may be of a type the
+ * other level lacks. Otherwise the total is null and the field is named on
+ * the element's gaps.
+ */
+function workoutTotal(
+	el: AppleHealthElement,
+	raw: string | undefined,
+	unit: string | undefined,
+	isKind: (type: string | null) => boolean,
+	table: Readonly<Record<string, number>>,
+	field: string,
+): number | null {
+	if (raw !== undefined && raw.trim() !== "") {
+		return convertQuantity(raw, unit, table, el.pending, field);
+	}
+	const p = el.pending;
+	const complete =
+		p.statisticsTruncated === 0 &&
+		p.oversizedStatistics === 0 &&
+		!el.statisticsIncomplete;
+	const own = el.workoutStatistics.filter((s) => isKind(s.type));
+	const fromActivities = el.activityStatistics.filter((s) => isKind(s.type));
+	let statistics: AppleHealthWorkoutStatistics[] | null = null;
+	if (complete && hasEveryType(own, fromActivities)) {
+		statistics = own;
+	} else if (complete && hasEveryType(fromActivities, own)) {
+		statistics = fromActivities;
+	}
+	if (statistics === null) {
+		noteField(p, field);
+		return null;
+	}
+	if (statistics.length === 0) {
+		return null;
+	}
+	let total = 0;
+	for (const statistic of statistics) {
+		if (statistic.sum === null) {
+			noteField(p, field);
+			return null;
+		}
+		const value = convertNumber(statistic.sum, statistic.unit, table, p, field);
+		if (value === null) {
+			return null;
+		}
+		total += value;
+	}
+	return total;
+}
+
+// ─── Metadata / nested-child helpers ────────────────────────────────────
+
+/**
+ * Read the one metadata key published. Any application can write arbitrary
+ * keys and values into a record's metadata, so an open bag could not be
+ * audited in advance. HKWasUserEntered is kept because whether a person typed
+ * a reading in or a sensor recorded it changes how it should be weighed.
+ * Further keys can be added one at a time: adding a property is non-breaking,
+ * removing one is not.
+ */
+function extractWasUserEntered(
+	entries: readonly { key: string; value: string }[],
+): boolean | null {
+	// The scanner keeps only this key, so the list holds one entry at most.
+	for (const e of entries) {
+		if (e.key === "HKWasUserEntered") {
+			// Apple writes "1"/"0"; be tolerant of "true"/"false".
+			const v = e.value.trim().toLowerCase();
+			if (v === "1" || v === "true") {
+				return true;
+			}
+			if (v === "0" || v === "false") {
+				return false;
+			}
+			return null;
+		}
+	}
+	return null;
+}
+
+/**
+ * Build a bounded WorkoutStatistics child from its raw attribute bag.
+ *
+ * Only the typed quantity Apple records is kept. Unknown attributes are dropped
+ * here rather than forwarded, so a third-party writer cannot put arbitrary text
+ * onto a published stream. A figure stated but not a number is named on
+ * `pending`, for a statistic that is published.
+ */
+export function buildWorkoutStatistics(
 	attrs: AppleHealthAttrs,
-): AppleHealthWorkoutEvent {
+	pending?: AppleHealthElementGaps,
+): AppleHealthWorkoutStatistics {
+	const num = (v: string | undefined): number | null => {
+		if (v === undefined || v.trim() === "") {
+			return null;
+		}
+		const n = Number(v);
+		if (Number.isFinite(n)) {
+			return n;
+		}
+		// Stated but not a number: a gap in the published list, not an absence.
+		if (pending) {
+			noteField(pending, "statistics");
+		}
+		return null;
+	};
+	// Held until the workout closes, up to MAX_TRACKED_CHILDREN_PER_ELEMENT of
+	// them, so each string is held as a bounded copy.
+	const type = attrs.type ? healthTypeShort(attrs.type) || attrs.type : null;
 	return {
-		type: attrs.type
-			? attrs.type.replace(APPLE_HEALTH_WORKOUT_EVENT_PREFIX_RE, "")
-			: null,
-		date: isoDate(attrs.date),
-		duration_minutes: attrs.duration ? Number(attrs.duration) : null,
+		type: type ? heldForSchema(type, MAX_TYPE_LENGTH) : null,
+		unit: attrs.unit ? heldForSchema(attrs.unit, MAX_UNIT_LENGTH) : null,
+		sum: num(attrs.sum),
+		average: num(attrs.average),
+		minimum: num(attrs.minimum),
+		maximum: num(attrs.maximum),
 	};
 }
 
 /**
- * Record a Record element's `type` in the gap tally when it does not match
- * any known HK*TypeIdentifier prefix. Apple Health's export format is
- * undocumented and has shifted across iOS versions (see
- * ai/research/apple-health-export-format/), so a new/unrecognized type
- * prefix is expected eventually — this project never drops that silently.
+ * Build a WorkoutEvent from its raw attrs, its duration converted from the
+ * `durationUnit` stated, as a workout's is: a pause stated in seconds and
+ * published as minutes would be wrong by sixty.
  */
-export function trackUnrecognizedType(
+export function buildWorkoutEvent(
+	attrs: AppleHealthAttrs,
+	pending: AppleHealthElementGaps,
+): AppleHealthWorkoutEvent {
+	// Held until the workout closes, up to MAX_TRACKED_CHILDREN_PER_ELEMENT of
+	// them, so the type is held as a bounded copy, as a statistic's is.
+	return {
+		type: attrs.type
+			? heldForSchema(
+					attrs.type.replace(APPLE_HEALTH_WORKOUT_EVENT_PREFIX_RE, ""),
+					MAX_TYPE_LENGTH,
+				)
+			: null,
+		date: isoDate(attrs.date),
+		duration_minutes: convertQuantity(
+			attrs.duration,
+			attrs.durationUnit,
+			DURATION_TO_MINUTES,
+			pending,
+			"events",
+		),
+	};
+}
+
+/**
+ * How many distinct names a progress-line tally names, and how much of each.
+ * Every name comes from the export, so an export of a million invented types
+ * or units would otherwise grow a tally without limit; occurrences of further
+ * names are counted together.
+ */
+export const MAX_NAMED_PER_TALLY = 20;
+export const MAX_TALLIED_NAME_LENGTH = 100;
+
+/**
+ * Count one occurrence of `name` in a tally of at most MAX_NAMED_PER_TALLY
+ * names. Returns false, counting nothing, when the name is new and the tally
+ * is full, for the caller to count among the unnamed. A new name is kept as
+ * a detached copy of at most MAX_TALLIED_NAME_LENGTH characters, since it
+ * outlives the scan buffer it came from.
+ */
+function countNamed(tally: Map<string, number>, name: string): boolean {
+	const key = name.slice(0, MAX_TALLIED_NAME_LENGTH);
+	const count = tally.get(key);
+	if (count !== undefined) {
+		tally.set(key, count + 1);
+		return true;
+	}
+	if (tally.size >= MAX_NAMED_PER_TALLY) {
+		return false;
+	}
+	tally.set(detached(key), 1);
+	return true;
+}
+
+/**
+ * Tally a delivered record whose `type` the area table (areas.ts) does not
+ * list, as HealthKit's identifiers grow with each release. Such a record is
+ * delivered on `other`, never dropped; this names its type on the progress
+ * line, and the other stream's receipt counts the records.
+ */
+export function tallyUnrecognizedType(
 	type: string | undefined,
 	gaps: AppleHealthGapCounts,
 ): void {
-	if (!type || APPLE_HEALTH_KNOWN_TYPE_RE.test(type)) {
+	if (!type || isListedHealthType(type)) {
 		return;
 	}
-	gaps.unrecognizedRecordTypes.set(
-		type,
-		(gaps.unrecognizedRecordTypes.get(type) ?? 0) + 1,
-	);
+	if (!countNamed(gaps.unrecognizedRecordTypes, type)) {
+		gaps.unrecognizedRecordsUnnamed += 1;
+	}
+}
+
+/**
+ * Tally, for the progress line, a unit that left a quantity on a DELIVERED
+ * record null: absent, or one this connector cannot convert. Bounded like
+ * the unrecognised-type tally.
+ */
+export function tallyUnconvertibleUnit(
+	unit: string,
+	gaps: AppleHealthGapCounts,
+): void {
+	if (!countNamed(gaps.unrecognizedUnits, unit)) {
+		gaps.unrecognizedUnitsUnnamed += 1;
+	}
+}
+
+export function newElementGaps(): AppleHealthElementGaps {
+	return {
+		eventsTruncated: 0,
+		fields: [],
+		oversizedEvents: 0,
+		oversizedMetadata: 0,
+		oversizedStatistics: 0,
+		statisticsTruncated: 0,
+		units: [],
+	};
 }
 
 export function newGapCounts(): AppleHealthGapCounts {
 	return {
 		unrecognizedRecordTypes: new Map(),
+		unrecognizedRecordsUnnamed: 0,
+		unrecognizedUnits: new Map(),
+		unrecognizedUnitsUnnamed: 0,
 		recordsMissingStartDate: 0,
 		workoutsMissingStartDate: 0,
 		workoutRoutesUncaptured: 0,
+		duplicatesDiscarded: 0,
+		emptyValues: 0,
+		malformedElementsSkipped: 0,
+		oversizedRecordsSkipped: 0,
+		oversizedWorkoutsSkipped: 0,
+		oversizedRecordMetadataSkipped: 0,
+		oversizedWorkoutEventsSkipped: 0,
+		oversizedWorkoutStatisticsSkipped: 0,
+		oversizedOtherSkipped: 0,
+		oversizedOutOfScopeSkipped: 0,
+		workoutEventsTruncated: 0,
+		workoutStatisticsTruncated: 0,
 	};
 }
 
 // ─── Record / workout builders ─────────────────────────────────────────
 
 /**
- * Build a single `records`-stream record from a parsed HKRecord element
- * (attrs + any nested MetadataEntry children). Returns null when startDate
- * is missing or unparseable; index.ts counts that in `gaps` rather than
- * dropping it silently, since Apple Health emits some records without a
- * usable timestamp (e.g. metadata rows).
+ * Build a health-area record (for whichever stream areas.ts assigns its type
+ * to) from a parsed HKRecord element (attrs + any nested MetadataEntry
+ * children). Returns null when startDate is missing or unparseable; index.ts
+ * counts that in `gaps` rather than dropping it silently, since Apple Health
+ * emits some records without a usable timestamp (e.g. metadata rows).
  */
 export function buildHealthRecord(
 	el: AppleHealthElement,
 	gaps: AppleHealthGapCounts,
+	provenance: AppleHealthProvenance,
 ): HealthRecordOut | null {
 	const { attrs } = el;
-	trackUnrecognizedType(attrs.type, gaps);
 	const startDate = isoDate(attrs.startDate);
 	if (!startDate) {
 		gaps.recordsMissingStartDate += 1;
 		return null;
 	}
 	const type = healthTypeShort(attrs.type) || attrs.type || "Unknown";
-	const value = attrs.value === undefined ? null : Number(attrs.value);
+	// A blank value attribute is absent, not zero. Number("") is 0, so passing
+	// it through would publish a plausible reading of 0 for a value the export
+	// left empty. It is recorded as a gap in `value` instead, the way an absent
+	// unit is recorded as a gap in `unit`.
+	const blank = attrs.value !== undefined && attrs.value.trim() === "";
+	if (blank) {
+		noteField(el.pending, "value");
+	}
+	const rawValue = blank ? undefined : attrs.value;
+	const value = rawValue === undefined ? null : Number(rawValue);
 	const finite = value !== null && Number.isFinite(value);
-	const id = hashId(
-		`${type}|${attrs.sourceName || ""}|${startDate}|${attrs.value || ""}`,
-	);
-	return {
-		id,
+	const endDate = isoDate(attrs.endDate);
+	// A quantity with a number and no unit gives a reader no way to tell mg/dL
+	// from mmol/L, so the gap is charged to `unit`; record units are carried
+	// verbatim, never converted.
+	if (finite && !attrs.unit) {
+		el.pending.units.push({ field: "unit", unit: "(absent)" });
+	}
+	const device = normaliseDevice(attrs.device, el.pending);
+	const published = {
 		type,
-		source_name: attrs.sourceName || null,
-		source_version: attrs.sourceVersion || null,
-		device: attrs.device || null,
+		device: device.published,
+		// The export's own unit attribute, verbatim. Never inferred, and never
+		// converted: unlike a workout total there is no canonical unit per record
+		// type to convert toward.
 		unit: attrs.unit || null,
 		value: finite && value !== null ? value : null,
-		value_raw: !finite && attrs.value ? attrs.value : null,
+		value_raw: !finite && rawValue ? rawValue : null,
+		was_user_entered: extractWasUserEntered(el.metadata),
 		start_date: startDate,
-		end_date: isoDate(attrs.endDate),
+		start_utc_offset_minutes: startOffsetMinutes(el),
+		end_date: endDate,
 		creation_date: isoDate(attrs.creationDate),
-		metadata: buildMetadataMap(el.metadata),
+		freshness: "snapshot" as const,
+		exported_at: provenance.exported_at,
 	};
+	// Identity is the record's published content: every published scalar, read
+	// back from the object that is emitted, with the device represented by its
+	// maker, model and hardware (IDENTITY_DEVICE_FIELDS). A description that is
+	// absent or cannot be read is null here, so readings that differ only in
+	// such descriptions share an id, and two physical devices with the same
+	// maker, model and hardware are one device: telling them apart would take
+	// the identifier that is withheld. The manifest says both.
+	//
+	// creation_date is in: without it, two readings a person entered
+	// separately, which Health shows as two, would be one. The offset is in
+	// because the local wall clock is often the fact itself.
+	//
+	// Published values only. With a withheld field such as sourceName in the
+	// hash and every other input published, a reader could test candidate
+	// names against the id. The normalised number is hashed, so value="1" and
+	// value="1.0" are one reading. JSON rather than a delimiter, so no value
+	// can move a boundary: model "D|E" with unit "U" and model "D" with unit
+	// "E|U" would otherwise give one id to two readings.
+	const id = hashId(
+		JSON.stringify([
+			published.type,
+			device.identity,
+			published.unit,
+			published.start_date,
+			published.start_utc_offset_minutes,
+			published.end_date,
+			published.creation_date,
+			published.value,
+			published.value_raw,
+			published.was_user_entered,
+		]),
+	);
+	return { id, ...published };
 }
 
 /**
@@ -259,6 +1116,7 @@ export function buildHealthRecord(
 export function buildWorkoutRecord(
 	el: AppleHealthElement,
 	gaps: AppleHealthGapCounts,
+	provenance: AppleHealthProvenance,
 ): WorkoutRecordOut | null {
 	const { attrs } = el;
 	const startDate = isoDate(attrs.startDate);
@@ -266,293 +1124,91 @@ export function buildWorkoutRecord(
 		gaps.workoutsMissingStartDate += 1;
 		return null;
 	}
-	const id = hashId(
-		`${attrs.workoutActivityType || ""}|${attrs.sourceName || ""}|${startDate}`,
-	);
-	return {
-		id,
+	const endDate = isoDate(attrs.endDate);
+	const device = normaliseDevice(attrs.device, el.pending);
+	const published = {
 		workout_activity_type: attrs.workoutActivityType
 			? attrs.workoutActivityType.replace(APPLE_HEALTH_WORKOUT_PREFIX_RE, "")
 			: null,
-		source_version: attrs.sourceVersion || null,
-		device: attrs.device || null,
-		metadata: buildMetadataMap(el.metadata),
-		events:
-			el.workoutEvents.length > 0
-				? el.workoutEvents.slice(0, MAX_TRACKED_CHILDREN_PER_ELEMENT)
-				: null,
-		statistics:
-			el.workoutStatistics.length > 0
-				? el.workoutStatistics.slice(0, MAX_TRACKED_CHILDREN_PER_ELEMENT)
-				: null,
-		duration_minutes: attrs.duration ? Number(attrs.duration) : null,
-		total_energy_burned_kcal: attrs.totalEnergyBurned
-			? Number(attrs.totalEnergyBurned)
-			: null,
-		total_distance_km: attrs.totalDistance ? Number(attrs.totalDistance) : null,
-		source_name: attrs.sourceName || null,
+		device: device.published,
+		// Bounded at attach time in index.ts, with a tally per kind; nothing is
+		// sliced here.
+		events: el.workoutEvents.length > 0 ? el.workoutEvents : null,
+		statistics: el.workoutStatistics.length > 0 ? el.workoutStatistics : null,
+		// Each quantity is converted FROM the unit the export states; the raw
+		// number under a field named for a unit nobody checked would report
+		// miles as kilometres on an imperial export. An unrecognised or absent
+		// unit yields null and a tally entry rather than a plausible wrong
+		// number.
+		duration_minutes: convertQuantity(
+			attrs.duration,
+			attrs.durationUnit,
+			DURATION_TO_MINUTES,
+			el.pending,
+			"duration_minutes",
+		),
+		// From the workout's own attributes on an older export, and from its
+		// statistics on a newer one (see workoutTotal).
+		total_energy_burned_kcal: workoutTotal(
+			el,
+			attrs.totalEnergyBurned,
+			attrs.totalEnergyBurnedUnit,
+			isActiveEnergyStatistic,
+			ENERGY_TO_KCAL,
+			"total_energy_burned_kcal",
+		),
+		total_distance_km: workoutTotal(
+			el,
+			attrs.totalDistance,
+			attrs.totalDistanceUnit,
+			isDistanceStatistic,
+			DISTANCE_TO_KM,
+			"total_distance_km",
+		),
 		start_date: startDate,
-		end_date: isoDate(attrs.endDate),
+		start_utc_offset_minutes: startOffsetMinutes(el),
+		end_date: endDate,
+		freshness: "snapshot" as const,
+		exported_at: provenance.exported_at,
 	};
-}
-
-// ─── Cursor / watermark helpers ────────────────────────────────────────
-
-/**
- * Return true if `startDate` falls on or before the incremental cursor
- * `since`. index.ts uses this to skip already-emitted records.
- */
-export function isBeforeCursor(
-	startDate: string,
-	since: string | undefined,
-): boolean {
-	return Boolean(since && startDate <= since);
-}
-
-/** Monotonic max of an existing cursor and a new ISO date string. */
-export function advanceCursor(prev: string | undefined, next: string): string {
-	if (!prev || next > prev) {
-		return next;
-	}
-	return prev;
-}
-
-// ─── Manual-upload discovery / zip extraction ──────────────────────────
-
-// A real iOS Health app export.xml is commonly hundreds of MB and can reach
-// several GB for a long-lived, densely-instrumented account. This ceiling
-// exists to reject genuinely adversarial archives (see
-// streamZipEntryToFile's actual-bytes enforcement, which this bounds), not
-// to reject real exports — set well above any real single-user export.
-const MAX_EXPORT_XML_BYTES = 8 * 1024 * 1024 * 1024;
-const APPLE_HEALTH_ZIP_POLICY: ZipReadPolicy = {
-	maxEntries: 5000,
-	maxEntryUncompressedBytes: MAX_EXPORT_XML_BYTES,
-	maxTotalUncompressedBytes: MAX_EXPORT_XML_BYTES,
-};
-const ZIP_EXT_RE = /\.zip$/i;
-const XML_EXT_RE = /\.xml$/i;
-const EXPORT_XML_ENTRY_RE = /(^|\/)export\.xml$/i;
-const HEALTH_DATA_ROOT_RE = /<HealthData[\s>]/;
-// Cap how much of a candidate file we read hunting for the <HealthData root
-// element before giving up -- a real export.xml declares it within its
-// first few hundred bytes (XML decl + one root open tag), so a file that
-// still hasn't shown it after 1 MiB is not a health export at all, not a
-// slow-starting valid one. Bounds worst-case sniff cost on an oversized
-// wrong-file upload to a few chunk reads, not a whole-file scan.
-const ROOT_SNIFF_WINDOW_BYTES = 1024 * 1024;
-const ROOT_SNIFF_READ_CHUNK_BYTES = 65_536;
-// Bounded recursive scan for an owner-uploaded artifact, matching the same
-// depth WhatsApp's discoverExportFiles uses for the same reason: a
-// manual-upload artifact can land flat (join(importDir, fileName)) OR
-// nested one level under its artifact id
-// (join(importDir, artifactId, fileName)) depending on which upload route
-// created it -- see ref-manual-upload-draft-connection.ts's two write
-// paths. Depth 3 comfortably covers both without an unbounded walk.
-const MAX_DISCOVERY_DEPTH = 3;
-const MAX_DISCOVERY_ENTRIES = 10_000;
-
-export function appleHealthZipPolicy(): ZipReadPolicy {
-	return APPLE_HEALTH_ZIP_POLICY;
-}
-
-/**
- * Find the single most-recently-modified owner-uploaded `.xml` or `.zip` in
- * `importDir` (bounded recursive scan — see MAX_DISCOVERY_DEPTH/ENTRIES).
- * Apple Health supports exactly one export per connection (a full snapshot,
- * not a per-chat append like WhatsApp), so "most recent" is the correct
- * choice when more than one candidate is present (e.g. after a re-upload
- * that landed in a new artifact subdirectory rather than overwriting the
- * old one). Returns null when the directory has no candidate file at all —
- * callers then fall back to the legacy pre-extracted directory layout.
- */
-interface DiscoveryState {
-	best: { mtimeMs: number; path: string } | null;
-	visited: number;
-}
-
-function considerDiscoveredFile(state: DiscoveryState, path: string): void {
-	const { mtimeMs } = statSync(path);
-	if (!state.best || mtimeMs > state.best.mtimeMs) {
-		state.best = { mtimeMs, path };
-	}
-}
-
-function walkForUploadedExportCandidate(
-	state: DiscoveryState,
-	dir: string,
-	depth: number,
-): void {
-	if (depth > MAX_DISCOVERY_DEPTH || state.visited >= MAX_DISCOVERY_ENTRIES) {
-		return;
-	}
-	let entries: Dirent[];
-	try {
-		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		state.visited += 1;
-		if (state.visited > MAX_DISCOVERY_ENTRIES) {
-			return;
-		}
-		const path = join(dir, entry.name);
-		if (entry.isDirectory()) {
-			walkForUploadedExportCandidate(state, path, depth + 1);
-		} else if (
-			entry.isFile() &&
-			(XML_EXT_RE.test(entry.name) || ZIP_EXT_RE.test(entry.name))
-		) {
-			considerDiscoveredFile(state, path);
-		}
-	}
-}
-
-export function findUploadedExportCandidate(importDir: string): string | null {
-	const state: DiscoveryState = { best: null, visited: 0 };
-	walkForUploadedExportCandidate(state, importDir, 0);
-	return state.best?.path ?? null;
-}
-
-export interface ResolvedExportExtraction {
-	readonly extractedFromZip: boolean;
-	readonly path: string;
-}
-
-export type ResolvedExportOutcome =
-	| { readonly kind: "resolved"; readonly resolved: ResolvedExportExtraction }
-	| { readonly kind: "not_found" }
-	| { readonly kind: "extraction_failed"; readonly message: string };
-
-/**
- * Bounded, streaming sniff for the `<HealthData` root element -- reads at
- * most ROOT_SNIFF_WINDOW_BYTES regardless of file size, so a large
- * not-actually-a-health-export upload fails fast instead of being scanned
- * to its end just to discover it never had the root element at all.
- */
-async function looksLikeHealthExportFile(path: string): Promise<boolean> {
-	const stream = createReadStream(path, {
-		encoding: "utf8",
-		highWaterMark: ROOT_SNIFF_READ_CHUNK_BYTES,
-	});
-	let buf = "";
-	let sniffedBytes = 0;
-	try {
-		for await (const chunk of stream as AsyncIterable<string | Buffer>) {
-			const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-			buf += text;
-			sniffedBytes += Buffer.byteLength(text, "utf8");
-			if (HEALTH_DATA_ROOT_RE.test(buf)) {
-				return true;
-			}
-			if (sniffedBytes > ROOT_SNIFF_WINDOW_BYTES) {
-				return false;
-			}
-		}
-	} finally {
-		stream.destroy();
-	}
-	return false;
-}
-
-/**
- * Validate that `path` (an already-resolved bare .xml, or a freshly
- * extracted export.xml) genuinely looks like an Apple Health export before
- * handing it to the streaming parser -- WITHOUT this check, a wrong file
- * that happens to end in .xml (or a .zip whose export.xml entry is garbage)
- * would silently parse to zero Record/Workout tags and report a
- * misleadingly successful "0 records" run instead of a clear, actionable
- * failure. This is the collect-time backstop: the manual-upload route's own
- * validation preview (validation.ts) already rejects this case before a run
- * is even created, but a developer placing a file directly under
- * APPLE_HEALTH_EXPORT_DIR (the legacy layout) never goes through that
- * preview, so collect() must fail closed on its own too.
- */
-async function resolveIfLooksLikeHealthExport(
-	path: string,
-	extractedFromZip: boolean,
-): Promise<ResolvedExportOutcome> {
-	if (await looksLikeHealthExportFile(path)) {
-		return { kind: "resolved", resolved: { extractedFromZip, path } };
-	}
-	return {
-		kind: "extraction_failed",
-		message: extractedFromZip
-			? "The export.xml extracted from the uploaded .zip does not look like an Apple Health export (no <HealthData root element found). Choose the .zip from Health app > profile > Export All Health Data."
-			: "The uploaded file does not look like an Apple Health export.xml (no <HealthData root element found). Choose the export.xml extracted from Health app > profile > Export All Health Data, or upload the .zip directly.",
-	};
-}
-
-/**
- * Resolve the real, ready-to-stream `export.xml` path for one collect run,
- * given an owner-uploaded candidate (`.xml` used directly, `.zip`
- * extracted). Extraction writes to a SIBLING file next to the uploaded zip
- * (`<zip-dir>/.extracted-export.xml`) via {@link streamZipEntryToFile} —
- * never buffering the inflated XML in memory (a real export.xml can be
- * hundreds of MB to multiple GB; see that function's own doc comment for
- * why this matters). Extraction is CACHED: if the sibling file already
- * exists and is newer than the zip, re-extraction is skipped, so a second
- * `collect` run against the same uploaded zip (e.g. a later incremental
- * sync) does not re-pay the extraction cost every time.
- */
-export async function resolveUploadedExportPath(
-	candidatePath: string,
-): Promise<ResolvedExportOutcome> {
-	if (XML_EXT_RE.test(candidatePath)) {
-		return await resolveIfLooksLikeHealthExport(candidatePath, false);
-	}
-	if (!ZIP_EXT_RE.test(candidatePath)) {
-		return { kind: "not_found" };
-	}
-
-	const destPath = join(`${candidatePath.slice(0, -".zip".length)}.export.xml`);
-	if (existsSync(destPath)) {
-		const zipStat = statSync(candidatePath);
-		const destStat = statSync(destPath);
-		if (destStat.mtimeMs >= zipStat.mtimeMs) {
-			return await resolveIfLooksLikeHealthExport(destPath, true);
-		}
-	}
-
-	const fileSize = statSync(candidatePath).size;
-	const fd = openSync(candidatePath, "r");
-	try {
-		const result = await streamZipEntryToFile(
-			fd,
-			fileSize,
-			"export.xml",
-			destPath,
-			APPLE_HEALTH_ZIP_POLICY,
-		);
-		if (!result.found) {
-			return {
-				kind: "extraction_failed",
-				message:
-					"The uploaded .zip does not contain an export.xml. Apple Health exports look like 'export.zip' containing 'apple_health_export/export.xml' — choose the .zip from Health app > profile > Export All Health Data, or extract it yourself and upload export.xml directly.",
-			};
-		}
-		return await resolveIfLooksLikeHealthExport(destPath, true);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return {
-			kind: "extraction_failed",
-			message: `Failed to extract export.xml from the uploaded .zip: ${message}`,
-		};
-	} finally {
-		closeSync(fd);
-	}
-}
-
-/** Matches export.xml at any depth inside a zip's central directory — used
- *  by validation to sniff for the entry without extracting it. */
-export function isExportXmlEntryName(name: string): boolean {
-	return EXPORT_XML_ENTRY_RE.test(name);
+	// As on records: published values only, the device by its maker, model and
+	// hardware, the offset included, serialised as JSON. The duration is
+	// hashed as converted, or duration="1" min and duration="1" h would be one
+	// workout. End date and duration separate back-to-back intervals of one
+	// type on one device, such as a swim set, that would otherwise share a
+	// start.
+	//
+	// Distance and energy are left out. Apple states them differently between
+	// exports, as the workout's attributes on older ones and as statistics of
+	// the workout or its activities on newer ones (see workoutTotal), each
+	// giving a slightly different figure or none; in the id, an unchanged
+	// workout would take a new id per representation, and a reader, never
+	// sent a deletion, would keep every copy. The events and statistics lists
+	// are left out as detail rather than identity: in the id, their order
+	// would matter, and a workout that gained a marker past the cap of 500
+	// would change identity without changing.
+	const id = hashId(
+		JSON.stringify([
+			published.workout_activity_type,
+			device.identity,
+			published.start_date,
+			published.start_utc_offset_minutes,
+			published.end_date,
+			published.duration_minutes,
+		]),
+	);
+	return { id, ...published };
 }
 
 // ─── Manual-upload validation summary scan ─────────────────────────────
 
 const SCAN_READ_BUFFER_SIZE = 65_536;
+const HEALTH_DATA_ROOT_RE = /<HealthData[\s/>]/;
+// How far the summary scan reads looking for the <HealthData root before
+// giving up, so a large wrong file is not scanned to its end. The upload
+// preview judges an upload by its root element first (uploads.ts); this is
+// the scan's own backstop.
+const ROOT_SNIFF_WINDOW_BYTES = 1024 * 1024;
 
 export interface ExportXmlSummary {
 	readonly earliestStartDate: string | null;
@@ -572,27 +1228,6 @@ interface SummaryScanState {
 	workoutCount: number;
 }
 
-/**
- * Update `state.looksLikeHealthExport` from the current buffer, honoring
- * the bounded sniff window. Returns `true` when the caller should stop
- * reading entirely (window exhausted with no root element found yet).
- */
-function updateHealthDataRootSniff(
-	state: SummaryScanState,
-	buf: string,
-	chunkText: string,
-): boolean {
-	if (state.looksLikeHealthExport) {
-		return false;
-	}
-	state.sniffedBytes += Buffer.byteLength(chunkText, "utf8");
-	if (HEALTH_DATA_ROOT_RE.test(buf)) {
-		state.looksLikeHealthExport = true;
-		return false;
-	}
-	return state.sniffedBytes > ROOT_SNIFF_WINDOW_BYTES;
-}
-
 function recordStartDateBounds(
 	state: SummaryScanState,
 	startDate: string,
@@ -606,23 +1241,18 @@ function recordStartDateBounds(
 }
 
 /**
- * APPLE_HEALTH_TAG_RE also matches nested MetadataEntry/WorkoutEvent/
- * WorkoutStatistics open tags and </Record>/</Workout> close tags (see its
- * own doc comment) -- only count a Record/Workout on its OPEN tag (group
- * 1), exactly once per element regardless of whether it is self-closing or
- * has nested children, mirroring index.ts's handleTopLevelOpenTag. Counting
- * on close tags too, or counting every match unconditionally, would
- * double-count non-self-closing elements.
+ * Count a Record or Workout on its open tag only, once per element whether
+ * or not it is self-closing, as index.ts's handleTopLevelOpenTag does;
+ * counting its close tag too would count an element with children twice.
  */
-function applyTagMatch(
-	state: SummaryScanState,
-	openTag: string | undefined,
-	attrString: string | undefined,
-): void {
+function applyTagMatch(state: SummaryScanState, tag: ScannedTag): void {
+	const openTag = tag.open;
 	if (!(openTag === "Record" || openTag === "Workout")) {
 		return;
 	}
-	const attrs = parseAttrs(attrString ?? "");
+	// An unreadable element is still an element: the preview counts it and
+	// takes no date from it.
+	const attrs = parseAttrs(tag.attrs) ?? {};
 	const startDate = isoDate(attrs.startDate);
 	if (openTag === "Record") {
 		state.recordCount += 1;
@@ -634,34 +1264,25 @@ function applyTagMatch(
 	}
 }
 
-/** Scan every Record/Workout open tag in `buf`, returning the unconsumed tail past the last full match. */
-function scanTagMatches(state: SummaryScanState, buf: string): string {
-	const re = new RegExp(APPLE_HEALTH_TAG_RE.source, "g");
-	let m: RegExpExecArray | null = re.exec(buf);
-	let lastEnd = 0;
-	while (m !== null) {
-		const [, openTag, attrString] = m;
-		applyTagMatch(state, openTag, attrString);
-		lastEnd = re.lastIndex;
-		m = re.exec(buf);
+/** Count every tag nextTag finds in `text`; returns where the last one ends. */
+function scanTagMatches(state: SummaryScanState, text: string): number {
+	let at = 0;
+	for (let tag = nextTag(text, at); tag !== null; tag = nextTag(text, at)) {
+		applyTagMatch(state, tag);
+		at = tag.end;
 	}
-	return buf.slice(lastEnd);
+	return at;
 }
 
 /**
- * Stream-scan `path` (an export.xml, however it got there — direct upload
- * or already-extracted from a zip) to produce validation-preview stats
- * WITHOUT emitting or retaining individual records — mirrors index.ts's
- * streamParse loop (same tag regex, same chunk size) but accumulates only
- * counts and a min/max date range, so peak memory stays O(1) regardless of
- * export size, matching the collect-time streaming guarantee this connector
- * makes everywhere else.
+ * Stream-scan an export XML for the upload preview: counts and a date range
+ * only, never a record, with streamParse's tag scanner, chunk size and
+ * ScanBuffer, so memory stays bounded whatever the export's size.
  */
 export async function scanExportXmlSummary(
 	path: string,
 ): Promise<ExportXmlSummary> {
 	const stream = createReadStream(path, {
-		encoding: "utf8",
 		highWaterMark: SCAN_READ_BUFFER_SIZE,
 	});
 	const state: SummaryScanState = {
@@ -672,19 +1293,40 @@ export async function scanExportXmlSummary(
 		sniffedBytes: 0,
 		workoutCount: 0,
 	};
-	let buf = "";
-
-	for await (const chunk of stream as AsyncIterable<string | Buffer>) {
-		const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-		buf += text;
-		if (updateHealthDataRootSniff(state, buf, text)) {
-			// Never found <HealthData within the sniff window -- stop reading
-			// early rather than scanning a large unsupported file to its end.
-			stream.destroy();
-			break;
+	const pending = new ScanBuffer();
+	const scan = (): void => {
+		const text = pending.text();
+		// Held to the import scanner's bound (streamParse in index.ts): only
+		// from the last '<', and nothing of an element still open past
+		// MAX_PENDING_TAG_BYTES, which is then left uncounted. Otherwise a long
+		// run the tag pattern never matches, such as a GPS route's locations,
+		// would be held whole.
+		pending.keep(text, scanTagMatches(state, text));
+		if (!state.looksLikeHealthExport && HEALTH_DATA_ROOT_RE.test(text)) {
+			state.looksLikeHealthExport = true;
 		}
-		buf = scanTagMatches(state, buf);
+	};
+
+	for await (const chunk of stream as AsyncIterable<Buffer>) {
+		const due = pending.push(chunk);
+		if (state.looksLikeHealthExport && !due) {
+			continue;
+		}
+		scan();
+		if (pending.bytes > MAX_PENDING_TAG_BYTES) {
+			pending.clear();
+		}
+		if (!state.looksLikeHealthExport) {
+			state.sniffedBytes += chunk.length;
+			if (state.sniffedBytes > ROOT_SNIFF_WINDOW_BYTES) {
+				// Never found <HealthData within the sniff window -- stop reading
+				// early rather than scanning a large unsupported file to its end.
+				stream.destroy();
+				break;
+			}
+		}
 	}
+	scan();
 
 	const {
 		earliestStartDate,
