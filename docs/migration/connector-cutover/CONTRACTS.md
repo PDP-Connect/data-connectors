@@ -58,7 +58,7 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 - `nutrition` is a typed stream keyed by `product_id` and replaces the untyped `order_items.nutrition`. The sources are the Whole Foods product page first, then USDA FDC. A USDA key is an optional manifest option, with `DEMO_KEY` rate limits stated.
 - Amazon session code that `amazon` and `wholefoods` both need moves into the runtime library (`src/auto-login/amazon.ts` or a sibling). A connector never imports another connector.
 
-**D9. YouTube** is a manual import of a Google Takeout "YouTube and YouTube Music" export. Google browser scraping is out of scope unless the real export lacks a scope and a recorded decision approves a narrow fallback. The watch-history parser is one library module shared with `google_takeout.youtube_watch_history`.
+**D9. YouTube (superseded 2026-09-23).** The Vana cutover keeps owner-authenticated browser collection as the default `youtube` profile. The previous Takeout-only decision did not preserve the seven legacy browser scopes. The existing import is retained as a separate optional `youtube_takeout` profile and excluded from publication pending review. Browser history is a day-granular, most-recent-50 snapshot in page order; it has no fabricated watch timestamp or incremental timestamp cursor. Browser display labels are retained alongside parsed values only where the legacy projection needs the exact label (subscriber count, duration, view count, and history section). The Takeout history parser continues to share its implementation with `google_takeout.youtube_watch_history`.
 
 **D10. Shop** is implemented from contract and fixtures. It stays `development` until independent live evidence exists.
 

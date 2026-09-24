@@ -530,10 +530,10 @@
       "connector_key": "youtube",
       "oci_name": "youtube",
       "lane": "cut-youtube",
-      "acquisition": "manual import of a Google Takeout 'YouTube and YouTube Music' export (filesystem, manual_or_upload); no Google browser scraping unless Takeout provably lacks a scope and a decision record approves a narrow fallback",
-      "browser_profile": null,
-      "tier_target": "development until proof gate",
-      "takeout_coverage": "UNVERIFIED until Tim's Takeout arrives. The inventory claim that Takeout contains only watch history is NOT accepted (it was derived from google_takeout code, not from an export).",
+      "acquisition": "owner-authenticated youtube.com browser session; optional Takeout import uses a separate unpublished youtube-takeout identity",
+      "browser_profile": "youtube",
+      "tier_target": "development until authenticated browser proof",
+      "takeout_coverage": "Optional youtube-takeout profile is separate and excluded from publication pending review.",
       "scopes": [
         {
           "legacy_scope": "youtube.profile",
@@ -542,7 +542,7 @@
           ],
           "migration": "rename+fields",
           "field_map": {
-            "channelId": "profile.id",
+            "channelId": "profile.channel_id",
             "channelTitle": "profile.title",
             "channelUrl": "profile.channel_url",
             "handle": "profile.handle",
@@ -556,7 +556,7 @@
             "videoCount": "profile.video_count"
           },
           "dropped": [],
-          "notes": "fields absent from Takeout become documented breaks, per field",
+          "notes": "browser fields require authenticated live verification; missing own-channel identity is skipped, never borrowed from another channel",
           "status": "contracted"
         },
         {
@@ -572,16 +572,12 @@
             "handle": "subscriptions.handle",
             "avatarUrl": "subscriptions.avatar_url",
             "subscriberCount": "subscriptions.subscriber_count",
+            "subscriberCountText": "subscriptions.subscriber_count_text",
             "description": "subscriptions.description",
             "isVerified": "subscriptions.is_verified",
             "isBellNotification": "subscriptions.notifications"
           },
-          "dropped": [
-            {
-              "field": "subscriberCountText",
-              "reason": "display string"
-            }
-          ],
+          "dropped": [],
           "status": "contracted"
         },
         {
@@ -601,7 +597,7 @@
             "views": "playlists.view_count"
           },
           "dropped": [],
-          "notes": "legacy capped at 50 playlists; modern uncapped",
+          "notes": "browser collection retains the 50-playlist cap and reports bounded coverage",
           "status": "contracted"
         },
         {
@@ -635,7 +631,7 @@
             "videoTitle": "likes.video_title",
             "channelTitle": "likes.channel_title",
             "channelUrl": "likes.channel_url",
-            "durationText": "likes.duration_seconds",
+            "durationText": "likes.duration_text",
             "thumbnailUrl": "likes.thumbnail_url"
           },
           "dropped": [],
@@ -653,7 +649,7 @@
             "videoTitle": "watch_later.video_title",
             "channelTitle": "watch_later.channel_title",
             "channelUrl": "watch_later.channel_url",
-            "durationText": "watch_later.duration_seconds",
+            "durationText": "watch_later.duration_text",
             "thumbnailUrl": "watch_later.thumbnail_url"
           },
           "dropped": [],
@@ -666,21 +662,22 @@
           ],
           "migration": "rename",
           "field_map": {
-            "watchedAt": "watch_history.watched_at",
+            "watchedAt": "watch_history.watched_date",
             "videoId": "watch_history.video_id",
             "videoUrl": "watch_history.video_url",
             "videoTitle": "watch_history.video_title",
             "channelTitle": "watch_history.channel_title",
-            "views": "watch_history.view_count",
+            "views": "watch_history.views_text",
+            "watchedAtText": "watch_history.watched_date_label",
             "description": "watch_history.description"
           },
           "dropped": [
             {
-              "field": "timeWindow, watchedAtText",
-              "reason": "legacy 50-item window artifacts; Takeout gives exact timestamps"
+              "field": "watch time of day",
+              "reason": "the browser exposes a day label, not a timestamp"
             }
           ],
-          "notes": "Takeout watch-history parsing must be shared with google_takeout.youtube_watch_history through one runtime-library module (same file format, same reason to change)",
+          "notes": "browser history is a day-granular top-50 snapshot in page order; watch_history.position preserves that order and there is no timestamp cursor",
           "status": "contracted"
         }
       ]

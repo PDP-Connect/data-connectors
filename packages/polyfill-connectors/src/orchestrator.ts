@@ -62,7 +62,9 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	usaa: c("usaa"),
 	amazon: c("amazon"),
 	github: c("github"),
+	github_browser: c("github_browser"),
 	oura: c("oura"),
+	oura_browser: c("oura_browser"),
 	spotify: c("spotify"),
 	anthropic: c("anthropic"),
 	shopify: c("shopify"),
@@ -102,6 +104,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	venmo: c("venmo"),
 	signal: c("signal"),
 	youtube: c("youtube"),
+	youtube_takeout: c("youtube_takeout"),
 	icloud_notes: c("icloud_notes"),
 };
 

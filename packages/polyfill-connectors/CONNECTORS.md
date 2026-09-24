@@ -53,6 +53,7 @@ First-run-portability notes are platform-specific and worth reading before handi
 | usaa | USAA member login + SMS 2FA | ✅ | ⚠ needs SMS access | 887 (5 streams, pre-refactor) | SMS OTP delivered to the account's registered phone. Tier A refactor (Zod, shape-check, tracing, isolated-browser code) complete; end-to-end validation blocked on Akamai rejecting the maintainer's IP — need reverse proxy or fresh IP. |
 | anthropic | Claude.ai login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js` (now on isolated path); selectors TBD. |
 | shopify | Shopify admin login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
+| oura_browser | Owner sign-in to Oura cloud | 🟡 code ready | ⚠ owner login required | — | Separate browser-session profile for the Oura streams; `oura` remains the PAT setup profile. |
 | heb | HEB.com login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
 | wholefoods | Piggybacks on Amazon session | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. Inherits Amazon's portability profile. |
 | linkedin | LinkedIn login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |

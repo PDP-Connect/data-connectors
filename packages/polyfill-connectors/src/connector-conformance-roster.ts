@@ -87,6 +87,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 		testFile: "connectors/google_messages/integration.test.ts",
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
+	github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
 	meta: { testFile: "connectors/meta/integration.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
@@ -94,6 +95,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
+	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
 	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
@@ -102,4 +104,5 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
 	youtube: { testFile: "connectors/youtube/index.test.ts" },
+	youtube_takeout: { testFile: "connectors/youtube_takeout/index.test.ts" },
 };

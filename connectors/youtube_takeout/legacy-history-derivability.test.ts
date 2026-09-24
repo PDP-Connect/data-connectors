@@ -32,7 +32,7 @@
  *     behavior (the legacy scraper emits the constant unconditionally).
  *
  * Genuine losses (not fabricated — confirmed absent from Takeout, see
- * connectors/youtube/parsers.ts:66-67 and src/youtube-watch-history.ts):
+ * connectors/youtube_takeout/parsers.ts:66-67 and src/youtube-watch-history.ts):
  *   - history[].views: legacy scraped the DOM metadata row
  *     (youtube-playwright.js:1062-1066, "349K views" text). Takeout's
  *     watch-history.json carries only {time, title, titleUrl, subtitles}

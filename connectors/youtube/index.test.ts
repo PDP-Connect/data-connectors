@@ -1,278 +1,254 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-/**
- * End-to-end tests for the YouTube Takeout connector, driven through the
- * real connector protocol as a subprocess: proves START -> RECORD -> STATE
- * -> DONE, scope filtering (a stream absent from scope.streams emits
- * nothing), and the honest-coverage behavior for UNVERIFIED streams (see
- * parsers.ts's file header).
- */
-
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import {
-	connectorEntrypoint,
-	packageRoot as PACKAGE_ROOT,
-} from "../../packages/polyfill-connectors/src/connector-paths.ts";
-import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { collectYoutubeBrowser, resolveWatchedDate } from "./index.ts";
+import { validateRecord } from "./schemas.ts";
 
-const ENTRYPOINT = connectorEntrypoint("youtube");
+const VIDEO = {
+	video_id: "abc123XYZ0",
+	video_url: "https://www.youtube.com/watch?v=abc123XYZ0",
+	video_title: "Real video title",
+	channel_title: "Creator",
+	channel_url: "https://www.youtube.com/@creator",
+	duration_text: "4:30",
+	thumbnail_url: "https://i.ytimg.com/vi/abc123XYZ0/default.jpg",
+	watched_date_label: "Yesterday",
+	views_text: "1.2K views",
+	description: "Snippet",
+};
 
-const WATCH_HISTORY_JSON = JSON.stringify([
-	{
-		header: "YouTube",
-		title: "Watched How to make sourdough",
-		titleUrl: "https://www.youtube.com/watch?v=abc123XYZ0",
-		subtitles: [
-			{ name: "Baker Channel", url: "https://www.youtube.com/channel/UCxxx" },
-		],
-		time: "2024-06-05T13:45:22.123Z",
-	},
-	{
-		header: "YouTube",
-		title: "Watched Music video",
-	},
-]);
-
-async function withExportDir(
-	files: Record<string, string>,
-	body: (dir: string) => Promise<void>,
-): Promise<void> {
-	const dir = await mkdtemp(join(tmpdir(), "youtube-takeout-"));
-	try {
-		for (const [relPath, content] of Object.entries(files)) {
-			const fullPath = join(dir, relPath);
-			await mkdir(dirname(fullPath), { recursive: true });
-			await writeFile(fullPath, content, "utf8");
-		}
-		await body(dir);
-	} finally {
-		await rm(dir, { force: true, recursive: true });
+class FixturePage {
+	url = "";
+	async goto(url: string) {
+		this.url = url;
+	}
+	locator() {
+		return { first: () => ({ click: async () => undefined }) };
+	}
+	async waitForTimeout() {
+		/* fixture has no renderer delay */
+	}
+	async waitForFunction() {
+		return { jsonValue: async () => "content", dispose: async () => undefined };
+	}
+	async evaluate(fn: Function): Promise<any> {
+		if (fn.name === "readOwnAccount")
+			return {
+				channel_url: "https://www.youtube.com/@owner",
+				email: "owner@example.com",
+			};
+		if (fn.name === "readChannelPage")
+			return {
+				channel_id: "UCowner",
+				channel_url: this.url,
+				title: "Owner",
+				handle: "@owner",
+				avatar_url: null,
+			};
+		if (fn.name === "readSubscriptions")
+			return [
+				{
+					channel_url: "https://www.youtube.com/@creator",
+					channel_id: null,
+					channel_title: "Creator",
+					handle: "@creator",
+					avatar_url: null,
+					description: null,
+					subscriber_count_text: "1.2K subscribers",
+					is_verified: true,
+					notifications: true,
+				},
+			];
+		if (fn.name === "readPlaylistLinks")
+			return [{ id: "PL1", url: "https://www.youtube.com/playlist?list=PL1" }];
+		if (fn.name === "readPlaylistHeader")
+			return {
+				title: "My list",
+				owner: "Owner",
+				owner_url: "https://www.youtube.com/@owner",
+				visibility: "Public",
+				video_count_text: "1 video",
+				view_count_text: "No views",
+			};
+		if (fn.name === "readVideos") return [{ ...VIDEO }];
+		return undefined;
 	}
 }
 
-const ALL_STREAMS = [
-	"profile",
-	"subscriptions",
-	"playlists",
-	"playlist_items",
-	"likes",
-	"watch_later",
-	"watch_history",
-	"coverage_diagnostics",
-];
-
-async function run(
-	dir: string,
-	streams: string[] = ALL_STREAMS,
-	state?: Record<string, unknown>,
-) {
-	return await runConnectorProtocolSubprocess({
-		cwd: PACKAGE_ROOT,
-		entrypoint: ENTRYPOINT,
-		env: {
-			PDPP_OWNER_TOKEN: "",
-			PDPP_RS_URL: "",
-			RS_URL: "",
-			YOUTUBE_TAKEOUT_DIR: dir,
-			TZ: "UTC",
-		},
-		start: {
-			scope: { streams: streams.map((name) => ({ name })) },
-			...(state ? { state } : {}),
-			type: "START",
-		},
-	});
-}
-
-function recordsOf(result: { messages?: unknown[] }, stream: string) {
-	const messages = (result.messages ?? []) as Array<Record<string, unknown>>;
-	return messages
-		.filter((m) => m.type === "RECORD" && m.stream === stream)
-		.map((m) => m.data as Record<string, unknown>);
-}
-
-function messagesOf(result: { messages?: unknown[] }, type: string) {
-	const messages = (result.messages ?? []) as Array<Record<string, unknown>>;
-	return messages.filter((m) => m.type === type);
-}
-
-test("watch_history: a real-shaped watch-history.json emits RECORD -> STATE for every entry with a timestamp", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-		},
-		async (dir) => {
-			const result = await run(dir, ["watch_history"]);
-			const records = recordsOf(result, "watch_history");
-			// The second entry has no `time`, so it must not emit — same rule as
-			// google_takeout.youtube_watch_history via the shared parser.
-			assert.equal(records.length, 1);
-			assert.equal(records[0]?.watched_at, "2024-06-05T13:45:22.123Z");
-			assert.equal(records[0]?.video_id, "abc123XYZ0");
-			assert.equal(records[0]?.channel_title, "Baker Channel");
-
-			const state = messagesOf(result, "STATE").find(
-				(m) => (m as { stream?: string }).stream === "watch_history",
-			) as { cursor?: Record<string, unknown> } | undefined;
-			assert.equal(state?.cursor?.last_timestamp, "2024-06-05T13:45:22.123Z");
-
-			const done = messagesOf(result, "DONE");
-			assert.equal(done.length, 1);
-		},
-	);
-});
-
-test("watch_history: a second run resumes from the cursor rather than re-emitting", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-		},
-		async (dir) => {
-			const second = await run(dir, ["watch_history"], {
-				watch_history: { last_timestamp: "2024-06-05T13:45:22.123Z" },
-			});
-			assert.equal(recordsOf(second, "watch_history").length, 0);
-		},
-	);
-});
-
-test("scope filtering: a stream absent from scope.streams emits nothing for that stream", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-			"YouTube and YouTube Music/subscriptions/subscriptions.csv":
-				"Channel Id,Channel Url,Channel Title\nUC1,https://www.youtube.com/channel/UC1,Chan One\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["watch_history"]);
-			assert.equal(recordsOf(result, "watch_history").length, 1);
-			assert.equal(recordsOf(result, "subscriptions").length, 0);
-			assert.equal(recordsOf(result, "coverage_diagnostics").length, 0);
-		},
-	);
-});
-
-test("subscriptions: a real-shaped subscriptions.csv emits one record per row", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/subscriptions/subscriptions.csv":
-				"Channel Id,Channel Url,Channel Title\n" +
-				"UC1,https://www.youtube.com/channel/UC1,Chan One\n" +
-				"UC2,https://www.youtube.com/channel/UC2,Chan Two\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["subscriptions", "coverage_diagnostics"]);
-			const records = recordsOf(result, "subscriptions");
-			assert.equal(records.length, 2);
-			assert.equal(records[0]?.channel_id, "UC1");
-
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			assert.equal(diagnostic?.stream, "subscriptions");
-			assert.equal(diagnostic?.status, "complete");
-			assert.equal(diagnostic?.record_count, 2);
-		},
-	);
-});
-
-test("playlists + playlist_items: an index file with one per-item CSV emits both streams", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/playlists/playlists.csv":
-				"Playlist Id,Playlist Name\nPL1,My Mix\n",
-			"YouTube and YouTube Music/playlists/My Mix-videos.csv":
-				"Video Id,Playlist Video Creation Timestamp\nvid1,2024-01-01T00:00:00Z\nvid2,2024-01-02T00:00:00Z\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["playlists", "playlist_items"]);
-			const playlists = recordsOf(result, "playlists");
-			assert.equal(playlists.length, 1);
-			assert.equal(playlists[0]?.id, "PL1");
-
-			const items = recordsOf(result, "playlist_items");
-			assert.equal(items.length, 2);
-			assert.equal(items[0]?.video_id, "vid1");
-		},
-	);
-});
-
-test("likes and watch_later: named playlist export files map to their own streams", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/playlists/Liked videos-videos.csv":
-				"Video Id\nvidLike1\n",
-			"YouTube and YouTube Music/playlists/Watch later-videos.csv":
-				"Video Id\nvidWL1\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["likes", "watch_later"]);
-			assert.equal(recordsOf(result, "likes").length, 1);
-			assert.equal(recordsOf(result, "likes")[0]?.video_id, "vidLike1");
-			assert.equal(recordsOf(result, "watch_later").length, 1);
-			assert.equal(recordsOf(result, "watch_later")[0]?.video_id, "vidWL1");
-		},
-	);
-});
-
-test("a missing export directory reports every requested stream as awaiting import, not silent success", async () => {
-	const dir = join(tmpdir(), "youtube-takeout-does-not-exist-0000");
-	const result = await run(dir, ["watch_history", "coverage_diagnostics"]);
-	assert.equal(recordsOf(result, "watch_history").length, 0);
-	assert.equal(messagesOf(result, "SKIP_RESULT").length, 1);
-	const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-	assert.ok(diagnostic);
-	assert.equal(diagnostic.status, "empty");
-});
-
-test("a directory containing only a .zip is reported as source_unreadable with remediation, not silently ignored", async () => {
-	await withExportDir(
-		{ "takeout-export.zip": "not a real zip" },
-		async (dir) => {
-			const result = await run(dir, ["watch_history", "coverage_diagnostics"]);
-			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.equal(skips.length, 1);
-			assert.match(
-				(skips[0] as { message?: string }).message ?? "",
-				/extract/i,
-			);
-		},
-	);
-});
-
-test("an unverified stream missing its expected file reports file_not_found_in_export honestly", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-		},
-		async (dir) => {
-			const result = await run(dir, ["profile", "coverage_diagnostics"]);
-			assert.equal(recordsOf(result, "profile").length, 0);
-			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.equal(skips.length, 1);
+test("browser collector emits schema-valid records for all seven scopes without a Takeout directory", async () => {
+	const streams = [
+		"profile",
+		"subscriptions",
+		"playlists",
+		"playlist_items",
+		"likes",
+		"watch_later",
+		"watch_history",
+		"coverage_diagnostics",
+	];
+	const records = new Map<string, Record<string, unknown>[]>();
+	await collectYoutubeBrowser({
+		page: new FixturePage() as never,
+		requested: new Map(streams.map((name) => [name, { name }])) as never,
+		emitRecord: async (stream, data) => {
 			assert.equal(
-				(skips[0] as { reason?: string }).reason,
-				"file_not_found_in_export",
+				validateRecord(stream, data).ok,
+				true,
+				`${stream}: ${JSON.stringify(data)}`,
 			);
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			assert.equal(diagnostic?.reason, "file_not_found_in_export");
+			records.set(stream, [...(records.get(stream) ?? []), data]);
 		},
+		emit: async () => undefined,
+		progress: async () => undefined,
+	});
+	for (const stream of streams)
+		assert.ok((records.get(stream)?.length ?? 0) > 0, stream);
+	assert.equal(records.get("subscriptions")?.[0]?.notifications, true);
+	assert.equal(
+		records.get("playlist_items")?.[0]?.video_title,
+		"Real video title",
+	);
+	assert.equal(records.get("playlist_items")?.[0]?.playlist_id, "PL1");
+	assert.equal(records.get("watch_history")?.[0]?.position, 0);
+	assert.equal("watched_at" in records.get("watch_history")![0]!, false);
+	assert.match(
+		String(records.get("watch_history")?.[0]?.watched_date),
+		/^\d{4}-\d{2}-\d{2}$/,
 	);
 });
 
-test("an extracted export directly in the import dir (no wrapping folder) is also read", async () => {
-	await withExportDir(
-		{ "history/watch-history.json": WATCH_HISTORY_JSON },
-		async (dir) => {
-			const result = await run(dir, ["watch_history"]);
-			assert.equal(recordsOf(result, "watch_history").length, 1);
+test("date resolver keeps day precision and rejects unknown labels", () => {
+	const now = new Date(2026, 8, 23, 12);
+	assert.equal(resolveWatchedDate("Today", now), "2026-09-23");
+	assert.equal(resolveWatchedDate("Yesterday", now), "2026-09-22");
+	assert.equal(resolveWatchedDate("Sep 21, 2026", now), "2026-09-21");
+	assert.equal(resolveWatchedDate("Feb 30, 2026", now), null);
+	assert.equal(resolveWatchedDate("Unknown", now), null);
+});
+
+test("history is the first 50 visible records in page order with no timestamp cursor", async () => {
+	const page = new FixturePage();
+	page.evaluate = async (fn: Function) =>
+		fn.name === "readVideos"
+			? Array.from({ length: 60 }, (_, i) => ({
+					...VIDEO,
+					video_id: `video${i}`,
+					video_url: `https://www.youtube.com/watch?v=video${i}`,
+				}))
+			: undefined;
+	const history: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		emitRecord: async (_stream, data) => {
+			history.push(data);
 		},
+		emit: async () => undefined,
+		progress: async () => undefined,
+	});
+	assert.equal(history.length, 50);
+	assert.equal(history[0]?.video_id, "video0");
+	assert.equal(history[49]?.video_id, "video49");
+	assert.equal(history[49]?.position, 49);
+	assert.equal("watched_at" in history[0]!, false);
+});
+
+test("repeated history videos keep the first page occurrence and one primary key", async () => {
+	const page = new FixturePage();
+	page.evaluate = async (fn: Function) =>
+		fn.name === "readVideos"
+			? [
+					{ ...VIDEO, watched_date_label: "Today" },
+					{ ...VIDEO, watched_date_label: "Yesterday" },
+				]
+			: undefined;
+	const history: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		emitRecord: async (_stream, data) => {
+			history.push(data);
+		},
+		emit: async () => undefined,
+		progress: async () => undefined,
+	});
+	assert.equal(history.length, 1);
+	assert.equal(history[0]?.position, 0);
+	assert.equal(history[0]?.watched_date_label, "Today");
+});
+
+test("video primary keys survive playlist index changes", async () => {
+	const collectKeys = async (
+		index: number,
+		videoId: string | null = VIDEO.video_id,
+	) => {
+		const page = new FixturePage();
+		page.evaluate = async (fn: Function) =>
+			fn.name === "readVideos"
+				? [
+						{
+							...VIDEO,
+							video_id: videoId,
+							video_url: `${VIDEO.video_url}&list=PL1&index=${index}`,
+						},
+					]
+				: fn.name === "readPlaylistLinks"
+					? [{ id: "PL1", url: "https://www.youtube.com/playlist?list=PL1" }]
+					: fn.name === "readPlaylistHeader"
+						? {
+								title: "My list",
+								owner: null,
+								owner_url: null,
+								visibility: null,
+								video_count_text: null,
+								view_count_text: null,
+							}
+						: undefined;
+		const keys = new Map<string, string>();
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map(
+				["playlist_items", "likes", "watch_later"].map((name) => [
+					name,
+					{ name },
+				]),
+			) as never,
+			emitRecord: async (stream, data) => {
+				keys.set(stream, String(data.id));
+			},
+			emit: async () => undefined,
+			progress: async () => undefined,
+		});
+		return keys;
+	};
+	assert.deepEqual(await collectKeys(1), await collectKeys(9));
+	assert.deepEqual(await collectKeys(1, null), await collectKeys(9, null));
+});
+
+test("unreadable list DOM emits a skip instead of a successful zero-row snapshot", async () => {
+	const page = new FixturePage();
+	page.waitForFunction = async () => {
+		throw new Error("read deadline");
+	};
+	const skipped: Record<string, unknown>[] = [];
+	const records: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map(
+			["subscriptions", "coverage_diagnostics"].map((name) => [name, { name }]),
+		) as never,
+		emitRecord: async (_stream, data) => {
+			records.push(data);
+		},
+		emit: async (message) => {
+			skipped.push(message as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+	assert.deepEqual(
+		skipped.map((message) => [message.type, message.stream, message.reason]),
+		[["SKIP_RESULT", "subscriptions", "page_unreadable"]],
 	);
+	assert.equal(records.length, 0);
 });

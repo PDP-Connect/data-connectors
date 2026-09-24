@@ -36,9 +36,9 @@ function listSchemaConnectors(): string[] {
 }
 
 function emitSourcePathsFor(name: string): string[] {
-	return ["index.ts", "parsers.ts"]
-		.map((f) => join(CONNECTORS_DIR, name, f))
-		.filter(existsSync);
+	return readdirSync(join(CONNECTORS_DIR, name))
+		.filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+		.map((file) => join(CONNECTORS_DIR, name, file));
 }
 
 const connectors = listSchemaConnectors();

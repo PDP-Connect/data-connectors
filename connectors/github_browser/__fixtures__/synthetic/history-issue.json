@@ -1,0 +1,17 @@
+{
+	"items": [
+		{
+			"id": 10,
+			"number": 2,
+			"title": "Synthetic issue",
+			"body": "Fixture body",
+			"state": "closed",
+			"created_at": "2025-01-01T00:00:00Z",
+			"repository_url": "https://api.github.com/repos/sample-user/demo",
+			"html_url": "https://github.com/sample-user/demo/issues/2",
+			"labels": [{ "name": "fixture" }],
+			"comments": 1,
+			"reactions": { "total_count": 2 }
+		}
+	]
+}

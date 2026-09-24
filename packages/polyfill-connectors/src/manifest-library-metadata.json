@@ -172,6 +172,15 @@
 		}
 	},
 	{
+		"file": "github_browser.json",
+		"manifest": {
+			"connector_key": "github-browser",
+			"reason_display_messages": {
+				"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+			}
+		}
+	},
+	{
 		"file": "gmail.json",
 		"manifest": {
 			"connector_key": "gmail",
@@ -401,6 +410,15 @@
 		}
 	},
 	{
+		"file": "oura_browser.json",
+		"manifest": {
+			"connector_key": "oura-browser",
+			"reason_display_messages": {
+				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+			}
+		}
+	},
+	{
 		"file": "reddit.json",
 		"manifest": {
 			"connector_key": "reddit",
@@ -612,6 +630,16 @@
 		"file": "youtube.json",
 		"manifest": {
 			"connector_key": "youtube",
+			"reason_display_messages": {
+				"bounded_browser_snapshot": "This is a bounded browser snapshot. More items may exist beyond the visible list or scroll limit.",
+				"page_unreadable": "The signed-in page did not expose a trustworthy record."
+			}
+		}
+	},
+	{
+		"file": "youtube_takeout.json",
+		"manifest": {
+			"connector_key": "youtube-takeout",
 			"reason_display_messages": {
 				"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
 				"covered_in_full": "Everything this export carries for this stream was imported.",

@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Zod schemas for the browser-first YouTube connector's streams. Shape-check-
+ * Zod schemas for the YouTube Takeout connector's streams. Shape-check-
  * before-emit per docs/connector-authoring-guide.md §3.
  *
- * Source: the authenticated YouTube DOM. History dates retain day precision.
+ * Ground truth: the record builders in parsers.ts and the record interfaces
+ * in types.ts. See parsers.ts's file header for which streams are VERIFIED
+ * (watch_history, via the shared src/youtube-watch-history.ts module) vs
+ * UNVERIFIED (profile, subscriptions, playlists, playlist_items, likes,
+ * watch_later — parsers exist but no repo evidence confirms the Takeout
+ * file layout they read).
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -21,8 +26,7 @@ const isoTimestampSchema = z
 const urlSchema = z.url().max(4096).nullable();
 
 export const profileSchema = z.object({
-	id: pdppSafeText.max(200),
-	channel_id: pdppSafeText.max(200).nullable(),
+	id: pdppSafeText.max(200).nullable(),
 	channel_url: urlSchema,
 	title: pdppSafeText.max(500).nullable(),
 	handle: pdppSafeText.max(200).nullable(),
@@ -38,13 +42,12 @@ export const profileSchema = z.object({
 
 export const subscriptionsSchema = z.object({
 	id: pdppSafeText.max(200),
-	channel_id: pdppSafeText.max(200).nullable(),
+	channel_id: pdppSafeText.max(200),
 	channel_title: pdppSafeText.max(500).nullable(),
 	channel_url: urlSchema,
 	handle: pdppSafeText.max(200).nullable(),
 	avatar_url: urlSchema,
 	subscriber_count: z.number().int().min(0).nullable(),
-	subscriber_count_text: pdppSafeText.max(200).nullable(),
 	description: pdppSafeText.max(5000).nullable(),
 	is_verified: z.boolean().nullable(),
 	notifications: z.boolean().nullable(),
@@ -70,7 +73,6 @@ export const playlistItemsSchema = z.object({
 	channel_title: pdppSafeText.max(500).nullable(),
 	channel_url: urlSchema,
 	duration_seconds: z.number().int().min(0).nullable(),
-	duration_text: pdppSafeText.max(80).nullable(),
 	thumbnail_url: urlSchema,
 });
 
@@ -82,7 +84,6 @@ export const likesSchema = z.object({
 	channel_title: pdppSafeText.max(500).nullable(),
 	channel_url: urlSchema,
 	duration_seconds: z.number().int().min(0).nullable(),
-	duration_text: pdppSafeText.max(80).nullable(),
 	thumbnail_url: urlSchema,
 });
 
@@ -94,26 +95,29 @@ export const watchLaterSchema = z.object({
 	channel_title: pdppSafeText.max(500).nullable(),
 	channel_url: urlSchema,
 	duration_seconds: z.number().int().min(0).nullable(),
-	duration_text: pdppSafeText.max(80).nullable(),
 	thumbnail_url: urlSchema,
 });
 
 export const watchHistorySchema = z.object({
 	id: z.string().regex(RECORD_ID_RE, "id must be a 24-hex sha256 slice"),
-	position: z.number().int().min(0),
-	watched_date: pdppSafeText.regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
-	watched_date_label: pdppSafeText.max(80).nullable(),
+	watched_at: isoTimestampSchema,
 	video_id: pdppSafeText.max(200).nullable(),
 	video_url: urlSchema,
 	video_title: pdppSafeText.max(2000).nullable(),
 	channel_title: pdppSafeText.max(500).nullable(),
 	channel_url: urlSchema,
 	view_count: z.number().int().min(0).nullable(),
-	views_text: pdppSafeText.max(200).nullable(),
 	description: pdppSafeText.max(5000).nullable(),
 });
 
-export const COVERAGE_REASONS = ["bounded_browser_snapshot"] as const;
+export const COVERAGE_REASONS = [
+	"covered_in_full",
+	"nothing_in_range",
+	"awaiting_upload",
+	"source_unreadable",
+	"records_unreadable",
+	"file_not_found_in_export",
+] as const;
 
 export const coverageDiagnosticsSchema = z.object({
 	id: pdppSafeText.max(200),
@@ -122,8 +126,8 @@ export const coverageDiagnosticsSchema = z.object({
 	reason: z.enum(COVERAGE_REASONS),
 	record_count: z.number().int().min(0).nullable(),
 	fields_unavailable: z.array(pdppSafeText.max(200)),
-	freshness: z.literal("live"),
-	captured_at: isoTimestampSchema,
+	freshness: z.enum(["live", "snapshot"]),
+	exported_at: pdppSafeText.max(40).nullable(),
 });
 
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {

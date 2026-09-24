@@ -6237,6 +6237,661 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/github_browser/icon.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/github-browser",
+			"entry": "./connectors/github_browser/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/github-browser",
+				"connector_key": "github-browser",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
+				"version": "0.1.0",
+				"display_name": "GitHub (browser session)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#181717"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true
+						},
+						"browser": {
+							"required": true
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"public_listing": {
+						"tier": "development",
+						"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
+					},
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 21600,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 86400,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "high",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Uses an owner signed-in GitHub browser session and public GitHub web/API surfaces. Expired sessions need owner sign-in."
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": true,
+						"description": "Legacy GitHub profile, pinned repositories, organization links, achievements, and displayed contribution count, collected from the signed-in profile page.",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"username": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"fullName": {
+									"type": "string"
+								},
+								"bio": {
+									"type": "string"
+								},
+								"company": {
+									"type": "string"
+								},
+								"location": {
+									"type": "string"
+								},
+								"website": {
+									"type": "string"
+								},
+								"avatarUrl": {
+									"type": "string"
+								},
+								"followers": {
+									"type": "number"
+								},
+								"following": {
+									"type": "number"
+								},
+								"repositoryCount": {
+									"type": "number"
+								},
+								"profileUrl": {
+									"type": "string"
+								},
+								"pinnedRepositories": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"fullName": {
+												"type": "string"
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"description": {
+												"type": "string"
+											},
+											"language": {
+												"type": ["string", "null"]
+											},
+											"stars": {
+												"type": "number"
+											}
+										},
+										"required": ["fullName"],
+										"additionalProperties": false
+									}
+								},
+								"organizations": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"login": {
+												"type": "string"
+											},
+											"label": {
+												"type": "string"
+											},
+											"url": {
+												"type": "string"
+											},
+											"avatarUrl": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["login"],
+										"additionalProperties": false
+									}
+								},
+								"achievements": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"name": {
+												"type": "string"
+											},
+											"iconUrl": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["name"],
+										"additionalProperties": false
+									}
+								},
+								"contributionsLastYear": {
+									"type": ["number", "null"]
+								}
+							},
+							"required": ["id", "username", "profileUrl"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["username", "bio", "company", "location"],
+								"semantic_fields": ["bio"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "repositories",
+						"required": true,
+						"description": "Repositories displayed in the signed-in user's repositories tab.",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								},
+								"repositories": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"name": {
+												"type": "string"
+											},
+											"url": {
+												"type": "string"
+											},
+											"description": {
+												"type": "string"
+											},
+											"language": {
+												"type": "string"
+											},
+											"stars": {
+												"type": "number"
+											},
+											"forks": {
+												"type": "number"
+											},
+											"visibility": {
+												"type": "string"
+											},
+											"topics": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["name", "url"],
+										"additionalProperties": false
+									}
+								}
+							},
+							"required": ["id", "repositories"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "starred",
+						"required": true,
+						"description": "Repositories displayed in the signed-in user's starred list.",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								},
+								"starred": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"fullName": {
+												"type": "string"
+											},
+											"url": {
+												"type": "string"
+											},
+											"description": {
+												"type": "string"
+											},
+											"language": {
+												"type": "string"
+											},
+											"stars": {
+												"type": "number"
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["fullName", "url"],
+										"additionalProperties": false
+									}
+								}
+							},
+							"required": ["id", "starred"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "events",
+						"required": true,
+						"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"events": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"createdAt": {
+												"type": "string"
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": "string"
+											},
+											"action": {
+												"type": ["string", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"branch": {
+												"type": ["string", "null"]
+											},
+											"commits": {
+												"type": ["number", "null"]
+											},
+											"isPublic": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "createdAt", "repo", "isPublic"],
+										"additionalProperties": false
+									}
+								},
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								},
+								"windowDescription": {
+									"type": "string"
+								}
+							},
+							"required": ["id", "events", "fetchedAt"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "contributions",
+						"required": true,
+						"description": "Contribution graph days and summaries for four year views. Summary is emitted only when all four views contain data.",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"totalContributionsLastYear": {
+									"type": ["number", "null"]
+								},
+								"yearTotals": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"year": {
+												"type": "number"
+											},
+											"total": {
+												"type": "number"
+											}
+										},
+										"required": ["year", "total"],
+										"additionalProperties": false
+									}
+								},
+								"days": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"date": {
+												"type": "string"
+											},
+											"count": {
+												"type": "number"
+											},
+											"level": {
+												"type": ["number", "null"]
+											}
+										},
+										"required": ["date", "count"],
+										"additionalProperties": false
+									}
+								},
+								"monthlyTotals": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"month": {
+												"type": "string"
+											},
+											"count": {
+												"type": "number"
+											}
+										},
+										"required": ["month", "count"],
+										"additionalProperties": false
+									}
+								},
+								"topDay": {
+									"type": ["object", "null"],
+									"properties": {
+										"date": {
+											"type": "string"
+										},
+										"count": {
+											"type": "number"
+										}
+									},
+									"required": ["date", "count"],
+									"additionalProperties": false
+								},
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								}
+							},
+							"required": ["id", "days", "fetchedAt"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "history",
+						"required": true,
+						"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"pullRequests": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"number": {
+												"type": ["number", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"state": {
+												"type": ["string", "null"]
+											},
+											"createdAt": {
+												"type": ["string", "null"]
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											},
+											"closedAt": {
+												"type": ["string", "null"]
+											},
+											"mergedAt": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": ["string", "null"]
+											},
+											"labels": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"comments": {
+												"type": "number"
+											},
+											"reactionsTotal": {
+												"type": "number"
+											},
+											"isDraft": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "repo"],
+										"additionalProperties": false
+									}
+								},
+								"issues": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"number": {
+												"type": ["number", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"state": {
+												"type": ["string", "null"]
+											},
+											"createdAt": {
+												"type": ["string", "null"]
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											},
+											"closedAt": {
+												"type": ["string", "null"]
+											},
+											"mergedAt": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": ["string", "null"]
+											},
+											"labels": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"comments": {
+												"type": "number"
+											},
+											"reactionsTotal": {
+												"type": "number"
+											},
+											"isDraft": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "repo"],
+										"additionalProperties": false
+									}
+								},
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								},
+								"windowDescription": {
+									"type": "string"
+								}
+							},
+							"required": ["id", "pullRequests", "issues", "fetchedAt"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"profiles": [
+					{
+						"id": "legacy",
+						"label": "Legacy GitHub browser collection",
+						"streams": [
+							{
+								"name": "profile"
+							},
+							{
+								"name": "repositories"
+							},
+							{
+								"name": "starred"
+							},
+							{
+								"name": "events"
+							},
+							{
+								"name": "contributions"
+							},
+							{
+								"name": "history"
+							}
+						]
+					}
+				],
+				"reason_display_messages": {
+					"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/gmail/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/gmail",
 			"entry": "./connectors/gmail/index.ts",
@@ -11862,6 +12517,287 @@
 				],
 				"reason_display_messages": {
 					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history, so some earlier days haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				}
+			}
+		},
+		{
+			"connectorId": "https://registry.pdpp.dev/connectors/oura-browser",
+			"entry": "./connectors/oura_browser/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/oura-browser",
+				"connector_key": "oura-browser",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
+				"version": "0.1.0",
+				"display_name": "Oura (Browser Sign-In)",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true
+						},
+						"browser": {
+							"required": true
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 21600,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 86400,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection reuses the owner’s cloud.ouraring.com browser session. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "sleep",
+						"description": "Daily sleep sessions. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"display": {
+							"label": "Your sleep sessions",
+							"detail": "Per-night: total sleep duration, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"day": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time"
+								},
+								"bedtime_start": {
+									"type": ["string", "null"]
+								},
+								"bedtime_end": {
+									"type": ["string", "null"]
+								},
+								"total_sleep_duration": {
+									"type": ["integer", "null"]
+								},
+								"rem_sleep_duration": {
+									"type": ["integer", "null"]
+								},
+								"deep_sleep_duration": {
+									"type": ["integer", "null"]
+								},
+								"light_sleep_duration": {
+									"type": ["integer", "null"]
+								},
+								"efficiency": {
+									"type": ["integer", "null"]
+								},
+								"latency": {
+									"type": ["integer", "null"]
+								},
+								"average_heart_rate": {
+									"type": ["number", "null"]
+								},
+								"lowest_heart_rate": {
+									"type": ["integer", "null"]
+								},
+								"average_hrv": {
+									"type": ["number", "null"]
+								},
+								"temperature_delta": {
+									"type": ["number", "null"]
+								},
+								"sleep_score": {
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
+								},
+								"average_breath": {
+									"type": ["number", "null"]
+								},
+								"restless_periods": {
+									"type": ["integer", "null"]
+								},
+								"time_in_bed": {
+									"type": ["integer", "null"]
+								},
+								"type": {
+									"type": ["string", "null"]
+								},
+								"contributors": {
+									"type": "object"
+								}
+							},
+							"required": ["id", "day"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "day",
+						"consent_time_field": "day",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": true,
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"day": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["day"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "readiness",
+						"description": "Daily readiness scores. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"display": {
+							"label": "Your readiness",
+							"detail": "Daily readiness score with contributing factors (activity balance, recovery index, HRV balance, etc.)."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"day": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time"
+								},
+								"score": {
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
+								},
+								"temperature_deviation": {
+									"type": ["number", "null"]
+								},
+								"temperature_trend_deviation": {
+									"type": ["number", "null"]
+								},
+								"contributors": {
+									"type": "object"
+								}
+							},
+							"required": ["id", "day"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "day",
+						"consent_time_field": "day",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": true,
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"day": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["day"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "activity",
+						"description": "Daily activity and movement. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"display": {
+							"label": "Your activity",
+							"detail": "Daily steps, active calories, total calories, inactive/low/medium/high activity time, target progress."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"day": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time"
+								},
+								"score": {
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
+								},
+								"active_calories": {
+									"type": ["integer", "null"]
+								},
+								"total_calories": {
+									"type": ["integer", "null"]
+								},
+								"steps": {
+									"type": ["integer", "null"]
+								},
+								"target_calories": {
+									"type": ["integer", "null"]
+								},
+								"equivalent_walking_distance": {
+									"type": ["integer", "null"]
+								},
+								"high_activity_time": {
+									"type": ["integer", "null"]
+								},
+								"medium_activity_time": {
+									"type": ["integer", "null"]
+								},
+								"low_activity_time": {
+									"type": ["integer", "null"]
+								},
+								"sedentary_time": {
+									"type": ["integer", "null"]
+								},
+								"resting_time": {
+									"type": ["integer", "null"]
+								},
+								"inactivity_alerts": {
+									"type": ["integer", "null"]
+								},
+								"contributors": {
+									"type": "object"
+								}
+							},
+							"required": ["id", "day"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "day",
+						"consent_time_field": "day",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": true,
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"day": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["day"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"reason_display_messages": {
+					"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
 				}
 			}
 		},
@@ -19546,8 +20482,573 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/youtube",
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.1.0",
+				"version": "0.2.0",
 				"display_name": "YouTube",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#FF0000"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true
+						},
+						"browser": {
+							"required": true
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection uses the owner's authenticated YouTube browser session. Login and session repair require the owner; lists are bounded browser snapshots."
+					},
+					"public_listing": {
+						"tier": "development",
+						"rationale": "Browser replacement for seven Vana legacy YouTube scopes; live authenticated proof is required before promotion."
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "Signed-in owner channel identity from the account menu and channel page.",
+						"display": {
+							"label": "Your YouTube channel",
+							"detail": "The owner channel ID, URL, title, handle, avatar and account email when visible."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Stable browser-observed channel identity: native channel ID when present, otherwise the owner channel URL."
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"handle": {
+									"type": ["string", "null"]
+								},
+								"email": {
+									"type": ["string", "null"]
+								},
+								"joined_at": {
+									"type": ["string", "null"]
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"country": {
+									"type": ["string", "null"]
+								},
+								"subscriber_count": {
+									"type": ["integer", "null"]
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								},
+								"video_count": {
+									"type": ["integer", "null"]
+								},
+								"channel_id": {
+									"type": ["string", "null"],
+									"description": "Native YouTube channel ID when exposed by the own-channel page."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "description"],
+								"semantic_fields": ["title", "description"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "subscriptions",
+						"required": false,
+						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"display": {
+							"label": "Your subscriptions",
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"channel_id": {
+									"type": ["string", "null"]
+								},
+								"channel_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"handle": {
+									"type": ["string", "null"]
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"subscriber_count": {
+									"type": ["integer", "null"]
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"is_verified": {
+									"type": ["boolean", "null"]
+								},
+								"notifications": {
+									"type": ["boolean", "null"]
+								},
+								"subscriber_count_text": {
+									"type": ["string", "null"],
+									"description": "Browser-visible raw subscriber count for legacy projection."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "playlists",
+						"required": false,
+						"description": "Owner library playlists visible in the browser, up to 50.",
+						"display": {
+							"label": "Your playlists",
+							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"owner": {
+									"type": ["string", "null"]
+								},
+								"owner_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"visibility": {
+									"type": ["string", "null"]
+								},
+								"video_count": {
+									"type": ["integer", "null"]
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "playlist_items",
+						"required": false,
+						"description": "Videos visible in those playlists, up to 20 scroll rounds per playlist.",
+						"display": {
+							"label": "Your playlist items",
+							"detail": "Video titles and URLs from each visible playlist. Scrolling is bounded."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"playlist_id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_text": {
+									"type": ["string", "null"],
+									"description": "Browser-visible duration label for legacy projection."
+								}
+							},
+							"required": ["id", "playlist_id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "likes",
+						"required": false,
+						"description": "Videos visible in the signed-in Liked Videos (LL) playlist.",
+						"display": {
+							"label": "Your liked videos",
+							"detail": "Liked video titles and URLs from the signed-in playlist. Scrolling is bounded."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_text": {
+									"type": ["string", "null"],
+									"description": "Browser-visible duration label for legacy projection."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "watch_later",
+						"required": false,
+						"description": "Videos visible in the signed-in Watch Later (WL) playlist.",
+						"display": {
+							"label": "Your watch later list",
+							"detail": "Saved video titles and URLs from Watch Later. Scrolling is bounded."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"]
+								},
+								"thumbnail_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"duration_text": {
+									"type": ["string", "null"],
+									"description": "Browser-visible duration label for legacy projection."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "watch_history",
+						"required": false,
+						"description": "Most recent 50 visible browser history entries in page order; watch dates have day precision.",
+						"display": {
+							"label": "Your watch history",
+							"detail": "The latest 50 visible videos in page order. A date is recorded when its section label can be resolved; no watch time is invented."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"video_id": {
+									"type": ["string", "null"]
+								},
+								"video_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"video_title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"channel_title": {
+									"type": ["string", "null"]
+								},
+								"channel_url": {
+									"type": ["string", "null"],
+									"format": "uri"
+								},
+								"view_count": {
+									"type": ["integer", "null"]
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"position": {
+									"type": "integer",
+									"minimum": 0,
+									"description": "Order on the browser history page, newest first."
+								},
+								"watched_date": {
+									"type": ["string", "null"],
+									"format": "date",
+									"description": "Day from the browser section header; null when unrecognized."
+								},
+								"views_text": {
+									"type": ["string", "null"],
+									"description": "Browser-visible raw view count for legacy projection."
+								},
+								"watched_date_label": {
+									"type": ["string", "null"],
+									"description": "Browser section header as shown at capture time."
+								}
+							},
+							"required": ["id", "position", "video_url"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true,
+							"time_range": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							},
+							"range_filters": {
+								"watched_date": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "coverage_diagnostics",
+						"required": false,
+						"description": "Browser snapshot bounds and missing field diagnostics for each requested stream.",
+						"display": {
+							"label": "What your YouTube import covered",
+							"detail": "Per-stream bounded browser snapshot counts and unavailable fields."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"stream": {
+									"type": ["string", "null"]
+								},
+								"status": {
+									"type": "string",
+									"enum": ["complete", "partial", "empty"]
+								},
+								"reason": {
+									"type": "string",
+									"enum": ["bounded_browser_snapshot"],
+									"x_pdpp_role": "primary-title"
+								},
+								"record_count": {
+									"type": ["integer", "null"]
+								},
+								"fields_unavailable": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"freshness": {
+									"type": "string",
+									"enum": ["live"]
+								},
+								"captured_at": {
+									"type": "string",
+									"format": "date-time"
+								}
+							},
+							"required": [
+								"id",
+								"status",
+								"reason",
+								"fields_unavailable",
+								"freshness",
+								"captured_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"range_filters": {
+								"captured_at": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_policy": "inventory_only",
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"bounded_browser_snapshot": "This is a bounded browser snapshot. More items may exist beyond the visible list or scroll limit.",
+					"page_unreadable": "The signed-in page did not expose a trustworthy record."
+				}
+			}
+		},
+		{
+			"brandIcon": "./connectors/youtube_takeout/icon.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/youtube-takeout",
+			"entry": "./connectors/youtube_takeout/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/youtube-takeout",
+				"connector_key": "youtube-takeout",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
+				"version": "0.1.0",
+				"display_name": "YouTube Takeout",
 				"brand": {
 					"icon": "icon.svg",
 					"background_color": "#FF0000"
@@ -19579,7 +21080,7 @@
 						"accepted_file_extensions": [],
 						"import_dir_env_var": "YOUTUBE_TAKEOUT_DIR",
 						"help_url": "https://support.google.com/accounts/answer/3024190",
-						"help_text": "Per a recorded decision (D9 in docs/migration/connector-cutover/CONTRACTS.md), this connector reads a Google Takeout export rather than driving youtube.com through a browser. Google does not publish a stable API surface for personal-account playlists, subscriptions, and watch history equivalent to what Takeout exports, and automating sign-in against a Google account carries meaningfully higher account-safety risk than an owner-initiated data export. Takeout is Google's own documented self-service export path for exactly this data.",
+						"help_text": "This is the optional Takeout profile retained alongside the browser-first youtube profile. It requires an owner-requested export and is excluded from publication pending review.",
 						"large_file_fallback": "This connector reads an already-extracted export directory, not the .zip directly. Extract the Takeout archive yourself and point YOUTUBE_TAKEOUT_DIR at the extracted folder.",
 						"validation_expectations": [
 							"Detected a Google Takeout \"YouTube and YouTube Music\" export directory",

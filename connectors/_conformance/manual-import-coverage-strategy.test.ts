@@ -71,7 +71,7 @@ test("every manual-upload connector is discoverable by setup modality", () => {
 		"netflix-export",
 		"strava",
 		"whatsapp",
-		"youtube",
+		"youtube-takeout",
 	]);
 });
 

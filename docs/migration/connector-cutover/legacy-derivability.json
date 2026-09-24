@@ -986,7 +986,7 @@
     "connector_key": "youtube",
     "streams": ["profile"],
     "derivable": {
-      "channelId": "profile.id",
+      "channelId": "profile.channel_id",
       "channelTitle": "profile.title",
       "channelUrl": "profile.channel_url",
       "handle": "profile.handle",
@@ -1001,7 +1001,7 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Sourced from Takeout CSV files whose exact presence/column names are UNVERIFIED against a real export (parsers.ts header notes only watch_history is verified); each parser is defensive (nulls on missing/renamed columns, never guesses). This is a live-evidence caveat, not a field-mapping gap — every legacy field has a coded destination."
+      "Browser source reads the signed-in account header and own channel page. A routed DOM fixture proves the shape; an authenticated live run is still required to validate current selectors."
     ],
     "status": "derivable"
   },
@@ -1016,14 +1016,13 @@
       "handle": "subscriptions.handle",
       "avatarUrl": "subscriptions.avatar_url",
       "subscriberCount": "subscriptions.subscriber_count",
+      "subscriberCountText": "subscriptions.subscriber_count_text",
       "description": "subscriptions.description",
       "isVerified": "subscriptions.is_verified",
       "isBellNotification": "subscriptions.notifications"
     },
-    "not_derivable": [
-      "subscriberCountText: display string of subscriber_count, correctly dropped by design (D4: no display strings beside parsed values)"
-    ],
-    "semantic_notes": [],
+    "not_derivable": [],
+    "semantic_notes": ["Notification state stays null when the browser control is absent; no false value is fabricated."],
     "status": "derivable"
   },
   {
@@ -1042,7 +1041,7 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Legacy capped at 50 playlists; modern is uncapped — a strict improvement, not a break."
+      "Browser collection retains the legacy cap of 50 playlists and reports bounded coverage."
     ],
     "status": "derivable"
   },
@@ -1057,7 +1056,7 @@
       "items[].videoTitle": "playlist_items.video_title",
       "items[].channelTitle": "playlist_items.channel_title",
       "items[].channelUrl": "playlist_items.channel_url",
-      "items[].durationText": "playlist_items.duration_seconds (D4: parsed to seconds, display string dropped)",
+      "items[].durationText": "playlist_items.duration_text",
       "items[].thumbnailUrl": "playlist_items.thumbnail_url"
     },
     "not_derivable": [],
@@ -1074,7 +1073,7 @@
       "videoTitle": "likes.video_title",
       "channelTitle": "likes.channel_title",
       "channelUrl": "likes.channel_url",
-      "durationText": "likes.duration_seconds (D4)",
+      "durationText": "likes.duration_text",
       "thumbnailUrl": "likes.thumbnail_url"
     },
     "not_derivable": [],
@@ -1091,7 +1090,7 @@
       "videoTitle": "watch_later.video_title",
       "channelTitle": "watch_later.channel_title",
       "channelUrl": "watch_later.channel_url",
-      "durationText": "watch_later.duration_seconds (D4)",
+      "durationText": "watch_later.duration_text",
       "thumbnailUrl": "watch_later.thumbnail_url"
     },
     "not_derivable": [],
@@ -1103,21 +1102,20 @@
     "connector_key": "youtube",
     "streams": ["watch_history"],
     "derivable": {
-      "watchedAt": "watch_history.watched_at (full Takeout timestamp, strictly more precise than legacy's date-only resolution)",
+      "watchedAt": "watch_history.watched_date (day precision from the browser section label)",
       "videoId": "watch_history.video_id (extractVideoId from video_url)",
       "videoUrl": "watch_history.video_url",
       "videoTitle": "watch_history.video_title",
       "channelTitle": "watch_history.channel_title",
-      "timeWindow": "PUBLIC-COMPAT PROJECTION (proposed, needs Tim decision; test-only, connectors/youtube/legacy-history-derivability.test.ts): slice youtube.watch_history to its latest 50 records by watched_at (descending); timeWindow is set to the exact legacy literal 'top 50 most recent items' (connectors/google/youtube-playwright.js:1597, MAX_HISTORY_ITEMS=50), unconditionally, regardless of the true span or record count — this preserves the OLD meaning verbatim rather than inventing a new ISO date-range rendering. Native PDPP retains the precise per-record watched_at separately on each history item. No lead_decision or CONTRACTS.md entry accepts any alternative rendering of this field."
+      "views": "watch_history.views_text",
+      "description": "watch_history.description",
+      "watchedAtText": "watch_history.watched_date_label",
+      "timeWindow": "Vana projection sets the legacy literal 'top 50 most recent items'. The browser source emits at most 50 entries with watch_history.position in page order; it has no watch timestamp cursor."
     },
-    "not_derivable": [
-      "views: CONFIRMED genuine loss, not fabricated. Legacy scraped the DOM metadata row (youtube-playwright.js:1062-1066, e.g. '349K views' text). Takeout's watch-history.json entries carry only {time, title, titleUrl, subtitles} (packages/polyfill-connectors/src/youtube-watch-history.ts:23-28, WatchHistoryEntry interface) — no view-count field exists in the export at all. connectors/youtube/parsers.ts:66 hardcodes view_count: null for exactly this reason.",
-      "description: CONFIRMED genuine loss. Legacy scraped a DOM snippet element (youtube-playwright.js:1069-1075). Takeout has no description field on a watch-history entry (same WatchHistoryEntry interface). parsers.ts:67 hardcodes description: null.",
-      "watchedAtText: genuine loss by design, not fabrication. Legacy's raw day-granularity section-header text (e.g. 'Yesterday', 'Jan 23, 2026') was used only to resolve watchedAt (youtube-playwright.js:901-950, resolveWatchedAt). watchedAtText is optional in the legacy schema; modern watched_at is a full Takeout timestamp, strictly more precise, with nothing left to reconstruct a display string from."
-    ],
+    "not_derivable": [],
     "semantic_notes": [
-      "Test-only derivability evidence for this projection lives at packages/polyfill-connectors/connectors/youtube/legacy-history-derivability.test.ts (revised this audit): asserts timeWindow is the exact legacy literal 'top 50 most recent items' in all cases (large/small/empty history), matches the real legacy fixtures (connectors/google/fixtures/youtube.history.*.json, all of which carry this identical literal), and rejects a malformed entry missing the required videoUrl field. Per CONTRACTS.md's ownership boundary, this repo does not implement or ship the actual public-scope projection — Vana owns that; this test exists only as evidence the literal-preserving rule is mechanically sound before a Vana lane relies on it. Status: field-projectable, live proof missing (no real Takeout export has been captured to confirm the watch_history column shapes feeding this projection)."
+      "Browser fixture tests prove day-only dates and top-50 page order. The old Takeout derivability test is retained under connectors/youtube_takeout. Vana must update its projection binding from watched_at sorting to position ordering before the cutover; this repository does not ship that projection. Authenticated live browser proof remains outstanding."
     ],
-    "status": "loss"
+    "status": "in_progress"
   }
 ]
