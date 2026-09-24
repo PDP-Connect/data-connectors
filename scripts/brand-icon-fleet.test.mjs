@@ -68,6 +68,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
   "google_takeout.json",
   "oura.json",
+  "oura_browser.json",
   "pocket.json",
   "usaa.json",
   "wholefoods.json",
