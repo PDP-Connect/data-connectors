@@ -74,8 +74,11 @@
  * observed behavior, not independently re-verified against a live account.
  *
  * CHANGES
- *   v0.1.0 (2026-09-22) — initial PDPP Collection Profile implementation.
- *   v0.1.1 (2026-09-22) — switched from a custom `ensureSession` (with its
+ *   v0.1.1 (2026-09-24) — owner sign-in assistance now uses a
+ *     connector-local `ensureSession` with auto-resume once CloudKit validate
+ *     proves the iCloud session is live.
+ *   v0.1.0 (2026-09-22) — initial PDPP Collection Profile implementation,
+ *     switched from a custom `ensureSession` (with its
  *     own manual-handoff wrapper) to the runtime's generic `probeSession`
  *     hook, so credential resolution defers to session establishment
  *     rather than running eagerly before it; live-verified against a real,
@@ -86,7 +89,11 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { probeICloudSession } from "../../packages/polyfill-connectors/src/auto-login/icloud.ts";
-import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import type {
+	BrowserCollectContext,
+	EnsureSessionArgs,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
@@ -116,6 +123,35 @@ interface ProgressExtra {
 
 export const ICLOUD_NOTES_RETRYABLE_PATTERN =
 	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited/i;
+
+export async function ensureICloudNotesSession({
+	assist,
+	completeAssistance,
+	page,
+	sendInteraction,
+}: EnsureSessionArgs): Promise<void> {
+	if (await probeICloudSession(page)) {
+		return;
+	}
+	const live = await manualBrowserLogin({
+		assist,
+		completeAssistance,
+		isProbeSuccessful: (ready) => ready,
+		message:
+			"Sign in to iCloud Notes. The connector will continue automatically once the session is live.",
+		page,
+		probe: () => probeICloudSession(page),
+		readinessProbe: probeICloudSession,
+		reason: "login",
+		sendInteraction,
+		timeoutSeconds: 1800,
+	});
+	if (!live) {
+		throw new Error(
+			"icloud_notes_login_manual_incomplete: CloudKit validate did not return a live session after handoff",
+		);
+	}
+}
 
 // ─── CloudKit config + fetch ──────────────────────────────────────────────
 
@@ -437,6 +473,7 @@ if (isMainModule(import.meta.url)) {
 		retryablePattern: ICLOUD_NOTES_RETRYABLE_PATTERN,
 		browser: { profileName: "icloud_notes" },
 		probeSession: ({ page }) => probeICloudSession(page),
+		ensureSession: ensureICloudNotesSession,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
 			await collectAllStreams(ctx);
 		},

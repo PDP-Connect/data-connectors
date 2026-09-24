@@ -117,6 +117,8 @@
  *     `/api/v1/feed/user/self/` posts endpoint with passive
  *     `page.waitForResponse` capture of the real request, added posts STATE,
  *     and normalized empty-string web_info fields to null.
+ *   v0.4.1 (2026-09-24) — owner sign-in assistance now auto-resumes
+ *     once the Instagram session cookie is live.
  *   v0.3.0 (2026-09-22) — real collector replacing the
  *     `instagram_graphql_wiring_pending` scaffold; merges both legacy
  *     connectors' streams into profile/posts/post_likes/following/ads per D6.
@@ -125,7 +127,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
@@ -194,6 +196,8 @@ export async function probeMetaSession({
 }
 
 export async function ensureMetaSession({
+	assist,
+	completeAssistance,
 	context,
 	page,
 	sendInteraction,
@@ -201,16 +205,24 @@ export async function ensureMetaSession({
 	if (await hasSessionCookie(context)) {
 		return;
 	}
-	await manualLoginHandoff({ context, page, sendInteraction });
+	await manualLoginHandoff({
+		assist,
+		completeAssistance,
+		context,
+		page,
+		sendInteraction,
+	});
 }
 
 async function manualLoginHandoff({
+	assist,
+	completeAssistance,
 	context,
 	page,
 	sendInteraction,
 }: Pick<
 	EnsureSessionArgs,
-	"context" | "page" | "sendInteraction"
+	"assist" | "completeAssistance" | "context" | "page" | "sendInteraction"
 >): Promise<void> {
 	await page
 		.goto(`${INSTAGRAM_ORIGIN}/accounts/login/`, {
@@ -219,14 +231,19 @@ async function manualLoginHandoff({
 		})
 		.catch((): undefined => undefined);
 
-	await manualAction(
-		{
-			message: "Log in to Instagram, then click Done.",
-			page,
-			reason: "login",
-		},
+	await manualBrowserLogin({
+		assist,
+		completeAssistance,
+		isProbeSuccessful: (live) => live,
+		message:
+			"Log in to Instagram. The connector will continue automatically once the session is live.",
+		page,
+		probe: () => hasSessionCookie(context),
+		readinessProbe: () => hasSessionCookie(context),
+		reason: "login",
 		sendInteraction,
-	);
+		timeoutSeconds: 1800,
+	});
 
 	const live = await hasSessionCookie(context);
 	if (!live) {

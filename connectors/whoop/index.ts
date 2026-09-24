@@ -5,12 +5,11 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
+	type EnsureSessionArgs,
 	type EmittedMessage,
-	type InteractionRequest,
-	type InteractionResponse,
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -148,6 +147,21 @@ export async function fetchBootstrap(
 	return parseBootstrapResponse(assertSourceResponse(result, "bootstrap"));
 }
 
+export async function probeWhoopReadinessPage(
+	page: Page,
+): Promise<WhoopBootstrap | null> {
+	await page
+		.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+		.catch((): undefined => undefined);
+	const result = await makeWhoopPageFetch(page)(BOOTSTRAP_PATH);
+	if (result.status === 401 || result.status === 403) {
+		return null;
+	}
+	return parseBootstrapResponse(
+		assertSourceResponse(result, "bootstrap-after-owner-login"),
+	);
+}
+
 export function whoopAllowsInteractiveAuthRepair(
 	env: NodeJS.ProcessEnv = process.env,
 ): boolean {
@@ -156,14 +170,14 @@ export function whoopAllowsInteractiveAuthRepair(
 }
 
 export async function ensureWhoopSession(args: {
-	capture?: Parameters<typeof manualAction>[0]["capture"];
+	assist?: EnsureSessionArgs["assist"];
+	capture?: Parameters<typeof manualBrowserLogin>[0]["capture"];
+	completeAssistance?: EnsureSessionArgs["completeAssistance"];
 	fetchPath: WhoopFetch;
 	interactive: boolean;
 	manualLogin?: () => Promise<void>;
 	page: Page;
-	sendInteraction: (
-		request: InteractionRequest,
-	) => Promise<InteractionResponse>;
+	sendInteraction: EnsureSessionArgs["sendInteraction"];
 }): Promise<void> {
 	await args.page
 		.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
@@ -184,17 +198,27 @@ export async function ensureWhoopSession(args: {
 	if (args.manualLogin) {
 		await args.manualLogin();
 	} else {
-		await manualAction(
-			{
-				...(args.capture ? { capture: args.capture } : {}),
-				page: args.page,
-				reason: "login",
-				message:
-					"Sign in to WHOOP in the secure browser, then respond success. PDPP will verify the session before collecting.",
-				timeoutSeconds: 1800,
+		await manualBrowserLogin({
+			...(args.assist ? { assist: args.assist } : {}),
+			...(args.capture ? { capture: args.capture } : {}),
+			...(args.completeAssistance
+				? { completeAssistance: args.completeAssistance }
+				: {}),
+			isProbeSuccessful: (bootstrap) => bootstrap !== null,
+			message:
+				"Sign in to WHOOP in the secure browser. The connector will continue automatically once the session is live.",
+			page: args.page,
+			probe: async () => {
+				const reprobe = await args.fetchPath(BOOTSTRAP_PATH);
+				return parseBootstrapResponse(
+					assertSourceResponse(reprobe, "bootstrap-after-owner-login"),
+				);
 			},
-			args.sendInteraction,
-		);
+			readinessProbe: probeWhoopReadinessPage,
+			reason: "login",
+			sendInteraction: args.sendInteraction,
+			timeoutSeconds: 1800,
+		});
 	}
 	const reprobe = await args.fetchPath(BOOTSTRAP_PATH);
 	parseBootstrapResponse(
@@ -366,10 +390,18 @@ if (isMainModule(import.meta.url)) {
 			}
 			return "observed_at";
 		},
-		async ensureSession({ capture, page, sendInteraction }) {
+		async ensureSession({
+			assist,
+			capture,
+			completeAssistance,
+			page,
+			sendInteraction,
+		}) {
 			const fetchPath = makeWhoopPageFetch(page);
 			await ensureWhoopSession({
+				assist,
 				...(capture ? { capture } : {}),
+				completeAssistance,
 				fetchPath,
 				interactive: whoopAllowsInteractiveAuthRepair(),
 				page,
