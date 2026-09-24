@@ -3462,7 +3462,7 @@ test("collectNutrition retains blocked outcomes with the observed product URL", 
 	);
 });
 
-test("collectNutrition reports skipped products with no resolvable product_url without navigating", async () => {
+test("collectNutrition emits an explicit not_found outcome for products without product_url", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const targets: NutritionTarget[] = [
 		{ name: "No URL Item", productId: "999", productUrl: null },
@@ -3475,7 +3475,12 @@ test("collectNutrition reports skipped products with no resolvable product_url w
 		waitForHydration: immediateWait,
 	});
 
-	assert.equal(emitted.filter((r) => r.stream === "nutrition").length, 0);
+	const outcome = emitted.find((r) => r.stream === "nutrition");
+	assert.equal(outcome?.data.product_id, "999");
+	assert.equal(outcome?.data.product_url, null);
+	assert.equal(outcome?.data.source, "not_found");
+	assert.equal(outcome?.data.confidence, "low");
+	assert.equal(outcome?.data.calories, null);
 	const skip = protocolMessages.find(
 		(m) =>
 			m.type === "SKIP_RESULT" &&

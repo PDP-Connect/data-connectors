@@ -1326,7 +1326,7 @@ export function buildNutritionRecord(
 	extraction: NutritionDomExtraction,
 	fallbackName: string,
 	emittedAt: string,
-	productUrl: string,
+	productUrl: string | null,
 	sourceOverride?: NutritionSource,
 ): NutritionRecord {
 	const source: NutritionSource =

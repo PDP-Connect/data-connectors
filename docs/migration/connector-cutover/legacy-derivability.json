@@ -974,13 +974,17 @@
   {
     "scope": "heb.nutrition",
     "connector_key": "heb",
-    "streams": [],
-    "derivable": {},
+    "streams": ["nutrition"],
+    "derivable": {
+      "items{productId}": "nutrition.product_id, including one not_found outcome for each ordered product whose source item has no product URL",
+      "coverage.total": "unique nutrition.product_id count; no-URL outcomes retain the source ID and count",
+      "product_url": "project only when non-null; the frozen legacy H-E-B nutrition contract does not define this field"
+    },
     "not_derivable": [],
     "semantic_notes": [
-      "Owned by the parallel lane cut-heb-gaps; not audited here per instruction."
+      "A missing source URL produces a bounded not_found record with null product_url and null nutrients; the collector never guesses a URL or nutrient values. The Vana projection should omit product_url when null."
     ],
-    "status": "in_progress"
+    "status": "derivable"
   },
   {
     "scope": "youtube.profile",

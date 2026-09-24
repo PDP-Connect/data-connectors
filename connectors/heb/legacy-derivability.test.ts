@@ -151,7 +151,7 @@ function toLegacyProfile(record: ProfileRecord): unknown {
 function toLegacyNutritionItem(record: NutritionRecord): unknown {
 	return {
 		name: record.name,
-		product_url: record.product_url,
+		...(record.product_url ? { product_url: record.product_url } : {}),
 		source: record.source,
 		confidence: record.confidence,
 		calories: record.calories,
@@ -357,6 +357,27 @@ test("legacy heb.nutrition envelope carries the derived images field with both t
 		thumbnail:
 			"https://images.heb.com/is/image/HEBGrocery/prd-small/123456789.jpg",
 	});
+});
+
+test("nutrition outcome without a source URL remains projectable by product ID and omits product_url", () => {
+	const noUrl: NutritionRecord = {
+		...NUTRITION_RECORD_NOT_FOUND,
+		id: "999",
+		product_id: "999",
+		product_url: null,
+		name: "No URL Item",
+	};
+	const legacyPayload = toLegacyNutritionEnvelope([noUrl]) as {
+		items: Record<string, Record<string, unknown>>;
+		coverage: { total: number };
+	};
+	assert.deepEqual(
+		validateAgainst(LEGACY_NUTRITION_SCHEMA, legacyPayload, "$"),
+		[],
+	);
+	assert.equal(legacyPayload.coverage.total, 1);
+	assert.equal(legacyPayload.items["999"]?.source, "not_found");
+	assert.equal("product_url" in (legacyPayload.items["999"] ?? {}), false);
 });
 
 test("legacy heb.nutrition envelope's coverage counters are reconstructable run evidence, not a PDPP record (D3)", () => {

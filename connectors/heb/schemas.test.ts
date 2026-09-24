@@ -389,6 +389,26 @@ test("nutrition schema accepts an all-null-macros not_found record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("nutrition schema accepts not_found outcomes without a source product URL", () => {
+	const result = nutritionSchema.safeParse({
+		...NUTRITION_RECORD,
+		product_id: "999",
+		id: "999",
+		name: "No URL Item",
+		product_url: null,
+		confidence: "low",
+		source: "not_found",
+		calories: null,
+		protein_g: null,
+		carbs_g: null,
+		fat_g: null,
+		sodium_mg: null,
+		fiber_g: null,
+		sugar_g: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
 test("nutrition schema rejects a non-heb-cdn images url", () => {
 	assert.equal(
 		nutritionSchema.safeParse({
