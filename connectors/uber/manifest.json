@@ -85,6 +85,12 @@
 					"duration_seconds": {
 						"type": ["integer", "null"]
 					},
+					"distance_display": {
+						"type": ["string", "null"]
+					},
+					"duration_display": {
+						"type": ["string", "null"]
+					},
 					"product_type": {
 						"type": ["string", "null"],
 						"x_pdpp_role": "secondary"

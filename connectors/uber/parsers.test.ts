@@ -159,6 +159,8 @@ test("tripRecord: builds a full trips record from GetTrip's trip + receipt", () 
 	assert.equal(record.fare_total_cents, 4136);
 	assert.equal(record.distance_meters, 29_490);
 	assert.equal(record.duration_seconds, 2100);
+	assert.equal(record.distance_display, "29.49 kilometers");
+	assert.equal(record.duration_display, "35 minutes");
 	assert.equal(record.product_type, "UberX");
 	assert.equal(record.is_surge, false);
 	// Detail-only fields that belong to receipts must never appear here (D3).
@@ -189,6 +191,8 @@ test("tripRecord: nulls every field cleanly with no trip evidence beyond an id",
 	assert.equal(record.fare_total_cents, null);
 	assert.equal(record.distance_meters, null);
 	assert.equal(record.duration_seconds, null);
+	assert.equal(record.distance_display, null);
+	assert.equal(record.duration_display, null);
 	assert.equal(record.product_type, null);
 	assert.equal(record.is_surge, null);
 });
