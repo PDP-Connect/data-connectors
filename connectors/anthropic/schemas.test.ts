@@ -16,12 +16,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	accountProfileSchema,
 	conversationsSchema,
 	messagesSchema,
 	projectDocumentsSchema,
 	projectsSchema,
 	validateRecord,
 } from "./schemas.ts";
+
+test("account profile schema requires the collector's organization identity", () => {
+	assert.equal(
+		accountProfileSchema.safeParse({
+			organization_id: "synthetic-org-id",
+			full_name: "Synthetic Name",
+		}).success,
+		true,
+	);
+	assert.equal(
+		accountProfileSchema.safeParse({ full_name: null }).success,
+		false,
+	);
+});
 
 const CONVERSATION_RECORD = {
 	id: "9f8e7d6c-1234-4abc-9def-0123456789ab",
@@ -125,7 +140,14 @@ test("project_documents schema rejects a missing project_id (manifest-required f
 	);
 });
 
-test("validateRecord routes all four streams and passes unknown streams through", () => {
+test("validateRecord routes all five streams and passes unknown streams through", () => {
+	assert.equal(
+		validateRecord("account_profile", {
+			organization_id: "synthetic-org-id",
+			full_name: null,
+		}).ok,
+		true,
+	);
 	assert.equal(validateRecord("conversations", CONVERSATION_RECORD).ok, true);
 	assert.equal(validateRecord("messages", MESSAGE_RECORD).ok, true);
 	assert.equal(validateRecord("projects", PROJECT_RECORD).ok, true);

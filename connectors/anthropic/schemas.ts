@@ -120,11 +120,17 @@ export const projectDocumentsSchema = z.object({
 	update_time: isoDateTimeNullable,
 });
 
+export const accountProfileSchema = z.object({
+	organization_id: idSchema,
+	full_name: pdppSafeText.max(2000).nullable(),
+});
+
 /**
  * Stream -> schema registry. Single source of truth for the streams this
  * connector declares and emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
+	account_profile: accountProfileSchema,
 	conversations: conversationsSchema,
 	messages: messagesSchema,
 	projects: projectsSchema,

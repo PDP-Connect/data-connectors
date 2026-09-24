@@ -468,6 +468,7 @@ export interface ClassifiedManifestPart {
 	category: string;
 	conversations: unknown[];
 	projects: unknown[];
+	userProfiles: unknown[];
 	/** Entries whose manifest category has no capability-map stream
 	 * (`memories`, `design_chats`, `light_metadata`, or any other category
 	 * this connector does not declare) — expected, not an anomaly. */
@@ -476,6 +477,25 @@ export interface ClassifiedManifestPart {
 	 * content matched neither known shape — a real anomaly, surfaced via
 	 * PROGRESS, never silently dropped. */
 	unclassifiedEntryNames: string[];
+}
+
+/** Reads only the exported display name from the declared users.json payload. */
+export function parseExportedFullName(value: unknown): string | null {
+	const isObject = (candidate: unknown): candidate is Record<string, unknown> =>
+		typeof candidate === "object" &&
+		candidate !== null &&
+		!Array.isArray(candidate);
+	const candidates = Array.isArray(value)
+		? value
+		: isObject(value) && Array.isArray(value.users)
+			? value.users
+			: [value];
+	for (const candidate of candidates) {
+		if (isObject(candidate) && typeof candidate.full_name === "string") {
+			return candidate.full_name;
+		}
+	}
+	return null;
 }
 
 /** Manifest `category` values this connector has a stream for. Any other
@@ -508,8 +528,24 @@ export function classifyManifestPartEntries(
 ): ClassifiedManifestPart {
 	const conversations: unknown[] = [];
 	const projects: unknown[] = [];
+	const userProfiles: unknown[] = [];
 	const outOfScopeEntryNames: string[] = [];
 	const unclassifiedEntryNames: string[] = [];
+
+	if (category === "light_metadata") {
+		for (const entry of entries) {
+			if (entry.name === "users.json") userProfiles.push(entry.json);
+			else outOfScopeEntryNames.push(entry.name);
+		}
+		return {
+			category,
+			conversations,
+			projects,
+			userProfiles,
+			outOfScopeEntryNames,
+			unclassifiedEntryNames,
+		};
+	}
 
 	if (!IN_SCOPE_CATEGORIES.has(category)) {
 		for (const entry of entries) {
@@ -519,6 +555,7 @@ export function classifyManifestPartEntries(
 			category,
 			conversations,
 			projects,
+			userProfiles,
 			outOfScopeEntryNames,
 			unclassifiedEntryNames,
 		};
@@ -545,6 +582,7 @@ export function classifyManifestPartEntries(
 		category,
 		conversations,
 		projects,
+		userProfiles,
 		outOfScopeEntryNames,
 		unclassifiedEntryNames,
 	};

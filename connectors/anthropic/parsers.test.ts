@@ -26,6 +26,7 @@ import {
 	parseClassifiedExport,
 	parseConversation,
 	parseExport,
+	parseExportedFullName,
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
@@ -40,6 +41,25 @@ const ZIP_POLICY: ZipReadPolicy = {
 	maxEntryUncompressedBytes: 50 * 1024 * 1024,
 	maxTotalUncompressedBytes: 200 * 1024 * 1024,
 };
+
+test("manifest classification exposes only users.json from light_metadata", () => {
+	const classified = classifyManifestPartEntries("light_metadata", [
+		{ name: "users.json", json: { users: [{ full_name: "Synthetic Name" }] } },
+		{ name: "login_history.json", json: [{ private: "ignored" }] },
+	]);
+	assert.deepEqual(classified.userProfiles, [
+		{ users: [{ full_name: "Synthetic Name" }] },
+	]);
+	assert.deepEqual(classified.outOfScopeEntryNames, ["login_history.json"]);
+	assert.equal(
+		parseExportedFullName(classified.userProfiles[0]),
+		"Synthetic Name",
+	);
+});
+
+test("profile name parser returns null when users.json has no full_name", () => {
+	assert.equal(parseExportedFullName({ id: "synthetic-id" }), null);
+});
 
 // ─── flattenMessageText ─────────────────────────────────────────────────
 
@@ -422,10 +442,8 @@ test("classifyManifestPartEntries: light_metadata is out-of-scope by category, n
 	assert.equal(result.conversations.length, 0);
 	assert.equal(result.projects.length, 0);
 	assert.deepEqual(result.unclassifiedEntryNames, []);
-	assert.deepEqual(result.outOfScopeEntryNames, [
-		"users.json",
-		"login_history.json",
-	]);
+	assert.deepEqual(result.outOfScopeEntryNames, ["login_history.json"]);
+	assert.deepEqual(result.userProfiles, [{ some_field: 1 }]);
 });
 
 test("classifyManifestPartEntries: memories is out-of-scope by category, even though memory_files[] could coincidentally resemble other shapes", () => {

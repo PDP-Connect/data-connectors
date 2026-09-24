@@ -44,7 +44,9 @@ process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS = "50";
 
 const { collectAnthropic } = await import("./index.ts");
 const { validateRecord } = await import("./schemas.ts");
-const { makeRecordingEmit } = await import("../../packages/polyfill-connectors/src/test-harness.ts");
+const { makeRecordingEmit } = await import(
+	"../../packages/polyfill-connectors/src/test-harness.ts"
+);
 type BrowserCollectContext =
 	import("../../packages/polyfill-connectors/src/connector-runtime.ts").BrowserCollectContext;
 
@@ -522,7 +524,7 @@ async function buildManifestPartZip(
 
 const MANIFEST_RESPONSE = {
 	version: "1.0",
-	total_files: 2,
+	total_files: 3,
 	data_files: [
 		{
 			batch_index: 0,
@@ -533,6 +535,13 @@ const MANIFEST_RESPONSE = {
 		},
 		{
 			batch_index: 1,
+			category: "light_metadata",
+			part: 0,
+			filename: "light_metadata-000.zip",
+			export_url: "https://claude.ai/export/org-1/download/part-token-profile",
+		},
+		{
+			batch_index: 2,
 			category: "projects",
 			part: 0,
 			filename: "projects-000.zip",
@@ -575,9 +584,17 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 			],
 		},
 	]);
+	const profileZip = await buildManifestPartZip([
+		{
+			name: "users.json",
+			content: { users: [{ full_name: "Synthetic Name" }] },
+		},
+		{ name: "login_history.json", content: [{ private: "not emitted" }] },
+	]);
 	const zipByUrl = new Map<string, Buffer>([
 		["part-token-conv", conversationsZip],
 		["part-token-proj", projectsZip],
+		["part-token-profile", profileZip],
 	]);
 
 	const fetchStub: FetchStub = (url) => {
@@ -591,7 +608,13 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 	};
 
 	const { ctx, emitted, protocolMessages, page } = makeContext({
-		streams: ["conversations", "messages", "projects", "project_documents"],
+		streams: [
+			"account_profile",
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		],
 		fetchStub,
 	});
 
@@ -613,17 +636,22 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 
 	assert.deepEqual(
 		[...downloadCounts.values()],
-		[1, 1],
+		[1, 1, 1],
 		"each one-shot part URL must be downloaded exactly once",
 	);
 
 	const streams = new Set(emitted.map((r) => r.stream));
 	assert.deepEqual([...streams].sort(), [
+		"account_profile",
 		"conversations",
 		"messages",
 		"project_documents",
 		"projects",
 	]);
+	assert.deepEqual(
+		emitted.find((record) => record.stream === "account_profile")?.data,
+		{ organization_id: "org-1", full_name: "Synthetic Name" },
+	);
 
 	// No pending-export STATE checkpoint for the manifest format — see
 	// index.ts module header: export_url values are one-shot secrets and
