@@ -47,10 +47,6 @@
       "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f45db10cecdaf366536034ea92658b1e63cc5a60/packages/polyfill-connectors/manifests/icons/github.svg",
       "backgroundColor": "#181717"
     },
-    "https://registry.pdpp.dev/connectors/github-browser": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cf8472eebf271d7e79390ce139609d537d60633a/connectors/github_browser/icon.svg",
-      "backgroundColor": "#181717"
-    },
     "https://registry.pdpp.dev/connectors/gmail": {
       "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f45db10cecdaf366536034ea92658b1e63cc5a60/packages/polyfill-connectors/manifests/icons/gmail.svg",
       "backgroundColor": "#EA4335"
@@ -161,10 +157,6 @@
     },
     "https://registry.pdpp.dev/connectors/youtube": {
       "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/f45db10cecdaf366536034ea92658b1e63cc5a60/packages/polyfill-connectors/manifests/icons/youtube.svg",
-      "backgroundColor": "#FF0000"
-    },
-    "https://registry.pdpp.dev/connectors/youtube-takeout": {
-      "url": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cf8472eebf271d7e79390ce139609d537d60633a/connectors/youtube_takeout/icon.svg",
       "backgroundColor": "#FF0000"
     }
   },

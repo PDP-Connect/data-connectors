@@ -76,6 +76,10 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "ynab.json",
 ]);
 
+// These Collection Profiles are carried by signed OCI artifacts, not by the
+// frozen Desktop connector index. Their manifest-local icons still need proof.
+const MODERN_ONLY_PROFILE_ICONS = new Set(["github_browser.json", "youtube_takeout.json"]);
+
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);
   assert.ok(root, `${filename}: SVG root is required`);
@@ -131,12 +135,23 @@ test("every shipped polyfill manifest either declares a local brand icon or has 
   for (const filename of CONNECTORS_WITHOUT_A_BRAND_MARK) {
     assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from CONNECTORS_WITHOUT_A_BRAND_MARK`);
   }
+  for (const filename of MODERN_ONLY_PROFILE_ICONS) {
+    assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from MODERN_ONLY_PROFILE_ICONS`);
+  }
 });
 
 test("connector index resolves every shipped polyfill brand icon, and omits connectors with none", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   for (const filename of manifestFiles()) {
-    const { manifest } = readManifest(filename);
+    const { path, manifest } = readManifest(filename);
+    if (MODERN_ONLY_PROFILE_ICONS.has(filename)) {
+      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: modern profile must not change the frozen connector index`);
+      const iconPath = join(dirname(path), manifest.brand.icon);
+      const source = readFileSync(iconPath, "utf8");
+      assertSafeRecognisableSvg(source, iconPath);
+      assertRealBrandMarkShape(source, iconPath);
+      continue;
+    }
     if (manifest.brand === undefined) {
       assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: has no brand but connector-index.json still has a brandIcons entry`);
       continue;
@@ -162,8 +177,8 @@ test("connector index resolves every shipped polyfill brand icon, and omits conn
 test("every indexed brand icon is a self-contained, intentionally inked SVG mark", () => {
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   const referenced = Object.values(index.brandIcons ?? {});
-  const expectedCount = manifestFiles().length - CONNECTORS_WITHOUT_A_BRAND_MARK.size;
-  assert.equal(referenced.length, expectedCount, "expected every shipped connector with a brand mark to be indexed, and no others");
+  const expectedCount = manifestFiles().length - CONNECTORS_WITHOUT_A_BRAND_MARK.size - MODERN_ONLY_PROFILE_ICONS.size;
+  assert.equal(referenced.length, expectedCount, "expected every legacy connector with a brand mark to be indexed, and no others");
 
   for (const icon of referenced) {
     assert.equal(typeof icon?.url, "string", "brand icon URL is required");
