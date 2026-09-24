@@ -61,6 +61,7 @@ import {
 	reasonForDetailFailure,
 	recordDetailOutcome,
 	recoverPendingOrderItemDetailGaps,
+	nutritionCoverageBlockReason,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	resolveOrderDetail,
 	runForwardScan,
@@ -3387,6 +3388,114 @@ test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redi
 			m.reason === "session_repair_required",
 	);
 	assert.ok(skip);
+});
+
+
+test("nutritionCoverageBlockReason requires orders and order_items in the same run", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: false,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"nutrition requires orders and order_items in the same run",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on the 50-page order-history ceiling", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: true,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order history stopped at the page budget before all orders were scanned",
+	);
+});
+
+
+
+test("nutritionCoverageBlockReason blocks on a resume checkpoint boundary stop", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: true,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on unrecovered prior order-item gaps", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 1,
+		}),
+		"prior order_items detail gaps are still pending",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on unresolved order-item detail gaps", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 1,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order_items detail coverage has unresolved gaps",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on item-count shortfall", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: true,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"some order_items records are short of the item counts declared by H-E-B",
+	);
+});
+
+test("nutritionCoverageBlockReason allows nutrition only after source coverage is complete", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		null,
+	);
 });
 
 test("collectNutrition emits one record per unique product target", async () => {
