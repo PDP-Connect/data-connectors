@@ -13,9 +13,8 @@
  *   - `profile`       — the Amazon account's name/email (the scope is advertised).
  *   - `orders`        — one record per Whole Foods order.
  *   - `order_items`   — one record per line item within an order.
- *   - `nutrition`     — one record per unique product, typed (replaces the
- *                       untyped `order_items.nutrition` object the scaffold
- *                       previously declared).
+ *   - `nutrition`     — one outcome per unique product, including observed
+ *                       not_found/error/blocked results.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -73,8 +72,7 @@ export const orderItemsSchema = z.object({
 	order_id: z.string().min(1).max(200),
 	product_id: z
 		.string()
-		.regex(/^[A-Z0-9]{10}$/, "product_id must be a 10-char Amazon ASIN")
-		.nullable(),
+		.regex(/^[A-Z0-9]{10}$/, "product_id must be a 10-char Amazon ASIN"),
 	product_url: z.url().nullable(),
 	quantity: z.number().min(0).nullable(),
 	unit_price_cents: z.number().int().min(0).nullable(),
@@ -85,9 +83,8 @@ export const orderItemsSchema = z.object({
  * unique product encountered in this run's order_items, keyed by
  * `product_id` (the Amazon ASIN — the same id order_items uses, so
  * consumers can join the two streams). `source` names which surface
- * produced the facts; `confidence` reflects match certainty (a UPC-keyed
- * USDA lookup is high confidence, a text-search match is medium, per D8/the
- * legacy connector's own confidence labeling).
+ * produced facts or which observed failure occurred. `confidence` reflects
+ * match certainty for facts and is low for unsuccessful outcomes.
  */
 export const nutritionSchema = z.object({
 	calories: z.number().min(0).nullable(),
@@ -103,7 +100,13 @@ export const nutritionSchema = z.object({
 	serving_size: z.string().max(200).nullable(),
 	servings_per_container: z.number().min(0).nullable(),
 	sodium_mg: z.number().min(0).nullable(),
-	source: z.enum(["wholefoods_product_page", "usda_fdc"]),
+	source: z.enum([
+		"wholefoods_product_page",
+		"usda_fdc",
+		"not_found",
+		"error",
+		"blocked",
+	]),
 	sugar_g: z.number().min(0).nullable(),
 });
 

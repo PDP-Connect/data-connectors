@@ -59,7 +59,7 @@ const ORDER_RECORD = {
 	item_count: 3,
 	order_date: "2026-03-03",
 	order_url: `https://www.amazon.com/uff/your-account/order-details?orderID=${ORDER_ID}`,
-	status: "Completed",
+	status: null,
 	total_cents: 4299,
 };
 
@@ -102,12 +102,12 @@ test("order_items schema accepts a fully-populated record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("order_items schema accepts a null product_id (ghost-item-filtered detail gap)", () => {
+test("order_items schema rejects a null product_id (legacy orders require source identity)", () => {
 	const result = orderItemsSchema.safeParse({
 		...ORDER_ITEM_RECORD,
 		product_id: null,
 	});
-	assert.ok(result.success, JSON.stringify(result.error?.issues));
+	assert.equal(result.success, false);
 });
 
 test("order_items schema strips an unknown nutrition field rather than emitting it (D8: nutrition is its own stream)", () => {
@@ -148,6 +148,18 @@ test("nutrition schema accepts a usda_fdc record with medium confidence", () => 
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
+
+for (const source of ["not_found", "error", "blocked"] as const) {
+	test(`nutrition schema accepts a source-backed ${source} outcome`, () => {
+		const result = nutritionSchema.safeParse({
+			...NUTRITION_RECORD,
+			calories: null,
+			confidence: "low",
+			source,
+		});
+		assert.ok(result.success, JSON.stringify(result.error?.issues));
+	});
+}
 
 test("nutrition schema rejects an unknown source", () => {
 	const result = nutritionSchema.safeParse({

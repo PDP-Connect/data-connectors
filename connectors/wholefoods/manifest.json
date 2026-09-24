@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.1.1",
+	"version": "1.0.0",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
@@ -150,7 +150,7 @@
 		{
 			"name": "order_items",
 			"required": true,
-			"description": "Items within Whole Foods orders. Nutrition is a separate typed stream (see `nutrition`), joined on `product_id`.",
+			"description": "Items within Whole Foods orders, each with a source Amazon product ID. Nutrition joins on `product_id`.",
 			"display": {
 				"label": "Your Whole Foods items",
 				"detail": "Product name, quantity, price."
@@ -170,7 +170,7 @@
 						"x_pdpp_role": "primary-title"
 					},
 					"product_id": {
-						"type": ["string", "null"]
+						"type": "string"
 					},
 					"product_url": {
 						"type": ["string", "null"],
@@ -186,7 +186,7 @@
 						"type": ["integer", "null"]
 					}
 				},
-				"required": ["id", "order_id", "name"]
+				"required": ["id", "order_id", "name", "product_id"]
 			},
 			"primary_key": ["id"],
 			"selection": {
@@ -205,10 +205,10 @@
 		{
 			"name": "nutrition",
 			"required": false,
-			"description": "Typed nutrition facts per unique product, sourced from the Whole Foods product page first, then the USDA FoodData Central API. Joins to `order_items` on `product_id`.",
+			"description": "Nutrition facts or observed lookup outcome per unique product. Sources are the Whole Foods product page and USDA FoodData Central. Joins to `order_items` on `product_id`.",
 			"display": {
 				"label": "Nutrition facts",
-				"detail": "Calories, macros, sodium, fiber, sugar, serving size — from the Whole Foods product page or USDA FoodData Central."
+				"detail": "Nutrition facts when found, or a not found, blocked, or error outcome when lookup fails."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -223,7 +223,13 @@
 					},
 					"source": {
 						"type": "string",
-						"enum": ["wholefoods_product_page", "usda_fdc"]
+						"enum": [
+							"wholefoods_product_page",
+							"usda_fdc",
+							"not_found",
+							"error",
+							"blocked"
+						]
 					},
 					"confidence": {
 						"type": "string",

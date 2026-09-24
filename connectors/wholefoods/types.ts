@@ -109,7 +109,7 @@ export interface OrderItemRecord {
 	image_url: string | null;
 	name: string;
 	order_id: string;
-	product_id: string | null;
+	product_id: string;
 	product_url: string | null;
 	quantity: number | null;
 	unit_price_cents: number | null;
@@ -129,7 +129,12 @@ export interface NutritionRecord {
 	serving_size: string | null;
 	servings_per_container: number | null;
 	sodium_mg: number | null;
-	source: "usda_fdc" | "wholefoods_product_page";
+	source:
+		| "usda_fdc"
+		| "wholefoods_product_page"
+		| "not_found"
+		| "error"
+		| "blocked";
 	sugar_g: number | null;
 	[field: string]: unknown;
 }

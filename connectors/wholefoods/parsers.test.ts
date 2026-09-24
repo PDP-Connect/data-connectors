@@ -176,6 +176,12 @@ test("parseOrderDetailDom defaults quantity to 1 when the row has no Qty text", 
 	assert.equal(detail.items[0]?.quantity, 1);
 });
 
+test("parseOrderDetailDom fails closed when a source item has no ASIN", () => {
+	const html =
+		'<html><body><div data-component="purchasedItemsRightGrid"><a href="/product/unknown">Unidentified item</a></div></body></html>';
+	assert.throws(() => parseOrderDetailDom(html), /no source product ASIN/);
+});
+
 // ─── Shared value parsing ──────────────────────────────────────────────────
 
 test("parseOrderDateIso converts a free-text date to date-only ISO precision", () => {
