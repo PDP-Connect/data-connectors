@@ -1459,7 +1459,7 @@ export async function resolveCredentials(
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
-function makeEmitRecord(deps: {
+export function makeEmitRecord(deps: {
 	requested: Map<string, StreamScope>;
 	emit: (msg: EmittedMessage) => Promise<void>;
 	emittedAt: string;

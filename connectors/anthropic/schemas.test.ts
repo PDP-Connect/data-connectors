@@ -16,12 +16,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	accountProfileSchema,
 	conversationsSchema,
 	messagesSchema,
 	projectDocumentsSchema,
 	projectsSchema,
 	validateRecord,
 } from "./schemas.ts";
+
+test("account profile schema requires the collector's organization identity", () => {
+	assert.equal(
+		accountProfileSchema.safeParse({
+			id: "synthetic-org-id",
+			organization_id: "synthetic-org-id",
+			full_name: "Synthetic Name",
+			plan: "Pro",
+			name_source: "browser_menu",
+			metadata_status: "valid",
+		}).success,
+		true,
+	);
+	assert.equal(
+		accountProfileSchema.safeParse({ full_name: null }).success,
+		false,
+	);
+});
 
 const CONVERSATION_RECORD = {
 	id: "9f8e7d6c-1234-4abc-9def-0123456789ab",
@@ -54,6 +73,11 @@ const PROJECT_RECORD = {
 	update_time: "2024-05-02T14:30:00.000Z",
 	is_archived: false,
 	prompt_template: "You are a helpful assistant for connector work.",
+	creator: null,
+	is_private: null,
+	is_starter_project: null,
+	archived_at: null,
+	raw_docs: [],
 };
 
 const PROJECT_DOCUMENT_RECORD = {
@@ -94,6 +118,32 @@ test("projects schema accepts a contract-shaped record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("projects schema accepts the retained detail fields with a closed shape", () => {
+	const result = projectsSchema.safeParse({
+		...PROJECT_RECORD,
+		creator: { uuid: "synthetic-user", full_name: "Synthetic Owner" },
+		is_private: true,
+		is_starter_project: false,
+		archived_at: "2025-12-01T00:00:00Z",
+		raw_docs: [{ filename: "synthetic.md", content: "Synthetic body" }],
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			creator: { uuid: "synthetic-user", api_key: "secret" },
+		}).success,
+		false,
+	);
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			raw_docs: [{ filename: "synthetic.md", access_token: "secret" }],
+		}).success,
+		false,
+	);
+});
+
 test("messages schema rejects a missing conversation_id (manifest-required field)", () => {
 	const { conversation_id: _omit, ...withoutConv } = MESSAGE_RECORD;
 	assert.equal(messagesSchema.safeParse(withoutConv).success, false);
@@ -125,7 +175,18 @@ test("project_documents schema rejects a missing project_id (manifest-required f
 	);
 });
 
-test("validateRecord routes all four streams and passes unknown streams through", () => {
+test("validateRecord routes all five streams and passes unknown streams through", () => {
+	assert.equal(
+		validateRecord("account_profile", {
+			id: "synthetic-org-id",
+			organization_id: "synthetic-org-id",
+			full_name: null,
+			plan: null,
+			name_source: "none",
+			metadata_status: "absent",
+		}).ok,
+		true,
+	);
 	assert.equal(validateRecord("conversations", CONVERSATION_RECORD).ok, true);
 	assert.equal(validateRecord("messages", MESSAGE_RECORD).ok, true);
 	assert.equal(validateRecord("projects", PROJECT_RECORD).ok, true);

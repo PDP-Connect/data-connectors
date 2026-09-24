@@ -273,6 +273,17 @@ export interface ProjectRecord {
 	update_time: string | null;
 	is_archived: boolean | null;
 	prompt_template: PdppSafeText | null;
+	creator: { uuid?: string; full_name?: string } | null;
+	is_private: boolean | null;
+	is_starter_project: boolean | null;
+	archived_at: string | null;
+	raw_docs: Array<{
+		uuid?: string;
+		filename?: string;
+		content?: string;
+		created_at?: string;
+		updated_at?: string;
+	}>;
 	[field: string]: unknown;
 }
 
@@ -328,12 +339,13 @@ export function parseProjectDocument(
  * per legacy normalizeProject), create_time<-created_at, update_time<-
  * updated_at, is_archived<-derived from archived_at, prompt_template<-
  * detail.prompt_template, project_documents<-detail.docs[]. `label`, `href`,
- * and the raw `detail` blob are D3/capability-map-dropped fields and are not
- * carried into either record.
+ * The source preserves known raw detail fields alongside the normalized
+ * values. Unknown project keys are excluded to prevent arbitrary data from
+ * entering the manifest; raw docs retain the legacy detail fields even when
+ * an entry has no id.
  *
- * The legacy export's raw project object IS `detail` (claude-export-
- * ingest.cjs's normalizeProject sets `detail: proj || null` — the whole raw
- * object). `prompt_template` and `docs` are read directly off it.
+ * Desktop exposed the raw project object as `detail`. This stream preserves
+ * the known non-credential fields needed for production cutover.
  */
 export function parseProject(raw: unknown): {
 	project: ProjectRecord;
@@ -351,6 +363,9 @@ export function parseProject(raw: unknown): {
 	const documents = docsRaw
 		.map((d) => parseProjectDocument(d, id))
 		.filter((d): d is ProjectDocumentRecord => d !== null);
+	const creator = isRecord(raw.creator) ? raw.creator : null;
+	const creatorUuid = creator === null ? null : str(creator.uuid);
+	const creatorFullName = creator === null ? null : str(creator.full_name);
 
 	// `name` is required (non-nullable in schemas.ts) — a control-rich name
 	// cannot become null like an optional field. Fall back to the same
@@ -376,6 +391,29 @@ export function parseProject(raw: unknown): {
 			// — a definite false, not an unknown, when the key is absent or null.
 			is_archived: raw.archived_at != null,
 			prompt_template: safeText(str(raw.prompt_template), 65_000),
+			creator: creator !== null
+				? {
+					...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
+					...(creatorFullName !== null ? { full_name: creatorFullName } : {}),
+				}
+				: null,
+			is_private: bool(raw.is_private),
+			is_starter_project: bool(raw.is_starter_project),
+			archived_at: str(raw.archived_at),
+			raw_docs: docsRaw.filter(isRecord).map((doc) => {
+				const uuid = str(doc.uuid);
+				const filename = str(doc.filename);
+				const content = str(doc.content);
+				const createdAt = str(doc.created_at);
+				const updatedAt = str(doc.updated_at);
+				return {
+					...(uuid !== null ? { uuid } : {}),
+					...(filename !== null ? { filename } : {}),
+					...(content !== null ? { content } : {}),
+					...(createdAt !== null ? { created_at: createdAt } : {}),
+					...(updatedAt !== null ? { updated_at: updatedAt } : {}),
+				};
+			}),
 		},
 		documents,
 	};
@@ -439,10 +477,9 @@ export function parseProject(raw: unknown): {
 //     match it — these are a distinct sub-product (Claude's Artifacts/
 //     "design" chat surface) with no capability-map stream. See
 //     CONTRACT-CHANGE-REQUEST.
-//   light_metadata-000.zip -> `users.json`, `login_history.json`. Account
-//     roster / auth-audit data, never a candidate for any content stream —
-//     per the task's hard rule, nothing from this category may reach a
-//     record, a fixture, or a log line.
+//   light_metadata-000.zip -> `users.json`, `login_history.json`. Only the
+//     display name from `users.json` may reach account_profile when its
+//     ownership is unambiguous. Login history is never emitted.
 //
 // Because `memories` and `design_chats` have no capability-map stream,
 // `classifyManifestPartEntries` below classifies by MANIFEST CATEGORY
@@ -450,8 +487,8 @@ export function parseProject(raw: unknown): {
 // content-shape classifier at all, so its real per-item field names can
 // never accidentally satisfy `looksLikeConversation`/`looksLikeProject` by
 // coincidence), then applies content-shape classification only to
-// `conversations` and `projects` category parts. `light_metadata` is always
-// out-of-scope. Every out-of-scope category's entries are reported back
+// `conversations` and `projects` category parts. `light_metadata` contributes
+// only users.json to account_profile. Every other out-of-scope entry is reported back
 // via `outOfScopeEntryNames` (grouped by category) so index.ts can log an
 // honest "N entries in category X are out of this connector's declared
 // scope" PROGRESS line — never silently dropped without a trace, but also
@@ -468,14 +505,80 @@ export interface ClassifiedManifestPart {
 	category: string;
 	conversations: unknown[];
 	projects: unknown[];
-	/** Entries whose manifest category has no capability-map stream
-	 * (`memories`, `design_chats`, `light_metadata`, or any other category
-	 * this connector does not declare) — expected, not an anomaly. */
+	userProfiles: unknown[];
+	/** Entries not used by declared streams, including login_history.json —
+	 * expected, not an anomaly. */
 	outOfScopeEntryNames: string[];
 	/** Entries from an in-scope category (`conversations`, `projects`) whose
 	 * content matched neither known shape — a real anomaly, surfaced via
 	 * PROGRESS, never silently dropped. */
 	unclassifiedEntryNames: string[];
+}
+
+/** Resolve a display name only when the browser profile belongs to this export. */
+export function resolveExportedProfile(
+	userFiles: readonly unknown[],
+	browserName: string | null,
+	browserProfileAppliesToExport: boolean,
+): {
+	fullName: string | null;
+	nameSource: "browser_menu" | "users_json" | "none";
+	metadataStatus: "valid" | "absent" | "malformed" | "ambiguous" | "mismatch";
+} {
+	const isObject = (candidate: unknown): candidate is Record<string, unknown> =>
+		typeof candidate === "object" &&
+		candidate !== null &&
+		!Array.isArray(candidate);
+	const browserFallback = (
+		metadataStatus: "absent" | "malformed" | "ambiguous" | "mismatch",
+	) => ({
+		fullName:
+			browserProfileAppliesToExport &&
+			(metadataStatus === "absent" || metadataStatus === "malformed")
+				? browserName
+				: null,
+		nameSource:
+			browserProfileAppliesToExport &&
+			browserName &&
+			(metadataStatus === "absent" || metadataStatus === "malformed")
+				? ("browser_menu" as const)
+				: ("none" as const),
+		metadataStatus,
+	});
+	if (userFiles.length === 0) return browserFallback("absent");
+	if (userFiles.length !== 1) return browserFallback("ambiguous");
+	const value = userFiles[0];
+	const users = Array.isArray(value)
+		? value
+		: isObject(value) && Array.isArray(value.users)
+			? value.users
+			: isObject(value)
+				? [value]
+				: null;
+	if (!users || users.length === 0) return browserFallback("malformed");
+	if (users.length !== 1) return browserFallback("ambiguous");
+	const user = users[0];
+	if (
+		!isObject(user) ||
+		typeof user.full_name !== "string" ||
+		!user.full_name.trim()
+	) {
+		return browserFallback("malformed");
+	}
+	const exportedName = user.full_name.trim();
+	if (browserName && browserName !== exportedName)
+		return browserFallback("mismatch");
+	// A single roster entry or a matching display name cannot link a resumed
+	// export to the current browser account.
+	const attributableBrowserName =
+		browserProfileAppliesToExport && browserName === exportedName
+			? browserName
+			: null;
+	return {
+		fullName: attributableBrowserName,
+		nameSource: attributableBrowserName ? "browser_menu" : "none",
+		metadataStatus: "valid",
+	};
 }
 
 /** Manifest `category` values this connector has a stream for. Any other
@@ -496,8 +599,8 @@ function looksLikeProject(v: unknown): boolean {
 
 /**
  * Classify one manifest part's extracted JSON entries. Category first
- * (`memories`/`design_chats`/`light_metadata`/anything else undeclared ->
- * out-of-scope, never inspected for content shape), then content shape for
+ * (`memories`/`design_chats`/anything else undeclared -> out-of-scope;
+ * `light_metadata` contributes only users.json), then content shape for
  * `conversations`/`projects` categories (see module note above for why
  * content shape, not filename, is still the dispatch within an in-scope
  * category — an in-scope category ZIP can, in principle, mix shapes).
@@ -508,8 +611,24 @@ export function classifyManifestPartEntries(
 ): ClassifiedManifestPart {
 	const conversations: unknown[] = [];
 	const projects: unknown[] = [];
+	const userProfiles: unknown[] = [];
 	const outOfScopeEntryNames: string[] = [];
 	const unclassifiedEntryNames: string[] = [];
+
+	if (category === "light_metadata") {
+		for (const entry of entries) {
+			if (entry.name === "users.json") userProfiles.push(entry.json);
+			else outOfScopeEntryNames.push(entry.name);
+		}
+		return {
+			category,
+			conversations,
+			projects,
+			userProfiles,
+			outOfScopeEntryNames,
+			unclassifiedEntryNames,
+		};
+	}
 
 	if (!IN_SCOPE_CATEGORIES.has(category)) {
 		for (const entry of entries) {
@@ -519,6 +638,7 @@ export function classifyManifestPartEntries(
 			category,
 			conversations,
 			projects,
+			userProfiles,
 			outOfScopeEntryNames,
 			unclassifiedEntryNames,
 		};
@@ -545,6 +665,7 @@ export function classifyManifestPartEntries(
 		category,
 		conversations,
 		projects,
+		userProfiles,
 		outOfScopeEntryNames,
 		unclassifiedEntryNames,
 	};

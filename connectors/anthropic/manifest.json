@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Claude (Anthropic)",
 	"brand": {
 		"icon": "icon.svg",
@@ -35,6 +35,34 @@
 		}
 	},
 	"streams": [
+		{
+			"name": "account_profile",
+			"description": "Claude account profile name, browser plan label, and export organization.",
+			"required": false,
+			"display": {
+				"label": "Your Claude account",
+				"detail": "Account display name, plan label, and export organization identity."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"organization_id": { "type": "string" },
+					"full_name": { "type": ["string", "null"], "x_pdpp_role": "primary-title" },
+					"plan": { "type": ["string", "null"] },
+					"name_source": { "type": "string", "enum": ["browser_menu", "users_json", "none"] },
+					"metadata_status": { "type": "string", "enum": ["valid", "absent", "malformed", "ambiguous", "mismatch"] }
+				},
+				"required": ["id", "organization_id", "full_name", "plan", "name_source", "metadata_status"]
+			},
+			"primary_key": ["id"],
+			"query": { "search": { "lexical_fields": ["full_name"] } },
+			"selection": { "fields": true, "resources": false },
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
 		{
 			"name": "conversations",
 			"description": "Claude.ai conversations.",
@@ -219,6 +247,31 @@
 					},
 					"prompt_template": {
 						"type": ["string", "null"]
+					},
+					"creator": {
+						"type": ["object", "null"],
+						"properties": {
+							"uuid": { "type": "string" },
+							"full_name": { "type": "string" }
+						},
+						"additionalProperties": false
+					},
+					"is_private": { "type": ["boolean", "null"] },
+					"is_starter_project": { "type": ["boolean", "null"] },
+					"archived_at": { "type": ["string", "null"] },
+					"raw_docs": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"uuid": { "type": "string" },
+								"filename": { "type": "string" },
+								"content": { "type": "string" },
+								"created_at": { "type": "string" },
+								"updated_at": { "type": "string" }
+							},
+							"additionalProperties": false
+						}
 					}
 				},
 				"required": ["id", "name"]
