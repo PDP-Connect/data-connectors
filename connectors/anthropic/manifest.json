@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Claude (Anthropic)",
 	"brand": {
 		"icon": "icon.svg",
