@@ -327,7 +327,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 	]);
 });
 
-test("postLikeRecords: skips likers missing id or username", () => {
+test("postLikeRecords: keeps identified likers with a missing username and skips missing ids", () => {
 	const edge = makeEdge({
 		facepile_top_likers: [
 			{ id: "u1" },
@@ -336,6 +336,14 @@ test("postLikeRecords: skips likers missing id or username", () => {
 		],
 	});
 	assert.deepEqual(postLikeRecords(edge), [
+		{
+			post_id: "post1",
+			profile_pic_url: null,
+			pk: "u1",
+			id: "u1",
+			user_id: "u1",
+			username: "",
+		},
 		{
 			post_id: "post1",
 			profile_pic_url: null,

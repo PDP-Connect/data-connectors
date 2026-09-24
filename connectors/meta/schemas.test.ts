@@ -200,6 +200,16 @@ test("post_likes schema remains compatible with records from before liker parity
 	);
 });
 
+test("post_likes schema accepts an empty username emitted by the legacy source", () => {
+	assert.ok(
+		postLikesSchema.safeParse({
+			post_id: "3401234567890123456",
+			user_id: "999",
+			username: "",
+		}).success,
+	);
+});
+
 // ─── following ────────────────────────────────────────────────────────
 
 test("following schema accepts a fully-populated record", () => {

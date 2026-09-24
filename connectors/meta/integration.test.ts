@@ -22,6 +22,7 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -320,6 +321,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 												profile_pic_url: "https://example.com/alice.jpg",
 												username: "alice",
 											},
+											{ id: "liker2" },
 										],
 										id: "p1",
 										image_versions2: {
@@ -346,15 +348,28 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	const likes = harness.emitted.filter((e) => e.stream === "post_likes");
 	assert.equal(posts.length, 1);
 	assert.equal(posts[0]?.data.id, "p1");
-	assert.equal(likes.length, 1);
-	assert.deepEqual(likes[0]?.data, {
-		post_id: "p1",
-		profile_pic_url: "https://example.com/alice.jpg",
-		pk: "liker-pk1",
-		id: "liker1",
-		user_id: "liker1",
-		username: "alice",
-	});
+	assert.equal(likes.length, 2);
+	assert.deepEqual(
+		likes.map((like) => like.data),
+		[
+			{
+				post_id: "p1",
+				profile_pic_url: "https://example.com/alice.jpg",
+				pk: "liker-pk1",
+				id: "liker1",
+				user_id: "liker1",
+				username: "alice",
+			},
+			{
+				post_id: "p1",
+				profile_pic_url: null,
+				pk: "liker2",
+				id: "liker2",
+				user_id: "liker2",
+				username: "",
+			},
+		],
+	);
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
@@ -558,8 +573,6 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
 		{
-			considered: 3,
-			covered: 3,
 			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
 			reference_only: true,
 			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
@@ -568,9 +581,18 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 			type: "DETAIL_COVERAGE",
 		},
 	);
+	assert.deepEqual(
+		buildRunSummary(harness.protocolMessages, {
+			connector: "meta",
+			finished_at: EMITTED_AT,
+			started_at: EMITTED_AT,
+			tool_version: "test",
+		}).done.coverage,
+		{ considered: 3, covered: 3, streams: ["ads"] },
+	);
 });
 
-test("collectAllStreams: ads all reached with empty lists emits complete zero coverage", async () => {
+test("collectAllStreams: ads all reached with empty lists emits complete surface coverage", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -609,8 +631,6 @@ test("collectAllStreams: ads all reached with empty lists emits complete zero co
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
 		{
-			considered: 0,
-			covered: 0,
 			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
 			reference_only: true,
 			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
@@ -618,6 +638,15 @@ test("collectAllStreams: ads all reached with empty lists emits complete zero co
 			stream: "ads",
 			type: "DETAIL_COVERAGE",
 		},
+	);
+	assert.deepEqual(
+		buildRunSummary(harness.protocolMessages, {
+			connector: "meta",
+			finished_at: EMITTED_AT,
+			started_at: EMITTED_AT,
+			tool_version: "test",
+		}).done.coverage,
+		{ considered: 3, covered: 3, streams: ["ads"] },
 	);
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
@@ -662,8 +691,6 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
 		{
-			considered: 2,
-			covered: 2,
 			hydrated_keys: ["advertisers", "ad_topics"],
 			reference_only: true,
 			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
@@ -671,6 +698,15 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 			stream: "ads",
 			type: "DETAIL_COVERAGE",
 		},
+	);
+	assert.deepEqual(
+		buildRunSummary(harness.protocolMessages, {
+			connector: "meta",
+			finished_at: EMITTED_AT,
+			started_at: EMITTED_AT,
+			tool_version: "test",
+		}).done.coverage,
+		{ considered: 3, covered: 2, streams: ["ads"] },
 	);
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>

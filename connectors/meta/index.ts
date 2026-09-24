@@ -951,8 +951,6 @@ export async function collectAllStreams(
 			await emitRecord("ads", ad as RecordData);
 		}
 		await emitDetailCoverage(ctx, {
-			considered: ads.length,
-			covered: ads.length,
 			hydratedKeys: reachedSurfaces,
 			requiredKeys: ADS_REQUIRED_SURFACES,
 			stateStream: "ads",

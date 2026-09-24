@@ -31,6 +31,7 @@ const isoDateTimeSchema = z
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
 	.nullable();
 const usernameSchema = z.string().min(1).max(200);
+const postLikerUsernameSchema = z.string().max(200);
 const igIdSchema = z.string().min(1).max(200);
 const nullableBoolSchema = z.boolean().nullable();
 const nonNegativeIntSchema = z.number().int().min(0).nullable();
@@ -80,7 +81,7 @@ export const postLikesSchema = z.object({
 	pk: igIdSchema.optional(),
 	id: igIdSchema.optional(),
 	user_id: igIdSchema,
-	username: usernameSchema,
+	username: postLikerUsernameSchema,
 });
 
 /**
