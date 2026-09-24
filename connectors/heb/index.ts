@@ -80,6 +80,8 @@ export const HEB_HYDRATION_WAIT_MAX_MS = 2500;
 // 400-500ms between order-history list pages.
 const LIST_PAGE_POLITE_DELAY_MS = 450;
 export const MAX_LIST_PAGES = 50;
+const HEB_NUTRITION_COVERAGE_INCOMPLETE_REASON =
+	"nutrition_source_coverage_incomplete";
 // Bounded per-run detail budget (design doc "Collector plan" §3): blast-radius
 // stop, not an attempt at exhaustive backfill in one run.
 const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
@@ -1453,25 +1455,50 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
-	options: { recoveryOnly?: boolean; wantsItems: boolean },
+	options: {
+		recoveryOnly?: boolean;
+		wantsItems: boolean;
+		wantsNutrition?: boolean;
+	},
 ): Promise<{
 	recovered: number;
 	stoppedWithPending: boolean;
 	suppressForward: boolean;
 }> {
 	if (!options.wantsItems) {
+		const suppressForward = options.recoveryOnly === true;
+		if (suppressForward && options.wantsNutrition) {
+			await emitNutritionCoverageIncomplete(
+				deps,
+				"H-E-B nutrition was not collected because recovery-only mode suppressed the order-history scan.",
+				{ recovery_only: true },
+			);
+		}
 		return {
 			recovered: 0,
 			stoppedWithPending: false,
-			suppressForward: options.recoveryOnly === true,
+			suppressForward,
 		};
 	}
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
 	const detailBudgetExhausted =
 		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
+	const suppressForward =
+		options.recoveryOnly === true || detailBudgetExhausted;
+	if (suppressForward && options.wantsNutrition) {
+		await emitNutritionCoverageIncomplete(
+			deps,
+			"H-E-B nutrition was not collected because order-item recovery suppressed the order-history scan.",
+			{
+				detail_budget_exhausted: detailBudgetExhausted,
+				detail_attempts: flags.detailAttempts,
+				recovery_only: options.recoveryOnly === true,
+			},
+		);
+	}
 	return {
 		...recovery,
-		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+		suppressForward,
 	};
 }
 
@@ -1647,6 +1674,7 @@ export async function processListOrder(
  */
 export interface ForwardScanResult {
 	newestOrderDate: string | null;
+	stoppedAtBoundary: boolean;
 	truncated: boolean;
 }
 
@@ -1675,6 +1703,7 @@ export async function runForwardScan(
 	// Retained past the loop so the ceiling exit can measure how much of the
 	// source's own advertised list this run never traversed.
 	let advertisedMaxPage: number | null = null;
+	let stoppedAtBoundary = false;
 	// Which of the loop's two exits fired. `runForwardScan` can stop because it
 	// reached the end of the list (honest completion: `pageNum > maxPage`, a
 	// terminal page, or a full page past the resume boundary) or because it hit
@@ -1725,6 +1754,7 @@ export async function runForwardScan(
 			}
 
 			if (shouldStopPaginating(pageOrderDates, boundary)) {
+				stoppedAtBoundary = true;
 				await deps.progress(
 					`H-E-B list page ${pageNum}: full page older than checkpoint boundary; stopping`,
 					{
@@ -1754,7 +1784,7 @@ export async function runForwardScan(
 		await reportListPageCeiling(deps, advertisedMaxPage);
 	}
 
-	return { newestOrderDate, truncated: walk.truncated };
+	return { newestOrderDate, stoppedAtBoundary, truncated: walk.truncated };
 }
 
 /**
@@ -2132,6 +2162,54 @@ export interface NutritionTarget {
 	productUrl: string | null;
 }
 
+export interface NutritionCoverageGateInput {
+	itemCountShort: boolean;
+	orderHistoryStoppedAtBoundary: boolean;
+	orderItemsGapCount: number;
+	ordersRequested: boolean;
+	orderItemsRequested: boolean;
+	ordersTruncated: boolean;
+	unrecoveredPriorOrderItemGapCount: number;
+}
+
+export function nutritionCoverageBlockReason(
+	input: NutritionCoverageGateInput,
+): string | null {
+	if (!input.ordersRequested || !input.orderItemsRequested) {
+		return "nutrition requires orders and order_items in the same run";
+	}
+	if (input.ordersTruncated) {
+		return "order history stopped at the page budget before all orders were scanned";
+	}
+	if (input.orderHistoryStoppedAtBoundary) {
+		return "order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run";
+	}
+	if (input.unrecoveredPriorOrderItemGapCount > 0) {
+		return "prior order_items detail gaps are still pending";
+	}
+	if (input.orderItemsGapCount > 0) {
+		return "order_items detail coverage has unresolved gaps";
+	}
+	if (input.itemCountShort) {
+		return "some order_items records are short of the item counts declared by H-E-B";
+	}
+	return null;
+}
+
+async function emitNutritionCoverageIncomplete(
+	deps: Pick<EmitDeps, "emit">,
+	message: string,
+	diagnostics: Record<string, unknown>,
+): Promise<void> {
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream: "nutrition",
+		reason: HEB_NUTRITION_COVERAGE_INCOMPLETE_REASON,
+		message,
+		diagnostics,
+	});
+}
+
 /** Fetch and emit `nutrition` records for every unique product this run's
  *  `order_items` collection observed. Products without a resolvable
  *  `product_url` receive an explicit not_found outcome; no URL is guessed. */
@@ -2297,17 +2375,18 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			// `nutrition` looks up products by the item names/urls this run's
-			// order_items collection observes; it has no independent product
-			// catalog to browse. Without order_items also in scope this run,
-			// there is nothing to look nutrition up against.
-			if (wantsNutrition && !wantsItems) {
-				await emit({
-					type: "SKIP_RESULT",
-					stream: "nutrition",
-					reason: "scope_not_supported",
-					message:
-						"H-E-B nutrition lookup requires order_items in the same run's scope; it has no independent product catalog to browse.",
-				});
+			// order_items collection observes, and its historical completeness is
+			// anchored by the same run's order-history scan. With neither source
+			// stream requested, there is nothing to look up or prove.
+			if (wantsNutrition && !(wantsOrders || wantsItems)) {
+				await emitNutritionCoverageIncomplete(
+					{ emit },
+					"H-E-B nutrition lookup requires orders and order_items in the same run's scope; it has no independent product catalog to browse and cannot prove full historical coverage without the order-history coverage anchors.",
+					{
+						orders_requested: wantsOrders,
+						order_items_requested: wantsItems,
+					},
+				);
 			}
 
 			if (!(wantsOrders || wantsItems)) {
@@ -2384,7 +2463,11 @@ if (isMainModule(import.meta.url)) {
 						sendInteraction,
 					},
 					flags,
-					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
+					{
+						recoveryOnly: ctx.recoveryOnly === true,
+						wantsItems,
+						wantsNutrition,
+					},
 				);
 			if (gapRecovery.stoppedWithPending) {
 				await progress(
@@ -2397,7 +2480,7 @@ if (isMainModule(import.meta.url)) {
 
 			await progress("H-E-B session verified; scanning order history");
 
-			const { newestOrderDate, truncated } = await runForwardScan(
+			const { newestOrderDate, stoppedAtBoundary, truncated } = await runForwardScan(
 				page,
 				deps,
 				flags,
@@ -2426,9 +2509,11 @@ if (isMainModule(import.meta.url)) {
 			// say something is missing — a run where every order reconciles needs
 			// no notice, and an order with no declared count is silently
 			// unanchored rather than falsely clean.
+			let itemCountShort = false;
 			if (itemCountTallies && itemCountTallies.length > 0) {
 				const summary = summarizeItemCounts(itemCountTallies);
-				if (summary.short > 0) {
+				itemCountShort = summary.short > 0;
+				if (itemCountShort) {
 					await emit({
 						type: "SKIP_RESULT",
 						stream: "order_items",
@@ -2453,12 +2538,40 @@ if (isMainModule(import.meta.url)) {
 				await emitOrdersCoverage(deps, ordersCoverage);
 			}
 
-			if (collectNutritionTargets) {
-				await collectNutrition(page, nutritionTargets, {
-					emit,
-					emitRecord,
-					emittedAt,
+			if (wantsNutrition) {
+				const coverageBlockReason = nutritionCoverageBlockReason({
+					itemCountShort,
+					orderHistoryStoppedAtBoundary: stoppedAtBoundary,
+					orderItemsGapCount: orderItemsCoverage?.gap.length ?? 0,
+					orderItemsRequested: wantsItems,
+					ordersRequested: wantsOrders,
+					ordersTruncated: truncated,
+					unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
+						? 1
+						: 0,
 				});
+				if (coverageBlockReason) {
+					await emitNutritionCoverageIncomplete(
+						{ emit },
+						`H-E-B nutrition was not marked complete because ${coverageBlockReason}.`,
+						{
+							item_count_short: itemCountShort,
+							order_history_stopped_at_boundary: stoppedAtBoundary,
+							order_items_gap_count: orderItemsCoverage?.gap.length ?? 0,
+							orders_requested: wantsOrders,
+							order_items_requested: wantsItems,
+							orders_truncated: truncated,
+							unrecovered_prior_order_item_gap_count:
+								gapRecovery.stoppedWithPending ? 1 : 0,
+						},
+					);
+				} else {
+					await collectNutrition(page, nutritionTargets, {
+						emit,
+						emitRecord,
+						emittedAt,
+					});
+				}
 			}
 		},
 	});

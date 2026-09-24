@@ -61,6 +61,7 @@ import {
 	reasonForDetailFailure,
 	recordDetailOutcome,
 	recoverPendingOrderItemDetailGaps,
+	nutritionCoverageBlockReason,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	resolveOrderDetail,
 	runForwardScan,
@@ -2494,7 +2495,7 @@ test("recoverPendingOrderItemDetailGaps: a legacy gap with no order_date does NO
 });
 
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses the forward walk", async () => {
-	const { deps } = makeRecordingDeps();
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const flags = makeRunFlags();
 	const page = makePageStub({ content: DETAIL_HTML });
 
@@ -2509,7 +2510,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 			waitForHydration: deps.waitForHydration,
 		},
 		flags,
-		{ recoveryOnly: true, wantsItems: true },
+		{ recoveryOnly: true, wantsItems: true, wantsNutrition: true },
 	);
 
 	assert.equal(result.recovered, 1);
@@ -2517,6 +2518,55 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 		result.suppressForward,
 		true,
 		"recovery_only must suppress the forward scan even after recovering",
+	);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "nutrition" &&
+				message.reason === "nutrition_source_coverage_incomplete",
+		),
+		"nutrition must be marked incomplete before the recovery-only return",
+	);
+	assert.equal(
+		emitted.filter((record) => record.stream === "nutrition").length,
+		0,
+		"recovery-only must not fabricate nutrition rows",
+	);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget skips nutrition", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const flags = makeRunFlags({ detailAttempts: 100 });
+
+	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		NEVER_CALLED_PAGE,
+		{
+			detailGaps: [],
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		flags,
+		{ recoveryOnly: false, wantsItems: true, wantsNutrition: true },
+	);
+
+	assert.equal(result.suppressForward, true);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "nutrition" &&
+				message.reason === "nutrition_source_coverage_incomplete",
+		),
+		"nutrition must be marked incomplete when the 100-detail budget suppresses the forward scan",
+	);
+	assert.equal(
+		emitted.filter((record) => record.stream === "nutrition").length,
+		0,
+		"budget exhaustion must not fabricate nutrition rows",
 	);
 });
 
@@ -3387,6 +3437,114 @@ test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redi
 			m.reason === "session_repair_required",
 	);
 	assert.ok(skip);
+});
+
+
+test("nutritionCoverageBlockReason requires orders and order_items in the same run", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: false,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"nutrition requires orders and order_items in the same run",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on the 50-page order-history ceiling", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: true,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order history stopped at the page budget before all orders were scanned",
+	);
+});
+
+
+
+test("nutritionCoverageBlockReason blocks on a resume checkpoint boundary stop", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: true,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on unrecovered prior order-item gaps", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 1,
+		}),
+		"prior order_items detail gaps are still pending",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on unresolved order-item detail gaps", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 1,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"order_items detail coverage has unresolved gaps",
+	);
+});
+
+test("nutritionCoverageBlockReason blocks on item-count shortfall", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: true,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		"some order_items records are short of the item counts declared by H-E-B",
+	);
+});
+
+test("nutritionCoverageBlockReason allows nutrition only after source coverage is complete", () => {
+	assert.equal(
+		nutritionCoverageBlockReason({
+			itemCountShort: false,
+			orderHistoryStoppedAtBoundary: false,
+			orderItemsGapCount: 0,
+			orderItemsRequested: true,
+			ordersRequested: true,
+			ordersTruncated: false,
+			unrecoveredPriorOrderItemGapCount: 0,
+		}),
+		null,
+	);
 });
 
 test("collectNutrition emits one record per unique product target", async () => {
