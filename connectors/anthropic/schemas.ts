@@ -121,8 +121,18 @@ export const projectDocumentsSchema = z.object({
 });
 
 export const accountProfileSchema = z.object({
+	id: idSchema,
 	organization_id: idSchema,
 	full_name: pdppSafeText.max(2000).nullable(),
+	plan: pdppSafeText.max(2000).nullable(),
+	name_source: z.enum(["browser_menu", "users_json", "none"]),
+	metadata_status: z.enum([
+		"valid",
+		"absent",
+		"malformed",
+		"ambiguous",
+		"mismatch",
+	]),
 });
 
 /**

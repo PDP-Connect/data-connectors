@@ -27,8 +27,12 @@ import {
 test("account profile schema requires the collector's organization identity", () => {
 	assert.equal(
 		accountProfileSchema.safeParse({
+			id: "synthetic-org-id",
 			organization_id: "synthetic-org-id",
 			full_name: "Synthetic Name",
+			plan: "Pro",
+			name_source: "browser_menu",
+			metadata_status: "valid",
 		}).success,
 		true,
 	);
@@ -143,8 +147,12 @@ test("project_documents schema rejects a missing project_id (manifest-required f
 test("validateRecord routes all five streams and passes unknown streams through", () => {
 	assert.equal(
 		validateRecord("account_profile", {
+			id: "synthetic-org-id",
 			organization_id: "synthetic-org-id",
 			full_name: null,
+			plan: null,
+			name_source: "none",
+			metadata_status: "absent",
 		}).ok,
 		true,
 	);

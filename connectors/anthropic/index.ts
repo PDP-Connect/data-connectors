@@ -15,8 +15,8 @@
  * archive.ts) instead of the legacy runner's bespoke
  * `page.captureDownload`/`page.extractZipEntries` methods.
  *
- * Streams: conversations, messages (claude.conversations split per D3),
- * projects, project_documents (claude.projects split per D3). See
+ * Streams: account_profile, conversations, messages (claude.conversations
+ * split per D3), projects, project_documents (claude.projects split per D3). See
  * parsers.ts for the pure JSON -> record mapping and schemas.ts for the
  * capability-map field-mapping documentation.
  *
@@ -56,10 +56,11 @@
  * report for the driver used. `classifyManifestPartEntries` classifies each
  * `conversations`/`projects` part's JSON entries by CONTENT SHAPE (matching
  * the verified real keys), and treats any other category (`memories`,
- * `design_chats`, `light_metadata`) as out-of-scope by category before
+ * `design_chats`) as out-of-scope by category before
  * content inspection — those categories have no capability-map stream (see
  * report's CONTRACT-CHANGE-REQUEST) and are downloaded-but-not-parsed,
- * reported via PROGRESS rather than silently dropped.
+ * reported via PROGRESS rather than silently dropped. `light_metadata` only
+ * contributes `users.json` to account_profile; login history is ignored.
  *
  * ── RESUMABILITY: OLD vs NEW FORMAT DIFFERS ─────────────────────────────
  *
@@ -151,13 +152,39 @@ import {
 	type ParsedExport,
 	parseClassifiedExport,
 	parseExport,
-	parseExportedFullName,
+	resolveExportedProfile,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
+
+/** The signed-in user's menu was the legacy collector's name and plan source. */
+async function readBrowserProfile(
+	page: BrowserCollectContext["page"],
+): Promise<{
+	name: string | null;
+	plan: string | null;
+}> {
+	try {
+		return await page.evaluate(() => {
+			const clean = (value: string | null | undefined) =>
+				value?.replace(/\s+/g, " ").trim() || null;
+			const button = document.querySelector(
+				'button[data-testid="user-menu-button"]',
+			);
+			const name = clean(button?.querySelector("span")?.textContent);
+			const plan =
+				Array.from(button?.querySelectorAll("span") ?? [])
+					.map((span) => clean(span.textContent))
+					.find((value) => value !== null && value !== name) ?? null;
+			return { name, plan };
+		});
+	} catch {
+		return { name: null, plan: null };
+	}
+}
 
 // Bounded run budget for the export-poll loop. Generous but finite: a
 // connector run must not block forever (spec-collection-profile.md §5:
@@ -459,6 +486,7 @@ interface ProjectZipFile {
 export function readExportZip(zipPath: string): {
 	conversationsJson: unknown;
 	projectFiles: ProjectZipFile[];
+	userFiles: unknown[];
 } {
 	const fd = openSync(zipPath, "r");
 	try {
@@ -476,7 +504,14 @@ export function readExportZip(zipPath: string): {
 				name: e.name,
 				json: safeJsonParse(e.data().toString("utf8")),
 			}));
-		return { conversationsJson, projectFiles };
+		const usersEntry = entries.find((e) => e.name === "users.json");
+		return {
+			conversationsJson,
+			projectFiles,
+			userFiles: usersEntry
+				? [safeJsonParse(usersEntry.data().toString("utf8"))]
+				: [],
+		};
 	} finally {
 		closeSync(fd);
 	}
@@ -641,6 +676,7 @@ export async function collectAnthropic({
 		})
 		.catch((): undefined => undefined);
 	await politeDelay(1500);
+	const browserProfile = await readBrowserProfile(page);
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
 	const wantsMessages = requested.has(MESSAGES_STREAM);
@@ -650,12 +686,25 @@ export async function collectAnthropic({
 	async function emitParsed(
 		parsed: ParsedExport,
 		organizationId: string,
-		profileFullName: string | null,
+		userFiles: readonly unknown[],
 	): Promise<void> {
 		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
+			const profile = resolveExportedProfile(userFiles, browserProfile.name);
+			if (profile.metadataStatus !== "valid") {
+				await progress(
+					`Claude users.json metadata: ${profile.metadataStatus}. Profile name source: ${profile.nameSource}.`,
+					{
+						stream: ACCOUNT_PROFILE_STREAM,
+					},
+				);
+			}
 			await emitRecord(ACCOUNT_PROFILE_STREAM, {
+				id: organizationId,
 				organization_id: organizationId,
-				full_name: profileFullName,
+				full_name: profile.fullName,
+				plan: browserProfile.plan,
+				name_source: profile.nameSource,
+				metadata_status: profile.metadataStatus,
 			});
 		}
 		if (wantsConversations) {
@@ -727,6 +776,7 @@ export async function collectAnthropic({
 		});
 		return;
 	}
+	const organizationId = org.uuid;
 
 	await progress("Requesting Claude data export...", {
 		stream: CONVERSATIONS_STREAM,
@@ -811,14 +861,14 @@ export async function collectAnthropic({
 			await progress("Reading downloaded export...", {
 				stream: CONVERSATIONS_STREAM,
 			});
-			const { conversationsJson, projectFiles } = readExportZip(
+			const { conversationsJson, projectFiles, userFiles } = readExportZip(
 				attempt.zipPath,
 			);
 			const parsed = parseExport(
 				conversationsJson,
 				projectFiles.map((f) => f.json),
 			);
-			await emitParsed(parsed, pendingExport.organization_id, null);
+			await emitParsed(parsed, pendingExport.organization_id, userFiles);
 		} finally {
 			await attempt.cleanup?.();
 		}
@@ -874,7 +924,7 @@ export async function collectAnthropic({
 		}
 
 		// Categories this connector declares no stream for (memories,
-		// design_chats, light_metadata, or any other future category) are
+		// design_chats, or any other future category) are
 		// downloaded (the manifest offers no selective fetch) but never
 		// classified for content — reported here so the run's PROGRESS log
 		// names exactly which categories were out of scope, rather than
@@ -907,13 +957,7 @@ export async function collectAnthropic({
 		}
 
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
-		await emitParsed(
-			parsed,
-			org.uuid,
-			rawUserProfiles
-				.map(parseExportedFullName)
-				.find((name) => name !== null) ?? null,
-		);
+		await emitParsed(parsed, organizationId, rawUserProfiles);
 	}
 }
 

@@ -44,6 +44,9 @@ process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS = "50";
 
 const { collectAnthropic } = await import("./index.ts");
 const { validateRecord } = await import("./schemas.ts");
+const { makeEmitRecord } = await import(
+	"../../packages/polyfill-connectors/src/connector-runtime.ts"
+);
 const { makeRecordingEmit } = await import(
 	"../../packages/polyfill-connectors/src/test-harness.ts"
 );
@@ -56,6 +59,7 @@ type FetchStub = (url: string, init?: RequestInit) => Promise<Response>;
 
 class FakePage extends EventEmitter {
 	private fetchStub: FetchStub;
+	menuSpans: string[] = [];
 	gotoCalls: string[] = [];
 
 	constructor(fetchStub: FetchStub) {
@@ -74,12 +78,32 @@ class FakePage extends EventEmitter {
 	// stub, rather than in a real browser page.
 	async evaluate<T, A>(fn: (arg: A) => Promise<T> | T, arg?: A): Promise<T> {
 		const realFetch = globalThis.fetch;
+		const priorDocument = Object.getOwnPropertyDescriptor(
+			globalThis,
+			"document",
+		);
+		const spans = this.menuSpans.map((textContent) => ({ textContent }));
+		Object.defineProperty(globalThis, "document", {
+			configurable: true,
+			value: {
+				querySelector: () =>
+					spans.length
+						? {
+								querySelector: () => spans[0],
+								querySelectorAll: () => spans,
+							}
+						: null,
+			},
+		});
 		// biome-ignore lint/suspicious/noExplicitAny: test-only global patch
 		(globalThis as any).fetch = this.fetchStub;
 		try {
 			return await fn(arg as A);
 		} finally {
 			globalThis.fetch = realFetch;
+			if (priorDocument)
+				Object.defineProperty(globalThis, "document", priorDocument);
+			else Reflect.deleteProperty(globalThis, "document");
 		}
 	}
 }
@@ -186,7 +210,7 @@ const PROJECT_JSON = {
 	docs: [{ uuid: "doc-1", filename: "notes.md", content: "notes" }],
 };
 
-async function buildZipBytes(): Promise<Buffer> {
+async function buildZipBytes(users?: unknown): Promise<Buffer> {
 	const { deflateRawSync } = await import("node:zlib");
 	const files = [
 		{
@@ -198,6 +222,11 @@ async function buildZipBytes(): Promise<Buffer> {
 			content: Buffer.from(JSON.stringify(PROJECT_JSON)),
 		},
 	];
+	if (users !== undefined)
+		files.push({
+			name: "users.json",
+			content: Buffer.from(JSON.stringify(users)),
+		});
 	const localParts: Buffer[] = [];
 	const centralParts: Buffer[] = [];
 	let offset = 0;
@@ -319,6 +348,71 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 		"final conversations STATE must carry synced_at",
 	);
 });
+
+for (const scenario of [
+	{
+		label: "users.json name",
+		users: [{ full_name: "Export Owner" }],
+		menu: [],
+		name: "Export Owner",
+		status: "valid",
+	},
+	{
+		label: "absent users.json uses browser name",
+		users: undefined,
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
+		status: "absent",
+	},
+	{
+		label: "malformed users.json uses browser name",
+		users: { users: [{ id: "x" }] },
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
+		status: "malformed",
+	},
+]) {
+	test(`collectAnthropic: old ZIP ${scenario.label}`, async () => {
+		const zipBytes = await buildZipBytes(scenario.users);
+		const { download } = makeFakeDownload(zipBytes);
+		const fetchStub: FetchStub = (url) => {
+			if (url.includes("/api/organizations") && !url.includes("export_data"))
+				return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+			if (url.includes("/export_data"))
+				return Promise.resolve(jsonResponse(200, { nonce: "nonce-abc" }));
+			return Promise.reject(new Error(`unexpected fetch: ${url}`));
+		};
+		const { ctx, emitted, protocolMessages, page } = makeContext({
+			streams: ["account_profile"],
+			fetchStub,
+		});
+		page.menuSpans = scenario.menu;
+		const originalGoto = page.goto.bind(page);
+		page.goto = async (url: string): Promise<null> => {
+			const result = await originalGoto(url);
+			if (url.includes("/export/"))
+				queueMicrotask(() => page.emit("download", download));
+			return result;
+		};
+		await collectAnthropic(ctx);
+		assert.deepEqual(emitted[0]?.data, {
+			id: "org-1",
+			organization_id: "org-1",
+			full_name: scenario.name,
+			plan: scenario.menu[1] ?? null,
+			name_source: scenario.menu.length ? "browser_menu" : "users_json",
+			metadata_status: scenario.status,
+		});
+		assert.equal(
+			protocolMessages.some(
+				(message) =>
+					message.type === "PROGRESS" &&
+					message.message.includes(`metadata: ${scenario.status}`),
+			),
+			scenario.status !== "valid",
+		);
+	});
+}
 
 test("collectAnthropic: scope filtering — requesting only 'projects' emits no conversations/messages/project_documents", async () => {
 	const zipBytes = await buildZipBytes();
@@ -587,7 +681,9 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 	const profileZip = await buildManifestPartZip([
 		{
 			name: "users.json",
-			content: { users: [{ full_name: "Synthetic Name" }] },
+			content: {
+				users: [{ full_name: "Wrong User" }, { full_name: "Synthetic Name" }],
+			},
 		},
 		{ name: "login_history.json", content: [{ private: "not emitted" }] },
 	]);
@@ -607,7 +703,7 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		return Promise.reject(new Error(`unexpected fetch: ${url}`));
 	};
 
-	const { ctx, emitted, protocolMessages, page } = makeContext({
+	const { ctx, protocolMessages, page } = makeContext({
 		streams: [
 			"account_profile",
 			"conversations",
@@ -617,6 +713,18 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		],
 		fetchStub,
 	});
+	page.menuSpans = ["Synthetic Name", "Pro"];
+	const runtimeEmitter = makeEmitRecord({
+		requested: ctx.requested,
+		emit: async (message) => {
+			protocolMessages.push(message);
+		},
+		emittedAt: ctx.emittedAt,
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: () => "",
+	});
+	ctx.emitRecord = runtimeEmitter.emit;
 
 	const downloadCounts = new Map<string, number>();
 	const originalGoto = page.goto.bind(page);
@@ -640,7 +748,20 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		"each one-shot part URL must be downloaded exactly once",
 	);
 
-	const streams = new Set(emitted.map((r) => r.stream));
+	const profileRecords = protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+			message.type === "RECORD" && message.stream === "account_profile",
+	);
+	assert.equal(
+		profileRecords.length,
+		1,
+		"production emitRecord must emit a profile RECORD",
+	);
+	assert.equal(runtimeEmitter.counters.totalEmitted, 5);
+	assert.equal(profileRecords[0]?.key, "org-1");
+	const streams = new Set(
+		protocolMessages.filter((m) => m.type === "RECORD").map((m) => m.stream),
+	);
 	assert.deepEqual([...streams].sort(), [
 		"account_profile",
 		"conversations",
@@ -648,10 +769,14 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		"project_documents",
 		"projects",
 	]);
-	assert.deepEqual(
-		emitted.find((record) => record.stream === "account_profile")?.data,
-		{ organization_id: "org-1", full_name: "Synthetic Name" },
-	);
+	assert.deepEqual(profileRecords[0]?.data, {
+		id: "org-1",
+		organization_id: "org-1",
+		full_name: "Synthetic Name",
+		plan: "Pro",
+		name_source: "browser_menu",
+		metadata_status: "ambiguous",
+	});
 
 	// No pending-export STATE checkpoint for the manifest format — see
 	// index.ts module header: export_url values are one-shot secrets and

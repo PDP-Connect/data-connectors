@@ -406,26 +406,53 @@
 				"streams": [
 					{
 						"name": "account_profile",
-						"description": "Claude account profile name and the organization used for export collection.",
+						"description": "Claude account profile name, browser plan label, and export organization.",
 						"required": false,
 						"display": {
 							"label": "Your Claude account",
-							"detail": "Account display name and export organization identity."
+							"detail": "Account display name, plan label, and export organization identity."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"id": {
+									"type": "string"
+								},
 								"organization_id": {
 									"type": "string"
 								},
 								"full_name": {
 									"type": ["string", "null"]
+								},
+								"plan": {
+									"type": ["string", "null"]
+								},
+								"name_source": {
+									"type": "string",
+									"enum": ["browser_menu", "users_json", "none"]
+								},
+								"metadata_status": {
+									"type": "string",
+									"enum": [
+										"valid",
+										"absent",
+										"malformed",
+										"ambiguous",
+										"mismatch"
+									]
 								}
 							},
-							"required": ["organization_id", "full_name"]
+							"required": [
+								"id",
+								"organization_id",
+								"full_name",
+								"plan",
+								"name_source",
+								"metadata_status"
+							]
 						},
-						"primary_key": ["organization_id"],
+						"primary_key": ["id"],
 						"selection": {
 							"fields": true,
 							"resources": false

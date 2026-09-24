@@ -26,10 +26,10 @@ import {
 	parseClassifiedExport,
 	parseConversation,
 	parseExport,
-	parseExportedFullName,
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	resolveExportedProfile,
 } from "./parsers.ts";
 
 const SYNTHETIC_ZIP_PATH = fileURLToPath(
@@ -51,14 +51,45 @@ test("manifest classification exposes only users.json from light_metadata", () =
 		{ users: [{ full_name: "Synthetic Name" }] },
 	]);
 	assert.deepEqual(classified.outOfScopeEntryNames, ["login_history.json"]);
-	assert.equal(
-		parseExportedFullName(classified.userProfiles[0]),
-		"Synthetic Name",
-	);
+	assert.deepEqual(resolveExportedProfile(classified.userProfiles, null), {
+		fullName: "Synthetic Name",
+		nameSource: "users_json",
+		metadataStatus: "valid",
+	});
 });
 
-test("profile name parser returns null when users.json has no full_name", () => {
-	assert.equal(parseExportedFullName({ id: "synthetic-id" }), null);
+test("profile metadata distinguishes absent, malformed, and ambiguous rosters", () => {
+	assert.equal(resolveExportedProfile([], null).metadataStatus, "absent");
+	assert.equal(
+		resolveExportedProfile([{ id: "synthetic-id" }], null).metadataStatus,
+		"malformed",
+	);
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Other" }, { full_name: "Owner" }]],
+			null,
+		),
+		{
+			fullName: null,
+			nameSource: "none",
+			metadataStatus: "ambiguous",
+		},
+	);
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Other" }, { full_name: "Owner" }]],
+			"Owner",
+		),
+		{
+			fullName: "Owner",
+			nameSource: "browser_menu",
+			metadataStatus: "ambiguous",
+		},
+	);
+	assert.equal(
+		resolveExportedProfile([[{ full_name: "Other" }]], "Owner").metadataStatus,
+		"mismatch",
+	);
 });
 
 // ─── flattenMessageText ─────────────────────────────────────────────────
