@@ -133,6 +133,29 @@ test("all three streams produce schema-valid UUID records and day checkpoints", 
   assert.ok(requests.every((url) => url.includes(`start=${today}`) && url.includes(`end=${today}`)));
 });
 
+test("sleep preserves daily score-only days, score identity and timestamp, and awake time", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/sleep-score-parity.json", import.meta.url), "utf8")) as {
+    sleeps: Array<Record<string, unknown>>;
+    daily_sleeps: Array<Record<string, unknown>>;
+  };
+  await withBrowser(async () => Response.json(fixture), async () => {
+    const h = harness(["sleep"], page(HOME), {}, { since: "2026-09-22", until: "2026-09-24" });
+    await collectOuraBrowser(h.ctx);
+    assert.equal(h.records.length, 2);
+    const session = h.records.find((record) => record.data.id === UUID(101));
+    assert.equal(session?.data.record_type, "sleep_session");
+    assert.equal(session?.data.awake_time, 1200);
+    assert.equal(session?.data.daily_sleep_id, UUID(201));
+    assert.equal(session?.data.daily_sleep_timestamp, "2026-09-23T08:15:00+00:00");
+    const scoreOnly = h.records.find((record) => record.data.day === "2026-09-22");
+    assert.equal(scoreOnly?.data.id, UUID(202));
+    assert.equal(scoreOnly?.data.record_type, "daily_score");
+    assert.equal(scoreOnly?.data.daily_sleep_id, UUID(202));
+    assert.equal(scoreOnly?.data.sleep_score, 76);
+    assert.equal(scoreOnly?.data.daily_sleep_timestamp, "2026-09-22T07:45:00+00:00");
+  });
+});
+
 test("failed required window reports runtime failure and saves retry state", async () => {
   const today = new Date().toISOString().slice(0, 10);
   let retryState: unknown;
