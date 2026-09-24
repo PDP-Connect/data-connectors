@@ -307,7 +307,14 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 								{
 									node: {
 										caption: { text: "post one" },
-										facepile_top_likers: [{ id: "liker1", username: "alice" }],
+										facepile_top_likers: [
+											{
+												id: "liker1",
+												pk: "liker-pk1",
+												profile_pic_url: "https://example.com/alice.jpg",
+												username: "alice",
+											},
+										],
 										id: "p1",
 										image_versions2: {
 											candidates: [{ url: "https://example.com/1.jpg" }],
@@ -336,6 +343,9 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	assert.equal(likes.length, 1);
 	assert.deepEqual(likes[0]?.data, {
 		post_id: "p1",
+		profile_pic_url: "https://example.com/alice.jpg",
+		pk: "liker-pk1",
+		id: "liker1",
 		user_id: "liker1",
 		username: "alice",
 	});
@@ -657,9 +667,7 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		},
 	);
 	const skip = harness.protocolMessages.find(
-		(
-			m,
-		): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
 	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");

@@ -11523,7 +11523,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/meta",
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.3.3",
+				"version": "0.3.4",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -11696,13 +11696,22 @@
 						"description": "Likers of the user's own posts (bounded top-likers sample per post; Instagram exposes no full-likers listing endpoint from a logged-in web session).",
 						"display": {
 							"label": "Likes on your posts",
-							"detail": "Post id, liker's user id and username. Sample, not a full likers list."
+							"detail": "Post id, liker id, username and profile picture. Sample, not a full likers list."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"post_id": {
+									"type": "string"
+								},
+								"profile_pic_url": {
+									"type": ["string", "null"]
+								},
+								"pk": {
+									"type": "string"
+								},
+								"id": {
 									"type": "string"
 								},
 								"user_id": {
@@ -11713,7 +11722,14 @@
 									"x_pdpp_role": "actor"
 								}
 							},
-							"required": ["post_id", "user_id", "username"]
+							"required": [
+								"post_id",
+								"profile_pic_url",
+								"pk",
+								"id",
+								"user_id",
+								"username"
+							]
 						},
 						"primary_key": ["post_id", "user_id"],
 						"selection": {
@@ -11829,6 +11845,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"ads_surfaces_unavailable": "We reached only part of Meta Accounts Center's ad preferences screen, so this ads run is incomplete. Try again after opening Accounts Center in your browser.",
 					"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
 					"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
 				}

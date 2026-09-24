@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/meta",
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"display_name": "Instagram (Meta)",
 	"brand": {
 		"icon": "icon.svg",
@@ -176,13 +176,22 @@
 			"description": "Likers of the user's own posts (bounded top-likers sample per post; Instagram exposes no full-likers listing endpoint from a logged-in web session).",
 			"display": {
 				"label": "Likes on your posts",
-				"detail": "Post id, liker's user id and username. Sample, not a full likers list."
+				"detail": "Post id, liker id, username and profile picture. Sample, not a full likers list."
 			},
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
 					"post_id": {
+						"type": "string"
+					},
+					"profile_pic_url": {
+						"type": ["string", "null"]
+					},
+					"pk": {
+						"type": "string"
+					},
+					"id": {
 						"type": "string"
 					},
 					"user_id": {
@@ -193,7 +202,7 @@
 						"x_pdpp_role": "actor"
 					}
 				},
-				"required": ["post_id", "user_id", "username"]
+				"required": ["post_id", "profile_pic_url", "pk", "id", "user_id", "username"]
 			},
 			"primary_key": ["post_id", "user_id"],
 			"selection": {

@@ -48,6 +48,9 @@ const POST_RECORD = {
 
 const POST_LIKE_RECORD = {
 	post_id: "3401234567890123456",
+	profile_pic_url: "https://scontent.cdninstagram.com/liker.jpg",
+	pk: "999",
+	id: "999",
 	user_id: "999",
 	username: "liker_one",
 };
@@ -175,6 +178,16 @@ test("post_likes schema rejects a missing post_id", () => {
 test("post_likes schema rejects a missing username", () => {
 	const { username: _omit, ...rest } = POST_LIKE_RECORD;
 	assert.equal(postLikesSchema.safeParse(rest).success, false);
+});
+
+test("post_likes schema accepts a null picture URL and preserves legacy id fields", () => {
+	const result = postLikesSchema.safeParse({
+		...POST_LIKE_RECORD,
+		profile_pic_url: null,
+		pk: "legacy-pk",
+		id: "legacy-id",
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
 // ─── following ────────────────────────────────────────────────────────

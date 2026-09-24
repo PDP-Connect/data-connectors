@@ -216,6 +216,9 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 		}
 		out.push({
 			post_id: postId,
+			profile_pic_url: liker.profile_pic_url || null,
+			pk: liker.pk ?? liker.id ?? userId,
+			id: liker.id ?? liker.pk ?? userId,
 			user_id: userId,
 			username,
 		});
