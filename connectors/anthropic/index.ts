@@ -147,9 +147,11 @@ import {
 	readZipEntriesFromFile,
 	type ZipReadPolicy,
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
 	type EmittedMessage,
+	type EnsureSessionArgs,
 	nowIso,
 	type ProbeSessionArgs,
 	politeDelay,
@@ -171,6 +173,8 @@ import { validateRecord } from "./schemas.ts";
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
+export const ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE =
+	"Sign in to Claude in the secure browser. PDPP continues automatically when Claude confirms the session.";
 
 /**
  * Probe the browser's Claude session. A dead cookie probe also opens Claude's
@@ -192,6 +196,47 @@ export async function probeAnthropicSession({
 	}
 	await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
 	return false;
+}
+
+export async function ensureAnthropicSession({
+	assist,
+	autoProbeIntervalMs,
+	autoProbeWindowMs,
+	capture,
+	completeAssistance,
+	context,
+	now,
+	page,
+	sendInteraction,
+}: Pick<
+	EnsureSessionArgs,
+	| "assist"
+	| "capture"
+	| "completeAssistance"
+	| "context"
+	| "page"
+	| "sendInteraction"
+> & {
+	readonly autoProbeIntervalMs?: number;
+	readonly autoProbeWindowMs?: number;
+	readonly now?: () => number;
+}): Promise<void> {
+	await manualBrowserLogin({
+		assist,
+		...(autoProbeIntervalMs === undefined ? {} : { autoProbeIntervalMs }),
+		...(autoProbeWindowMs === undefined ? {} : { autoProbeWindowMs }),
+		...(capture ? { capture } : {}),
+		completeAssistance,
+		isProbeSuccessful: (isLive: boolean) => isLive,
+		message: ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE,
+		...(now ? { now } : {}),
+		page,
+		probe: () => probeAnthropicSession({ context, page }),
+		readinessProbe: (probePage) =>
+			probeAnthropicSession({ context, page: probePage }),
+		sendInteraction,
+		timeoutSeconds: 1800,
+	});
 }
 
 /** The signed-in user's menu was the legacy collector's name and plan source. */
@@ -1126,7 +1171,9 @@ if (isMainModule(import.meta.url)) {
 		browser: { profileName: "anthropic" },
 		validateRecord,
 		retryablePattern: /ECONN|fetch failed|rate_limited|export_pending/i,
+		ensureSession: ensureAnthropicSession,
 		probeSession: probeAnthropicSession,
+		probeSessionIsAuthoritative: true,
 		collect: collectAnthropic,
 	});
 }
