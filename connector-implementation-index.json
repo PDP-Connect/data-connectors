@@ -11722,14 +11722,7 @@
 									"x_pdpp_role": "actor"
 								}
 							},
-							"required": [
-								"post_id",
-								"profile_pic_url",
-								"pk",
-								"id",
-								"user_id",
-								"username"
-							]
+							"required": ["post_id", "user_id", "username"]
 						},
 						"primary_key": ["post_id", "user_id"],
 						"selection": {

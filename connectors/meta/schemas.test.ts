@@ -190,6 +190,16 @@ test("post_likes schema accepts a null picture URL and preserves legacy id field
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("post_likes schema remains compatible with records from before liker parity", () => {
+	assert.ok(
+		postLikesSchema.safeParse({
+			post_id: "3401234567890123456",
+			user_id: "999",
+			username: "liker_one",
+		}).success,
+	);
+});
+
 // ─── following ────────────────────────────────────────────────────────
 
 test("following schema accepts a fully-populated record", () => {

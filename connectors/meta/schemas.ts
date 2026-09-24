@@ -76,9 +76,9 @@ export const postsSchema = z.object({
  */
 export const postLikesSchema = z.object({
 	post_id: igIdSchema,
-	profile_pic_url: z.url().nullable(),
-	pk: igIdSchema,
-	id: igIdSchema,
+	profile_pic_url: z.url().nullable().optional(),
+	pk: igIdSchema.optional(),
+	id: igIdSchema.optional(),
 	user_id: igIdSchema,
 	username: usernameSchema,
 });
