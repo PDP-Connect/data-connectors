@@ -372,7 +372,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Claude (Anthropic)",
 				"brand": {
 					"icon": "icon.svg",
@@ -5009,7 +5009,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/github",
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.1",
+				"version": "0.7.2",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
@@ -8838,7 +8838,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/heb",
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.3.0",
+				"version": "0.3.1",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -14503,7 +14503,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/spotify",
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -14808,7 +14808,10 @@
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "manual_as_of"
 					}
-				]
+				],
+				"reason_display_messages": {
+					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+				}
 			}
 		},
 		{
@@ -17272,7 +17275,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "1.0.0",
+				"version": "0.1.0",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
