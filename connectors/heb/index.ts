@@ -2309,6 +2309,8 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "heb",
 		validateRecord,
+		auth: { kind: "env", required: ["HEB_USERNAME", "HEB_PASSWORD"] },
+		authOptional: true,
 		// H-E-B is fronted by Incapsula, which fingerprints headless Chromium.
 		// Persistent profile keeps cookies + TLS fingerprint warm across runs.
 		browser: { profileName: "heb" },

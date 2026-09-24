@@ -837,28 +837,31 @@ test("two gmail connections run with distinct injected secrets, scoped per run, 
  * complete unattended must say 'needs you to sign in' with a reachable
  * handoff, never 'Setup never completed'."
  *
- * The strongest available form of that guarantee today is to keep the mode
- * from existing at all. `captureRequired: false` means the run-env resolver
- * returns `null`, the child gets no credential env, and the connector falls
- * back to a hand-sign-in path — which is unreachable on the server-side
- * browser that actually runs collection. The owner then sees "Setup never
- * completed" with no action he can take, which is what happened to venmo
- * seven times.
- *
- * There is deliberately NO owner-facing "needs you to sign in" state added
- * here: with venmo flipped, no connector can reach that condition, and adding
- * a state no producer can emit would be dead copy pretending to be a fix. If
- * this guard ever fails, the honest-state work becomes real and must ship
- * WITH the connector that reintroduced the mode — a `required: false` capture
- * is only safe on a deployment where a human can actually reach the browser.
+ * H-E-B is the supported exception: its runtime has an owner-present browser
+ * handoff, and `authOptional` lets that run proceed without saved credentials.
+ * Keep this exception pinned to those connector behaviors so another optional
+ * capture cannot strand an owner on an unattended login page.
  */
-test("(b) no connector may sit in an unattended-incapable capture mode", () => {
+test("(b) only H-E-B may use optional capture because its owner can reach browser sign-in", () => {
 	const optional = Object.keys(STATIC_SECRET_CONNECTOR_REGISTRY).filter(
 		(connectorId) => isStaticSecretCaptureOptional(connectorId),
 	);
+	assert.deepEqual(optional, ["heb"]);
+	const manifest = JSON.parse(readFileSync(manifestPath("heb"), "utf8")) as {
+		setup?: { credential_capture?: { required?: unknown } };
+	};
+	const source = readFileSync(
+		new URL("../../../connectors/heb/index.ts", import.meta.url),
+		"utf8",
+	);
+	assert.equal(manifest.setup?.credential_capture?.required, false);
+	assert.match(source, /authOptional:\s*true/u);
+	assert.match(source, /ensureHebSession/u);
 	assert.deepEqual(
-		optional,
-		[],
-		`these connectors declare credential_capture.required:false, so their runs get NO credential env and park on a login page nobody can reach: ${optional.join(", ")}. Either give the connector a required capture, or ship the owner-facing "needs you to sign in" state with a reachable handoff before landing it.`,
+		buildConnectionScopedSecretEnv("heb", {
+			credentialKind: "username_password",
+			secret: "{}",
+		}),
+		{},
 	);
 });

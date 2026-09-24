@@ -22,9 +22,9 @@
  * seconds, forever.
  *
  * Four connectors (`amazon`, `chase`, `heb`, `chatgpt`) shipped in exactly that
- * state. H-E-B no longer requests saved credentials: its browser sign-in path
- * is the first-run path. The remaining credential-capture connectors are
- * compared here so a missing runtime declaration cannot recur.
+ * state. H-E-B now makes saved credentials optional because first login uses
+ * its owner-present browser handoff. The remaining credential-capture
+ * connectors are compared here so a missing runtime declaration cannot recur.
  *
  * See `src/auto-login/login-credentials.ts` for the credential-naming contract
  * and `scripts/check-no-direct-credential-env.ts` for the sibling gate that
@@ -174,13 +174,14 @@ test("every username/password connector declares an auth block naming its creden
 	);
 });
 
-test("connectors that require saved sign-in pairs declare the right auth fields", () => {
+test("connectors with saved sign-in fields declare the right auth names", () => {
 	// Pinned by name because the general test above protects all other
 	// manifest-declared username/password connectors.
 	const expected: Readonly<Record<string, readonly string[]>> = {
 		amazon: ["AMAZON_USERNAME", "AMAZON_PASSWORD"],
 		chase: ["CHASE_USERNAME", "CHASE_PASSWORD"],
 		chatgpt: ["CHATGPT_USERNAME", "CHATGPT_PASSWORD"],
+		heb: ["HEB_USERNAME", "HEB_PASSWORD"],
 	};
 
 	for (const [connectorKey, names] of Object.entries(expected)) {

@@ -10,7 +10,10 @@ const MANIFEST_PATH = manifestPath("heb");
 
 interface HebManifest {
 	setup?: {
-		credential_capture?: unknown;
+		credential_capture?: {
+			required?: unknown;
+			fields?: readonly { name?: unknown; required?: unknown }[];
+		};
 		modality?: unknown;
 	};
 	version?: unknown;
@@ -23,13 +26,23 @@ interface HebManifest {
 	};
 }
 
-test("heb first-time setup starts in browser login without requiring saved credentials", () => {
+test("heb first-time setup allows browser login with optional saved credentials", () => {
 	const manifest = JSON.parse(
 		readFileSync(MANIFEST_PATH, "utf8"),
 	) as HebManifest;
 	assert.equal(manifest.version, "0.5.3");
-	assert.equal(manifest.setup?.modality, null);
-	assert.equal(manifest.setup?.credential_capture, undefined);
+	assert.equal(manifest.setup?.modality, "static_secret");
+	assert.equal(manifest.setup?.credential_capture?.required, false);
+	assert.deepEqual(
+		manifest.setup?.credential_capture?.fields?.map((field) => [
+			field.name,
+			field.required,
+		]),
+		[
+			["username", false],
+			["password", false],
+		],
+	);
 });
 
 test("heb manifest declares otp alongside manual_action and keeps the posture honest", () => {

@@ -16,7 +16,34 @@
 		}
 	},
 	"setup": {
-		"modality": null
+		"modality": "static_secret",
+		"credential_capture": {
+			"required": false,
+			"kind": "username_password",
+			"label": "Optional H-E-B sign-in details",
+			"description": "You can save both details for automated sign-in and session repair, or leave both blank to sign in in the secure browser. Credentials are stored only for this connection.",
+			"submit_label": "Save optional details and start collection",
+			"fields": [
+				{
+					"name": "username",
+					"label": "H-E-B email or phone",
+					"type": "text",
+					"required": false,
+					"secret": true,
+					"autocomplete": "username",
+					"env": ["HEB_USERNAME"]
+				},
+				{
+					"name": "password",
+					"label": "H-E-B password",
+					"type": "password",
+					"required": false,
+					"secret": true,
+					"autocomplete": "current-password",
+					"env": ["HEB_PASSWORD"]
+				}
+			]
+		}
 	},
 	"capabilities": {
 		"human_interaction": ["manual_action", "otp"],

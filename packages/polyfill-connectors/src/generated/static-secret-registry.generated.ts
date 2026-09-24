@@ -80,6 +80,15 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 		credentialKind: "access_token",
 		secretEnvVars: ["GROUPME_ACCESS_TOKEN"],
 	},
+	heb: {
+		credentialKind: "username_password",
+		captureRequired: false,
+		secretFieldEnvVars: {
+			password: ["HEB_PASSWORD"],
+			username: ["HEB_USERNAME"],
+		},
+		optionalSecretBundleFields: ["username", "password"],
+	},
 	jellyfin: {
 		credentialKind: "username_password",
 		secretFieldEnvVars: {
