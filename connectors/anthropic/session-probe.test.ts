@@ -3,7 +3,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { probeAnthropicSession } from "./index.ts";
+import type { Page } from "playwright";
+import {
+	ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE,
+	ensureAnthropicSession,
+	probeAnthropicSession,
+} from "./index.ts";
 
 function makeArgs(
 	cookies: Array<{ name: string; value: string }>,
@@ -54,3 +59,116 @@ test("live Claude cookie probe leaves the current page alone", async () => {
 	assert.equal(await probeAnthropicSession(args), true);
 	assert.deepEqual(navigations, []);
 });
+
+test("Claude manual login handoff auto-resumes when readiness probe sees a live session", async () => {
+	let readinessProbeCount = 0;
+	const assistance: unknown[] = [];
+	const completions: unknown[] = [];
+	const interactions: unknown[] = [];
+	const handoffPage = makePageWithReadinessPages(() => {
+		readinessProbeCount += 1;
+		return readinessProbeCount >= 2
+			? [{ name: "sessionKey", value: "synthetic" }]
+			: [];
+	});
+
+	await ensureAnthropicSession({
+		assist: (request) => {
+			assistance.push(request);
+			return Promise.resolve("assist-1");
+		},
+		autoProbeIntervalMs: 0,
+		autoProbeWindowMs: 10_000,
+		capture: null,
+		completeAssistance: (id, status, extra) => {
+			completions.push({ extra, id, status });
+			return Promise.resolve();
+		},
+		context: handoffPage.context(),
+		now: () => 0,
+		page: handoffPage,
+		sendInteraction: (request) => {
+			interactions.push(request);
+			return Promise.resolve({ kind: "manual_action", data: {} } as never);
+		},
+	});
+
+	assert.equal(readinessProbeCount, 2);
+	assert.equal(interactions.length, 0);
+	assert.deepEqual(assistance, [
+		{
+			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
+			message: ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE,
+			owner_action: "operate_attachment",
+			progress_posture: "blocked",
+			response_contract: "none",
+			timeout_seconds: 1800,
+		},
+	]);
+	assert.deepEqual(completions, [
+		{
+			extra: {
+				message:
+					"The connector detected the session was ready and continued automatically.",
+			},
+			id: "assist-1",
+			status: "resolved",
+		},
+	]);
+});
+
+test("Claude manual login handoff fails closed when readiness never appears", async () => {
+	const completions: unknown[] = [];
+	const handoffPage = makePageWithReadinessPages(() => []);
+
+	await assert.rejects(
+		ensureAnthropicSession({
+			assist: () => Promise.resolve("assist-1"),
+			autoProbeIntervalMs: 0,
+			autoProbeWindowMs: 0,
+			capture: null,
+			completeAssistance: (id, status, extra) => {
+				completions.push({ extra, id, status });
+				return Promise.resolve();
+			},
+			context: handoffPage.context(),
+			now: () => 0,
+			page: handoffPage,
+			sendInteraction: () =>
+				Promise.resolve({ kind: "manual_action", data: {} } as never),
+		}),
+		/browser_handoff_readiness_timed_out/u,
+	);
+
+	assert.deepEqual(completions, [
+		{
+			extra: {
+				message:
+					"Browser sign-in did not become ready before the handoff timed out.",
+			},
+			id: "assist-1",
+			status: "escalated",
+		},
+	]);
+});
+
+function makePageWithReadinessPages(
+	readinessCookies: () => Array<{ name: string; value: string }>,
+): Page {
+	return makePage(readinessCookies, () => makePage(readinessCookies));
+}
+
+function makePage(
+	cookies: () => Array<{ name: string; value: string }>,
+	newPage?: () => Page,
+): Page {
+	const page = Object.create(null) as Page;
+	page.close = () => Promise.resolve();
+	page.context = () =>
+		({
+			cookies: () => Promise.resolve(cookies()),
+			newPage: () => Promise.resolve(newPage?.() ?? makePage(cookies)),
+		}) as ReturnType<Page["context"]>;
+	page.goto = () => Promise.resolve(null);
+	return page;
+}
