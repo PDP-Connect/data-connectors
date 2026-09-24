@@ -319,18 +319,23 @@ test("parseProject: archived_at present -> is_archived true", () => {
 	assert.equal(parsed?.project.is_archived, true);
 });
 
-test("parseProject: drops the raw detail blob, label, href fields (D3/capability-map dropped)", () => {
+test("parseProject: retains known legacy detail fields and raw docs without IDs", () => {
 	const parsed = parseProject({
 		uuid: "p1",
 		name: "x",
-		label: "Project, x",
-		href: "/project/p1",
-		docs: [],
+		creator: { uuid: "u1", full_name: "Owner", access_token: "discard" },
+		is_private: true,
+		is_starter_project: false,
+		archived_at: "2024-01-02T03:04:05Z",
+		docs: [{ filename: "legacy.md", content: "body", api_key: "discard" }],
 	});
 	assert.ok(parsed);
-	assert.ok(!("label" in parsed.project));
-	assert.ok(!("href" in parsed.project));
-	assert.ok(!("detail" in parsed.project));
+	assert.deepEqual(parsed.project.creator, { uuid: "u1", full_name: "Owner" });
+	assert.equal(parsed.project.is_private, true);
+	assert.equal(parsed.project.is_starter_project, false);
+	assert.equal(parsed.project.archived_at, "2024-01-02T03:04:05Z");
+	assert.deepEqual(parsed.project.raw_docs, [{ filename: "legacy.md", content: "body" }]);
+	assert.equal(parsed.documents.length, 0);
 });
 
 test("parseProject: a project with no uuid/id is dropped", () => {

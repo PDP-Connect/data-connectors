@@ -73,6 +73,11 @@ const PROJECT_RECORD = {
 	update_time: "2024-05-02T14:30:00.000Z",
 	is_archived: false,
 	prompt_template: "You are a helpful assistant for connector work.",
+	creator: null,
+	is_private: null,
+	is_starter_project: null,
+	archived_at: null,
+	raw_docs: [],
 };
 
 const PROJECT_DOCUMENT_RECORD = {

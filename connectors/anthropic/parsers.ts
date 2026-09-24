@@ -273,6 +273,11 @@ export interface ProjectRecord {
 	update_time: string | null;
 	is_archived: boolean | null;
 	prompt_template: PdppSafeText | null;
+	creator: unknown;
+	is_private: boolean | null;
+	is_starter_project: boolean | null;
+	archived_at: string | null;
+	raw_docs: Array<Record<string, string>>;
 	[field: string]: unknown;
 }
 
@@ -328,12 +333,13 @@ export function parseProjectDocument(
  * per legacy normalizeProject), create_time<-created_at, update_time<-
  * updated_at, is_archived<-derived from archived_at, prompt_template<-
  * detail.prompt_template, project_documents<-detail.docs[]. `label`, `href`,
- * and the raw `detail` blob are D3/capability-map-dropped fields and are not
- * carried into either record.
+ * The source preserves known raw detail fields alongside the normalized
+ * values. Unknown project keys are excluded to prevent arbitrary data from
+ * entering the manifest; raw docs retain the legacy detail fields even when
+ * an entry has no id.
  *
- * The legacy export's raw project object IS `detail` (claude-export-
- * ingest.cjs's normalizeProject sets `detail: proj || null` — the whole raw
- * object). `prompt_template` and `docs` are read directly off it.
+ * Desktop exposed the raw project object as `detail`. This stream preserves
+ * the known non-credential fields needed for production cutover.
  */
 export function parseProject(raw: unknown): {
 	project: ProjectRecord;
@@ -376,6 +382,22 @@ export function parseProject(raw: unknown): {
 			// — a definite false, not an unknown, when the key is absent or null.
 			is_archived: raw.archived_at != null,
 			prompt_template: safeText(str(raw.prompt_template), 65_000),
+			creator: isRecord(raw.creator)
+				? {
+					...(str(raw.creator.uuid) !== null ? { uuid: str(raw.creator.uuid)! } : {}),
+					...(str(raw.creator.full_name) !== null ? { full_name: str(raw.creator.full_name)! } : {}),
+				}
+				: null,
+			is_private: bool(raw.is_private),
+			is_starter_project: bool(raw.is_starter_project),
+			archived_at: str(raw.archived_at),
+			raw_docs: docsRaw.filter(isRecord).map((doc) => ({
+				...(str(doc.uuid) !== null ? { uuid: str(doc.uuid)! } : {}),
+				...(str(doc.filename) !== null ? { filename: str(doc.filename)! } : {}),
+				...(str(doc.content) !== null ? { content: str(doc.content)! } : {}),
+				...(str(doc.created_at) !== null ? { created_at: str(doc.created_at)! } : {}),
+				...(str(doc.updated_at) !== null ? { updated_at: str(doc.updated_at)! } : {}),
+			})),
 		},
 		documents,
 	};
