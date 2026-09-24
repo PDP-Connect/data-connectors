@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCollectorConnector } from "@pdpp/collector-runtime";
-import { manifestPath } from "./connector-paths.ts";
+import { connectorEntrypoint, manifestPath } from "./connector-paths.ts";
 import { resolveExecutionRoot } from "./execution-root.ts";
 import {
 	buildConnectionScopedSecretEnv,
@@ -851,7 +851,7 @@ test("(b) only H-E-B may use optional capture because its owner can reach browse
 		setup?: { credential_capture?: { required?: unknown } };
 	};
 	const source = readFileSync(
-		new URL("../../../connectors/heb/index.ts", import.meta.url),
+		connectorEntrypoint("heb"),
 		"utf8",
 	);
 	assert.equal(manifest.setup?.credential_capture?.required, false);
