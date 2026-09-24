@@ -539,7 +539,7 @@ export function parseLegacyEvent(raw: unknown): LegacyEvent | null {
 		case "ReleaseEvent":
 			extras.action = stringValue(payload.action);
 			extras.title =
-				stringValue(release.name) || stringValue(release.tag_name) || null;
+				stringValue(release.name) ?? stringValue(release.tag_name);
 			extras.body = stringValue(release.body)?.slice(0, 280) ?? null;
 			extras.url = stringValue(release.html_url);
 			break;

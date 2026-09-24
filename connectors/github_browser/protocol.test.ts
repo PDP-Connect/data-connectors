@@ -151,8 +151,8 @@ test("collector skips contribution snapshots when any year view is unavailable",
 		const messages: Array<{ type: string }> = [];
 		await collectGitHubBrowser(
 			{
-				emit: async (message) => messages.push({ type: message.type }),
-				emitRecord: async (_stream, record) => records.push(record),
+				emit: async (message) => { messages.push({ type: message.type }); },
+				emitRecord: async (_stream, record) => { records.push(record); },
 				progress: async () => {},
 				requested: new Set(["contributions"]),
 				state: {},
