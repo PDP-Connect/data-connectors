@@ -626,7 +626,11 @@ async function scrapeDialogListItems(
 		if (!dialog) {
 			return { items: [], reached: false };
 		}
-		const items = dialog.querySelectorAll('[role="list"] [role="listitem"]');
+		const list = dialog.querySelector('[role="list"]');
+		if (!list) {
+			return { items: [], reached: false };
+		}
+		const items = list.querySelectorAll('[role="listitem"]');
 		return {
 			items: Array.from(items)
 				.map((el) => (el.textContent ?? "").trim())
@@ -750,19 +754,33 @@ export async function scrapeTargetingCategories(
 	}
 	await delay(1500);
 
-	await page.evaluate(() => {
+	const clickedViewAll = await page.evaluate(() => {
 		const btns = document.querySelectorAll('button, [role="button"]');
 		for (const btn of Array.from(btns)) {
 			if ((btn.textContent ?? "").trim() === "View all") {
 				(btn as HTMLElement).click();
-				break;
+				return true;
 			}
 		}
+		return false;
 	});
 	await delay(500);
+	const viewAllExpanded =
+		!clickedViewAll ||
+		(await page.evaluate(() => {
+			const btns = document.querySelectorAll('button, [role="button"]');
+			return !Array.from(btns).some(
+				(btn) => (btn.textContent ?? "").trim() === "View all",
+			);
+		}));
 
 	const categories = await page.evaluate(() => {
-		const items = document.querySelectorAll('[role="listitem"]');
+		const dialog = document.querySelector('[role="dialog"]');
+		const list = dialog?.querySelector('[role="list"]');
+		if (!list) {
+			return { items: [], reached: false };
+		}
+		const items = list.querySelectorAll('[role="listitem"]');
 		const seen = new Set<string>();
 		const out: Array<{ description: string | null; name: string }> = [];
 		for (const item of Array.from(items)) {
@@ -791,10 +809,14 @@ export async function scrapeTargetingCategories(
 			seen.add(name);
 			out.push({ description: texts[1] ?? null, name });
 		}
-		return out;
+		return { items: out, reached: true };
 	});
 	await closeDialog(page);
-	return { items: categories, reached: true, surface: "targeting_categories" };
+	return {
+		items: categories.items,
+		reached: categories.reached && viewAllExpanded,
+		surface: "targeting_categories",
+	};
 }
 
 // ─── Collect ────────────────────────────────────────────────────────────

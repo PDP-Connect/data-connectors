@@ -50,8 +50,10 @@ type ScriptedPostsPage = { json: unknown; status: number } | null;
  *  scroll-triggered `evaluate` call. */
 function makeFakePage(options: {
 	categoriesAvailable?: boolean;
+	categoryDestinationReached?: boolean;
 	categoryRows?: Array<{ description: string | null; name: string }>;
 	dialogScrapes?: string[][];
+	dialogReached?: boolean[];
 	fetchScript: Record<string, ScriptedFetch[]>;
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
@@ -59,6 +61,7 @@ function makeFakePage(options: {
 	const calls: string[] = [];
 	const cursors: Record<string, number> = {};
 	const dialogQueue = [...(options.dialogScrapes ?? [])];
+	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 
@@ -140,7 +143,10 @@ function makeFakePage(options: {
 				return Promise.resolve(undefined);
 			}
 			if (fnSource.includes("Removed categories")) {
-				return Promise.resolve(options.categoryRows ?? []);
+				return Promise.resolve({
+					items: options.categoryRows ?? [],
+					reached: options.categoryDestinationReached !== false,
+				});
 			}
 			if (
 				fnSource.includes("querySelectorAll") &&
@@ -149,7 +155,7 @@ function makeFakePage(options: {
 				const items = dialogQueue.shift();
 				return Promise.resolve({
 					items: items ?? [],
-					reached: items !== undefined,
+					reached: dialogReachedQueue.shift() ?? items !== undefined,
 				});
 			}
 			return Promise.resolve(undefined);
@@ -672,6 +678,94 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 	);
 	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
 	assert.equal(skip.reason, "ads_surfaces_unavailable");
+	assert.deepEqual(skip.diagnostics, {
+		missing_surfaces: ["targeting_categories"],
+	});
+});
+
+test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [],
+		dialogReached: [false, true],
+		dialogScrapes: [[], []],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested: new Map([["ads", { name: "ads" }]]),
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	const skip = harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT" && m.stream === "ads",
+	);
+	assert.ok(skip, "a dialog without its list must not count as a reached surface");
+	assert.deepEqual(skip.diagnostics, { missing_surfaces: ["advertisers"] });
+});
+
+test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryDestinationReached: false,
+		categoryRows: [],
+		dialogScrapes: [[], []],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested: new Map([["ads", { name: "ads" }]]),
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	const skip = harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT" && m.stream === "ads",
+	);
+	assert.ok(skip, "clicking through without a destination list must not count as reached");
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
 	});
