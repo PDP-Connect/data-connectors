@@ -1455,25 +1455,50 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
-	options: { recoveryOnly?: boolean; wantsItems: boolean },
+	options: {
+		recoveryOnly?: boolean;
+		wantsItems: boolean;
+		wantsNutrition?: boolean;
+	},
 ): Promise<{
 	recovered: number;
 	stoppedWithPending: boolean;
 	suppressForward: boolean;
 }> {
 	if (!options.wantsItems) {
+		const suppressForward = options.recoveryOnly === true;
+		if (suppressForward && options.wantsNutrition) {
+			await emitNutritionCoverageIncomplete(
+				deps,
+				"H-E-B nutrition was not collected because recovery-only mode suppressed the order-history scan.",
+				{ recovery_only: true },
+			);
+		}
 		return {
 			recovered: 0,
 			stoppedWithPending: false,
-			suppressForward: options.recoveryOnly === true,
+			suppressForward,
 		};
 	}
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
 	const detailBudgetExhausted =
 		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
+	const suppressForward =
+		options.recoveryOnly === true || detailBudgetExhausted;
+	if (suppressForward && options.wantsNutrition) {
+		await emitNutritionCoverageIncomplete(
+			deps,
+			"H-E-B nutrition was not collected because order-item recovery suppressed the order-history scan.",
+			{
+				detail_budget_exhausted: detailBudgetExhausted,
+				detail_attempts: flags.detailAttempts,
+				recovery_only: options.recoveryOnly === true,
+			},
+		);
+	}
 	return {
 		...recovery,
-		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+		suppressForward,
 	};
 }
 
@@ -2438,7 +2463,11 @@ if (isMainModule(import.meta.url)) {
 						sendInteraction,
 					},
 					flags,
-					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
+					{
+						recoveryOnly: ctx.recoveryOnly === true,
+						wantsItems,
+						wantsNutrition,
+					},
 				);
 			if (gapRecovery.stoppedWithPending) {
 				await progress(

@@ -2495,7 +2495,7 @@ test("recoverPendingOrderItemDetailGaps: a legacy gap with no order_date does NO
 });
 
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses the forward walk", async () => {
-	const { deps } = makeRecordingDeps();
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const flags = makeRunFlags();
 	const page = makePageStub({ content: DETAIL_HTML });
 
@@ -2510,7 +2510,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 			waitForHydration: deps.waitForHydration,
 		},
 		flags,
-		{ recoveryOnly: true, wantsItems: true },
+		{ recoveryOnly: true, wantsItems: true, wantsNutrition: true },
 	);
 
 	assert.equal(result.recovered, 1);
@@ -2518,6 +2518,55 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 		result.suppressForward,
 		true,
 		"recovery_only must suppress the forward scan even after recovering",
+	);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "nutrition" &&
+				message.reason === "nutrition_source_coverage_incomplete",
+		),
+		"nutrition must be marked incomplete before the recovery-only return",
+	);
+	assert.equal(
+		emitted.filter((record) => record.stream === "nutrition").length,
+		0,
+		"recovery-only must not fabricate nutrition rows",
+	);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget skips nutrition", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const flags = makeRunFlags({ detailAttempts: 100 });
+
+	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		NEVER_CALLED_PAGE,
+		{
+			detailGaps: [],
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		flags,
+		{ recoveryOnly: false, wantsItems: true, wantsNutrition: true },
+	);
+
+	assert.equal(result.suppressForward, true);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "nutrition" &&
+				message.reason === "nutrition_source_coverage_incomplete",
+		),
+		"nutrition must be marked incomplete when the 100-detail budget suppresses the forward scan",
+	);
+	assert.equal(
+		emitted.filter((record) => record.stream === "nutrition").length,
+		0,
+		"budget exhaustion must not fabricate nutrition rows",
 	);
 });
 
