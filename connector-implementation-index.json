@@ -10371,7 +10371,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/icloud-notes",
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -11571,7 +11571,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/meta",
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.0",
+				"version": "0.4.1",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18688,7 +18688,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/whoop",
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "WHOOP",
 				"runtime_requirements": {
 					"bindings": {

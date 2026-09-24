@@ -13,6 +13,7 @@ import {
 	ensureWhoopSession,
 	makeWhoopPageFetch,
 	parseFetchTextForTest,
+	probeWhoopReadinessPage,
 	type WhoopFetch,
 	whoopAllowsInteractiveAuthRepair,
 } from "./index.ts";
@@ -239,6 +240,23 @@ test("manual login re-probes source truth and unattended repair does not prompt"
 	assert.equal(
 		whoopAllowsInteractiveAuthRepair({ PDPP_RUN_TRIGGER_KIND: "scheduled" }),
 		false,
+	);
+});
+
+test("WHOOP readiness probe treats unauthenticated responses as not ready only", async () => {
+	let status = 401;
+	const page = {
+		goto: () => Promise.resolve(null),
+		evaluate: () => Promise.resolve({ status, json: null }),
+	} as unknown as Page;
+
+	assert.equal(await probeWhoopReadinessPage(page), null);
+	status = 403;
+	assert.equal(await probeWhoopReadinessPage(page), null);
+	status = 429;
+	await assert.rejects(
+		probeWhoopReadinessPage(page),
+		/whoop_rate_limited/u,
 	);
 });
 
