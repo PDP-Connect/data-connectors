@@ -2548,14 +2548,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/collector-definition-protocol-capabilities.test.ts",
-			line: 106,
+			line: 108,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "readConnectorSource(): test drives/asserts an ordered per-case side effect",
 		},
 		{
 			path: "src/collector-definition-protocol-capabilities.test.ts",
-			line: 130,
+			line: 132,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "readConnectorSource(): test drives/asserts an ordered per-case side effect",
