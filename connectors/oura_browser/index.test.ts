@@ -7,7 +7,7 @@ import test from "node:test";
 import type { Page } from "playwright";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import type { BrowserCollectContext, EmittedMessage, RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { validateRecord } from "../oura/schemas.ts";
+import { validateRecord } from "./schemas.ts";
 import { collectOuraBrowser, ensureOuraSession, initialStartDate } from "./index.ts";
 
 const HOME = "https://cloud.ouraring.com/";
@@ -133,7 +133,7 @@ test("all three streams produce schema-valid UUID records and day checkpoints", 
   assert.ok(requests.every((url) => url.includes(`start=${today}`) && url.includes(`end=${today}`)));
 });
 
-test("sleep preserves daily score-only days, score identity and timestamp, and awake time", async () => {
+test("browser schema accepts +00:00 timestamps on matched and score-only sleep rows", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/sleep-score-parity.json", import.meta.url), "utf8")) as {
     sleeps: Array<Record<string, unknown>>;
     daily_sleeps: Array<Record<string, unknown>>;

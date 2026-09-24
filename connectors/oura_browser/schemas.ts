@@ -10,7 +10,7 @@ const browserSleepSchema = sleepSchema.extend({
 	record_type: z.enum(["sleep_session", "daily_score"]),
 	awake_time: z.number().nullable(),
 	daily_sleep_id: z.string().uuid().nullable(),
-	daily_sleep_timestamp: z.string().datetime().nullable(),
+	daily_sleep_timestamp: z.string().datetime({ offset: true }).nullable(),
 });
 
 export const SCHEMAS: Record<string, Zod.ZodTypeAny> = {
