@@ -12528,7 +12528,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/oura-browser",
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -12560,15 +12560,19 @@
 				"streams": [
 					{
 						"name": "sleep",
-						"description": "Daily sleep sessions. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"description": "Daily sleep sessions and sleep scores, including score-only days. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
 						"display": {
 							"label": "Your sleep sessions",
-							"detail": "Per-night: total sleep duration, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing."
+							"detail": "Per-night: total sleep duration, awake time, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing, and daily score contributors."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"record_type": {
+									"type": "string",
+									"enum": ["sleep_session", "daily_score"]
+								},
 								"id": {
 									"type": "string"
 								},
@@ -12616,6 +12620,16 @@
 								"sleep_score": {
 									"type": ["integer", "null"],
 									"x_pdpp_role": "amount"
+								},
+								"daily_sleep_id": {
+									"type": ["string", "null"]
+								},
+								"daily_sleep_timestamp": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"awake_time": {
+									"type": ["integer", "null"]
 								},
 								"average_breath": {
 									"type": ["number", "null"]
