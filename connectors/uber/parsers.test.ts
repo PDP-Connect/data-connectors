@@ -247,14 +247,14 @@ test("receiptRecord: builds a full detail record from fare_breakdown lines", () 
 	]);
 });
 
-test("receiptRecord: falls back to null fare_total when no fare_total line exists", () => {
+test("receiptRecord: uses the hydrated trip fare when the receipt has no total line", () => {
 	const record = receiptRecord("trip-2", [
 		{ amountRaw: "$2.00", label: "Booking Fee", slug: "booking_fee" },
-	]);
+	], "$42.00");
 	assert.ok(record);
-	assert.equal(record.fare_total, null);
-	assert.equal(record.fare_total_cents, null);
-	assert.equal(record.currency, null);
+	assert.equal(record.fare_total, "$42.00");
+	assert.equal(record.fare_total_cents, 4200);
+	assert.equal(record.currency, "USD");
 	assert.deepEqual(record.fare_breakdown, [
 		{ label: "Booking Fee", amount_cents: 200 },
 	]);

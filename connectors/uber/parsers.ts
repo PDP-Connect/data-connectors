@@ -225,13 +225,17 @@ export function parseFareBreakdown(
 export function receiptRecord(
 	tripId: string,
 	fareBreakdown: UberFareBreakdownLine[],
+	tripFare?: string | null,
 ): RecordData | null {
 	if (fareBreakdown.length === 0) {
 		return null;
 	}
 	const totalLine = fareBreakdown.find((l) => l.slug === "fare_total");
 	const breakdownLines = fareBreakdown.filter((l) => l.slug !== "fare_total");
-	const fareRaw = totalLine?.amountRaw ?? null;
+	// GetReceipt often exposes only itemized lines. GetTrip's fare is the
+	// same headline value the legacy trip-detail page exposed, so use it when
+	// the receipt HTML has no explicit total line.
+	const fareRaw = totalLine?.amountRaw ?? tripFare ?? null;
 	return {
 		// The runtime's emit gate requires a literal `id` field regardless of
 		// the manifest's declared `primary_key` (see connector-runtime.ts's

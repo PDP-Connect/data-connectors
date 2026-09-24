@@ -188,16 +188,23 @@ test("collectAllStreams: receipts requested emits both streams from GetTrip + Ge
 	assert.equal(calls.filter((c) => c.startsWith("GetReceipt")).length, 2);
 });
 
-test("collectAllStreams: receipts-only (trips not requested) fetches GetReceipt but not GetTrip, no trips RECORDs", async () => {
+test("collectAllStreams: receipts-only hydrates GetTrip for its headline fare without emitting trips", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
-		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+		getTrip: {
+			"trip-1": { body: getTripBody({ status: "COMPLETED", fare: "$10.00" }) },
+		},
+		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$3.00")) } },
 	});
 	const { ctx, emitted } = makeCtx(["receipts"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 0);
-	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 1);
-	assert.equal(calls.filter((c) => c.startsWith("GetTrip")).length, 0);
+	const receipts = emitted.filter((r) => r.stream === "receipts");
+	assert.equal(receipts.length, 1);
+	assert.equal(receipts[0]?.data.fare_total, "$10.00");
+	assert.equal(receipts[0]?.data.fare_total_cents, 1000);
+	assert.equal(receipts[0]?.data.currency, "USD");
+	assert.equal(calls.filter((c) => c.startsWith("GetTrip")).length, 1);
 	assert.equal(calls.filter((c) => c.startsWith("GetReceipt")).length, 1);
 });
 
