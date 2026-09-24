@@ -613,9 +613,9 @@ if (isMainModule(import.meta.url)) {
 							item.name,
 						);
 						if (typeof facts === "string") {
-							throw new Error(
-								`Whole Foods nutrition lookup for product ${item.productId} (${item.name}) was incomplete: ${facts}`,
-							);
+							if (facts === "blocked") nutritionCoverage.blocked += 1;
+							else if (facts === "error") nutritionCoverage.error += 1;
+							else nutritionCoverage.notFound += 1;
 						} else if (facts.source === "usda_fdc")
 							nutritionCoverage.foundUSDA += 1;
 						else nutritionCoverage.found += 1;

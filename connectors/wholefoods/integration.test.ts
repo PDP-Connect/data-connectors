@@ -207,6 +207,24 @@ test("observed blocked lookup emits a blocked nutrition row when USDA finds no m
 	}
 });
 
+test("legacy nutrition outcome rows remain valid for not_found, error, and blocked", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	for (const source of ["not_found", "error", "blocked"] as const) {
+		await harness.emitRecord(
+			"nutrition",
+			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", source),
+		);
+	}
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.source),
+		["not_found", "error", "blocked"],
+	);
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.calories),
+		[null, null, null],
+	);
+});
+
 test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>
