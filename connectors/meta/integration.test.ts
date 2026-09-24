@@ -24,7 +24,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams } from "./index.ts";
+import { collectAllStreams, scrapeAdvertisers } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -55,16 +55,34 @@ function makeFakePage(options: {
 	categoryRows?: Array<{ description: string | null; name: string }>;
 	dialogScrapes?: string[][];
 	dialogReached?: boolean[];
+	delayFirstDialogItems?: boolean;
+	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
-}): { calls: string[]; page: Page } {
+}): {
+	calls: string[];
+	page: Page;
+	waitConditions: string[];
+	waitRejections: string[];
+	waitTimeouts: number[];
+} {
 	const calls: string[] = [];
+	const waitConditions: string[] = [];
+	const waitRejections: string[] = [];
+	const waitTimeouts: number[] = [];
 	const cursors: Record<string, number> = {};
 	const dialogQueue = [...(options.dialogScrapes ?? [])];
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
+	let adsListWait = 0;
+	let dialogScrapeCount = 0;
+	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
+	const resolveReadiness = (ready: boolean): Promise<unknown> =>
+		ready
+			? Promise.resolve(true)
+			: Promise.reject(new Error("Timeout while waiting for fake DOM"));
 
 	const resolveNextPostsPage = (): void => {
 		const next = pendingPostsResolve;
@@ -98,6 +116,84 @@ function makeFakePage(options: {
 			new Promise((resolve) => {
 				pendingPostsResolve = resolve;
 			}),
+		waitForFunction: (
+			condition: unknown,
+			_arg?: unknown,
+			waitOptions?: { timeout?: number },
+		): Promise<unknown> => {
+			const source = String(condition);
+			waitConditions.push(source);
+			if (waitOptions?.timeout !== undefined) {
+				waitTimeouts.push(waitOptions.timeout);
+			}
+			const readiness = (ready: boolean): Promise<unknown> => {
+				if (!ready) {
+					waitRejections.push(source);
+				}
+				return resolveReadiness(ready);
+			};
+			if (source.includes("Manage info")) {
+				return readiness(options.categoriesAvailable === true);
+			}
+			if (source.includes("Categories used to reach you")) {
+				return readiness(options.categoriesAvailable === true);
+			}
+			if (source.includes("View all")) {
+				return readiness(true);
+			}
+			if (source.includes("advertiser")) {
+				return readiness(true);
+			}
+			if (
+				source.includes('[role="dialog"] [role="list"]') &&
+				!source.includes('[role="listitem"]')
+			) {
+				const index = adsListWait++;
+				if (index < 2) {
+					const reached = dialogReachedQueue[0];
+					const ready = reached ?? dialogQueue[0] !== undefined;
+					if (!ready) {
+						// A timed-out surface is not scraped, so consume its scripted
+						// slot here to keep the next surface aligned with the UI flow.
+						dialogQueue.shift();
+						dialogReachedQueue.shift();
+					}
+					return readiness(ready);
+				}
+				return readiness(options.categoryDestinationReached !== false);
+			}
+			if (
+				source.includes('[role="dialog"] [role="list"]') &&
+				source.includes('[role="listitem"]')
+			) {
+				const index = adsListWait - 1;
+				const ready =
+					index < 2
+						? (dialogQueue[0]?.some((item) => item.trim().length > 0) ?? false)
+						: (options.categoryRows?.length ?? 0) > 0;
+				if (index === 0 && ready && options.delayFirstDialogItems) {
+					return new Promise((resolve) => {
+						setTimeout(() => {
+							firstDialogItemsReady = true;
+							resolve(true);
+						}, 5);
+					});
+				}
+				if (ready) {
+					return readiness(true);
+				}
+				if (options.waitEmptySettle) {
+					return new Promise((_, reject) => {
+						setTimeout(
+							() => reject(new Error("Timeout while waiting for fake DOM")),
+							waitOptions?.timeout ?? 0,
+						);
+					});
+				}
+				return readiness(false);
+			}
+			return readiness(true);
+		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
 			if (fnSource.includes("scrollTo")) {
@@ -153,17 +249,24 @@ function makeFakePage(options: {
 				fnSource.includes("querySelectorAll") &&
 				fnSource.includes("listitem")
 			) {
-				const items = dialogQueue.shift();
+				const items = dialogQueue[0];
+				if (dialogScrapeCount++ === 0 && !firstDialogItemsReady) {
+					return Promise.resolve({ items: [], reached: true });
+				}
+				dialogQueue.shift();
 				return Promise.resolve({
 					items: items ?? [],
 					reached: dialogReachedQueue.shift() ?? items !== undefined,
 				});
 			}
+			if (fnSource.includes('[role="dialog"] [role="list"]')) {
+				return Promise.resolve(true);
+			}
 			return Promise.resolve(undefined);
 		},
 	} as unknown as Page;
 
-	return { calls, page };
+	return { calls, page, waitConditions, waitRejections, waitTimeouts };
 }
 
 const WEB_INFO_USER = {
@@ -550,7 +653,7 @@ test("collectAllStreams: following hitting the page ceiling emits an honest SKIP
 
 test("collectAllStreams: ads stream merges advertisers/topics/categories with kind discriminator", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page } = makeFakePage({
+	const { page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
@@ -586,6 +689,18 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
 	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
+	assert.equal(waitConditions.length, 9);
+	assert.ok(
+		waitConditions.some((condition) => condition.includes("advertiser")),
+	);
+	assert.ok(
+		waitConditions.some((condition) => condition.includes("Manage info")),
+	);
+	assert.ok(
+		waitConditions.some((condition) =>
+			condition.includes("Categories used to reach you"),
+		),
+	);
 	assert.equal(harness.skipped.length, 0);
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
@@ -671,9 +786,44 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 	);
 });
 
+test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
+	const { page, waitConditions } = makeFakePage({
+		delayFirstDialogItems: true,
+		dialogScrapes: [["Acme Corp"]],
+		fetchScript: {},
+	});
+
+	assert.deepEqual(await scrapeAdvertisers(page), {
+		items: ["Acme Corp"],
+		reached: true,
+		surface: "advertisers",
+	});
+	assert.ok(
+		waitConditions.some((condition) => condition.includes('[role="listitem"]')),
+		"the scrape must wait for list items after the dialog list mounts",
+	);
+});
+
+test("scrapeAdvertisers preserves a genuine empty list after the settle window", async () => {
+	const { page, waitTimeouts } = makeFakePage({
+		dialogScrapes: [[]],
+		fetchScript: {},
+		waitEmptySettle: true,
+	});
+	const startedAt = Date.now();
+
+	assert.deepEqual(await scrapeAdvertisers(page), {
+		items: [],
+		reached: true,
+		surface: "advertisers",
+	});
+	assert.ok(Date.now() - startedAt >= 2_500);
+	assert.ok(waitTimeouts.includes(2_500));
+});
+
 test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page } = makeFakePage({
+	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
@@ -734,6 +884,10 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
 	});
+	assert.ok(
+		waitRejections.some((condition) => condition.includes("Manage info")),
+		"an unavailable Manage info tab must reject its Playwright-style wait",
+	);
 });
 
 test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
