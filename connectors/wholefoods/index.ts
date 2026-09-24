@@ -67,13 +67,7 @@ const NAV_SETTLE_MS = 2500;
 const POLITE_DELAY_MS = 800;
 const MAX_SEARCH_PAGES = 50;
 const USDA_MIN_TEXT_SCORE = 0.4;
-// Per-run cap on nutrition lookups (wholefoodsmarket.com product-page
-// navigations + USDA FDC requests). Nutrition is best-effort enrichment, not
-// core scope (D8) — a run with hundreds of unique products should not spend
-// hundreds of extra navigations/requests polling two external sites every
-// run. A capped run reports its coverage (considered vs. looked-up) via
-// PROGRESS rather than silently truncating.
-const MAX_NUTRITION_LOOKUPS_PER_RUN = 25;
+const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
 
 const AMAZON_ORDER_HISTORY_URL = "https://www.amazon.com/gp/css/homepage.html";
 const AMAZON_SEARCH_BASE =
@@ -93,26 +87,30 @@ function wholeFoodsSearchUrl(page: number): string {
 	return `${AMAZON_SEARCH_BASE}&page=${page}`;
 }
 
-/** Navigate, then wait for a content-ready signal before treating the page
- *  as settled — best-effort: a page that never matches still falls through
- *  to the fixed politeDelay rather than hanging on waitForSelector's own
- *  timeout. */
+/** Navigation and a known page-ready signal must succeed before parsing. */
 async function navigateAndSettle(
 	page: Page,
 	url: string,
 	readySelector?: string,
-): Promise<void> {
-	await page
-		.goto(url, { timeout: NAV_TIMEOUT_MS, waitUntil: "domcontentloaded" })
-		.catch((): undefined => undefined);
+	inspectHttpError = false,
+): Promise<number | null> {
+	const response = await page.goto(url, {
+		timeout: NAV_TIMEOUT_MS,
+		waitUntil: "domcontentloaded",
+	});
+	if (response && !response.ok() && !inspectHttpError) {
+		throw new Error(
+			`Whole Foods navigation failed with HTTP ${response.status()}`,
+		);
+	}
 	if (readySelector) {
-		await page
-			.locator(readySelector)
-			.first()
-			.waitFor({ state: "attached", timeout: NAV_READY_WAIT_MS })
-			.catch((): undefined => undefined);
+		await page.locator(readySelector).first().waitFor({
+			state: "attached",
+			timeout: NAV_READY_WAIT_MS,
+		});
 	}
 	await politeDelay(NAV_SETTLE_MS);
+	return response?.status() ?? null;
 }
 
 // ─── Profile ────────────────────────────────────────────────────────────
@@ -152,7 +150,18 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 			ORDERS_PAGE_READY_SELECTOR,
 		);
 		const html = await page.content();
+		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
+			throw new Error("Whole Foods order search was blocked or signed out");
+		}
 		const { hasNextPage, stubs: pageStubs } = parseOrderSearchPageDom(html);
+		if (
+			pageStubs.length === 0 &&
+			!/no-orders|\b(?:0|no)\s+(?:orders|results)\b/i.test(html)
+		) {
+			throw new Error(
+				"Whole Foods order search returned no recognizable results or empty-state evidence",
+			);
+		}
 		let sawNewOrder = false;
 		for (const stub of pageStubs) {
 			if (seen.has(stub.orderId)) {
@@ -162,7 +171,17 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 			stubs.push(stub);
 			sawNewOrder = true;
 		}
-		if (!hasNextPage || !sawNewOrder) {
+		if (hasNextPage && !sawNewOrder) {
+			throw new Error(
+				"Whole Foods order pagination repeated without new orders",
+			);
+		}
+		if (hasNextPage && pageNum === MAX_SEARCH_PAGES) {
+			throw new Error(
+				"Whole Foods order search exceeded the page limit before reaching the end",
+			);
+		}
+		if (!hasNextPage) {
 			break;
 		}
 		await politeDelay(POLITE_DELAY_MS);
@@ -182,13 +201,15 @@ function buildOrderRecord(
 		const qty = item.quantity ?? 1;
 		return cents === null ? sum : sum + Math.round(cents * qty);
 	}, 0);
+	const hasCompletePrices =
+		items.length > 0 && items.every((item) => item.unitPriceDollars !== null);
 	return {
 		id: stub.orderId,
 		item_count: items.length > 0 ? items.length : null,
 		order_date: parseOrderDateIso(orderDateRaw ?? stub.orderDateRaw),
 		order_url: stub.orderUrl,
-		status: "Completed",
-		total_cents: items.length > 0 ? totalCents : null,
+		status: null,
+		total_cents: hasCompletePrices ? totalCents : null,
 	};
 }
 
@@ -199,9 +220,12 @@ function buildOrderItemRecord(
 	// Amazon ASINs are globally unique per product but not per order line, so
 	// the item id is the (order, product) pair — mirrors connectors/amazon's
 	// order_items id shape.
-	const id = item.productId
-		? `${orderId}#${item.productId}`
-		: `${orderId}#${item.name}`;
+	if (!item.productId) {
+		throw new Error(
+			`Whole Foods order ${orderId} has an item without a source product ASIN`,
+		);
+	}
+	const id = `${orderId}#${item.productId}`;
 	return {
 		id,
 		image_url: item.imageUrl,
@@ -233,15 +257,13 @@ async function usdaSearch(
 		url.searchParams.set(key, value);
 	}
 	url.searchParams.set("api_key", apiKey);
-	const res = await fetch(url, {
-		signal: AbortSignal.timeout(10_000),
-	}).catch((): null => null);
-	if (!res || !res.ok) {
-		return [];
+	const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+	if (!res.ok) {
+		throw new Error(`USDA nutrition lookup failed with HTTP ${res.status}`);
 	}
-	const json: unknown = await res.json().catch((): null => null);
+	const json: unknown = await res.json();
 	if (!isUsdaSearchResponse(json) || !Array.isArray(json.foods)) {
-		return [];
+		throw new Error("USDA nutrition lookup returned an invalid response");
 	}
 	return json.foods;
 }
@@ -283,43 +305,120 @@ async function lookupUsdaNutrition(
 	return null;
 }
 
-/** Try the Whole Foods product page first; fall back to USDA FDC when the
- *  product page has no nutrition evidence AND a USDA key is configured.
- *  `usdaApiKey` is undefined when the connection has no `USDA_API_KEY`
- *  credential and no default is configured — see index.ts's `auth` block
- *  (optional, via `authOptional: true`) and manifest `setup` — in which case
- *  the public DEMO_KEY (rate-limited but functional) is used, matching the
- *  legacy connector's default. */
+/** Try the Whole Foods page first, then USDA FDC. A successful USDA match
+ *  can supply facts after a blocked or failed Whole Foods page. Otherwise
+ *  retain the observed failure; only confirmed product/no-results pages
+ *  plus an empty USDA search produce not_found. The optional API key falls
+ *  back to DEMO_KEY at the collect call site, matching the legacy default.
+ *  Each result becomes one product-keyed nutrition record. */
+type NutritionOutcome = NutritionFacts | "not_found" | "error" | "blocked";
+
+function isBlockedPage(html: string): boolean {
+	return /(?:validateCaptcha|captchacharacters|Sorry, we just need to make sure|<title>[^<]*(?:robot|captcha|blocked|denied)[^<]*<\/title>)/i.test(
+		html,
+	);
+}
+
+function hasProductPageEvidence(html: string): boolean {
+	return /"@type"\s*:\s*"Product"|itemtype=["'][^"']*schema\.org\/Product|data-testid=["']product-detail/i.test(
+		html,
+	);
+}
+
 async function lookupNutritionForProduct(
 	page: Page,
 	usdaApiKey: string,
 	name: string,
-): Promise<NutritionFacts | null> {
+): Promise<NutritionOutcome> {
 	const query = cleanProductName(name);
-	if (query.length >= 3) {
-		await navigateAndSettle(
-			page,
-			`https://www.wholefoodsmarket.com/search?text=${encodeURIComponent(query)}`,
-		);
-		const searchHtml = await page.content();
-		const productUrl = parseWholeFoodsSearchResultDom(searchHtml);
-		if (productUrl) {
-			await navigateAndSettle(page, productUrl);
-			const productHtml = await page.content();
-			const fromWholeFoods = parseWholeFoodsProductPageDom(productHtml);
-			if (fromWholeFoods) {
-				return fromWholeFoods;
+	let sourceOutcome: "not_found" | "error" | "blocked" = "error";
+	try {
+		if (query.length >= 3) {
+			const searchStatus = await navigateAndSettle(
+				page,
+				`${WHOLE_FOODS_ORIGIN}/search?text=${encodeURIComponent(query)}`,
+				undefined,
+				true,
+			);
+			const searchHtml = await page.content();
+			if (isBlockedPage(searchHtml)) {
+				sourceOutcome = "blocked";
+			} else if (searchStatus !== null && searchStatus >= 400) {
+				sourceOutcome = "error";
+			} else {
+				const productUrl = parseWholeFoodsSearchResultDom(searchHtml);
+				if (productUrl) {
+					const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
+					if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
+						throw new Error(
+							"Whole Foods search returned a non-Whole-Foods product URL",
+						);
+					}
+					const productStatus = await navigateAndSettle(
+						page,
+						resolvedUrl.href,
+						undefined,
+						true,
+					);
+					const productHtml = await page.content();
+					if (isBlockedPage(productHtml)) {
+						sourceOutcome = "blocked";
+					} else if (productStatus !== null && productStatus >= 400) {
+						sourceOutcome = "error";
+					} else {
+						const finalUrl = new URL(page.url());
+						if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
+							throw new Error(
+								"Whole Foods product navigation left the trusted origin",
+							);
+						}
+						const facts = parseWholeFoodsProductPageDom(productHtml);
+						if (facts) return facts;
+						sourceOutcome = hasProductPageEvidence(productHtml)
+							? "not_found"
+							: "error";
+					}
+				} else if (
+					/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
+						searchHtml,
+					)
+				) {
+					sourceOutcome = "not_found";
+				}
 			}
 		}
+	} catch {
+		sourceOutcome = "error";
 	}
-	return lookupUsdaNutrition(usdaApiKey, name);
+	try {
+		return (await lookupUsdaNutrition(usdaApiKey, name)) ?? sourceOutcome;
+	} catch {
+		return sourceOutcome === "blocked" ? "blocked" : "error";
+	}
 }
 
 function buildNutritionRecord(
 	productId: string,
 	name: string,
-	facts: NutritionFacts,
+	facts: NutritionOutcome,
 ): NutritionRecord {
+	if (typeof facts === "string") {
+		return {
+			calories: null,
+			carbs_g: null,
+			confidence: "low",
+			fat_g: null,
+			fiber_g: null,
+			name,
+			product_id: productId,
+			protein_g: null,
+			serving_size: null,
+			servings_per_container: null,
+			sodium_mg: null,
+			source: facts,
+			sugar_g: null,
+		};
+	}
 	return {
 		calories: facts.calories,
 		carbs_g: facts.carbsG,
@@ -421,13 +520,16 @@ if (isMainModule(import.meta.url)) {
 			});
 
 			const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
-			// `consideredProductIds` is every unique product id this run's orders
-			// referenced (the honest denominator); `lookedUpProductIds` is the
-			// capped subset actually looked up (the numerator). Reported as
-			// PROGRESS, not a record — D3: envelope/coverage counters are run
-			// evidence, not entity data.
+			// Every source-backed item is considered. A record for each product
+			// makes the legacy coverage counts derivable from outcome rows.
 			const consideredProductIds = new Set<string>();
-			const lookedUpProductIds = new Set<string>();
+			const nutritionCoverage = {
+				blocked: 0,
+				found: 0,
+				foundUSDA: 0,
+				error: 0,
+				notFound: 0,
+			};
 			const nutritionCursor = wantsNutrition
 				? openFingerprintCursor(state.nutrition)
 				: null;
@@ -444,6 +546,23 @@ if (isMainModule(import.meta.url)) {
 					'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"]',
 				);
 				const html = await page.content();
+				if (
+					isBlockedPage(html) ||
+					/<form[^>]*name=["']signIn["']/i.test(html)
+				) {
+					throw new Error(
+						`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
+					);
+				}
+				if (
+					!/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']/i.test(
+						html,
+					)
+				) {
+					throw new Error(
+						`Whole Foods order ${stub.orderId} detail has no item or cancellation evidence`,
+					);
+				}
 				const detail = parseOrderDetailDom(html);
 
 				if (wantsOrders) {
@@ -472,18 +591,18 @@ if (isMainModule(import.meta.url)) {
 							continue;
 						}
 						consideredProductIds.add(item.productId);
-						if (lookedUpProductIds.size >= MAX_NUTRITION_LOOKUPS_PER_RUN) {
-							continue;
-						}
-						lookedUpProductIds.add(item.productId);
 						const facts = await lookupNutritionForProduct(
 							page,
 							usdaApiKey,
 							item.name,
 						);
-						if (!facts) {
-							continue;
-						}
+						if (typeof facts === "string") {
+							if (facts === "blocked") nutritionCoverage.blocked += 1;
+							else if (facts === "error") nutritionCoverage.error += 1;
+							else nutritionCoverage.notFound += 1;
+						} else if (facts.source === "usda_fdc")
+							nutritionCoverage.foundUSDA += 1;
+						else nutritionCoverage.found += 1;
 						const record = buildNutritionRecord(
 							item.productId,
 							item.name,
@@ -514,9 +633,9 @@ if (isMainModule(import.meta.url)) {
 			}
 			if (wantsNutrition && nutritionCursor) {
 				await progress(
-					`Nutrition lookup coverage: ${lookedUpProductIds.size}/${consideredProductIds.size} unique product(s) looked up (cap ${MAX_NUTRITION_LOOKUPS_PER_RUN} per run)`,
+					`Nutrition lookup coverage: ${consideredProductIds.size} products; ${nutritionCoverage.found} Whole Foods, ${nutritionCoverage.foundUSDA} USDA, ${nutritionCoverage.blocked} blocked, ${nutritionCoverage.error} error, ${nutritionCoverage.notFound} not found`,
 					{
-						count: lookedUpProductIds.size,
+						count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
 						stream: "nutrition",
 						total: consideredProductIds.size,
 					},

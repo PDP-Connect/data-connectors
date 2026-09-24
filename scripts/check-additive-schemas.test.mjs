@@ -30,3 +30,11 @@ test("additive schema check runs over root Collection Profile manifests", () => 
 
   assert.match(stdout, /^Schemas additive: \d+ schema\(s\) checked\.\n$/);
 });
+
+test("a 0.x minor bump permits a breaking schema, but a patch or stable minor does not", () => {
+  assert.equal(permitsBreakingChange("0.1.1", "0.2.0"), true);
+  assert.equal(permitsBreakingChange("0.1.1", "0.1.2"), false);
+  assert.equal(permitsBreakingChange("1.0.0", "1.1.0"), false);
+  assert.equal(permitsBreakingChange("1.0.0", "2.0.0"), true);
+  assert.equal(permitsBreakingChange("invalid", "0.2.0"), false);
+});

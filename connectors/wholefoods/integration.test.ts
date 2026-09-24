@@ -24,6 +24,8 @@ import {
 	buildOrderItemRecord,
 	buildOrderRecord,
 	collectProfile,
+	discoverOrderStubs,
+	lookupNutritionForProduct,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
@@ -40,8 +42,9 @@ const PROFILE_HTML = `<html><body>
 </body></html>`;
 
 function fakePage(html: string): Page {
-	const shape: Pick<Page, "content" | "goto"> = {
+	const shape: Pick<Page, "content" | "goto" | "url"> = {
 		content: () => Promise.resolve(html),
+		url: () => "https://www.wholefoodsmarket.com/product/example",
 		// biome-ignore lint/suspicious/noExplicitAny: minimal Page stub for a pure-composition test; matching Playwright's real overload set isn't the point here.
 		goto: (() => Promise.resolve(null)) as any,
 	};
@@ -109,6 +112,36 @@ test("buildOrderRecord reports null total/item_count for an order with zero surv
 	assert.equal(record.total_cents, null);
 });
 
+test("buildOrderRecord does not turn missing item prices into a partial total", () => {
+	const record = buildOrderRecord(STUB, null, [
+		{
+			imageUrl: null,
+			name: "Unpriced item",
+			productId: "B01ABCDEFG",
+			productUrl: "https://www.amazon.com/dp/B01ABCDEFG",
+			quantity: 1,
+			unitPriceDollars: null,
+		},
+	]);
+	assert.equal(record.total_cents, null);
+	assert.equal(record.status, null);
+});
+
+test("buildOrderItemRecord refuses a name-derived identity", () => {
+	assert.throws(
+		() =>
+			buildOrderItemRecord(STUB.orderId, {
+				imageUrl: null,
+				name: "Unidentified item",
+				productId: null,
+				productUrl: null,
+				quantity: 1,
+				unitPriceDollars: null,
+			}),
+		/without a source product ASIN/,
+	);
+});
+
 test("buildNutritionRecord shape passes schema validation for both sources", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	await harness.emitRecord(
@@ -131,6 +164,280 @@ test("buildNutritionRecord shape passes schema validation for both sources", asy
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.skipped.length, 0);
 	assert.equal(harness.emitted[0]?.data.product_id, "B01ABCDEFG");
+});
+
+test("observed blocked lookup emits a blocked nutrition row when USDA finds no match", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			fakePage(
+				'<html><title>Robot Check</title><body><form action="validateCaptcha"></form></body></html>',
+			),
+			"DEMO_KEY",
+			"Organic Bananas",
+		);
+		assert.equal(outcome, "blocked");
+		const harness = makeRecordingEmit(validateRecord);
+		await harness.emitRecord(
+			"nutrition",
+			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", outcome),
+		);
+		assert.equal(harness.emitted[0]?.data.source, "blocked");
+		assert.equal(harness.emitted[0]?.data.calories, null);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	try {
+		const shape = {
+			...fakePage(
+				'<html><title>Robot Check</title><form action="validateCaptcha"></form></html>',
+			),
+			goto: () => Promise.resolve({ ok: () => false, status: () => 403 }),
+		} as unknown as Page;
+		assert.equal(
+			await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+			"blocked",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HTTP 403 product CAPTCHA is blocked after search succeeds", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	let visits = 0;
+	const shape = {
+		content: () =>
+			Promise.resolve(
+				visits === 1
+					? '<a href="/product/example">Organic Bananas</a>'
+					: '<html><title>Robot Check</title><form action="validateCaptcha"></form></html>',
+			),
+		goto: () => {
+			visits += 1;
+			return Promise.resolve({
+				ok: () => visits === 1,
+				status: () => (visits === 1 ? 200 : 403),
+			});
+		},
+	} as unknown as Page;
+	try {
+		assert.equal(
+			await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+			"blocked",
+		);
+		assert.equal(visits, 2);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("USDA request failure emits error instead of not_found", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response("unavailable", { status: 503 })) as typeof fetch;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			fakePage("<html><body>No matching Whole Foods product</body></html>"),
+			"DEMO_KEY",
+			"Organic Bananas",
+		);
+		assert.equal(outcome, "error");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("a nonzero search summary with no parsed orders fails rather than reporting empty history", async () => {
+	const shape = {
+		...fakePage(
+			'<html><body><div class="hzsearch-results-summary">3 orders matching Whole Foods Market</div><div class="order-card">new markup</div></body></html>',
+		),
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+	} as unknown as Page;
+	await assert.rejects(
+		discoverOrderStubs(shape),
+		/no recognizable results or empty-state evidence/,
+	);
+});
+
+test("HTTP 503 product navigation plus empty USDA results emits error", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	const shape = {
+		content: () =>
+			Promise.resolve("<html><body>Service Unavailable</body></html>"),
+		goto: () => Promise.resolve({ ok: () => false, status: () => 503 }),
+	} as unknown as Page;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			shape,
+			"DEMO_KEY",
+			"Organic Bananas",
+		);
+		assert.equal(outcome, "error");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("an unrecognized Whole Foods page plus empty USDA results emits error", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			fakePage("<html><body>unexpected client-rendered shell</body></html>"),
+			"DEMO_KEY",
+			"Organic Bananas",
+		);
+		assert.equal(outcome, "error");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("Whole Foods search resolves a relative product link before reading facts", async () => {
+	const visited: string[] = [];
+	const shape: Pick<Page, "content" | "goto" | "url"> = {
+		content: () =>
+			Promise.resolve(
+				visited.length === 1
+					? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
+					: '<html><body><script type="application/ld+json">{"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script></body></html>',
+			),
+		// biome-ignore lint/suspicious/noExplicitAny: scripted Page navigation captures the actual URL supplied to Playwright.
+		goto: ((url: string) => {
+			visited.push(url);
+			return Promise.resolve(null);
+		}) as any,
+		url: () => visited.at(-1) ?? "about:blank",
+	};
+	const outcome = await lookupNutritionForProduct(
+		shape as Page,
+		"DEMO_KEY",
+		"Organic Bananas",
+	);
+	assert.equal(
+		visited[1],
+		"https://www.wholefoodsmarket.com/product/organic-bananas",
+	);
+	assert.equal(
+		typeof outcome === "string" ? outcome : outcome.source,
+		"wholefoods_product_page",
+	);
+});
+
+test("a rendered product without nutrition and an empty USDA result emits not_found", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	let visits = 0;
+	const shape = {
+		content: () =>
+			Promise.resolve(
+				visits === 1
+					? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
+					: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas"}</script></body></html>',
+			),
+		goto: () => {
+			visits += 1;
+			return Promise.resolve(null);
+		},
+		url: () => "https://www.wholefoodsmarket.com/product/organic-bananas",
+	} as unknown as Page;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			shape,
+			"DEMO_KEY",
+			"Organic Bananas",
+		);
+		assert.equal(outcome, "not_found");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HTTP product links and cross-origin redirects cannot supply nutrition", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	const facts =
+		'<script type="application/ld+json">{"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script>';
+	try {
+		await Promise.all(
+			(
+				[
+					[
+						"http://www.wholefoodsmarket.com/product/example",
+						"http://www.wholefoodsmarket.com/product/example",
+						1,
+					],
+					["/product/example", "https://example.com/product/example", 2],
+					[
+						"/product/example",
+						"http://www.wholefoodsmarket.com/product/example",
+						2,
+					],
+					[
+						"https://www.wholefoodsmarket.com:444/product/example",
+						"https://www.wholefoodsmarket.com:444/product/example",
+						1,
+					],
+					[
+						"/product/example",
+						"https://www.wholefoodsmarket.com:444/product/example",
+						2,
+					],
+				] as const
+			).map(async ([href, finalUrl, expectedVisits]) => {
+				let visits = 0;
+				const shape = {
+					content: () =>
+						Promise.resolve(
+							visits === 1 ? `<a href="${href}">Organic Bananas</a>` : facts,
+						),
+					goto: () => {
+						visits += 1;
+						return Promise.resolve(null);
+					},
+					url: () => finalUrl,
+				} as unknown as Page;
+				assert.equal(
+					await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+					"error",
+				);
+				assert.equal(visits, expectedVisits);
+			}),
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
 });
 
 test("a stream absent from `requested` never reaches emitRecord — scope filtering happens before record building", async () => {

@@ -463,25 +463,26 @@
     "connector_key": "wholefoods",
     "streams": ["orders", "order_items"],
     "derivable": {
-      "orders[].orderId": "orders.id (index.ts:186)",
-      "orders[].orderUrl": "orders.order_url (index.ts:189)",
-      "orders[].orderDate": "orders.order_date (index.ts:188, date-only per D4)",
-      "orders[].total": "orders.total_cents (index.ts:180-184,191, integer cents)",
-      "orders[].itemCount": "orders.item_count (index.ts:187)",
-      "orders[].status": "orders.status (index.ts:190) — see semantic_notes",
-      "orders[].items[].name": "order_items.name (index.ts:208)",
-      "orders[].items[].productId": "order_items.product_id (index.ts:210)",
-      "orders[].items[].productUrl": "order_items.product_url (index.ts:211)",
-      "orders[].items[].imageUrl": "order_items.image_url (index.ts:207)",
-      "orders[].items[].quantity": "order_items.quantity (index.ts:212, parsed to number via QTY_RE — legacy was string|null e.g. '2 ct')",
-      "orders[].items[].price": "order_items.unit_price_cents (index.ts:213, D4 integer minor units)"
+      "orders[].orderId": "orders.id (index.ts:207)",
+      "orders[].orderUrl": "orders.order_url (index.ts:210)",
+      "orders[].orderDate": "orders.order_date (index.ts:209, date-only per D4)",
+      "orders[].total": "orders.total_cents (index.ts:199-205,212, integer cents)",
+      "orders[].itemCount": "orders.item_count (index.ts:208)",
+      "orders[].items[].name": "order_items.name (index.ts:232)",
+      "orders[].items[].productId": "order_items.product_id (index.ts:234)",
+      "orders[].items[].productUrl": "order_items.product_url (index.ts:235)",
+      "orders[].items[].imageUrl": "order_items.image_url (index.ts:231)",
+      "orders[].items[].quantity": "order_items.quantity (index.ts:236, parsed to number via QTY_RE — legacy was string|null e.g. '2 ct')",
+      "orders[].items[].price": "order_items.unit_price_cents (index.ts:237, D4 integer minor units)"
     },
-    "not_derivable": [],
+    "not_derivable": [
+      "orders[].status: the frozen legacy collector hardcodes Completed in the order-search stub; no captured Whole Foods search or detail page proves a corresponding status. Modern orders.status remains null rather than manufacturing parity."
+    ],
     "semantic_notes": [
-      "orders.status is hardcoded to the literal 'Completed' (index.ts:190), not scraped — a real narrowing versus legacy's freeform scraped status text. A separate cancelled-order selector exists (index.ts:444) but it is not confirmed how (or whether) a cancelled order surfaces in the emitted status field; worth a follow-up check.",
+      "The collector emits null status because it has no confirmed source status extractor; a Vana projection must retain null rather than invent Completed. A source line without an ASIN now fails collection instead of emitting a null product_id.",
       "totalOrders/totalItems (D3 envelope) and the untyped order_items.nutrition (replaced by the typed nutrition stream) are correctly dropped."
     ],
-    "status": "derivable"
+    "status": "loss"
   },
   {
     "scope": "wholefoods.nutrition",
@@ -490,7 +491,7 @@
     "derivable": {
       "items{id}": "nutrition.product_id (index.ts:319-337, keyed by ASIN)",
       "name": "nutrition.name (index.ts:329)",
-      "source": "nutrition.source (index.ts:335) — narrowed enum, see semantic_notes",
+      "source": "nutrition.source includes observed success, not_found, error, and blocked outcomes",
       "confidence": "nutrition.confidence (index.ts:326)",
       "calories": "nutrition.calories (index.ts:324)",
       "protein_g": "nutrition.protein_g (index.ts:331)",
@@ -504,9 +505,9 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Legacy source enum had 7 values including negative/error states (not_found, error, blocked); modern nutrition.source (schemas.ts:106) is narrowed to only [wholefoods_product_page, usda_fdc] — a product with no match simply gets no record rather than a not_found/error/blocked row. A real, if reasonable, narrowing: legacy could represent 'we tried and failed', modern can only represent silence.",
-      "coverage{} (D3) correctly dropped, replaced by a PROGRESS event (index.ts:516-523) reporting lookedUpProductIds/consideredProductIds.",
-      "A new per-run cap of 25 nutrition lookups (index.ts:76) is honestly reported via PROGRESS, not silently truncated.",
+      "The collector now emits one outcome row for each source-backed product ID; not_found follows a completed no-match lookup, blocked follows observed challenge evidence, and error follows request/navigation failure. The old amazon_product_page and wholefoods_structured_data success source labels are not emitted by this acquisition path.",
+      "coverage{} remains run evidence, not an entity record. With a complete order-item and nutrition snapshot, Vana can derive total from unique product IDs, found/foundUSDA/blocked from outcome sources, and percentCovered from those counts. The collector also reports the counts in PROGRESS.",
+      "The per-run nutrition lookup cap was removed so every source-backed product is attempted; a failed order discovery/detail aborts rather than producing a false empty or partial scope.",
       "NOT a SKIP_RESULT scaffold — see wholefoods.profile's semantic_notes for the same correction."
     ],
     "status": "derivable"

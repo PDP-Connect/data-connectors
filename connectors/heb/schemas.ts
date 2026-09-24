@@ -225,6 +225,7 @@ export const nutritionSchema = z.object({
 	name: pdppSafeText.min(1).max(1024),
 	potassium_mg: nonNegativeNutrientSchema,
 	product_id: z.string().min(1).max(64),
+	product_url: z.string().url(),
 	protein_g: nonNegativeNutrientSchema,
 	saturated_fat_g: nonNegativeNutrientSchema,
 	serving_size: pdppSafeText.max(200).nullable(),

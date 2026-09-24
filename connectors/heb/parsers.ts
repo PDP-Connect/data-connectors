@@ -1326,10 +1326,11 @@ export function buildNutritionRecord(
 	extraction: NutritionDomExtraction,
 	fallbackName: string,
 	emittedAt: string,
+	productUrl: string,
+	sourceOverride?: NutritionSource,
 ): NutritionRecord {
-	const source: NutritionSource = extraction.found
-		? "heb_product_page"
-		: "not_found";
+	const source: NutritionSource =
+		sourceOverride ?? (extraction.found ? "heb_product_page" : "not_found");
 	return {
 		added_sugar_g: extraction.addedSugarG,
 		allergens: extraction.allergens,
@@ -1338,7 +1339,7 @@ export function buildNutritionRecord(
 		carbs_g: extraction.carbsG,
 		category: extraction.category,
 		cholesterol_mg: extraction.cholesterolMg,
-		confidence: extraction.found ? "high" : "low",
+		confidence: source === "heb_product_page" ? "high" : "low",
 		fat_g: extraction.fatG,
 		fetched_at: emittedAt,
 		fiber_g: extraction.fiberG,
@@ -1350,6 +1351,7 @@ export function buildNutritionRecord(
 		name: extraction.name || fallbackName,
 		potassium_mg: extraction.potassiumMg,
 		product_id: productId,
+		product_url: productUrl,
 		protein_g: extraction.proteinG,
 		saturated_fat_g: extraction.saturatedFatG,
 		serving_size: extraction.servingSize,

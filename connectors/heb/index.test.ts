@@ -3411,7 +3411,55 @@ test("collectNutrition emits one record per unique product target", async () => 
 	assert.equal(nutritionRecords.length, 1);
 	assert.equal(nutritionRecords[0]?.data.product_id, "123456789");
 	assert.equal(nutritionRecords[0]?.data.source, "heb_product_page");
+	assert.equal(
+		nutritionRecords[0]?.data.product_url,
+		"https://www.heb.com/product-detail/heb-milk/123456789",
+	);
 	assert.equal(nutritionRecords[0]?.data.calories, 150);
+});
+
+test("collectNutrition retains blocked outcomes with the observed product URL", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const blockedPage = makePageStub({
+		content:
+			"<html><body><iframe src='/_Incapsula_Resource'></iframe></body></html>",
+	});
+
+	await collectNutrition(
+		blockedPage,
+		[
+			{
+				name: "H-E-B Organic 2% Reduced Fat Milk",
+				productId: "123456789",
+				productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+			},
+		],
+		{
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			waitForHydration: immediateWait,
+		},
+	);
+
+	const nutritionRecord = emitted.find(
+		(record) => record.stream === "nutrition",
+	);
+	assert.equal(nutritionRecord?.data.source, "blocked");
+	assert.equal(
+		nutritionRecord?.data.product_url,
+		"https://www.heb.com/product-detail/heb-milk/123456789",
+	);
+	assert.equal(nutritionRecord?.data.calories, null);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "nutrition" &&
+				message.reason === "session_repair_required",
+		),
+		"blocked record must retain the existing repair diagnostic",
+	);
 });
 
 test("collectNutrition reports skipped products with no resolvable product_url without navigating", async () => {

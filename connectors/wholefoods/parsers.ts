@@ -179,11 +179,17 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		);
 		const href = anchor?.getAttribute("href") ?? "";
 		const name = textOf(anchor).trim();
-		if (!(anchor && name) || name.length < 3 || seenHrefs.has(href)) {
+		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
+		// The legacy orders scope requires productId for every item. A row
+		// without a source ASIN cannot be projected, so never discard it or
+		// replace its identity with a name-derived key.
+		if (!(anchor && name && productId) || name.length < 3) {
+			throw new Error("Whole Foods order item has no source product ASIN");
+		}
+		if (seenHrefs.has(href)) {
 			continue;
 		}
 		seenHrefs.add(href);
-		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		const rowText = textOf(itemRow);
 		const quantity = QTY_RE.exec(rowText)?.[1];
 		const price = PRICE_RE.exec(rowText)?.[1];
