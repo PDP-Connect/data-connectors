@@ -74,6 +74,10 @@ import {
 	unregisterBrowserInteractionTarget,
 	withDeadline,
 } from "./browser-handoff.ts";
+import {
+	minimizeBrowserWindow,
+	restoreBrowserWindow,
+} from "./browser-window.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
 import {
 	type CaptureSession,
@@ -1725,14 +1729,24 @@ async function runInBrowser(args: {
 	> | null = null;
 	try {
 		page = await selectBrowserPageForRun(ctx, browser);
-		browserSurfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
+		const surfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
 			assist,
 			completeAssistance,
 			nextAssistanceRequestId,
 			page: page as Page,
 		});
-		const browserAssist = browserSurfaceAssistance.assist;
-		const browserCompleteAssistance = browserSurfaceAssistance.complete;
+		browserSurfaceAssistance = surfaceAssistance;
+		const browserAssist: BaseCollectContext["assist"] = async (request) => {
+			await restoreBrowserWindow(page as Page);
+			return surfaceAssistance.assist(request);
+		};
+		const browserCompleteAssistance: BaseCollectContext["completeAssistance"] =
+			async (assistanceRequestId, status, extra) => {
+				await surfaceAssistance.complete(assistanceRequestId, status, extra);
+				if (status === "resolved") {
+					await minimizeBrowserWindow(page as Page);
+				}
+			};
 		const browserSendInteraction = makeBrowserInteractionKeepalive({
 			context: ctx,
 			diagnostics: process.env.PDPP_BROWSER_SURFACE_DIAGNOSTICS === "1",
@@ -1792,6 +1806,7 @@ async function runInBrowser(args: {
 				},
 			),
 		);
+		await minimizeBrowserWindow(page as Page);
 		await captureBrowserPage(
 			baseCtx.capture,
 			page,

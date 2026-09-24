@@ -41,6 +41,7 @@ import type {
 	AssistanceRequest,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { Page } from "playwright";
+import { restoreBrowserWindow } from "./browser-window.ts";
 
 import type {
 	InteractionRequest,
@@ -606,6 +607,7 @@ export async function manualAction(
 	args: ManualActionArgs,
 	sendInteraction: SendInteraction,
 ): Promise<InteractionResponse> {
+	await restoreBrowserWindow(args.page, args.env ?? process.env);
 	const { interactionId } = await prepareManualAction({
 		page: args.page,
 		...(args.reason ? { reason: args.reason } : {}),
@@ -648,11 +650,11 @@ export async function manualAction(
  * connector prove whether the session is live. The owner response is only a
  * signal to re-probe; site-specific session evidence stays with the connector.
  *
- * A streamed handoff uses a separate, temporary readiness page in the same
- * browser context. The connector may navigate that page to prove its session,
- * while the streamed page remains entirely under the owner's control. The
- * readiness watcher lasts for the handoff's declared timeout; an owner who
- * finishes after the first few seconds still resumes collection automatically.
+ * A streamed handoff uses a separate, temporary readiness page by default.
+ * Connectors with a non-navigating session probe can opt to run it in the
+ * owner's tab instead. The readiness watcher lasts for the handoff's declared
+ * timeout; an owner who finishes after the first few seconds still resumes
+ * collection automatically.
  * Callers that cannot supply the complete streamed contract retain the legacy
  * click-first path.
  */
@@ -690,6 +692,11 @@ export interface ManualBrowserLoginArgs<Result> {
 	 * a temporary sibling page, never the owner's streamed page.
 	 */
 	readonly readinessProbe?: (page: Page) => Promise<Result>;
+	/**
+	 * Reuse the owner's tab for readiness checks that only inspect the current
+	 * page and do not navigate. This keeps login in one visible tab.
+	 */
+	readonly readinessProbeOnHandoffPage?: boolean;
 	readonly reason?: ManualActionReason;
 	readonly sendInteraction: SendInteraction;
 	readonly timeoutSeconds?: number;
@@ -732,9 +739,16 @@ async function pollNavigationSafeBrowserReadiness<Result>(
 	handoffPage: Page,
 	readinessProbe: (page: Page) => Promise<Result>,
 	isProbeSuccessful: (result: Result) => boolean,
-	options: { intervalMs: number; now?: () => number; windowMs: number },
+	options: {
+		intervalMs: number;
+		now?: () => number;
+		probeOnHandoffPage?: boolean;
+		windowMs: number;
+	},
 ): Promise<Result | undefined> {
-	const readinessPage = await handoffPage.context().newPage();
+	const readinessPage = options.probeOnHandoffPage
+		? handoffPage
+		: await handoffPage.context().newPage();
 	try {
 		return await pollBrowserReadiness(
 			() => readinessProbe(readinessPage),
@@ -742,7 +756,9 @@ async function pollNavigationSafeBrowserReadiness<Result>(
 			options,
 		);
 	} finally {
-		await readinessPage.close().catch((): undefined => undefined);
+		if (readinessPage !== handoffPage) {
+			await readinessPage.close().catch((): undefined => undefined);
+		}
 	}
 }
 
@@ -758,6 +774,7 @@ export async function manualBrowserLogin<Result>({
 	now,
 	page,
 	readinessProbe,
+	readinessProbeOnHandoffPage = false,
 	probe,
 	reason = "login",
 	sendInteraction,
@@ -788,6 +805,7 @@ export async function manualBrowserLogin<Result>({
 				{
 					intervalMs: autoProbeIntervalMs,
 					...(now ? { now } : {}),
+					...(readinessProbeOnHandoffPage ? { probeOnHandoffPage: true } : {}),
 					windowMs: readinessWindowMs,
 				},
 			);

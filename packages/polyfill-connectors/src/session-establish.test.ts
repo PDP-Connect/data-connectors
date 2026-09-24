@@ -12,8 +12,8 @@
  *      `resolveDeferredCredentials` must never be called and collection
  *      proceeds with no secrets resolved.
  *   2. Dead-profile path: the first probe reports a dead session, so
- *      `resolveDeferredCredentials` IS called (existing credential path runs
- *      unchanged) before the manual_action fallback.
+ *      `resolveDeferredCredentials` runs before the owner-assisted readiness
+ *      watcher and explicit manual_action fallback.
  *   3. No `resolveDeferredCredentials` supplied (the `ensureSession` path, or
  *      any `probeSession` connector that doesn't opt in): behavior is
  *      byte-for-byte what it was before this hook existed — the dead-path
@@ -93,7 +93,7 @@ test("live-profile path: probeSession live means resolveDeferredCredentials is n
 	);
 });
 
-test("dead-profile path: probeSession dead means resolveDeferredCredentials runs before manual_action, and the resolved credentials are visible", async () => {
+test("dead-profile path: resolveDeferredCredentials runs before assistance and the manual_action fallback", async () => {
 	let resolveCalls = 0;
 	let manualActionCalls = 0;
 	let credentialsAtManualAction: Readonly<Record<string, string>> | null = null;
@@ -109,6 +109,7 @@ test("dead-profile path: probeSession dead means resolveDeferredCredentials runs
 			{ ensureSession: undefined, probeSession },
 			{
 				assist: async () => "req-1",
+				autoProbeWindowMs: 0,
 				capture: null,
 				checkpoint: async () => {
 					/* no-op */
@@ -159,7 +160,7 @@ test("dead-profile path: probeSession dead means resolveDeferredCredentials runs
 	});
 });
 
-test("secrets present (no deferral configured): resolveDeferredCredentials absent leaves the dead-path unchanged — manual_action still fires, no crash", async () => {
+test("secrets present (no deferral configured): manual_action remains available after the probe watcher", async () => {
 	let manualActionCalls = 0;
 	const probeSession = async (): Promise<boolean> => false;
 
@@ -168,6 +169,7 @@ test("secrets present (no deferral configured): resolveDeferredCredentials absen
 			{ ensureSession: undefined, probeSession },
 			{
 				assist: async () => "req-1",
+				autoProbeWindowMs: 0,
 				capture: null,
 				checkpoint: async () => {
 					/* no-op */
@@ -207,6 +209,89 @@ test("secrets present (no deferral configured): resolveDeferredCredentials absen
 		1,
 		"omitting resolveDeferredCredentials must not change the dead-path manual_action behavior",
 	);
+});
+
+test("probe-only sign-in continues automatically when the owner establishes a session", async () => {
+	let signedIn = false;
+	let manualActionCalls = 0;
+	const assistanceStatuses: string[] = [];
+	await establishSession(
+		{
+			ensureSession: undefined,
+			probeSession: async () => signedIn,
+		},
+		{
+			assist: async (request) => {
+				assert.equal(request.owner_action, "operate_attachment");
+				assert.equal(request.response_contract, "none");
+				signedIn = true;
+				return "req-automatic";
+			},
+			capture: null,
+			checkpoint: async () => undefined,
+			completeAssistance: async (_id, status) => {
+				assistanceStatuses.push(status);
+			},
+			context: makeStubContext(),
+			credentials: {},
+			name: "anthropic",
+			page: makeStubPage(),
+			progress: async () => undefined,
+			retryablePattern: /never/,
+			sendInteraction: async (req) => {
+				if (req.kind === "manual_action") manualActionCalls += 1;
+				return {
+					request_id: req.request_id ?? "int-automatic",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				};
+			},
+		},
+	);
+
+	assert.deepEqual(assistanceStatuses, ["resolved"]);
+	assert.equal(manualActionCalls, 0);
+});
+
+test("probe-only timeout escalates to manual action and rechecks the session", async () => {
+	let signedIn = false;
+	let manualActionCalls = 0;
+	const assistanceStatuses: string[] = [];
+	await establishSession(
+		{
+			ensureSession: undefined,
+			probeSession: async () => signedIn,
+		},
+		{
+			assist: async () => "req-timeout",
+			autoProbeWindowMs: 0,
+			capture: null,
+			checkpoint: async () => undefined,
+			completeAssistance: async (_id, status) => {
+				assistanceStatuses.push(status);
+			},
+			context: makeStubContext(),
+			credentials: {},
+			name: "anthropic",
+			page: makeStubPage(),
+			progress: async () => undefined,
+			retryablePattern: /never/,
+			sendInteraction: async (req) => {
+				if (req.kind === "manual_action") {
+					manualActionCalls += 1;
+					signedIn = true;
+				}
+				return {
+					request_id: req.request_id ?? "int-timeout",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				};
+			},
+		},
+	);
+
+	assert.deepEqual(assistanceStatuses, ["escalated"]);
+	assert.equal(manualActionCalls, 1);
 });
 
 test("ensureSession-only path (no probeSession) is unaffected: resolveDeferredCredentials is never consulted", async () => {
