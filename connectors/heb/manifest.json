@@ -517,7 +517,7 @@
 						"format": "date-time"
 					}
 				},
-				"required": ["id", "product_id", "name"]
+				"required": ["id", "product_id", "product_url", "name"]
 			},
 			"primary_key": ["id"],
 			"relationships": [
