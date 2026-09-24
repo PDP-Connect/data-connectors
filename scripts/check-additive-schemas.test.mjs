@@ -16,6 +16,8 @@ test("a pre-1.0 minor bump permits a breaking schema while a patch bump does not
   assert.equal(permitsBreakingChange("1.0.0", "1.1.0"), false);
   assert.equal(permitsBreakingChange("1.0.0", "2.0.0"), true);
   assert.equal(permitsBreakingChange("0.2.0", "0.1.0"), false);
+  assert.equal(permitsBreakingChange("0.1.0", "0.02.0"), false);
+  assert.equal(permitsBreakingChange("1.0.0", "02.0.0"), false);
 });
 
 test("additive schema check runs over root Collection Profile manifests", () => {

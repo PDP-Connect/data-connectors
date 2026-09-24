@@ -87,7 +87,7 @@ function getFileAtRef(ref, relPath) {
 
 function parseMajorMinor(version) {
   if (typeof version !== "string") return null;
-  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  const match = version.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
   return match ? { major: Number(match[1]), minor: Number(match[2]) } : null;
 }
 
