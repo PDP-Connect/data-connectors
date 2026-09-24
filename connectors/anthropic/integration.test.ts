@@ -31,7 +31,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -148,6 +148,7 @@ function makeFakeDownload(bytes: Buffer): {
 
 function makeContext(overrides: {
 	streams: string[];
+	resources?: Record<string, string[]>;
 	state?: Record<string, unknown>;
 	fetchStub: FetchStub;
 }): {
@@ -159,7 +160,23 @@ function makeContext(overrides: {
 } {
 	const harness = makeRecordingEmit(validateRecord);
 	const page = new FakePage(overrides.fetchStub);
-	const requested = new Map(overrides.streams.map((name) => [name, { name }]));
+	const scopeStreams = overrides.streams.map((name) => ({
+		name,
+		...(overrides.resources?.[name]
+			? { resources: overrides.resources[name] }
+			: {}),
+	}));
+	const requested = new Map(
+		scopeStreams.map((stream) => [stream.name, stream]),
+	);
+	const selector = makeEmitRecord({
+		requested,
+		emit: harness.emit,
+		emittedAt: "2026-01-01T00:00:00.000Z",
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: () => "date",
+	});
 	const ctx: BrowserCollectContext = {
 		assist: () => {
 			throw new Error("assist not expected in this test");
@@ -170,6 +187,7 @@ function makeContext(overrides: {
 		detailGaps: [],
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
+		isRecordSelected: selector.isSelected,
 		emittedAt: "2026-01-01T00:00:00.000Z",
 		progress: (message: string): Promise<void> => {
 			harness.emit({ type: "PROGRESS", message });
@@ -177,7 +195,7 @@ function makeContext(overrides: {
 		},
 		requestDetailGapPage: () => Promise.resolve([]),
 		requested,
-		scope: { streams: overrides.streams.map((name) => ({ name })) },
+		scope: { streams: scopeStreams },
 		sendInteraction: () => {
 			throw new Error("sendInteraction not expected in this test");
 		},
@@ -222,12 +240,15 @@ const PROJECT_JSON = {
 	docs: [{ uuid: "doc-1", filename: "notes.md", content: "notes" }],
 };
 
-async function buildZipBytes(users?: unknown): Promise<Buffer> {
+async function buildZipBytes(
+	users?: unknown,
+	conversations: unknown = CONVERSATIONS_JSON,
+): Promise<Buffer> {
 	const { deflateRawSync } = await import("node:zlib");
 	const files = [
 		{
 			name: "conversations.json",
-			content: Buffer.from(JSON.stringify(CONVERSATIONS_JSON)),
+			content: Buffer.from(JSON.stringify(conversations)),
 		},
 		{
 			name: "projects/proj-1.json",
@@ -401,6 +422,80 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 	assert.ok(
 		"synced_at" in (finalConvState.cursor as Record<string, unknown>),
 		"final conversations STATE must carry synced_at",
+	);
+});
+
+test("collectAnthropic: excluded oversized source is never spooled; selected oversized source aborts before records", async () => {
+	const hugeConversation = {
+		uuid: "conv-huge",
+		name: "Excluded source",
+		chat_messages: [{ uuid: "msg-huge", text: "x".repeat(33_554_432) }],
+	};
+	const zipBytes = await buildZipBytes(undefined, [
+		hugeConversation,
+		CONVERSATIONS_JSON[0],
+	]);
+	const run = async (resources: string[], streams: string[]) => {
+		const { download } = makeFakeDownload(zipBytes);
+		const { ctx, emitted, protocolMessages, page } = makeContext({
+			streams,
+			resources: { conversations: resources },
+			fetchStub: (url) => {
+				if (url.includes("/api/organizations") && !url.includes("export_data"))
+					return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+				if (url.includes("/export_data"))
+					return Promise.resolve(
+						jsonResponse(200, { nonce: "nonce-oversize" }),
+					);
+				return Promise.reject(new Error(`unexpected fetch: ${url}`));
+			},
+		});
+		const originalGoto = page.goto.bind(page);
+		page.goto = async (url: string): Promise<null> => {
+			const result = await originalGoto(url);
+			if (url.includes("/export/"))
+				queueMicrotask(() => page.emit("download", download));
+			return result;
+		};
+		return { ctx, emitted, protocolMessages };
+	};
+
+	const before = new Set(readdirSync(blobSpoolDir));
+	const excluded = await run(["conv-1"], ["conversations"]);
+	await collectAnthropic(excluded.ctx);
+	assert.deepEqual(
+		excluded.emitted.map((record) => record.data.id),
+		["conv-1"],
+	);
+	assert.equal(
+		excluded.protocolMessages.filter((message) => message.type === "BLOB")
+			.length,
+		1,
+	);
+	assert.equal(
+		readdirSync(blobSpoolDir).filter((file) => !before.has(file)).length,
+		1,
+	);
+
+	const beforeSelected = new Set(readdirSync(blobSpoolDir));
+	const selected = await run(
+		["conv-huge"],
+		["account_profile", "conversations", "projects"],
+	);
+	await assert.rejects(
+		() => collectAnthropic(selected.ctx),
+		/Anthropic conversations source record exceeds the 33554432-byte host blob limit; no export records were emitted/,
+	);
+	assert.equal(selected.emitted.length, 0);
+	assert.equal(
+		selected.protocolMessages.filter((message) => message.type === "BLOB")
+			.length,
+		0,
+	);
+	assert.equal(
+		readdirSync(blobSpoolDir).filter((file) => !beforeSelected.has(file))
+			.length,
+		0,
 	);
 });
 

@@ -210,6 +210,8 @@ interface BaseCollectContext {
 		data: RecordData,
 		options?: EmitRecordOptions,
 	) => Promise<void>;
+	/** Uses the same id, resource, and time gates as emitRecord, without effects. */
+	isRecordSelected?: (stream: string, data: RecordData) => boolean;
 	emittedAt: string;
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
 	/**
@@ -1289,6 +1291,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			credentials,
 			emit,
 			emitRecord: emitRecord.emit,
+			isRecordSelected: emitRecord.isSelected,
 			assist,
 			completeAssistance,
 			progress,
@@ -1474,6 +1477,11 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options?: EmitRecordOptions,
 	) => Promise<void>;
+	isSelected: (
+		stream: string,
+		data: RecordData,
+		options?: EmitRecordOptions,
+	) => boolean;
 	counters: {
 		totalEmitted: number;
 		totalSkipped: number;
@@ -1496,20 +1504,34 @@ export function makeEmitRecord(deps: {
 		resFilters.set(streamName, resourceSet(scope));
 	}
 
+	const selectRecord = (
+		stream: string,
+		data: RecordData,
+		options: EmitRecordOptions = {},
+	): "skip" | "tombstone" | "record" => {
+		if (data.id == null) return "skip";
+		const rs = resFilters.get(stream);
+		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+			return "skip";
+		if (isTombstone?.(stream, data)) return "tombstone";
+		const streamScope = requested.get(stream);
+		const field = timeRangeFieldFor(stream);
+		if (
+			streamScope?.time_range &&
+			isOutsideTimeRange(streamScope.time_range, data[field])
+		)
+			return "skip";
+		return "record";
+	};
+
 	const emitRecord = (
 		stream: string,
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): Promise<void> => {
-		if (data.id == null) {
-			return Promise.resolve();
-		}
-		const rs = resFilters.get(stream);
-		if (!options.skipResourceFilter && rs && !rs.has(String(data.id))) {
-			return Promise.resolve();
-		}
-
-		if (isTombstone?.(stream, data)) {
+		const selection = selectRecord(stream, data, options);
+		if (selection === "skip" || data.id == null) return Promise.resolve();
+		if (selection === "tombstone") {
 			counters.totalEmitted += 1;
 			return emit({
 				type: "RECORD",
@@ -1519,15 +1541,6 @@ export function makeEmitRecord(deps: {
 				emitted_at: emittedAt,
 				op: "delete",
 			});
-		}
-
-		const streamScope = requested.get(stream);
-		const field = timeRangeFieldFor(stream);
-		if (
-			streamScope?.time_range &&
-			isOutsideTimeRange(streamScope.time_range, data[field])
-		) {
-			return Promise.resolve();
 		}
 
 		const validation = validateRecord?.(stream, data);
@@ -1563,7 +1576,12 @@ export function makeEmitRecord(deps: {
 			: emit(record);
 	};
 
-	return { emit: emitRecord, counters };
+	return {
+		emit: emitRecord,
+		isSelected: (stream, data, options) =>
+			selectRecord(stream, data, options) !== "skip",
+		counters,
+	};
 }
 
 interface BrowserSurfaceAssistanceLifecycleDependencies {
