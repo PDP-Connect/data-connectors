@@ -68,14 +68,21 @@ test("orders schema accepts a fully-populated record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("orders schema accepts null order_date/total_cents/item_count (unparseable source)", () => {
+test("orders schema accepts null order_date/total_cents (unparseable source)", () => {
 	const result = ordersSchema.safeParse({
 		...ORDER_RECORD,
-		item_count: null,
 		order_date: null,
 		total_cents: null,
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("orders schema rejects null item_count because source completeness must be proven", () => {
+	const result = ordersSchema.safeParse({
+		...ORDER_RECORD,
+		item_count: null,
+	});
+	assert.equal(result.success, false);
 });
 
 test("orders schema rejects an order_date with a fabricated time component", () => {

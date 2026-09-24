@@ -20,6 +20,7 @@ import { test } from "node:test";
 import type { Page } from "playwright";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	assertCompleteOrderDetail,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
@@ -71,10 +72,16 @@ test("collectProfile emits nothing when the account page has no scrapeable custo
 });
 
 const STUB: OrderStub = {
+	expectedItemCount: 1,
 	orderDateRaw: "March 3, 2026",
 	orderId: "111-1111111-1111111",
 	orderUrl:
 		"https://www.amazon.com/uff/your-account/order-details?orderID=111-1111111-1111111",
+};
+
+const EMPTY_STUB: OrderStub = {
+	...STUB,
+	expectedItemCount: 0,
 };
 
 test("buildOrderRecord + buildOrderItemRecord validate and order-before-items when replayed through emitRecord", async () => {
@@ -106,10 +113,17 @@ test("buildOrderRecord + buildOrderItemRecord validate and order-before-items wh
 	assert.equal(harness.emitted[1]?.data.product_id, "B01ABCDEFG");
 });
 
-test("buildOrderRecord reports null total/item_count for an order with zero survived items (not a fabricated zero)", () => {
-	const record = buildOrderRecord(STUB, null, []);
-	assert.equal(record.item_count, null);
+test("buildOrderRecord reports the source-declared zero item count for an empty order", () => {
+	const record = buildOrderRecord(EMPTY_STUB, null, []);
+	assert.equal(record.item_count, 0);
 	assert.equal(record.total_cents, null);
+});
+
+test("assertCompleteOrderDetail rejects partial detail rows before emitting an order", () => {
+	assert.throws(
+		() => assertCompleteOrderDetail({ ...STUB, expectedItemCount: 2 }, []),
+		/did not match search result count 2/,
+	);
 });
 
 test("buildOrderRecord does not turn missing item prices into a partial total", () => {
@@ -191,6 +205,24 @@ test("observed blocked lookup emits a blocked nutrition row when USDA finds no m
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("legacy nutrition outcome rows remain valid for not_found, error, and blocked", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	for (const source of ["not_found", "error", "blocked"] as const) {
+		await harness.emitRecord(
+			"nutrition",
+			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", source),
+		);
+	}
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.source),
+		["not_found", "error", "blocked"],
+	);
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.calories),
+		[null, null, null],
+	);
 });
 
 test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {

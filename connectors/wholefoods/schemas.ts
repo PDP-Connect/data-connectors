@@ -43,14 +43,17 @@ export const profileSchema = z.object({
 
 /**
  * orders stream (manifest required: id). One record per Whole Foods order.
- * `total_cents` / `item_count` are non-negative ints; `order_date` is a
+ * `total_cents` is null when any detail item lacks a price. `item_count`
+ * is the source-backed count from the complete search-page item rows and is
+ * required so downstream legacy projections never receive an unproven count.
+ * `order_date` is a
  * date-only ISO-8601 string (source precision — Amazon's order pages never
  * expose a time-of-day, so a datetime would fabricate precision, violating
  * D4).
  */
 export const ordersSchema = z.object({
 	id: z.string().min(1).max(200),
-	item_count: z.number().int().min(0).nullable(),
+	item_count: z.number().int().min(0),
 	order_date: z
 		.string()
 		.regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD")

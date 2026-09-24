@@ -165,6 +165,10 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 		let sawNewOrder = false;
 		for (const stub of pageStubs) {
 			if (seen.has(stub.orderId)) {
+				const existing = stubs.find((s) => s.orderId === stub.orderId);
+				if (existing) {
+					existing.expectedItemCount += stub.expectedItemCount;
+				}
 				continue;
 			}
 			seen.add(stub.orderId);
@@ -191,6 +195,17 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 
 // ─── Orders: detail + record building ─────────────────────────────────────
 
+function assertCompleteOrderDetail(
+	stub: OrderStub,
+	items: readonly OrderDetailItem[],
+): void {
+	if (items.length !== stub.expectedItemCount) {
+		throw new Error(
+			`Whole Foods order ${stub.orderId} detail item count ${items.length} did not match search result count ${stub.expectedItemCount}`,
+		);
+	}
+}
+
 function buildOrderRecord(
 	stub: OrderStub,
 	orderDateRaw: string | null,
@@ -205,7 +220,7 @@ function buildOrderRecord(
 		items.length > 0 && items.every((item) => item.unitPriceDollars !== null);
 	return {
 		id: stub.orderId,
-		item_count: items.length > 0 ? items.length : null,
+		item_count: stub.expectedItemCount,
 		order_date: parseOrderDateIso(orderDateRaw ?? stub.orderDateRaw),
 		order_url: stub.orderUrl,
 		status: null,
@@ -564,6 +579,7 @@ if (isMainModule(import.meta.url)) {
 					);
 				}
 				const detail = parseOrderDetailDom(html);
+				assertCompleteOrderDetail(stub, detail.items);
 
 				if (wantsOrders) {
 					const orderRecord = buildOrderRecord(
@@ -656,6 +672,7 @@ export {
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
+	assertCompleteOrderDetail,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,

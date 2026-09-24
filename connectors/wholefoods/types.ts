@@ -18,6 +18,7 @@ export interface WholeFoodsProfile {
  *  Whole Foods Market. The search page shows items, not orders, so this is
  *  built by deduplicating on `orderId` across every item row. */
 export interface OrderStub {
+	expectedItemCount: number;
 	orderDateRaw: string | null;
 	orderId: string;
 	orderUrl: string;
@@ -95,7 +96,7 @@ export interface ProfileRecord {
 /** Emitted `orders` stream record shape. */
 export interface OrderRecord {
 	id: string;
-	item_count: number | null;
+	item_count: number;
 	order_date: string | null;
 	order_url: string | null;
 	status: string | null;

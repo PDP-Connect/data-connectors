@@ -71,17 +71,19 @@ test("parseOrderSearchPageDom extracts unique order stubs and their order date t
 	assert.equal(hasNextPage, false);
 	assert.equal(stubs.length, 2);
 	assert.equal(stubs[0]?.orderId, "111-1111111-1111111");
+	assert.equal(stubs[0]?.expectedItemCount, 1);
 	assert.equal(stubs[0]?.orderDateRaw, "March 3, 2026");
 	assert.equal(stubs[1]?.orderId, "222-2222222-2222222");
 });
 
-test("parseOrderSearchPageDom dedupes repeated item rows for the same order", () => {
+test("parseOrderSearchPageDom counts repeated item rows for the same order", () => {
 	const html = `<html><body>
     ${searchResultRow("111-1111111-1111111", "Ordered on March 3, 2026")}
     ${searchResultRow("111-1111111-1111111", "Ordered on March 3, 2026")}
   </body></html>`;
 	const { stubs } = parseOrderSearchPageDom(html);
 	assert.equal(stubs.length, 1);
+	assert.equal(stubs[0]?.expectedItemCount, 2);
 });
 
 test("parseOrderSearchPageDom reports hasNextPage from the pagination control", () => {

@@ -119,7 +119,14 @@ export function parseOrderSearchPageDom(html: string): {
 		);
 		const href = link?.getAttribute("href") ?? "";
 		const orderId = ORDER_ID_FROM_HREF_RE.exec(href)?.[1];
-		if (!orderId || seen.has(orderId)) {
+		if (!orderId) {
+			continue;
+		}
+		if (seen.has(orderId)) {
+			const existing = stubs.find((stub) => stub.orderId === orderId);
+			if (existing) {
+				existing.expectedItemCount += 1;
+			}
 			continue;
 		}
 		seen.add(orderId);
@@ -137,7 +144,12 @@ export function parseOrderSearchPageDom(html: string): {
 		// `/your-orders/order-details?orderID=...`, not the legacy
 		// `/uff/your-account/order-details` path this connector's prior art
 		// assumed.
-		stubs.push({ orderDateRaw, orderId, orderUrl: absoluteAmazonUrl(href) });
+		stubs.push({
+			expectedItemCount: 1,
+			orderDateRaw,
+			orderId,
+			orderUrl: absoluteAmazonUrl(href),
+		});
 	}
 	const hasNextPage = Boolean(
 		document.querySelector("ul.a-pagination li.a-last a"),

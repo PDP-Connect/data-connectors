@@ -18324,7 +18324,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.2.0",
+				"version": "0.3.0",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -18444,10 +18444,10 @@
 									"type": ["integer", "null"]
 								},
 								"item_count": {
-									"type": ["integer", "null"]
+									"type": "integer"
 								}
 							},
-							"required": ["id"]
+							"required": ["id", "item_count"]
 						},
 						"primary_key": ["id"],
 						"consent_time_field": "order_date",
