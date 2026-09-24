@@ -176,10 +176,16 @@ const ADS_REQUIRED_SURFACES = [
 ] as const;
 
 type AdsSurface = (typeof ADS_REQUIRED_SURFACES)[number];
+type AdsSurfaceStep =
+	| "navigation_failed"
+	| "control_not_found"
+	| "destination_list_not_found"
+	| "reached_empty";
 
 interface ReachedScrape<T> {
 	items: T[];
 	reached: boolean;
+	step: AdsSurfaceStep | null;
 	surface: AdsSurface;
 }
 
@@ -645,8 +651,8 @@ export async function fetchAllFollowing(
  */
 async function scrapeDialogListItems(
 	page: Page,
-): Promise<{ items: string[]; reached: boolean }> {
-	return await page.evaluate(() => {
+): Promise<{ items: string[]; reached: boolean; step: AdsSurfaceStep | null }> {
+	const result = await page.evaluate(() => {
 		const dialog = document.querySelector('[role="dialog"]');
 		if (!dialog) {
 			return { items: [], reached: false };
@@ -656,13 +662,22 @@ async function scrapeDialogListItems(
 			return { items: [], reached: false };
 		}
 		const items = list.querySelectorAll('[role="listitem"]');
+		const values = Array.from(items)
+			.map((el) => (el.textContent ?? "").trim())
+			.filter((t) => t.length > 0);
 		return {
-			items: Array.from(items)
-				.map((el) => (el.textContent ?? "").trim())
-				.filter((t) => t.length > 0),
+			items: values,
 			reached: true,
 		};
 	});
+	return {
+		...result,
+		step: !result.reached
+			? "destination_list_not_found"
+			: result.items.length === 0
+				? "reached_empty"
+				: null,
+	};
 }
 
 /** A mounted list is only a shell. Prefer populated rows, but preserve empty
@@ -730,19 +745,31 @@ async function closeDialog(page: Page): Promise<void> {
 export async function scrapeAdvertisers(
 	page: Page,
 ): Promise<ReachedScrape<string>> {
-	await page
-		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
+	try {
+		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
 			timeout: 30_000,
 			waitUntil: "domcontentloaded",
-		})
-		.catch((): undefined => undefined);
+		});
+	} catch {
+		return {
+			items: [],
+			reached: false,
+			step: "navigation_failed",
+			surface: "advertisers",
+		};
+	}
 	const buttonReady = await waitForAdsCondition(page, () =>
 		Boolean(
 			document.querySelector('[role="button"][aria-label*="advertiser" i]'),
 		),
 	);
 	if (!buttonReady) {
-		return { items: [], reached: false, surface: "advertisers" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "advertisers",
+		};
 	}
 
 	const clicked = await page.evaluate(() => {
@@ -756,12 +783,22 @@ export async function scrapeAdvertisers(
 		return false;
 	});
 	if (!clicked) {
-		return { items: [], reached: false, surface: "advertisers" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "advertisers",
+		};
 	}
 	const listReady = await waitForAdsList(page);
 	if (!listReady) {
 		await closeDialog(page);
-		return { items: [], reached: false, surface: "advertisers" };
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "advertisers",
+		};
 	}
 	const result = await scrapeDialogListItems(page);
 	await closeDialog(page);
@@ -774,21 +811,38 @@ const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
 export async function scrapeAdTopics(
 	page: Page,
 ): Promise<ReachedScrape<string>> {
-	await page
-		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`, {
+	try {
+		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`, {
 			timeout: 30_000,
 			waitUntil: "domcontentloaded",
-		})
-		.catch((): undefined => undefined);
+		});
+	} catch {
+		return {
+			items: [],
+			reached: false,
+			step: "navigation_failed",
+			surface: "ad_topics",
+		};
+	}
 	const listReady = await waitForAdsList(page);
 	if (!listReady) {
-		return { items: [], reached: false, surface: "ad_topics" };
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		};
 	}
 	const result = await scrapeDialogListItems(page);
 	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
 	return {
 		items,
 		reached: result.reached,
+		step: !result.reached
+			? "destination_list_not_found"
+			: result.items.filter((t) => !NON_TOPIC_RE.test(t)).length === 0
+				? "reached_empty"
+				: null,
 		surface: "ad_topics",
 	};
 }
@@ -802,19 +856,31 @@ export async function scrapeAdTopics(
 export async function scrapeTargetingCategories(
 	page: Page,
 ): Promise<ReachedScrape<{ description: string | null; name: string }>> {
-	await page
-		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
+	try {
+		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
 			timeout: 30_000,
 			waitUntil: "domcontentloaded",
-		})
-		.catch((): undefined => undefined);
+		});
+	} catch {
+		return {
+			items: [],
+			reached: false,
+			step: "navigation_failed",
+			surface: "targeting_categories",
+		};
+	}
 	const tabReady = await waitForAdsCondition(page, () =>
 		Array.from(document.querySelectorAll('[role="tab"]')).some((tab) =>
 			(tab.textContent ?? "").includes("Manage info"),
 		),
 	);
 	if (!tabReady) {
-		return { items: [], reached: false, surface: "targeting_categories" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "targeting_categories",
+		};
 	}
 
 	const clickedTab = await page.evaluate(() => {
@@ -828,7 +894,12 @@ export async function scrapeTargetingCategories(
 		return false;
 	});
 	if (!clickedTab) {
-		return { items: [], reached: false, surface: "targeting_categories" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "targeting_categories",
+		};
 	}
 	const panelLinkReady = await waitForAdsCondition(page, () =>
 		Array.from(
@@ -840,7 +911,12 @@ export async function scrapeTargetingCategories(
 		),
 	);
 	if (!panelLinkReady) {
-		return { items: [], reached: false, surface: "targeting_categories" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "targeting_categories",
+		};
 	}
 
 	const clickedCategories = await page.evaluate(() => {
@@ -856,12 +932,22 @@ export async function scrapeTargetingCategories(
 		return false;
 	});
 	if (!clickedCategories) {
-		return { items: [], reached: false, surface: "targeting_categories" };
+		return {
+			items: [],
+			reached: false,
+			step: "control_not_found",
+			surface: "targeting_categories",
+		};
 	}
 	const categoryListReady = await waitForAdsList(page);
 	if (!categoryListReady) {
 		await closeDialog(page);
-		return { items: [], reached: false, surface: "targeting_categories" };
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "targeting_categories",
+		};
 	}
 
 	const clickedViewAll = await page.evaluate(() => {
@@ -924,6 +1010,13 @@ export async function scrapeTargetingCategories(
 	return {
 		items: categories.items,
 		reached: categories.reached && viewAllExpanded,
+		step: !categories.reached
+			? "destination_list_not_found"
+			: !viewAllExpanded
+				? "destination_list_not_found"
+				: categories.items.length === 0
+					? "reached_empty"
+					: null,
 		surface: "targeting_categories",
 	};
 }
@@ -1070,7 +1163,12 @@ export async function collectAllStreams(
 		);
 		if (missingSurfaces.length > 0) {
 			await emit({
-				diagnostics: { missing_surfaces: missingSurfaces },
+				diagnostics: {
+					missing_surfaces: missingSurfaces,
+					surface_steps: [advertisers, adTopics, categories]
+						.filter((surface) => surface.step !== null)
+						.map(({ step, surface }) => ({ surface, step })),
+				},
 				message: `Instagram ads scan could not reach ${missingSurfaces.join(", ")}`,
 				reason: "ads_surfaces_unavailable",
 				stream: "ads",

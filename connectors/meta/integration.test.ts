@@ -58,6 +58,7 @@ function makeFakePage(options: {
 	delayFirstDialogItems?: boolean;
 	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
+	navigationFailures?: string[];
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
 }): {
@@ -108,7 +109,10 @@ function makeFakePage(options: {
 	};
 
 	const page = {
-		goto: (): Promise<null> => {
+		goto: (url?: string): Promise<null> => {
+			if (url && options.navigationFailures?.some((path) => url.includes(path))) {
+				return Promise.reject(new Error("scripted navigation failure"));
+			}
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
@@ -280,6 +284,14 @@ const WEB_INFO_USER = {
 };
 
 function makeCtx(args: {
+	pageOptions?: {
+		categoriesAvailable?: boolean;
+		categoryDestinationReached?: boolean;
+		categoryRows?: Array<{ description: string | null; name: string }>;
+		dialogScrapes?: string[][];
+		dialogReached?: boolean[];
+		navigationFailures?: string[];
+	};
 	fetchScript: Record<string, ScriptedFetch[]>;
 	harness: ReturnType<typeof makeRecordingEmit>;
 	postsScript?: ScriptedPostsPage[];
@@ -287,6 +299,7 @@ function makeCtx(args: {
 	webInfoUser?: unknown;
 }): { calls: string[]; ctx: BrowserCollectContext } {
 	const { calls, page } = makeFakePage({
+		...args.pageOptions,
 		fetchScript: args.fetchScript,
 		...(args.postsScript ? { postsScript: args.postsScript } : {}),
 		webInfoUser:
@@ -883,6 +896,9 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 	assert.equal(skip.reason, "ads_surfaces_unavailable");
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
+		surface_steps: [
+			{ surface: "targeting_categories", step: "control_not_found" },
+		],
 	});
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
@@ -933,7 +949,13 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		skip,
 		"a dialog without its list must not count as a reached surface",
 	);
-	assert.deepEqual(skip.diagnostics, { missing_surfaces: ["advertisers"] });
+	assert.deepEqual(skip.diagnostics, {
+		missing_surfaces: ["advertisers"],
+		surface_steps: [
+			{ surface: "advertisers", step: "destination_list_not_found" },
+			{ surface: "ad_topics", step: "reached_empty" },
+		],
+	});
 });
 
 test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
@@ -981,7 +1003,46 @@ test("collectAllStreams: successful category clicks without a destination list e
 	);
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
+		surface_steps: [
+			{ surface: "advertisers", step: "reached_empty" },
+			{ surface: "ad_topics", step: "reached_empty" },
+			{
+				surface: "targeting_categories",
+				step: "destination_list_not_found",
+			},
+		],
 	});
+});
+
+test("collectAllStreams: ads navigation failure reports only a bounded surface step", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		pageOptions: {
+			categoriesAvailable: true,
+			categoryRows: [{ description: null, name: "Music" }],
+			dialogScrapes: [["Acme"], ["Sports"]],
+			navigationFailures: ["/ads/ad_topics/"],
+		},
+		requestedStreams: ["ads"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	const skip = harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT" && m.stream === "ads",
+	);
+	assert.ok(skip);
+	assert.deepEqual(skip.diagnostics, {
+		missing_surfaces: ["ad_topics"],
+		surface_steps: [{ surface: "ad_topics", step: "navigation_failed" }],
+	});
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.kind),
+		["advertiser", "ad_category"],
+	);
 });
 
 // ─── Invariant 6: shape-check catches a drifted record ──────────────────
