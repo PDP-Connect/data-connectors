@@ -11,6 +11,7 @@ function handoffFixture() {
 	let signedIn = false;
 	const navigations: string[] = [];
 	const completions: string[] = [];
+	let siblingPagesCreated = 0;
 	const sibling = {
 		url: "about:blank",
 		async waitForFunction() {
@@ -46,7 +47,12 @@ function handoffFixture() {
 			return this.url === "https://www.youtube.com/" && signedIn;
 		},
 		context() {
-			return { newPage: async () => sibling };
+			return {
+				newPage: async () => {
+					siblingPagesCreated += 1;
+					return sibling;
+				},
+			};
 		},
 	};
 	const args = {
@@ -66,20 +72,19 @@ function handoffFixture() {
 		args,
 		completions,
 		navigations,
+		siblingPagesCreated: () => siblingPagesCreated,
 		setSignedIn: (value: boolean) => {
 			signedIn = value;
 		},
 	};
 }
 
-test("production session hook navigates the blank sibling and resolves streamed sign-in", async () => {
+test("production session hook resolves streamed sign-in on the owner tab", async () => {
 	const fixture = handoffFixture();
 	assert.equal(youtubeConnectorConfig.ensureSession, ensureYoutubeSession);
 	await ensureYoutubeSession(fixture.args as never);
-	assert.deepEqual(fixture.navigations, [
-		"owner:https://www.youtube.com/",
-		"sibling:https://www.youtube.com/",
-	]);
+	assert.deepEqual(fixture.navigations, ["owner:https://www.youtube.com/"]);
+	assert.equal(fixture.siblingPagesCreated(), 0);
 	assert.deepEqual(fixture.completions, ["resolved"]);
 });
 
@@ -94,7 +99,8 @@ test("production session hook escalates a timed-out streamed handoff", async () 
 		/browser_handoff_readiness_timed_out/,
 	);
 	assert.deepEqual(fixture.completions, ["escalated"]);
-	assert.ok(fixture.navigations.includes("sibling:https://www.youtube.com/"));
+	assert.deepEqual(fixture.navigations, ["owner:https://www.youtube.com/"]);
+	assert.equal(fixture.siblingPagesCreated(), 0);
 });
 
 test("runConnector emits streamed assistance completion and DONE through the production session hook", async () => {
