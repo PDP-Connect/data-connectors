@@ -58,15 +58,25 @@ function makeFakePage(options: {
 	fetchScript: Record<string, ScriptedFetch[]>;
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
-}): { calls: string[]; page: Page; waitConditions: string[] } {
+}): {
+	calls: string[];
+	page: Page;
+	waitConditions: string[];
+	waitRejections: string[];
+} {
 	const calls: string[] = [];
 	const waitConditions: string[] = [];
+	const waitRejections: string[] = [];
 	const cursors: Record<string, number> = {};
 	const dialogQueue = [...(options.dialogScrapes ?? [])];
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let adsListWait = 0;
+	const resolveReadiness = (ready: boolean): Promise<unknown> =>
+		ready
+			? Promise.resolve(true)
+			: Promise.reject(new Error("Timeout while waiting for fake DOM"));
 
 	const resolveNextPostsPage = (): void => {
 		const next = pendingPostsResolve;
@@ -103,27 +113,40 @@ function makeFakePage(options: {
 		waitForFunction: (condition: unknown): Promise<unknown> => {
 			const source = String(condition);
 			waitConditions.push(source);
+			const readiness = (ready: boolean): Promise<unknown> => {
+				if (!ready) {
+					waitRejections.push(source);
+				}
+				return resolveReadiness(ready);
+			};
 			if (source.includes("Manage info")) {
-				return Promise.resolve(options.categoriesAvailable === true);
+				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("Categories used to reach you")) {
-				return Promise.resolve(options.categoriesAvailable === true);
+				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("View all")) {
-				return Promise.resolve(true);
+				return readiness(true);
 			}
 			if (source.includes("advertiser")) {
-				return Promise.resolve(true);
+				return readiness(true);
 			}
 			if (source.includes('[role="dialog"] [role="list"]')) {
 				const index = adsListWait++;
 				if (index < 2) {
-					const reached = dialogReachedQueue[index];
-					return Promise.resolve(reached ?? dialogQueue[index] !== undefined);
+					const reached = dialogReachedQueue[0];
+					const ready = reached ?? dialogQueue[0] !== undefined;
+					if (!ready) {
+						// A timed-out surface is not scraped, so consume its scripted
+						// slot here to keep the next surface aligned with the UI flow.
+						dialogQueue.shift();
+						dialogReachedQueue.shift();
+					}
+					return readiness(ready);
 				}
-				return Promise.resolve(options.categoryDestinationReached !== false);
+				return readiness(options.categoryDestinationReached !== false);
 			}
-			return Promise.resolve(true);
+			return readiness(true);
 		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
@@ -190,7 +213,7 @@ function makeFakePage(options: {
 		},
 	} as unknown as Page;
 
-	return { calls, page, waitConditions };
+	return { calls, page, waitConditions, waitRejections };
 }
 
 const WEB_INFO_USER = {
@@ -712,7 +735,7 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 
 test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page } = makeFakePage({
+	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
@@ -773,6 +796,10 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 	assert.deepEqual(skip.diagnostics, {
 		missing_surfaces: ["targeting_categories"],
 	});
+	assert.ok(
+		waitRejections.some((condition) => condition.includes("Manage info")),
+		"an unavailable Manage info tab must reject its Playwright-style wait",
+	);
 });
 
 test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
