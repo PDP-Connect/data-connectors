@@ -7,8 +7,8 @@
 // HEAD. A breaking change is: a removed property, a removed required field,
 // or a new required field.
 //
-// If a breaking change is present, the schema's `version` field must be
-// bumped (major) compared to the base revision.
+// If a breaking change is present, the schema's `version` field must advance
+// its major version, or its minor version while still in 0.x development.
 //
 // Acceptance target:
 //   HC-COMPAT-ADDITIVE-SCHEMA-001 — public scope schemas evolve additively
@@ -20,7 +20,7 @@
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -85,10 +85,18 @@ function getFileAtRef(ref, relPath) {
   }
 }
 
-function parseMajor(version) {
-  if (typeof version !== "string") return 0;
-  const m = version.match(/^(\d+)/);
-  return m ? parseInt(m[1], 10) : 0;
+function parseMajorMinor(version) {
+  if (typeof version !== "string") return null;
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  return match ? { major: Number(match[1]), minor: Number(match[2]) } : null;
+}
+
+export function permitsBreakingChange(baseVersion, headVersion) {
+  const base = parseMajorMinor(baseVersion);
+  const head = parseMajorMinor(headVersion);
+  if (!base || !head) return false;
+  return head.major > base.major ||
+    (base.major === 0 && head.major === 0 && head.minor > base.minor);
 }
 
 function collectProperties(schema, path = "") {
@@ -143,13 +151,10 @@ function main() {
 
     checked++;
     const { removed, newlyRequired } = diffSchemas(base.schema, head.schema);
-    const baseMajor = parseMajor(base.version);
-    const headMajor = parseMajor(head.version);
-
     const breaking = removed.length > 0 || newlyRequired.length > 0;
-    if (breaking && headMajor <= baseMajor) {
+    if (breaking && !permitsBreakingChange(base.version, head.version)) {
       errors.push(
-        `${head.rel}: breaking schema change without major version bump (base v${base.version}, head v${head.version}). removed=${JSON.stringify(removed)} newly_required=${JSON.stringify(newlyRequired)}`,
+        `${head.rel}: breaking schema change without major (or 0.x minor) version bump (base v${base.version}, head v${head.version}). removed=${JSON.stringify(removed)} newly_required=${JSON.stringify(newlyRequired)}`,
       );
     }
   }
@@ -157,7 +162,7 @@ function main() {
   if (errors.length > 0) {
     for (const e of errors) console.error(`error: ${e}`);
     console.error(
-      `\nHC-COMPAT-ADDITIVE-SCHEMA-001 FAIL: ${errors.length} breaking schema change(s). Either revert the change or bump the schema's major version.`,
+      `\nHC-COMPAT-ADDITIVE-SCHEMA-001 FAIL: ${errors.length} breaking schema change(s). Either revert the change or bump the schema's major version (minor in 0.x).`,
     );
     process.exit(1);
   }
@@ -165,4 +170,6 @@ function main() {
   console.log(`Schemas additive: ${checked} schema(s) checked.`);
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
