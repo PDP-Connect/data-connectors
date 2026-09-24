@@ -560,7 +560,8 @@ function chatEventsState(harness: ChatRun["harness"]): Record<string, unknown> {
 			(message as { stream?: unknown }).stream === "chat_events",
 	) as { cursor?: unknown } | undefined;
 	assert.ok(state, "chat_events must end with a STATE checkpoint");
-	return { chat_events: { cursor: state.cursor } };
+	// Hosts hand back the last cursor unwrapped: START.state[stream] = cursor.
+	return { chat_events: state.cursor };
 }
 
 function historyCalls(
@@ -666,15 +667,13 @@ test("a new event in the checkpoint's own second is collected, the old ones are 
 	assert.deepEqual(chatEventIds(harness), [sameSecond.id]);
 	const state = chatEventsState(harness) as {
 		chat_events: {
-			cursor: {
-				chats: Record<
-					string,
-					{ newest_created_at: number; newest_ids: string[] }
-				>;
-			};
+			chats: Record<
+				string,
+				{ newest_created_at: number; newest_ids: string[] }
+			>;
 		};
 	};
-	assert.deepEqual(state.chat_events.cursor.chats[MAIN_CHAT], {
+	assert.deepEqual(state.chat_events.chats[MAIN_CHAT], {
 		newest_created_at: 1_789_070_050,
 		newest_ids: [
 			"00000000-0000-4000-8000-000000000107",
@@ -707,9 +706,9 @@ test("a chatHistory failure on one chat skips it and still collects the other", 
 	]);
 	// The failed chat keeps no checkpoint, so the next run backfills it.
 	const state = chatEventsState(harness) as {
-		chat_events: { cursor: { chats: Record<string, unknown> } };
+		chat_events: { chats: Record<string, unknown> };
 	};
-	assert.deepEqual(Object.keys(state.chat_events.cursor.chats), [
+	assert.deepEqual(Object.keys(state.chat_events.chats), [
 		WHATSAPP_CHAT,
 	]);
 });

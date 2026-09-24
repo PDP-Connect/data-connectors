@@ -700,12 +700,11 @@ const chatCheckpointSchema = z.object({
 	newest_created_at: z.number().int(),
 	newest_ids: z.array(z.string()),
 });
-const chatEventsStateSchema = z.object({
-	cursor: z
-		.object({ chats: z.record(z.string(), chatCheckpointSchema) })
-		.partial()
-		.nullish(),
-});
+// START.state carries each stream's last STATE cursor as-is, so this is the
+// `{ chats }` object the run emits below, not a `{ cursor }` wrapper.
+const chatEventsStateSchema = z
+	.object({ chats: z.record(z.string(), chatCheckpointSchema) })
+	.partial();
 
 /** Prior per-chat checkpoints, or none when state is absent or unreadable. */
 export function readChatCheckpoints(
@@ -715,7 +714,7 @@ export function readChatCheckpoints(
 	if (!parsed.success) {
 		return {};
 	}
-	return { ...(parsed.data.cursor?.chats ?? {}) };
+	return { ...(parsed.data.chats ?? {}) };
 }
 
 async function listChats(args: CollectInstinctArgs): Promise<Chat[] | null> {
