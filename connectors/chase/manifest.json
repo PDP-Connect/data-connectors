@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/chase",
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",

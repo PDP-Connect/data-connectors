@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A connection with no stored credential must SAY that, naming the fields.
+ * A connection with no stored credential must say that without exposing field names.
  *
  * These tests pin the owner-facing copy at the moment of absence for each
  * migrated connector. The defect they guard is not a crash — it is a run that
@@ -81,14 +81,8 @@ for (const { connector, fields, password, username } of CASES) {
 			return;
 		}
 		assert.deepEqual(resolved.missing, [username, password]);
-		assert.match(
-			resolved.reason,
-			new RegExp(`no stored credential for this ${connector} connection`, "u"),
-		);
-		assert.match(
-			resolved.reason,
-			new RegExp(`missing: ${username}, ${password}`, "u"),
-		);
+		assert.match(resolved.reason, /No saved .* sign-in is available/u);
+		assert.doesNotMatch(resolved.reason, new RegExp(`${username}|${password}`, "u"));
 		assert.doesNotMatch(resolved.reason, PAGE_BLAMING);
 	});
 
@@ -106,8 +100,7 @@ for (const { connector, fields, password, username } of CASES) {
 			return;
 		}
 		assert.deepEqual(resolved.missing, [password]);
-		assert.match(resolved.reason, new RegExp(`missing: ${password}`, "u"));
-		assert.doesNotMatch(resolved.reason, new RegExp(username, "u"));
+		assert.doesNotMatch(resolved.reason, new RegExp(`${username}|${password}`, "u"));
 		// Names only, never values.
 		assert.doesNotMatch(resolved.reason, /owner@example\.com/u);
 	});

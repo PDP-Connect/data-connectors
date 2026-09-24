@@ -614,8 +614,7 @@ test("ChatGPT manual auth repair can use the secure browser without storing a pa
 			// stored username/password reached this run, before the (still-valid)
 			// fallback offer to sign in in the secure browser instead.
 			assert.deepEqual(assistanceMessages, [
-				"no stored credential for this chatgpt connection (missing: CHATGPT_USERNAME, CHATGPT_PASSWORD). " +
-					"Automated sign-in was not attempted. Save this connection's credentials to enable it. " +
+				"No saved ChatGPT sign-in is available for this connection. Automated sign-in was skipped. " +
 					"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.",
 			]);
 

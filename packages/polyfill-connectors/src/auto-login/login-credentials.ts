@@ -75,9 +75,8 @@ export interface AbsentLoginCredentials {
 	/** The credential field names that were absent or blank. */
 	readonly missing: readonly string[];
 	/**
-	 * Owner-facing reason. Names the CREDENTIAL, never the page — the whole
-	 * point of the type. Safe to surface in an interaction message: it contains
-	 * only field NAMES, never a value.
+	 * Owner-facing reason. Explains the connection state without exposing
+	 * implementation field names or credential values.
 	 */
 	readonly reason: string;
 }
@@ -154,26 +153,22 @@ export function resolveLoginCredentials(
 	return {
 		kind: "absent",
 		missing,
-		reason: noStoredCredentialReason(connectorName, missing),
+		reason: noStoredCredentialReason(connectorName),
 	};
 }
 
 /**
  * The owner-facing sentence for an absent credential.
  *
- * Deliberately says "no stored credential for this connection" rather than
- * anything about the page. Before this existed, a run with no credential
- * reported "sign-in form did not render" / "unexpected UI" — which reads as a
- * provider outage and sent owners to debug the wrong thing.
+ * Keep environment and runtime field names inside the implementation;
+ * members need the connection state, not its configuration keys.
  */
-export function noStoredCredentialReason(
-	connectorName: string,
-	missing: readonly string[],
-): string {
-	const fieldList =
-		missing.length > 0 ? missing.join(", ") : "username, password";
-	return (
-		`no stored credential for this ${connectorName} connection (missing: ${fieldList}). ` +
-		"Automated sign-in was not attempted. Save this connection's credentials to enable it."
-	);
+export function noStoredCredentialReason(connectorName: string): string {
+	const provider =
+		{
+			chatgpt: "ChatGPT",
+			heb: "H-E-B",
+			usaa: "USAA",
+		}[connectorName] ?? connectorName[0]?.toUpperCase() + connectorName.slice(1);
+	return `No saved ${provider} sign-in is available for this connection. Automated sign-in was skipped.`;
 }

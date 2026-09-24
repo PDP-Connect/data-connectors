@@ -745,12 +745,9 @@ test("ensureChaseSession hands off when optional credentials are absent", async 
 		// stored for this connection" from "Chase failed to render".
 		assert.match(
 			requests[0]?.message ?? "",
-			/no stored credential for this chase connection/,
+			/No saved Chase sign-in is available/,
 		);
-		assert.match(
-			requests[0]?.message ?? "",
-			/missing: CHASE_USERNAME, CHASE_PASSWORD/,
-		);
+		assert.doesNotMatch(requests[0]?.message ?? "", /CHASE_USERNAME|CHASE_PASSWORD/);
 		assert.doesNotMatch(
 			requests[0]?.message ?? "",
 			/did not render|failed to load/i,
@@ -800,7 +797,7 @@ test("ensureChaseSession self-resolves the no-credentials manual handoff via ass
 		assert.equal(assistCalls.length, 1);
 		assert.deepEqual(assistCalls[0], {
 			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
-			message: `${noStoredCredentialReason("chase", ["CHASE_USERNAME", "CHASE_PASSWORD"])} Sign in to Chase in the secure browser. PDPP continues automatically when the session is ready.`,
+			message: `${noStoredCredentialReason("chase")} Sign in to Chase in the secure browser. PDPP continues automatically when the session is ready.`,
 			owner_action: "operate_attachment",
 			progress_posture: "blocked",
 			response_contract: "none",
