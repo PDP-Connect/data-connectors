@@ -34,14 +34,41 @@ export function readOwnAccount(doc: Document = document): {
 				a.getAttribute("href") ?? "",
 			),
 	);
+	const menuItem = Array.from(
+		doc.querySelectorAll("ytd-multi-page-menu-renderer ytd-compact-link-renderer"),
+	).find((item) => {
+		const label = item
+			.querySelector("#label")
+			?.textContent?.trim()
+			.replace(/\s+/g, " ")
+			.toLowerCase();
+		const accessibleLink = item.querySelector<HTMLAnchorElement>(
+			"a[aria-label], a[title]",
+		);
+		const accessibleLabel = (
+			accessibleLink?.getAttribute("aria-label") ??
+			accessibleLink?.getAttribute("title") ??
+			""
+		)
+			.trim()
+			.toLowerCase();
+		return label === "your channel" || accessibleLabel === "your channel";
+	});
+	const menuLink = menuItem?.querySelector<HTMLAnchorElement>(
+		'a[href*="/@"], a[href*="/channel/"]',
+	);
 	const href = handle?.startsWith("@")
 		? `/${handle}`
-		: link?.getAttribute("href");
+		: link?.getAttribute("href") ?? menuLink?.getAttribute("href");
 	const email =
 		header.querySelector("#email, [id*='email']")?.textContent?.trim() || null;
 	const url = href ? new URL(href, "https://www.youtube.com") : null;
 	return {
-		channel_url: url?.origin === "https://www.youtube.com" ? url.href : null,
+		channel_url:
+			url?.origin === "https://www.youtube.com" &&
+				!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
+				? url.href
+				: null,
 		email,
 	};
 }
