@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
 	"connector_key": "linkedin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"display_name": "LinkedIn",
 	"brand": {
 		"icon": "icon.svg",

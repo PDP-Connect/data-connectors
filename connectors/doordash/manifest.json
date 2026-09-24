@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/doordash",
 	"connector_key": "doordash",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"display_name": "DoorDash",
 	"brand": {
 		"icon": "icon.svg",

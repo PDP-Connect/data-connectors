@@ -3,7 +3,7 @@
   "connector_id": "https://registry.pdpp.dev/connectors/oura-browser",
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {

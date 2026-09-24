@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/google-calendar",
 	"connector_key": "google-calendar",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-calendar",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Google Calendar",
 	"brand": {
 		"icon": "icon.svg",

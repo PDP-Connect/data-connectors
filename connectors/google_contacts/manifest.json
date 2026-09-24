@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/google-contacts",
 	"connector_key": "google-contacts",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Google Contacts",
 	"brand": {
 		"icon": "icon.svg",

@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/jellyfin",
 	"connector_key": "jellyfin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Jellyfin",
 	"brand": {
 		"icon": "icon.svg",
