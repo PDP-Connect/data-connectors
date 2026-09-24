@@ -26,10 +26,12 @@ interface DailySleep {
   day: string;
   id: string;
   score?: number | null;
+  timestamp?: string | null;
 }
 
 interface SleepSession {
   average_breath?: number | null;
+  awake_time?: number | null;
   average_heart_rate?: number | null;
   average_hrv?: number | null;
   bedtime_end?: string | null;
@@ -238,6 +240,7 @@ async function fetchWindow(
 
 function sleepRecord(session: SleepSession, daily?: DailySleep): RecordData {
   return {
+    record_type: "sleep_session",
     id: session.id,
     day: session.day,
     bedtime_start: session.bedtime_start ?? null,
@@ -253,11 +256,43 @@ function sleepRecord(session: SleepSession, daily?: DailySleep): RecordData {
     average_hrv: session.average_hrv ?? null,
     temperature_delta: session.temperature_delta ?? null,
     sleep_score: daily?.score ?? null,
+    daily_sleep_id: daily?.id ?? null,
+    daily_sleep_timestamp: daily?.timestamp ?? null,
+    awake_time: session.awake_time ?? null,
     average_breath: session.average_breath ?? null,
     restless_periods: session.restless_periods ?? null,
     time_in_bed: session.time_in_bed ?? null,
     type: session.type ?? null,
     contributors: daily?.contributors ?? {},
+  };
+}
+
+function dailyScoreRecord(daily: DailySleep): RecordData {
+  return {
+    record_type: "daily_score",
+    id: daily.id,
+    day: daily.day,
+    bedtime_start: null,
+    bedtime_end: null,
+    total_sleep_duration: null,
+    rem_sleep_duration: null,
+    deep_sleep_duration: null,
+    light_sleep_duration: null,
+    efficiency: null,
+    latency: null,
+    average_heart_rate: null,
+    lowest_heart_rate: null,
+    average_hrv: null,
+    temperature_delta: null,
+    sleep_score: daily.score ?? null,
+    daily_sleep_id: daily.id,
+    daily_sleep_timestamp: daily.timestamp ?? null,
+    awake_time: null,
+    average_breath: null,
+    restless_periods: null,
+    time_in_bed: null,
+    type: null,
+    contributors: daily.contributors ?? {},
   };
 }
 
@@ -310,7 +345,10 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
     if (stream === "sleep") {
       const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
       const sessions = data.sleeps ?? [];
-      records = sessions.map((row) => sleepRecord(row, scores.get(row.day)));
+      records = [
+        ...sessions.map((row) => sleepRecord(row, scores.get(row.day))),
+        ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
+      ];
     } else if (stream === "readiness") {
       const rows = data.daily_readinesses ?? [];
       records = rows.map(readinessRecord);
