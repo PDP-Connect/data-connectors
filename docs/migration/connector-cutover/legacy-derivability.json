@@ -292,13 +292,13 @@
       "posts[].caption": "posts.caption (parsers.ts:147)",
       "posts[].num_of_likes": "posts.like_count (parsers.ts:150)",
       "posts[].taken_at": "posts.taken_at (parsers.ts:54-64,153, isoFromTakenAt, unix seconds-or-ms -> ISO-8601)",
-      "posts[].who_liked[]": "post_likes {post_id, user_id, username} (parsers.ts:162-183, node.facepile_top_likers[])"
+      "posts[].who_liked[]": "post_likes {post_id, user_id, username, profile_pic_url, pk, id} (parsers.ts postLikeRecords, node.facepile_top_likers[]); Vana must map the child stream back into posts[].who_liked"
     },
-    "not_derivable": [
-      "posts[].who_liked[].profile_pic_url: expiring signed CDN URL of a third party, correctly dropped by design (not durable data); confirmed no code path emits it."
-    ],
+    "not_derivable": [],
     "semantic_notes": [
       "COVERAGE DIFFERENCE: post_likes is a bounded 'top likers' sample (facepile_top_likers), not necessarily the full likers list the legacy who_liked[] name implies. Instagram's web surface has no full-likers-listing endpoint reachable from a logged-in session; the legacy scraper's own who_liked[] was presumably also bounded, but this cap is not disclosed by the legacy field name/description.",
+      "posts[].who_liked[].profile_pic_url is an expiring third-party CDN URL and may be absent; retained for legacy parity but not durable.",
+      "Rows without both id and pk are preserved with empty legacy identifiers and a liker_ordinal from facepile_top_likers array order; post_likes primary key is (post_id, liker_ordinal).",
       "PROOF-GATE GAP: the live test account used to build this connector has zero posts, so posts/post_likes extraction is structurally proven but not proven against real post data yet (the committed fixture is synthetic-but-shape-calibrated). Does not change the field-mapping classification."
     ],
     "status": "derivable"

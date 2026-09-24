@@ -208,16 +208,16 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 	}
 	const likers = node.facepile_top_likers ?? [];
 	const out: PostLikeRecord[] = [];
-	for (const liker of likers) {
-		const userId = liker.id ?? liker.pk ?? null;
-		const username = liker.username ?? null;
-		if (!userId || !username) {
-			continue;
-		}
+	for (const [liker_ordinal, liker] of likers.entries()) {
+		const userId = liker.id || liker.pk || "";
 		out.push({
+			liker_ordinal,
 			post_id: postId,
+			profile_pic_url: liker.profile_pic_url || "",
+			pk: liker.pk || liker.id || userId,
+			id: liker.id || liker.pk || userId,
 			user_id: userId,
-			username,
+			username: liker.username || "",
 		});
 	}
 	return out;

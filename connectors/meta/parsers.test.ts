@@ -298,17 +298,38 @@ test("postRecord: falls back through pk/media_id/code for id", () => {
 test("postLikeRecords: one record per (post, liker) pair", () => {
 	const edge = makeEdge({
 		facepile_top_likers: [
-			{ id: "u1", username: "alice" },
+			{
+				id: "u1",
+				pk: "pk1",
+				profile_pic_url: "https://cdn.example.com/alice.jpg",
+				username: "alice",
+			},
 			{ pk: "u2", username: "bob" },
 		],
 	});
 	assert.deepEqual(postLikeRecords(edge), [
-		{ post_id: "post1", user_id: "u1", username: "alice" },
-		{ post_id: "post1", user_id: "u2", username: "bob" },
+		{
+			liker_ordinal: 0,
+			post_id: "post1",
+			profile_pic_url: "https://cdn.example.com/alice.jpg",
+			pk: "pk1",
+			id: "u1",
+			user_id: "u1",
+			username: "alice",
+		},
+		{
+			liker_ordinal: 1,
+			post_id: "post1",
+			profile_pic_url: "",
+			pk: "u2",
+			id: "u2",
+			user_id: "u2",
+			username: "bob",
+		},
 	]);
 });
 
-test("postLikeRecords: skips likers missing id or username", () => {
+test("postLikeRecords: preserves source order and empty legacy identifiers", () => {
 	const edge = makeEdge({
 		facepile_top_likers: [
 			{ id: "u1" },
@@ -317,15 +338,41 @@ test("postLikeRecords: skips likers missing id or username", () => {
 		],
 	});
 	assert.deepEqual(postLikeRecords(edge), [
-		{ post_id: "post1", user_id: "u3", username: "carol" },
+		{
+			liker_ordinal: 0,
+			post_id: "post1",
+			profile_pic_url: "",
+			pk: "u1",
+			id: "u1",
+			user_id: "u1",
+			username: "",
+		},
+		{
+			liker_ordinal: 1,
+			post_id: "post1",
+			profile_pic_url: "",
+			pk: "",
+			id: "",
+			user_id: "",
+			username: "no-id",
+		},
+		{
+			liker_ordinal: 2,
+			post_id: "post1",
+			profile_pic_url: "",
+			pk: "u3",
+			id: "u3",
+			user_id: "u3",
+			username: "carol",
+		},
 	]);
 });
 
-test("postLikeRecords: empty array when post has no facepile_top_likers", () => {
+test("postLikeRecords: empty result when post has no facepile_top_likers", () => {
 	assert.deepEqual(postLikeRecords(makeEdge()), []);
 });
 
-test("postLikeRecords: empty array when the post itself has no id", () => {
+test("postLikeRecords: empty result when the post itself has no id", () => {
 	assert.deepEqual(
 		postLikeRecords({
 			node: { facepile_top_likers: [{ id: "u1", username: "a" }] },

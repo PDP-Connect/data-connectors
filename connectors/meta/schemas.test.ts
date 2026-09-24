@@ -47,7 +47,11 @@ const POST_RECORD = {
 };
 
 const POST_LIKE_RECORD = {
+	liker_ordinal: 0,
 	post_id: "3401234567890123456",
+	profile_pic_url: "https://scontent.cdninstagram.com/liker.jpg",
+	pk: "999",
+	id: "999",
 	user_id: "999",
 	username: "liker_one",
 };
@@ -175,6 +179,32 @@ test("post_likes schema rejects a missing post_id", () => {
 test("post_likes schema rejects a missing username", () => {
 	const { username: _omit, ...rest } = POST_LIKE_RECORD;
 	assert.equal(postLikesSchema.safeParse(rest).success, false);
+});
+
+test("post_likes schema accepts absent-source empty picture URL and preserves legacy id fields", () => {
+	const result = postLikesSchema.safeParse({
+		...POST_LIKE_RECORD,
+		profile_pic_url: "",
+		pk: "legacy-pk",
+		id: "legacy-id",
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("post_likes schema requires the ordinal used by the new composite key", () => {
+	const { liker_ordinal: _omit, ...preParityRecord } = POST_LIKE_RECORD;
+	assert.equal(postLikesSchema.safeParse(preParityRecord).success, false);
+});
+
+test("post_likes schema accepts an empty username emitted by the legacy source", () => {
+	assert.ok(
+		postLikesSchema.safeParse({
+			liker_ordinal: 0,
+			post_id: "3401234567890123456",
+			user_id: "999",
+			username: "",
+		}).success,
+	);
 });
 
 // ─── following ────────────────────────────────────────────────────────

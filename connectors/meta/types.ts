@@ -38,6 +38,7 @@ export interface InstagramFacepileLiker {
 	full_name?: string | null;
 	id?: string | null;
 	pk?: string | null;
+	profile_pic_url?: string | null;
 	username?: string | null;
 }
 
@@ -156,7 +157,11 @@ export interface PostRecord {
  *  sample per post via this API; there is no full-likers listing endpoint
  *  reachable from a logged-in web session). */
 export interface PostLikeRecord {
+	liker_ordinal: number;
 	post_id: string;
+	profile_pic_url: string | null;
+	pk: string;
+	id: string;
 	user_id: string;
 	username: string;
 	[field: string]: unknown;

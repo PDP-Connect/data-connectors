@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.3.3)
+ * PDPP Meta (Instagram) Connector (v0.4.0)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -97,6 +97,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.0 (2026-09-24) — preserves every legacy top-liker field, including
+ *     empty profile_pic_url values; adds required liker_ordinal and changes
+ *     the post_likes primary key to (post_id, liker_ordinal).
  *   v0.3.3 (2026-09-22) — fills profile.follower_count/following_count/
  *     post_count from a passively observed profile-page GraphQL response
  *     (`fetchProfileCounts`), the same query the legacy connector captured
@@ -126,6 +129,7 @@ import { manualAction } from "../../packages/polyfill-connectors/src/browser-han
 import {
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
+	emitDetailCoverage,
 	type ProbeSessionArgs,
 	politeDelay,
 	type RecordData,
@@ -158,6 +162,19 @@ const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const ACCOUNTS_CENTER_ORIGIN = "https://accountscenter.instagram.com";
 const SESSION_COOKIE_RE = /sessionid|ds_user_id/;
 const POSTS_MAX_PAGES = 100;
+const ADS_REQUIRED_SURFACES = [
+	"advertisers",
+	"ad_topics",
+	"targeting_categories",
+] as const;
+
+type AdsSurface = (typeof ADS_REQUIRED_SURFACES)[number];
+
+interface ReachedScrape<T> {
+	items: T[];
+	reached: boolean;
+	surface: AdsSurface;
+}
 
 // ─── Session ────────────────────────────────────────────────────────────
 
@@ -604,16 +621,25 @@ export async function fetchAllFollowing(
  * the page. Shared by advertisers and ad-topics collection — both legacy
  * connectors used this identical selector chain.
  */
-async function scrapeDialogListItems(page: Page): Promise<string[]> {
+async function scrapeDialogListItems(
+	page: Page,
+): Promise<{ items: string[]; reached: boolean }> {
 	return await page.evaluate(() => {
 		const dialog = document.querySelector('[role="dialog"]');
 		if (!dialog) {
-			return [];
+			return { items: [], reached: false };
 		}
-		const items = dialog.querySelectorAll('[role="list"] [role="listitem"]');
-		return Array.from(items)
-			.map((el) => (el.textContent ?? "").trim())
-			.filter((t) => t.length > 0);
+		const list = dialog.querySelector('[role="list"]');
+		if (!list) {
+			return { items: [], reached: false };
+		}
+		const items = list.querySelectorAll('[role="listitem"]');
+		return {
+			items: Array.from(items)
+				.map((el) => (el.textContent ?? "").trim())
+				.filter((t) => t.length > 0),
+			reached: true,
+		};
 	});
 }
 
@@ -632,7 +658,7 @@ async function closeDialog(page: Page): Promise<void> {
 export async function scrapeAdvertisers(
 	page: Page,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<string[]> {
+): Promise<ReachedScrape<string>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
 			timeout: 30_000,
@@ -652,12 +678,12 @@ export async function scrapeAdvertisers(
 		return false;
 	});
 	if (!clicked) {
-		return [];
+		return { items: [], reached: false, surface: "advertisers" };
 	}
 	await delay(2000);
-	const names = await scrapeDialogListItems(page);
+	const result = await scrapeDialogListItems(page);
 	await closeDialog(page);
-	return names;
+	return { ...result, surface: "advertisers" };
 }
 
 const NON_TOPIC_RE = /special topic|see less/i;
@@ -665,7 +691,7 @@ const NON_TOPIC_RE = /special topic|see less/i;
 export async function scrapeAdTopics(
 	page: Page,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<string[]> {
+): Promise<ReachedScrape<string>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`, {
 			timeout: 30_000,
@@ -673,8 +699,12 @@ export async function scrapeAdTopics(
 		})
 		.catch((): undefined => undefined);
 	await delay(3000);
-	const names = await scrapeDialogListItems(page);
-	return names.filter((t) => !NON_TOPIC_RE.test(t));
+	const result = await scrapeDialogListItems(page);
+	return {
+		items: result.items.filter((t) => !NON_TOPIC_RE.test(t)),
+		reached: result.reached,
+		surface: "ad_topics",
+	};
 }
 
 /**
@@ -686,7 +716,7 @@ export async function scrapeAdTopics(
 export async function scrapeTargetingCategories(
 	page: Page,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<Array<{ description: string | null; name: string }>> {
+): Promise<ReachedScrape<{ description: string | null; name: string }>> {
 	await page
 		.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
 			timeout: 30_000,
@@ -706,7 +736,7 @@ export async function scrapeTargetingCategories(
 		return false;
 	});
 	if (!clickedTab) {
-		return [];
+		return { items: [], reached: false, surface: "targeting_categories" };
 	}
 	await delay(1000);
 
@@ -723,23 +753,37 @@ export async function scrapeTargetingCategories(
 		return false;
 	});
 	if (!clickedCategories) {
-		return [];
+		return { items: [], reached: false, surface: "targeting_categories" };
 	}
 	await delay(1500);
 
-	await page.evaluate(() => {
+	const clickedViewAll = await page.evaluate(() => {
 		const btns = document.querySelectorAll('button, [role="button"]');
 		for (const btn of Array.from(btns)) {
 			if ((btn.textContent ?? "").trim() === "View all") {
 				(btn as HTMLElement).click();
-				break;
+				return true;
 			}
 		}
+		return false;
 	});
 	await delay(500);
+	const viewAllExpanded =
+		!clickedViewAll ||
+		(await page.evaluate(() => {
+			const btns = document.querySelectorAll('button, [role="button"]');
+			return !Array.from(btns).some(
+				(btn) => (btn.textContent ?? "").trim() === "View all",
+			);
+		}));
 
 	const categories = await page.evaluate(() => {
-		const items = document.querySelectorAll('[role="listitem"]');
+		const dialog = document.querySelector('[role="dialog"]');
+		const list = dialog?.querySelector('[role="list"]');
+		if (!list) {
+			return { items: [], reached: false };
+		}
+		const items = list.querySelectorAll('[role="listitem"]');
 		const seen = new Set<string>();
 		const out: Array<{ description: string | null; name: string }> = [];
 		for (const item of Array.from(items)) {
@@ -768,10 +812,14 @@ export async function scrapeTargetingCategories(
 			seen.add(name);
 			out.push({ description: texts[1] ?? null, name });
 		}
-		return out;
+		return { items: out, reached: true };
 	});
 	await closeDialog(page);
-	return categories;
+	return {
+		items: categories.items,
+		reached: categories.reached && viewAllExpanded,
+		surface: "targeting_categories",
+	};
 }
 
 // ─── Collect ────────────────────────────────────────────────────────────
@@ -894,9 +942,34 @@ export async function collectAllStreams(
 		const advertisers = await scrapeAdvertisers(page, delay);
 		const adTopics = await scrapeAdTopics(page, delay);
 		const categories = await scrapeTargetingCategories(page, delay);
-		const ads = buildAdRecords({ adTopics, advertisers, categories });
+		const reachedSurfaces = [advertisers, adTopics, categories]
+			.filter((surface) => surface.reached)
+			.map((surface) => surface.surface);
+		const ads = buildAdRecords({
+			adTopics: adTopics.items,
+			advertisers: advertisers.items,
+			categories: categories.items,
+		});
 		for (const ad of ads) {
 			await emitRecord("ads", ad as RecordData);
+		}
+		await emitDetailCoverage(ctx, {
+			hydratedKeys: reachedSurfaces,
+			requiredKeys: ADS_REQUIRED_SURFACES,
+			stateStream: "ads",
+			stream: "ads",
+		});
+		const missingSurfaces = ADS_REQUIRED_SURFACES.filter(
+			(surface) => !reachedSurfaces.includes(surface),
+		);
+		if (missingSurfaces.length > 0) {
+			await emit({
+				diagnostics: { missing_surfaces: missingSurfaces },
+				message: `Instagram ads scan could not reach ${missingSurfaces.join(", ")}`,
+				reason: "ads_surfaces_unavailable",
+				stream: "ads",
+				type: "SKIP_RESULT",
+			});
 		}
 	}
 }

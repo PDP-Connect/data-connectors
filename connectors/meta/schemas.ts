@@ -31,6 +31,7 @@ const isoDateTimeSchema = z
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
 	.nullable();
 const usernameSchema = z.string().min(1).max(200);
+const postLikerUsernameSchema = z.string().max(200);
 const igIdSchema = z.string().min(1).max(200);
 const nullableBoolSchema = z.boolean().nullable();
 const nonNegativeIntSchema = z.number().int().min(0).nullable();
@@ -71,13 +72,17 @@ export const postsSchema = z.object({
 
 /**
  * post_likes stream. Child stream of posts (D3): one record per (post,
- * liker) pair. Primary key is the pair itself, since a single liker can
- * appear on many of the owner's posts.
+ * liker) pair. The source facepile array position is stable within each
+ * captured post and preserves duplicate or identity-free legacy rows.
  */
 export const postLikesSchema = z.object({
+	liker_ordinal: z.number().int().nonnegative(),
 	post_id: igIdSchema,
-	user_id: igIdSchema,
-	username: usernameSchema,
+	profile_pic_url: z.url().or(z.literal("")).nullable().optional(),
+	pk: z.string().optional(),
+	id: z.string().optional(),
+	user_id: z.string(),
+	username: postLikerUsernameSchema,
 });
 
 /**

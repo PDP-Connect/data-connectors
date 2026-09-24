@@ -225,14 +225,9 @@
             "posts[].caption": "posts.caption",
             "posts[].num_of_likes": "posts.like_count",
             "posts[].taken_at": "posts.taken_at",
-            "posts[].who_liked[]": "post_likes {post_id, user_id, username}"
+            "posts[].who_liked[]": "post_likes {post_id, user_id, username, profile_pic_url, pk, id}"
           },
-          "dropped": [
-            {
-              "field": "who_liked[].profile_pic_url",
-              "reason": "expiring signed CDN URL of a third party; not durable data"
-            }
-          ],
+          "dropped": [],
           "status": "contracted"
         },
         {
