@@ -442,11 +442,9 @@ export async function collectAllStreams(
 			}
 		}
 		if (wantTrips) {
-			const record = getTrip
-				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
-				: null;
-			if (record) {
-				await emitRecord("trips", record);
+			const record = tripRecord(tripId, getTrip?.trip, getTrip?.receipt);
+			await emitRecord("trips", record);
+			if (getTrip?.trip) {
 				tripsHydrated.push(tripId);
 			}
 		}

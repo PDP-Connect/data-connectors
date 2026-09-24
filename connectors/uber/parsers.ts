@@ -160,30 +160,26 @@ export function parseDurationSeconds(
  * `trips` record for one trip, hydrated from `GetTrip`'s `trip`/`receipt`
  * (D5 revised per capability-map.json's `lead_decision_live`: the Activities
  * list carries only a trip id, so every other field comes from GetTrip, not
- * the list row). Returns null when GetTrip produced no usable trip — the
- * caller records that trip as an unhydrated key rather than emitting a
- * mostly-null record.
+ * the list row). With no usable GetTrip response, it still emits the Activity
+ * identity with unknown fields null so the source preserves trip count.
  */
 export function tripRecord(
 	tripId: string,
 	trip: UberTrip | undefined,
 	receiptSummary: UberReceiptSummary | undefined,
-): RecordData | null {
-	if (!trip) {
-		return null;
-	}
-	const waypoints = trip.waypoints ?? [];
+): RecordData {
+	const waypoints = trip?.waypoints ?? [];
 	return {
 		id: tripId,
-		status: trip.status ?? null,
-		requested_at: parseIsoDateTime(trip.beginTripTime),
-		completed_at: parseIsoDateTime(trip.dropoffTime),
+		status: trip?.status ?? null,
+		requested_at: parseIsoDateTime(trip?.beginTripTime),
+		completed_at: parseIsoDateTime(trip?.dropoffTime),
 		pickup_address: waypoints[0] ?? null,
 		dropoff_address:
 			waypoints.length > 0 ? waypoints[waypoints.length - 1] : null,
-		driver_name: trip.driver || null,
-		fare_total: trip.fare ?? null,
-		fare_total_cents: parseCurrencyCents(trip.fare),
+		driver_name: trip?.driver || null,
+		fare_total: trip?.fare ?? null,
+		fare_total_cents: parseCurrencyCents(trip?.fare),
 		distance_meters: parseDistanceMeters(
 			receiptSummary?.distance,
 			receiptSummary?.distanceLabel,
@@ -200,8 +196,8 @@ export function tripRecord(
 				? receiptSummary.duration
 				: null,
 		product_type:
-			receiptSummary?.vehicleType || trip.vehicleDisplayName || null,
-		is_surge: trip.isSurgeTrip ?? null,
+			receiptSummary?.vehicleType || trip?.vehicleDisplayName || null,
+		is_surge: trip?.isSurgeTrip ?? null,
 	};
 }
 

@@ -267,6 +267,22 @@ test("collectAllStreams: a GetReceipt failure keeps the receipt row with GetTrip
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
 });
 
+test("collectAllStreams: a GetTrip failure retains the Activity trip identity with null details", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-2" }]) }],
+		// No scripted GetTrip response for trip-2 -> caught as a non-fatal
+		// detail failure. The Activity id is known; all detail fields stay null.
+	});
+	const { ctx, emitted } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	const trip = emitted.find((r) => r.stream === "trips");
+	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
+	assert.equal(trip?.data.id, "trip-2");
+	assert.equal(trip?.data.requested_at, null);
+	assert.equal(trip?.data.pickup_address, null);
+	assert.equal(trip?.data.fare_total, null);
+});
+
 test("collectAllStreams: trips DETAIL_COVERAGE is self-mapped (state_stream === trips)", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],

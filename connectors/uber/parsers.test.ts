@@ -197,8 +197,13 @@ test("tripRecord: nulls every field cleanly with no trip evidence beyond an id",
 	assert.equal(record.is_surge, null);
 });
 
-test("tripRecord: returns null when GetTrip produced no trip at all", () => {
-	assert.equal(tripRecord("trip-4", undefined, undefined), null);
+test("tripRecord: retains the Activity identity when GetTrip produced no trip", () => {
+	const record = tripRecord("trip-4", undefined, undefined);
+	assert.equal(record.id, "trip-4");
+	assert.equal(record.status, null);
+	assert.equal(record.requested_at, null);
+	assert.equal(record.pickup_address, null);
+	assert.equal(record.fare_total, null);
 });
 
 test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
