@@ -3418,6 +3418,66 @@ test("collectNutrition emits one record per unique product target", async () => 
 	assert.equal(nutritionRecords[0]?.data.calories, 150);
 });
 
+test("collectNutrition covers products past the former 50-lookup limit and records navigation failures", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const targets: NutritionTarget[] = Array.from({ length: 52 }, (_, index) => {
+		const productId = String(123456789 + index);
+		return {
+			name: `Product ${index}`,
+			productId,
+			productUrl:
+				index === 1
+					? null
+					: `https://www.heb.com/product-detail/product/${productId}`,
+		};
+	});
+	const failedUrl = targets[51]?.productUrl;
+	const page = makePageStub({
+		content: SYNTHETIC_NUTRITION_HTML,
+		goto(url) {
+			if (url === failedUrl) {
+				throw new Error("net::ERR_CONNECTION_TIMED_OUT");
+			}
+		},
+	});
+
+	await collectNutrition(page, targets, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+
+	const outcomes = emitted.filter((record) => record.stream === "nutrition");
+	assert.equal(outcomes.length, targets.length);
+	assert.deepEqual(
+		new Set(outcomes.map((record) => record.data.product_id)),
+		new Set(targets.map((target) => target.productId)),
+	);
+	assert.equal(
+		outcomes.find((record) => record.data.product_id === targets[1]?.productId)
+			?.data.source,
+		"not_found",
+	);
+	assert.equal(
+		outcomes.find((record) => record.data.product_id === targets[51]?.productId)
+			?.data.source,
+		"error",
+	);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "nutrition_navigation_failed",
+		),
+	);
+	assert.equal(
+		protocolMessages.filter((message) => message.type === "SKIP_RESULT").length,
+		1,
+		"only the failed navigation should mark nutrition incomplete",
+	);
+});
+
 test("collectNutrition retains blocked outcomes with the observed product URL", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const blockedPage = makePageStub({
@@ -3481,13 +3541,11 @@ test("collectNutrition emits an explicit not_found outcome for products without 
 	assert.equal(outcome?.data.source, "not_found");
 	assert.equal(outcome?.data.confidence, "low");
 	assert.equal(outcome?.data.calories, null);
-	const skip = protocolMessages.find(
-		(m) =>
-			m.type === "SKIP_RESULT" &&
-			m.stream === "nutrition" &&
-			m.reason === "nutrition_lookup_incomplete",
+	assert.equal(
+		protocolMessages.filter((message) => message.type === "SKIP_RESULT").length,
+		0,
+		"not_found is a complete outcome for a product without a URL",
 	);
-	assert.ok(skip);
 });
 
 test("collectNutrition emits nothing when given zero targets", async () => {

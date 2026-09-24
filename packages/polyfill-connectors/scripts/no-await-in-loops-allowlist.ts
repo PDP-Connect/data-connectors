@@ -1372,14 +1372,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/heb/index.ts",
-			line: 2161,
+			line: 2150,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "collectNutrition(): emit each missing-URL outcome in source order before browser lookups",
 		},
 		{
 			path: "connectors/heb/index.ts",
-			line: 2176,
+			line: 2165,
 			column: 4,
 			category: "ordered_browser_interaction",
 			note: "collectNutrition(): each product lookup navigates the shared page after the prior lookup completes",
