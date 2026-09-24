@@ -135,7 +135,8 @@
       "incremental": true,
       "query": {
         "range_filters": {
-          "day": ["gte", "gt", "lte", "lt"]
+          "day": ["gte", "gt", "lte", "lt"],
+          "daily_sleep_timestamp": ["gte", "gt", "lte", "lt"]
         },
         "aggregations": {
           "count": true,
