@@ -966,6 +966,36 @@ test("manualBrowserLogin runs navigation-capable readiness evidence on a tempora
 	assert.equal(readinessClosed, 1);
 });
 
+test("manualBrowserLogin can poll a non-navigating readiness probe in the owner's tab", async () => {
+	let temporaryPageClosed = 0;
+	const ownerPage = makeMockPage({
+		readinessPage: {
+			close: () => {
+				temporaryPageClosed += 1;
+				return Promise.resolve();
+			},
+		} as Page,
+	});
+	const result = await manualBrowserLogin({
+		assist: () => Promise.resolve("assist_single_tab"),
+		completeAssistance: () => Promise.resolve(),
+		isProbeSuccessful: (ready: boolean) => ready,
+		message: "Finish sign-in in the secure browser.",
+		page: ownerPage,
+		probe: () => Promise.resolve(false),
+		readinessProbe: (probePage): Promise<boolean> => {
+			assert.equal(probePage, ownerPage);
+			return Promise.resolve(true);
+		},
+		readinessProbeOnHandoffPage: true,
+		sendInteraction: () =>
+			Promise.reject(new Error("manual interaction must not run")),
+	});
+
+	assert.equal(result, true);
+	assert.equal(temporaryPageClosed, 0);
+});
+
 test("manualBrowserLogin keeps watching after the initial fast window and self-resolves without a Continue interaction", async () => {
 	const page = makeMockPage();
 	const completions: { id: string; status: string }[] = [];

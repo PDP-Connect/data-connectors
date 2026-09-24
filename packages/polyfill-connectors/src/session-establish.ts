@@ -35,6 +35,27 @@ import {
 } from "./terminal-error.ts";
 
 export const DEFAULT_RETRYABLE_PATTERN = /ECONN|ETIMEDOUT|timeout/i;
+const DEFAULT_OWNER_LOGIN_PROBE_INTERVAL_MS = 3000;
+const DEFAULT_OWNER_LOGIN_PROBE_WINDOW_MS = 30 * 60_000;
+
+async function waitForSessionProbe(
+	probe: () => Promise<boolean>,
+	{ intervalMs, windowMs }: { intervalMs: number; windowMs: number },
+): Promise<boolean> {
+	const deadline = Date.now() + windowMs;
+	while (true) {
+		try {
+			if (await probe()) return true;
+		} catch {
+			// A temporary provider-page failure is not proof that sign-in failed.
+		}
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) return false;
+		await new Promise<void>((resolve) =>
+			setTimeout(resolve, Math.min(intervalMs, remainingMs)),
+		);
+	}
+}
 
 /**
  * Mark a named session-establishment phase. Calling this updates the run's
@@ -100,6 +121,10 @@ export interface SessionEstablishHooks {
 
 export interface SessionEstablishArgs {
 	assist: EnsureSessionArgs["assist"];
+	/** Test seam for the probe-only owner sign-in watcher. */
+	autoProbeIntervalMs?: number;
+	/** Test seam for the probe-only owner sign-in watcher. */
+	autoProbeWindowMs?: number;
 	capture: CaptureSession | null;
 	checkpoint: SessionCheckpointFn;
 	completeAssistance: EnsureSessionArgs["completeAssistance"];
@@ -181,9 +206,11 @@ export function buildSessionEstablishTerminalError(
  *   before this opt-in existed — the probe result never skips it.
  *
  * A connector with only `ensureSession` (no `probeSession`) runs it directly,
- * unchanged. A connector with only `probeSession` (no `ensureSession`) keeps
- * the prior read-only-probe + manual_action-fallback path, unchanged. Neither
- * hook: the connector assumes the session is live.
+ * unchanged. A connector with only `probeSession` (no `ensureSession`) requests
+ * owner assistance, watches the read-only probe for a bounded period, and
+ * continues as soon as the provider session is verified. If that signal never
+ * arrives, the existing explicit manual_action and final probe remain
+ * available. Neither hook: the connector assumes the session is live.
  *
  * The runtime frames the window with a `begin` checkpoint before delegating
  * and a `probe` checkpoint around the read-only probe path so the watchdog
@@ -201,6 +228,8 @@ export async function establishSession(
 	const { ensureSession, probeSession, probeSessionIsAuthoritative } = hooks;
 	const {
 		assist,
+		autoProbeIntervalMs = DEFAULT_OWNER_LOGIN_PROBE_INTERVAL_MS,
+		autoProbeWindowMs = DEFAULT_OWNER_LOGIN_PROBE_WINDOW_MS,
 		capture,
 		checkpoint,
 		completeAssistance,
@@ -307,6 +336,38 @@ export async function establishSession(
 	// `resolveCredentials` always has, including registering secrets for
 	// capture redaction, just deferred until the probe proves it's needed.
 	await resolveDeferredCredentials?.();
+
+	let assistanceRequestId: string | undefined;
+	try {
+		assistanceRequestId = await assist({
+			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
+			message: `${name} session expired. Sign in in the secure browser; PDPP will continue when it verifies the session.`,
+			owner_action: "operate_attachment",
+			progress_posture: "blocked",
+			response_contract: "none",
+			timeout_seconds: 1800,
+		});
+	} catch {
+		// Keep the explicit manual-action path available if assistance cannot be
+		// registered for this run.
+	}
+	if (assistanceRequestId) {
+		await checkpoint("session-establish:owner-sign-in");
+		const sessionReady = await waitForSessionProbe(
+			() => probeSession({ context, page }),
+			{ intervalMs: autoProbeIntervalMs, windowMs: autoProbeWindowMs },
+		);
+		if (sessionReady) {
+			await completeAssistance(assistanceRequestId, "resolved", {
+				message: "The connector detected the signed-in session and continued.",
+			}).catch((): undefined => undefined);
+			return;
+		}
+		await completeAssistance(assistanceRequestId, "escalated", {
+			message:
+				"The connector could not verify sign-in automatically. Complete sign-in in the browser, then confirm to retry the check.",
+		}).catch((): undefined => undefined);
+	}
 
 	await manualAction(
 		{

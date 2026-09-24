@@ -174,7 +174,8 @@ export async function ensureYoutubeSession(
 			"Sign in to YouTube in the secure browser, then continue. PDPP will verify the session before collecting.",
 		page: args.page,
 		probe: () => hasYoutubeSession(args.page),
-		readinessProbe: probeYoutubeSession,
+		readinessProbe: hasYoutubeSession,
+		readinessProbeOnHandoffPage: true,
 		sendInteraction: args.sendInteraction,
 		timeoutSeconds,
 	});
