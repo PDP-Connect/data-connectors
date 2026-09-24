@@ -67,7 +67,11 @@ export type RecordedEvent =
 
 export interface RecordingEmit {
 	emit: (msg: EmittedMessage) => Promise<void>;
-	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emitRecord: (
+		stream: string,
+		data: RecordData,
+		options?: { beforeEmit?: () => Promise<void> } | "id" | "name",
+	) => Promise<void>;
 	emitted: EmittedRecord[];
 	/** Unified time-ordered trace of every emit() and emitRecord() call,
 	 *  in invocation order. Use this when the assertion is cross-kind
@@ -155,7 +159,11 @@ export function makeRecordingEmit(
 		return Promise.resolve();
 	};
 
-	const emitRecord = (stream: string, data: RecordData): Promise<void> => {
+	const emitRecord = async (
+		stream: string,
+		data: RecordData,
+		options?: { beforeEmit?: () => Promise<void> } | "id" | "name",
+	): Promise<void> => {
 		if (validateRecord) {
 			const result = validateRecord(stream, data);
 			if (!result.ok) {
@@ -166,12 +174,12 @@ export function makeRecordingEmit(
 					issues: result.issues,
 					skipped: true,
 				});
-				return Promise.resolve();
+				return;
 			}
 		}
+		if (typeof options === "object") await options.beforeEmit?.();
 		emitted.push({ stream, data });
 		events.push({ kind: "record", stream, data, skipped: false });
-		return Promise.resolve();
 	};
 
 	return { emit, emitRecord, emitted, events, skipped, protocolMessages };

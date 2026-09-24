@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -125,13 +126,23 @@
  *     `attachDownloadQueue`, matching that constraint.
  *   - `docs[]` sub-field names and the multi-part category ZIP layout are
  *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
+ * Host blob limit: each selected conversation or project envelope must fit
+ * within 32 MiB. A larger source object fails the run before any RECORD or
+ * BLOB is emitted. The failed run does not advance a data checkpoint; for an
+ * old-format export, a newly requested pending nonce may be lost on retry.
  */
 
-import { closeSync, openSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, openSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	HOST_BLOB_MAX_BYTES,
+	type HostBlobMessage,
+	isMainModule,
+	validateHostBlobMessage,
+} from "@pdpp/connector-protocol";
 import {
 	readZipEntriesFromFile,
 	type ZipReadPolicy,
@@ -153,6 +164,7 @@ import {
 	parseClassifiedExport,
 	parseExport,
 	resolveExportedProfile,
+	type SourceRecordEnvelope,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -209,6 +221,51 @@ const ACCOUNT_PROFILE_STREAM = "account_profile";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
+
+function sourceRecordBytes(source: SourceRecordEnvelope): Buffer {
+	const bytes = Buffer.from(JSON.stringify(source), "utf8");
+	if (bytes.length === 0 || bytes.length > HOST_BLOB_MAX_BYTES) {
+		throw new Error(
+			`Anthropic ${source.stream} source record exceeds the ${HOST_BLOB_MAX_BYTES}-byte host blob limit; no export records were emitted`,
+		);
+	}
+	return bytes;
+}
+
+function spoolSourceRecord(source: SourceRecordEnvelope): {
+	event: HostBlobMessage;
+	blob_ref: Record<string, unknown>;
+} {
+	const spoolDir = process.env.PDPP_BLOB_SPOOL_DIR;
+	if (!spoolDir) {
+		throw new Error(
+			"Host blob spool is unavailable for Anthropic source records",
+		);
+	}
+	const bytes = sourceRecordBytes(source);
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const file = `anthropic-${randomUUID()}.json`;
+	writeFileSync(join(spoolDir, file), bytes, { flag: "wx", mode: 0o600 });
+	const event: HostBlobMessage = {
+		type: "BLOB",
+		stream: source.stream,
+		key: source.record_key,
+		file,
+		mime_type: "application/json",
+		size_bytes: bytes.length,
+		sha256,
+	};
+	validateHostBlobMessage(event);
+	return {
+		event,
+		blob_ref: {
+			blob_id: `sha256:${sha256}`,
+			mime_type: event.mime_type,
+			size_bytes: bytes.length,
+			sha256,
+		},
+	};
+}
 const ALL_STREAMS = [
 	ACCOUNT_PROFILE_STREAM,
 	CONVERSATIONS_STREAM,
@@ -663,6 +720,7 @@ export async function collectAnthropic({
 	state,
 	emit,
 	emitRecord,
+	isRecordSelected,
 	progress,
 }: BrowserCollectContext): Promise<void> {
 	if (requested.size === 0) {
@@ -682,6 +740,11 @@ export async function collectAnthropic({
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
+	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
+		throw new Error(
+			"Anthropic host blob collection requires the runtime record selector",
+		);
+	}
 
 	async function emitParsed(
 		parsed: ParsedExport,
@@ -689,6 +752,36 @@ export async function collectAnthropic({
 		userFiles: readonly unknown[],
 		browserProfileAppliesToExport: boolean,
 	): Promise<void> {
+		const selectedConversations: Array<{
+			record: (typeof parsed.conversations)[number];
+			source: SourceRecordEnvelope;
+		}> = [];
+		const selectedProjects: Array<{
+			record: (typeof parsed.projects)[number];
+			source: SourceRecordEnvelope;
+		}> = [];
+		if (wantsConversations) {
+			for (const [index, record] of parsed.conversations.entries()) {
+				const source = parsed.conversationSources[index];
+				if (!source || source.record_key !== record.id)
+					throw new Error("Anthropic conversation source alignment failed");
+				if (isRecordSelected?.(CONVERSATIONS_STREAM, record))
+					selectedConversations.push({ record, source });
+			}
+		}
+		if (wantsProjects) {
+			for (const [index, record] of parsed.projects.entries()) {
+				const source = parsed.projectSources[index];
+				if (!source || source.record_key !== record.id)
+					throw new Error("Anthropic project source alignment failed");
+				if (isRecordSelected?.(PROJECTS_STREAM, record))
+					selectedProjects.push({ record, source });
+			}
+		}
+		// Fail before the first RECORD if an in-scope source object cannot fit
+		// the version 1 host blob contract. Excluded objects are never serialized.
+		for (const { source } of [...selectedConversations, ...selectedProjects])
+			sourceRecordBytes(source);
 		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
 			const profile = resolveExportedProfile(
 				userFiles,
@@ -728,8 +821,15 @@ export async function collectAnthropic({
 			});
 		}
 		if (wantsConversations) {
-			for (const conversation of parsed.conversations) {
-				await emitRecord(CONVERSATIONS_STREAM, conversation);
+			for (const { record: conversation, source } of selectedConversations) {
+				const blob = spoolSourceRecord(source);
+				await emitRecord(
+					CONVERSATIONS_STREAM,
+					{ ...conversation, blob_ref: blob.blob_ref },
+					{
+						beforeEmit: () => emit(blob.event),
+					},
+				);
 			}
 		}
 		if (wantsMessages) {
@@ -738,8 +838,15 @@ export async function collectAnthropic({
 			}
 		}
 		if (wantsProjects) {
-			for (const project of parsed.projects) {
-				await emitRecord(PROJECTS_STREAM, project);
+			for (const { record: project, source } of selectedProjects) {
+				const blob = spoolSourceRecord(source);
+				await emitRecord(
+					PROJECTS_STREAM,
+					{ ...project, blob_ref: blob.blob_ref },
+					{
+						beforeEmit: () => emit(blob.event),
+					},
+				);
 			}
 		}
 		if (wantsDocuments) {

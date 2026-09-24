@@ -2,7 +2,7 @@
 	"format": "pdpp.fixture-provenance/1",
 	"class": "synthetic-but-shape-real",
 	"derived_from": "real Claude data export (2026-09-22, offline structural inspection only)",
-	"note": "All titles, names, ids, emails, and timestamps are invented. Structural shape (field names, nesting, per-field nullability observed on the real export) is preserved; no real content, identifiers, or timestamps are present.",
+	"note": "All titles, names, ids, emails, and timestamps are invented. Structural shape (field names, nesting, per-field nullability observed on the real export) is preserved; no real content, identifiers, or timestamps are present. The blob_ref objects are synthetic host-protocol shape placeholders added for the 0.2.0 schema; they do not identify stored blobs.",
 	"labeled_by": "human-reviewed",
 	"labeled_at": "2026-09-22"
 }

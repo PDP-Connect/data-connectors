@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
 	CONNECTOR_PROTOCOL_CAPABILITIES,
+	HOST_BLOB_CAPABILITY,
 	STREAM_EVIDENCE_CAPABILITY,
 } from "@pdpp/connector-protocol";
 
@@ -26,15 +27,15 @@ import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
  * behavior in either direction.
  *
  * These tests derive the expected value from each connector's own source
- * (does it emit STREAM_EVIDENCE?), never from its name, so adding a connector
- * that starts emitting STREAM_EVIDENCE without declaring the capability fails
+ * (does it emit a capability-gated message?), never from its name, so adding a connector
+ * that starts emitting one without declaring the capability fails
  * here instead of failing closed at runtime on an owner's machine.
  */
 
 /**
- * Every capability in the 0.0.2 vocabulary, paired with the emission the
- * connector must actually perform to need it. Today the vocabulary is exactly
- * one member; the map is keyed off `CONNECTOR_PROTOCOL_CAPABILITIES` so a
+ * Every installed protocol capability, paired with the emission the
+ * connector must actually perform to need it. The map is checked against
+ * `CONNECTOR_PROTOCOL_CAPABILITIES` so a
  * future capability cannot be added upstream and silently go unchecked here.
  *
  * The marker is the discriminant literal as it appears in a real emission
@@ -44,6 +45,7 @@ import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
  * those as an emission.
  */
 const CAPABILITY_EMISSION_MARKER = {
+	[HOST_BLOB_CAPABILITY]: /type\s*:\s*"BLOB"/,
 	[STREAM_EVIDENCE_CAPABILITY]: /type\s*:\s*"STREAM_EVIDENCE"/,
 } as const satisfies Readonly<Record<string, RegExp>>;
 
@@ -65,7 +67,7 @@ async function readConnectorSource(entry: string): Promise<string> {
 }
 
 test("the capability vocabulary this test derives against matches the installed protocol package", () => {
-	// Guards the derivation itself: if 0.0.3 adds a capability and no marker is
+	// Guards the derivation itself: if a release adds a capability and no marker is
 	// mapped for it, every "declares what it uses" assertion below would silently
 	// stop covering that capability.
 	assert.deepEqual(

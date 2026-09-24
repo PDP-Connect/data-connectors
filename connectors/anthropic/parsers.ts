@@ -171,7 +171,19 @@ function parseAttachments(raw: unknown): Record<string, unknown>[] | null {
 	if (!Array.isArray(raw)) {
 		return null;
 	}
-	return raw.filter(isRecord);
+	const safeJson = (value: unknown): boolean => {
+		if (typeof value === "string") return pdppSafeText.safeParse(value).success;
+		if (value === null || typeof value === "boolean") return true;
+		if (typeof value === "number") return Number.isFinite(value);
+		if (Array.isArray(value)) return value.every(safeJson);
+		return (
+			isRecord(value) &&
+			Object.entries(value).every(
+				([key, item]) => pdppSafeText.safeParse(key).success && safeJson(item),
+			)
+		);
+	};
+	return raw.filter(isRecord).filter(safeJson);
 }
 
 /**
@@ -256,7 +268,7 @@ export function parseConversation(raw: unknown): {
 			// The export carries no per-conversation model field (confirmed by
 			// claude-export-ingest.cjs's normalizeConversation); left null.
 			model: null,
-			message_count: messages.length,
+			message_count: rawMessages.length,
 			is_starred: bool(raw.is_starred),
 		},
 		messages,
@@ -366,6 +378,7 @@ export function parseProject(raw: unknown): {
 	const creator = isRecord(raw.creator) ? raw.creator : null;
 	const creatorUuid = creator === null ? null : str(creator.uuid);
 	const creatorFullName = creator === null ? null : str(creator.full_name);
+	const creatorFullNameSafe = safeText(creatorFullName, 2000);
 
 	// `name` is required (non-nullable in schemas.ts) — a control-rich name
 	// cannot become null like an optional field. Fall back to the same
@@ -391,21 +404,24 @@ export function parseProject(raw: unknown): {
 			// — a definite false, not an unknown, when the key is absent or null.
 			is_archived: raw.archived_at != null,
 			prompt_template: safeText(str(raw.prompt_template), 65_000),
-			creator: creator !== null
-				? {
-					...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
-					...(creatorFullName !== null ? { full_name: creatorFullName } : {}),
-				}
-				: null,
+			creator:
+				creator !== null
+					? {
+							...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
+							...(creatorFullNameSafe !== null
+								? { full_name: creatorFullNameSafe }
+								: {}),
+						}
+					: null,
 			is_private: bool(raw.is_private),
 			is_starter_project: bool(raw.is_starter_project),
-			archived_at: str(raw.archived_at),
+			archived_at: safeText(raw.archived_at, 128),
 			raw_docs: docsRaw.filter(isRecord).map((doc) => {
-				const uuid = str(doc.uuid);
-				const filename = str(doc.filename);
-				const content = str(doc.content);
-				const createdAt = str(doc.created_at);
-				const updatedAt = str(doc.updated_at);
+				const uuid = safeText(doc.uuid, 128);
+				const filename = safeText(doc.filename, 1024);
+				const content = safeText(doc.content, 10_000_000);
+				const createdAt = safeText(doc.created_at, 128);
+				const updatedAt = safeText(doc.updated_at, 128);
 				return {
 					...(uuid !== null ? { uuid } : {}),
 					...(filename !== null ? { filename } : {}),
@@ -675,9 +691,19 @@ export function classifyManifestPartEntries(
 
 export interface ParsedExport {
 	conversations: ConversationRecord[];
+	conversationSources: SourceRecordEnvelope[];
 	messages: MessageRecord[];
 	projects: ProjectRecord[];
+	projectSources: SourceRecordEnvelope[];
 	projectDocuments: ProjectDocumentRecord[];
+}
+
+/** Lossless upstream record; the consumer owns any legacy projection. */
+export interface SourceRecordEnvelope {
+	format: "anthropic-source-record-v1";
+	stream: "conversations" | "projects";
+	record_key: string;
+	payload: Record<string, unknown>;
 }
 
 /**
@@ -692,6 +718,7 @@ export function parseExport(
 	projectFiles: readonly unknown[],
 ): ParsedExport {
 	const conversations: ConversationRecord[] = [];
+	const conversationSources: SourceRecordEnvelope[] = [];
 	const messages: MessageRecord[] = [];
 	const rawConversations = Array.isArray(conversationsJson)
 		? conversationsJson
@@ -702,10 +729,17 @@ export function parseExport(
 			continue;
 		}
 		conversations.push(parsed.conversation);
+		conversationSources.push({
+			format: "anthropic-source-record-v1",
+			stream: "conversations",
+			record_key: parsed.conversation.id,
+			payload: rawConv as Record<string, unknown>,
+		});
 		messages.push(...parsed.messages);
 	}
 
 	const projects: ProjectRecord[] = [];
+	const projectSources: SourceRecordEnvelope[] = [];
 	const projectDocuments: ProjectDocumentRecord[] = [];
 	for (const rawProject of projectFiles) {
 		const parsed = parseProject(rawProject);
@@ -713,10 +747,23 @@ export function parseExport(
 			continue;
 		}
 		projects.push(parsed.project);
+		projectSources.push({
+			format: "anthropic-source-record-v1",
+			stream: "projects",
+			record_key: parsed.project.id,
+			payload: rawProject as Record<string, unknown>,
+		});
 		projectDocuments.push(...parsed.documents);
 	}
 
-	return { conversations, messages, projectDocuments, projects };
+	return {
+		conversations,
+		conversationSources,
+		messages,
+		projectDocuments,
+		projects,
+		projectSources,
+	};
 }
 
 /**

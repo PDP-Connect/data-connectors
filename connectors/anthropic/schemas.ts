@@ -36,6 +36,15 @@ const isoDateTimeNullable = z
 	.string()
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
 	.nullable();
+const blobRefSchema = z
+	.object({
+		blob_id: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+		mime_type: z.literal("application/json"),
+		size_bytes: z.number().int().min(1).max(33_554_432),
+		sha256: z.string().regex(/^[0-9a-f]{64}$/),
+	})
+	.strict()
+	.refine((ref) => ref.blob_id === `sha256:${ref.sha256}`);
 
 /**
  * conversations stream (manifest required: id). mutable_state, cursor
@@ -54,6 +63,7 @@ export const conversationsSchema = z.object({
 	model: z.string().min(1).max(128).nullable(),
 	message_count: z.number().int().min(0).nullable(),
 	is_starred: z.boolean().nullable(),
+	blob_ref: blobRefSchema,
 });
 
 /**
@@ -93,19 +103,25 @@ export const projectsSchema = z.object({
 	update_time: isoDateTimeNullable,
 	is_archived: z.boolean().nullable(),
 	prompt_template: pdppSafeText.max(65_000).nullable(),
-	creator: z.object({ uuid: z.string().optional(), full_name: z.string().optional() }).strict().nullable(),
+	creator: z
+		.object({ uuid: z.string().optional(), full_name: z.string().optional() })
+		.strict()
+		.nullable(),
 	is_private: z.boolean().nullable(),
 	is_starter_project: z.boolean().nullable(),
 	archived_at: z.string().nullable(),
 	raw_docs: z.array(
-		z.object({
-			uuid: z.string().optional(),
-			filename: z.string().optional(),
-			content: z.string().optional(),
-			created_at: z.string().optional(),
-			updated_at: z.string().optional(),
-		}).strict(),
+		z
+			.object({
+				uuid: z.string().optional(),
+				filename: z.string().optional(),
+				content: z.string().optional(),
+				created_at: z.string().optional(),
+				updated_at: z.string().optional(),
+			})
+			.strict(),
 	),
+	blob_ref: blobRefSchema,
 });
 
 /**

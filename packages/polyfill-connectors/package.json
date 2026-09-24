@@ -145,8 +145,8 @@
 		"prepack": "npm --prefix ../.. run polyfill-library-metadata:check && npm run build"
 	},
 	"dependencies": {
-		"@pdpp/collector-runtime": "2.3.0",
-		"@pdpp/connector-protocol": "2.3.0",
+		"@pdpp/collector-runtime": "2.4.0",
+		"@pdpp/connector-protocol": "2.4.0",
 		"@streamparser/json": "^0.0.26",
 		"better-sqlite3": "^13.0.3",
 		"dotenv": "^17.4.2",
