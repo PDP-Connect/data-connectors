@@ -1,0 +1,20 @@
+{
+	"errors": [
+		{
+			"message": "internal server error",
+			"path": ["whoopConnection"]
+		}
+	],
+	"data": {
+		"googleWorkspaceConnections": [],
+		"outlookConnections": [],
+		"linearConnections": [],
+		"notionConnections": [],
+		"githubConnection": null,
+		"slackCanvasConnection": null,
+		"granolaConnection": null,
+		"shopWalletConnection": null,
+		"whoopConnection": null,
+		"stripeLinkConnection": null
+	}
+}

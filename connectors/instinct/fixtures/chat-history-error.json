@@ -1,0 +1,11 @@
+{
+	"errors": [
+		{
+			"message": "internal server error",
+			"path": ["chatHistory"]
+		}
+	],
+	"data": {
+		"chatHistory": null
+	}
+}

@@ -1,0 +1,74 @@
+{
+	"data": {
+		"vaultEntries": [
+			{
+				"kind": "login",
+				"name": "Example Airline",
+				"isAgentEntry": false,
+				"fields": [
+					{
+						"key": "username",
+						"populated": true
+					},
+					{
+						"key": "password",
+						"populated": true
+					},
+					{
+						"key": "totp",
+						"populated": false
+					}
+				]
+			},
+			{
+				"kind": "card",
+				"name": "Travel card",
+				"isAgentEntry": true,
+				"fields": [
+					{
+						"key": "number",
+						"populated": true
+					},
+					{
+						"key": "exp_m",
+						"populated": true
+					},
+					{
+						"key": "exp_y",
+						"populated": true
+					},
+					{
+						"key": "cvv",
+						"populated": true
+					},
+					{
+						"key": "zip",
+						"populated": false
+					}
+				]
+			}
+		],
+		"vaultKinds": [
+			{
+				"kind": "card",
+				"subfieldKeys": ["number", "exp_m", "exp_y", "cvv", "zip"]
+			},
+			{
+				"kind": "login",
+				"subfieldKeys": ["username", "password", "totp"]
+			},
+			{
+				"kind": "address",
+				"subfieldKeys": ["line1", "line2", "city", "state", "zip", "country"]
+			},
+			{
+				"kind": "phone",
+				"subfieldKeys": ["number"]
+			},
+			{
+				"kind": "ssn",
+				"subfieldKeys": ["full"]
+			}
+		]
+	}
+}

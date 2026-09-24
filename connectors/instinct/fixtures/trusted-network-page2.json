@@ -1,0 +1,35 @@
+{
+	"data": {
+		"agentToAgentSettings": {
+			"enabled": true
+		},
+		"trustedNetworkContacts": {
+			"items": [
+				{
+					"id": "tn-contact-02TEST",
+					"generation": 1,
+					"displayName": "Luigi M",
+					"phoneNumbers": ["+15550106666"],
+					"createdAt": 1789068500
+				}
+			],
+			"cursor": null
+		},
+		"trustedNetworkBlockedPeople": {
+			"items": [],
+			"cursor": null
+		},
+		"trustedNetworkRequests": {
+			"items": [],
+			"cursor": null
+		},
+		"trustedNetworkSentRequests": [
+			{
+				"id": "tn-sent-01TEST",
+				"phoneNumber": "+15550105555",
+				"createdAt": 1789068400,
+				"expiresAt": 1789154800
+			}
+		]
+	}
+}

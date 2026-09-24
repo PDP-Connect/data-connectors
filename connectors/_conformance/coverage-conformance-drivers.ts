@@ -1353,6 +1353,14 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"venmo.profile",
 	"venmo.friends",
 	"venmo.transactions",
+	// Instinct (REAL_UNLISTED_CONNECTORS, development): browser-session
+	// connector behind an SMS-code + Turnstile login; its integration suite
+	// drives collectInstinct against fixtures, but no credential-free coverage
+	// driver exists yet.
+	"instinct.profile",
+	"instinct.agent_contact",
+	"instinct.chats",
+	"instinct.chat_events",
 	// WHOOP (Preview): the owner-visible browser connector has a real
 	// integration suite, but no credential-free coverage driver yet.
 	"whoop.profile",

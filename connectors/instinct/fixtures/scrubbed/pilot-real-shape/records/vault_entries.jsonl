@@ -1,0 +1,2 @@
+{"field_keys":["password","totp","username"],"id":"login:Example Airline","is_agent_entry":false,"kind":"login","name":"Example Airline","observed_at":"2026-09-22T19:30:00.000Z","populated_field_keys":["password","username"]}
+{"field_keys":["cvv","exp_m","exp_y","number","zip"],"id":"card:Travel card","is_agent_entry":true,"kind":"card","name":"Travel card","observed_at":"2026-09-22T19:30:00.000Z","populated_field_keys":["cvv","exp_m","exp_y","number"]}

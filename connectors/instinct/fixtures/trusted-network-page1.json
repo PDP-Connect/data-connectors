@@ -1,0 +1,35 @@
+{
+	"data": {
+		"agentToAgentSettings": {
+			"enabled": true
+		},
+		"trustedNetworkContacts": {
+			"items": [
+				{
+					"id": "tn-contact-01TEST",
+					"generation": 3,
+					"displayName": "Charles B",
+					"phoneNumbers": ["+15550102222"],
+					"createdAt": 1789068259
+				}
+			],
+			"cursor": "cursor-page-2"
+		},
+		"trustedNetworkBlockedPeople": {
+			"items": [],
+			"cursor": null
+		},
+		"trustedNetworkRequests": {
+			"items": [],
+			"cursor": null
+		},
+		"trustedNetworkSentRequests": [
+			{
+				"id": "tn-sent-01TEST",
+				"phoneNumber": "+15550105555",
+				"createdAt": 1789068400,
+				"expiresAt": 1789154800
+			}
+		]
+	}
+}
