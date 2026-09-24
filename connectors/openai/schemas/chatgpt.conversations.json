@@ -14,9 +14,10 @@
           "properties": {
             "id": { "type": "string" },
             "title": { "type": "string" },
-            "create_time": { "type": "string" },
-            "update_time": { "type": "string" },
+            "create_time": { "type": ["string", "null"] },
+            "update_time": { "type": ["string", "null"] },
             "message_count": { "type": "number" },
+            "fetched_at": { "type": "string" },
             "messages": {
               "type": "array",
               "items": {

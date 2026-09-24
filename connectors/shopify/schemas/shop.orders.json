@@ -29,7 +29,8 @@
           "required": ["id"],
           "additionalProperties": false
         }
-      }
+      },
+      "total": { "type": "number" }
     },
     "required": ["orders"],
     "additionalProperties": false
