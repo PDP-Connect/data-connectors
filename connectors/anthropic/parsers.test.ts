@@ -51,23 +51,27 @@ test("manifest classification exposes only users.json from light_metadata", () =
 		{ users: [{ full_name: "Synthetic Name" }] },
 	]);
 	assert.deepEqual(classified.outOfScopeEntryNames, ["login_history.json"]);
-	assert.deepEqual(resolveExportedProfile(classified.userProfiles, null), {
-		fullName: "Synthetic Name",
-		nameSource: "users_json",
-		metadataStatus: "valid",
-	});
+	assert.deepEqual(
+		resolveExportedProfile(classified.userProfiles, null, true),
+		{
+			fullName: null,
+			nameSource: "none",
+			metadataStatus: "valid",
+		},
+	);
 });
 
 test("profile metadata distinguishes absent, malformed, and ambiguous rosters", () => {
-	assert.equal(resolveExportedProfile([], null).metadataStatus, "absent");
+	assert.equal(resolveExportedProfile([], null, true).metadataStatus, "absent");
 	assert.equal(
-		resolveExportedProfile([{ id: "synthetic-id" }], null).metadataStatus,
+		resolveExportedProfile([{ id: "synthetic-id" }], null, true).metadataStatus,
 		"malformed",
 	);
 	assert.deepEqual(
 		resolveExportedProfile(
 			[[{ full_name: "Other" }, { full_name: "Owner" }]],
 			null,
+			true,
 		),
 		{
 			fullName: null,
@@ -79,16 +83,30 @@ test("profile metadata distinguishes absent, malformed, and ambiguous rosters", 
 		resolveExportedProfile(
 			[[{ full_name: "Other" }, { full_name: "Owner" }]],
 			"Owner",
+			true,
 		),
 		{
-			fullName: "Owner",
-			nameSource: "browser_menu",
+			fullName: null,
+			nameSource: "none",
 			metadataStatus: "ambiguous",
 		},
 	);
-	assert.equal(
-		resolveExportedProfile([[{ full_name: "Other" }]], "Owner").metadataStatus,
-		"mismatch",
+	assert.deepEqual(
+		resolveExportedProfile([[{ full_name: "Other" }]], "Owner", true),
+		{ fullName: null, nameSource: "none", metadataStatus: "mismatch" },
+	);
+	assert.deepEqual(resolveExportedProfile([], "Current User", false), {
+		fullName: null,
+		nameSource: "none",
+		metadataStatus: "absent",
+	});
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Export Owner" }]],
+			"Export Owner",
+			false,
+		),
+		{ fullName: null, nameSource: "none", metadataStatus: "valid" },
 	);
 });
 

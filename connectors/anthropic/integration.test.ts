@@ -351,10 +351,17 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 
 for (const scenario of [
 	{
-		label: "users.json name",
+		label: "users.json alone cannot establish owner",
 		users: [{ full_name: "Export Owner" }],
 		menu: [],
-		name: "Export Owner",
+		name: null,
+		status: "valid",
+	},
+	{
+		label: "matching users.json and browser profile",
+		users: [{ full_name: "Browser Owner" }],
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
 		status: "valid",
 	},
 	{
@@ -370,6 +377,20 @@ for (const scenario of [
 		menu: ["Browser Owner", "Max"],
 		name: "Browser Owner",
 		status: "malformed",
+	},
+	{
+		label: "mismatched users.json omits browser identity",
+		users: [{ full_name: "Export Owner" }],
+		menu: ["Current User", "Max"],
+		name: null,
+		status: "mismatch",
+	},
+	{
+		label: "ambiguous users.json omits browser identity",
+		users: [{ full_name: "Export Owner" }, { full_name: "Current User" }],
+		menu: ["Current User", "Max"],
+		name: null,
+		status: "ambiguous",
 	},
 ]) {
 	test(`collectAnthropic: old ZIP ${scenario.label}`, async () => {
@@ -399,8 +420,13 @@ for (const scenario of [
 			id: "org-1",
 			organization_id: "org-1",
 			full_name: scenario.name,
-			plan: scenario.menu[1] ?? null,
-			name_source: scenario.menu.length ? "browser_menu" : "users_json",
+			plan: scenario.name === null ? null : (scenario.menu[1] ?? null),
+			name_source:
+				scenario.name === null
+					? "none"
+					: scenario.menu.length
+						? "browser_menu"
+						: "users_json",
 			metadata_status: scenario.status,
 		});
 		assert.equal(
@@ -409,7 +435,7 @@ for (const scenario of [
 					message.type === "PROGRESS" &&
 					message.message.includes(`metadata: ${scenario.status}`),
 			),
-			scenario.status !== "valid",
+			scenario.status !== "valid" || scenario.name === null,
 		);
 	});
 }
@@ -498,6 +524,105 @@ test("collectAnthropic: resumes a pending export from STATE without requesting a
 	);
 	assert.ok(emitted.some((r) => r.stream === "conversations"));
 });
+
+for (const scenario of [
+	{
+		label: "different exported owner",
+		users: [{ full_name: "Export Owner" }],
+		status: "mismatch",
+		name: null,
+		source: "none",
+	},
+	{
+		label: "matching roster name without verified owner identity",
+		users: [{ full_name: "Current User" }],
+		status: "valid",
+		name: null,
+		source: "none",
+	},
+	{
+		label: "missing roster",
+		users: undefined,
+		status: "absent",
+		name: null,
+		source: "none",
+	},
+]) {
+	test(`collectAnthropic: resumed account switch with ${scenario.label} emits attributable RECORD`, async () => {
+		const zipBytes = await buildZipBytes(scenario.users);
+		const { download } = makeFakeDownload(zipBytes);
+		let exportRequestCount = 0;
+		const fetchStub: FetchStub = (url) => {
+			if (url.includes("/export_data")) {
+				exportRequestCount += 1;
+				return Promise.resolve(jsonResponse(200, { nonce: "wrong-nonce" }));
+			}
+			return Promise.reject(new Error(`unexpected fetch: ${url}`));
+		};
+		const { ctx, page, protocolMessages } = makeContext({
+			streams: ["account_profile"],
+			state: {
+				conversations: {
+					pending_export: {
+						organization_id: "old-org",
+						nonce: "old-nonce",
+						requested_at: "2025-12-31T00:00:00.000Z",
+					},
+				},
+			},
+			fetchStub,
+		});
+		page.menuSpans = ["Current User", "Max"];
+		const runtimeEmitter = makeEmitRecord({
+			requested: ctx.requested,
+			emit: async (message) => {
+				protocolMessages.push(message);
+			},
+			emittedAt: ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: () => "",
+		});
+		ctx.emitRecord = runtimeEmitter.emit;
+		const originalGoto = page.goto.bind(page);
+		page.goto = async (url: string): Promise<null> => {
+			const result = await originalGoto(url);
+			if (url.includes("/export/"))
+				queueMicrotask(() => page.emit("download", download));
+			return result;
+		};
+
+		await collectAnthropic(ctx);
+
+		assert.equal(exportRequestCount, 0);
+		assert.ok(
+			page.gotoCalls.some((url) =>
+				url.includes("/export/old-org/download/old-nonce"),
+			),
+		);
+		const records = protocolMessages.filter(
+			(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+				message.type === "RECORD" && message.stream === "account_profile",
+		);
+		assert.equal(runtimeEmitter.counters.totalEmitted, 1);
+		assert.equal(records[0]?.key, "old-org");
+		assert.deepEqual(records[0]?.data, {
+			id: "old-org",
+			organization_id: "old-org",
+			full_name: scenario.name,
+			plan: null,
+			name_source: scenario.source,
+			metadata_status: scenario.status,
+		});
+		assert.ok(
+			protocolMessages.some(
+				(message) =>
+					message.type === "PROGRESS" &&
+					message.message.includes("Resumed export owner is not verified"),
+			),
+		);
+	});
+}
 
 test("collectAnthropic: export never becomes ready within the poll budget -> retryable SKIP_RESULT per requested stream, pending STATE untouched", async () => {
 	const fetchStub: FetchStub = (url) => {
@@ -772,9 +897,9 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 	assert.deepEqual(profileRecords[0]?.data, {
 		id: "org-1",
 		organization_id: "org-1",
-		full_name: "Synthetic Name",
-		plan: "Pro",
-		name_source: "browser_menu",
+		full_name: null,
+		plan: null,
+		name_source: "none",
 		metadata_status: "ambiguous",
 	});
 

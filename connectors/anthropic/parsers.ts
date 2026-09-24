@@ -477,10 +477,11 @@ export interface ClassifiedManifestPart {
 	unclassifiedEntryNames: string[];
 }
 
-/** Resolve a display name without treating the first roster entry as the owner. */
+/** Resolve a display name only when the browser profile belongs to this export. */
 export function resolveExportedProfile(
 	userFiles: readonly unknown[],
 	browserName: string | null,
+	browserProfileAppliesToExport: boolean,
 ): {
 	fullName: string | null;
 	nameSource: "browser_menu" | "users_json" | "none";
@@ -493,8 +494,17 @@ export function resolveExportedProfile(
 	const browserFallback = (
 		metadataStatus: "absent" | "malformed" | "ambiguous" | "mismatch",
 	) => ({
-		fullName: browserName,
-		nameSource: browserName ? ("browser_menu" as const) : ("none" as const),
+		fullName:
+			browserProfileAppliesToExport &&
+			(metadataStatus === "absent" || metadataStatus === "malformed")
+				? browserName
+				: null,
+		nameSource:
+			browserProfileAppliesToExport &&
+			browserName &&
+			(metadataStatus === "absent" || metadataStatus === "malformed")
+				? ("browser_menu" as const)
+				: ("none" as const),
 		metadataStatus,
 	});
 	if (userFiles.length === 0) return browserFallback("absent");
@@ -520,9 +530,15 @@ export function resolveExportedProfile(
 	const exportedName = user.full_name.trim();
 	if (browserName && browserName !== exportedName)
 		return browserFallback("mismatch");
+	// A single roster entry or a matching display name cannot link a resumed
+	// export to the current browser account.
+	const attributableBrowserName =
+		browserProfileAppliesToExport && browserName === exportedName
+			? browserName
+			: null;
 	return {
-		fullName: browserName ?? exportedName,
-		nameSource: browserName ? "browser_menu" : "users_json",
+		fullName: attributableBrowserName,
+		nameSource: attributableBrowserName ? "browser_menu" : "none",
 		metadataStatus: "valid",
 	};
 }

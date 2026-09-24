@@ -687,12 +687,26 @@ export async function collectAnthropic({
 		parsed: ParsedExport,
 		organizationId: string,
 		userFiles: readonly unknown[],
+		browserProfileAppliesToExport: boolean,
 	): Promise<void> {
 		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
-			const profile = resolveExportedProfile(userFiles, browserProfile.name);
-			if (profile.metadataStatus !== "valid") {
+			const profile = resolveExportedProfile(
+				userFiles,
+				browserProfile.name,
+				browserProfileAppliesToExport,
+			);
+			if (
+				profile.metadataStatus !== "valid" ||
+				!browserProfileAppliesToExport ||
+				profile.fullName === null
+			) {
 				await progress(
-					`Claude users.json metadata: ${profile.metadataStatus}. Profile name source: ${profile.nameSource}.`,
+					`Claude users.json metadata: ${profile.metadataStatus}. Profile name source: ${profile.nameSource}. ` +
+						(!browserProfileAppliesToExport
+							? "Resumed export owner is not verified against the current browser session; browser name and plan omitted."
+							: profile.fullName === null
+								? "Export owner is not verified; profile name and plan omitted."
+								: "Browser profile belongs to the newly requested export."),
 					{
 						stream: ACCOUNT_PROFILE_STREAM,
 					},
@@ -702,7 +716,13 @@ export async function collectAnthropic({
 				id: organizationId,
 				organization_id: organizationId,
 				full_name: profile.fullName,
-				plan: browserProfile.plan,
+				plan:
+					browserProfileAppliesToExport &&
+					profile.metadataStatus !== "mismatch" &&
+					profile.metadataStatus !== "ambiguous" &&
+					profile.fullName !== null
+						? browserProfile.plan
+						: null,
 				name_source: profile.nameSource,
 				metadata_status: profile.metadataStatus,
 			});
@@ -759,7 +779,7 @@ export async function collectAnthropic({
 	const pending = readPendingExport(state);
 
 	if (pending) {
-		await pollAndEmitOldFormat(pending);
+		await pollAndEmitOldFormat(pending, false);
 		return;
 	}
 
@@ -806,7 +826,7 @@ export async function collectAnthropic({
 			stream: CONVERSATIONS_STREAM,
 			cursor: { pending_export: newPending },
 		});
-		await pollAndEmitOldFormat(newPending);
+		await pollAndEmitOldFormat(newPending, true);
 		return;
 	}
 
@@ -819,6 +839,7 @@ export async function collectAnthropic({
 
 	async function pollAndEmitOldFormat(
 		pendingExport: PendingExportState,
+		pendingExportWasCreatedThisRun: boolean,
 	): Promise<void> {
 		const downloadUrl = exportDownloadUrl(
 			pendingExport.organization_id,
@@ -868,7 +889,12 @@ export async function collectAnthropic({
 				conversationsJson,
 				projectFiles.map((f) => f.json),
 			);
-			await emitParsed(parsed, pendingExport.organization_id, userFiles);
+			await emitParsed(
+				parsed,
+				pendingExport.organization_id,
+				userFiles,
+				pendingExportWasCreatedThisRun,
+			);
 		} finally {
 			await attempt.cleanup?.();
 		}
@@ -957,7 +983,7 @@ export async function collectAnthropic({
 		}
 
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
-		await emitParsed(parsed, organizationId, rawUserProfiles);
+		await emitParsed(parsed, organizationId, rawUserProfiles, true);
 	}
 }
 
