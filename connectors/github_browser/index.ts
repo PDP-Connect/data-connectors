@@ -13,6 +13,34 @@ import { collectGitHubBrowser } from "./collector.ts";
 import { probeGitHubBrowserSession } from "./probe.ts";
 import { validateRecord } from "./schemas.ts";
 
+const CONTRIBUTION_CALENDAR_SELECTOR =
+	"td.ContributionCalendar-day[data-date], rect.day[data-date]";
+const CONTRIBUTION_CALENDAR_MINIMUM_DAYS = 365;
+const CONTRIBUTION_CALENDAR_WAIT_TIMEOUT_MS = 8_000;
+
+export async function openContributionPage(
+	page: BrowserCollectContext["page"],
+	url: string,
+): Promise<string> {
+	await page.goto(url, { waitUntil: "domcontentloaded" });
+	try {
+		const ready = await page.waitForFunction(
+			({ minimumDays, selector }) =>
+				Boolean(document.querySelector("h2.f4.text-normal.mb-2")) &&
+				document.querySelectorAll(selector).length >= minimumDays,
+			{
+				minimumDays: CONTRIBUTION_CALENDAR_MINIMUM_DAYS,
+				selector: CONTRIBUTION_CALENDAR_SELECTOR,
+			},
+			{ timeout: CONTRIBUTION_CALENDAR_WAIT_TIMEOUT_MS },
+		);
+		await ready.dispose();
+	} catch {
+		// Leave incomplete pages for the collector's completeness check to skip.
+	}
+	return await page.content();
+}
+
 async function ensureSession({
 	assist,
 	capture,
@@ -66,6 +94,8 @@ export async function collect({
 			await page.goto(url, { waitUntil: "domcontentloaded" });
 			return await page.content();
 		},
+		openContributionPage: async (url: string) =>
+			openContributionPage(page, url),
 		sleep: async (ms: number) =>
 			new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	};

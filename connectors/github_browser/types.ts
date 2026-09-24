@@ -12,6 +12,7 @@ export interface BrowserServices {
 	fetchPublicJson(url: string): Promise<unknown>;
 	now(): Date;
 	openPage(url: string): Promise<string>;
+	openContributionPage?(url: string): Promise<string>;
 	sleep(ms: number): Promise<void>;
 }
 

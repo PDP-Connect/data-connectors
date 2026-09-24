@@ -143,12 +143,14 @@ export async function collectGitHubBrowser(
 	if (wants.has("contributions")) {
 		const year = services.now().getUTCFullYear();
 		const graphs = [];
+		const openContributionPage =
+			services.openContributionPage ?? services.openPage;
 		for (let offset = 0; offset < 4; offset += 1) {
 			const itemYear = year - offset;
 			const suffix =
 				offset === 0 ? "" : `?from=${itemYear}-01-01&to=${itemYear}-12-31`;
 			const graph = parseContributionHtml(
-				await services.openPage(`${GITHUB}/${username}${suffix}`),
+				await openContributionPage(`${GITHUB}/${username}${suffix}`),
 			);
 			graphs.push({ ...graph, year: itemYear });
 		}
