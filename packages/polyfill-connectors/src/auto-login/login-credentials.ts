@@ -167,8 +167,10 @@ export function noStoredCredentialReason(connectorName: string): string {
 	const provider =
 		{
 			chatgpt: "ChatGPT",
+			doordash: "DoorDash",
 			heb: "H-E-B",
 			usaa: "USAA",
-		}[connectorName] ?? connectorName[0]?.toUpperCase() + connectorName.slice(1);
+		}[connectorName] ??
+		connectorName[0]?.toUpperCase() + connectorName.slice(1);
 	return `No saved ${provider} sign-in is available for this connection. Automated sign-in was skipped.`;
 }

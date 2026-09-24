@@ -747,7 +747,10 @@ test("ensureChaseSession hands off when optional credentials are absent", async 
 			requests[0]?.message ?? "",
 			/No saved Chase sign-in is available/,
 		);
-		assert.doesNotMatch(requests[0]?.message ?? "", /CHASE_USERNAME|CHASE_PASSWORD/);
+		assert.doesNotMatch(
+			requests[0]?.message ?? "",
+			/CHASE_USERNAME|CHASE_PASSWORD/,
+		);
 		assert.doesNotMatch(
 			requests[0]?.message ?? "",
 			/did not render|failed to load/i,
