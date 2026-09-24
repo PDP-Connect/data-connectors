@@ -22,7 +22,28 @@ function sha256(file) {
 }
 
 test("runtime-support export builds, imports, and packs only its maintained artifact", async () => {
+	const builtArtifacts = [
+		"dist/runtime-support.mjs",
+		"dist/runtime-support.d.ts",
+	];
+	const checkedInArtifacts = builtArtifacts.map((path) => {
+		assert.equal(
+			run("git", ["ls-files", "--error-unmatch", path]).trim(),
+			path,
+			`${path} is checked in so installs with ignored scripts can use it`,
+		);
+		return readFileSync(new URL(`../${path}`, import.meta.url));
+	});
+
 	run("npm", ["run", "runtime-support:build"]);
+
+	for (const [index, path] of builtArtifacts.entries()) {
+		assert.deepEqual(
+			readFileSync(new URL(`../${path}`, import.meta.url)),
+			checkedInArtifacts[index],
+			`${path} matches the output rebuilt from source`,
+		);
+	}
 
 	const buildInfo = JSON.parse(
 		readFileSync(
