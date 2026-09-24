@@ -67,6 +67,7 @@ const NAV_SETTLE_MS = 2500;
 const POLITE_DELAY_MS = 800;
 const MAX_SEARCH_PAGES = 50;
 const USDA_MIN_TEXT_SCORE = 0.4;
+const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
 
 const AMAZON_ORDER_HISTORY_URL = "https://www.amazon.com/gp/css/homepage.html";
 const AMAZON_SEARCH_BASE =
@@ -91,12 +92,13 @@ async function navigateAndSettle(
 	page: Page,
 	url: string,
 	readySelector?: string,
-): Promise<void> {
+	inspectHttpError = false,
+): Promise<number | null> {
 	const response = await page.goto(url, {
 		timeout: NAV_TIMEOUT_MS,
 		waitUntil: "domcontentloaded",
 	});
-	if (response && !response.ok()) {
+	if (response && !response.ok() && !inspectHttpError) {
 		throw new Error(
 			`Whole Foods navigation failed with HTTP ${response.status()}`,
 		);
@@ -108,6 +110,7 @@ async function navigateAndSettle(
 		});
 	}
 	await politeDelay(NAV_SETTLE_MS);
+	return response?.status() ?? null;
 }
 
 // ─── Profile ────────────────────────────────────────────────────────────
@@ -331,30 +334,44 @@ async function lookupNutritionForProduct(
 	let sourceOutcome: "not_found" | "error" | "blocked" = "error";
 	try {
 		if (query.length >= 3) {
-			await navigateAndSettle(
+			const searchStatus = await navigateAndSettle(
 				page,
-				`https://www.wholefoodsmarket.com/search?text=${encodeURIComponent(query)}`,
+				`${WHOLE_FOODS_ORIGIN}/search?text=${encodeURIComponent(query)}`,
+				undefined,
+				true,
 			);
 			const searchHtml = await page.content();
 			if (isBlockedPage(searchHtml)) {
 				sourceOutcome = "blocked";
+			} else if (searchStatus !== null && searchStatus >= 400) {
+				sourceOutcome = "error";
 			} else {
 				const productUrl = parseWholeFoodsSearchResultDom(searchHtml);
 				if (productUrl) {
-					const resolvedUrl = new URL(
-						productUrl,
-						"https://www.wholefoodsmarket.com",
-					);
-					if (resolvedUrl.hostname !== "www.wholefoodsmarket.com") {
+					const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
+					if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
 						throw new Error(
 							"Whole Foods search returned a non-Whole-Foods product URL",
 						);
 					}
-					await navigateAndSettle(page, resolvedUrl.href);
+					const productStatus = await navigateAndSettle(
+						page,
+						resolvedUrl.href,
+						undefined,
+						true,
+					);
 					const productHtml = await page.content();
 					if (isBlockedPage(productHtml)) {
 						sourceOutcome = "blocked";
+					} else if (productStatus !== null && productStatus >= 400) {
+						sourceOutcome = "error";
 					} else {
+						const finalUrl = new URL(page.url());
+						if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
+							throw new Error(
+								"Whole Foods product navigation left the trusted origin",
+							);
+						}
 						const facts = parseWholeFoodsProductPageDom(productHtml);
 						if (facts) return facts;
 						sourceOutcome = hasProductPageEvidence(productHtml)

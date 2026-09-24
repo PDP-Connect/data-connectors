@@ -42,8 +42,9 @@ const PROFILE_HTML = `<html><body>
 </body></html>`;
 
 function fakePage(html: string): Page {
-	const shape: Pick<Page, "content" | "goto"> = {
+	const shape: Pick<Page, "content" | "goto" | "url"> = {
 		content: () => Promise.resolve(html),
+		url: () => "https://www.wholefoodsmarket.com/product/example",
 		// biome-ignore lint/suspicious/noExplicitAny: minimal Page stub for a pure-composition test; matching Playwright's real overload set isn't the point here.
 		goto: (() => Promise.resolve(null)) as any,
 	};
@@ -192,6 +193,61 @@ test("observed blocked lookup emits a blocked nutrition row when USDA finds no m
 	}
 });
 
+test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	try {
+		const shape = {
+			...fakePage(
+				'<html><title>Robot Check</title><form action="validateCaptcha"></form></html>',
+			),
+			goto: () => Promise.resolve({ ok: () => false, status: () => 403 }),
+		} as unknown as Page;
+		assert.equal(
+			await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+			"blocked",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HTTP 403 product CAPTCHA is blocked after search succeeds", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	let visits = 0;
+	const shape = {
+		content: () =>
+			Promise.resolve(
+				visits === 1
+					? '<a href="/product/example">Organic Bananas</a>'
+					: '<html><title>Robot Check</title><form action="validateCaptcha"></form></html>',
+			),
+		goto: () => {
+			visits += 1;
+			return Promise.resolve({
+				ok: () => visits === 1,
+				status: () => (visits === 1 ? 200 : 403),
+			});
+		},
+	} as unknown as Page;
+	try {
+		assert.equal(
+			await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+			"blocked",
+		);
+		assert.equal(visits, 2);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("USDA request failure emits error instead of not_found", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>
@@ -264,7 +320,7 @@ test("an unrecognized Whole Foods page plus empty USDA results emits error", asy
 
 test("Whole Foods search resolves a relative product link before reading facts", async () => {
 	const visited: string[] = [];
-	const shape: Pick<Page, "content" | "goto"> = {
+	const shape: Pick<Page, "content" | "goto" | "url"> = {
 		content: () =>
 			Promise.resolve(
 				visited.length === 1
@@ -276,6 +332,7 @@ test("Whole Foods search resolves a relative product link before reading facts",
 			visited.push(url);
 			return Promise.resolve(null);
 		}) as any,
+		url: () => visited.at(-1) ?? "about:blank",
 	};
 	const outcome = await lookupNutritionForProduct(
 		shape as Page,
@@ -310,6 +367,7 @@ test("a rendered product without nutrition and an empty USDA result emits not_fo
 			visits += 1;
 			return Promise.resolve(null);
 		},
+		url: () => "https://www.wholefoodsmarket.com/product/organic-bananas",
 	} as unknown as Page;
 	try {
 		const outcome = await lookupNutritionForProduct(
@@ -318,6 +376,65 @@ test("a rendered product without nutrition and an empty USDA result emits not_fo
 			"Organic Bananas",
 		);
 		assert.equal(outcome, "not_found");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HTTP product links and cross-origin redirects cannot supply nutrition", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
+	const facts =
+		'<script type="application/ld+json">{"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script>';
+	try {
+		await Promise.all(
+			(
+				[
+					[
+						"http://www.wholefoodsmarket.com/product/example",
+						"http://www.wholefoodsmarket.com/product/example",
+						1,
+					],
+					["/product/example", "https://example.com/product/example", 2],
+					[
+						"/product/example",
+						"http://www.wholefoodsmarket.com/product/example",
+						2,
+					],
+					[
+						"https://www.wholefoodsmarket.com:444/product/example",
+						"https://www.wholefoodsmarket.com:444/product/example",
+						1,
+					],
+					[
+						"/product/example",
+						"https://www.wholefoodsmarket.com:444/product/example",
+						2,
+					],
+				] as const
+			).map(async ([href, finalUrl, expectedVisits]) => {
+				let visits = 0;
+				const shape = {
+					content: () =>
+						Promise.resolve(
+							visits === 1 ? `<a href="${href}">Organic Bananas</a>` : facts,
+						),
+					goto: () => {
+						visits += 1;
+						return Promise.resolve(null);
+					},
+					url: () => finalUrl,
+				} as unknown as Page;
+				assert.equal(
+					await lookupNutritionForProduct(shape, "DEMO_KEY", "Organic Bananas"),
+					"error",
+				);
+				assert.equal(visits, expectedVisits);
+			}),
+		);
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
