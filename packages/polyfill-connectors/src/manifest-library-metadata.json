@@ -48,8 +48,15 @@
 		"manifest": {
 			"connector_key": "apple-health",
 			"reason_display_messages": {
-				"export_not_found": "We couldn't find an export to import",
-				"export_extraction_failed": "We couldn't read the uploaded export"
+				"covered_in_full": "Everything of this kind in your export for this period was imported.",
+				"nothing_in_range": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read.",
+				"awaiting_upload": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready.",
+				"source_unreadable": "That file isn't an Apple Health export we can read. It should be the export.zip your iPhone produced, or the export.xml from inside it.",
+				"export_extraction_failed": "We couldn't read your export, so nothing was imported. If it is a .zip that is incomplete, take a fresh export on your iPhone and upload it again. If the .zip cannot be opened here and the export XML inside it is under 8 GB, unzip it on a computer and upload that XML instead.",
+				"collection_interrupted": "Your export file ended earlier than expected, so some records are missing. Take a fresh export on your iPhone and upload the new file.",
+				"records_unreadable": "Some entries in your export couldn't be read and were skipped - everything else imported normally. Importing the same file again won't recover them.",
+				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have.",
+				"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here."
 			}
 		}
 	},

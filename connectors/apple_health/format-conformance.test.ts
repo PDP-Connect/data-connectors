@@ -5,7 +5,7 @@
  * FORMAT-CONFORMANCE proof, NOT live proof. Runs the real connector
  * subprocess (exact protocol an orchestrator uses) against a large
  * synthetic export.xml built from the researched Apple Health export
- * shape (ai/research/apple-health-export-format/) — multi-year, multiple
+ * shape — multi-year, multiple
  * sources/devices, sleep sessions, workouts with events/statistics/
  * metadata, and deliberate edge cases (missing unit, unknown type,
  * missing startDate, a DST boundary, a zero-duration workout).
@@ -32,6 +32,7 @@ import {
 	buildSyntheticExportDir,
 	syntheticExportStartYear,
 } from "./__fixtures__/synthetic-export.ts";
+import { HEALTH_AREA_STREAMS } from "./areas.ts";
 
 const ENTRYPOINT = connectorEntrypoint("apple_health");
 
@@ -46,6 +47,13 @@ function records(
 		)
 		.filter((m) => m.stream === stream)
 		.map((m) => m.data);
+}
+
+/** Every reading, whichever health-area stream carried it. */
+function readings(
+	messages: readonly EmittedMessage[],
+): Record<string, unknown>[] {
+	return HEALTH_AREA_STREAMS.flatMap((stream) => records(messages, stream));
 }
 
 function progressLines(messages: readonly EmittedMessage[]): string[] {
@@ -66,7 +74,11 @@ function run(exportDir: string, opts: { peakRssPollIntervalMs?: number } = {}) {
 			? {}
 			: { peakRssPollIntervalMs: opts.peakRssPollIntervalMs }),
 		start: {
-			scope: { streams: [{ name: "records" }, { name: "workouts" }] },
+			scope: {
+				streams: [...HEALTH_AREA_STREAMS, "workouts"].map((name) => ({
+					name,
+				})),
+			},
 			state: {},
 			type: "START",
 		},
@@ -85,7 +97,7 @@ test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k rec
 		assert.ok(done && done.type === "DONE", "expected a DONE message");
 		assert.equal(done.status, "succeeded");
 
-		const recordRows = records(result.messages, "records");
+		const recordRows = readings(result.messages);
 		const workoutRows = records(result.messages, "workouts");
 
 		// Ground truth from the generator: every Record element except the
@@ -103,9 +115,10 @@ test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k rec
 		);
 
 		// Fidelity: heart rate (unit contains '/') actually made it through —
-		// this is the exact case the tag-regex bug this session fixed would
-		// have silently dropped.
-		const heartRateRows = recordRows.filter((r) => r.type === "HeartRate");
+		// a tag pattern that excluded '/' from attribute values would drop it.
+		const heartRateRows = records(result.messages, "vital_signs").filter(
+			(r) => r.type === "HeartRate",
+		);
 		assert.ok(
 			heartRateRows.length > 0,
 			"HeartRate records (unit=count/min) must not be silently dropped",
@@ -116,16 +129,42 @@ test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k rec
 		);
 
 		// Sleep (category) records: value_raw carries the HK token, value is null.
-		const sleepRows = recordRows.filter((r) => r.type === "SleepAnalysis");
+		const sleepRows = records(result.messages, "sleep");
 		assert.ok(sleepRows.length > 0, "expected sleep analysis rows");
 		assert.ok(
 			sleepRows.every(
 				(r) => r.value === null && typeof r.value_raw === "string",
 			),
 		);
+		// The fixture writes <MetadataEntry key="HKWasUserEntered" value="0"/> on
+		// sleep rows. It must arrive as a typed boolean, not as an open bag.
 		assert.ok(
-			sleepRows.every((r) => r.metadata && typeof r.metadata === "object"),
-			"sleep rows carry MetadataEntry",
+			sleepRows.every((r) => r.was_user_entered === false),
+			"HKWasUserEntered=0 must surface as was_user_entered === false",
+		);
+		assert.ok(
+			sleepRows.every((r) => !Object.hasOwn(r, "metadata")),
+			"the free-form metadata bag must not reach an emitted record",
+		);
+
+		// Privacy, asserted end to end rather than only at the unit level. The
+		// fixture's workouts carry HKWeatherTemperature, and weather reconstructs
+		// location: sunrise and sunset on a known date give latitude. Nothing in
+		// the emitted output may carry it, nor any device or application name.
+		const emittedJson = JSON.stringify([...recordRows, ...workoutRows]);
+		assert.ok(
+			!emittedJson.includes("HKWeatherTemperature"),
+			"a workout's weather block must never be emitted",
+		);
+		assert.ok(
+			!emittedJson.includes("source_name"),
+			"device and application names must never be emitted",
+		);
+
+		// A type no area lists is delivered on other, never dropped.
+		assert.deepEqual(
+			records(result.messages, "other").map((r) => r.type),
+			["HKBiomarkerTypeIdentifierFutureBiomarkerNotYetInvented"],
 		);
 
 		// Device provenance preserved for iPhone/Watch-sourced records.
