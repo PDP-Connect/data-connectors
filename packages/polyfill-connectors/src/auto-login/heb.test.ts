@@ -1441,6 +1441,33 @@ test("ensureHebSession fills the verified login form, submits, and waits for the
 	});
 });
 
+test("ensureHebSession hands a first-time owner the browser login when credentials are absent", async () => {
+	const page = makePage({
+		html: SIGNIN_HTML,
+		live: false,
+		url: SIGNIN_URL,
+		view: "login",
+	});
+	const harness = makeInteractionHarness();
+
+	const ok = await ensureHebSession({
+		page,
+		postSubmitWaitClock: makePostSubmitWaitClock(page),
+		sendInteraction: harness.sendInteraction,
+	});
+
+	assert.equal(ok, true);
+	assert.deepEqual(
+		harness.requests.map((request) => request.kind),
+		["manual_action"],
+	);
+	assert.match(harness.requests[0]?.message ?? "", /secure browser/i);
+	assert.doesNotMatch(
+		harness.requests[0]?.message ?? "",
+		/username|password|save this connection/i,
+	);
+});
+
 test("ensureHebSession fires onCredentialSubmit exactly once, and only when the verified form was actually submitted", async () => {
 	await withHebCredentials(async () => {
 		const page = makePage({

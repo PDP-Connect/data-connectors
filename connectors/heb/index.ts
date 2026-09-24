@@ -2309,10 +2309,8 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "heb",
 		validateRecord,
-		// See the chase declaration: without this the runtime resolves `{}`, never
-		// raises the `credentials` INTERACTION, and H-E-B's hand-off blames the
-		// page for what is really an absent stored credential.
 		auth: { kind: "env", required: ["HEB_USERNAME", "HEB_PASSWORD"] },
+		authOptional: true,
 		// H-E-B is fronted by Incapsula, which fingerprints headless Chromium.
 		// Persistent profile keeps cookies + TLS fingerprint warm across runs.
 		browser: { profileName: "heb" },

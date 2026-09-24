@@ -82,10 +82,12 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 	},
 	heb: {
 		credentialKind: "username_password",
+		captureRequired: false,
 		secretFieldEnvVars: {
 			password: ["HEB_PASSWORD"],
 			username: ["HEB_USERNAME"],
 		},
+		optionalSecretBundleFields: ["username", "password"],
 	},
 	jellyfin: {
 		credentialKind: "username_password",
