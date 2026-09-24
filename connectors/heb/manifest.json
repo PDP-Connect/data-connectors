@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -388,7 +388,7 @@
 						"type": "string"
 					},
 					"product_url": {
-						"type": "string",
+						"type": ["string", "null"],
 						"format": "uri",
 						"description": "Product page URL observed on the H-E-B order item; never constructed or inferred."
 					},
@@ -517,7 +517,7 @@
 						"format": "date-time"
 					}
 				},
-				"required": ["id", "product_id", "product_url", "name"]
+				"required": ["id", "product_id", "name"]
 			},
 			"primary_key": ["id"],
 			"relationships": [

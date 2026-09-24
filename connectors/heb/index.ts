@@ -2141,8 +2141,8 @@ export interface NutritionTarget {
 
 /** Fetch and emit `nutrition` records for the unique products this run's
  *  `order_items` collection observed, deduped by product_id and bounded by
- *  `MAX_NUTRITION_LOOKUPS_PER_RUN`. A product with no resolvable
- *  `product_url` is skipped (never guessed) and reported once in aggregate. */
+ *  `MAX_NUTRITION_LOOKUPS_PER_RUN`. Products without a resolvable
+ *  `product_url` receive an explicit not_found outcome; no URL is guessed. */
 export async function collectNutrition(
 	page: Page,
 	targets: readonly NutritionTarget[],
@@ -2157,6 +2157,19 @@ export async function collectNutrition(
 	const skippedNoUrl = targets.length - withUrl.length;
 	const bounded = withUrl.slice(0, MAX_NUTRITION_LOOKUPS_PER_RUN);
 	const deferred = withUrl.length - bounded.length;
+	for (const target of targets.filter((t) => !t.productUrl)) {
+		await deps.emitRecord(
+			"nutrition",
+			buildNutritionRecord(
+				target.productId,
+				parseNutritionDom(""),
+				target.name,
+				deps.emittedAt,
+				null,
+				"not_found",
+			),
+		);
+	}
 
 	for (const target of bounded) {
 		try {
