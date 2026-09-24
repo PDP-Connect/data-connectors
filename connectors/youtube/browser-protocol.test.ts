@@ -12,7 +12,7 @@ import { validateRecord } from "./schemas.ts";
 const card =
 	'<yt-lockup-view-model class="content-id-abc123XYZ0"><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span aria-label="Go to channel Creator"></span><span class="ytBadgeShapeText">4:30</span></yt-lockup-view-model>';
 const pages: Record<string, string> = {
-	"/": '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>',
+	"/": '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer></ytd-active-account-header-renderer><ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a href="/@owner"><span id="label">Your channel</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>',
 	"/@owner":
 		'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Owner</h1>',
 	"/@owner/about":

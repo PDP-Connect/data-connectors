@@ -16,7 +16,7 @@ function dom(html: string): Document {
 		.document as unknown as Document;
 }
 
-test("own channel is read only from the active account header", () => {
+test("own channel prefers the active account header over generic page links", () => {
 	const doc = dom(
 		'<a href="/@someone-else">sidebar</a><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email">owner@example.com</span></ytd-active-account-header-renderer>',
 	);
@@ -28,6 +28,28 @@ test("own channel is read only from the active account header", () => {
 		readOwnAccount(dom('<a href="/@someone-else">sidebar</a>')).channel_url,
 		null,
 	);
+});
+
+test("own channel falls back to the authenticated menu's labeled Your channel link", () => {
+	const doc = dom(`
+		<a href="/@subscribed">subscribed channel</a>
+		<ytd-active-account-header-renderer><span id="email">owner@example.com</span></ytd-active-account-header-renderer>
+		<ytd-multi-page-menu-renderer>
+			<ytd-compact-link-renderer><a href="/@other"><span id="label">Switch account</span></a></ytd-compact-link-renderer>
+			<ytd-compact-link-renderer><a href="/channel/UCowner"><span id="label">Your channel</span></a></ytd-compact-link-renderer>
+		</ytd-multi-page-menu-renderer>`);
+	assert.deepEqual(readOwnAccount(doc), {
+		channel_url: "https://www.youtube.com/channel/UCowner",
+		email: "owner@example.com",
+	});
+});
+
+test("own channel menu fallback rejects unlabeled channel links", () => {
+	const doc = dom(`
+		<ytd-active-account-header-renderer></ytd-active-account-header-renderer>
+		<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a href="/@not-owner"><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>
+		<a href="/@subscribed">subscribed channel</a>`);
+	assert.equal(readOwnAccount(doc).channel_url, null);
 });
 
 test("own channel About fields retain their source text", () => {
