@@ -805,9 +805,7 @@ export async function manualBrowserLogin<Result>({
 				{
 					intervalMs: autoProbeIntervalMs,
 					...(now ? { now } : {}),
-					...(readinessProbeOnHandoffPage
-						? { probeOnHandoffPage: true }
-						: {}),
+					...(readinessProbeOnHandoffPage ? { probeOnHandoffPage: true } : {}),
 					windowMs: readinessWindowMs,
 				},
 			);

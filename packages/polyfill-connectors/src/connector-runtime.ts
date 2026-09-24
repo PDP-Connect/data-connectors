@@ -74,7 +74,10 @@ import {
 	unregisterBrowserInteractionTarget,
 	withDeadline,
 } from "./browser-handoff.ts";
-import { minimizeBrowserWindow, restoreBrowserWindow } from "./browser-window.ts";
+import {
+	minimizeBrowserWindow,
+	restoreBrowserWindow,
+} from "./browser-window.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
 import {
 	type CaptureSession,

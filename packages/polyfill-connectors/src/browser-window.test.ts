@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Browser, BrowserContext, CDPSession, Page } from "playwright";
 import {
-	minimizeBrowserWindow,
 	BROWSER_MINIMIZE_AFTER_AUTH_ENV,
+	minimizeBrowserWindow,
 	restoreBrowserWindow,
 } from "./browser-window.ts";
 
@@ -22,7 +22,10 @@ function makePage(commands: string[], fail = false): Page {
 		detach: async () => undefined,
 	} as CDPSession;
 	const browserSession = {
-		send: async (command: string, params?: { bounds?: { windowState?: string } }) => {
+		send: async (
+			command: string,
+			params?: { bounds?: { windowState?: string } },
+		) => {
 			commands.push(
 				command === "Browser.setWindowBounds"
 					? `${command}:${params?.bounds?.windowState}`
@@ -73,5 +76,8 @@ test("unsupported browser window control does not fail connector collection", as
 			[BROWSER_MINIMIZE_AFTER_AUTH_ENV]: "1",
 		}),
 	);
-	assert.deepEqual(commands, ["Target.getTargetInfo", "Browser.getWindowForTarget"]);
+	assert.deepEqual(commands, [
+		"Target.getTargetInfo",
+		"Browser.getWindowForTarget",
+	]);
 });

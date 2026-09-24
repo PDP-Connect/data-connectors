@@ -17,8 +17,12 @@ async function setBrowserWindowState(
 	const browser = context.browser();
 	if (!browser) return;
 
-	let targetSession: Awaited<ReturnType<typeof context.newCDPSession>> | undefined;
-	let browserSession: Awaited<ReturnType<typeof browser.newBrowserCDPSession>> | undefined;
+	let targetSession:
+		| Awaited<ReturnType<typeof context.newCDPSession>>
+		| undefined;
+	let browserSession:
+		| Awaited<ReturnType<typeof browser.newBrowserCDPSession>>
+		| undefined;
 	try {
 		targetSession = await context.newCDPSession(page);
 		const target = (await targetSession.send("Target.getTargetInfo")) as {
