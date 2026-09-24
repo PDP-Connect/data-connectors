@@ -2905,7 +2905,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/protocol.test.ts",
-			line: 230,
+			line: 273,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Each incomplete search response is run and checked before the next case.",

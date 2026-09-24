@@ -137,6 +137,49 @@ test("browser collection emits valid records and state for each selected legacy 
 	);
 });
 
+test("collector skips contribution snapshots when any year view is unavailable", async () => {
+	const profile = await readFixture("profile.html");
+	let current = '<h2 class="f4 text-normal mb-2">3 contributions</h2>';
+	for (
+		let date = new Date("2025-01-02T00:00:00Z");
+		date.toISOString().slice(0, 10) <= "2026-01-01";
+		date.setUTCDate(date.getUTCDate() + 1)
+	)
+		current += `<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="0" data-level="0"></td>`;
+	const run = async (currentHtml: string) => {
+		const records: Array<Record<string, unknown>> = [];
+		const messages: Array<{ type: string }> = [];
+		await collectGitHubBrowser(
+			{
+				emit: async (message) => { messages.push({ type: message.type }); },
+				emitRecord: async (_stream, record) => { records.push(record); },
+				progress: async () => {},
+				requested: new Set(["contributions"]),
+				state: {},
+			},
+			{
+				fetchPublicJson: async () => [],
+				now: () => new Date("2026-01-01T00:00:00Z"),
+				openPage: async (url) =>
+					url === "https://github.com/"
+						? profile
+						: url.includes("?from=")
+							? "<main>Unavailable</main>"
+							: currentHtml,
+				sleep: async () => {},
+			},
+		);
+		return { messages, records };
+	};
+	const missingPrior = await run(current);
+	assert.equal(missingPrior.records.length, 0);
+	assert.ok(missingPrior.messages.some(({ type }) => type === "SKIP_RESULT"));
+	assert.equal(missingPrior.messages.some(({ type }) => type === "STATE"), false);
+	const missingCurrent = await run("<main>Unavailable</main>");
+	assert.equal(missingCurrent.records.length, 0);
+	assert.ok(missingCurrent.messages.some(({ type }) => type === "SKIP_RESULT"));
+});
+
 test("real runtime emits START-selected six RECORDs before DONE", async () => {
 	const streams = [
 		"profile",
