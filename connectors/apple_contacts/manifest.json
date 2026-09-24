@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/apple-contacts",
 	"connector_key": "apple-contacts",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Apple Contacts",
 	"brand": {
 		"icon": "icon.svg",

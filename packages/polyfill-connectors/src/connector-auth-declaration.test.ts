@@ -220,7 +220,7 @@ test("no shipped connector directory is missing from the audit", () => {
 		const descriptor =
 			GENERATED_STATIC_SECRET_REGISTRY[registryKeyForDirectory(name)];
 		if (!descriptor && declared.some((n) => n.endsWith("_PASSWORD"))) {
-			// ChatGPT 0.2.1 intentionally has no static credential capture UI.
+			// ChatGPT 0.2.2 intentionally has no static credential capture UI.
 			// It keeps authOptional for the secure browser/manual-login path; a
 			// missing registry row is expected and must not enable secret injection.
 			const manifest = JSON.parse(readFileSync(MANIFEST_DIR(name), "utf8")) as {
@@ -229,7 +229,7 @@ test("no shipped connector directory is missing from the audit", () => {
 			};
 			if (
 				name === "chatgpt" &&
-				manifest.version === "0.2.1" &&
+				manifest.version === "0.2.2" &&
 				!manifest.setup?.credential_capture &&
 				/\bauthOptional\s*:\s*true\b/u.test(source)
 			) {

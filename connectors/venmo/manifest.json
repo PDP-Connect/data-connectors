@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/venmo",
 	"connector_key": "venmo",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"display_name": "Venmo",
 	"brand": {
 		"icon": "icon.svg",

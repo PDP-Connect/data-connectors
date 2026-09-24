@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/pocket",
 	"connector_key": "pocket",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Pocket",
 	"runtime_requirements": {
 		"bindings": {

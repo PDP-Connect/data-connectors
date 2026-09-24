@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/spotify",
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",

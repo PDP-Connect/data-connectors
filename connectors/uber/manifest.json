@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/uber",
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icon.svg",
