@@ -123,10 +123,7 @@ function validateAgainst(
 }
 
 function loadLegacySchema(name: string): JsonSchema {
-	const url = new URL(
-		`./schemas/${name}`,
-		import.meta.url,
-	);
+	const url = new URL(`./schemas/${name}`, import.meta.url);
 	const contract = JSON.parse(readFileSync(url, "utf8")) as {
 		schema: JsonSchema;
 	};
@@ -154,6 +151,7 @@ function toLegacyProfile(record: ProfileRecord): unknown {
 function toLegacyNutritionItem(record: NutritionRecord): unknown {
 	return {
 		name: record.name,
+		product_url: record.product_url,
 		source: record.source,
 		confidence: record.confidence,
 		calories: record.calories,
@@ -195,6 +193,7 @@ function toLegacyNutritionEnvelope(
 	}
 	const found = records.filter((r) => r.source === "heb_product_page").length;
 	const foundUSDA = records.filter((r) => r.source === "usda_fdc").length;
+	const blocked = records.filter((r) => r.source === "blocked").length;
 	const total = records.length;
 	return {
 		items,
@@ -202,6 +201,7 @@ function toLegacyNutritionEnvelope(
 			total,
 			found,
 			foundUSDA,
+			blocked,
 			percentCovered:
 				total > 0 ? Math.round(((found + foundUSDA) / total) * 100) : 0,
 		},
@@ -254,6 +254,8 @@ const NUTRITION_RECORD_FOUND: NutritionRecord = {
 	name: "H-E-B Organic 2% Reduced Fat Milk",
 	potassium_mg: 380,
 	product_id: "123456789",
+	product_url:
+		"https://www.heb.com/product-detail/heb-organic-2-reduced-fat-milk/123456789",
 	protein_g: 8,
 	saturated_fat_g: 5,
 	serving_size: "1 cup (240mL)",
@@ -290,6 +292,7 @@ const NUTRITION_RECORD_NOT_FOUND: NutritionRecord = {
 	name: "Unlabeled Fallback Item",
 	potassium_mg: null,
 	product_id: "999",
+	product_url: "https://www.heb.com/product-detail/unlabeled-item/999",
 	protein_g: null,
 	saturated_fat_g: null,
 	serving_size: null,
@@ -339,6 +342,7 @@ test("PDPP nutrition records map to a legacy heb.nutrition envelope (items + cov
 	const legacyPayload = toLegacyNutritionEnvelope([
 		NUTRITION_RECORD_FOUND,
 		NUTRITION_RECORD_NOT_FOUND,
+		{ ...NUTRITION_RECORD_NOT_FOUND, source: "blocked" },
 	]);
 	const errors = validateAgainst(LEGACY_NUTRITION_SCHEMA, legacyPayload, "$");
 	assert.deepEqual(errors, []);
@@ -359,19 +363,22 @@ test("legacy heb.nutrition envelope's coverage counters are reconstructable run 
 	const legacyPayload = toLegacyNutritionEnvelope([
 		NUTRITION_RECORD_FOUND,
 		NUTRITION_RECORD_NOT_FOUND,
+		{ ...NUTRITION_RECORD_NOT_FOUND, source: "blocked" },
 	]) as {
 		coverage: {
 			total: number;
 			found: number;
 			foundUSDA: number;
+			blocked: number;
 			percentCovered: number;
 		};
 	};
 	assert.deepEqual(legacyPayload.coverage, {
-		total: 2,
+		total: 3,
 		found: 1,
 		foundUSDA: 0,
-		percentCovered: 50,
+		blocked: 1,
+		percentCovered: 33,
 	});
 });
 

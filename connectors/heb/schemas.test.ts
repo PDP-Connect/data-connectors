@@ -63,6 +63,8 @@ const NUTRITION_RECORD = {
 	name: "H-E-B Organic 2% Reduced Fat Milk",
 	potassium_mg: 380,
 	product_id: "123456789",
+	product_url:
+		"https://www.heb.com/product-detail/heb-organic-2-reduced-fat-milk/123456789",
 	protein_g: 8,
 	saturated_fat_g: 5,
 	serving_size: "1 cup (240mL)",

@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -372,7 +372,7 @@
 		{
 			"name": "nutrition",
 			"required": false,
-			"description": "Nutrition facts per unique H-E-B product ordered, scraped from each product's detail page. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+			"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Incapsula blocks emit source=blocked with no nutrition values and a session-repair diagnostic. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
 			"display": {
 				"label": "Your H-E-B product nutrition",
 				"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
@@ -386,6 +386,11 @@
 					},
 					"product_id": {
 						"type": "string"
+					},
+					"product_url": {
+						"type": "string",
+						"format": "uri",
+						"description": "Product page URL observed on the H-E-B order item; never constructed or inferred."
 					},
 					"name": {
 						"type": "string",
@@ -512,7 +517,7 @@
 						"format": "date-time"
 					}
 				},
-				"required": ["id", "product_id", "name"]
+				"required": ["id", "product_id", "product_url", "name"]
 			},
 			"primary_key": ["id"],
 			"relationships": [

@@ -24,7 +24,10 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import pRetry from "p-retry";
 import type { Page } from "playwright";
-import { ensureHebSession, probeHebSession } from "../../packages/polyfill-connectors/src/auto-login/heb.ts";
+import {
+	ensureHebSession,
+	probeHebSession,
+} from "../../packages/polyfill-connectors/src/auto-login/heb.ts";
 import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -2175,6 +2178,17 @@ export async function collectNutrition(
 		await (deps.waitForHydration ?? hydrationWait)();
 		const html = await page.content().catch((): string => "");
 		if (isIncapsulaBlocked(html)) {
+			await deps.emitRecord(
+				"nutrition",
+				buildNutritionRecord(
+					target.productId,
+					parseNutritionDom(""),
+					target.name,
+					deps.emittedAt,
+					target.productUrl,
+					"blocked",
+				),
+			);
 			await deps.emit({
 				type: "SKIP_RESULT",
 				stream: "nutrition",
@@ -2192,6 +2206,7 @@ export async function collectNutrition(
 				extraction,
 				target.name,
 				deps.emittedAt,
+				target.productUrl,
 			),
 		);
 	}

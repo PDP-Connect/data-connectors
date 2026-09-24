@@ -1284,10 +1284,15 @@ test("buildNutritionRecord uses heb_product_page source when a panel was found",
 		extraction,
 		"H-E-B Organic 2% Reduced Fat Milk",
 		"2026-07-14T12:00:00.000Z",
+		"https://www.heb.com/product-detail/heb-milk/123456789",
 	);
 	assert.equal(record.source, "heb_product_page");
 	assert.equal(record.confidence, "high");
 	assert.equal(record.product_id, "123456789");
+	assert.equal(
+		record.product_url,
+		"https://www.heb.com/product-detail/heb-milk/123456789",
+	);
 	assert.equal(record.id, "123456789");
 	assert.deepEqual(record.images, {
 		full: "https://images.heb.com/is/image/HEBGrocery/123456789-1",
@@ -1303,6 +1308,7 @@ test("buildNutritionRecord uses not_found source and the fallback name when no p
 		extraction,
 		"Fallback Item Name",
 		"2026-07-14T12:00:00.000Z",
+		"https://www.heb.com/product-detail/unknown/999",
 	);
 	assert.equal(record.source, "not_found");
 	assert.equal(record.confidence, "low");

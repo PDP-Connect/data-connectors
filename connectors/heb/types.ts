@@ -195,6 +195,7 @@ export interface NutritionRecord {
 	name: string;
 	potassium_mg: number | null;
 	product_id: string;
+	product_url: string;
 	protein_g: number | null;
 	saturated_fat_g: number | null;
 	serving_size: string | null;
