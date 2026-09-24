@@ -263,5 +263,6 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 		},
 		public: true,
 	});
-	assert.equal(release?.title, "v2.0.0");
+	// The legacy formatter preserves an explicitly empty release name.
+	assert.equal(release?.title, "");
 });
