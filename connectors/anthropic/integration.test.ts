@@ -44,7 +44,12 @@ process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS = "50";
 
 const { collectAnthropic } = await import("./index.ts");
 const { validateRecord } = await import("./schemas.ts");
-const { makeRecordingEmit } = await import("../../packages/polyfill-connectors/src/test-harness.ts");
+const { makeEmitRecord } = await import(
+	"../../packages/polyfill-connectors/src/connector-runtime.ts"
+);
+const { makeRecordingEmit } = await import(
+	"../../packages/polyfill-connectors/src/test-harness.ts"
+);
 type BrowserCollectContext =
 	import("../../packages/polyfill-connectors/src/connector-runtime.ts").BrowserCollectContext;
 
@@ -54,6 +59,7 @@ type FetchStub = (url: string, init?: RequestInit) => Promise<Response>;
 
 class FakePage extends EventEmitter {
 	private fetchStub: FetchStub;
+	menuSpans: string[] = [];
 	gotoCalls: string[] = [];
 
 	constructor(fetchStub: FetchStub) {
@@ -72,12 +78,32 @@ class FakePage extends EventEmitter {
 	// stub, rather than in a real browser page.
 	async evaluate<T, A>(fn: (arg: A) => Promise<T> | T, arg?: A): Promise<T> {
 		const realFetch = globalThis.fetch;
+		const priorDocument = Object.getOwnPropertyDescriptor(
+			globalThis,
+			"document",
+		);
+		const spans = this.menuSpans.map((textContent) => ({ textContent }));
+		Object.defineProperty(globalThis, "document", {
+			configurable: true,
+			value: {
+				querySelector: () =>
+					spans.length
+						? {
+								querySelector: () => spans[0],
+								querySelectorAll: () => spans,
+							}
+						: null,
+			},
+		});
 		// biome-ignore lint/suspicious/noExplicitAny: test-only global patch
 		(globalThis as any).fetch = this.fetchStub;
 		try {
 			return await fn(arg as A);
 		} finally {
 			globalThis.fetch = realFetch;
+			if (priorDocument)
+				Object.defineProperty(globalThis, "document", priorDocument);
+			else Reflect.deleteProperty(globalThis, "document");
 		}
 	}
 }
@@ -184,7 +210,7 @@ const PROJECT_JSON = {
 	docs: [{ uuid: "doc-1", filename: "notes.md", content: "notes" }],
 };
 
-async function buildZipBytes(): Promise<Buffer> {
+async function buildZipBytes(users?: unknown): Promise<Buffer> {
 	const { deflateRawSync } = await import("node:zlib");
 	const files = [
 		{
@@ -196,6 +222,11 @@ async function buildZipBytes(): Promise<Buffer> {
 			content: Buffer.from(JSON.stringify(PROJECT_JSON)),
 		},
 	];
+	if (users !== undefined)
+		files.push({
+			name: "users.json",
+			content: Buffer.from(JSON.stringify(users)),
+		});
 	const localParts: Buffer[] = [];
 	const centralParts: Buffer[] = [];
 	let offset = 0;
@@ -318,6 +349,97 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 	);
 });
 
+for (const scenario of [
+	{
+		label: "users.json alone cannot establish owner",
+		users: [{ full_name: "Export Owner" }],
+		menu: [],
+		name: null,
+		status: "valid",
+	},
+	{
+		label: "matching users.json and browser profile",
+		users: [{ full_name: "Browser Owner" }],
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
+		status: "valid",
+	},
+	{
+		label: "absent users.json uses browser name",
+		users: undefined,
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
+		status: "absent",
+	},
+	{
+		label: "malformed users.json uses browser name",
+		users: { users: [{ id: "x" }] },
+		menu: ["Browser Owner", "Max"],
+		name: "Browser Owner",
+		status: "malformed",
+	},
+	{
+		label: "mismatched users.json omits browser identity",
+		users: [{ full_name: "Export Owner" }],
+		menu: ["Current User", "Max"],
+		name: null,
+		status: "mismatch",
+	},
+	{
+		label: "ambiguous users.json omits browser identity",
+		users: [{ full_name: "Export Owner" }, { full_name: "Current User" }],
+		menu: ["Current User", "Max"],
+		name: null,
+		status: "ambiguous",
+	},
+]) {
+	test(`collectAnthropic: old ZIP ${scenario.label}`, async () => {
+		const zipBytes = await buildZipBytes(scenario.users);
+		const { download } = makeFakeDownload(zipBytes);
+		const fetchStub: FetchStub = (url) => {
+			if (url.includes("/api/organizations") && !url.includes("export_data"))
+				return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+			if (url.includes("/export_data"))
+				return Promise.resolve(jsonResponse(200, { nonce: "nonce-abc" }));
+			return Promise.reject(new Error(`unexpected fetch: ${url}`));
+		};
+		const { ctx, emitted, protocolMessages, page } = makeContext({
+			streams: ["account_profile"],
+			fetchStub,
+		});
+		page.menuSpans = scenario.menu;
+		const originalGoto = page.goto.bind(page);
+		page.goto = async (url: string): Promise<null> => {
+			const result = await originalGoto(url);
+			if (url.includes("/export/"))
+				queueMicrotask(() => page.emit("download", download));
+			return result;
+		};
+		await collectAnthropic(ctx);
+		assert.deepEqual(emitted[0]?.data, {
+			id: "org-1",
+			organization_id: "org-1",
+			full_name: scenario.name,
+			plan: scenario.name === null ? null : (scenario.menu[1] ?? null),
+			name_source:
+				scenario.name === null
+					? "none"
+					: scenario.menu.length
+						? "browser_menu"
+						: "users_json",
+			metadata_status: scenario.status,
+		});
+		assert.equal(
+			protocolMessages.some(
+				(message) =>
+					message.type === "PROGRESS" &&
+					message.message.includes(`metadata: ${scenario.status}`),
+			),
+			scenario.status !== "valid" || scenario.name === null,
+		);
+	});
+}
+
 test("collectAnthropic: scope filtering — requesting only 'projects' emits no conversations/messages/project_documents", async () => {
 	const zipBytes = await buildZipBytes();
 	const { download } = makeFakeDownload(zipBytes);
@@ -402,6 +524,105 @@ test("collectAnthropic: resumes a pending export from STATE without requesting a
 	);
 	assert.ok(emitted.some((r) => r.stream === "conversations"));
 });
+
+for (const scenario of [
+	{
+		label: "different exported owner",
+		users: [{ full_name: "Export Owner" }],
+		status: "mismatch",
+		name: null,
+		source: "none",
+	},
+	{
+		label: "matching roster name without verified owner identity",
+		users: [{ full_name: "Current User" }],
+		status: "valid",
+		name: null,
+		source: "none",
+	},
+	{
+		label: "missing roster",
+		users: undefined,
+		status: "absent",
+		name: null,
+		source: "none",
+	},
+]) {
+	test(`collectAnthropic: resumed account switch with ${scenario.label} emits attributable RECORD`, async () => {
+		const zipBytes = await buildZipBytes(scenario.users);
+		const { download } = makeFakeDownload(zipBytes);
+		let exportRequestCount = 0;
+		const fetchStub: FetchStub = (url) => {
+			if (url.includes("/export_data")) {
+				exportRequestCount += 1;
+				return Promise.resolve(jsonResponse(200, { nonce: "wrong-nonce" }));
+			}
+			return Promise.reject(new Error(`unexpected fetch: ${url}`));
+		};
+		const { ctx, page, protocolMessages } = makeContext({
+			streams: ["account_profile"],
+			state: {
+				conversations: {
+					pending_export: {
+						organization_id: "old-org",
+						nonce: "old-nonce",
+						requested_at: "2025-12-31T00:00:00.000Z",
+					},
+				},
+			},
+			fetchStub,
+		});
+		page.menuSpans = ["Current User", "Max"];
+		const runtimeEmitter = makeEmitRecord({
+			requested: ctx.requested,
+			emit: async (message) => {
+				protocolMessages.push(message);
+			},
+			emittedAt: ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: () => "",
+		});
+		ctx.emitRecord = runtimeEmitter.emit;
+		const originalGoto = page.goto.bind(page);
+		page.goto = async (url: string): Promise<null> => {
+			const result = await originalGoto(url);
+			if (url.includes("/export/"))
+				queueMicrotask(() => page.emit("download", download));
+			return result;
+		};
+
+		await collectAnthropic(ctx);
+
+		assert.equal(exportRequestCount, 0);
+		assert.ok(
+			page.gotoCalls.some((url) =>
+				url.includes("/export/old-org/download/old-nonce"),
+			),
+		);
+		const records = protocolMessages.filter(
+			(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+				message.type === "RECORD" && message.stream === "account_profile",
+		);
+		assert.equal(runtimeEmitter.counters.totalEmitted, 1);
+		assert.equal(records[0]?.key, "old-org");
+		assert.deepEqual(records[0]?.data, {
+			id: "old-org",
+			organization_id: "old-org",
+			full_name: scenario.name,
+			plan: null,
+			name_source: scenario.source,
+			metadata_status: scenario.status,
+		});
+		assert.ok(
+			protocolMessages.some(
+				(message) =>
+					message.type === "PROGRESS" &&
+					message.message.includes("Resumed export owner is not verified"),
+			),
+		);
+	});
+}
 
 test("collectAnthropic: export never becomes ready within the poll budget -> retryable SKIP_RESULT per requested stream, pending STATE untouched", async () => {
 	const fetchStub: FetchStub = (url) => {
@@ -522,7 +743,7 @@ async function buildManifestPartZip(
 
 const MANIFEST_RESPONSE = {
 	version: "1.0",
-	total_files: 2,
+	total_files: 3,
 	data_files: [
 		{
 			batch_index: 0,
@@ -533,6 +754,13 @@ const MANIFEST_RESPONSE = {
 		},
 		{
 			batch_index: 1,
+			category: "light_metadata",
+			part: 0,
+			filename: "light_metadata-000.zip",
+			export_url: "https://claude.ai/export/org-1/download/part-token-profile",
+		},
+		{
+			batch_index: 2,
 			category: "projects",
 			part: 0,
 			filename: "projects-000.zip",
@@ -575,9 +803,19 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 			],
 		},
 	]);
+	const profileZip = await buildManifestPartZip([
+		{
+			name: "users.json",
+			content: {
+				users: [{ full_name: "Wrong User" }, { full_name: "Synthetic Name" }],
+			},
+		},
+		{ name: "login_history.json", content: [{ private: "not emitted" }] },
+	]);
 	const zipByUrl = new Map<string, Buffer>([
 		["part-token-conv", conversationsZip],
 		["part-token-proj", projectsZip],
+		["part-token-profile", profileZip],
 	]);
 
 	const fetchStub: FetchStub = (url) => {
@@ -590,10 +828,28 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		return Promise.reject(new Error(`unexpected fetch: ${url}`));
 	};
 
-	const { ctx, emitted, protocolMessages, page } = makeContext({
-		streams: ["conversations", "messages", "projects", "project_documents"],
+	const { ctx, protocolMessages, page } = makeContext({
+		streams: [
+			"account_profile",
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		],
 		fetchStub,
 	});
+	page.menuSpans = ["Synthetic Name", "Pro"];
+	const runtimeEmitter = makeEmitRecord({
+		requested: ctx.requested,
+		emit: async (message) => {
+			protocolMessages.push(message);
+		},
+		emittedAt: ctx.emittedAt,
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: () => "",
+	});
+	ctx.emitRecord = runtimeEmitter.emit;
 
 	const downloadCounts = new Map<string, number>();
 	const originalGoto = page.goto.bind(page);
@@ -613,17 +869,39 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 
 	assert.deepEqual(
 		[...downloadCounts.values()],
-		[1, 1],
+		[1, 1, 1],
 		"each one-shot part URL must be downloaded exactly once",
 	);
 
-	const streams = new Set(emitted.map((r) => r.stream));
+	const profileRecords = protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+			message.type === "RECORD" && message.stream === "account_profile",
+	);
+	assert.equal(
+		profileRecords.length,
+		1,
+		"production emitRecord must emit a profile RECORD",
+	);
+	assert.equal(runtimeEmitter.counters.totalEmitted, 5);
+	assert.equal(profileRecords[0]?.key, "org-1");
+	const streams = new Set(
+		protocolMessages.filter((m) => m.type === "RECORD").map((m) => m.stream),
+	);
 	assert.deepEqual([...streams].sort(), [
+		"account_profile",
 		"conversations",
 		"messages",
 		"project_documents",
 		"projects",
 	]);
+	assert.deepEqual(profileRecords[0]?.data, {
+		id: "org-1",
+		organization_id: "org-1",
+		full_name: null,
+		plan: null,
+		name_source: "none",
+		metadata_status: "ambiguous",
+	});
 
 	// No pending-export STATE checkpoint for the manifest format — see
 	// index.ts module header: export_url values are one-shot secrets and

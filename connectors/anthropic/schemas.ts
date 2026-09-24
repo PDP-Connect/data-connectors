@@ -93,6 +93,19 @@ export const projectsSchema = z.object({
 	update_time: isoDateTimeNullable,
 	is_archived: z.boolean().nullable(),
 	prompt_template: pdppSafeText.max(65_000).nullable(),
+	creator: z.object({ uuid: z.string().optional(), full_name: z.string().optional() }).strict().nullable(),
+	is_private: z.boolean().nullable(),
+	is_starter_project: z.boolean().nullable(),
+	archived_at: z.string().nullable(),
+	raw_docs: z.array(
+		z.object({
+			uuid: z.string().optional(),
+			filename: z.string().optional(),
+			content: z.string().optional(),
+			created_at: z.string().optional(),
+			updated_at: z.string().optional(),
+		}).strict(),
+	),
 });
 
 /**
@@ -120,11 +133,27 @@ export const projectDocumentsSchema = z.object({
 	update_time: isoDateTimeNullable,
 });
 
+export const accountProfileSchema = z.object({
+	id: idSchema,
+	organization_id: idSchema,
+	full_name: pdppSafeText.max(2000).nullable(),
+	plan: pdppSafeText.max(2000).nullable(),
+	name_source: z.enum(["browser_menu", "users_json", "none"]),
+	metadata_status: z.enum([
+		"valid",
+		"absent",
+		"malformed",
+		"ambiguous",
+		"mismatch",
+	]),
+});
+
 /**
  * Stream -> schema registry. Single source of truth for the streams this
  * connector declares and emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
+	account_profile: accountProfileSchema,
 	conversations: conversationsSchema,
 	messages: messagesSchema,
 	projects: projectsSchema,

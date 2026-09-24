@@ -29,6 +29,7 @@ import {
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	resolveExportedProfile,
 } from "./parsers.ts";
 
 const SYNTHETIC_ZIP_PATH = fileURLToPath(
@@ -40,6 +41,74 @@ const ZIP_POLICY: ZipReadPolicy = {
 	maxEntryUncompressedBytes: 50 * 1024 * 1024,
 	maxTotalUncompressedBytes: 200 * 1024 * 1024,
 };
+
+test("manifest classification exposes only users.json from light_metadata", () => {
+	const classified = classifyManifestPartEntries("light_metadata", [
+		{ name: "users.json", json: { users: [{ full_name: "Synthetic Name" }] } },
+		{ name: "login_history.json", json: [{ private: "ignored" }] },
+	]);
+	assert.deepEqual(classified.userProfiles, [
+		{ users: [{ full_name: "Synthetic Name" }] },
+	]);
+	assert.deepEqual(classified.outOfScopeEntryNames, ["login_history.json"]);
+	assert.deepEqual(
+		resolveExportedProfile(classified.userProfiles, null, true),
+		{
+			fullName: null,
+			nameSource: "none",
+			metadataStatus: "valid",
+		},
+	);
+});
+
+test("profile metadata distinguishes absent, malformed, and ambiguous rosters", () => {
+	assert.equal(resolveExportedProfile([], null, true).metadataStatus, "absent");
+	assert.equal(
+		resolveExportedProfile([{ id: "synthetic-id" }], null, true).metadataStatus,
+		"malformed",
+	);
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Other" }, { full_name: "Owner" }]],
+			null,
+			true,
+		),
+		{
+			fullName: null,
+			nameSource: "none",
+			metadataStatus: "ambiguous",
+		},
+	);
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Other" }, { full_name: "Owner" }]],
+			"Owner",
+			true,
+		),
+		{
+			fullName: null,
+			nameSource: "none",
+			metadataStatus: "ambiguous",
+		},
+	);
+	assert.deepEqual(
+		resolveExportedProfile([[{ full_name: "Other" }]], "Owner", true),
+		{ fullName: null, nameSource: "none", metadataStatus: "mismatch" },
+	);
+	assert.deepEqual(resolveExportedProfile([], "Current User", false), {
+		fullName: null,
+		nameSource: "none",
+		metadataStatus: "absent",
+	});
+	assert.deepEqual(
+		resolveExportedProfile(
+			[[{ full_name: "Export Owner" }]],
+			"Export Owner",
+			false,
+		),
+		{ fullName: null, nameSource: "none", metadataStatus: "valid" },
+	);
+});
 
 // ─── flattenMessageText ─────────────────────────────────────────────────
 
@@ -250,18 +319,59 @@ test("parseProject: archived_at present -> is_archived true", () => {
 	assert.equal(parsed?.project.is_archived, true);
 });
 
-test("parseProject: drops the raw detail blob, label, href fields (D3/capability-map dropped)", () => {
+test("parseProject: retains known legacy detail fields and raw docs without IDs", () => {
 	const parsed = parseProject({
 		uuid: "p1",
 		name: "x",
-		label: "Project, x",
-		href: "/project/p1",
-		docs: [],
+		creator: { uuid: "u1", full_name: "Owner", access_token: "discard" },
+		is_private: true,
+		is_starter_project: false,
+		archived_at: "2024-01-02T03:04:05Z",
+		docs: [{ filename: "legacy.md", content: "body", api_key: "discard" }],
 	});
 	assert.ok(parsed);
-	assert.ok(!("label" in parsed.project));
-	assert.ok(!("href" in parsed.project));
-	assert.ok(!("detail" in parsed.project));
+	assert.deepEqual(parsed.project.creator, { uuid: "u1", full_name: "Owner" });
+	assert.equal(parsed.project.is_private, true);
+	assert.equal(parsed.project.is_starter_project, false);
+	assert.equal(parsed.project.archived_at, "2024-01-02T03:04:05Z");
+	assert.deepEqual(parsed.project.raw_docs, [{ filename: "legacy.md", content: "body" }]);
+	assert.equal(parsed.documents.length, 0);
+});
+
+test("parseProject: identified documents match the retained raw copy and ID-less docs stay raw-only", () => {
+	const parsed = parseProject({
+		uuid: "p1",
+		name: "Project",
+		docs: [
+			{
+				uuid: "d1",
+				filename: "notes.md",
+				content: "Document body",
+				created_at: "2025-01-02T03:04:05Z",
+			},
+			{ filename: "legacy.md", content: "ID-less body" },
+		],
+	});
+	assert.ok(parsed);
+	assert.deepEqual(parsed.project.raw_docs, [
+		{
+			uuid: "d1",
+			filename: "notes.md",
+			content: "Document body",
+			created_at: "2025-01-02T03:04:05Z",
+		},
+		{ filename: "legacy.md", content: "ID-less body" },
+	]);
+	assert.deepEqual(parsed.documents, [
+		{
+			id: "d1",
+			project_id: "p1",
+			filename: "notes.md",
+			content: "Document body",
+			create_time: "2025-01-02T03:04:05Z",
+			update_time: null,
+		},
+	]);
 });
 
 test("parseProject: a project with no uuid/id is dropped", () => {
@@ -422,10 +532,8 @@ test("classifyManifestPartEntries: light_metadata is out-of-scope by category, n
 	assert.equal(result.conversations.length, 0);
 	assert.equal(result.projects.length, 0);
 	assert.deepEqual(result.unclassifiedEntryNames, []);
-	assert.deepEqual(result.outOfScopeEntryNames, [
-		"users.json",
-		"login_history.json",
-	]);
+	assert.deepEqual(result.outOfScopeEntryNames, ["login_history.json"]);
+	assert.deepEqual(result.userProfiles, [{ some_field: 1 }]);
 });
 
 test("classifyManifestPartEntries: memories is out-of-scope by category, even though memory_files[] could coincidentally resemble other shapes", () => {

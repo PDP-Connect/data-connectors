@@ -15,8 +15,8 @@
  * archive.ts) instead of the legacy runner's bespoke
  * `page.captureDownload`/`page.extractZipEntries` methods.
  *
- * Streams: conversations, messages (claude.conversations split per D3),
- * projects, project_documents (claude.projects split per D3). See
+ * Streams: account_profile, conversations, messages (claude.conversations
+ * split per D3), projects, project_documents (claude.projects split per D3). See
  * parsers.ts for the pure JSON -> record mapping and schemas.ts for the
  * capability-map field-mapping documentation.
  *
@@ -56,10 +56,11 @@
  * report for the driver used. `classifyManifestPartEntries` classifies each
  * `conversations`/`projects` part's JSON entries by CONTENT SHAPE (matching
  * the verified real keys), and treats any other category (`memories`,
- * `design_chats`, `light_metadata`) as out-of-scope by category before
+ * `design_chats`) as out-of-scope by category before
  * content inspection — those categories have no capability-map stream (see
  * report's CONTRACT-CHANGE-REQUEST) and are downloaded-but-not-parsed,
- * reported via PROGRESS rather than silently dropped.
+ * reported via PROGRESS rather than silently dropped. `light_metadata` only
+ * contributes `users.json` to account_profile; login history is ignored.
  *
  * ── RESUMABILITY: OLD vs NEW FORMAT DIFFERS ─────────────────────────────
  *
@@ -151,12 +152,39 @@ import {
 	type ParsedExport,
 	parseClassifiedExport,
 	parseExport,
+	resolveExportedProfile,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
+
+/** The signed-in user's menu was the legacy collector's name and plan source. */
+async function readBrowserProfile(
+	page: BrowserCollectContext["page"],
+): Promise<{
+	name: string | null;
+	plan: string | null;
+}> {
+	try {
+		return await page.evaluate(() => {
+			const clean = (value: string | null | undefined) =>
+				value?.replace(/\s+/g, " ").trim() || null;
+			const button = document.querySelector(
+				'button[data-testid="user-menu-button"]',
+			);
+			const name = clean(button?.querySelector("span")?.textContent);
+			const plan =
+				Array.from(button?.querySelectorAll("span") ?? [])
+					.map((span) => clean(span.textContent))
+					.find((value) => value !== null && value !== name) ?? null;
+			return { name, plan };
+		});
+	} catch {
+		return { name: null, plan: null };
+	}
+}
 
 // Bounded run budget for the export-poll loop. Generous but finite: a
 // connector run must not block forever (spec-collection-profile.md §5:
@@ -177,10 +205,12 @@ const DOWNLOAD_TIMEOUT_MS =
 	Number(process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS) || 180_000;
 
 const CONVERSATIONS_STREAM = "conversations";
+const ACCOUNT_PROFILE_STREAM = "account_profile";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
 const ALL_STREAMS = [
+	ACCOUNT_PROFILE_STREAM,
 	CONVERSATIONS_STREAM,
 	MESSAGES_STREAM,
 	PROJECTS_STREAM,
@@ -456,6 +486,7 @@ interface ProjectZipFile {
 export function readExportZip(zipPath: string): {
 	conversationsJson: unknown;
 	projectFiles: ProjectZipFile[];
+	userFiles: unknown[];
 } {
 	const fd = openSync(zipPath, "r");
 	try {
@@ -473,7 +504,14 @@ export function readExportZip(zipPath: string): {
 				name: e.name,
 				json: safeJsonParse(e.data().toString("utf8")),
 			}));
-		return { conversationsJson, projectFiles };
+		const usersEntry = entries.find((e) => e.name === "users.json");
+		return {
+			conversationsJson,
+			projectFiles,
+			userFiles: usersEntry
+				? [safeJsonParse(usersEntry.data().toString("utf8"))]
+				: [],
+		};
 	} finally {
 		closeSync(fd);
 	}
@@ -638,13 +676,57 @@ export async function collectAnthropic({
 		})
 		.catch((): undefined => undefined);
 	await politeDelay(1500);
+	const browserProfile = await readBrowserProfile(page);
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
 
-	async function emitParsed(parsed: ParsedExport): Promise<void> {
+	async function emitParsed(
+		parsed: ParsedExport,
+		organizationId: string,
+		userFiles: readonly unknown[],
+		browserProfileAppliesToExport: boolean,
+	): Promise<void> {
+		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
+			const profile = resolveExportedProfile(
+				userFiles,
+				browserProfile.name,
+				browserProfileAppliesToExport,
+			);
+			if (
+				profile.metadataStatus !== "valid" ||
+				!browserProfileAppliesToExport ||
+				profile.fullName === null
+			) {
+				await progress(
+					`Claude users.json metadata: ${profile.metadataStatus}. Profile name source: ${profile.nameSource}. ` +
+						(!browserProfileAppliesToExport
+							? "Resumed export owner is not verified against the current browser session; browser name and plan omitted."
+							: profile.fullName === null
+								? "Export owner is not verified; profile name and plan omitted."
+								: "Browser profile belongs to the newly requested export."),
+					{
+						stream: ACCOUNT_PROFILE_STREAM,
+					},
+				);
+			}
+			await emitRecord(ACCOUNT_PROFILE_STREAM, {
+				id: organizationId,
+				organization_id: organizationId,
+				full_name: profile.fullName,
+				plan:
+					browserProfileAppliesToExport &&
+					profile.metadataStatus !== "mismatch" &&
+					profile.metadataStatus !== "ambiguous" &&
+					profile.fullName !== null
+						? browserProfile.plan
+						: null,
+				name_source: profile.nameSource,
+				metadata_status: profile.metadataStatus,
+			});
+		}
 		if (wantsConversations) {
 			for (const conversation of parsed.conversations) {
 				await emitRecord(CONVERSATIONS_STREAM, conversation);
@@ -697,7 +779,7 @@ export async function collectAnthropic({
 	const pending = readPendingExport(state);
 
 	if (pending) {
-		await pollAndEmitOldFormat(pending);
+		await pollAndEmitOldFormat(pending, false);
 		return;
 	}
 
@@ -714,6 +796,7 @@ export async function collectAnthropic({
 		});
 		return;
 	}
+	const organizationId = org.uuid;
 
 	await progress("Requesting Claude data export...", {
 		stream: CONVERSATIONS_STREAM,
@@ -743,7 +826,7 @@ export async function collectAnthropic({
 			stream: CONVERSATIONS_STREAM,
 			cursor: { pending_export: newPending },
 		});
-		await pollAndEmitOldFormat(newPending);
+		await pollAndEmitOldFormat(newPending, true);
 		return;
 	}
 
@@ -756,6 +839,7 @@ export async function collectAnthropic({
 
 	async function pollAndEmitOldFormat(
 		pendingExport: PendingExportState,
+		pendingExportWasCreatedThisRun: boolean,
 	): Promise<void> {
 		const downloadUrl = exportDownloadUrl(
 			pendingExport.organization_id,
@@ -798,14 +882,19 @@ export async function collectAnthropic({
 			await progress("Reading downloaded export...", {
 				stream: CONVERSATIONS_STREAM,
 			});
-			const { conversationsJson, projectFiles } = readExportZip(
+			const { conversationsJson, projectFiles, userFiles } = readExportZip(
 				attempt.zipPath,
 			);
 			const parsed = parseExport(
 				conversationsJson,
 				projectFiles.map((f) => f.json),
 			);
-			await emitParsed(parsed);
+			await emitParsed(
+				parsed,
+				pendingExport.organization_id,
+				userFiles,
+				pendingExportWasCreatedThisRun,
+			);
 		} finally {
 			await attempt.cleanup?.();
 		}
@@ -839,6 +928,7 @@ export async function collectAnthropic({
 
 		const rawConversations: unknown[] = [];
 		const rawProjects: unknown[] = [];
+		const rawUserProfiles: unknown[] = [];
 		const unclassified: string[] = [];
 		const outOfScopeByCategory = new Map<string, number>();
 		for (const result of results) {
@@ -848,6 +938,7 @@ export async function collectAnthropic({
 			);
 			rawConversations.push(...classified.conversations);
 			rawProjects.push(...classified.projects);
+			rawUserProfiles.push(...classified.userProfiles);
 			unclassified.push(...classified.unclassifiedEntryNames);
 			if (classified.outOfScopeEntryNames.length > 0) {
 				outOfScopeByCategory.set(
@@ -859,7 +950,7 @@ export async function collectAnthropic({
 		}
 
 		// Categories this connector declares no stream for (memories,
-		// design_chats, light_metadata, or any other future category) are
+		// design_chats, or any other future category) are
 		// downloaded (the manifest offers no selective fetch) but never
 		// classified for content — reported here so the run's PROGRESS log
 		// names exactly which categories were out of scope, rather than
@@ -892,7 +983,7 @@ export async function collectAnthropic({
 		}
 
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
-		await emitParsed(parsed);
+		await emitParsed(parsed, organizationId, rawUserProfiles, true);
 	}
 }
 
