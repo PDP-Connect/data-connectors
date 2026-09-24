@@ -12,6 +12,7 @@ import {
 	spotifyCollect,
 	spotifyRetryablePattern,
 } from "./index.ts";
+import { playlistItemsSchema } from "./schemas.ts";
 
 function makeContext(
 	webResult: Record<string, unknown>,
@@ -91,6 +92,7 @@ const webFixture = {
 			id: "pl1:0",
 			playlist_id: "pl1",
 			track_id: "trackA",
+			uri: "spotify:local:Artist:Album:Local%20Track:180000",
 			position: 0,
 			added_at: "2024-01-01T00:00:00Z",
 			added_by: "Display Name",
@@ -115,6 +117,10 @@ test("spotify browser collect emits modern profile, playlists, and playlist_item
 		["profile", "playlists", "playlist_items"],
 	);
 	assert.equal(emittedRecords[2]?.data.added_by, "Display Name");
+	assert.equal(
+		emittedRecords[2]?.data.uri,
+		"spotify:local:Artist:Album:Local%20Track:180000",
+	);
 	assert.equal(
 		messages.filter((message) => message.type === "DETAIL_COVERAGE").length,
 		3,
@@ -612,6 +618,66 @@ test("spotify browser parser rejects repeated full playlist pages", async () => 
 			}),
 		/spotify_playlist_pagination_no_progress/,
 	);
+});
+
+test("spotify browser parser preserves the full playlist track URI alongside its ID", async () => {
+	const { emittedRecords } = await collectWithInPageFetch(
+		["playlist_items"],
+		(operationName) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+								totalCount: 1,
+							},
+						},
+					},
+				};
+			}
+			assert.equal(operationName, "fetchPlaylist");
+			return {
+				data: {
+					playlistV2: {
+						uri: "spotify:playlist:pl1",
+						content: {
+							totalCount: 1,
+							items: [
+								{
+									itemV2: {
+										data: {
+											__typename: "Track",
+											uri: "spotify:local:Artist:Album:Local%20Track:180000",
+											name: "Track",
+										},
+									},
+								},
+							],
+						},
+					},
+				},
+			};
+		},
+	);
+	const track = emittedRecords.find(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(track?.data.track_id, "180000");
+	assert.equal(
+		track?.data.uri,
+		"spotify:local:Artist:Album:Local%20Track:180000",
+	);
+	assert.equal(playlistItemsSchema.safeParse(track?.data).success, true);
 });
 
 test("spotify browser parser rejects repeated full saved-track pages even when every row is skipped", async () => {

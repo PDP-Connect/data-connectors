@@ -750,6 +750,7 @@ async function collectSpotifyWebData(
 								id: `${playlistId}:${position}`,
 								playlist_id: playlistId,
 								track_id: idFromUri(t.uri),
+								uri: typeof t.uri === "string" ? t.uri : null,
 								position,
 								added_at: item.addedAt?.isoString ?? null,
 								added_by: item.addedBy?.data?.name ?? null,

@@ -149,11 +149,14 @@ export const profileSchema = z.object({
  * ordering, so the id stays unique and stable across runs as long as the
  * playlist's ordering does not change (a Spotify-side reorder invalidates
  * positions the same way it would any offset-based list).
+ * `uri` preserves the exact web-player Track URI; `track_id` alone cannot
+ * reconstruct every URI shape exposed by that payload.
  */
 export const playlistItemsSchema = z.object({
 	id: z.string().min(1).max(120),
 	playlist_id: spotifyIdSchema,
 	track_id: spotifyIdSchema.nullable(),
+	uri: z.string().max(2000).nullable(),
 	position: z.number().int().min(0),
 	added_at: isoDateTimeSchema.nullable(),
 	added_by: pdppSafeText.max(1000).nullable(),
