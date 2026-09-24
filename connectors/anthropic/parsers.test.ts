@@ -334,7 +334,9 @@ test("parseProject: retains known legacy detail fields and raw docs without IDs"
 	assert.equal(parsed.project.is_private, true);
 	assert.equal(parsed.project.is_starter_project, false);
 	assert.equal(parsed.project.archived_at, "2024-01-02T03:04:05Z");
-	assert.deepEqual(parsed.project.raw_docs, [{ filename: "legacy.md", content: "body" }]);
+	assert.deepEqual(parsed.project.raw_docs, [
+		{ filename: "legacy.md", content: "body" },
+	]);
 	assert.equal(parsed.documents.length, 0);
 });
 
@@ -395,6 +397,141 @@ test("parseExport: filters non-array conversations.json and non-project entries 
 	const parsed = parseExport(null, [null, { uuid: "p1", name: "x", docs: [] }]);
 	assert.deepEqual(parsed.conversations, []);
 	assert.equal(parsed.projects.length, 1);
+});
+
+test("source envelopes retain every legacy conversation message and full project detail", () => {
+	// Synthetic fixture follows retired claude-export-ingest.cjs normalizeConversation/
+	// normalizeProject inputs. The blob is source-shaped; the adapter owns their
+	// legacy output mapping. An idless message, string attachment, control-rich
+	// body, and unknown project key distinguish it from the keyed PDPP records.
+	const rawConversation = {
+		uuid: "c1",
+		name: "Archive",
+		chat_messages: [
+			{ uuid: "m2", created_at: "2026-01-02T00:00:00Z", text: "second" },
+			{
+				created_at: "2026-01-01T00:00:00Z",
+				sender: "human",
+				text: "first\u0000body",
+				attachments: ["file.txt", { name: "image.png" }],
+			},
+		],
+	};
+	const rawProject = {
+		uuid: "p1",
+		name: "Project",
+		docs: [{ filename: "notes", content: "raw\u0000notes" }],
+		future_provider_field: { nested: [1, "verbatim"] },
+	};
+	const parsed = parseExport([rawConversation], [rawProject]);
+	assert.equal(parsed.conversations[0]?.message_count, 2);
+	assert.equal(
+		parsed.messages.length,
+		1,
+		"only native keyed messages enter the messages stream",
+	);
+	assert.deepEqual(parsed.conversationSources, [
+		{
+			format: "anthropic-source-record-v1",
+			stream: "conversations",
+			record_key: "c1",
+			payload: rawConversation,
+		},
+	]);
+	assert.deepEqual(parsed.projectSources, [
+		{
+			format: "anthropic-source-record-v1",
+			stream: "projects",
+			record_key: "p1",
+			payload: rawProject,
+		},
+	]);
+	const restored = JSON.parse(
+		JSON.stringify(parsed.conversationSources[0]),
+	) as (typeof parsed.conversationSources)[number];
+	const restoredConversation = restored.payload as typeof rawConversation;
+	const messages = restoredConversation.chat_messages
+		.slice()
+		.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+		.map((message) => ({
+			id: "uuid" in message ? message.uuid : null,
+			sender: "sender" in message ? message.sender : null,
+			parentId: null,
+			createdAt: message.created_at,
+			updatedAt: null,
+			content: message.text,
+			attachments: "attachments" in message ? message.attachments : [],
+		}));
+	assert.deepEqual(
+		{
+			id: restoredConversation.uuid,
+			title: restoredConversation.name,
+			href: `/chat/${restoredConversation.uuid}`,
+			createdAt: null,
+			updatedAt: null,
+			starred: null,
+			projectId: null,
+			messageCount: messages.length,
+			messages,
+			fetchError: null,
+		},
+		{
+			id: "c1",
+			title: "Archive",
+			href: "/chat/c1",
+			createdAt: null,
+			updatedAt: null,
+			starred: null,
+			projectId: null,
+			messageCount: 2,
+			fetchError: null,
+			messages: [
+				{
+					id: null,
+					sender: "human",
+					parentId: null,
+					createdAt: "2026-01-01T00:00:00Z",
+					updatedAt: null,
+					content: "first\u0000body",
+					attachments: ["file.txt", { name: "image.png" }],
+				},
+				{
+					id: "m2",
+					sender: null,
+					parentId: null,
+					createdAt: "2026-01-02T00:00:00Z",
+					updatedAt: null,
+					content: "second",
+					attachments: [],
+				},
+			],
+		},
+	);
+	const restoredProject = JSON.parse(
+		JSON.stringify(parsed.projectSources[0]),
+	) as (typeof parsed.projectSources)[number];
+	assert.deepEqual(
+		{
+			id: restoredProject.record_key,
+			title: restoredProject.payload.name,
+			href: `/project/${restoredProject.record_key}`,
+			label: `Project, ${String(restoredProject.payload.name)}`,
+			createdAt: null,
+			updatedAt: null,
+			archived: false,
+			detail: restoredProject.payload,
+		},
+		{
+			id: "p1",
+			title: "Project",
+			href: "/project/p1",
+			label: "Project, Project",
+			createdAt: null,
+			updatedAt: null,
+			archived: false,
+			detail: rawProject,
+		},
+	);
 });
 
 // ─── End-to-end: real ZIP reader against the synthetic fixture ──────────

@@ -42,6 +42,13 @@ test("account profile schema requires the collector's organization identity", ()
 	);
 });
 
+const BLOB_REF = {
+	blob_id: `sha256:${"a".repeat(64)}`,
+	mime_type: "application/json",
+	size_bytes: 123,
+	sha256: "a".repeat(64),
+};
+
 const CONVERSATION_RECORD = {
 	id: "9f8e7d6c-1234-4abc-9def-0123456789ab",
 	title: "Debugging the connector gate",
@@ -51,6 +58,7 @@ const CONVERSATION_RECORD = {
 	model: "claude-3-5-sonnet",
 	message_count: 12,
 	is_starred: false,
+	blob_ref: BLOB_REF,
 };
 
 const MESSAGE_RECORD = {
@@ -78,6 +86,7 @@ const PROJECT_RECORD = {
 	is_starter_project: null,
 	archived_at: null,
 	raw_docs: [],
+	blob_ref: BLOB_REF,
 };
 
 const PROJECT_DOCUMENT_RECORD = {
@@ -97,6 +106,7 @@ test("conversations schema accepts a contract-shaped record", () => {
 test("conversations schema accepts a minimal record (only id, rest null)", () => {
 	const result = conversationsSchema.safeParse({
 		id: "9f8e7d6c-1234-4abc-9def-0123456789ab",
+		blob_ref: BLOB_REF,
 		title: null,
 		create_time: null,
 		update_time: null,

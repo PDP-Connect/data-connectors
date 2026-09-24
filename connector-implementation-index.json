@@ -372,7 +372,8 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.1.3",
+				"version": "0.2.0",
+				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
 					"icon": "icon.svg",
@@ -389,6 +390,11 @@
 					}
 				},
 				"capabilities": {
+					"host_blob_write": {
+						"version": 1,
+						"max_blob_bytes": 33554432,
+						"streams": ["conversations", "projects"]
+					},
 					"human_interaction": ["manual_action"],
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -505,9 +511,27 @@
 								},
 								"is_starred": {
 									"type": ["boolean", "null"]
+								},
+								"blob_ref": {
+									"type": "object",
+									"properties": {
+										"blob_id": {
+											"type": "string"
+										},
+										"mime_type": {
+											"type": "string"
+										},
+										"size_bytes": {
+											"type": "integer"
+										},
+										"sha256": {
+											"type": "string"
+										}
+									},
+									"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 								}
 							},
-							"required": ["id"]
+							"required": ["id", "blob_ref"]
 						},
 						"primary_key": ["id"],
 						"consent_time_field": "create_time",
@@ -696,9 +720,27 @@
 										},
 										"additionalProperties": false
 									}
+								},
+								"blob_ref": {
+									"type": "object",
+									"properties": {
+										"blob_id": {
+											"type": "string"
+										},
+										"mime_type": {
+											"type": "string"
+										},
+										"size_bytes": {
+											"type": "integer"
+										},
+										"sha256": {
+											"type": "string"
+										}
+									},
+									"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 								}
 							},
-							"required": ["id", "name"]
+							"required": ["id", "name", "blob_ref"]
 						},
 						"primary_key": ["id"],
 						"consent_time_field": "create_time",

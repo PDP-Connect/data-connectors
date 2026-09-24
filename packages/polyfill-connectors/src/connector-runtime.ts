@@ -173,6 +173,8 @@ type Credentials = Record<string, string>;
 
 interface EmitRecordOptions {
 	skipResourceFilter?: boolean;
+	/** Runs after all record gates and immediately before a retained RECORD. */
+	beforeEmit?: () => Promise<void>;
 }
 
 interface BaseCollectContext {
@@ -1467,7 +1469,11 @@ export function makeEmitRecord(deps: {
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
 	timeRangeFieldFor: (stream: string) => string;
 }): {
-	emit: (stream: string, data: RecordData) => Promise<void>;
+	emit: (
+		stream: string,
+		data: RecordData,
+		options?: EmitRecordOptions,
+	) => Promise<void>;
 	counters: {
 		totalEmitted: number;
 		totalSkipped: number;
@@ -1547,10 +1553,14 @@ export function makeEmitRecord(deps: {
 		if (anomalies?.length) {
 			counters.totalAnomalous += 1;
 			return emit(makeShapeAnomalyReport(stream, data, anomalies)).then(() =>
-				emit(record),
+				options.beforeEmit
+					? options.beforeEmit().then(() => emit(record))
+					: emit(record),
 			);
 		}
-		return emit(record);
+		return options.beforeEmit
+			? options.beforeEmit().then(() => emit(record))
+			: emit(record);
 	};
 
 	return { emit: emitRecord, counters };

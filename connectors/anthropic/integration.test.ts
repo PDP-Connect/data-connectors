@@ -29,8 +29,12 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 
@@ -41,6 +45,12 @@ import type { Page } from "playwright";
 process.env.PDPP_ANTHROPIC_MAX_POLL_WAIT_MS = "50";
 process.env.PDPP_ANTHROPIC_POLL_INTERVAL_MS = "10";
 process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS = "50";
+const blobSpoolDir = mkdtempSync(join(tmpdir(), "anthropic-blob-test-"));
+process.env.PDPP_BLOB_SPOOL_DIR = blobSpoolDir;
+after(() => {
+	rmSync(blobSpoolDir, { recursive: true, force: true });
+	delete process.env.PDPP_BLOB_SPOOL_DIR;
+});
 
 const { collectAnthropic } = await import("./index.ts");
 const { validateRecord } = await import("./schemas.ts");
@@ -144,6 +154,7 @@ function makeContext(overrides: {
 	page: FakePage;
 	ctx: BrowserCollectContext;
 	emitted: ReturnType<typeof makeRecordingEmit>["emitted"];
+	events: ReturnType<typeof makeRecordingEmit>["events"];
 	protocolMessages: EmittedMessage[];
 } {
 	const harness = makeRecordingEmit(validateRecord);
@@ -177,6 +188,7 @@ function makeContext(overrides: {
 	return {
 		ctx,
 		emitted: harness.emitted,
+		events: harness.events,
 		page,
 		protocolMessages: harness.protocolMessages,
 	};
@@ -295,7 +307,7 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 		return Promise.reject(new Error(`unexpected fetch: ${url}`));
 	};
 
-	const { ctx, emitted, protocolMessages, page } = makeContext({
+	const { ctx, emitted, events, protocolMessages, page } = makeContext({
 		streams: ["conversations", "messages", "projects", "project_documents"],
 		fetchStub,
 	});
@@ -329,6 +341,49 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 		emitted.filter((r) => r.stream === "project_documents").length,
 		1,
 	);
+	for (const stream of ["conversations", "projects"]) {
+		const recordIndex = events.findIndex(
+			(event) => event.kind === "record" && event.stream === stream,
+		);
+		assert.ok(recordIndex > 0);
+		const record = events[recordIndex];
+		const preceding = events[recordIndex - 1];
+		assert.equal(preceding?.kind, "message");
+		assert.equal(
+			preceding?.kind === "message" && preceding.message.type,
+			"BLOB",
+		);
+		if (
+			record?.kind !== "record" ||
+			preceding?.kind !== "message" ||
+			preceding.message.type !== "BLOB"
+		)
+			continue;
+		const event = preceding.message;
+		assert.equal(event.stream, stream);
+		assert.equal(event.key, record.data.id);
+		assert.match(event.file, /^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+		const bytes = readFileSync(join(blobSpoolDir, event.file));
+		assert.equal(bytes.length, event.size_bytes);
+		assert.equal(
+			createHash("sha256").update(bytes).digest("hex"),
+			event.sha256,
+		);
+		assert.deepEqual(record.data.blob_ref, {
+			blob_id: `sha256:${event.sha256}`,
+			mime_type: "application/json",
+			size_bytes: event.size_bytes,
+			sha256: event.sha256,
+		});
+		const envelope = JSON.parse(bytes.toString("utf8"));
+		assert.equal(envelope.format, "anthropic-source-record-v1");
+		assert.equal(envelope.stream, stream);
+		assert.equal(envelope.record_key, record.data.id);
+		assert.deepEqual(
+			envelope.payload,
+			stream === "conversations" ? CONVERSATIONS_JSON[0] : PROJECT_JSON,
+		);
+	}
 
 	// STATE emitted for the checkpoint (pending, then synced) — pending first,
 	// synced_at last, and no leftover pending_export in the final state message.
@@ -894,6 +949,19 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		"project_documents",
 		"projects",
 	]);
+	for (const stream of ["conversations", "projects"]) {
+		const recordIndex = protocolMessages.findIndex(
+			(message) => message.type === "RECORD" && message.stream === stream,
+		);
+		assert.ok(recordIndex > 0);
+		const record = protocolMessages[recordIndex];
+		const blob = protocolMessages[recordIndex - 1];
+		assert.equal(blob?.type, "BLOB");
+		if (record?.type === "RECORD" && blob?.type === "BLOB") {
+			assert.equal(blob.stream, record.stream);
+			assert.equal(blob.key, record.key);
+		}
+	}
 	assert.deepEqual(profileRecords[0]?.data, {
 		id: "org-1",
 		organization_id: "org-1",

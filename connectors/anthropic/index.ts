@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -127,11 +128,17 @@
  *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
  */
 
-import { closeSync, openSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, openSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	HOST_BLOB_MAX_BYTES,
+	type HostBlobMessage,
+	isMainModule,
+	validateHostBlobMessage,
+} from "@pdpp/connector-protocol";
 import {
 	readZipEntriesFromFile,
 	type ZipReadPolicy,
@@ -153,6 +160,7 @@ import {
 	parseClassifiedExport,
 	parseExport,
 	resolveExportedProfile,
+	type SourceRecordEnvelope,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -209,6 +217,46 @@ const ACCOUNT_PROFILE_STREAM = "account_profile";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
+
+function spoolSourceRecord(source: SourceRecordEnvelope): {
+	event: HostBlobMessage;
+	blob_ref: Record<string, unknown>;
+} {
+	const spoolDir = process.env.PDPP_BLOB_SPOOL_DIR;
+	if (!spoolDir) {
+		throw new Error(
+			"Host blob spool is unavailable for Anthropic source records",
+		);
+	}
+	const bytes = Buffer.from(JSON.stringify(source), "utf8");
+	if (bytes.length === 0 || bytes.length > HOST_BLOB_MAX_BYTES) {
+		throw new Error(
+			`Anthropic ${source.stream} source record exceeds host blob limit`,
+		);
+	}
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const file = `anthropic-${randomUUID()}.json`;
+	writeFileSync(join(spoolDir, file), bytes, { flag: "wx", mode: 0o600 });
+	const event: HostBlobMessage = {
+		type: "BLOB",
+		stream: source.stream,
+		key: source.record_key,
+		file,
+		mime_type: "application/json",
+		size_bytes: bytes.length,
+		sha256,
+	};
+	validateHostBlobMessage(event);
+	return {
+		event,
+		blob_ref: {
+			blob_id: `sha256:${sha256}`,
+			mime_type: event.mime_type,
+			size_bytes: bytes.length,
+			sha256,
+		},
+	};
+}
 const ALL_STREAMS = [
 	ACCOUNT_PROFILE_STREAM,
 	CONVERSATIONS_STREAM,
@@ -728,8 +776,18 @@ export async function collectAnthropic({
 			});
 		}
 		if (wantsConversations) {
-			for (const conversation of parsed.conversations) {
-				await emitRecord(CONVERSATIONS_STREAM, conversation);
+			for (const [index, conversation] of parsed.conversations.entries()) {
+				const source = parsed.conversationSources[index];
+				if (!source || source.record_key !== conversation.id)
+					throw new Error("Anthropic conversation source alignment failed");
+				const blob = spoolSourceRecord(source);
+				await emitRecord(
+					CONVERSATIONS_STREAM,
+					{ ...conversation, blob_ref: blob.blob_ref },
+					{
+						beforeEmit: () => emit(blob.event),
+					},
+				);
 			}
 		}
 		if (wantsMessages) {
@@ -738,8 +796,18 @@ export async function collectAnthropic({
 			}
 		}
 		if (wantsProjects) {
-			for (const project of parsed.projects) {
-				await emitRecord(PROJECTS_STREAM, project);
+			for (const [index, project] of parsed.projects.entries()) {
+				const source = parsed.projectSources[index];
+				if (!source || source.record_key !== project.id)
+					throw new Error("Anthropic project source alignment failed");
+				const blob = spoolSourceRecord(source);
+				await emitRecord(
+					PROJECTS_STREAM,
+					{ ...project, blob_ref: blob.blob_ref },
+					{
+						beforeEmit: () => emit(blob.event),
+					},
+				);
 			}
 		}
 		if (wantsDocuments) {
