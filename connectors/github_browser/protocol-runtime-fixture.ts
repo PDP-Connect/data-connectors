@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Synthetic source pages, real connector runtime. Run only as a test subprocess.
 import { readFileSync } from "node:fs";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
