@@ -93,11 +93,19 @@ export const projectsSchema = z.object({
 	update_time: isoDateTimeNullable,
 	is_archived: z.boolean().nullable(),
 	prompt_template: pdppSafeText.max(65_000).nullable(),
-	creator: z.object({ uuid: z.string().optional(), full_name: z.string().optional() }).nullable(),
+	creator: z.object({ uuid: z.string().optional(), full_name: z.string().optional() }).strict().nullable(),
 	is_private: z.boolean().nullable(),
 	is_starter_project: z.boolean().nullable(),
 	archived_at: z.string().nullable(),
-	raw_docs: z.array(z.record(z.string(), z.string())),
+	raw_docs: z.array(
+		z.object({
+			uuid: z.string().optional(),
+			filename: z.string().optional(),
+			content: z.string().optional(),
+			created_at: z.string().optional(),
+			updated_at: z.string().optional(),
+		}).strict(),
+	),
 });
 
 /**

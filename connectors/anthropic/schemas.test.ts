@@ -118,6 +118,32 @@ test("projects schema accepts a contract-shaped record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("projects schema accepts the retained detail fields with a closed shape", () => {
+	const result = projectsSchema.safeParse({
+		...PROJECT_RECORD,
+		creator: { uuid: "synthetic-user", full_name: "Synthetic Owner" },
+		is_private: true,
+		is_starter_project: false,
+		archived_at: "2025-12-01T00:00:00Z",
+		raw_docs: [{ filename: "synthetic.md", content: "Synthetic body" }],
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			creator: { uuid: "synthetic-user", api_key: "secret" },
+		}).success,
+		false,
+	);
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			raw_docs: [{ filename: "synthetic.md", access_token: "secret" }],
+		}).success,
+		false,
+	);
+});
+
 test("messages schema rejects a missing conversation_id (manifest-required field)", () => {
 	const { conversation_id: _omit, ...withoutConv } = MESSAGE_RECORD;
 	assert.equal(messagesSchema.safeParse(withoutConv).success, false);

@@ -273,11 +273,17 @@ export interface ProjectRecord {
 	update_time: string | null;
 	is_archived: boolean | null;
 	prompt_template: PdppSafeText | null;
-	creator: unknown;
+	creator: { uuid?: string; full_name?: string } | null;
 	is_private: boolean | null;
 	is_starter_project: boolean | null;
 	archived_at: string | null;
-	raw_docs: Array<Record<string, string>>;
+	raw_docs: Array<{
+		uuid?: string;
+		filename?: string;
+		content?: string;
+		created_at?: string;
+		updated_at?: string;
+	}>;
 	[field: string]: unknown;
 }
 
@@ -357,6 +363,9 @@ export function parseProject(raw: unknown): {
 	const documents = docsRaw
 		.map((d) => parseProjectDocument(d, id))
 		.filter((d): d is ProjectDocumentRecord => d !== null);
+	const creator = isRecord(raw.creator) ? raw.creator : null;
+	const creatorUuid = creator === null ? null : str(creator.uuid);
+	const creatorFullName = creator === null ? null : str(creator.full_name);
 
 	// `name` is required (non-nullable in schemas.ts) — a control-rich name
 	// cannot become null like an optional field. Fall back to the same
@@ -382,22 +391,29 @@ export function parseProject(raw: unknown): {
 			// — a definite false, not an unknown, when the key is absent or null.
 			is_archived: raw.archived_at != null,
 			prompt_template: safeText(str(raw.prompt_template), 65_000),
-			creator: isRecord(raw.creator)
+			creator: creator !== null
 				? {
-					...(str(raw.creator.uuid) !== null ? { uuid: str(raw.creator.uuid)! } : {}),
-					...(str(raw.creator.full_name) !== null ? { full_name: str(raw.creator.full_name)! } : {}),
+					...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
+					...(creatorFullName !== null ? { full_name: creatorFullName } : {}),
 				}
 				: null,
 			is_private: bool(raw.is_private),
 			is_starter_project: bool(raw.is_starter_project),
 			archived_at: str(raw.archived_at),
-			raw_docs: docsRaw.filter(isRecord).map((doc) => ({
-				...(str(doc.uuid) !== null ? { uuid: str(doc.uuid)! } : {}),
-				...(str(doc.filename) !== null ? { filename: str(doc.filename)! } : {}),
-				...(str(doc.content) !== null ? { content: str(doc.content)! } : {}),
-				...(str(doc.created_at) !== null ? { created_at: str(doc.created_at)! } : {}),
-				...(str(doc.updated_at) !== null ? { updated_at: str(doc.updated_at)! } : {}),
-			})),
+			raw_docs: docsRaw.filter(isRecord).map((doc) => {
+				const uuid = str(doc.uuid);
+				const filename = str(doc.filename);
+				const content = str(doc.content);
+				const createdAt = str(doc.created_at);
+				const updatedAt = str(doc.updated_at);
+				return {
+					...(uuid !== null ? { uuid } : {}),
+					...(filename !== null ? { filename } : {}),
+					...(content !== null ? { content } : {}),
+					...(createdAt !== null ? { created_at: createdAt } : {}),
+					...(updatedAt !== null ? { updated_at: updatedAt } : {}),
+				};
+			}),
 		},
 		documents,
 	};
