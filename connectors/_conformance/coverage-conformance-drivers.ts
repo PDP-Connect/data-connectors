@@ -1228,10 +1228,11 @@ export const REDDIT_MALFORMED_DRIVER: ConnectorDriver = {
 // silent bypass: growing this list is a visible, reviewable diff, and
 // shrinking it is enforced automatically the moment a driver exists.
 export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
-	// Apple Health / Apple Photos (REAL_UNLISTED_CONNECTORS): filesystem/export
-	// snapshot-import receipts, no driver yet.
-	"apple_health.records",
-	"apple_health.workouts",
+	// Apple Photos (REAL_UNLISTED_CONNECTORS): filesystem/export snapshot-import
+	// receipts, no driver yet. Apple Health has no entry: every one of its
+	// streams is required:false, so none is an unexercised REQUIRED stream. Its
+	// coverage is exercised directly by connectors/apple_health/index.test.ts,
+	// which asserts a receipt on the populated, empty and awaiting-upload paths.
 	"apple_photos.photos",
 	// Chase (browser + auth-walled; no credential-free fixture yet).
 	"chase.accounts",
