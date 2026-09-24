@@ -338,6 +338,42 @@ test("parseProject: retains known legacy detail fields and raw docs without IDs"
 	assert.equal(parsed.documents.length, 0);
 });
 
+test("parseProject: identified documents match the retained raw copy and ID-less docs stay raw-only", () => {
+	const parsed = parseProject({
+		uuid: "p1",
+		name: "Project",
+		docs: [
+			{
+				uuid: "d1",
+				filename: "notes.md",
+				content: "Document body",
+				created_at: "2025-01-02T03:04:05Z",
+			},
+			{ filename: "legacy.md", content: "ID-less body" },
+		],
+	});
+	assert.ok(parsed);
+	assert.deepEqual(parsed.project.raw_docs, [
+		{
+			uuid: "d1",
+			filename: "notes.md",
+			content: "Document body",
+			created_at: "2025-01-02T03:04:05Z",
+		},
+		{ filename: "legacy.md", content: "ID-less body" },
+	]);
+	assert.deepEqual(parsed.documents, [
+		{
+			id: "d1",
+			project_id: "p1",
+			filename: "notes.md",
+			content: "Document body",
+			create_time: "2025-01-02T03:04:05Z",
+			update_time: null,
+		},
+	]);
+});
+
 test("parseProject: a project with no uuid/id is dropped", () => {
 	assert.equal(parseProject({ name: "no id" }), null);
 });
