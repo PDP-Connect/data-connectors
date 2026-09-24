@@ -19,8 +19,12 @@
  *     prefer the specific ID and require visibility before filling.
  */
 
+import type {
+	AssistanceCompletionStatus,
+	AssistanceRequest,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { BrowserContext, Locator, Page } from "playwright";
-import { manualAction } from "../browser-handoff.ts";
+import { manualBrowserLogin } from "../browser-handoff.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -55,7 +59,28 @@ const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
  */
 const noopCheckpoint: SessionCheckpointFn = () => Promise.resolve();
 
+type ManualHandoffOptions = Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance">;
+
+interface ManualHandoffInputs {
+	assist: EnsureAmazonSessionArgs["assist"] | undefined;
+	capture: EnsureAmazonSessionArgs["capture"] | undefined;
+	completeAssistance: EnsureAmazonSessionArgs["completeAssistance"] | undefined;
+}
+
+function getManualHandoffOptions(
+	args: ManualHandoffInputs,
+): ManualHandoffOptions {
+	return {
+		...(args.assist ? { assist: args.assist } : {}),
+		...(args.capture ? { capture: args.capture } : {}),
+		...(args.completeAssistance
+			? { completeAssistance: args.completeAssistance }
+			: {}),
+	};
+}
+
 interface EnsureAmazonSessionArgs {
+	assist?: (req: AssistanceRequest) => Promise<string>;
 	capture?: CaptureSession | null;
 	/**
 	 * Session-establishment checkpoint hook from the runtime watchdog. Each call
@@ -63,6 +88,11 @@ interface EnsureAmazonSessionArgs {
 	 * phase diagnostic so a hang no longer leaves only an about:blank artifact.
 	 */
 	checkpoint?: SessionCheckpointFn;
+	completeAssistance?: (
+		assistanceRequestId: string,
+		status: AssistanceCompletionStatus,
+		extra?: { message?: string },
+	) => Promise<void>;
 	context: BrowserContext;
 	/**
 	 * This connection's resolved sign-in pair, threaded from the runtime (see
@@ -146,15 +176,17 @@ async function probeAmazonSession(page: Page): Promise<boolean> {
  * credentials, and the sign-in URL handed to the operator carries no secrets.
  */
 async function requestManualLoginForChallenge({
+	assist,
 	capture,
+	completeAssistance,
 	page,
 	reason,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
 	readonly reason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
-		...(capture ? { capture } : {}),
+		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		handoffReason: "captcha",
 		message:
 			`Amazon did not render the expected sign-in form (${reason}). ` +
@@ -167,61 +199,65 @@ async function requestManualLoginForChallenge({
 }
 
 async function requestManualLoginWithoutCredentials({
+	assist,
 	capture,
+	completeAssistance,
 	credentialReason,
 	page,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
 	readonly credentialReason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
-		...(capture ? { capture } : {}),
+		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		handoffReason: "login",
-		// Leads with the CREDENTIAL. The previous copy called the sign-in details
-		// "optional" and named no field, so an owner could not tell that a stored
-		// credential was expected and absent.
 		message:
 			`${credentialReason} ` +
-			"Alternatively, sign in to Amazon in the secure browser and complete any CAPTCHA, OTP, passkey, or other human verification there, then respond success.",
+			"Sign in to Amazon in the secure browser and complete any CAPTCHA, OTP, passkey, or other human verification there, then continue.",
 		page,
 		sendInteraction,
 	});
 }
 
 async function waitForManualLogin({
+	assist,
 	capture,
+	completeAssistance,
 	handoffReason,
 	message,
 	page,
 	sendInteraction,
-}: Pick<EnsureAmazonSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
 	readonly handoffReason: "captcha" | "login";
 	readonly message: string;
 }): Promise<boolean> {
-	await manualAction(
-		{
-			...(capture ? { capture } : {}),
-			page,
-			reason: handoffReason,
-			message,
-			timeoutSeconds: 1800,
-		},
+	return await manualBrowserLogin({
+		...getManualHandoffOptions({ assist, capture, completeAssistance }),
+		isProbeSuccessful: (ready) => ready,
+		message,
+		page,
+		probe: () => probeAmazonSession(page),
+		readinessProbe: probeAmazonSession,
+		reason: handoffReason,
 		sendInteraction,
-	);
-	await page.waitForTimeout(3000);
-	return probeAmazonSession(page);
+		timeoutSeconds: 1800,
+	});
 }
 
 async function ensureManualSessionWithoutCredentials({
+	assist,
 	capture,
 	checkpoint,
+	completeAssistance,
 	credentialReason,
 	page,
 	sendInteraction,
 }: {
+	assist?: (req: AssistanceRequest) => Promise<string>;
 	capture?: CaptureSession | null;
 	checkpoint: SessionCheckpointFn;
-	/** Owner-facing reason naming the absent credential fields. */
+	completeAssistance?: EnsureAmazonSessionArgs["completeAssistance"];
+	/** Member-facing reason explaining that no saved sign-in is available. */
 	readonly credentialReason: string;
 	page: Page;
 	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
@@ -229,7 +265,7 @@ async function ensureManualSessionWithoutCredentials({
 	await checkpoint("amazon-signin-manual-required");
 	if (
 		await requestManualLoginWithoutCredentials({
-			...(capture ? { capture } : {}),
+			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			credentialReason,
 			page,
 			sendInteraction,
@@ -253,14 +289,16 @@ async function ensureManualSessionWithoutCredentials({
  * step did not establish a session.
  */
 async function fillOrHandleChallenge({
+	assist,
 	capture,
+	completeAssistance,
 	fieldTimeoutMs = 15_000,
 	locator,
 	page,
 	reason,
 	sendInteraction,
 	value,
-}: Pick<EnsureAmazonSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<EnsureAmazonSessionArgs, "assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"> & {
 	readonly locator: Locator;
 	readonly fieldTimeoutMs?: number | undefined;
 	readonly reason: string;
@@ -279,7 +317,7 @@ async function fillOrHandleChallenge({
 		// declaring failure, rather than crashing with a bare selector timeout.
 		if (
 			await requestManualLoginForChallenge({
-				...(capture ? { capture } : {}),
+				...getManualHandoffOptions({ assist, capture, completeAssistance }),
 				page,
 				reason,
 				sendInteraction,
@@ -292,8 +330,10 @@ async function fillOrHandleChallenge({
 }
 
 export async function ensureAmazonSession({
+	assist,
 	capture,
 	checkpoint = noopCheckpoint,
+	completeAssistance,
 	context: _context,
 	credentials,
 	fieldTimeoutMs,
@@ -319,10 +359,8 @@ export async function ensureAmazonSession({
 	);
 	if (resolved.kind === "absent") {
 		return await ensureManualSessionWithoutCredentials({
-			...(capture ? { capture } : {}),
+			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			checkpoint,
-			// Names the CREDENTIAL, not the page: the old copy said sign-in details
-			// were "optional" and never named the fields the owner had to supply.
 			credentialReason: resolved.reason,
 			page,
 			sendInteraction,
@@ -357,7 +395,7 @@ export async function ensureAmazonSession({
 		.catch((): string => "");
 	if (currentEmail !== email) {
 		const emailStep = await fillOrHandleChallenge({
-			...(capture ? { capture } : {}),
+			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			fieldTimeoutMs,
 			locator: emailLoc,
 			page,
@@ -385,7 +423,7 @@ export async function ensureAmazonSession({
 	// Password step — `#ap_password` remains stable; `input[name="password"]`
 	// also matches a hidden autofill hint, so we prefer the id + require vis.
 	const passwordStep = await fillOrHandleChallenge({
-		...(capture ? { capture } : {}),
+		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		fieldTimeoutMs,
 		locator: page.locator("input#ap_password"),
 		page,
@@ -456,7 +494,7 @@ export async function ensureAmazonSession({
 	}
 	if (
 		await requestManualLoginForChallenge({
-			...(capture ? { capture } : {}),
+			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			page,
 			reason: "automated sign-in did not complete",
 			sendInteraction,

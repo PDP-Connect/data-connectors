@@ -2106,8 +2106,10 @@ if (isMainModule(import.meta.url)) {
 		// mode is selected by the deployment, not by this connector.
 		browser: { profileName: "amazon" },
 		async ensureSession({
+			assist,
 			capture,
 			checkpoint,
+			completeAssistance,
 			context,
 			credentials,
 			onCredentialSubmit,
@@ -2115,8 +2117,10 @@ if (isMainModule(import.meta.url)) {
 			sendInteraction,
 		}): Promise<void> {
 			await ensureAmazonSession({
+				assist,
 				...(capture ? { capture } : {}),
 				checkpoint,
+				completeAssistance,
 				context,
 				credentials,
 				onCredentialSubmit,

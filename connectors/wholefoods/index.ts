@@ -477,8 +477,10 @@ if (isMainModule(import.meta.url)) {
 			);
 		},
 		async ensureSession({
+			assist,
 			capture,
 			checkpoint,
+			completeAssistance,
 			context,
 			credentials,
 			onCredentialSubmit,
@@ -495,8 +497,10 @@ if (isMainModule(import.meta.url)) {
 			// profile is provisioned already signed into amazon.com (see manifest
 			// `display.detail` and the lane brief).
 			await ensureAmazonSession({
+				assist,
 				...(capture ? { capture } : {}),
 				checkpoint,
+				completeAssistance,
 				context,
 				credentials,
 				onCredentialSubmit,
