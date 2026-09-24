@@ -36,7 +36,8 @@ test("an absent pair names the credential, never the page", () => {
 		"HEB_PASSWORD",
 	]);
 	const reason = result.kind === "absent" ? result.reason : "";
-	assert.match(reason, /no stored credential for this heb connection/);
+	assert.match(reason, /No saved H-E-B sign-in is available/);
+	assert.doesNotMatch(reason, /HEB_USERNAME|HEB_PASSWORD/);
 	// The whole point of the type: the owner-facing sentence must not blame the
 	// provider's page. Before this existed the same state reported "sign-in form
 	// did not render".
@@ -107,15 +108,10 @@ test("aliases resolve first-non-empty", () => {
 	);
 });
 
-test("the missing-credential reason names the missing fields", () => {
-	assert.match(
-		noStoredCredentialReason("venmo", ["VENMO_PASSWORD"]),
-		/missing: VENMO_PASSWORD/,
-	);
-	assert.match(
-		noStoredCredentialReason("venmo", []),
-		/missing: username, password/,
-	);
+test("the missing-credential reason does not expose implementation field names", () => {
+	const reason = noStoredCredentialReason("venmo");
+	assert.match(reason, /No saved Venmo sign-in is available/);
+	assert.doesNotMatch(reason, /VENMO_PASSWORD|username|password/iu);
 });
 
 /**

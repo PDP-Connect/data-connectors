@@ -242,12 +242,9 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 		// "Amazon failed to render".
 		assert.match(
 			interactions.requests[0]?.message ?? "",
-			/no stored credential for this amazon connection \(missing: AMAZON_USERNAME, AMAZON_PASSWORD\)/u,
+			/No saved Amazon sign-in is available/u,
 		);
-		assert.match(
-			interactions.requests[0]?.message ?? "",
-			/Automated sign-in was not attempted/u,
-		);
+		assert.doesNotMatch(interactions.requests[0]?.message ?? "", /AMAZON_USERNAME|AMAZON_PASSWORD/u);
 		assert.match(interactions.requests[0]?.message ?? "", /secure browser/);
 		assert.doesNotMatch(
 			interactions.requests[0]?.message ?? "",
