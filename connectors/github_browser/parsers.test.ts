@@ -140,31 +140,20 @@ test("contribution summary requires the full rolling year and three complete pri
 	assert.equal(snapshot?.yearTotals[0]?.year, 2026);
 });
 
-test("contributions tolerate absent prior views but never claim them as zero", () => {
+test("contributions reject absent prior views instead of emitting a silent partial snapshot", () => {
 	const current = {
 		days: calendarDays("2025-01-02", "2026-01-01"),
 		total: 1234,
 		year: 2026,
 	};
-	const snapshot = buildContributionSnapshot(
-		[
-			current,
-			{ days: [], total: 0, year: 2025 },
-			{ days: [], total: 0, year: 2024 },
-			{ days: calendarDays("2023-01-01", "2023-12-31"), total: 40, year: 2023 },
-		],
-		"2026-01-01T00:00:00Z",
-	);
-	assert.equal(snapshot?.totalContributionsLastYear, 1234);
-	assert.deepEqual(snapshot?.yearTotals.map(({ year }) => year), [2026, 2023]);
-	assert.equal(snapshot?.days.some(({ date }) => date.startsWith("2024-")), false);
-	assert.equal(
-		validateRecord("contributions", { id: "sample-user:contributions", ...snapshot }).ok,
-		true,
-	);
 	assert.equal(
 		buildContributionSnapshot(
-			[{ days: [], total: 0, year: 2026 }, ...[2025, 2024, 2023].map((year) => ({ days: [], total: 0, year }))],
+			[
+				current,
+				{ days: [], total: 0, year: 2025 },
+				{ days: [], total: 0, year: 2024 },
+				{ days: calendarDays("2023-01-01", "2023-12-31"), total: 40, year: 2023 },
+			],
 			"2026-01-01T00:00:00Z",
 		),
 		null,
@@ -262,4 +251,17 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 	assert.equal(issue?.title, "Fix the report");
 	assert.equal(issue?.body, "Issue description");
 	assert.equal(issue?.url, "https://github.com/sample-user/demo/issues/8");
+
+	const release = parseLegacyEvent({
+		id: "4",
+		type: "ReleaseEvent",
+		created_at: "2026-01-04T00:00:00Z",
+		repo: { name: "sample-user/demo" },
+		payload: {
+			action: "published",
+			release: { name: "", tag_name: "v2.0.0", html_url: "https://example.test/release" },
+		},
+		public: true,
+	});
+	assert.equal(release?.title, "v2.0.0");
 });

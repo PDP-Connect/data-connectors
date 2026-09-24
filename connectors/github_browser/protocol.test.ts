@@ -137,7 +137,7 @@ test("browser collection emits valid records and state for each selected legacy 
 	);
 });
 
-test("collector emits degraded prior-year coverage but skips a missing current graph", async () => {
+test("collector skips contribution snapshots when any year view is unavailable", async () => {
 	const profile = await readFixture("profile.html");
 	let current = '<h2 class="f4 text-normal mb-2">3 contributions</h2>';
 	for (
@@ -171,10 +171,10 @@ test("collector emits degraded prior-year coverage but skips a missing current g
 		);
 		return { messages, records };
 	};
-	const degraded = await run(current);
-	assert.equal(degraded.records.length, 1);
-	assert.equal(degraded.records[0]?.id, "sample-user:contributions");
-	assert.ok(degraded.messages.some(({ type }) => type === "STATE"));
+	const missingPrior = await run(current);
+	assert.equal(missingPrior.records.length, 0);
+	assert.ok(missingPrior.messages.some(({ type }) => type === "SKIP_RESULT"));
+	assert.equal(missingPrior.messages.some(({ type }) => type === "STATE"), false);
 	const missingCurrent = await run("<main>Unavailable</main>");
 	assert.equal(missingCurrent.records.length, 0);
 	assert.ok(missingCurrent.messages.some(({ type }) => type === "SKIP_RESULT"));

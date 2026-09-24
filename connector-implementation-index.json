@@ -6650,7 +6650,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution graph days and summaries. The current rolling year must be complete; unavailable prior-year views are omitted and do not contribute totals.",
+						"description": "Contribution graph days and summaries for four year views. A snapshot is emitted only when all four views are complete; missing history reports the stream as incomplete.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
