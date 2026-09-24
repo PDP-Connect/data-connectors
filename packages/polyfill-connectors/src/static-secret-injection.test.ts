@@ -850,10 +850,7 @@ test("(b) only H-E-B may use optional capture because its owner can reach browse
 	const manifest = JSON.parse(readFileSync(manifestPath("heb"), "utf8")) as {
 		setup?: { credential_capture?: { required?: unknown } };
 	};
-	const source = readFileSync(
-		connectorEntrypoint("heb"),
-		"utf8",
-	);
+	const source = readFileSync(connectorEntrypoint("heb"), "utf8");
 	assert.equal(manifest.setup?.credential_capture?.required, false);
 	assert.match(source, /authOptional:\s*true/u);
 	assert.match(source, /ensureHebSession/u);
