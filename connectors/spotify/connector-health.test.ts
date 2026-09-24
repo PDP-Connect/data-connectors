@@ -8,9 +8,10 @@ import {
 	recentlyPlayedAfterCursor,
 	type SpotifyPlaylist,
 	spotifyNextPath,
+	spotifyPlaylistItemRecord,
 	spotifyPlaylistRecord,
 } from "./index.ts";
-import { playlistsSchema } from "./schemas.ts";
+import { playlistItemsSchema, playlistsSchema } from "./schemas.ts";
 
 const playlist = JSON.parse(
 	readFileSync(
@@ -56,4 +57,19 @@ test("Spotify next-page handling stays on the API origin and rejects no-progress
 			),
 		/spotify_pagination_no_progress/,
 	);
+});
+
+test("Spotify playlist item helper preserves URI and validates against the stream schema", () => {
+	const record = spotifyPlaylistItemRecord("playlist1", 0, {
+		track: {
+			id: "track1",
+			uri: "spotify:track:track1",
+			name: "Track",
+			artists: [],
+			album: { name: "Album" },
+			duration_ms: 180_000,
+		},
+	});
+	assert.equal(record.uri, "spotify:track:track1");
+	assert.equal(playlistItemsSchema.safeParse(record).success, true);
 });

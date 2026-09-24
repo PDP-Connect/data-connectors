@@ -63,6 +63,7 @@ const PLAYLIST_ITEM_RECORD = {
 	id: "37i9dQZF1DXcBWIGoYBM5M:0",
 	playlist_id: "37i9dQZF1DXcBWIGoYBM5M",
 	track_id: "11dFghVXANMlKmJXsNCbNl",
+	uri: "spotify:track:11dFghVXANMlKmJXsNCbNl",
 	position: 0,
 	added_at: "2024-04-01T18:22:05Z",
 	added_by: "spotify",
@@ -235,6 +236,7 @@ test("playlist_items schema accepts a track with a null track_id and added_by (d
 	const result = playlistItemsSchema.safeParse({
 		...PLAYLIST_ITEM_RECORD,
 		track_id: null,
+		uri: null,
 		added_at: null,
 		added_by: null,
 	});

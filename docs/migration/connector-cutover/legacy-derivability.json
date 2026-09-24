@@ -830,7 +830,7 @@
       "tracks[].artists[].name": "playlist_items.artist_names[]",
       "tracks[].album": "playlist_items.album_name",
       "tracks[].duration_ms": "playlist_items.duration_ms",
-      "tracks[].uri": "playlist_items.track_id (Spotify base-62 id; identity preserved, string format changes)"
+      "tracks[].uri": "playlist_items.uri (exact web-player Track URI retained); playlist_items.track_id remains the normalized resource id"
     },
     "not_derivable": [],
     "semantic_notes": [
