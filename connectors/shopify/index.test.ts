@@ -18,15 +18,193 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Page } from "playwright";
 import type {
 	EmittedMessage,
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectShopify } from "./index.ts";
+import {
+	collectShopify,
+	ensureShopifySession,
+	hasShopOrderHistoryContextInPage,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache } from "./types.ts";
+
+test("Shop sign-in opens order history before the manual handoff and checks the returned page", async () => {
+	const navigations: string[] = [];
+	let liveSession = false;
+	const page = Object.assign({} as Page, {
+		goto: async (url: string) => {
+			navigations.push(url);
+			return null;
+		},
+		url: () => navigations.at(-1) ?? "about:blank",
+		waitForFunction: async () => {
+			if (!liveSession) throw new Error("order history not visible");
+			return {};
+		},
+	});
+
+	await ensureShopifySession({
+		capture: null,
+		page,
+		manualLogin: async () => {
+			assert.deepEqual(navigations, ["https://shop.app/account/order-history"]);
+			liveSession = true;
+		},
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("manualAction should be injected in this test");
+		},
+	});
+	assert.equal(liveSession, true);
+	assert.deepEqual(navigations, [
+		"https://shop.app/account/order-history",
+		"https://shop.app/account/order-history",
+	]);
+});
+
+test("Shop sign-in does not hand off a blank page when navigation fails", async () => {
+	let handoffStarted = false;
+	const page = Object.assign({} as Page, {
+		goto: (async () => {
+			throw new Error("navigation failed");
+		}) as Page["goto"],
+	});
+
+	await assert.rejects(
+		() =>
+			ensureShopifySession({
+				capture: null,
+				page,
+				manualLogin: async () => {
+					handoffStarted = true;
+				},
+				sendInteraction: async (): Promise<never> => {
+					throw new Error("manualAction should be injected in this test");
+				},
+			}),
+		/shopify_login_page_unreachable/,
+	);
+	assert.equal(handoffStarted, false);
+});
+
+test("Shop sign-in rejects a completed handoff without an authenticated order page", async () => {
+	const page = Object.assign({} as Page, {
+		goto: async () => null,
+		url: () => "https://shop.app/account/order-history",
+		waitForFunction: async () => {
+			throw new Error("order history not visible");
+		},
+	});
+	await assert.rejects(
+		() =>
+			ensureShopifySession({
+				capture: null,
+				page,
+				manualLogin: async () => undefined,
+				sendInteraction: async (): Promise<never> => {
+					throw new Error("manualAction should be injected in this test");
+				},
+			}),
+		/shopify_login_manual_incomplete/,
+	);
+});
+
+test("Shop sign-in accepts a visible order page without requiring a cookie probe", async () => {
+	const navigations: string[] = [];
+	const page = Object.assign({} as Page, {
+		goto: async (url: string) => {
+			navigations.push(url);
+			return null;
+		},
+		url: () => navigations.at(-1) ?? "about:blank",
+		waitForFunction: async () => ({}),
+	});
+	await ensureShopifySession({
+		capture: null,
+		page,
+		manualLogin: async () => {
+			throw new Error("live session must not request manual login");
+		},
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("live session must not request manual action");
+		},
+	});
+	assert.deepEqual(navigations, ["https://shop.app/account/order-history"]);
+});
+
+test("Shop sign-in self-resolves through an order-page readiness probe", async () => {
+	let ownerReady = false;
+	let responseContract: string | undefined;
+	let completionStatus: string | undefined;
+	const readinessPage = Object.assign({} as Page, {
+		goto: async () => null,
+		url: () => "https://shop.app/account/order-history",
+		waitForFunction: async () => {
+			ownerReady = true;
+			return {};
+		},
+		close: async () => undefined,
+	});
+	const page = Object.assign({} as Page, {
+		goto: async () => null,
+		url: () => "https://shop.app/account/order-history",
+		waitForFunction: async () => {
+			if (!ownerReady) throw new Error("sign-in needed");
+			return {};
+		},
+		context: () => ({ newPage: async () => readinessPage }),
+	});
+
+	await ensureShopifySession({
+		assist: async (request) => {
+			responseContract = request.response_contract;
+			return "shop-assistance";
+		},
+		capture: null,
+		completeAssistance: async (id, status) => {
+			assert.equal(id, "shop-assistance");
+			completionStatus = status;
+		},
+		page,
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("automatic readiness must not request a button click");
+		},
+	});
+	assert.equal(responseContract, "none");
+	assert.equal(completionStatus, "resolved");
+});
+
+test("Shop order-page signal rejects a login form even when the page has an orders heading", () => {
+	const priorDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+	let loginVisible = true;
+	let ordersVisible = true;
+	Object.defineProperty(globalThis, "document", {
+		configurable: true,
+		value: {
+			querySelector: (selector: string) =>
+				selector.startsWith("input") && loginVisible ? {} : null,
+			querySelectorAll: () =>
+				ordersVisible ? [{ textContent: "Your orders" }] : [],
+		},
+	});
+	try {
+		assert.equal(hasShopOrderHistoryContextInPage(), false);
+		loginVisible = false;
+		assert.equal(hasShopOrderHistoryContextInPage(), true);
+		ordersVisible = false;
+		assert.equal(hasShopOrderHistoryContextInPage(), false);
+	} finally {
+		if (priorDocument) {
+			Object.defineProperty(globalThis, "document", priorDocument);
+		} else {
+			Reflect.deleteProperty(globalThis, "document");
+		}
+	}
+});
 
 function makeCache(orderRefs: string[], hasNextPage: boolean): ApolloCache {
 	const entries: Record<string, unknown> = {

@@ -1645,7 +1645,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/index.ts",
-			line: 238,
+			line: 240,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectShopify(): emitRecord() per order, fingerprint-gated, must land before the run's single STATE message",

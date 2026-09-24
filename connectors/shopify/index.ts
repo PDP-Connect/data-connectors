@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.0)
+ * PDPP Shopify (Shop app) Connector (v0.2.1)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -28,11 +28,10 @@
  *            docs/migration/connector-cutover/capability-map.json's
  *            `shopify` entry for the legacy-scope -> stream field mapping.
  *
- * Session: cookie-probed (shop.app sets a session/consumer-access-token
- * cookie on login). No credentialed auto-login — Shop app authenticates by
- * email + emailed verification code, not a password an env var can hold, so
- * `ensureSession` is intentionally absent; a dead session surfaces to the
- * owner as `manual_action` per the manifest's `human_interaction` capability.
+ * Session: open order history and inspect the rendered account page, as the
+ * legacy connector did. No credentialed auto-login — Shop authenticates by
+ * email and verification code. A dead session hands that page to the owner,
+ * then verifies order-history access after manual sign-in.
  *
  * Pagination: Shop app's orders list is infinite-scroll, cursor-paginated
  * through Apollo. This connector scrolls the page and re-reads the cache
@@ -48,6 +47,8 @@
  * orders no longer returned (full scan each run).
  *
  * CHANGES
+ *   v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
+ *     the session afterward.
  *   v0.2.0 (2026-09-22) — real Apollo-cache extraction wired (parsers.ts);
  *     fingerprint-cursor incremental gate; added order_number,
  *     detail_url, line_item_titles per capability-map field contract.
@@ -55,9 +56,11 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import type { Page } from "playwright";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
-	type ProbeSessionArgs,
+	type EnsureSessionArgs,
 	politeDelay,
 	type RecordData,
 	runConnector,
@@ -68,7 +71,6 @@ import { extractOrders, hasNextOrdersPage } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
-const SESSION_COOKIE = /session|_shop_session|consumer_access_token/;
 const ORDER_HISTORY_URL = "https://shop.app/account/order-history";
 const SCROLL_STEP_DELAY_MS = 800;
 const MAX_SCROLL_ROUNDS = 20;
@@ -273,9 +275,96 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	});
 }
 
-async function probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-	const cookies = await context.cookies("https://shop.app/");
-	return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
+export function hasShopOrderHistoryContextInPage(): boolean {
+	if (
+		document.querySelector(
+			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
+		)
+	) {
+		return false;
+	}
+	const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
+	return (
+		headings.some((heading) =>
+			/orders?|order history/i.test(heading.textContent ?? ""),
+		) ||
+		Boolean(
+			document.querySelector(
+				'[data-test*="order"], [data-testid*="order"], a[href*="/orders/"], a[href*="/order/"]',
+			),
+		)
+	);
+}
+
+async function hasShopOrderHistorySession(page: Page): Promise<boolean> {
+	try {
+		const currentUrl = new URL(page.url());
+		if (
+			currentUrl.origin !== "https://shop.app" ||
+			!currentUrl.pathname.startsWith("/account/order-history")
+		) {
+			return false;
+		}
+		await page.waitForFunction(hasShopOrderHistoryContextInPage, undefined, {
+			timeout: 10_000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export async function ensureShopifySession({
+	assist,
+	capture,
+	completeAssistance,
+	page,
+	sendInteraction,
+	manualLogin,
+}: Pick<EnsureSessionArgs, "capture" | "page" | "sendInteraction"> &
+	Partial<Pick<EnsureSessionArgs, "assist" | "completeAssistance">> & {
+		manualLogin?: () => Promise<void>;
+	}): Promise<void> {
+	const openOrderHistory = async (targetPage: Page) => {
+		try {
+			await targetPage.goto(ORDER_HISTORY_URL, {
+				waitUntil: "domcontentloaded",
+				timeout: 30_000,
+			});
+		} catch (cause) {
+			throw new Error("shopify_login_page_unreachable", { cause });
+		}
+	};
+	await openOrderHistory(page);
+	if (await hasShopOrderHistorySession(page)) {
+		return;
+	}
+
+	if (manualLogin) {
+		await manualLogin();
+	} else {
+		await manualBrowserLogin({
+			...(assist ? { assist } : {}),
+			...(capture ? { capture } : {}),
+			...(completeAssistance ? { completeAssistance } : {}),
+			isProbeSuccessful: (ready) => ready,
+			message:
+				"Sign in to Shop in the secure browser. PDPP will continue when your order history is available.",
+			page,
+			probe: () => hasShopOrderHistorySession(page),
+			readinessProbe: async (readinessPage) => {
+				await openOrderHistory(readinessPage);
+				return await hasShopOrderHistorySession(readinessPage);
+			},
+			sendInteraction,
+			timeoutSeconds: 1800,
+		});
+	}
+
+	await openOrderHistory(page);
+	if (!(await hasShopOrderHistorySession(page))) {
+		throw new Error("shopify_login_manual_incomplete");
+	}
 }
 
 async function collect(ctx: BrowserCollectContext): Promise<void> {
@@ -304,7 +393,9 @@ if (isMainModule(import.meta.url)) {
 		name: "shopify",
 		browser: {},
 		validateRecord,
-		probeSession,
+		async ensureSession(args: EnsureSessionArgs): Promise<void> {
+			await ensureShopifySession(args);
+		},
 		collect,
 	});
 }
