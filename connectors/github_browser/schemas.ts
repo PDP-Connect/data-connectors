@@ -56,7 +56,7 @@ const historyItem = z.object({
 	reactionsTotal: z.number(),
 	isDraft: z.boolean(),
 });
-export const schemas = {
+const schemas = {
 	profile: z.object({
 		id: z.string(),
 		username: z.string(),
@@ -124,4 +124,13 @@ export const schemas = {
 	}),
 };
 
-export const validateRecord = makeValidateRecord(schemas);
+export const SCHEMAS = {
+	profile: schemas.profile,
+	repositories: schemas.repositories,
+	starred: schemas.starred,
+	events: schemas.events,
+	contributions: schemas.contributions,
+	history: schemas.history,
+};
+
+export const validateRecord = makeValidateRecord(SCHEMAS);

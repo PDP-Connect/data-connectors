@@ -471,6 +471,15 @@
 				"time_range": true
 			},
 			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				},
+				"range_filters": {
+					"watched_date": ["gte", "gt", "lte", "lt"]
+				}
+			},
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		},
@@ -534,6 +543,11 @@
 				"resources": true
 			},
 			"incremental": false,
+			"query": {
+				"range_filters": {
+					"captured_at": ["gte", "gt", "lte", "lt"]
+				}
+			},
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"

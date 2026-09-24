@@ -62,7 +62,7 @@ export const BOUNDED_READ_EXCEPTIONS: readonly BoundedReadException[] = [
 			"Reviewed safeAll helper for bounded lookup tables such as workspace, users, channels, files, and canvases. The unbounded MESSAGE table now uses iterateMessageRows.",
 	},
 	{
-		connector: "youtube",
+		connector: "youtube_takeout",
 		file: "index.ts",
 		pattern: "readFile",
 		lineIncludes: 'import { readFile } from "node:fs/promises";',
@@ -70,7 +70,7 @@ export const BOUNDED_READ_EXCEPTIONS: readonly BoundedReadException[] = [
 			"Imports readFile for reviewed Takeout JSON/CSV sidecar reads below.",
 	},
 	{
-		connector: "youtube",
+		connector: "youtube_takeout",
 		file: "index.ts",
 		pattern: "readFile",
 		lineIncludes: 'JSON.parse(await readFile(path, "utf8"))',
@@ -78,7 +78,7 @@ export const BOUNDED_READ_EXCEPTIONS: readonly BoundedReadException[] = [
 			"Reads one Takeout JSON sidecar per call, same reviewed pattern as google_takeout; streaming migration is deferred until large fixtures justify it.",
 	},
 	{
-		connector: "youtube",
+		connector: "youtube_takeout",
 		file: "index.ts",
 		pattern: "readFile",
 		lineIncludes: 'return await readFile(path, "utf8");',

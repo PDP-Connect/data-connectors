@@ -110,7 +110,9 @@ test("browser collection emits valid records and state for each selected legacy 
 		assert.ok(spec?.schema.required.includes("id"));
 		assert.ok(spec?.schema.properties.id);
 		assert.equal(
-			new Ajv().compile(spec?.schema)(data),
+			new Ajv()
+				.addKeyword({ keyword: "x_pdpp_role", schemaType: "string", valid: true })
+				.compile(spec?.schema)(data),
 			true,
 			`${stream} matches manifest schema`,
 		);

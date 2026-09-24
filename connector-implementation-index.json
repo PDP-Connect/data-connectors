@@ -6282,6 +6282,7 @@
 				"streams": [
 					{
 						"name": "profile",
+						"required": true,
 						"description": "Legacy GitHub profile, pinned repositories, organization links, achievements, and displayed contribution count, collected from the signed-in profile page.",
 						"semantics": "mutable_state",
 						"schema": {
@@ -6291,7 +6292,8 @@
 									"type": "string"
 								},
 								"username": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "primary-title"
 								},
 								"fullName": {
 									"type": "string"
@@ -6399,18 +6401,26 @@
 							"resources": true
 						},
 						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["username", "bio", "company", "location"],
+								"semantic_fields": ["bio"]
+							}
+						},
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
 						"name": "repositories",
+						"required": true,
 						"description": "Repositories displayed in the signed-in user's repositories tab.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								},
 								"repositories": {
 									"type": "array",
@@ -6467,13 +6477,15 @@
 					},
 					{
 						"name": "starred",
+						"required": true,
 						"description": "Repositories displayed in the signed-in user's starred list.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								},
 								"starred": {
 									"type": "array",
@@ -6518,6 +6530,7 @@
 					},
 					{
 						"name": "events",
+						"required": true,
 						"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
 						"semantics": "mutable_state",
 						"schema": {
@@ -6573,7 +6586,8 @@
 									}
 								},
 								"fetchedAt": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "event-time"
 								},
 								"windowDescription": {
 									"type": "string"
@@ -6588,11 +6602,12 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "scheduled_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
 						"name": "contributions",
+						"required": true,
 						"description": "Contribution graph days and summaries for four year views. Summary is emitted only when all four views contain data.",
 						"semantics": "mutable_state",
 						"schema": {
@@ -6669,7 +6684,8 @@
 									"additionalProperties": false
 								},
 								"fetchedAt": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id", "days", "fetchedAt"],
@@ -6681,11 +6697,12 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "scheduled_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
 						"name": "history",
+						"required": true,
 						"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
 						"semantics": "mutable_state",
 						"schema": {
@@ -6823,7 +6840,8 @@
 									}
 								},
 								"fetchedAt": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "event-time"
 								},
 								"windowDescription": {
 									"type": "string"
@@ -6838,7 +6856,7 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "scheduled_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					}
 				],
@@ -20932,6 +20950,15 @@
 							"time_range": true
 						},
 						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["description"],
+								"semantic_fields": ["description"]
+							},
+							"range_filters": {
+								"watched_date": ["gte", "gt", "lte", "lt"]
+							}
+						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
 					},
@@ -20995,6 +21022,11 @@
 							"resources": true
 						},
 						"incremental": false,
+						"query": {
+							"range_filters": {
+								"captured_at": ["gte", "gt", "lte", "lt"]
+							}
+						},
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"

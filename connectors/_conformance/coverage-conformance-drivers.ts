@@ -1279,6 +1279,15 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.events",
 	"github.organizations",
 	"github.pinned_repositories",
+	// GitHub browser profile: auth-walled browser-session collection with no
+	// credential-free coverage driver yet. The PAT/API GitHub connector remains
+	// the supported setup profile; this profile is listed as development.
+	"github_browser.profile",
+	"github_browser.repositories",
+	"github_browser.starred",
+	"github_browser.events",
+	"github_browser.contributions",
+	"github_browser.history",
 	// LinkedIn (browser-session-backed; no credential-free fixture yet).
 	"linkedin.profile",
 	"linkedin.experience",
@@ -1329,6 +1338,13 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura.sleep",
 	"oura.readiness",
 	"oura.activity",
+	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
+	// collection with no credential-free coverage driver yet. The PAT/API Oura
+	// connector remains the supported setup profile; this profile is listed as
+	// development.
+	"oura_browser.sleep",
+	"oura_browser.readiness",
+	"oura_browser.activity",
 	"slack.channels",
 	"slack.channel_memberships",
 	"slack.channel_stats",

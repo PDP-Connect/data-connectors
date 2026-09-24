@@ -12,7 +12,7 @@ import type {
   RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { validateRecord } from "../oura/schemas.ts";
+import { validateRecord } from "./schemas.ts";
 
 const HOME = "https://cloud.ouraring.com/";
 const ORIGIN = new URL(HOME).origin;

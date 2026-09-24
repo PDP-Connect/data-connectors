@@ -98,12 +98,15 @@ export async function collectGitHubBrowser(
 			url = proof.nextUrl;
 		}
 		if (done) {
-			await context.emitRecord(
-				stream,
-				stream === "repositories"
-					? { id: snapshotId(stream), repositories: collected }
-					: { id: snapshotId(stream), starred: collected },
-			);
+			if (stream === "repositories") {
+				await context.emitRecord("repositories", {
+					id: snapshotId(stream), repositories: collected,
+				});
+			} else {
+				await context.emitRecord("starred", {
+					id: snapshotId(stream), starred: collected,
+				});
+			}
 			await complete(stream);
 		} else await incomplete(stream);
 	}
