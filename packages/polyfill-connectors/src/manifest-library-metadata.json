@@ -297,7 +297,6 @@
 				"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
 				"list_page_navigation_failed": "We couldn't load a page of your H-E-B order history and didn't want to assume that meant the end",
 				"list_page_shape_check_failed": "The page didn't look like we expected",
-				"nutrition_lookup_incomplete": "We couldn't look up nutrition facts for every product in your orders this run",
 				"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
 				"pagination_exhausted": "We reached the end of the available pages",

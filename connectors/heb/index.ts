@@ -2126,22 +2126,14 @@ export async function collectProfile(
 
 // ─── nutrition ──────────────────────────────────────────────────────────
 
-/** One unique product referenced by items emitted this run (or, when
- *  `order_items` is out of scope, an empty set — nutrition has no order-item
- *  source to dedup against). Bounded like `MAX_DETAIL_ATTEMPTS_PER_RUN`: a
- *  large order history should not turn one run into hundreds of product-page
- *  navigations. */
-const MAX_NUTRITION_LOOKUPS_PER_RUN = 50;
-
 export interface NutritionTarget {
 	name: string;
 	productId: string;
 	productUrl: string | null;
 }
 
-/** Fetch and emit `nutrition` records for the unique products this run's
- *  `order_items` collection observed, deduped by product_id and bounded by
- *  `MAX_NUTRITION_LOOKUPS_PER_RUN`. Products without a resolvable
+/** Fetch and emit `nutrition` records for every unique product this run's
+ *  `order_items` collection observed. Products without a resolvable
  *  `product_url` receive an explicit not_found outcome; no URL is guessed. */
 export async function collectNutrition(
 	page: Page,
@@ -2154,9 +2146,6 @@ export async function collectNutrition(
 	const withUrl = targets.filter(
 		(t): t is NutritionTarget & { productUrl: string } => Boolean(t.productUrl),
 	);
-	const skippedNoUrl = targets.length - withUrl.length;
-	const bounded = withUrl.slice(0, MAX_NUTRITION_LOOKUPS_PER_RUN);
-	const deferred = withUrl.length - bounded.length;
 	for (const target of targets.filter((t) => !t.productUrl)) {
 		await deps.emitRecord(
 			"nutrition",
@@ -2171,7 +2160,7 @@ export async function collectNutrition(
 		);
 	}
 
-	for (const target of bounded) {
+	for (const target of withUrl) {
 		try {
 			await page.goto(target.productUrl, {
 				waitUntil: "domcontentloaded",
@@ -2179,6 +2168,17 @@ export async function collectNutrition(
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			await deps.emitRecord(
+				"nutrition",
+				buildNutritionRecord(
+					target.productId,
+					parseNutritionDom(""),
+					target.name,
+					deps.emittedAt,
+					target.productUrl,
+					"error",
+				),
+			);
 			await deps.emit({
 				type: "SKIP_RESULT",
 				stream: "nutrition",
@@ -2222,16 +2222,6 @@ export async function collectNutrition(
 				target.productUrl,
 			),
 		);
-	}
-
-	if (skippedNoUrl > 0 || deferred > 0) {
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "nutrition",
-			reason: "nutrition_lookup_incomplete",
-			message: `${skippedNoUrl} product(s) had no resolvable product page; ${deferred} product(s) deferred past this run's ${MAX_NUTRITION_LOOKUPS_PER_RUN}-lookup budget.`,
-			diagnostics: { skipped_no_url: skippedNoUrl, deferred },
-		});
 	}
 }
 
