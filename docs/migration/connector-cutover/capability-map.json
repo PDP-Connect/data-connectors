@@ -831,14 +831,11 @@
             "firstTimestamp": "sessions.started_at",
             "lastTimestamp": "sessions.last_event_at",
             "messageCount": "sessions.message_count",
+            "title": "sessions.title",
             "kind": "sessions.kind",
             "parentSessionId": "sessions.parent_session_id"
           },
           "dropped": [
-            {
-              "field": "title",
-              "reason": "AI-generated session title; no modern field"
-            },
             {
               "field": "userMessageCount, assistantMessageCount",
               "reason": "derivable from messages stream by role, D3 aggregate"
@@ -865,17 +862,13 @@
           },
           "dropped": [
             {
-              "field": "hasPastedContent",
-              "reason": "no modern equivalent flag; attachment presence would need a join against an attachments stream"
-            },
-            {
               "field": "project",
               "reason": "legacy denormalization; modern requires a join to sessions.project_path"
             }
           ],
           "status": "needs_parity_audit",
-          "question": "Is hasPastedContent load-bearing for any downstream consumer? If yes, add messages.has_pasted_content; if no, record as deliberate break.",
-          "lead_decision": "ADD messages.has_pasted_content. Low cost and advertised."
+          "question": "The modern flag detects transcript imagePasteIds. Legacy used history.jsonl pastedContents, whose non-image cases are not represented in transcripts. Decide whether exact history.jsonl correlation is required for all pasted-content types.",
+          "lead_decision": "PARTIAL: populate messages.has_pasted_content from imagePasteIds; audit history.jsonl before claiming full legacy flag parity."
         },
         {
           "legacy_scope": "claude_code.trajectories",
@@ -883,24 +876,18 @@
             "claude_code.messages",
             "claude_code.attachments"
           ],
-          "migration": "DELIBERATE BREAK candidate: full trajectory reconstruction not possible from modern streams",
+          "migration": "reconstruct from messages + attachments; tool bodies use local artifact capture",
           "field_map": {
             "step.text": "messages.content",
             "step.role": "messages.role",
             "step.type": "messages.type",
             "step.sidechain": "messages.is_sidechain",
             "tool_call.callId": "attachments.tool_use_id",
-            "tool_result.output": "attachments.content_preview (truncated preview only, not full body)"
+            "tool_call.tool": "attachments.tool_name",
+            "tool_call.input": "attachments.content_preview + artifact_sha256 (full JSON input spooled locally)",
+            "tool_result.output": "attachments.content_preview + artifact_sha256 (full body spooled locally)"
           },
           "dropped": [
-            {
-              "field": "tool_call.tool, tool_call.input",
-              "reason": "tool name and full arguments not recorded in modern attachments stream"
-            },
-            {
-              "field": "tool_result.output (full body)",
-              "reason": "modern attachments stream stores a bounded content_preview only, by design, likely for size/privacy reasons"
-            },
             {
               "field": "step.model",
               "reason": "no per-message model field; only derivable via session-level version, not per-step"
@@ -911,23 +898,31 @@
             }
           ],
           "status": "needs_parity_audit",
-          "question": "Is the attachments.content_preview truncation a deliberate privacy/size decision, or an oversight? Needs a lead decision: accept as deliberate_break with a written rationale, or add a full-body attachments field.",
-          "lead_decision": "PRESERVE. Legacy advertised full tool input/output. Add full-body fields (tool input, tool result output) when the modern code's truncation has no documented privacy or size rationale. If such a rationale exists, the lane cites it and proposes a bounded field with an explicit truncated flag. No silent truncation."
+          "question": "Full tool bodies are spooled locally and identified by SHA-256, but the current runtime has no artifact upload transport or resolvable blob_ref. Decide whether local spool access satisfies trajectory consumers or wire artifact delivery before claiming remote full-body parity.",
+          "lead_decision": "IMPLEMENTED SOURCE CAPTURE: emit tool_use/tool_result attachments from message content with tool name, call id, bounded preview, and legacy-compatible credential redaction before full JSON/text body enters the local artifact spool. Remote body retrieval remains unavailable until a delivery transport exists."
         },
         {
           "legacy_scope": "claude_code.usage",
-          "streams": [],
-          "migration": "GAP: no modern stream",
-          "field_map": {},
-          "dropped": [
-            {
-              "field": "totals.*, models[].*, dailyActivity[], dailyModelTokens[], hourCounts, longestSession, totalCostUSD",
-              "reason": "modern connector has no token/cost/usage aggregation stream; source data (stats-cache.json) is available but unused"
-            }
-          ],
-          "status": "needs_parity_audit",
-          "question": "Add a new claude_code.usage stream sourced from stats-cache.json (same file legacy used), or accept usage/cost tracking as out of scope for this connector generation?",
-          "lead_decision": "ADD stream claude_code.usage from stats-cache.json (same source as legacy)."
+          "streams": ["claude_code.usage"],
+          "migration": "new stream sourced from stats-cache.json",
+          "field_map": {
+            "totals.sessions": "usage.total_sessions",
+            "totals.messages": "usage.total_messages",
+            "totals.firstSessionDate": "usage.first_session_date",
+            "totals.lastComputedDate": "usage.last_computed_date",
+            "totals.speculationTimeSavedMs": "usage.total_speculation_time_saved_ms",
+            "models[].*": "usage.models[] (token counts, cache counts, web requests, context window, output limit)",
+            "models[].costUSD": "usage.models[].cost_usd_cents (integer minor units)",
+            "dailyActivity[]": "usage.daily_activity[]",
+            "dailyModelTokens[]": "usage.daily_model_tokens[]",
+            "hourCounts": "usage.hour_counts",
+            "longestSession": "usage.longest_session (duration_seconds)",
+            "totalCostUSD": "usage.total_cost_usd_cents + usage.currency"
+          },
+          "dropped": [],
+          "status": "implemented",
+          "question": null,
+          "lead_decision": "IMPLEMENTED: the usage stream reads ~/.claude/stats-cache.json and normalizes cost to integer cents plus currency."
         }
       ]
     },
@@ -1378,9 +1373,9 @@
             "communityVisibilityState": "profile.communityvisibilitystate"
           },
           "dropped": [],
-          "status": "needs_parity_audit",
-          "question": "profile.timecreated and profile.lastlogoff are unix-epoch seconds, not ISO-8601 *_at strings. D4 requires ISO-8601 for *_at fields. Confirm whether these fields are named to signal raw-epoch intentionally (they are not named *_at) or need conversion + rename before this can be 'contracted'.",
-          "lead_decision": "KEEP the existing modern field names and types (D2: no churn of published modern names). The fields are not named *_at, so raw epoch seconds are honest. Document the unit in the schema description."
+          "status": "implemented",
+          "question": null,
+          "lead_decision": "IMPLEMENTED: keep the published timecreated and lastlogoff integer fields as Unix epoch seconds; unit is documented in the profile stream schema. This intentionally differs from the legacy UI's ISO-8601 projection."
         },
         {
           "legacy_scope": "steam.games",
@@ -1413,21 +1408,19 @@
           "streams": [
             "steam.friends"
           ],
-          "migration": "rename+fields; GAP: friend profile fields dropped",
+          "migration": "rename+fields; hydrate persona fields in batches",
           "field_map": {
             "steamId": "friends.steamid",
             "friendSince": "friends.friend_since",
-            "relationship": "friends.relationship"
+            "relationship": "friends.relationship",
+            "personaName": "friends.persona_name",
+            "avatarUrl": "friends.avatar_url",
+            "profileUrl": "friends.profile_url"
           },
-          "dropped": [
-            {
-              "field": "personaName, avatarUrl, profileUrl",
-              "reason": "modern friends stream stores relationship state only; friend profile hydration would require a per-friend API call (N+1), not implemented"
-            }
-          ],
-          "status": "needs_parity_audit",
-          "question": "Is friend display name/avatar load-bearing for any consumer? If yes this is add-fields work requiring a batched profile lookup (Steam ISteamUser/GetPlayerSummaries supports up to 100 steamids per call, so N+1 is avoidable). If no, record as deliberate break.",
-          "lead_decision": "ADD fields persona_name, avatar_url, profile_url via batched GetPlayerSummaries (100 IDs per call)."
+          "dropped": [],
+          "status": "implemented",
+          "question": null,
+          "lead_decision": "IMPLEMENTED: persona_name, avatar_url, and profile_url are hydrated with GetPlayerSummaries in batches of up to 100 IDs; missing/private summaries produce null fields."
         }
       ]
     }

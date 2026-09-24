@@ -39,6 +39,21 @@ const CLAUDE_FM_QUOTED_SINGLE_RE = /^'([\s\S]*)'$/;
 const CLAUDE_FM_COLLAPSE_WS_RE = /\s+/g;
 const CLAUDE_FM_LINE_SPLIT_RE = /\r?\n/;
 const CLAUDE_MD_SUFFIX_RE = /\.md$/i;
+const TOOL_BODY_REDACTIONS = [
+	/-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g,
+	/\bsk-ant-[A-Za-z0-9_-]{16,}/g,
+	/\bsk-(?:proj-)?[A-Za-z0-9]{20,}/g,
+	/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
+	/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+	/\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+	/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+	/\bAIza[0-9A-Za-z_-]{35}\b/g,
+	/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+	/\b[Bb]earer\s+[A-Za-z0-9._~+/-]{16,}=*/g,
+	/\b0x[0-9a-fA-F]{64}\b/g,
+];
+const TOOL_SECRET_ASSIGNMENT_RE =
+	/((?:[A-Za-z0-9_-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)[A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?)(?!\[redacted:)([^\s"',;)}]{6,})/gi;
 
 // ─── Previews ───────────────────────────────────────────────────────────
 
@@ -54,6 +69,40 @@ export function truncateBody(
 	max: number = SKILL_BODY_MAX_CHARS,
 ): string {
 	return body.length > max ? body.slice(0, max) : body;
+}
+
+/** Match the credential-shape redaction applied by the retired trajectory exporter. */
+export function redactToolBodyText(value: string): string {
+	let redacted = value;
+	for (const pattern of TOOL_BODY_REDACTIONS) {
+		redacted = redacted.replace(pattern, "[redacted:credential]");
+	}
+	return redacted.replace(
+		TOOL_SECRET_ASSIGNMENT_RE,
+		"$1[redacted:secret_assignment]",
+	);
+}
+
+/** Preserve the tool-input JSON shape while redacting strings recursively. */
+export function redactToolBodyValue(value: unknown, depth = 0): unknown {
+	if (depth > 6) {
+		return "[depth-limited]";
+	}
+	if (typeof value === "string") {
+		return redactToolBodyText(value);
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => redactToolBodyValue(item, depth + 1));
+	}
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, item]) => [
+				key,
+				redactToolBodyValue(item, depth + 1),
+			]),
+		);
+	}
+	return value;
 }
 
 // ─── Content extraction (messages + attachments) ────────────────────────

@@ -88,6 +88,8 @@ import {
 	mergeSessionObservations,
 	parseCsvEnv,
 	parseFrontmatter,
+	redactToolBodyText,
+	redactToolBodyValue,
 	SESSION_DIR_PREFIX_RE,
 	TOOL_RESULT_PREVIEW_CHARS,
 	textPreview,
@@ -100,6 +102,7 @@ import type {
 	ClaudeJsonlGap,
 	ClaudeSessionFileCursorV1,
 	ClaudeSourceGap,
+	ContentPart,
 	JsonlObject,
 	JsonlObservations,
 	SessionAccumulator,
@@ -411,6 +414,55 @@ export async function buildAttachmentRecord(
 	};
 }
 
+async function emitToolContentAttachments(
+	obj: JsonlObject,
+	sessionId: string,
+	parentUuid: string,
+	deps: LineEmitDeps,
+): Promise<void> {
+	const message = obj.message as { content?: unknown } | undefined;
+	if (!Array.isArray(message?.content)) {
+		return;
+	}
+	for (const [index, part] of message.content.entries()) {
+		if (!part || typeof part !== "object") {
+			continue;
+		}
+		const block = part as ContentPart;
+		if (block.type !== "tool_use" && block.type !== "tool_result") {
+			continue;
+		}
+		const body =
+			block.type === "tool_use"
+				? JSON.stringify(redactToolBodyValue(block.input ?? {}))
+				: redactToolBodyText(
+						extractContent(block.content) ??
+							JSON.stringify(block.content ?? ""),
+					);
+		const id = `${parentUuid}:${block.type}:${index}`;
+		const preview = safeTextPreview(body, ATTACHMENT_PREVIEW_CHARS);
+		const capture = await captureAttachmentBody(
+			body,
+			id,
+			deps.captureContext ?? null,
+		);
+		await deps.emitRecord("attachments", {
+			id,
+			session_id: sessionId,
+			parent_uuid: parentUuid,
+			event_type: block.type,
+			hook_name: null,
+			tool_use_id: block.id ?? block.tool_use_id ?? null,
+			tool_name: block.type === "tool_use" ? (block.name ?? null) : null,
+			content_preview: preview.preview,
+			content_binary_reason: preview.kind === "binary" ? preview.reason : null,
+			content_bytes: Buffer.byteLength(body, "utf8"),
+			timestamp: obj.timestamp ?? null,
+			...capture,
+		});
+	}
+}
+
 // ─── Per-line dispatcher ────────────────────────────────────────────────
 
 /** Injected deps threaded through every per-line emit helper. Mirrors the
@@ -473,6 +525,9 @@ export async function processJsonlLine({
 				"messages",
 				buildMessageRecord(obj, sessionId, uuid, obs.subagentSessionId),
 			);
+		}
+		if (!buildOnly && deps.requested.has("attachments") && uuid) {
+			await emitToolContentAttachments(obj, sessionId, uuid, deps);
 		}
 		return;
 	}
