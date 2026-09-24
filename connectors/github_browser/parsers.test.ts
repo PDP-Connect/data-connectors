@@ -140,6 +140,49 @@ test("contribution summary requires the full rolling year and three complete pri
 	assert.equal(snapshot?.yearTotals[0]?.year, 2026);
 });
 
+test("contributions tolerate absent prior views but never claim them as zero", () => {
+	const current = {
+		days: calendarDays("2025-01-02", "2026-01-01"),
+		total: 1234,
+		year: 2026,
+	};
+	const snapshot = buildContributionSnapshot(
+		[
+			current,
+			{ days: [], total: 0, year: 2025 },
+			{ days: [], total: 0, year: 2024 },
+			{ days: calendarDays("2023-01-01", "2023-12-31"), total: 40, year: 2023 },
+		],
+		"2026-01-01T00:00:00Z",
+	);
+	assert.equal(snapshot?.totalContributionsLastYear, 1234);
+	assert.deepEqual(snapshot?.yearTotals.map(({ year }) => year), [2026, 2023]);
+	assert.equal(snapshot?.days.some(({ date }) => date.startsWith("2024-")), false);
+	assert.equal(
+		validateRecord("contributions", { id: "sample-user:contributions", ...snapshot }).ok,
+		true,
+	);
+	assert.equal(
+		buildContributionSnapshot(
+			[{ days: [], total: 0, year: 2026 }, ...[2025, 2024, 2023].map((year) => ({ days: [], total: 0, year }))],
+			"2026-01-01T00:00:00Z",
+		),
+		null,
+	);
+	assert.equal(
+		buildContributionSnapshot(
+			[
+				current,
+				{ days: [], total: 5, year: 2025 },
+				{ days: [], total: 0, year: 2024 },
+				{ days: [], total: 0, year: 2023 },
+			],
+			"2026-01-01T00:00:00Z",
+		),
+		null,
+	);
+});
+
 test("a contribution cell without count evidence cannot become a zero or complete aggregate", () => {
 	const parsed = parseContributionHtml(
 		'<h2 class="f4 text-normal mb-2">5 contributions</h2><td class="ContributionCalendar-day" data-date="2026-01-01"></td>',

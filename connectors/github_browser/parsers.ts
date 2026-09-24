@@ -371,6 +371,9 @@ export function buildContributionSnapshot(
 	rollingStart.setUTCDate(rollingStart.getUTCDate() - 364);
 	const rollingStartDate = rollingStart.toISOString().slice(0, 10);
 	for (const [index, graph] of graphs.entries()) {
+		// GitHub can omit older calendar views for accounts with unavailable
+		// history. An empty prior view is absence of evidence, not zero activity.
+		if (index > 0 && graph.days.length === 0 && graph.total === 0) continue;
 		const actualDates = new Set(graph.days.map((day) => day.date));
 		let date = index === 0 ? rollingStartDate : `${graph.year}-01-01`;
 		const endDate = index === 0 ? fetchedDate : `${graph.year}-12-31`;
@@ -386,6 +389,7 @@ export function buildContributionSnapshot(
 	}
 	const daysByDate = new Map<string, LegacyContributionDay>();
 	for (const [index, graph] of graphs.entries()) {
+		if (index > 0 && graph.days.length === 0 && graph.total === 0) continue;
 		for (const day of graph.days) {
 			if (
 				index === 0 &&
@@ -421,7 +425,12 @@ export function buildContributionSnapshot(
 				? { count: topDay.count, date: topDay.date }
 				: null,
 		totalContributionsLastYear: latestYearGraph.total,
-		yearTotals: graphs.map(({ total, year }) => ({ total, year })),
+		yearTotals: graphs
+			.filter(
+				(graph, index) =>
+					index === 0 || graph.days.length > 0 || graph.total !== 0,
+			)
+			.map(({ total, year }) => ({ total, year })),
 	};
 }
 

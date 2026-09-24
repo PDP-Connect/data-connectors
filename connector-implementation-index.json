@@ -6650,7 +6650,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution graph days and summaries for four year views. Summary is emitted only when all four views contain data.",
+						"description": "Contribution graph days and summaries. The current rolling year must be complete; unavailable prior-year views are omitted and do not contribute totals.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
