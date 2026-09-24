@@ -11,6 +11,7 @@ import {
 	parseLegacyEvent,
 	parseProfileHtml,
 	parseRepositoriesHtml,
+	parseStarredHtml,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -103,6 +104,15 @@ test("repository and starred pages require list or explicit empty evidence", () 
 			false,
 		);
 	}
+});
+
+test("current GitHub starred empty state confirms an empty inventory", async () => {
+	const html = await fixture("starred-empty-current-github.html");
+	assert.deepEqual(parseStarredHtml(html), []);
+	assert.deepEqual(
+		inspectInventoryPage(html, "starred", "sample-user", 1, 0),
+		{ valid: true, nextUrl: null },
+	);
 });
 
 test("contribution summary requires the full rolling year and three complete prior years", async () => {

@@ -278,7 +278,7 @@ export function inspectInventoryPage(
 			? /(?:doesn't have any|has no) (?:public )?repositories yet/iu.test(
 					emptyText,
 				)
-			: /(?:hasn't starred any|has no starred) repositories yet/iu.test(
+			: /(?:hasn['’]t starred any|has no starred|you don['’]t have any starred) repositories yet/iu.test(
 					emptyText,
 				);
 	const next = document.querySelector('a.next_page[rel="next"]');

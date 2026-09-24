@@ -15,6 +15,67 @@ const readFixture = (name: string): Promise<string> =>
 		"utf8",
 	);
 
+test("collector uses the contribution page loader that waits for rendered calendar cells", async () => {
+	const now = new Date("2026-09-24T12:00:00Z");
+	const contributionPageLoads: string[] = [];
+	const messages: Array<{ type: string; stream: string | undefined }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const calendar = (start: string, end: string): string => {
+		let html = '<h2 class="f4 text-normal mb-2">0 contributions</h2>';
+		for (
+			let date = new Date(`${start}T00:00:00Z`);
+			date.toISOString().slice(0, 10) <= end;
+			date.setUTCDate(date.getUTCDate() + 1)
+		) {
+			html += `<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="0" data-level="0"></td>`;
+		}
+		return html;
+	};
+	const rollingStart = new Date(now);
+	rollingStart.setUTCDate(rollingStart.getUTCDate() - 364);
+	const services = {
+		fetchPublicJson: async () => [],
+		now: () => now,
+		openPage: async (url: string) =>
+			url === "https://github.com/"
+				? '<meta name="user-login" content="sample-user">'
+				: "<main>Calendar still loading</main>",
+		openContributionPage: async (url: string) => {
+			contributionPageLoads.push(url);
+			const year = Number(/from=(\d{4})/u.exec(url)?.[1] ?? now.getUTCFullYear());
+			return year === now.getUTCFullYear()
+				? calendar(rollingStart.toISOString().slice(0, 10), now.toISOString().slice(0, 10))
+				: calendar(`${year}-01-01`, `${year}-12-31`);
+		},
+		sleep: async () => {},
+	};
+
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push({
+					type: message.type,
+					stream: "stream" in message ? message.stream : undefined,
+				});
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["contributions"]),
+			state: {},
+		},
+		services,
+	);
+
+	assert.equal(contributionPageLoads.length, 4);
+	assert.deepEqual(records.map(({ stream }) => stream), ["contributions"]);
+	assert.equal(validateRecord("contributions", records[0]?.data ?? {}).ok, true);
+	assert.deepEqual(messages, [
+		{ type: "STATE", stream: "contributions" },
+	]);
+});
+
 test("browser collection emits valid records and state for each selected legacy stream", async () => {
 	const profile = await readFixture("profile.html");
 	const repositories = await readFixture("repositories.html");
