@@ -244,15 +244,21 @@ function buildCtx(
 	};
 }
 
-
 // ─── Session establishment ────────────────────────────────────────────────
 
-test("ensureLinkedInSession: no session opens LinkedIn login before manual handoff", async () => {
+test("ensureLinkedInSession: login becoming ready resumes without an interaction", async () => {
 	const gotoUrls: string[] = [];
-	let manualPrompted = false;
+	const assistanceStatuses: string[] = [];
 	let liveSession = false;
+	const readinessPage = {
+		close: async () => undefined,
+		evaluate: evaluateVoyagerMe(() => liveSession),
+		goto: async () => null,
+	} as unknown as Page;
 	const context = {
-		cookies: async () => (liveSession ? [{ name: "li_at", value: "token" }] : []),
+		cookies: async () =>
+			liveSession ? [{ name: "li_at", value: "token" }] : [],
+		newPage: async () => readinessPage,
 	} as BrowserContext;
 	const page = {
 		context: () => context,
@@ -264,26 +270,65 @@ test("ensureLinkedInSession: no session opens LinkedIn login before manual hando
 	} as Page;
 
 	await ensureLinkedInSession({
-		capture: null,
-		context,
-		manualLogin: async () => {
-			manualPrompted = true;
+		assist: async () => {
 			liveSession = true;
+			return "assistance-1";
 		},
+		capture: null,
+		completeAssistance: async (_id, status) => {
+			assistanceStatuses.push(status);
+		},
+		context,
 		page,
 		sendInteraction: async (): Promise<never> => {
-			throw new Error("manualAction should be injected in this test");
+			throw new Error("unexpected manual interaction");
 		},
 	});
 
-	assert.equal(manualPrompted, true);
+	assert.deepEqual(assistanceStatuses, ["resolved"]);
 	assert.deepEqual(gotoUrls, ["https://www.linkedin.com/login"]);
 });
 
+test("ensureLinkedInSession: readiness timeout escalates and fails safely", async () => {
+	const assistanceStatuses: string[] = [];
+	const context = {
+		cookies: async () => NO_LINKEDIN_COOKIES,
+		newPage: async () =>
+			({
+				close: async () => undefined,
+				evaluate: evaluateVoyagerMe(() => false),
+				goto: async () => null,
+			}) as unknown as Page,
+	} as BrowserContext;
+	const page = {
+		context: () => context,
+		evaluate: evaluateVoyagerMe(() => false),
+		goto: async () => null,
+	} as unknown as Page;
 
+	await assert.rejects(
+		ensureLinkedInSession(
+			{
+				assist: async () => "assistance-timeout",
+				capture: null,
+				completeAssistance: async (_id, status) => {
+					assistanceStatuses.push(status);
+				},
+				context,
+				page,
+				sendInteraction: async (): Promise<never> => {
+					throw new Error("unexpected manual interaction");
+				},
+			},
+			0,
+		),
+		/browser_handoff_readiness_timed_out/u,
+	);
+	assert.deepEqual(assistanceStatuses, ["escalated"]);
+});
 
 test("ensureLinkedInSession: login navigation failure rejects before manual handoff", async () => {
-	let manualPrompted = false;
+	let assistanceRequested = false;
 	const context = {
 		cookies: async () => NO_LINKEDIN_COOKIES,
 	} as BrowserContext;
@@ -298,11 +343,13 @@ test("ensureLinkedInSession: login navigation failure rejects before manual hand
 	await assert.rejects(
 		() =>
 			ensureLinkedInSession({
-				capture: null,
-				context,
-				manualLogin: async () => {
-					manualPrompted = true;
+				assist: async () => {
+					assistanceRequested = true;
+					return "unexpected";
 				},
+				capture: null,
+				completeAssistance: async () => undefined,
+				context,
 				page,
 				sendInteraction: async (): Promise<never> => {
 					throw new Error("manualAction should be injected in this test");
@@ -310,13 +357,12 @@ test("ensureLinkedInSession: login navigation failure rejects before manual hand
 			}),
 		/linkedin_login_page_unreachable/,
 	);
-	assert.equal(manualPrompted, false);
+	assert.equal(assistanceRequested, false);
 });
-
 
 test("ensureLinkedInSession: live session skips login handoff", async () => {
 	const gotoUrls: string[] = [];
-	let manualPrompted = false;
+	let assistanceRequested = false;
 	const context = {
 		cookies: async () => [{ name: "li_at", value: "token" }],
 	} as BrowserContext;
@@ -330,18 +376,20 @@ test("ensureLinkedInSession: live session skips login handoff", async () => {
 	} as Page;
 
 	await ensureLinkedInSession({
-		capture: null,
-		context,
-		manualLogin: async () => {
-			manualPrompted = true;
+		assist: async () => {
+			assistanceRequested = true;
+			return "unexpected";
 		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context,
 		page,
 		sendInteraction: async (): Promise<never> => {
 			throw new Error("manualAction should be injected in this test");
 		},
 	});
 
-	assert.equal(manualPrompted, false);
+	assert.equal(assistanceRequested, false);
 	assert.deepEqual(gotoUrls, ["https://www.linkedin.com/feed/"]);
 });
 

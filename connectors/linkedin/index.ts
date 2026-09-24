@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.2)
+ * PDPP LinkedIn Connector (v0.3.3)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
  * proves an existing browser session and, when absent, navigates to LinkedIn
  * login before handing the page to the owner. The owner authenticates manually
- * in the connector's persistent browser profile.
+ * in the connector's persistent browser profile; LinkedIn session readiness is
+ * detected automatically before collection continues.
  *
  * All Voyager calls run inside the logged-in page context via
  * `page.evaluate(fetch)`, exactly as the legacy connector did — Voyager
@@ -46,6 +47,8 @@
  *     `profileEducations[].grade` value set.
  *
  * CHANGES
+ *   v0.3.3 (2026-09-24) — detect LinkedIn readiness during sign-in and
+ *     continue collection automatically after `/voyager/api/me` succeeds.
  *   v0.3.2 (2026-09-24) — navigate to LinkedIn login before the manual
  *     owner handoff when the profile has no live Voyager session, then verify
  *     `/voyager/api/me` after the handoff before collection starts.
@@ -67,12 +70,12 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
 	buildFullScanCoverageMessage,
-	type EnsureSessionArgs,
 	type EmittedMessage,
+	type EnsureSessionArgs,
 	type ProbeSessionArgs,
 	type ProgressExtra,
 	politeDelay,
@@ -350,20 +353,28 @@ export async function hasLinkedInSessionCookie(
 	context: ProbeSessionArgs["context"],
 ): Promise<boolean> {
 	const cookies = await context.cookies("https://www.linkedin.com/");
-	return cookies.some(
-		(c) => SESSION_COOKIE.test(c.name) && Boolean(c.value),
-	);
+	return cookies.some((c) => SESSION_COOKIE.test(c.name) && Boolean(c.value));
 }
 
-export async function ensureLinkedInSession({
-	capture,
-	context,
-	page,
-	sendInteraction,
-	manualLogin,
-}: Pick<EnsureSessionArgs, "capture" | "context" | "page" | "sendInteraction"> & {
-	manualLogin?: () => Promise<void>;
-}): Promise<void> {
+export async function ensureLinkedInSession(
+	{
+		assist,
+		capture,
+		completeAssistance,
+		context,
+		page,
+		sendInteraction,
+	}: Pick<
+		EnsureSessionArgs,
+		| "assist"
+		| "capture"
+		| "completeAssistance"
+		| "context"
+		| "page"
+		| "sendInteraction"
+	>,
+	timeoutSeconds = 1800,
+): Promise<void> {
 	if (await hasLinkedInSessionCookie(context)) {
 		await page
 			.goto(LINKEDIN_FEED_URL, {
@@ -385,25 +396,27 @@ export async function ensureLinkedInSession({
 		throw new Error("linkedin_login_page_unreachable", { cause: err });
 	}
 
-	if (manualLogin) {
-		await manualLogin();
-	} else {
-		await manualAction(
-			{
-				...(capture ? { capture } : {}),
-				message:
-					"Sign in to LinkedIn in the secure browser, then click Done. PDPP will verify the session before collecting.",
-				page,
-				reason: "login",
-				timeoutSeconds: 1800,
-			},
-			sendInteraction,
-		);
-	}
-
-	if (!(await checkApiAuth(page, capture))) {
+	const ready = await manualBrowserLogin({
+		assist,
+		capture,
+		completeAssistance,
+		isProbeSuccessful: (ok) => ok === true,
+		message:
+			"Sign in to LinkedIn in the secure browser. PDPP will verify the session and continue automatically.",
+		page,
+		probe: () => checkApiAuth(page, capture),
+		readinessProbe: async (readinessPage) => {
+			await readinessPage
+				.goto(LINKEDIN_FEED_URL, { waitUntil: "domcontentloaded" })
+				.catch((): undefined => undefined);
+			return checkApiAuth(readinessPage, capture);
+		},
+		sendInteraction,
+		timeoutSeconds,
+	});
+	if (!ready || !(await checkApiAuth(page, capture))) {
 		throw new Error(
-			"linkedin_login_manual_incomplete: no live Voyager session after owner handoff",
+			"linkedin_login_incomplete: no live Voyager session after owner handoff",
 		);
 	}
 }
