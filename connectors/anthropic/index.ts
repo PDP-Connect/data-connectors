@@ -172,6 +172,28 @@ const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
 
+/**
+ * Probe the browser's Claude session. A dead cookie probe also opens Claude's
+ * sign-in origin so the runtime's manual-action handoff has a useful page.
+ * Navigation errors intentionally propagate; a blank-page handoff is not a
+ * successful recovery path.
+ */
+export async function probeAnthropicSession({
+	context,
+	page,
+}: ProbeSessionArgs): Promise<boolean> {
+	const cookies = await context.cookies(`${CLAUDE_ORIGIN}/`);
+	if (
+		cookies.some(
+			(cookie) => SESSION_COOKIE.test(cookie.name) && Boolean(cookie.value),
+		)
+	) {
+		return true;
+	}
+	await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
+	return false;
+}
+
 /** The signed-in user's menu was the legacy collector's name and plan source. */
 async function readBrowserProfile(
 	page: BrowserCollectContext["page"],
@@ -1104,12 +1126,7 @@ if (isMainModule(import.meta.url)) {
 		browser: { profileName: "anthropic" },
 		validateRecord,
 		retryablePattern: /ECONN|fetch failed|rate_limited|export_pending/i,
-		async probeSession({ context }: ProbeSessionArgs): Promise<boolean> {
-			const cookies = await context.cookies(`${CLAUDE_ORIGIN}/`);
-			return cookies.some(
-				(c) => SESSION_COOKIE.test(c.name) && Boolean(c.value),
-			);
-		},
+		probeSession: probeAnthropicSession,
 		collect: collectAnthropic,
 	});
 }
