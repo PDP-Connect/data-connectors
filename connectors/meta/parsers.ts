@@ -208,12 +208,10 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 	}
 	const likers = node.facepile_top_likers ?? [];
 	const out: PostLikeRecord[] = [];
-	for (const liker of likers) {
-		const userId = liker.id || liker.pk || null;
-		if (!userId) {
-			continue;
-		}
+	for (const [liker_ordinal, liker] of likers.entries()) {
+		const userId = liker.id || liker.pk || "";
 		out.push({
+			liker_ordinal,
 			post_id: postId,
 			profile_pic_url: liker.profile_pic_url || null,
 			pk: liker.pk || liker.id || userId,

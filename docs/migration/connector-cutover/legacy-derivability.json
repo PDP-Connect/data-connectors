@@ -298,6 +298,7 @@
     "semantic_notes": [
       "COVERAGE DIFFERENCE: post_likes is a bounded 'top likers' sample (facepile_top_likers), not necessarily the full likers list the legacy who_liked[] name implies. Instagram's web surface has no full-likers-listing endpoint reachable from a logged-in session; the legacy scraper's own who_liked[] was presumably also bounded, but this cap is not disclosed by the legacy field name/description.",
       "posts[].who_liked[].profile_pic_url is an expiring third-party CDN URL and may be absent; retained for legacy parity but not durable.",
+      "Rows without both id and pk are preserved with empty legacy identifiers and a liker_ordinal from facepile_top_likers array order; post_likes primary key is (post_id, liker_ordinal).",
       "PROOF-GATE GAP: the live test account used to build this connector has zero posts, so posts/post_likes extraction is structurally proven but not proven against real post data yet (the committed fixture is synthetic-but-shape-calibrated). Does not change the field-mapping classification."
     ],
     "status": "derivable"

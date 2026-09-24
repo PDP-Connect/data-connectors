@@ -72,15 +72,16 @@ export const postsSchema = z.object({
 
 /**
  * post_likes stream. Child stream of posts (D3): one record per (post,
- * liker) pair. Primary key is the pair itself, since a single liker can
- * appear on many of the owner's posts.
+ * liker) pair. The source facepile array position is stable within each
+ * captured post and preserves duplicate or identity-free legacy rows.
  */
 export const postLikesSchema = z.object({
+	liker_ordinal: z.number().int().nonnegative(),
 	post_id: igIdSchema,
 	profile_pic_url: z.url().nullable().optional(),
-	pk: igIdSchema.optional(),
-	id: igIdSchema.optional(),
-	user_id: igIdSchema,
+	pk: z.string().optional(),
+	id: z.string().optional(),
+	user_id: z.string(),
 	username: postLikerUsernameSchema,
 });
 

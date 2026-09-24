@@ -322,6 +322,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 												username: "alice",
 											},
 											{ id: "liker2" },
+											{ username: "unkeyed" },
 										],
 										id: "p1",
 										image_versions2: {
@@ -348,11 +349,12 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	const likes = harness.emitted.filter((e) => e.stream === "post_likes");
 	assert.equal(posts.length, 1);
 	assert.equal(posts[0]?.data.id, "p1");
-	assert.equal(likes.length, 2);
+	assert.equal(likes.length, 3);
 	assert.deepEqual(
 		likes.map((like) => like.data),
 		[
 			{
+				liker_ordinal: 0,
 				post_id: "p1",
 				profile_pic_url: "https://example.com/alice.jpg",
 				pk: "liker-pk1",
@@ -361,6 +363,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 				username: "alice",
 			},
 			{
+				liker_ordinal: 1,
 				post_id: "p1",
 				profile_pic_url: null,
 				pk: "liker2",
@@ -368,8 +371,22 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 				user_id: "liker2",
 				username: "",
 			},
+			{
+				liker_ordinal: 2,
+				post_id: "p1",
+				profile_pic_url: null,
+				pk: "",
+				id: "",
+				user_id: "",
+				username: "unkeyed",
+			},
 		],
 	);
+	const unkeyedLike = likes.find((e) => e.data.liker_ordinal === 2)?.data;
+	assert.ok(unkeyedLike, "an identity-free source liker must be preserved");
+	assert.equal(unkeyedLike.user_id, "");
+	assert.equal(unkeyedLike.id, "");
+	assert.equal(unkeyedLike.pk, "");
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,

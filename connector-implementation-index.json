@@ -11702,6 +11702,9 @@
 						"schema": {
 							"type": "object",
 							"properties": {
+								"liker_ordinal": {
+									"type": "integer"
+								},
 								"post_id": {
 									"type": "string"
 								},
@@ -11722,9 +11725,9 @@
 									"x_pdpp_role": "actor"
 								}
 							},
-							"required": ["post_id", "user_id", "username"]
+							"required": ["liker_ordinal", "post_id", "user_id", "username"]
 						},
-						"primary_key": ["post_id", "user_id"],
+						"primary_key": ["post_id", "liker_ordinal"],
 						"selection": {
 							"fields": true,
 							"resources": true

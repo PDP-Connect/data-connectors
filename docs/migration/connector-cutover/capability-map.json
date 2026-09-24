@@ -112,7 +112,12 @@
             "orders[].items[].quantity": "order_items.quantity",
             "orders[].items[].price": "order_items.unit_price_cents"
           },
-          "dropped": [],
+          "dropped": [
+            {
+              "field": "posts[].who_liked[] rows without id or pk",
+              "reason": "source provides no liker id or pk; retained with empty identifiers and keyed by facepile ordinal"
+            }
+          ],
           "status": "contracted"
         }
       ]
@@ -227,7 +232,12 @@
             "posts[].taken_at": "posts.taken_at",
             "posts[].who_liked[]": "post_likes {post_id, user_id, username, profile_pic_url, pk, id}"
           },
-          "dropped": [],
+          "dropped": [
+            {
+              "field": "posts[].who_liked[] rows without id or pk",
+              "reason": "source provides no liker id or pk; retained with empty identifiers and keyed by facepile ordinal"
+            }
+          ],
           "status": "contracted"
         },
         {

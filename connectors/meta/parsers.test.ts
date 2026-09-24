@@ -309,6 +309,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 	});
 	assert.deepEqual(postLikeRecords(edge), [
 		{
+			liker_ordinal: 0,
 			post_id: "post1",
 			profile_pic_url: "https://cdn.example.com/alice.jpg",
 			pk: "pk1",
@@ -317,6 +318,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 			username: "alice",
 		},
 		{
+			liker_ordinal: 1,
 			post_id: "post1",
 			profile_pic_url: null,
 			pk: "u2",
@@ -327,7 +329,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 	]);
 });
 
-test("postLikeRecords: keeps identified likers with a missing username and skips missing ids", () => {
+test("postLikeRecords: preserves source order and empty legacy identifiers", () => {
 	const edge = makeEdge({
 		facepile_top_likers: [
 			{ id: "u1" },
@@ -337,6 +339,7 @@ test("postLikeRecords: keeps identified likers with a missing username and skips
 	});
 	assert.deepEqual(postLikeRecords(edge), [
 		{
+			liker_ordinal: 0,
 			post_id: "post1",
 			profile_pic_url: null,
 			pk: "u1",
@@ -345,6 +348,16 @@ test("postLikeRecords: keeps identified likers with a missing username and skips
 			username: "",
 		},
 		{
+			liker_ordinal: 1,
+			post_id: "post1",
+			profile_pic_url: null,
+			pk: "",
+			id: "",
+			user_id: "",
+			username: "no-id",
+		},
+		{
+			liker_ordinal: 2,
 			post_id: "post1",
 			profile_pic_url: null,
 			pk: "u3",
@@ -355,11 +368,11 @@ test("postLikeRecords: keeps identified likers with a missing username and skips
 	]);
 });
 
-test("postLikeRecords: empty array when post has no facepile_top_likers", () => {
+test("postLikeRecords: empty result when post has no facepile_top_likers", () => {
 	assert.deepEqual(postLikeRecords(makeEdge()), []);
 });
 
-test("postLikeRecords: empty array when the post itself has no id", () => {
+test("postLikeRecords: empty result when the post itself has no id", () => {
 	assert.deepEqual(
 		postLikeRecords({
 			node: { facepile_top_likers: [{ id: "u1", username: "a" }] },

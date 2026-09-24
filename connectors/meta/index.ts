@@ -125,8 +125,8 @@ import type { Page } from "playwright";
 import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
-	emitDetailCoverage,
 	type EnsureSessionArgs,
+	emitDetailCoverage,
 	type ProbeSessionArgs,
 	politeDelay,
 	type RecordData,
