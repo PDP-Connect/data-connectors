@@ -9643,7 +9643,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/heb",
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.5.8",
+				"version": "0.5.9",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -10003,7 +10003,8 @@
 						},
 						"primary_key": ["id"],
 						"selection": {
-							"fields": true
+							"fields": true,
+							"resources": false
 						},
 						"incremental": false,
 						"query": {
@@ -10174,7 +10175,8 @@
 							}
 						],
 						"selection": {
-							"fields": true
+							"fields": true,
+							"resources": false
 						},
 						"incremental": true,
 						"query": {
@@ -14727,8 +14729,7 @@
 						"consent_time_field": "sent_at",
 						"selection": {
 							"fields": true,
-							"resources": true,
-							"resource_field": "channel_id"
+							"resources": true
 						},
 						"incremental": true,
 						"relationships": [
@@ -20567,7 +20568,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/youtube",
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.2",
+				"version": "0.2.3",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -21031,8 +21032,7 @@
 						"primary_key": ["id"],
 						"selection": {
 							"fields": true,
-							"resources": true,
-							"time_range": true
+							"resources": true
 						},
 						"incremental": false,
 						"query": {
@@ -21132,7 +21132,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/youtube-takeout",
 				"connector_key": "youtube-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "YouTube Takeout",
 				"brand": {
 					"icon": "icon.svg",
@@ -21587,10 +21587,10 @@
 						},
 						"primary_key": ["id"],
 						"cursor_field": "watched_at",
+						"consent_time_field": "watched_at",
 						"selection": {
 							"fields": true,
-							"resources": true,
-							"time_range": true
+							"resources": true
 						},
 						"incremental": true,
 						"query": {

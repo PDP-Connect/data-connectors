@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/youtube",
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.2",
+	"version": "0.2.3",
 	"display_name": "YouTube",
 	"brand": {
 		"icon": "icon.svg",
@@ -467,8 +467,7 @@
 			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
-				"resources": true,
-				"time_range": true
+				"resources": true
 			},
 			"incremental": false,
 			"query": {

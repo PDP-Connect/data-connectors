@@ -16,6 +16,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { buildSourceDeclaration, validateSourceDeclaration } from "./source-declaration.mjs";
 
 const validProfile = {
@@ -286,3 +287,22 @@ describe("validateSourceDeclaration — negative", () => {
   });
 });
 
+
+describe("validateSourceDeclaration — connector fleet", () => {
+  it("every connector manifest builds a valid SourceDeclaration", () => {
+    const connectors = new URL("../../connectors/", import.meta.url);
+    const invalid = [];
+    for (const key of readdirSync(connectors).sort()) {
+      let manifest;
+      try {
+        manifest = JSON.parse(readFileSync(new URL(`${key}/manifest.json`, connectors), "utf8"));
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+        throw error;
+      }
+      const result = validateSourceDeclaration(buildSourceDeclaration(manifest));
+      if (!result.ok) invalid.push(`${key}: ${result.errors.join("; ")}`);
+    }
+    assert.deepEqual(invalid, []);
+  });
+});
