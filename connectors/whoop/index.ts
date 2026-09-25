@@ -174,8 +174,17 @@ export async function probeWhoopReadinessOnOwnerPage(
 	} catch {
 		return null;
 	}
-	const result = await makeWhoopPageFetch(page)(BOOTSTRAP_PATH);
-	if (result.status === 401 || result.status === 403) return null;
+	let result: WhoopFetchResult;
+	try {
+		result = await makeWhoopPageFetch(page)(BOOTSTRAP_PATH);
+	} catch {
+		// A poll can race the owner tab's navigation back from the identity
+		// provider. Retry on the next interval after the execution context settles.
+		return null;
+	}
+	if (result.status === 0 || result.status === 401 || result.status === 403) {
+		return null;
+	}
 	return parseBootstrapResponse(
 		assertSourceResponse(result, "bootstrap-after-owner-login"),
 	);

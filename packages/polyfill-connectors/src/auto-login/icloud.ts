@@ -38,6 +38,8 @@
 import type { Page } from "playwright";
 
 const VALIDATE_URL = "https://setup.icloud.com/setup/ws/1/validate";
+const NOTES_URL = "https://www.icloud.com/notes";
+const ICLOUD_HOST_RE = /(?:^|\.)icloud\.com$/;
 
 export interface CloudKitLiveConfig {
   ckBaseUrl: string;
@@ -45,47 +47,46 @@ export interface CloudKitLiveConfig {
   fullName: string | null;
 }
 
-/** POST the setup/validate endpoint through the browser context's request
- *  client. It shares the browser cookie jar and does not navigate or depend
- *  on the owner's current login redirect origin. Never throws: any
- *  transport/parse failure reads as "not live", matching the legacy probe. */
+/** POST validate from the iCloud page so browser cookies and the browser's
+ *  network identity remain the source of truth. */
 export async function probeCloudKitConfig(page: Page): Promise<CloudKitLiveConfig | null> {
-  let response:
-    | {
-        ok: () => boolean;
-        json: () => Promise<unknown>;
-        dispose: () => Promise<void>;
+  const result = (await page
+    .evaluate(async (url) => {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (!res.ok) {
+          return null;
+        }
+        const data = (await res.json()) as {
+          dsInfo?: { dsid?: string | number; fullName?: string };
+          webservices?: { ckdatabasews?: { url?: string } };
+        };
+        const dsid = data?.dsInfo?.dsid;
+        const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
+        if (dsid === undefined || dsid === null || !ckBaseUrl) {
+          return null;
+        }
+        return {
+          dsid: String(dsid),
+          ckBaseUrl,
+          fullName: data?.dsInfo?.fullName ?? null,
+        };
+      } catch {
+        return null;
       }
-    | undefined;
+    }, VALIDATE_URL)
+    .catch(() => null)) as CloudKitLiveConfig | null;
+  return result?.dsid && result.ckBaseUrl ? result : null;
+}
+
+function isOnICloudOrigin(page: Page): boolean {
   try {
-    response = await page.context().request.post(VALIDATE_URL, {
-      headers: {
-        origin: "https://www.icloud.com",
-        referer: "https://www.icloud.com/notes",
-      },
-      timeout: 15_000,
-    });
-    if (!response.ok()) {
-      return null;
-    }
-    const data = (await response.json()) as {
-      dsInfo?: { dsid?: string | number; fullName?: string };
-      webservices?: { ckdatabasews?: { url?: string } };
-    };
-    const dsid = data?.dsInfo?.dsid;
-    const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
-    if (dsid === undefined || dsid === null || !ckBaseUrl) {
-      return null;
-    }
-    return {
-      dsid: String(dsid),
-      ckBaseUrl,
-      fullName: data?.dsInfo?.fullName ?? null,
-    };
+    return ICLOUD_HOST_RE.test(new URL(page.url()).hostname);
   } catch {
-    return null;
-  } finally {
-    await response?.dispose().catch((): undefined => undefined);
+    return false;
   }
 }
 
@@ -98,10 +99,22 @@ export async function probeCloudKitConfig(page: Page): Promise<CloudKitLiveConfi
  * all, so it can decide whether to hand off to the owner before `collect()`
  * ever runs.
  *
- * This probe must not navigate: Apple sign-in can remain on an identity
- * redirect while 2FA is in progress. The context request client uses the
- * shared cookie jar and can validate the session from any owner-page origin.
+ * Navigating is required for the first probe and for collection: the
+ * validate request needs an iCloud page origin. Sign-in itself stays in the
+ * iCloud page, so later probes on that origin do not reload it.
  */
 export async function probeICloudSession(page: Page): Promise<boolean> {
+  if (!isOnICloudOrigin(page)) {
+    await page.goto(NOTES_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
+  }
+  return (await probeCloudKitConfig(page)) !== null;
+}
+
+/** Handoff readiness probe: never navigate the owner's tab while Apple ID
+ *  sign-in or 2FA may be in progress in an embedded identity frame. */
+export async function probeICloudSessionInPlace(page: Page): Promise<boolean> {
+  if (!isOnICloudOrigin(page)) {
+    return false;
+  }
   return (await probeCloudKitConfig(page)) !== null;
 }
