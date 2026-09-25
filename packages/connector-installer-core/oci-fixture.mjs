@@ -33,6 +33,7 @@ import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildSourceDeclaration } from "./source-declaration.mjs";
 
 export const PINNED_IDENTITY =
   "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main";
@@ -397,6 +398,7 @@ export function publishArtifact(
     assetsBytes: assetsBytesOverride = null,
     tamperLayer = null,
     configOverrides = {},
+    sourceDeclarationOverride = null,
   } = {}
 ) {
   const resolvedConnectorId =
@@ -410,6 +412,15 @@ export function publishArtifact(
     runtime_requirements: { bindings: runtimeBindings },
     setup: { modality: setupModality },
     capabilities: { public_listing: { tier } },
+    streams: [
+      {
+        name: "records",
+        semantics: "append_only",
+        schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        primary_key: ["id"],
+        selection: { fields: true, resources: true },
+      },
+    ],
     ...(withAssets ? { brand: { icon: "icons/ynab.svg" } } : {}),
   };
   const profileBytes = canonicalJson(profile);
@@ -421,16 +432,12 @@ export function publishArtifact(
   const assetsBytes = withAssets
     ? (assetsBytesOverride ?? tarball({ "icons/ynab.svg": "<svg/>\n" }))
     : null;
-  const sourceDeclarationBytes = canonicalJson({
-    declaration_version: "1.0",
-    connector_key: connectorKey,
-    connector_id: resolvedConnectorId,
-    version,
-    canonical_inputs: {
-      manifest: { path: "connectors/fixture/manifest.json", sha256: sha256(profileBytes) },
-      source_inventory: [],
-    },
-  });
+  // A real normative SourceDeclaration by default, derived the same way the
+  // publisher's builder derives one, so tests exercising the happy path
+  // exercise the real shape. `sourceDeclarationOverride` lets a negative test
+  // substitute an invalid object without every other fixture caller having to
+  // know what an invalid one looks like.
+  const sourceDeclarationBytes = canonicalJson(sourceDeclarationOverride ?? buildSourceDeclaration(profile));
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
   // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the

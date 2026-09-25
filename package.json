@@ -21,7 +21,10 @@
     "packages/connector-installer-core/oci-catalog.mjs",
     "packages/connector-installer-core/catalog-schema.mjs",
     "packages/connector-installer-core/catalog-schema-data.mjs",
-    "schemas/connector-catalog.schema.json"
+    "schemas/connector-catalog.schema.json",
+    "packages/connector-installer-core/source-declaration.mjs",
+    "packages/connector-installer-core/source-declaration-schema-data.mjs",
+    "schemas/source-declaration.schema.json"
   ],
   "exports": {
     "./installer-core": "./packages/connector-installer-core/index.mjs"
@@ -40,10 +43,12 @@
     "connector-implementation-index:check": "node ./scripts/generate-connector-implementation-index.mjs --check",
     "historical-contract:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
     "historical-contract:test": "node --test ./scripts/brand-icon-fleet.test.mjs",
-    "installer:test": "npm run catalog-schema:check && node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs ./packages/connector-installer-core/oci-catalog.test.mjs ./scripts/generate-connector-catalog.test.mjs ./scripts/publish-connector-catalog.test.mjs ./scripts/publish-ref-gate.test.mjs ./scripts/connector-publish-allowlist.test.mjs ./scripts/select-publish-connectors.test.mjs",
+    "installer:test": "npm run catalog-schema:check && npm run source-declaration-schema:check && node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs ./packages/connector-installer-core/oci-catalog.test.mjs ./scripts/generate-connector-catalog.test.mjs ./scripts/publish-connector-catalog.test.mjs ./scripts/publish-ref-gate.test.mjs ./scripts/connector-publish-allowlist.test.mjs ./scripts/select-publish-connectors.test.mjs ./packages/connector-installer-core/source-declaration.test.mjs",
     "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs ./.github/scripts/cross-repo-integrity/pin-freshness.test.mjs ./.github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
     "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
     "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check",
+    "source-declaration-schema:generate": "node ./scripts/generate-source-declaration-schema-module.mjs",
+    "source-declaration-schema:check": "node ./scripts/generate-source-declaration-schema-module.mjs --check",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check"
   },

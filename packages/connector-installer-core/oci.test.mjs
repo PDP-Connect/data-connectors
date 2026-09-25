@@ -629,6 +629,63 @@ test("A-T8 refuses when config.profile_digest or any of the four cross-checked f
   }
 });
 
+test("W28 refuses an artifact whose source declaration is a provenance-like object rather than a normative PDPP SourceDeclaration", async () => {
+  const signer = createSigner();
+
+  // The exact shape scripts/build-connector-oci-artifact.mjs used to emit
+  // before this fix — connector_key/connector_id/version/source.repository/
+  // canonical_inputs instead of protocol_version/source/publisher/display/
+  // streams. See local/captain-0924/w28-oci-declaration-review.md.
+  const provenanceLookalike = {
+    declaration_version: "1.0",
+    connector_key: "ynab",
+    connector_id: "https://github.com/PDP-Connect/data-connectors/connector/ynab",
+    version: "0.3.0",
+    source: {
+      repository: "https://github.com/PDP-Connect/data-connectors",
+      revision: "0".repeat(40),
+      package: "connectors/ynab",
+    },
+    canonical_inputs: { manifest: { path: "x", sha256: "sha256:0" }, source_inventory: [] },
+  };
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, {
+      signer,
+      sourceDeclarationOverride: provenanceLookalike,
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /not a valid PDPP SourceDeclaration/);
+        return true;
+      },
+      "a provenance-like source declaration must refuse the install"
+    );
+  });
+});
+
+test("W28 accepts a real, normative PDPP SourceDeclaration derived from the profile", async () => {
+  const signer = createSigner();
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, { signer });
+
+    const resolved = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+    // fetchResolvedArtifact does not surface the parsed declaration on its
+    // return value today, so this is a proxy for "assertConfigMatchesProfile
+    // accepted it": a real derived declaration installs cleanly at all.
+    assert.ok(resolved.manifest);
+  });
+});
+
 test("A-T9 refuses unsafe archive members by type as well as name, and cleans up temp dirs", async () => {
   const signer = createSigner();
 
