@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
-import type { Locator, Page } from "playwright";
+import type { BrowserContext, Locator, Page } from "playwright";
 
 import { connectorDir } from "../connector-paths.ts";
 import type {
@@ -801,7 +801,21 @@ function makePage(initial: FakePageInit = {}): Page {
 	};
 
 	const page: Partial<Page> = {
+		close: (): Promise<void> => Promise.resolve(),
 		content: (): Promise<string> => Promise.resolve(state.html),
+		context: () => {
+			const context: Partial<BrowserContext> = {
+				cookies: async () => [],
+				newPage: async () =>
+					makePage({
+						html: state.html,
+						live: state.live,
+						url: state.url,
+						view: state.view,
+					}),
+			};
+			return context as BrowserContext;
+		},
 		goto: (url: string): Promise<null> => {
 			state.gotoEvents.push({
 				atMs: state.nowMs,
@@ -1466,6 +1480,36 @@ test("ensureHebSession hands a first-time owner the browser login when credentia
 		harness.requests[0]?.message ?? "",
 		/username|password|save this connection/i,
 	);
+});
+
+test("ensureHebSession auto-resumes after the owner establishes a session", async () => {
+	const page = makePage({
+		html: SIGNIN_HTML,
+		live: false,
+		url: SIGNIN_URL,
+		view: "login",
+	});
+	const completions: { id: string; status: string }[] = [];
+
+	const ready = await ensureHebSession({
+		assist: () => {
+			state.live = true;
+			return Promise.resolve("assist_heb_login");
+		},
+		completeAssistance: (id, status) => {
+			completions.push({ id, status });
+			return Promise.resolve();
+		},
+		page,
+		postSubmitWaitClock: makePostSubmitWaitClock(page),
+		sendInteraction: () =>
+			Promise.reject(new Error("manual confirmation must not be requested")),
+	});
+
+	assert.equal(ready, true);
+	assert.deepEqual(completions, [
+		{ id: "assist_heb_login", status: "resolved" },
+	]);
 });
 
 test("ensureHebSession fires onCredentialSubmit exactly once, and only when the verified form was actually submitted", async () => {

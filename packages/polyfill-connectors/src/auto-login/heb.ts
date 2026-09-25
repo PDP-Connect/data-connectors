@@ -22,12 +22,16 @@
  * input. First-time H-E-B setup uses the owner-present browser handoff.
  */
 
+import type {
+	AssistanceCompletionStatus,
+	AssistanceRequest,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { Locator, Page } from "playwright";
 import {
 	isIncapsulaBlocked,
 	looksLoggedOut,
 } from "../../../../connectors/heb/parsers.ts";
-import { manualAction } from "../browser-handoff.ts";
+import { manualAction, manualBrowserLogin } from "../browser-handoff.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -148,8 +152,16 @@ const HEB_LOGIN_FIELDS: LoginCredentialFields = {
 };
 
 interface EnsureHebSessionArgs {
+	assist?: ((req: AssistanceRequest) => Promise<string>) | undefined;
 	capture?: CaptureSession | null;
 	checkpoint?: SessionCheckpointFn;
+	completeAssistance?:
+		| ((
+				assistanceRequestId: string,
+				status: AssistanceCompletionStatus,
+				extra?: { message?: string },
+			) => Promise<void>)
+		| undefined;
 	/**
 	 * This connection's resolved sign-in pair, threaded from the runtime (see
 	 * `login-credentials.ts`). Optional so a direct, non-runtime caller can omit
@@ -836,13 +848,20 @@ async function waitForPostSubmitAuthSurface(
 }
 
 async function handOffToOwner({
+	assist,
 	capture,
 	checkpoint,
+	completeAssistance,
 	page,
 	sendInteraction,
 	surface,
-}: Pick<EnsureHebSessionArgs, "capture" | "page" | "sendInteraction"> & {
+	readinessCheck = false,
+}: Pick<
+		EnsureHebSessionArgs,
+		"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	> & {
 	readonly checkpoint?: SessionCheckpointFn | undefined;
+	readonly readinessCheck?: boolean;
 	readonly surface: Exclude<HebAuthSurface, "live">;
 }): Promise<boolean> {
 	let message: string;
@@ -856,6 +875,26 @@ async function handOffToOwner({
 	} else {
 		message = manualLoginMessage(surface);
 	}
+	if (assist && completeAssistance && readinessCheck) {
+		const automaticMessage = message.replace(
+			"then continue. PDPP will re-check the session afterward.",
+			"PDPP will continue automatically when the session is ready.",
+		);
+		return await manualBrowserLogin({
+			assist,
+			...(capture ? { capture } : {}),
+			completeAssistance,
+			isProbeSuccessful: (ready) => ready,
+			message: automaticMessage,
+			page,
+			probe: () => probeHebSession(page),
+			readinessProbe: (readinessPage) => probeHebSession(readinessPage),
+			reason: "login",
+			sendInteraction,
+			timeoutSeconds: 1800,
+		});
+	}
+
 	await manualAction(
 		{
 			...(capture ? { capture } : {}),
@@ -1198,8 +1237,10 @@ async function declinePasskeyEnrollmentThenSettle({
 }
 
 export async function ensureHebSession({
+	assist,
 	capture,
 	checkpoint,
+	completeAssistance,
 	credentials,
 	onCredentialSubmit,
 	page,
@@ -1269,9 +1310,12 @@ export async function ensureHebSession({
 	const repairSurface: Exclude<HebAuthSurface, "live"> =
 		surface === "live" ? "unknown" : surface;
 	const recovered = await handOffToOwner({
+		...(assist ? { assist } : {}),
 		...(capture ? { capture } : {}),
-		checkpoint,
+		...(checkpoint ? { checkpoint } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
 		page,
+		readinessCheck: true,
 		sendInteraction,
 		surface: repairSurface,
 	});
