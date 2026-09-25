@@ -28,6 +28,14 @@ const SHARED_ARTIFACT_INPUTS = [
 	"scripts/source-declaration-members.mjs",
 	"vendor/pdpp-reference-contract/source.ts",
 ];
+// Inputs added with the source declaration layer. A commit before that layer
+// lacks them, and comparing against it must still work.
+const OPTIONAL_SHARED_ARTIFACT_INPUTS = new Set([
+	"packages/connector-installer-core/source-declaration.mjs",
+	"packages/connector-installer-core/pdpp-source-contract.mjs",
+	"scripts/source-declaration-members.mjs",
+	"vendor/pdpp-reference-contract/source.ts",
+]);
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const SIDE_EFFECT_LOCAL_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const DYNAMIC_LOCAL_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"]*?)\1/g;
@@ -150,10 +158,12 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
   const files = new Map();
   for (const path of SHARED_ARTIFACT_INPUTS) {
     const content = readFileAtCommit(commit, path, options);
-    if (content === null) {
+    if (content === null && !OPTIONAL_SHARED_ARTIFACT_INPUTS.has(path)) {
       throw new ArtifactInputError(`cannot read shared artifact input ${path} at ${commit}`);
     }
-    files.set(path, content);
+    // An absent declaration input is a real prior state (before artifacts
+    // carried a declaration); it hashes differently from any present file.
+    files.set(path, content ?? Buffer.from("\0absent"));
   }
 
   const manifestPath = `connectors/${manifest}/manifest.json`;
