@@ -11,6 +11,7 @@
  * Web API tokens that expire after roughly one hour.
  */
 
+import { createHmac } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
@@ -242,76 +243,85 @@ async function openSpotify(page: BrowserCollectContext["page"]): Promise<void> {
 	await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "domcontentloaded" });
 }
 
-async function hasSpotifySession(
+function spotifyTotp(timestampMs: number): string {
+	const encodedSecret = ',7/*F("rLJ2oxaKL^f+E1xvP@N';
+	const secret = Buffer.from(
+		encodedSecret
+			.split("")
+			.map((character, index) =>
+				String.fromCharCode(character.charCodeAt(0) ^ ((index % 33) + 9)),
+			)
+			.join(""),
+		"utf8",
+	);
+	const counter = BigInt(Math.floor(timestampMs / 1000 / 30));
+	const message = Buffer.alloc(8);
+	message.writeBigUInt64BE(counter);
+	const signature = createHmac("sha1", secret).update(message).digest();
+	const offset = (signature.at(-1) ?? 0) & 0x0f;
+	const code =
+		((((signature[offset] ?? 0) & 0x7f) << 24) |
+			(((signature[offset + 1] ?? 0) & 0xff) << 16) |
+			(((signature[offset + 2] ?? 0) & 0xff) << 8) |
+			((signature[offset + 3] ?? 0) & 0xff)) %
+		1000000;
+	return String(code).padStart(6, "0");
+}
+
+export async function hasSpotifySession(
 	page: BrowserCollectContext["page"],
 ): Promise<boolean> {
-	await openSpotify(page);
-	return await page.evaluate(async () => {
-		if (window.location.hostname !== "open.spotify.com") return false;
+	const request = page.context().request;
+	const headers = {
+		Origin: "https://open.spotify.com",
+		Referer: SPOTIFY_WEB_HOME,
+	};
+	let serverTime: number | null = null;
+	try {
+		const timeResponse = await request.get(
+			"https://open.spotify.com/api/server-time",
+			{ headers, timeout: 10_000 },
+		);
 		try {
-			let serverTime: number | null = null;
-			try {
-				const stResp = await fetch("/api/server-time");
-				const stData = await stResp.json();
-				const parsed = Number(stData.serverTime);
-				serverTime = Number.isFinite(parsed) ? parsed : null;
-			} catch {}
-			const totpSecret = ',7/*F("rLJ2oxaKL^f+E1xvP@N';
-			const xored = totpSecret
-				.split("")
-				.map((c, i) => c.charCodeAt(0) ^ ((i % 33) + 9));
-			const secretHex = Array.from(new TextEncoder().encode(xored.join("")))
-				.map((b) => b.toString(16).padStart(2, "0"))
-				.join("");
-			async function genTOTP(
-				hexSecret: string,
-				timestampMs: number,
-			): Promise<string> {
-				const counter = Math.floor(timestampMs / 1000 / 30);
-				const buf = new ArrayBuffer(8);
-				const v = new DataView(buf);
-				v.setUint32(0, Math.floor(counter / 0x100000000));
-				v.setUint32(4, counter & 0xffffffff);
-				const bytes = hexSecret.match(/.{1,2}/g) || [];
-				const kb = new Uint8Array(bytes.map((b) => Number.parseInt(b, 16)));
-				const key = await crypto.subtle.importKey(
-					"raw",
-					kb,
-					{ name: "HMAC", hash: "SHA-1" },
-					false,
-					["sign"],
-				);
-				const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, buf));
-				const o = (sig.at(-1) ?? 0) & 0x0f;
-				const code =
-					((((sig[o] ?? 0) & 0x7f) << 24) |
-						(((sig[o + 1] ?? 0) & 0xff) << 16) |
-						(((sig[o + 2] ?? 0) & 0xff) << 8) |
-						((sig[o + 3] ?? 0) & 0xff)) %
-					1000000;
-				return String(code).padStart(6, "0");
-			}
-			const now = Date.now();
-			const params = new URLSearchParams({
-				reason: "init",
-				productType: "web_player",
-				totp: await genTOTP(secretHex, now),
-				totpServer: serverTime
-					? await genTOTP(secretHex, serverTime * 1000)
-					: "unavailable",
-				totpVer: "61",
-			});
-			const tokenResp = await fetch(`/api/token?${params.toString()}`, {
-				credentials: "include",
-			});
-			const tokenData = await tokenResp.json();
-			return Boolean(
-				tokenResp.ok && tokenData.accessToken && !tokenData.isAnonymous,
-			);
-		} catch {
-			return false;
+			const timeData = (await timeResponse.json()) as {
+				serverTime?: unknown;
+			};
+			const parsed = Number(timeData.serverTime);
+			serverTime = Number.isFinite(parsed) ? parsed : null;
+		} finally {
+			await timeResponse.dispose();
 		}
+	} catch {
+		// The same token request below can still succeed without server time.
+	}
+
+	const now = Date.now();
+	const params = new URLSearchParams({
+		reason: "init",
+		productType: "web_player",
+		totp: spotifyTotp(now),
+		totpServer: serverTime ? spotifyTotp(serverTime * 1000) : "unavailable",
+		totpVer: "61",
 	});
+	try {
+		const tokenResponse = await request.get(
+			`https://open.spotify.com/api/token?${params.toString()}`,
+			{ headers, timeout: 10_000 },
+		);
+		try {
+			const tokenData = (await tokenResponse.json()) as {
+				accessToken?: unknown;
+				isAnonymous?: unknown;
+			};
+			return Boolean(
+				tokenResponse.ok() && tokenData.accessToken && !tokenData.isAnonymous,
+			);
+		} finally {
+			await tokenResponse.dispose();
+		}
+	} catch {
+		return false;
+	}
 }
 
 async function ensureSpotifySession({
@@ -336,6 +346,7 @@ async function ensureSpotifySession({
 		page,
 		probe: () => hasSpotifySession(page),
 		readinessProbe: hasSpotifySession,
+		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 30 * 60,
 	});

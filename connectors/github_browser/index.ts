@@ -62,6 +62,7 @@ async function ensureSession({
 		page,
 		probe: () => probeGitHubBrowserSession(page),
 		readinessProbe: (readinessPage) => probeGitHubBrowserSession(readinessPage),
+		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 30 * 60,
 	});
