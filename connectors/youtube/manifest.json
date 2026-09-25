@@ -467,8 +467,7 @@
 			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
-				"resources": true,
-				"time_range": true
+				"resources": true
 			},
 			"incremental": false,
 			"query": {

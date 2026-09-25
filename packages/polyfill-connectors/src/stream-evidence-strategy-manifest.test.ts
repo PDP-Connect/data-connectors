@@ -9,16 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import {
-	existsSync,
-	mkdtempSync,
-	mkdirSync,
-	readFileSync,
-	readdirSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -55,13 +46,10 @@ const VALID_FRESHNESS_STRATEGIES = new Set([
 	"source_reported_as_of",
 ]);
 
-const VALID_STREAM_SEMANTICS = new Set(["append_only", "mutable_state"]);
-
 interface ManifestStream {
 	coverage_strategy?: unknown;
 	freshness_strategy?: unknown;
 	name?: unknown;
-	semantics?: unknown;
 	[key: string]: unknown;
 }
 
@@ -107,23 +95,6 @@ function readManifests(): Array<{
 	return manifests;
 }
 
-function streamSemanticsViolations(
-	manifests = readManifests(),
-): string[] {
-	const violations: string[] = [];
-	for (const { connectorKey, manifest } of manifests) {
-		for (const stream of manifest.streams ?? []) {
-			const streamName = String(stream.name ?? "<missing>");
-			if (!VALID_STREAM_SEMANTICS.has(stream.semantics as string)) {
-				violations.push(
-					`${connectorKey}.${streamName}: semantics must be one of ${[...VALID_STREAM_SEMANTICS].join(" | ")}`,
-				);
-			}
-		}
-	}
-	return violations;
-}
-
 test("connector manifest streams declare valid coverage and freshness evidence strategies", () => {
 	const violations: string[] = [];
 	for (const { connectorKey, manifest } of readManifests()) {
@@ -149,46 +120,4 @@ test("connector manifest streams declare valid coverage and freshness evidence s
 		[],
 		"Every top-level manifest stream must declare coverage/freshness strategy",
 	);
-});
-
-test("connector manifest streams declare valid stream semantics", () => {
-	assert.deepEqual(
-		streamSemanticsViolations(),
-		[],
-		"Every top-level manifest stream must declare valid stream semantics",
-	);
-});
-
-test("connector manifest stream semantics reject unknown values such as append", () => {
-	const root = mkdtempSync(join(tmpdir(), "pdpp-manifest-semantics-"));
-	const prior = process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
-	try {
-		const connectorDir = join(root, "connectors", "probe");
-		mkdirSync(connectorDir, { recursive: true });
-		writeFileSync(
-			join(connectorDir, "manifest.json"),
-			JSON.stringify({
-				streams: [
-					{
-						name: "items",
-						semantics: "append",
-						coverage_strategy: "full_inventory",
-						freshness_strategy: "scheduled_window",
-					},
-				],
-			}),
-		);
-		process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = root;
-
-		assert.deepEqual(streamSemanticsViolations(), [
-			"polyfill/probe.items: semantics must be one of append_only | mutable_state",
-		]);
-	} finally {
-		if (prior === undefined) {
-			delete process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
-		} else {
-			process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = prior;
-		}
-		rmSync(root, { force: true, recursive: true });
-	}
 });

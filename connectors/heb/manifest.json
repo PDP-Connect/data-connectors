@@ -359,7 +359,8 @@
 			},
 			"primary_key": ["id"],
 			"selection": {
-				"fields": true
+				"fields": true,
+				"resources": false
 			},
 			"incremental": false,
 			"query": {
@@ -530,7 +531,8 @@
 				}
 			],
 			"selection": {
-				"fields": true
+				"fields": true,
+				"resources": false
 			},
 			"incremental": true,
 			"query": {
