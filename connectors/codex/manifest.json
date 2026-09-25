@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/codex",
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
 		"icon": "icon.svg",

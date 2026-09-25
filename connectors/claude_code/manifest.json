@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.2",
+	"version": "0.3.3",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",

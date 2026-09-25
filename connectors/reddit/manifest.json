@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/reddit",
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",

@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 	"connector_key": "imessage",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "iMessage (macOS)",
 	"brand": {
 		"icon": "icon.svg",

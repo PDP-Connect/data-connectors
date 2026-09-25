@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/strava",
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",

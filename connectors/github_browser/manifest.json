@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/github-browser",
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
