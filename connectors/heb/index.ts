@@ -2416,16 +2416,20 @@ if (isMainModule(import.meta.url)) {
 		// `shouldDeferCredentialsToProbe` / `establishSession`'s doc comments.
 		probeSessionIsAuthoritative: true,
 		async ensureSession({
+			assist,
 			page,
 			sendInteraction,
 			capture,
 			checkpoint,
+			completeAssistance,
 			credentials,
 			onCredentialSubmit,
 		}): Promise<void> {
 			const ok = await ensureHebSession({
+				assist,
 				capture,
 				checkpoint,
+				completeAssistance,
 				credentials,
 				onCredentialSubmit,
 				page,
