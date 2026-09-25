@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
-import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import type { BrowserCollectContext, EmittedMessage, RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { validateRecord } from "./schemas.ts";
+import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import { collectOuraBrowser, ensureOuraSession, initialStartDate } from "./index.ts";
+import { validateRecord } from "./schemas.ts";
 
 const HOME = "https://cloud.ouraring.com/";
 const UUID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -93,19 +93,18 @@ test("stored session navigates the blank run page before probing", async () => {
   assert.deepEqual(requests, ["/api/me"]);
 });
 
-test("streamed handoff navigates its separate readiness page to Oura", async () => {
+test("streamed handoff probes Oura on the login page without opening a sibling tab", async () => {
   let authenticated = false;
   const visits: string[] = [];
   const statuses: string[] = [];
-  const sibling = page("about:blank", visits);
   await withBrowser(async () => new Response("{}", { status: authenticated ? 200 : 401 }), async () => {
     await ensureOuraSession(Object.assign(Object.create(null) as EnsureSessionArgs, {
-      page: page("about:blank", [], async () => sibling),
+      page: page("about:blank", visits, async () => { throw new Error("unexpected sibling page"); }),
       assist: async () => { authenticated = true; return "assist-1"; },
       completeAssistance: async (_id: string, status: string) => { statuses.push(status); },
     }));
   });
-  assert.deepEqual(visits, [HOME]);
+  assert.deepEqual(visits, [HOME, `${HOME}user/sign-in`]);
   assert.deepEqual(statuses, ["resolved"]);
 });
 
