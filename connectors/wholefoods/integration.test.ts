@@ -126,6 +126,57 @@ test("assertCompleteOrderDetail rejects partial detail rows before emitting an o
 	);
 });
 
+// Regression test for the reported "Whole Foods failed right after the
+// profile record" defect (0.3.2/0.3.3): an order containing 2 units of the
+// SAME product renders as 2 rows on Amazon's search-results page
+// (`expectedItemCount: 2`, see parsers.ts's parseOrderSearchPageDom's
+// `seen.has(orderId)` increment), but the order-detail page dedupes by
+// product href/ASIN into ONE row with `quantity: 2` (parsers.ts's
+// `seenHrefs`). The prior raw `items.length` comparison (1 !== 2) threw for
+// every order with any repeated product — an ordinary, not edge-case,
+// grocery order shape — immediately after the profile record had already
+// been emitted, matching the reported symptom. No live account was
+// available to confirm this against a real run; this fixture is built
+// directly from both parsers' own documented dedup behavior. This must NOT
+// throw.
+test("assertCompleteOrderDetail tolerates a repeated-product order where the detail page folds duplicate units into one row's quantity", () => {
+	const repeatedProductStub: OrderStub = { ...STUB, expectedItemCount: 2 };
+	const dedupedDetailItems = [
+		{
+			imageUrl: null,
+			name: "Organic Bananas, 1 bunch",
+			productId: "B01ABCDEFG",
+			productUrl: "https://www.amazon.com/dp/B01ABCDEFG",
+			quantity: 2,
+			unitPriceDollars: 1.99,
+		},
+	];
+	assert.doesNotThrow(() =>
+		assertCompleteOrderDetail(repeatedProductStub, dedupedDetailItems),
+	);
+});
+
+// Counterweight: a genuinely incomplete detail page (a distinct product
+// missing its own row, not folded via quantity) must still fail closed.
+test("assertCompleteOrderDetail still rejects a detail page missing a distinct product row", () => {
+	const twoDistinctProductsStub: OrderStub = { ...STUB, expectedItemCount: 2 };
+	const onlyOneProductParsed = [
+		{
+			imageUrl: null,
+			name: "Organic Bananas, 1 bunch",
+			productId: "B01ABCDEFG",
+			productUrl: "https://www.amazon.com/dp/B01ABCDEFG",
+			quantity: 1,
+			unitPriceDollars: 1.99,
+		},
+	];
+	assert.throws(
+		() =>
+			assertCompleteOrderDetail(twoDistinctProductsStub, onlyOneProductParsed),
+		/did not match search result count 2/,
+	);
+});
+
 test("buildOrderRecord does not turn missing item prices into a partial total", () => {
 	const record = buildOrderRecord(STUB, null, [
 		{

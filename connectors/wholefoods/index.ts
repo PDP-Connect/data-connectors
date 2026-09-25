@@ -195,13 +195,38 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 
 // ─── Orders: detail + record building ─────────────────────────────────────
 
+/**
+ * `expectedItemCount` (from `parseOrderSearchPageDom`) counts one search-page
+ * ROW per matched order-id link; a repeated product's second unit renders as
+ * its own row on the search page and increments `expectedItemCount` again
+ * (parsers.ts's `parseOrderSearchPageDom`, the `seen.has(orderId)` branch).
+ * The order-detail page's `parseOrderDetailDom` instead dedupes items by
+ * product href/ASIN (`seenHrefs`) into one row per DISTINCT product, folding
+ * repeat units into that row's `quantity`. The two counts are in different
+ * units — search-page rows vs. distinct detail products — so comparing raw
+ * `items.length` against `expectedItemCount` (the pre-fix behavior) throws
+ * for ANY order containing more than one unit of the same product, which is
+ * an ordinary grocery-order shape, not an edge case. Reproduced against a
+ * synthetic fixture built from both parsers' own documented dedup rules (no
+ * live account was available); see the "repeated-product-quantity" test
+ * below. This is the most likely root cause of "Whole Foods failed right
+ * after the profile record" (0.3.2/0.3.3 did not touch this code path — see
+ * PR description for the git-history evidence). Comparing the search row
+ * count against the SUM of detail quantities reconciles the units and still
+ * fails closed if a distinct product is genuinely missing from the detail
+ * page.
+ */
 function assertCompleteOrderDetail(
 	stub: OrderStub,
 	items: readonly OrderDetailItem[],
 ): void {
-	if (items.length !== stub.expectedItemCount) {
+	const detailUnitCount = items.reduce(
+		(sum, item) => sum + (item.quantity ?? 1),
+		0,
+	);
+	if (detailUnitCount !== stub.expectedItemCount) {
 		throw new Error(
-			`Whole Foods order ${stub.orderId} detail item count ${items.length} did not match search result count ${stub.expectedItemCount}`,
+			`Whole Foods order ${stub.orderId} detail item count ${detailUnitCount} did not match search result count ${stub.expectedItemCount}`,
 		);
 	}
 }
