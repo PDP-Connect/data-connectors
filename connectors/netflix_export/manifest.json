@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/netflix-export",
 	"connector_key": "netflix-export",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Netflix Export",
 	"brand": {
 		"icon": "icon.svg",
