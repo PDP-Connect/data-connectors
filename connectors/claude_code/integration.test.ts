@@ -291,6 +291,64 @@ test("processJsonlLine: messages and attachments emit in file-line order within 
 	);
 });
 
+test("processJsonlLine: tool calls and results become searchable attachment records", async () => {
+	const { deps, emitted } = makeHarness();
+	await drive(deps, [
+		messageLine({
+			type: "assistant",
+			uuid: "assistant-message",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "call-1",
+						name: "Bash",
+						input: { command: "ls" },
+					},
+				],
+			},
+		}),
+		messageLine({
+			type: "user",
+			uuid: "tool-result-message",
+			message: {
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "call-1",
+						content: "file-a\\nfile-b",
+					},
+				],
+			},
+		}),
+	]);
+	const toolRecords = emitted.filter(
+		(record) => record.stream === "attachments",
+	);
+	assert.deepEqual(
+		toolRecords.map((record) => record.data.event_type),
+		["tool_use", "tool_result"],
+	);
+	assert.equal(toolRecords[0]?.data.tool_name, "Bash");
+	assert.equal(toolRecords[0]?.data.tool_use_id, "call-1");
+	assert.equal(toolRecords[0]?.data.content_preview, '{"command":"ls"}');
+	assert.equal(toolRecords[1]?.data.content_preview, "file-a\\nfile-b");
+	assert.equal(toolRecords[1]?.data.tool_use_id, "call-1");
+});
+
+test("processJsonlLine: message records preserve the pasted-image signal", async () => {
+	const { deps, emitted } = makeHarness();
+	await drive(deps, [
+		messageLine({ uuid: "plain-message" }),
+		messageLine({ uuid: "pasted-message", imagePasteIds: ["image-1"] }),
+	]);
+	const messages = emitted.filter((record) => record.stream === "messages");
+	assert.deepEqual(
+		messages.map((record) => record.data.has_pasted_content),
+		[false, true],
+	);
+});
+
 // ─── Invariant 5: timestamp propagation ─────────────────────────────────────
 
 test("processJsonlLine: obj.timestamp threads into each emitted record's `timestamp` field", async () => {

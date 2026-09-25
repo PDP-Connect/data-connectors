@@ -14,6 +14,8 @@ import {
 	mergeSessionObservations,
 	parseCsvEnv,
 	parseFrontmatter,
+	redactToolBodyText,
+	redactToolBodyValue,
 	SKILL_BODY_MAX_CHARS,
 	textPreview,
 	truncateBody,
@@ -140,6 +142,20 @@ test("parseFrontmatter: literal block scalar (|) keeps newlines", () => {
 test("parseFrontmatter: skips malformed key/value lines", () => {
 	const text = "---\nbad line\nname: foo\n---\n";
 	assert.equal(parseFrontmatter(text).frontmatter.name, "foo");
+});
+
+test("trajectory tool-body redaction replaces credential shapes and secret assignments", () => {
+	assert.equal(
+		redactToolBodyText("sk-ant-abcdefghijklmnop API_TOKEN=abcdef123456"),
+		"[redacted:credential] API_TOKEN=[redacted:secret_assignment]",
+	);
+	assert.deepEqual(
+		redactToolBodyValue({
+			command: "Bearer abcdefghijklmnop",
+			nested: ["safe"],
+		}),
+		{ command: "[redacted:credential]", nested: ["safe"] },
+	);
 });
 
 // ─── makeEmptySessionAccumulator / mergeSessionObservations / widenSessionTimeRange ─

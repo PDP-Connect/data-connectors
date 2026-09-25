@@ -29,7 +29,13 @@ import {
 } from "@pdpp/collector-runtime";
 
 import type { ArtifactCaptureContext } from "../../packages/polyfill-connectors/src/artifact-capture.ts";
-import { buildAttachmentRecord, emitToolResultFile } from "./index.ts";
+import {
+	buildAttachmentRecord,
+	emitToolResultFile,
+	makeJsonlObservations,
+	observeJsonlFields,
+	processJsonlLine,
+} from "./index.ts";
 import {
 	ATTACHMENT_PREVIEW_CHARS,
 	TOOL_RESULT_PREVIEW_CHARS,
@@ -247,6 +253,65 @@ describe("claude_code artifact capture", () => {
 });
 
 describe("claude_code inline attachment artifact capture (tool_use/tool_result JSONL content)", () => {
+	it("spools complete tool inputs and outputs from message content", async () => {
+		const h = makeHarness();
+		const emitted: Array<{ stream: string; data: Record<string, unknown> }> =
+			[];
+		const obj = {
+			type: "assistant",
+			uuid: "6a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f6",
+			sessionId: SESSION_ID,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "tool-use-1",
+						name: "Bash",
+						input: { command: "x".repeat(ATTACHMENT_PREVIEW_CHARS * 3) },
+					},
+					{
+						type: "tool_result",
+						tool_use_id: "tool-use-1",
+						content: "y".repeat(ATTACHMENT_PREVIEW_CHARS * 3),
+					},
+				],
+			},
+		};
+		const obs = makeJsonlObservations(null);
+		observeJsonlFields(obj, obs, null);
+		await processJsonlLine({
+			obj,
+			obs,
+			deps: {
+				captureContext: h.captureContext,
+				emitRecord: async (stream, data) => {
+					emitted.push({ stream, data });
+				},
+				requested: new Map([
+					["messages", { name: "messages" }],
+					["attachments", { name: "attachments" }],
+				]),
+			},
+		});
+		const attachments = emitted.filter(
+			(record) => record.stream === "attachments",
+		);
+		assert.equal(attachments.length, 2);
+		for (const [index, body] of [
+			JSON.stringify({ command: "x".repeat(ATTACHMENT_PREVIEW_CHARS * 3) }),
+			"y".repeat(ATTACHMENT_PREVIEW_CHARS * 3),
+		].entries()) {
+			const digest = attachments[index]?.data.artifact_sha256 as string;
+			assert.equal(attachments[index]?.data.artifact_capture, "captured");
+			assert.deepEqual(
+				await readFile(h.spool.pathFor(digest)),
+				Buffer.from(body),
+			);
+		}
+		h.outbox.close();
+	});
+
 	it("retains the complete body of an inline tool_result far larger than the preview", async () => {
 		const h = makeHarness();
 		const bigText = "y".repeat(ATTACHMENT_PREVIEW_CHARS * 20);

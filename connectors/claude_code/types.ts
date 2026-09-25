@@ -32,9 +32,14 @@ export interface JsonlObject {
 }
 
 export interface ContentPart {
+	id?: string;
+	input?: unknown;
+	is_error?: boolean;
 	name?: string;
 	text?: string;
+	tool_use_id?: string;
 	type?: string;
+	content?: unknown;
 }
 
 export interface SessionAccumulator {

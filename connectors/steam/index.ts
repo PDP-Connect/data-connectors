@@ -471,7 +471,7 @@ function friendRecord(
 		relationship: friend.relationship,
 		friend_since: friend.friend_since,
 		persona_name: persona?.personaname ?? null,
-		avatar_url: persona?.avatarfull ?? null,
+		avatar_url: persona?.avatarfull ?? persona?.avatar ?? null,
 		profile_url: persona?.profileurl ?? null,
 	};
 }

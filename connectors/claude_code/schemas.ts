@@ -112,6 +112,7 @@ export const attachmentsSchema = z.object({
 	event_type: stringMaxSchema(64),
 	hook_name: stringMaxSchema(256),
 	tool_use_id: stringMaxSchema(256),
+	tool_name: stringMaxSchema(256).optional(),
 	// content_preview keeps its bespoke refine for the +1-for-ellipsis bound;
 	// semantically equivalent to pdppSafeText (same safeTextPreview check).
 	content_preview: z

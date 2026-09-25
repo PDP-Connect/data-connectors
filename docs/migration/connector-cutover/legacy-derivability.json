@@ -75,14 +75,11 @@
       "messageCount": "sessions.message_count",
       "userMessageCount": "derivation: COUNT(messages WHERE session_id=X AND role='user')",
       "assistantMessageCount": "derivation: COUNT(messages WHERE session_id=X AND role='assistant')",
-      "models": "derivation: DISTINCT model per session — NOTE: no per-message model field currently exists on the messages stream (see semantic_notes); this derivation is not fully wired today"
+      "models": "not derivable: no per-message model field exists on the modern messages stream"
     },
-    "not_derivable": [
-      "kind (session vs subagent): the lead_decision explicitly says 'ADD fields sessions.kind, sessions.parent_session_id, sessions.title' but only title has landed — kind is NOT a stored sessions field (verified absent from manifests/claude_code.json and connectors/claude_code/index.ts/schemas.ts). It is PARTIALLY derivable via a join (EXISTS messages WHERE session_id=X AND is_sidechain=true, using messages.is_sidechain which does exist — index.ts:343), but this is a derivation gap versus the accepted lead_decision, not a genuine data absence.",
-      "parentSessionId: NOT reliably derivable. messages.agent_id (index.ts:345) identifies which subagent produced a message, but no field links a sidechain session back to the session_id that dispatched it — there is no dispatching-session pointer anywhere in the current schema. This is a genuine gap against the lead_decision's explicit 'ADD ... parent_session_id' instruction."
-    ],
+    "not_derivable": ["models: the modern message schema has no per-message model field; the session version is the CLI version, not a model id."],
     "semantic_notes": [
-      "lead_decision status: PARTIALLY IMPLEMENTED. title landed; kind and parent_session_id did not, despite the lead_decision calling for all three. This needs either a code follow-up (thread a dispatching-session id through subagent transcript creation) or a lead re-confirmation that the join-based derivation for kind is acceptable and parent_session_id is an accepted loss."
+      "The root Collection Profile now stores sessions.kind and sessions.parent_session_id. The collector derives subagent identity from the transcript file basename and parent id from the enclosing <parentSessionId>/subagents path, matching the legacy file-path derivation."
     ],
     "status": "loss"
   },
@@ -94,33 +91,34 @@
       "display": "messages.content (filtered to role=user)",
       "timestamp": "messages.timestamp",
       "sessionId": "messages.session_id",
-      "hasPastedContent": "messages.has_pasted_content (implemented; schemas.ts:196-198, index.ts:346 hasPastedContent(obj) — matches lead_decision 'ADD messages.has_pasted_content')",
+      "hasPastedContent": "messages.has_pasted_content for pasted images (transcript imagePasteIds); legacy history.jsonl pastedContents can cover cases not represented by this transcript field",
       "project": "derivation: JOIN sessions ON messages.session_id = sessions.id, read sessions.project_path"
     },
-    "not_derivable": [],
+    "not_derivable": ["Exact hasPastedContent parity for non-image pasted content: the legacy flag comes from history.jsonl pastedContents; the modern collector currently reads imagePasteIds from transcripts and does not ingest or correlate history.jsonl."],
     "semantic_notes": [
-      "lead_decision fully implemented: has_pasted_content is a required field on the messages schema, not merely optional-and-sometimes-present."
+      "The modern schema requires has_pasted_content and the source marks pasted images, but exact coverage of legacy history.jsonl pastedContents remains unresolved. Do not treat the imagePasteIds signal as proof that every legacy pasted-content type is captured."
     ],
-    "status": "derivable"
+    "status": "loss"
   },
   {
     "scope": "claude_code.trajectories",
     "connector_key": "claude_code",
     "streams": ["messages", "attachments"],
     "derivable": {
-      "sessions[].steps[] (array shape)": "reconstructable by joining messages + attachments on session_id, ordered by timestamp",
+      "sessions[].steps[] (array shape)": "reconstructable by joining messages + attachments on session_id, ordered by timestamp; tool_use and tool_result blocks in message content emit attachment records",
       "step.index, step.role, step.type (required fields)": "derivable from messages.role/type + attachments.event_type, message/attachment ordering",
       "step.text": "messages.content",
       "step.sidechain": "messages.is_sidechain",
       "tool_call.callId": "attachments.tool_use_id",
-      "tool_result.output (full body)": "attachments.blob_ref -> full-fidelity blob storage. IMPLEMENTED: captureAttachmentBody()/captureInlineArtifact (connectors/claude_code/index.ts:358-408) stores the complete tool-result body out-of-band; attachments.content_preview stays a bounded preview but artifact_capture/artifact_sha256/blob_ref (when captured) resolve to the full, untruncated body. This satisfies the lead_decision's 'add full-body fields ... when truncation has no documented rationale' by adding a full-body path alongside the preview, rather than removing the preview."
+      "tool_call.tool": "attachments.tool_name",
+      "tool_call.input": "attachments.content_preview plus artifact_sha256 for the full JSON input spooled locally",
+      "tool_result.output": "attachments.content_preview plus artifact_sha256 for the full output spooled locally"
     },
     "not_derivable": [
-      "tool_call.input (tool arguments): CONFIRMED genuine loss, not merely truncated. extractFromArrayPart (connectors/claude_code/parsers.ts:61-75) flattens a tool_use content block to the literal placeholder string \"[tool_use: <name>]\" and explicitly discards the block's `input` object — no other field on messages or attachments carries it. The JsonlObject.attachment type (connectors/claude_code/types.ts:13-18) has no input-shaped field either. This is a genuine, code-confirmed data loss requiring a named implementation change: thread `part.input` through into a stored field (e.g. attachments.tool_input, JSON-stringified with the same blob-capture treatment as tool_result.output) before claude_code.trajectories can be called fully derivable.",
-      "step.model: no per-step model field exists; only session-level version is stored"
+      "step.model: no per-step model field exists; only the CLI version is stored on the session"
     ],
     "semantic_notes": [
-      "lead_decision status: SUBSTANTIALLY IMPLEMENTED for tool_result.output (full-fidelity blob capture landed), but NOT implemented for tool_call.input (arguments), which remains completely unrecorded rather than truncated. The lead_decision's framing ('add full-body fields... or cite a documented rationale') was written assuming both input and output were merely truncated; input is actually not captured in any form, which is a stronger gap than the lead_decision anticipated."
+      "Credential-shaped values are redacted before new inline tool bodies are previewed or spooled, matching the frozen trajectory exporter. Full redacted bodies are durably spooled on the local device and identified by artifact_sha256. The current runtime has no artifact upload transport and records blob_ref as null, so remote retrieval is not available. The bounded content_preview is searchable, but local capture must not be described as end-to-end remote full-body parity until delivery exists."
     ],
     "status": "loss"
   },
@@ -896,14 +894,14 @@
       "state": "profile.loccstatecode",
       "cityId": "profile.loccityid",
       "steamLevel": "steam_level.player_level (schemas.ts:75)",
-      "accountCreated": "profile.timecreated (unix epoch seconds, intentionally not converted; index.ts:415, schemas.ts:22)",
-      "lastLogoff": "profile.lastlogoff (unix epoch seconds; index.ts:419, schemas.ts:26)",
+      "accountCreated": "profile.timecreated (integer Unix epoch seconds; legacy converted the same source value to ISO-8601, while the accepted modern contract keeps the source unit)",
+      "lastLogoff": "profile.lastlogoff (integer Unix epoch seconds; legacy converted it to ISO-8601, modern keeps the documented raw unit)",
       "personaState": "profile.personastate",
       "communityVisibilityState": "profile.communityvisibilitystate"
     },
     "not_derivable": [],
     "semantic_notes": [
-      "lead_decision 'KEEP raw-epoch field names' confirmed landed and unchanged: timecreated/lastlogoff remain integer epoch seconds (not renamed to *_at, not ISO-8601-converted), with the unit documented in the manifest description. Accepted, not a gap."
+      "lead_decision 'KEEP raw-epoch field names' is implemented: timecreated/lastlogoff remain integer epoch seconds (not renamed to *_at or ISO-8601-converted), with the unit documented in the manifest description. This intentionally preserves the Steam API representation instead of the legacy UI's ISO-8601 projection."
     ],
     "status": "derivable"
   },
@@ -939,7 +937,7 @@
       "friendSince": "friends.friend_since (unix epoch seconds, documented)",
       "relationship": "friends.relationship",
       "personaName": "friends.persona_name — IMPLEMENTED: batched GetPlayerSummaries, index.ts:473, chunked 100 ids/call at index.ts:725,732,748; schemas.ts:67",
-      "avatarUrl": "friends.avatar_url — index.ts:474 (avatarfull), schemas.ts:68",
+      "avatarUrl": "friends.avatar_url — index.ts:474 (avatarfull, falling back to avatar), schemas.ts:68",
       "profileUrl": "friends.profile_url — index.ts:475, schemas.ts:69"
     },
     "not_derivable": [],
