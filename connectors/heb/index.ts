@@ -215,6 +215,34 @@ function inspectAndAdvanceDetailSurface(input: {
 		expectedItemCount !== null && rowLinks.length === expectedItemCount
 			? "declared_count"
 			: null;
+	// A genuinely virtualized long list (declared count exceeds what this
+	// snapshot could ever mount at once) can never earn `declared_count`
+	// evidence on ANY single snapshot — by construction, the full set is never
+	// mounted together. Falling straight to the positional-identity throw
+	// would make every large virtualized order un-collectible (0924
+	// shortfall: a live DCR read showed 42/42 orders — itemCount 69-112 each
+	// — with a fully empty items array, because the very first page.evaluate
+	// snapshot threw before any scrolling could accumulate anything). When
+	// the row also carries no positional attribute, fall back to a content
+	// key derived from the row's own product href instead of a local index.
+	// This key is NOT trusted blindly: `collectDetailSurface` (Node side)
+	// tracks, across the whole scroll run, whether any href is ever seen,
+	// then unmounted, then seen again — the one pattern this content key
+	// cannot distinguish from a second, genuinely distinct purchased line of
+	// the same product — and fails closed for that specific href rather than
+	// silently collapsing two real rows into one. This branch requires
+	// expectedItemCount to be STRICTLY larger than this snapshot's mounted
+	// row count (rowLinks.length) specifically so it can never fire for the
+	// small/fully-mounted lists the declared_count and fail-closed tests
+	// already cover (order-detail-missing-row-identity.html, order-detail-
+	// unanchored-remount.html): both of those fixtures are called with NO
+	// expectedItemCount, so this condition is false for them and they keep
+	// throwing exactly as before.
+	const canAttemptVirtualizedContentIdentity =
+		expectedItemCount !== null &&
+		staticListEvidence === null &&
+		rowLinks.length > 0 &&
+		rowLinks.length < expectedItemCount;
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
 		const positionalIdentity = ["data-index", "aria-posinset"]
@@ -223,9 +251,13 @@ function inspectAndAdvanceDetailSurface(input: {
 				return value ? `position:${attribute}=${value}` : null;
 			})
 			.find((value) => value);
+		const href = link.getAttribute("href")?.trim() || null;
 		const key =
 			positionalIdentity ??
-			(staticListEvidence ? `position:document-order=${itemIndex}` : null);
+			(staticListEvidence ? `position:document-order=${itemIndex}` : null) ??
+			(canAttemptVirtualizedContentIdentity && href
+				? `content:href=${href}`
+				: null);
 		if (!key) {
 			throw new Error("detail row has no explicit positional identity");
 		}
@@ -381,6 +413,26 @@ async function collectDetailSurface(
 		staticListEvidence: null,
 	};
 	let lastError: string | null = null;
+	// `content:href=` rows (virtualized-large-list fallback, see
+	// inspectAndAdvanceDetailSurface) carry no positional attribute, so their
+	// per-snapshot occurrence rank alone cannot tell "the same row, still
+	// mounted or re-mounted after an overlap" apart from "a second, genuinely
+	// distinct purchased line of the same product, mounted after the first
+	// scrolled out of view and was never co-mounted with it." Both patterns
+	// present identically as "href seen at rank 1 again" once the row has
+	// unmounted in between: e.g. a same-href pair ~60 rows apart in an 80-row
+	// virtualized order would silently collapse to one `collected` entry if
+	// this were left unchecked, and `collected.size >= expectedRows` is not a
+	// reliable backstop against that collapse (a coincidental deficit
+	// elsewhere in the same run could still make the count line up). Rather
+	// than trust the count match, track this explicitly: once a
+	// `content:href=` base key has been observed, then goes a full snapshot
+	// without being mounted, then reappears, that specific href is ambiguous
+	// and the whole collection must fail closed rather than silently keep
+	// only one of its two rows.
+	const contentHrefMountedLastSnapshot = new Set<string>();
+	const contentHrefEverUnmounted = new Set<string>();
+	let ambiguousContentHref: string | null = null;
 
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
@@ -403,13 +455,37 @@ async function collectDetailSurface(
 		const scheme = identitySchemeOf(latest.rows);
 		if (scheme !== null && scheme !== collectedScheme) {
 			collected.clear();
+			contentHrefMountedLastSnapshot.clear();
+			contentHrefEverUnmounted.clear();
+			ambiguousContentHref = null;
 			collectedScheme = scheme;
 		}
+		const mountedContentHrefs = new Set<string>();
 		const occurrenceByKey = new Map<string, number>();
 		for (const row of latest.rows) {
 			const occurrence = (occurrenceByKey.get(row.key) ?? 0) + 1;
 			occurrenceByKey.set(row.key, occurrence);
 			collected.set(`${row.key}\u001f${occurrence}`, row.html);
+			if (row.key.startsWith("content:href=")) {
+				mountedContentHrefs.add(row.key);
+				if (
+					contentHrefEverUnmounted.has(row.key) &&
+					!contentHrefMountedLastSnapshot.has(row.key)
+				) {
+					const href = row.key.slice("content:href=".length);
+					ambiguousContentHref ??= href;
+					lastError ??= `ambiguous repeated product without positional identity: ${href}`;
+				}
+			}
+		}
+		for (const href of contentHrefMountedLastSnapshot) {
+			if (!mountedContentHrefs.has(href)) {
+				contentHrefEverUnmounted.add(href);
+			}
+		}
+		contentHrefMountedLastSnapshot.clear();
+		for (const href of mountedContentHrefs) {
+			contentHrefMountedLastSnapshot.add(href);
 		}
 		const signature = `${latest.scrollTop}:${latest.scrollHeight}:${[...collected.keys()].join("|")}:${latest.rows.map((row) => `${row.key}=${row.html}`).join("|")}`;
 		const progressed = signature !== lastSignature;
@@ -428,6 +504,14 @@ async function collectDetailSurface(
 				`H-E-B detail surface: ${collected.size} rows observed; action=${latest.actionableControl ?? "settling"}`,
 			);
 		}
+		if (ambiguousContentHref) {
+			// A repeated product whose two mounted appearances were never
+			// co-mounted cannot be proven complete under content identity — see
+			// the comment above `contentHrefMountedLastSnapshot`. Stop polling
+			// immediately rather than let further scrolling paper over it; this
+			// is reported as an error (not a silent hydrate) below.
+			break;
+		}
 		if (
 			latest.atEnd &&
 			!latest.loading &&
@@ -442,6 +526,7 @@ async function collectDetailSurface(
 
 	const timedOut = Date.now() - startedAt >= timeoutMs;
 	const complete =
+		!lastError &&
 		latest.atEnd &&
 		!latest.loading &&
 		!latest.actionableControl &&

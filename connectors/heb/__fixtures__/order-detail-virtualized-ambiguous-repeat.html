@@ -1,0 +1,67 @@
+<!-- Synthetic adversarial fixture: a large virtualized order (same shape as
+     order-detail-unattributed-large-virtualized.html — 80 declared items, an
+     18-row mounted window, no data-index/aria-posinset) except ONE product
+     href is deliberately repeated at two far-apart true positions (5 and 65)
+     that the 18-row window never mounts together. Content identity alone
+     (href) cannot tell "the same row, re-observed" apart from "a second,
+     genuinely distinct purchased line of the same product" once the row has
+     fully unmounted in between. Proves collectDetailSurface's ambiguous-
+     content-href guard fails closed here instead of silently keeping only one
+     of the two real rows. -->
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <section>
+        <h2 data-qe-id="orderDetailsGroupTitle">Synthetic groceries</h2>
+        <div id="order-items-scrollport" style="height: 180px; overflow-y: auto">
+          <div id="rows" style="position: relative"></div>
+        </div>
+      </section>
+    </main>
+    <script>
+      const TOTAL = 80;
+      const WINDOW_SIZE = 18;
+      const REPEATED_HREF = "/product-detail/ambiguous/repeated-widget";
+      const allItems = Array.from({ length: TOTAL }, (_, index) => {
+        if (index === 5 || index === 65) {
+          return { href: REPEATED_HREF, name: "Repeated widget" };
+        }
+        return {
+          href: `/product-detail/ambiguous/${index}`,
+          name: `Synthetic item ${index}`,
+        };
+      });
+      const rows = document.querySelector("#rows");
+      const scrollport = document.querySelector("#order-items-scrollport");
+      let first = 0;
+
+      function render() {
+        const last = Math.min(first + WINDOW_SIZE, TOTAL);
+        const visible = allItems.slice(first, last);
+        rows.style.height = `${TOTAL * 40}px`;
+        rows.innerHTML = visible
+          .map(
+            (item) =>
+              `<li data-qe-id="itemRow">
+                <a data-qe-id="itemRowDetailsName" href="${item.href}">${item.name}</a>
+                <span data-qe-id="checkoutItemPrice">$1.00</span>
+                <span data-qe-id="orderItemQty">Qty: 1</span>
+              </li>`
+          )
+          .join("");
+      }
+
+      scrollport.addEventListener("scroll", () => {
+        if (scrollport.scrollTop + scrollport.clientHeight >= scrollport.scrollHeight - 2) {
+          first = Math.min(first + WINDOW_SIZE, TOTAL - WINDOW_SIZE);
+        } else {
+          const ratio = scrollport.scrollTop / (scrollport.scrollHeight - scrollport.clientHeight);
+          first = Math.min(Math.round(ratio * (TOTAL - WINDOW_SIZE)), TOTAL - WINDOW_SIZE);
+        }
+        render();
+      });
+      render();
+    </script>
+  </body>
+</html>
