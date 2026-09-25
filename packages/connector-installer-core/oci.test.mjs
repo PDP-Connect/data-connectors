@@ -640,7 +640,7 @@ test("W28 refuses an artifact whose source declaration is a provenance-like obje
   // The exact shape scripts/build-connector-oci-artifact.mjs used to emit
   // before this fix — connector_key/connector_id/version/source.repository/
   // canonical_inputs instead of protocol_version/source/publisher/display/
-  // streams. See local/captain-0924/w28-oci-declaration-review.md.
+  // streams.
   const provenanceLookalike = {
     declaration_version: "1.0",
     connector_key: "ynab",

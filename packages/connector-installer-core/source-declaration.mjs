@@ -24,10 +24,9 @@ import {
 // per-connector value: `publisher.id` is a self-declared attribution claim
 // (pdpp spec-discovery-and-trust.md: "non-authoritative claim ... not used
 // for attribution, source acceptance, redirect approval, or any other trust
-// decision" until an out-of-repo binding exists — none does yet, see
-// local/captain-0924/w28-oci-declaration-fix.md), so this names the actual
-// publishing organisation rather than inventing a per-connector value the
-// schema does not ask for.
+// decision" until an out-of-repo binding exists — none does yet), so this
+// names the actual publishing organisation rather than inventing a
+// per-connector value the schema does not ask for.
 export const PUBLISHER_ID = "https://github.com/PDP-Connect";
 
 /**
