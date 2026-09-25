@@ -94,6 +94,8 @@ test("Claude manual login handoff auto-resumes when readiness probe sees a live 
 	});
 
 	assert.equal(readinessProbeCount, 2);
+	assert.equal(handoffPage.openedReadinessPages, 0);
+	assert.deepEqual(handoffPage.navigations, []);
 	assert.equal(interactions.length, 0);
 	assert.deepEqual(assistance, [
 		{
@@ -154,8 +156,32 @@ test("Claude manual login handoff fails closed when readiness never appears", as
 
 function makePageWithReadinessPages(
 	readinessCookies: () => Array<{ name: string; value: string }>,
-): Page {
-	return makePage(readinessCookies, () => makePage(readinessCookies));
+): Page & { navigations: string[]; openedReadinessPages: number } {
+	const page = makePage(readinessCookies, () =>
+		makePage(readinessCookies),
+	) as Page & {
+		navigations: string[];
+		openedReadinessPages: number;
+	};
+	page.navigations = [];
+	page.openedReadinessPages = 0;
+	const context = page.context;
+	page.context = () => {
+		const base = context();
+		return {
+			...base,
+			newPage: async () => {
+				page.openedReadinessPages += 1;
+				return makePage(readinessCookies);
+			},
+		} as ReturnType<Page["context"]>;
+	};
+	const goto = page.goto;
+	page.goto = async (url, options) => {
+		page.navigations.push(String(url));
+		return goto(url, options);
+	};
+	return page;
 }
 
 function makePage(

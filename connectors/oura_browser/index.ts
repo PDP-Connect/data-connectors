@@ -85,11 +85,12 @@ interface OuraDailyData {
   sleeps?: SleepSession[];
 }
 
-async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<boolean> {
-  if (new URL(page.url()).origin !== ORIGIN) {
-    await page.goto(HOME, { waitUntil: "domcontentloaded" });
+async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]): Promise<boolean> {
+  try {
+    if (new URL(page.url()).origin !== ORIGIN) return false;
+  } catch {
+    return false;
   }
-  if (new URL(page.url()).origin !== ORIGIN) return false;
   return page.evaluate(async () => {
     try {
       if (location.origin !== "https://cloud.ouraring.com") return false;
@@ -98,6 +99,13 @@ async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<bool
       return false;
     }
   });
+}
+
+async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<boolean> {
+  if (new URL(page.url()).origin !== ORIGIN) {
+    await page.goto(HOME, { waitUntil: "domcontentloaded" });
+  }
+  return hasOuraSessionOnCurrentPage(page);
 }
 
 export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> {
@@ -112,7 +120,8 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
     message: "Sign in to Oura in the secure browser, then continue. PDPP will verify the session before collecting.",
     page,
     probe: () => hasOuraSession(page),
-    readinessProbe: hasOuraSession,
+    readinessProbe: hasOuraSessionOnCurrentPage,
+    readinessProbeOnHandoffPage: true,
     sendInteraction,
     timeoutSeconds: 30 * 60,
   });

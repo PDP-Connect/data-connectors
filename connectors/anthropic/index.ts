@@ -143,6 +143,7 @@ import {
 	isMainModule,
 	validateHostBlobMessage,
 } from "@pdpp/connector-protocol";
+import type { BrowserContext } from "playwright";
 import {
 	readZipEntriesFromFile,
 	type ZipReadPolicy,
@@ -186,16 +187,18 @@ export async function probeAnthropicSession({
 	context,
 	page,
 }: ProbeSessionArgs): Promise<boolean> {
-	const cookies = await context.cookies(`${CLAUDE_ORIGIN}/`);
-	if (
-		cookies.some(
-			(cookie) => SESSION_COOKIE.test(cookie.name) && Boolean(cookie.value),
-		)
-	) {
-		return true;
-	}
+	if (await hasAnthropicSessionCookie(context)) return true;
 	await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
 	return false;
+}
+
+async function hasAnthropicSessionCookie(
+	context: BrowserContext,
+): Promise<boolean> {
+	const cookies = await context.cookies(`${CLAUDE_ORIGIN}/`);
+	return cookies.some(
+		(cookie) => SESSION_COOKIE.test(cookie.name) && Boolean(cookie.value),
+	);
 }
 
 export async function ensureAnthropicSession({
@@ -232,8 +235,8 @@ export async function ensureAnthropicSession({
 		...(now ? { now } : {}),
 		page,
 		probe: () => probeAnthropicSession({ context, page }),
-		readinessProbe: (probePage) =>
-			probeAnthropicSession({ context, page: probePage }),
+		readinessProbe: () => hasAnthropicSessionCookie(context),
+		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 1800,
 	});
