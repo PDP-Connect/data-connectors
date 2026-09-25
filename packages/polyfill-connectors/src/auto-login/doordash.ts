@@ -23,8 +23,12 @@
  * a live login before this connector is promoted past `development`.
  */
 
+import type {
+	AssistanceCompletionStatus,
+	AssistanceRequest,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { BrowserContext, Locator, Page } from "playwright";
-import { manualAction } from "../browser-handoff.ts";
+import { manualBrowserLogin } from "../browser-handoff.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -68,8 +72,16 @@ const SUBMIT_BUTTON_TEXT = /^(log in|sign in|submit)$/i;
 const noopCheckpoint: SessionCheckpointFn = () => Promise.resolve();
 
 interface EnsureDoorDashSessionArgs {
+	assist?: ((req: AssistanceRequest) => Promise<string>) | undefined;
 	capture?: CaptureSession | null;
 	checkpoint?: SessionCheckpointFn;
+	completeAssistance?:
+		| ((
+				assistanceRequestId: string,
+				status: AssistanceCompletionStatus,
+				extra?: { message?: string },
+		  ) => Promise<void>)
+		| undefined;
 	context: BrowserContext;
 	credentials?: Readonly<Record<string, string | undefined>> | undefined;
 	fieldTimeoutMs?: number | undefined;
@@ -118,15 +130,22 @@ async function probeDoorDashSession(page: Page): Promise<boolean> {
 }
 
 async function requestManualLoginForChallenge({
+	assist,
 	capture,
+	completeAssistance,
 	page,
 	reason,
 	sendInteraction,
-}: Pick<EnsureDoorDashSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureDoorDashSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly reason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
+		...(assist ? { assist } : {}),
 		...(capture ? { capture } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
 		handoffReason: "captcha",
 		message:
 			`DoorDash did not render the expected sign-in form (${reason}). ` +
@@ -139,15 +158,22 @@ async function requestManualLoginForChallenge({
 }
 
 async function requestManualLoginWithoutCredentials({
+	assist,
 	capture,
+	completeAssistance,
 	credentialReason,
 	page,
 	sendInteraction,
-}: Pick<EnsureDoorDashSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureDoorDashSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly credentialReason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
+		...(assist ? { assist } : {}),
 		...(capture ? { capture } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
 		handoffReason: "login",
 		message:
 			`${credentialReason} ` +
@@ -158,46 +184,59 @@ async function requestManualLoginWithoutCredentials({
 }
 
 async function waitForManualLogin({
+	assist,
 	capture,
+	completeAssistance,
 	handoffReason,
 	message,
 	page,
 	sendInteraction,
-}: Pick<EnsureDoorDashSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureDoorDashSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly handoffReason: "captcha" | "login";
 	readonly message: string;
 }): Promise<boolean> {
-	await manualAction(
-		{
-			...(capture ? { capture } : {}),
-			page,
-			reason: handoffReason,
-			message,
-			timeoutSeconds: 1800,
+	return await manualBrowserLogin({
+		...(assist ? { assist } : {}),
+		...(capture ? { capture } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
+		isProbeSuccessful: (ready) => ready,
+		message,
+		page,
+		probe: async () => {
+			await page.waitForTimeout(3000);
+			return await probeDoorDashSession(page);
 		},
+		readinessProbe: (readinessPage) => probeDoorDashSession(readinessPage),
+		reason: handoffReason,
 		sendInteraction,
-	);
-	await page.waitForTimeout(3000);
-	return probeDoorDashSession(page);
+		timeoutSeconds: 1800,
+	});
 }
 
 async function ensureManualSessionWithoutCredentials({
+	assist,
 	capture,
 	checkpoint,
+	completeAssistance,
 	credentialReason,
 	page,
 	sendInteraction,
-}: {
-	capture?: CaptureSession | null;
+}: Pick<
+	EnsureDoorDashSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	checkpoint: SessionCheckpointFn;
 	readonly credentialReason: string;
-	page: Page;
-	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
 }): Promise<boolean> {
 	await checkpoint("doordash-signin-manual-required");
 	if (
 		await requestManualLoginWithoutCredentials({
+			...(assist ? { assist } : {}),
 			...(capture ? { capture } : {}),
+			...(completeAssistance ? { completeAssistance } : {}),
 			credentialReason,
 			page,
 			sendInteraction,
@@ -209,14 +248,19 @@ async function ensureManualSessionWithoutCredentials({
 }
 
 async function fillOrHandleChallenge({
+	assist,
 	capture,
+	completeAssistance,
 	fieldTimeoutMs = 15_000,
 	locator,
 	page,
 	reason,
 	sendInteraction,
 	value,
-}: Pick<EnsureDoorDashSessionArgs, "capture" | "page" | "sendInteraction"> & {
+}: Pick<
+	EnsureDoorDashSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly locator: Locator;
 	readonly fieldTimeoutMs?: number | undefined;
 	readonly reason: string;
@@ -231,7 +275,9 @@ async function fillOrHandleChallenge({
 		}
 		if (
 			await requestManualLoginForChallenge({
+				...(assist ? { assist } : {}),
 				...(capture ? { capture } : {}),
+				...(completeAssistance ? { completeAssistance } : {}),
 				page,
 				reason,
 				sendInteraction,
@@ -262,8 +308,10 @@ async function clickButtonWithText(page: Page, pattern: RegExp): Promise<void> {
 }
 
 export async function ensureDoorDashSession({
+	assist,
 	capture,
 	checkpoint = noopCheckpoint,
+	completeAssistance,
 	context: _context,
 	credentials,
 	fieldTimeoutMs,
@@ -284,8 +332,10 @@ export async function ensureDoorDashSession({
 	);
 	if (resolved.kind === "absent") {
 		return await ensureManualSessionWithoutCredentials({
+			...(assist ? { assist } : {}),
 			...(capture ? { capture } : {}),
 			checkpoint,
+			...(completeAssistance ? { completeAssistance } : {}),
 			credentialReason: resolved.reason,
 			page,
 			sendInteraction,
@@ -304,7 +354,9 @@ export async function ensureDoorDashSession({
 	// legacy scraper's own selector list; fall back to type/id heuristics
 	// for the same reason amazon.ts tries multiple candidate selectors.
 	const emailStep = await fillOrHandleChallenge({
+		...(assist ? { assist } : {}),
 		...(capture ? { capture } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
 		fieldTimeoutMs,
 		locator: page.locator(
 			'input[name="email"], input[type="email"], input[autocomplete="email"]',
@@ -323,7 +375,9 @@ export async function ensureDoorDashSession({
 
 	// Password step — appears after the Continue click (multi-step form).
 	const passwordStep = await fillOrHandleChallenge({
+		...(assist ? { assist } : {}),
 		...(capture ? { capture } : {}),
+		...(completeAssistance ? { completeAssistance } : {}),
 		fieldTimeoutMs,
 		locator: page.locator('input[name="password"], input[type="password"]'),
 		page,
@@ -345,7 +399,9 @@ export async function ensureDoorDashSession({
 	}
 	if (
 		await requestManualLoginForChallenge({
+			...(assist ? { assist } : {}),
 			...(capture ? { capture } : {}),
+			...(completeAssistance ? { completeAssistance } : {}),
 			page,
 			reason: "automated sign-in did not complete",
 			sendInteraction,
