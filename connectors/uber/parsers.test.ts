@@ -159,6 +159,8 @@ test("tripRecord: builds a full trips record from GetTrip's trip + receipt", () 
 	assert.equal(record.fare_total_cents, 4136);
 	assert.equal(record.distance_meters, 29_490);
 	assert.equal(record.duration_seconds, 2100);
+	assert.equal(record.distance_display, "29.49 kilometers");
+	assert.equal(record.duration_display, "35 minutes");
 	assert.equal(record.product_type, "UberX");
 	assert.equal(record.is_surge, false);
 	// Detail-only fields that belong to receipts must never appear here (D3).
@@ -189,12 +191,19 @@ test("tripRecord: nulls every field cleanly with no trip evidence beyond an id",
 	assert.equal(record.fare_total_cents, null);
 	assert.equal(record.distance_meters, null);
 	assert.equal(record.duration_seconds, null);
+	assert.equal(record.distance_display, null);
+	assert.equal(record.duration_display, null);
 	assert.equal(record.product_type, null);
 	assert.equal(record.is_surge, null);
 });
 
-test("tripRecord: returns null when GetTrip produced no trip at all", () => {
-	assert.equal(tripRecord("trip-4", undefined, undefined), null);
+test("tripRecord: retains the Activity identity when GetTrip produced no trip", () => {
+	const record = tripRecord("trip-4", undefined, undefined);
+	assert.equal(record.id, "trip-4");
+	assert.equal(record.status, null);
+	assert.equal(record.requested_at, null);
+	assert.equal(record.pickup_address, null);
+	assert.equal(record.fare_total, null);
 });
 
 test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
@@ -247,19 +256,25 @@ test("receiptRecord: builds a full detail record from fare_breakdown lines", () 
 	]);
 });
 
-test("receiptRecord: falls back to null fare_total when no fare_total line exists", () => {
+test("receiptRecord: uses the hydrated trip fare when the receipt has no total line", () => {
 	const record = receiptRecord("trip-2", [
 		{ amountRaw: "$2.00", label: "Booking Fee", slug: "booking_fee" },
-	]);
+	], "$42.00");
 	assert.ok(record);
-	assert.equal(record.fare_total, null);
-	assert.equal(record.fare_total_cents, null);
-	assert.equal(record.currency, null);
+	assert.equal(record.fare_total, "$42.00");
+	assert.equal(record.fare_total_cents, 4200);
+	assert.equal(record.currency, "USD");
 	assert.deepEqual(record.fare_breakdown, [
 		{ label: "Booking Fee", amount_cents: 200 },
 	]);
 });
 
-test("receiptRecord: returns null with no fare-breakdown evidence at all", () => {
-	assert.equal(receiptRecord("trip-3", []), null);
+test("receiptRecord: keeps a receipt row when no fare-breakdown evidence is available", () => {
+	const record = receiptRecord("trip-3", []);
+	assert.equal(record.id, "trip-3");
+	assert.equal(record.trip_id, "trip-3");
+	assert.equal(record.fare_total, null);
+	assert.equal(record.fare_total_cents, null);
+	assert.equal(record.currency, null);
+	assert.deepEqual(record.fare_breakdown, []);
 });

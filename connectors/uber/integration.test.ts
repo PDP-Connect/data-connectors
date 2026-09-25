@@ -188,16 +188,23 @@ test("collectAllStreams: receipts requested emits both streams from GetTrip + Ge
 	assert.equal(calls.filter((c) => c.startsWith("GetReceipt")).length, 2);
 });
 
-test("collectAllStreams: receipts-only (trips not requested) fetches GetReceipt but not GetTrip, no trips RECORDs", async () => {
+test("collectAllStreams: receipts-only hydrates GetTrip for its headline fare without emitting trips", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
-		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+		getTrip: {
+			"trip-1": { body: getTripBody({ status: "COMPLETED", fare: "$10.00" }) },
+		},
+		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$3.00")) } },
 	});
 	const { ctx, emitted } = makeCtx(["receipts"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 0);
-	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 1);
-	assert.equal(calls.filter((c) => c.startsWith("GetTrip")).length, 0);
+	const receipts = emitted.filter((r) => r.stream === "receipts");
+	assert.equal(receipts.length, 1);
+	assert.equal(receipts[0]?.data.fare_total, "$10.00");
+	assert.equal(receipts[0]?.data.fare_total_cents, 1000);
+	assert.equal(receipts[0]?.data.currency, "USD");
+	assert.equal(calls.filter((c) => c.startsWith("GetTrip")).length, 1);
 	assert.equal(calls.filter((c) => c.startsWith("GetReceipt")).length, 1);
 });
 
@@ -240,20 +247,40 @@ test("collectAllStreams: receipts never constructs a DETAIL_COVERAGE of its own 
 	assert.equal(receiptsCoverage, undefined);
 });
 
-test("collectAllStreams: a GetReceipt failure is non-fatal — no receipts record is fabricated", async () => {
+test("collectAllStreams: a GetReceipt failure keeps the receipt row with GetTrip fare fallback", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
 		getTrip: {
 			"trip-1": { body: getTripBody({ status: "COMPLETED", fare: "$10.00" }) },
 		},
 		// No scripted GetReceipt response for trip-1 -> throws internally,
-		// caught as non-fatal; receiptRecord sees an empty fareBreakdown and
-		// returns null (no fabricated all-null record).
+		// caught as non-fatal. The receipt row mirrors legacy coverage and
+		// uses the observed GetTrip fare.
 	});
 	const { ctx, emitted } = makeCtx(["trips", "receipts"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
-	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 0);
+	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 1);
+	assert.equal(
+		emitted.find((r) => r.stream === "receipts")?.data.fare_total,
+		"$10.00",
+	);
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
+});
+
+test("collectAllStreams: a GetTrip failure retains the Activity trip identity with null details", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-2" }]) }],
+		// No scripted GetTrip response for trip-2 -> caught as a non-fatal
+		// detail failure. The Activity id is known; all detail fields stay null.
+	});
+	const { ctx, emitted } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	const trip = emitted.find((r) => r.stream === "trips");
+	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
+	assert.equal(trip?.data.id, "trip-2");
+	assert.equal(trip?.data.requested_at, null);
+	assert.equal(trip?.data.pickup_address, null);
+	assert.equal(trip?.data.fare_total, null);
 });
 
 test("collectAllStreams: trips DETAIL_COVERAGE is self-mapped (state_stream === trips)", async () => {
