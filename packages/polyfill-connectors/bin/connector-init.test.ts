@@ -35,6 +35,7 @@ import {
 	fixturesDir,
 	packageRoot as PACKAGE_ROOT,
 } from "../src/connector-paths.ts";
+import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 import {
 	findCollisions,
 	InitArgsError,
@@ -152,6 +153,17 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 		for (const [label, path] of Object.entries(plan.files)) {
 			assert.ok(existsSync(path), `${label} was not created at ${path}`);
 		}
+		const reconciliation = reconcileFromDisk({
+			connector: TEMP_NAME,
+			manifestPath: plan.files.manifestJson,
+			schemaPath: plan.files.schemasTs,
+			emitSourcePaths: [plan.files.indexTs, plan.files.parsersTs],
+		});
+		assert.equal(
+			reconciliation.ok,
+			true,
+			`scaffold does not reconcile: ${JSON.stringify(reconciliation, null, 2)}`,
+		);
 
 		// Re-running init against the now-populated tree must refuse (collision
 		// list is non-empty) rather than silently overwrite.
