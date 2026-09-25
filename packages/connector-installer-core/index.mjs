@@ -69,6 +69,9 @@ export { fetchCatalog } from "./oci-catalog.mjs";
 
 export const DEFAULT_CONNECTOR_INDEX_URL =
   "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
+// Where an OCI install writes the artifact's SourceDeclaration layer, relative
+// to the connector's collection-profile directory.
+export const SOURCE_DECLARATION_PATH = "source-declaration.json";
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
 export const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY =
@@ -1016,6 +1019,10 @@ async function fetchOciArtifact(entry, options = {}) {
     entrypointPath: entry.entrypointPath,
     provenanceBuffer: provenanceBytes,
     provenancePath: entry.provenancePath,
+    // Retained next to the profile so the host can read back the exact
+    // declaration bytes the signed manifest pins.
+    sourceDeclarationBuffer: sourceDeclarationBytes,
+    sourceDeclarationPath: SOURCE_DECLARATION_PATH,
     artifactKind: entry.artifactKind,
     schemaFiles: [],
     assetFiles: [
@@ -1035,6 +1042,7 @@ async function fetchOciArtifact(entry, options = {}) {
       manifest: sha256Digest(profileBytes),
       entrypoint: sha256Digest(entrypointFile.buffer),
       provenance: sha256Digest(provenanceBytes),
+      sourceDeclaration: sha256Digest(sourceDeclarationBytes),
     },
   };
 }
@@ -1272,6 +1280,14 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
       relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
       buffer: resolved.provenanceBuffer,
     },
+    ...(resolved.sourceDeclarationBuffer
+      ? [
+          {
+            relativePath: `${artifactRoot}/${resolved.sourceDeclarationPath}`,
+            buffer: resolved.sourceDeclarationBuffer,
+          },
+        ]
+      : []),
     // Licences and brand assets, which the publisher ships unconditionally
     // because distributing the code requires distributing them (C5.4), so they
     // are written rather than dropped on the floor.
@@ -1497,6 +1513,12 @@ export async function generateLock({
               entrypointSha256: resolved.checksums.entrypoint,
               provenancePath: resolved.entry.provenancePath,
               provenanceSha256: resolved.checksums.provenance,
+              ...(resolved.sourceDeclarationPath
+                ? {
+                    sourceDeclarationPath: resolved.sourceDeclarationPath,
+                    sourceDeclarationSha256: resolved.checksums.sourceDeclaration,
+                  }
+                : {}),
             }
           : { scriptSha256: resolved.checksums.script }),
         sourceTag: resolved.entry.sourceTag ?? resolved.entry.gitRef ?? sourceMeta.sourceTag,
@@ -1608,6 +1630,8 @@ export async function installFromLock({
         registry: artifact.oci.registry,
         repository: artifact.oci.repository,
         digest: artifact.oci.digest,
+        sourceDeclarationPath: `collection-profiles/${artifact.connectorId}/${artifact.sourceDeclarationPath}`,
+        sourceDeclarationSha256: artifact.checksums.sourceDeclaration,
       })),
   };
 }
