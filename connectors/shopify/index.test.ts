@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Page } from "playwright";
+import { chromium, type Page } from "playwright";
 import type {
 	EmittedMessage,
 	RecordData,
@@ -29,6 +29,7 @@ import {
 	collectShopify,
 	ensureShopifySession,
 	hasVerifiedEmptyOrderHistoryInPage,
+	readApolloCacheInPage,
 	hasShopOrderHistoryContextInPage,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -416,6 +417,48 @@ test("verified empty Shop page requires route, live cache, no order connection, 
 			if (descriptor) Object.defineProperty(globalThis, key, descriptor);
 			else Reflect.deleteProperty(globalThis, key);
 		}
+	}
+});
+
+test("Shop page.evaluate readers work with a serialized Playwright function", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) =>
+			route.fulfill({
+				status: 200,
+				contentType: "text/html",
+				body: '<div id="root"><h1>Orders</h1><span>No orders yet</span></div>',
+			}),
+		);
+		await page.goto("https://shop.app/account/order-history");
+		await page.evaluate(() => {
+			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
+			root["__reactFiber$fixture"] = {
+				memoizedProps: {
+					client: { cache: { extract: () => ({ ROOT_QUERY: { viewer: {} } }) } },
+				},
+			};
+		});
+		assert.deepEqual(await page.evaluate(readApolloCacheInPage), {
+			ROOT_QUERY: { viewer: {} },
+		});
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
+		await page.evaluate(() => {
+			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
+			root["__reactFiber$fixture"] = {
+				memoizedProps: {
+					client: {
+						cache: {
+							extract: () => ({ ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } } }),
+						},
+					},
+				},
+			};
+		});
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
+	} finally {
+		await browser.close();
 	}
 });
 

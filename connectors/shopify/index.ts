@@ -100,34 +100,27 @@ interface FiberProps {
 	client?: { cache?: { extract?: () => Record<string, unknown> } };
 }
 
-function isFiberHost(value: unknown): value is Record<string, FiberNode> {
-	return typeof value === "object" && value !== null;
-}
-
-function readApolloCacheInPage(): ApolloCache | null {
+export function readApolloCacheInPage(): ApolloCache | null {
+	function isFiberHostLocal(value: unknown): value is Record<string, FiberNode> {
+		return typeof value === "object" && value !== null;
+	}
 	function getLiveApolloState(): Record<string, unknown> | null {
 		try {
 			const root: unknown = document.querySelector("#root") ?? document.body;
-			if (!isFiberHost(root)) {
-				return null;
-			}
+			if (!isFiberHostLocal(root)) return null;
 			const fiberKey = Object.keys(root).find(
-				(k) =>
-					k.startsWith("__reactFiber") ||
-					k.startsWith("__reactInternalInstance"),
+				(key) =>
+					key.startsWith("__reactFiber") ||
+					key.startsWith("__reactInternalInstance"),
 			);
-			if (!fiberKey) {
-				return null;
-			}
+			if (!fiberKey) return null;
 			let fiber: FiberNode | null | undefined = root[fiberKey];
 			let steps = 0;
 			while (fiber && steps < 300) {
 				steps += 1;
 				const props = fiber.memoizedProps ?? fiber.pendingProps;
 				const extracted = props?.client?.cache?.extract?.();
-				if (extracted) {
-					return extracted;
-				}
+				if (extracted) return extracted;
 				fiber = fiber.return;
 			}
 		} catch {
@@ -145,31 +138,43 @@ function readApolloCacheInPage(): ApolloCache | null {
 	return state && typeof state === "object" ? state : null;
 }
 
-const VERIFIED_EMPTY_ORDER_PHRASES = new Set([
-	"no orders yet",
-	"no order history",
-	"no orders found",
-	"you haven't placed any orders",
-	"your order history is empty",
-]);
-
 /** True only for the signed-in order-history route with a live Apollo cache,
  *  no orders connection, and a visible exact generic empty-state phrase. */
 export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
+	const allowedPhrases = new Set([
+		"no orders yet",
+		"no order history",
+		"no orders found",
+		"you haven't placed any orders",
+		"your order history is empty",
+	]);
 	if (
 		location.origin !== "https://shop.app" ||
 		location.pathname !== "/account/order-history" ||
-		!hasShopOrderHistoryContextInPage()
+		document.querySelector(
+			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
+		)
 	) {
 		return false;
 	}
-	const root = document.querySelector("#root") ?? document.body;
-	if (!isFiberHost(root)) return false;
-	const fiberKey = Object.keys(root).find(
+	const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
+	const hasOrderContext =
+		headings.some((heading) => /orders?|order history/i.test(heading.textContent ?? "")) ||
+		Boolean(
+			document.querySelector(
+				'[data-test*="order"], [data-testid*="order"], a[href*="/orders/"], a[href*="/order/"]',
+			),
+		);
+	if (!hasOrderContext) return false;
+
+	const root: unknown = document.querySelector("#root") ?? document.body;
+	if (typeof root !== "object" || root === null) return false;
+	const rootObject = root as Record<string, FiberNode>;
+	const fiberKey = Object.keys(rootObject).find(
 		(key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
 	);
 	if (!fiberKey) return false;
-	let fiber: FiberNode | null | undefined = root[fiberKey];
+	let fiber: FiberNode | null | undefined = rootObject[fiberKey];
 	let liveState: Record<string, unknown> | null = null;
 	let steps = 0;
 	while (fiber && steps < 300) {
@@ -204,7 +209,7 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 			return false;
 		}
 		const phrase = (element.textContent ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-		return VERIFIED_EMPTY_ORDER_PHRASES.has(phrase);
+		return allowedPhrases.has(phrase);
 	});
 }
 
