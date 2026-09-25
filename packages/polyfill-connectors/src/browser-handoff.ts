@@ -744,6 +744,7 @@ function pollBrowserReadiness<Result>(
 			await waitForProbeInterval(intervalMs);
 			return attempt();
 		}
+		lastProbeError = undefined;
 		if (isProbeSuccessful(result)) {
 			return result;
 		}

@@ -1153,6 +1153,43 @@ test("manualBrowserLogin retains the last probe error when the readiness window 
 	assert.deepEqual(completions, [{ id: "assist_req_timeout", status: "escalated" }]);
 });
 
+test("manualBrowserLogin drops old probe errors after a clean not-ready result", async () => {
+	const completions: { id: string; status: string }[] = [];
+	let probeCalls = 0;
+	let now = 0;
+
+	await assert.rejects(
+		manualBrowserLogin({
+			assist: () => Promise.resolve("assist_req_clean_timeout"),
+			completeAssistance: (id, status) => {
+				completions.push({ id, status });
+				return Promise.resolve();
+			},
+			isProbeSuccessful: (ready: boolean) => ready,
+			message: "Finish sign-in in the secure browser.",
+			autoProbeIntervalMs: 0,
+			autoProbeWindowMs: 2,
+			now: () => now++,
+			page: makeMockPage(),
+			probe: (): Promise<boolean> => Promise.resolve(false),
+			readinessProbe: (): Promise<boolean> => {
+				probeCalls += 1;
+				return probeCalls === 1
+					? Promise.reject(new Error("navigation in progress"))
+					: Promise.resolve(false);
+			},
+			sendInteraction: () =>
+				Promise.reject(new Error("manual interaction must not run")),
+		}),
+		/browser_handoff_readiness_timed_out/,
+	);
+
+	assert.equal(probeCalls, 2);
+	assert.deepEqual(completions, [
+		{ id: "assist_req_clean_timeout", status: "escalated" },
+	]);
+});
+
 test("manualBrowserLogin keeps the legacy click-first behavior when isProbeSuccessful is omitted, even if assist is supplied", async () => {
 	const page = makeMockPage();
 	const requests: InteractionRequest[] = [];
