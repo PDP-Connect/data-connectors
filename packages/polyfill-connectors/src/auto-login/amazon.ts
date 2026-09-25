@@ -51,6 +51,9 @@ const ORDER_URL = /\/your-orders|\/order-history/;
 const TFA_PROMPT_TEXT =
 	/verification|two.?step|authenticator|passcode|code we sent|sent a text/i;
 const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
+const ORDER_PAGE_READY_SELECTOR =
+	'#orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"]';
+const ORDER_PAGE_READY_TIMEOUT_MS = 15_000;
 
 /**
  * No-op checkpoint for callers (e.g. existing tests) that drive
@@ -175,6 +178,22 @@ async function probeAmazonSession(page: Page): Promise<boolean> {
 async function probeAmazonOrdersPageInPlace(page: Page): Promise<boolean> {
 	const url = page.url();
 	if (SIGNIN_CHALLENGE_URL.test(url) || !ORDER_URL.test(url)) {
+		return false;
+	}
+	// Amazon can update the URL before the destination page has replaced the
+	// sign-in/challenge DOM. Require the same orders-page markers used by the
+	// connector's deep session probe before treating the handoff as ready.
+	const ordersPageReady = await page
+		.locator(ORDER_PAGE_READY_SELECTOR)
+		.first()
+		.waitFor({ state: "attached", timeout: ORDER_PAGE_READY_TIMEOUT_MS })
+		.then((): boolean => true)
+		.catch((): boolean => false);
+	if (!ordersPageReady) {
+		return false;
+	}
+	const settledUrl = page.url();
+	if (SIGNIN_CHALLENGE_URL.test(settledUrl) || !ORDER_URL.test(settledUrl)) {
 		return false;
 	}
 	const loginForm = await page

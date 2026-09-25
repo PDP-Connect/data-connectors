@@ -65,17 +65,27 @@ function makeChallengePage({
 }): {
 	gotoCalls: string[];
 	markLoggedIn: () => void;
+	markOrdersPageReady: () => void;
+	ordersPageReadinessChecks: () => number;
 	readinessPageCreations: () => number;
 	page: Page;
 } {
 	const gotoCalls: string[] = [];
 	let currentUrl = SIGNIN_URL;
 	let ownerLoggedIn = false;
+	let ordersPageReady = false;
+	let readinessChecks = 0;
 	let newPageCalls = 0;
 
 	const emptyLocator: Pick<
 		Locator,
-		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"
+		| "count"
+		| "first"
+		| "isVisible"
+		| "inputValue"
+		| "nth"
+		| "fill"
+		| "waitFor"
 	> = {
 		count: (): Promise<number> => Promise.resolve(0),
 		first(): Locator {
@@ -87,6 +97,22 @@ function makeChallengePage({
 			return emptyLocator as Locator;
 		},
 		fill: (): Promise<void> => Promise.resolve(),
+		waitFor(): Promise<void> {
+			readinessChecks += 1;
+			const start = Date.now();
+			return new Promise((resolve, reject) => {
+				const poll = (): void => {
+					if (ordersPageReady) {
+						resolve();
+					} else if (Date.now() - start >= 100) {
+						reject(new Error("orders page marker not attached"));
+					} else {
+						setTimeout(poll, 1);
+					}
+				};
+				poll();
+			});
+		},
 	};
 
 	const loggedIn = (): boolean =>
@@ -114,6 +140,9 @@ function makeChallengePage({
 			return Promise.resolve(null);
 		},
 		locator(_selector: string): Locator {
+			if (_selector.includes("orderTypeMenuContainer")) {
+				return emptyLocator as Locator;
+			}
 			// signIn form is "visible" only while still parked on the sign-in URL.
 			if (_selector.includes("signIn")) {
 				const formVisible = !loggedIn();
@@ -140,6 +169,10 @@ function makeChallengePage({
 			ownerLoggedIn = true;
 			currentUrl = ORDERS_URL;
 		},
+		markOrdersPageReady: () => {
+			ordersPageReady = true;
+		},
+		ordersPageReadinessChecks: () => readinessChecks,
 		page: page as Page,
 		readinessPageCreations: () => newPageCalls,
 	};
@@ -283,7 +316,14 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 
 test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async () => {
 	await withClearedStreamingEnv(async () => {
-		const { gotoCalls, markLoggedIn, page, readinessPageCreations } =
+		const {
+			gotoCalls,
+			markLoggedIn,
+			markOrdersPageReady,
+			ordersPageReadinessChecks,
+			page,
+			readinessPageCreations,
+		} =
 			makeChallengePage({
 				becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
 			});
@@ -292,6 +332,9 @@ test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async
 		const ok = await ensureAmazonSession({
 			assist: () => {
 				markLoggedIn();
+				// Amazon can change the URL before rendering its orders page. The
+				// readiness probe must wait for positive page evidence in that gap.
+				setTimeout(markOrdersPageReady, 15);
 				return Promise.resolve("amazon-assistance");
 			},
 			completeAssistance: (_id, status) => {
@@ -309,6 +352,7 @@ test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async
 		assert.equal(ok, true);
 		assert.equal(completionStatus, "resolved");
 		assert.equal(readinessPageCreations(), 0);
+		assert.equal(ordersPageReadinessChecks(), 1);
 		assert.deepEqual(gotoCalls, [ORDERS_URL]);
 	});
 });

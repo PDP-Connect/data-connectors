@@ -2254,14 +2254,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/auto-login/amazon.ts",
-			line: 124,
+			line: 127,
 			column: 13,
 			category: "ordered_browser_interaction",
 			note: "locator.count(): sequential Playwright action against the shared page/context",
 		},
 		{
 			path: "src/auto-login/amazon.ts",
-			line: 127,
+			line: 130,
 			column: 8,
 			category: "ordered_browser_interaction",
 			note: "el.isVisible(): sequential Playwright action against the shared page/context",
