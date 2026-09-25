@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.2)
+ * PDPP Meta (Instagram) Connector (v0.4.4)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -81,11 +81,11 @@
  *     (`[role="dialog"] [role="list"] [role="listitem"]`), also used by
  *     both legacy connectors. The signed v0.4.1 implementation used fixed
  *     delays before reading these surfaces, while the legacy implementation
- *     waited for matching selectors. A 2026-09-24 run left only ads missing,
- *     but Desktop continuation logs do not include the connector's
- *     `missing_surfaces` diagnostics, so they cannot show which ad surface
- *     failed. v0.4.2 waits for each intended control/list; a live retest is
- *     still needed to confirm whether layout drift also contributes.
+ *     waited for matching selectors. v0.4.2 waits for each intended
+ *     control/list. v0.4.3 adds bounded failure-step diagnostics, but no
+ *     retained sanitized trace identifies which step failed in the latest
+ *     partial ads run; a live retest is still needed to confirm whether
+ *     layout drift contributes.
  *     A persistent empty ARIA list counts as reached after a 2.5s settle
  *     window to preserve legacy empty-list behavior. Meta exposes no confirmed
  *     empty-state marker, so content arriving after that window remains a risk.
@@ -99,6 +99,10 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
+ *     in the owner's sign-in tab instead of opening a sibling about:blank tab.
+ *   v0.4.3 (2026-09-24) — reports bounded failure steps for incomplete ads
+ *     surfaces so a later sanitized trace can identify the failed UI step.
  *   v0.4.2 (2026-09-24) — waits for Accounts Center's interactive controls
  *     and lists before scraping each ad surface; replaces fixed sleeps that
  *     could sample the DOM before asynchronous dialog/tab content loaded.
@@ -251,6 +255,7 @@ async function manualLoginHandoff({
 		page,
 		probe: () => hasSessionCookie(context),
 		readinessProbe: () => hasSessionCookie(context),
+		readinessProbeOnHandoffPage: true,
 		reason: "login",
 		sendInteraction,
 		timeoutSeconds: 1800,
