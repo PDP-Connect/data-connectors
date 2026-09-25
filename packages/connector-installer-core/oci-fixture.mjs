@@ -421,6 +421,16 @@ export function publishArtifact(
   const assetsBytes = withAssets
     ? (assetsBytesOverride ?? tarball({ "icons/ynab.svg": "<svg/>\n" }))
     : null;
+  const sourceDeclarationBytes = canonicalJson({
+    declaration_version: "1.0",
+    connector_key: connectorKey,
+    connector_id: resolvedConnectorId,
+    version,
+    canonical_inputs: {
+      manifest: { path: "connectors/fixture/manifest.json", sha256: sha256(profileBytes) },
+      source_inventory: [],
+    },
+  });
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
   // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the
@@ -432,6 +442,7 @@ export function publishArtifact(
     version,
     protocol_version: protocolVersion,
     profile_digest: sha256(profileBytes),
+    source_declaration_digest: sha256(sourceDeclarationBytes),
     entrypoint: "code/collection-profile.mjs",
     entrypoint_kind: "import-safe",
     exports: ["collect"],
@@ -472,6 +483,7 @@ export function publishArtifact(
       ? [layer(assetsBytes, "application/vnd.pdpp.connector.assets.v1.tar+gzip", "assets.tar.gz")]
       : []),
     layer(licensesBytes, "application/vnd.pdpp.connector.licenses.v1.tar+gzip", "licenses.tar.gz"),
+    layer(sourceDeclarationBytes, "application/vnd.pdpp.connector.source-declaration.v1+json", "source-declaration.json"),
     layer(provenanceBytes, "application/vnd.pdpp.connector.provenance.v1+json", "provenance.json"),
     ...extraLayers,
   ];

@@ -506,11 +506,12 @@ test("A-T6 selects layers by media type with assets absent", async () => {
   await withRegistry({}, async (registry) => {
     const signer = createSigner();
 
-    // With no brand icon there is no assets layer, so licences and provenance
-    // sit at the positions assets and licences would otherwise occupy. A
-    // consumer indexing by position would read the wrong blob for both.
+    // With no brand icon there is no assets layer, so licences, the source
+    // declaration and provenance sit at the positions assets, licences and the
+    // source declaration would otherwise occupy. A consumer indexing by
+    // position would read the wrong blob for all three.
     const without = publishArtifact(registry, { signer, withAssets: false });
-    assert.equal(without.manifest.layers.length, 4);
+    assert.equal(without.manifest.layers.length, 5);
 
     const plain = await fetchResolvedArtifact(
       null,
@@ -524,7 +525,7 @@ test("A-T6 selects layers by media type with assets absent", async () => {
     assert.match(plain.entrypointBuffer.toString("utf8"), /export const collect/);
 
     const withAssets = publishArtifact(registry, { signer, withAssets: true, version: "0.4.0" });
-    assert.equal(withAssets.manifest.layers.length, 5);
+    assert.equal(withAssets.manifest.layers.length, 6);
     assert.equal(
       withAssets.manifest.layers[2].mediaType,
       "application/vnd.pdpp.connector.assets.v1.tar+gzip"
