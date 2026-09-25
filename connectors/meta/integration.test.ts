@@ -809,6 +809,7 @@ test("scrapeAdvertisers waits for items that arrive after the list shell", async
 	assert.deepEqual(await scrapeAdvertisers(page), {
 		items: ["Acme Corp"],
 		reached: true,
+		step: null,
 		surface: "advertisers",
 	});
 	assert.ok(
@@ -828,6 +829,7 @@ test("scrapeAdvertisers preserves a genuine empty list after the settle window",
 	assert.deepEqual(await scrapeAdvertisers(page), {
 		items: [],
 		reached: true,
+		step: "reached_empty",
 		surface: "advertisers",
 	});
 	assert.ok(Date.now() - startedAt >= 2_500);
@@ -954,6 +956,7 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		surface_steps: [
 			{ surface: "advertisers", step: "destination_list_not_found" },
 			{ surface: "ad_topics", step: "reached_empty" },
+			{ surface: "targeting_categories", step: "reached_empty" },
 		],
 	});
 });
