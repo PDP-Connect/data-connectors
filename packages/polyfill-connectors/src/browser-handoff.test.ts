@@ -27,6 +27,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
+import { chromium } from "playwright";
 
 import {
 	BROWSER_CDP_HOST_ENV,
@@ -964,6 +965,49 @@ test("manualBrowserLogin runs navigation-capable readiness evidence on a tempora
 		"https://example.test/session-ready",
 	]);
 	assert.equal(readinessClosed, 1);
+});
+
+test("manualBrowserLogin opens a sibling readiness tab unless owner-page mode is selected", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		for (const probeOnOwnerPage of [false, true]) {
+			const context = await browser.newContext();
+			const ownerPage = await context.newPage();
+			await ownerPage.goto("data:text/html,<title>sign-in</title>");
+			const pageCountsDuringProbe: number[] = [];
+			let pageCountWhenHandoffStarted = 0;
+			const result = await manualBrowserLogin({
+				assist: () => {
+					pageCountWhenHandoffStarted = context.pages().length;
+					return Promise.resolve("headless_tab_count");
+				},
+				autoProbeIntervalMs: 1,
+				completeAssistance: () => Promise.resolve(),
+				isProbeSuccessful: (ready: boolean) => ready,
+				message: "Finish sign-in in the secure browser.",
+				page: ownerPage,
+				probe: () => Promise.resolve(false),
+				readinessProbe: (readinessPage) => {
+					pageCountsDuringProbe.push(context.pages().length);
+					assert.equal(readinessPage === ownerPage, probeOnOwnerPage);
+					return Promise.resolve(true);
+				},
+				...(probeOnOwnerPage
+					? { readinessProbeOnHandoffPage: true }
+					: {}),
+				sendInteraction: () =>
+					Promise.reject(new Error("manual interaction must not run")),
+			});
+
+			assert.equal(result, true);
+			assert.equal(pageCountWhenHandoffStarted, 1);
+			assert.deepEqual(pageCountsDuringProbe, [probeOnOwnerPage ? 1 : 2]);
+			assert.equal(context.pages().length, 1);
+			await context.close();
+		}
+	} finally {
+		await browser.close();
+	}
 });
 
 test("manualBrowserLogin can poll a non-navigating readiness probe in the owner's tab", async () => {
