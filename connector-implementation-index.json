@@ -5348,7 +5348,7 @@
 							"label": "Your GitHub profile metrics (daily)",
 							"detail": "Daily snapshot of public_repos, public_gists, followers, following counts. Each record covers one calendar day."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -5989,7 +5989,7 @@
 							"label": "Your recent activity",
 							"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
 						},
-						"semantics": "append",
+						"semantics": "append_only",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -6047,7 +6047,7 @@
 							"label": "Your contribution history",
 							"detail": "One record per day with the total contribution count for that day, keyed by user and date."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -14018,7 +14018,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/slack",
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.6.0",
+				"version": "0.6.1",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -14362,7 +14362,7 @@
 							"label": "Slack channel member counts (daily)",
 							"detail": "Daily snapshot of num_members for each channel. Each record covers one calendar day."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -17139,7 +17139,7 @@
 							"label": "Your USAA account balances (daily)",
 							"detail": "Daily snapshot of balance and available balance (cents). Each record covers one calendar day for one account."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -17562,7 +17562,7 @@
 							"label": "Your credit card balances (daily)",
 							"detail": "Daily snapshot of current balance, available credit, cash rewards (cents), and the cycle billing status / minimum-payment-met flag. Each record covers one calendar day for one card."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -19480,7 +19480,7 @@
 							"label": "Account balances (daily)",
 							"detail": "Daily snapshot of balance, cleared_balance, and uncleared_balance (YNAB milliunits). Each record covers one calendar day for one account."
 						},
-						"semantics": "append",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {

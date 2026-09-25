@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/slack",
 	"connector_key": "slack",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"display_name": "Slack",
 	"brand": {
 		"icon": "icon.svg",
@@ -342,7 +342,7 @@
 				"label": "Slack channel member counts (daily)",
 				"detail": "Daily snapshot of num_members for each channel. Each record covers one calendar day."
 			},
-			"semantics": "append",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
