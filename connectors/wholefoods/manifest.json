@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
