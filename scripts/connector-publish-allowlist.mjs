@@ -25,7 +25,11 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["claude_code", "claude-code"],
     ["codex", "codex"],
     ["doordash", "doordash"],
-    ["github", "github"],
+    [
+      "github",
+      "github",
+      "Shares public source github with github-browser, but four shared stream names have different record contracts; held until they are reconciled so the source keeps one declaration.",
+    ],
     ["github_browser", "github-browser"],
     ["gmail", "gmail"],
     ["google_calendar", "google-calendar"],

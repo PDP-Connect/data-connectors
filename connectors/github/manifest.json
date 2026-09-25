@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/github",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/github",
+		"display": {
+			"name": "GitHub"
+		}
+	},
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
 	"version": "0.7.4",

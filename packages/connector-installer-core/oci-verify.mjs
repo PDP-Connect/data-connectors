@@ -56,7 +56,6 @@
 //
 // `ctLogThreshold` stays at the default too: real Fulcio leaves embed an SCT.
 
-import assert from "node:assert/strict";
 
 import {
   BUNDLE_V01_MEDIA_TYPE,
@@ -75,7 +74,7 @@ import {
   isValidDigest,
   sha256Digest,
 } from "./oci-registry.mjs";
-import { buildSourceDeclaration, validateSourceDeclaration } from "./source-declaration.mjs";
+import { profileDeclarationErrors, validateSourceDeclaration } from "./source-declaration.mjs";
 
 // THE PIN IS A REGULAR EXPRESSION, SO IT MUST BE ANCHORED. sigstore matches
 // `certificateIdentityURI` with `signerIdentity.match(policyIdentity)` — an
@@ -745,14 +744,15 @@ export function assertConfigMatchesProfile({
         "tampered"
       );
     }
-    // ...then that it is THIS profile's declaration: recomputed independently
-    // from the profile this consumer fetched and compared structurally,
-    // rather than trusting a digest the artifact could compute from anything.
-    try {
-      assert.deepStrictEqual(sourceDeclaration, buildSourceDeclaration(profile));
-    } catch {
+    // ...then that it declares THIS profile's source. The installer holds one
+    // artifact, not the source's other artifacts, so it checks membership:
+    // same source, content-derived version, every profile stream declared
+    // with the same contract.
+    const membershipErrors = profileDeclarationErrors(profile, sourceDeclaration);
+    if (membershipErrors.length > 0) {
       throw new OciRegistryError(
-        `Refusing ${repository}: source declaration does not match the declaration derived from the profile layer`,
+        `Refusing ${repository}: source declaration does not declare the profile layer: ` +
+          membershipErrors.join("; "),
         "tampered"
       );
     }

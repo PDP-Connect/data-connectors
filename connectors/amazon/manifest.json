@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/amazon",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/amazon",
+		"display": {
+			"name": "Amazon"
+		}
+	},
 	"connector_key": "amazon",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
 	"version": "0.1.6",

@@ -39,6 +39,7 @@ import {
   resolveVersionToDigest,
 } from "./oci-registry.mjs";
 import { indexLayersByMediaType } from "./oci-verify.mjs";
+import { buildSourceDeclaration } from "./source-declaration.mjs";
 
 /** Options that point installer-core at the fixture registry. */
 function fixtureOptions(registry, signer, overrides = {}) {
@@ -669,6 +670,39 @@ test("W28 refuses an artifact whose source declaration is a provenance-like obje
         return true;
       },
       "a provenance-like source declaration must refuse the install"
+    );
+  });
+});
+
+test("refuses a valid source declaration that declares another source", async () => {
+  const signer = createSigner();
+  const other = buildSourceDeclaration([
+    {
+      connector_key: "whoop",
+      source: { id: "https://registry.pdpp.dev/sources/whoop", display: { name: "WHOOP" } },
+      streams: [
+        {
+          name: "records",
+          semantics: "append_only",
+          schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          primary_key: ["id"],
+          selection: { fields: true, resources: true },
+        },
+      ],
+    },
+  ]);
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, { signer, sourceDeclarationOverride: other });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /does not declare the profile layer: source\.id/);
+        return true;
+      }
     );
   });
 });

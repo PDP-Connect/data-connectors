@@ -1,6 +1,12 @@
 {
   "protocol_version": "0.1.0",
   "connector_id": "https://registry.pdpp.dev/connectors/oura-browser",
+  "source": {
+    "id": "https://registry.pdpp.dev/sources/oura",
+    "display": {
+      "name": "Oura"
+    }
+  },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
   "version": "0.1.6",

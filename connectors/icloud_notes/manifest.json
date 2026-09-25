@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/icloud-notes",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/icloud_notes",
+		"display": {
+			"name": "iCloud Notes"
+		}
+	},
 	"connector_key": "icloud-notes",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
 	"version": "0.1.4",

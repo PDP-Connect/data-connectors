@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/whoop",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/whoop",
+		"display": {
+			"name": "WHOOP"
+		}
+	},
 	"connector_key": "whoop",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
 	"version": "0.1.4",

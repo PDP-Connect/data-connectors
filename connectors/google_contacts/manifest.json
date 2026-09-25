@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-contacts",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/google_contacts",
+		"display": {
+			"name": "Google Contacts"
+		}
+	},
 	"connector_key": "google-contacts",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
 	"version": "0.1.2",

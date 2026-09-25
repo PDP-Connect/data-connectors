@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/doordash",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/doordash",
+		"display": {
+			"name": "DoorDash"
+		}
+	},
 	"connector_key": "doordash",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
 	"version": "0.2.4",

@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/gmail",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/gmail",
+		"display": {
+			"name": "Gmail"
+		}
+	},
 	"connector_key": "gmail",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
 	"version": "0.2.2",

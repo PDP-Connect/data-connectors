@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/meta",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/instagram",
+		"display": {
+			"name": "Instagram"
+		}
+	},
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
 	"version": "0.4.6",

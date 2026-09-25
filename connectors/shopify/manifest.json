@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/shopify",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/shop",
+		"display": {
+			"name": "Shop"
+		}
+	},
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
 	"version": "0.2.6",

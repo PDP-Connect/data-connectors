@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/strava",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/strava",
+		"display": {
+			"name": "Strava"
+		}
+	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
 	"version": "1.0.3",

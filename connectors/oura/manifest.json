@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/oura",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/oura",
+		"display": {
+			"name": "Oura"
+		}
+	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"display_name": "Oura",
 	"runtime_requirements": {
 		"bindings": {
@@ -67,6 +73,10 @@
 			"schema": {
 				"type": "object",
 				"properties": {
+					"record_type": {
+						"type": "string",
+						"enum": ["sleep_session", "daily_score"]
+					},
 					"id": {
 						"type": "string"
 					},
@@ -115,6 +125,16 @@
 						"type": ["integer", "null"],
 						"x_pdpp_role": "amount"
 					},
+					"daily_sleep_id": {
+						"type": ["string", "null"]
+					},
+					"daily_sleep_timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"awake_time": {
+						"type": ["integer", "null"]
+					},
 					"average_breath": {
 						"type": ["number", "null"]
 					},
@@ -144,7 +164,8 @@
 			"incremental": true,
 			"query": {
 				"range_filters": {
-					"day": ["gte", "gt", "lte", "lt"]
+					"day": ["gte", "gt", "lte", "lt"],
+					"daily_sleep_timestamp": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
