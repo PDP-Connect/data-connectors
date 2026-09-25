@@ -42,52 +42,54 @@ const NOTES_URL = "https://www.icloud.com/notes";
 const ICLOUD_HOST_RE = /(?:^|\.)icloud\.com$/;
 
 export interface CloudKitLiveConfig {
-  ckBaseUrl: string;
-  dsid: string;
-  fullName: string | null;
+	ckBaseUrl: string;
+	dsid: string;
+	fullName: string | null;
 }
 
 /** POST validate from the iCloud page so browser cookies and the browser's
  *  network identity remain the source of truth. */
-export async function probeCloudKitConfig(page: Page): Promise<CloudKitLiveConfig | null> {
-  const result = (await page
-    .evaluate(async (url) => {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          credentials: "include",
-        });
-        if (!res.ok) {
-          return null;
-        }
-        const data = (await res.json()) as {
-          dsInfo?: { dsid?: string | number; fullName?: string };
-          webservices?: { ckdatabasews?: { url?: string } };
-        };
-        const dsid = data?.dsInfo?.dsid;
-        const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
-        if (dsid === undefined || dsid === null || !ckBaseUrl) {
-          return null;
-        }
-        return {
-          dsid: String(dsid),
-          ckBaseUrl,
-          fullName: data?.dsInfo?.fullName ?? null,
-        };
-      } catch {
-        return null;
-      }
-    }, VALIDATE_URL)
-    .catch(() => null)) as CloudKitLiveConfig | null;
-  return result?.dsid && result.ckBaseUrl ? result : null;
+export async function probeCloudKitConfig(
+	page: Page,
+): Promise<CloudKitLiveConfig | null> {
+	const result = (await page
+		.evaluate(async (url) => {
+			try {
+				const res = await fetch(url, {
+					method: "POST",
+					credentials: "include",
+				});
+				if (!res.ok) {
+					return null;
+				}
+				const data = (await res.json()) as {
+					dsInfo?: { dsid?: string | number; fullName?: string };
+					webservices?: { ckdatabasews?: { url?: string } };
+				};
+				const dsid = data?.dsInfo?.dsid;
+				const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
+				if (dsid === undefined || dsid === null || !ckBaseUrl) {
+					return null;
+				}
+				return {
+					dsid: String(dsid),
+					ckBaseUrl,
+					fullName: data?.dsInfo?.fullName ?? null,
+				};
+			} catch {
+				return null;
+			}
+		}, VALIDATE_URL)
+		.catch(() => null)) as CloudKitLiveConfig | null;
+	return result?.dsid && result.ckBaseUrl ? result : null;
 }
 
 function isOnICloudOrigin(page: Page): boolean {
-  try {
-    return ICLOUD_HOST_RE.test(new URL(page.url()).hostname);
-  } catch {
-    return false;
-  }
+	try {
+		return ICLOUD_HOST_RE.test(new URL(page.url()).hostname);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -104,17 +106,19 @@ function isOnICloudOrigin(page: Page): boolean {
  * iCloud page, so later probes on that origin do not reload it.
  */
 export async function probeICloudSession(page: Page): Promise<boolean> {
-  if (!isOnICloudOrigin(page)) {
-    await page.goto(NOTES_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((): undefined => undefined);
-  }
-  return (await probeCloudKitConfig(page)) !== null;
+	if (!isOnICloudOrigin(page)) {
+		await page
+			.goto(NOTES_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+			.catch((): undefined => undefined);
+	}
+	return (await probeCloudKitConfig(page)) !== null;
 }
 
 /** Handoff readiness probe: never navigate the owner's tab while Apple ID
  *  sign-in or 2FA may be in progress in an embedded identity frame. */
 export async function probeICloudSessionInPlace(page: Page): Promise<boolean> {
-  if (!isOnICloudOrigin(page)) {
-    return false;
-  }
-  return (await probeCloudKitConfig(page)) !== null;
+	if (!isOnICloudOrigin(page)) {
+		return false;
+	}
+	return (await probeCloudKitConfig(page)) !== null;
 }

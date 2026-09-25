@@ -992,9 +992,7 @@ test("manualBrowserLogin opens a sibling readiness tab unless owner-page mode is
 					assert.equal(readinessPage === ownerPage, probeOnOwnerPage);
 					return Promise.resolve(true);
 				},
-				...(probeOnOwnerPage
-					? { readinessProbeOnHandoffPage: true }
-					: {}),
+				...(probeOnOwnerPage ? { readinessProbeOnHandoffPage: true } : {}),
 				sendInteraction: () =>
 					Promise.reject(new Error("manual interaction must not run")),
 			});
@@ -1096,30 +1094,32 @@ test("manualBrowserLogin retries a transient readiness probe error during struct
 	let probeCalls = 0;
 
 	const result = await manualBrowserLogin({
-			assist: () => Promise.resolve("assist_req_rejected"),
-			completeAssistance: (id, status) => {
-				completions.push({ id, status });
-				return Promise.resolve();
-			},
-			isProbeSuccessful: (ready: boolean) => ready,
-			message: "Finish sign-in in the secure browser.",
-			autoProbeIntervalMs: 1,
-			autoProbeWindowMs: 100,
-			page,
-			probe: (): Promise<boolean> => Promise.resolve(false),
-			readinessProbe: (): Promise<boolean> => {
-				probeCalls += 1;
-				return probeCalls === 1
-					? Promise.reject(new Error("navigation in progress"))
-					: Promise.resolve(true);
-			},
-			sendInteraction: () =>
-				Promise.reject(new Error("manual interaction must not run")),
-		});
+		assist: () => Promise.resolve("assist_req_rejected"),
+		completeAssistance: (id, status) => {
+			completions.push({ id, status });
+			return Promise.resolve();
+		},
+		isProbeSuccessful: (ready: boolean) => ready,
+		message: "Finish sign-in in the secure browser.",
+		autoProbeIntervalMs: 1,
+		autoProbeWindowMs: 100,
+		page,
+		probe: (): Promise<boolean> => Promise.resolve(false),
+		readinessProbe: (): Promise<boolean> => {
+			probeCalls += 1;
+			return probeCalls === 1
+				? Promise.reject(new Error("navigation in progress"))
+				: Promise.resolve(true);
+		},
+		sendInteraction: () =>
+			Promise.reject(new Error("manual interaction must not run")),
+	});
 
 	assert.equal(result, true);
 	assert.equal(probeCalls, 2);
-	assert.deepEqual(completions, [{ id: "assist_req_rejected", status: "resolved" }]);
+	assert.deepEqual(completions, [
+		{ id: "assist_req_rejected", status: "resolved" },
+	]);
 });
 
 test("manualBrowserLogin retains the last probe error when the readiness window expires", async () => {
@@ -1150,7 +1150,9 @@ test("manualBrowserLogin retains the last probe error when the readiness window 
 		},
 	);
 
-	assert.deepEqual(completions, [{ id: "assist_req_timeout", status: "escalated" }]);
+	assert.deepEqual(completions, [
+		{ id: "assist_req_timeout", status: "escalated" },
+	]);
 });
 
 test("manualBrowserLogin drops old probe errors after a clean not-ready result", async () => {
