@@ -16,6 +16,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { buildSourceDeclaration, validateSourceDeclaration } from "./source-declaration.mjs";
 
 const validProfile = {
@@ -63,6 +66,31 @@ describe("buildSourceDeclaration", () => {
     assert.equal(declaration.declaration_version, validProfile.version);
     assert.equal(declaration.streams[0].name, "sleep");
     assert.deepEqual(declaration.streams[0].primary_key, ["id"]);
+  });
+
+  it("carries Core relationship and view members that query semantics depend on", () => {
+    const profile = structuredClone(validProfile);
+    profile.streams.push({
+      name: "samples",
+      semantics: "mutable_state",
+      schema: {
+        type: "object",
+        properties: { id: { type: "string" }, sleep_id: { type: "string" } },
+        required: ["id", "sleep_id"],
+      },
+      primary_key: ["id"],
+      selection: { fields: true, resources: true },
+    });
+    profile.streams[0].relationships = [
+      { cardinality: "has_many", foreign_key: "sleep_id", name: "samples", stream: "samples" },
+    ];
+    profile.streams[0].query = { expand: [{ name: "samples", default_limit: 10, max_limit: 50 }] };
+    profile.streams[0].views = [{ fields: ["id", "day"], id: "summary", label: "Summary" }];
+    const declaration = buildSourceDeclaration(profile);
+    const result = validateSourceDeclaration(declaration);
+    assert.equal(result.ok, true, JSON.stringify(result.errors));
+    assert.deepEqual(declaration.streams[0].relationships, profile.streams[0].relationships);
+    assert.deepEqual(declaration.streams[0].views, profile.streams[0].views);
   });
 
   it("drops Collection-Profile-only stream members the Core schema forbids", () => {
@@ -194,5 +222,130 @@ describe("validateSourceDeclaration — negative", () => {
     const declaration = buildSourceDeclaration(validProfile);
     declaration.protocol_version = "0.2.0";
     assert.equal(validateSourceDeclaration(declaration).ok, false);
+  });
+
+  it("rejects nonlocal $ref and $dynamicRef values in embedded stream schemas", () => {
+    const declaration = buildSourceDeclaration(validProfile);
+    declaration.streams[0].schema.properties.remote = { $ref: "https://example.com/schema.json" };
+    declaration.streams[0].schema.properties.dynamic = { $dynamicRef: "shared-schema" };
+    const result = validateSourceDeclaration(declaration);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("nonlocal schema reference")));
+  });
+
+  it("rejects query fields whose JSON Schema type does not support the requested capability", () => {
+    const declaration = buildSourceDeclaration(validProfile);
+    declaration.streams[0].schema.properties.score = { type: "number" };
+    declaration.streams[0].schema.properties.label = { type: "string" };
+    declaration.streams[0].query = {
+      aggregations: { group_by_time: ["label"], sum: ["label"] },
+      range_filters: { label: ["gte"] },
+      search: { lexical_fields: ["score"] },
+    };
+    const result = validateSourceDeclaration(declaration);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("invalid query field type")));
+  });
+
+  it("rejects duplicate expand relationship names", () => {
+    const declaration = buildSourceDeclaration(validProfile);
+    declaration.streams.push({
+      name: "samples",
+      semantics: "mutable_state",
+      schema: {
+        type: "object",
+        properties: { id: { type: "string" }, sleep_id: { type: "string" } },
+        required: ["id", "sleep_id"],
+      },
+      primary_key: ["id"],
+      selection: { fields: true, resources: true },
+    });
+    declaration.streams[0].relationships = [
+      { cardinality: "has_many", foreign_key: "sleep_id", name: "samples", stream: "samples" },
+    ];
+    declaration.streams[0].query = { expand: [{ name: "samples" }, { name: "samples" }] };
+    const result = validateSourceDeclaration(declaration);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("duplicate expand name")));
+  });
+
+  it("rejects expand limits on has_one relationships", () => {
+    const declaration = buildSourceDeclaration(validProfile);
+    declaration.streams[0].schema.properties.profile_id = { type: "string" };
+    declaration.streams.push({
+      name: "profiles",
+      semantics: "mutable_state",
+      schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      primary_key: ["id"],
+      selection: { fields: true, resources: true },
+    });
+    declaration.streams[0].relationships = [
+      { cardinality: "has_one", foreign_key: "profile_id", name: "profile", stream: "profiles" },
+    ];
+    declaration.streams[0].query = { expand: [{ name: "profile", default_limit: 1 }] };
+    const result = validateSourceDeclaration(declaration);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("invalid expand limits")));
+  });
+});
+
+describe("validateSourceDeclaration — canonical differential", () => {
+  it("matches the current PDPP reference-contract semantic validator when that source is available", { timeout: 10_000 }, () => {
+    const canonicalSource = "/home/tnunamak/code/pdpp/packages/reference-contract/src/public/source.ts";
+    if (!existsSync(canonicalSource)) {
+      return;
+    }
+
+    const valid = buildSourceDeclaration(validProfile);
+    const nonlocalRef = structuredClone(valid);
+    nonlocalRef.streams[0].schema.properties.remote = { $ref: "https://example.com/schema.json" };
+    const invalidQueryType = structuredClone(valid);
+    invalidQueryType.streams[0].schema.properties.score = { type: "number" };
+    invalidQueryType.streams[0].query = { search: { lexical_fields: ["score"] } };
+    const duplicateExpand = structuredClone(valid);
+    duplicateExpand.streams.push({
+      name: "samples",
+      semantics: "mutable_state",
+      schema: {
+        type: "object",
+        properties: { id: { type: "string" }, sleep_id: { type: "string" } },
+        required: ["id", "sleep_id"],
+      },
+      primary_key: ["id"],
+      selection: { fields: true, resources: true },
+    });
+    duplicateExpand.streams[0].relationships = [
+      { cardinality: "has_many", foreign_key: "sleep_id", name: "samples", stream: "samples" },
+    ];
+    duplicateExpand.streams[0].query = { expand: [{ name: "samples" }, { name: "samples" }] };
+    const hasOneLimit = structuredClone(valid);
+    hasOneLimit.streams[0].schema.properties.profile_id = { type: "string" };
+    hasOneLimit.streams.push({
+      name: "profiles",
+      semantics: "mutable_state",
+      schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      primary_key: ["id"],
+      selection: { fields: true, resources: true },
+    });
+    hasOneLimit.streams[0].relationships = [
+      { cardinality: "has_one", foreign_key: "profile_id", name: "profile", stream: "profiles" },
+    ];
+    hasOneLimit.streams[0].query = { expand: [{ name: "profile", default_limit: 1 }] };
+
+    const fixtures = [valid, nonlocalRef, invalidQueryType, duplicateExpand, hasOneLimit];
+    const localResults = fixtures.map((fixture) => validateSourceDeclaration(fixture).ok);
+    const script = `
+      import { readFileSync } from "node:fs";
+      import { validateSourceDeclarationSemantics } from ${JSON.stringify(pathToFileURL(canonicalSource).href)};
+      const fixtures = JSON.parse(readFileSync(0, "utf8"));
+      process.stdout.write(JSON.stringify(fixtures.map((fixture) => validateSourceDeclarationSemantics(fixture).ok)));
+    `;
+    const canonical = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+      cwd: "/home/tnunamak/code/pdpp",
+      encoding: "utf8",
+      input: JSON.stringify(fixtures),
+    });
+    assert.equal(canonical.status, 0, canonical.stderr);
+    assert.deepEqual(localResults, JSON.parse(canonical.stdout));
   });
 });

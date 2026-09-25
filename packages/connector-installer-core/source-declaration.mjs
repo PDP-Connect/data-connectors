@@ -10,12 +10,14 @@
  * copy of `SourceDeclarationSchema` in
  * pdpp/packages/reference-contract/src/public/source.ts (as of commit
  * a3b1902ff5, "spec(source): define declarations and resolved grants (#102)").
- * The semantic checks below port `validateSourceDeclarationSemantics` from
- * the same file. This repo has no package dependency on
- * `@pdpp/reference-contract` — it is a separate repository with no published
- * artifact this one can install — so the contract is vendored rather than
- * imported. Regenerate `source-declaration.schema.json` (and re-port the
- * semantics below) from that file if the normative schema changes; do not
+ * The semantic checks below are a direct JavaScript port of
+ * `validateSourceDeclarationSemantics` from the same file. The checked-in
+ * `@pdpp/reference-contract` tarball available to this repository is an
+ * older stand-in that does not export `./public/source`, and the current
+ * source package is private and TypeScript-only, so the installer cannot
+ * import the canonical validator at runtime without adding a TS loader to the
+ * shipped package. Regenerate `source-declaration.schema.json` (and re-port
+ * the semantics below) from that file if the normative schema changes; do not
  * hand-edit either into a shape the upstream source does not have.
  */
 
@@ -72,9 +74,11 @@ export function buildSourceDeclaration(profile) {
       name: stream.name,
       primary_key: stream.primary_key,
       ...(stream.query !== undefined ? { query: stream.query } : {}),
+      ...(stream.relationships !== undefined ? { relationships: stream.relationships } : {}),
       schema: stream.schema,
       selection: stream.selection,
       semantics: stream.semantics,
+      ...(stream.views !== undefined ? { views: stream.views } : {}),
     })),
   };
 }
@@ -106,6 +110,82 @@ function schemaFieldNames(stream) {
   return new Set(Object.keys(properties));
 }
 
+function validateEmbeddedSchemaNode(value, path, errors) {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      validateEmbeddedSchemaNode(item, `${path}/${index}`, errors);
+    }
+    return;
+  }
+  if (!(value && typeof value === "object")) {
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = `${path}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+    if ((key === "$ref" || key === "$dynamicRef") && (typeof child !== "string" || !child.startsWith("#"))) {
+      errors.push(`${childPath}: nonlocal schema reference '${typeof child === "string" ? child : String(child)}'`);
+    }
+    validateEmbeddedSchemaNode(child, childPath, errors);
+  }
+}
+
+function schemaProperty(stream, field) {
+  const properties = stream?.schema?.properties;
+  if (!(properties && typeof properties === "object" && !Array.isArray(properties))) {
+    return undefined;
+  }
+  return properties[field];
+}
+
+function nonNullSchemaTypes(schemaNode) {
+  const rawType = schemaNode?.type;
+  if (Array.isArray(rawType)) {
+    return rawType.filter((type) => type !== "null");
+  }
+  if (rawType === undefined || rawType === null) {
+    return [];
+  }
+  return [rawType].filter((type) => type !== "null");
+}
+
+function hasOneNonNullType(schemaNode, allowed) {
+  const types = nonNullSchemaTypes(schemaNode);
+  return types.length === 1 && allowed.has(types[0]);
+}
+
+function isSearchableStringSchema(schemaNode) {
+  return hasOneNonNullType(schemaNode, new Set(["string"]));
+}
+
+function isRangeSchema(schemaNode) {
+  if (hasOneNonNullType(schemaNode, new Set(["integer", "number"]))) {
+    return true;
+  }
+  return (
+    hasOneNonNullType(schemaNode, new Set(["string"])) &&
+    (schemaNode?.format === "date" || schemaNode?.format === "date-time")
+  );
+}
+
+function isScalarGroupSchema(schemaNode) {
+  return hasOneNonNullType(schemaNode, new Set(["boolean", "integer", "number", "string"]));
+}
+
+function isTimeBucketSchema(schemaNode) {
+  return (
+    hasOneNonNullType(schemaNode, new Set(["string"])) &&
+    (schemaNode?.format === "date" || schemaNode?.format === "date-time")
+  );
+}
+
+function pushInvalidQueryFieldType(errors, stream, fields, predicate, path) {
+  for (const field of fields) {
+    if (schemaFieldNames(stream).has(field) && !predicate(schemaProperty(stream, field))) {
+      errors.push(`${path}: invalid query field type '${field}'`);
+    }
+  }
+}
+
 function pushUnknownFields(errors, fields, knownFields, path) {
   for (const field of fields) {
     if (!knownFields.has(field)) {
@@ -132,6 +212,59 @@ function validateStreamFieldReferences(stream, streamIndex, errors) {
   for (const member of ["count_distinct", "group_by", "group_by_time", "max", "min", "sum"]) {
     pushUnknownFields(errors, query?.aggregations?.[member] ?? [], fields, `${basePath}/query/aggregations/${member}`);
   }
+  pushInvalidQueryFieldType(
+    errors,
+    stream,
+    query?.search?.lexical_fields ?? [],
+    isSearchableStringSchema,
+    `${basePath}/query/search/lexical_fields`,
+  );
+  pushInvalidQueryFieldType(
+    errors,
+    stream,
+    query?.search?.semantic_fields ?? [],
+    isSearchableStringSchema,
+    `${basePath}/query/search/semantic_fields`,
+  );
+  pushInvalidQueryFieldType(
+    errors,
+    stream,
+    Object.keys(query?.range_filters ?? {}),
+    isRangeSchema,
+    `${basePath}/query/range_filters`,
+  );
+  for (const member of ["count_distinct", "group_by"]) {
+    pushInvalidQueryFieldType(
+      errors,
+      stream,
+      query?.aggregations?.[member] ?? [],
+      isScalarGroupSchema,
+      `${basePath}/query/aggregations/${member}`,
+    );
+  }
+  pushInvalidQueryFieldType(
+    errors,
+    stream,
+    query?.aggregations?.group_by_time ?? [],
+    isTimeBucketSchema,
+    `${basePath}/query/aggregations/group_by_time`,
+  );
+  for (const member of ["min", "max"]) {
+    pushInvalidQueryFieldType(
+      errors,
+      stream,
+      query?.aggregations?.[member] ?? [],
+      isRangeSchema,
+      `${basePath}/query/aggregations/${member}`,
+    );
+  }
+  pushInvalidQueryFieldType(
+    errors,
+    stream,
+    query?.aggregations?.sum ?? [],
+    (schemaNode) => hasOneNonNullType(schemaNode, new Set(["integer", "number"])),
+    `${basePath}/query/aggregations/sum`,
+  );
 }
 
 function validateUniqueStreamMembers(stream, streamIndex, errors) {
@@ -155,6 +288,7 @@ function validateUniqueStreamMembers(stream, streamIndex, errors) {
 
 function validateRelationships(declaration, streamsByName, errors) {
   for (const [streamIndex, stream] of declaration.streams.entries()) {
+    const relationships = new Map((stream.relationships ?? []).map((relationship) => [relationship.name, relationship]));
     for (const [relationshipIndex, relationship] of (stream.relationships ?? []).entries()) {
       const relatedStream = streamsByName.get(relationship.stream);
       const basePath = `/streams/${streamIndex}/relationships/${relationshipIndex}`;
@@ -169,6 +303,30 @@ function validateRelationships(declaration, streamsByName, errors) {
         schemaFieldNames(foreignKeyStream),
         `${basePath}/foreign_key`,
       );
+    }
+    validateExpandCapabilities(stream, streamIndex, relationships, errors);
+  }
+}
+
+function validateExpandCapabilities(stream, streamIndex, relationships, errors) {
+  const expands = stream.query?.expand ?? [];
+  for (const [expandIndex, expand] of expands.entries()) {
+    const path = `/streams/${streamIndex}/query/expand/${expandIndex}`;
+    const firstIndex = expands.findIndex((candidate) => candidate.name === expand.name);
+    if (firstIndex !== expandIndex) {
+      errors.push(`${path}/name: duplicate expand name '${expand.name}'`);
+    }
+    const relationship = relationships.get(expand.name);
+    if (!relationship) {
+      errors.push(`${path}/name: unknown relationship '${expand.name}'`);
+      continue;
+    }
+    const limitsAreReversed =
+      expand.default_limit !== undefined && expand.max_limit !== undefined && expand.default_limit > expand.max_limit;
+    const hasOneDeclaresLimits =
+      relationship.cardinality === "has_one" && (expand.default_limit !== undefined || expand.max_limit !== undefined);
+    if (limitsAreReversed || hasOneDeclaresLimits) {
+      errors.push(`${path}: invalid expand limits '${expand.name}'`);
     }
   }
 }
@@ -212,6 +370,7 @@ function validateSemantics(declaration) {
     }
     validateUniqueStreamMembers(stream, streamIndex, errors);
     validateStreamFieldReferences(stream, streamIndex, errors);
+    validateEmbeddedSchemaNode(stream.schema, `/streams/${streamIndex}/schema`, errors);
   }
   validateRelationships(declaration, streamsByName, errors);
   validatePresets(declaration, streamsByName, errors);
