@@ -142,6 +142,32 @@ test("profile skips report a redacted branch code for each unreadable page", asy
 	}
 });
 
+test("profile account-header skips do not suppress later requested streams", async () => {
+	const skips: Array<Record<string, unknown>> = [];
+	const records = new Map<string, Record<string, unknown>[]>();
+	await collectYoutubeBrowser({
+		page: new FixturePage(["content", "empty"]) as never,
+		requested: new Map(
+			["profile", "subscriptions", "watch_history"].map((name) => [
+				name,
+				{ name },
+			]),
+		) as never,
+		emitRecord: async (stream, data) => {
+			records.set(stream, [...(records.get(stream) ?? []), data]);
+		},
+		emit: async (event) => {
+			skips.push(event as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "youtube_profile_account_header_unreadable");
+	assert.equal(records.get("subscriptions")?.length, 1);
+	assert.equal(records.get("watch_history")?.length, 1);
+});
+
 test("browser collector emits schema-valid records for all seven scopes without a Takeout directory", async () => {
 	const streams = [
 		"profile",

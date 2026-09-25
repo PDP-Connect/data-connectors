@@ -413,75 +413,75 @@ export async function collectYoutubeBrowser(
 					"profile",
 					"youtube_profile_account_header_unreadable",
 				);
-				return;
-			}
-			const own = await page.evaluate(
-				readOwnAccount as () => ReturnType<typeof readOwnAccount>,
-			);
-			if (!own.channel_url) {
-				await ctx.emit({
-					type: "SKIP_RESULT",
-					stream: "profile",
-					reason: "youtube_profile_channel_link_unavailable",
-					message:
-						"The signed-in account header did not expose an own-channel link.",
-				});
 			} else {
-				await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
-				const channelState = await waitForChannelIdentity(page);
-				if (channelState !== "content") {
-					await skipUnreadable(
-						ctx,
-						"profile",
-						"youtube_profile_channel_page_unreadable",
-					);
+				const own = await page.evaluate(
+					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
+				);
+				if (!own.channel_url) {
+					await ctx.emit({
+						type: "SKIP_RESULT",
+						stream: "profile",
+						reason: "youtube_profile_channel_link_unavailable",
+						message:
+							"The signed-in account header did not expose an own-channel link.",
+					});
 				} else {
-					const channel = await page.evaluate(
-						readChannelPage as () => ReturnType<typeof readChannelPage>,
-					);
-					let about: ReturnType<typeof readChannelAbout> | null = null;
-					let aboutUnreadable = false;
-					try {
-						await page.goto(`${own.channel_url.replace(/\/$/, "")}/about`, {
-							waitUntil: "domcontentloaded",
-						});
-						const aboutState = await waitForChannelAbout(page);
-						if (aboutState === "unreadable") {
+					await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
+					const channelState = await waitForChannelIdentity(page);
+					if (channelState !== "content") {
+						await skipUnreadable(
+							ctx,
+							"profile",
+							"youtube_profile_channel_page_unreadable",
+						);
+					} else {
+						const channel = await page.evaluate(
+							readChannelPage as () => ReturnType<typeof readChannelPage>,
+						);
+						let about: ReturnType<typeof readChannelAbout> | null = null;
+						let aboutUnreadable = false;
+						try {
+							await page.goto(`${own.channel_url.replace(/\/$/, "")}/about`, {
+								waitUntil: "domcontentloaded",
+							});
+							const aboutState = await waitForChannelAbout(page);
+							if (aboutState === "unreadable") {
+								await skipUnreadable(
+									ctx,
+									"profile",
+									"youtube_profile_about_page_unreadable",
+								);
+								aboutUnreadable = true;
+							} else if (aboutState === "content")
+								about = await page.evaluate(
+									readChannelAbout as () => ReturnType<typeof readChannelAbout>,
+								);
+						} catch {
 							await skipUnreadable(
 								ctx,
 								"profile",
 								"youtube_profile_about_page_unreadable",
 							);
 							aboutUnreadable = true;
-						} else if (aboutState === "content")
-							about = await page.evaluate(
-								readChannelAbout as () => ReturnType<typeof readChannelAbout>,
-							);
-					} catch {
-						await skipUnreadable(
-							ctx,
-							"profile",
-							"youtube_profile_about_page_unreadable",
-						);
-						aboutUnreadable = true;
-					}
-					if (!aboutUnreadable) {
-						await emit("profile", {
-							id: channel.channel_id ?? own.channel_url,
-							channel_id: channel.channel_id,
-							channel_url: own.channel_url,
-							title: channel.title,
-							handle: channel.handle,
-							email: own.email,
-							joined_at: about?.joined_at ?? null,
-							avatar_url: channel.avatar_url,
-							description: about?.description ?? null,
-							country: about?.country ?? null,
-							subscriber_count: parseCount(about?.subscriber_count_text),
-							view_count: parseCount(about?.view_count_text),
-							video_count: parseCount(about?.video_count_text),
-						});
-						profileEmitted = true;
+						}
+						if (!aboutUnreadable) {
+							await emit("profile", {
+								id: channel.channel_id ?? own.channel_url,
+								channel_id: channel.channel_id,
+								channel_url: own.channel_url,
+								title: channel.title,
+								handle: channel.handle,
+								email: own.email,
+								joined_at: about?.joined_at ?? null,
+								avatar_url: channel.avatar_url,
+								description: about?.description ?? null,
+								country: about?.country ?? null,
+								subscriber_count: parseCount(about?.subscriber_count_text),
+								view_count: parseCount(about?.view_count_text),
+								video_count: parseCount(about?.video_count_text),
+							});
+							profileEmitted = true;
+						}
 					}
 				}
 			}
