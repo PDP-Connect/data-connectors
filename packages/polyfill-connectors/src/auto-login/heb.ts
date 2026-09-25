@@ -160,7 +160,7 @@ interface EnsureHebSessionArgs {
 				assistanceRequestId: string,
 				status: AssistanceCompletionStatus,
 				extra?: { message?: string },
-			) => Promise<void>)
+		  ) => Promise<void>)
 		| undefined;
 	/**
 	 * This connection's resolved sign-in pair, threaded from the runtime (see
@@ -857,9 +857,9 @@ async function handOffToOwner({
 	surface,
 	readinessCheck = false,
 }: Pick<
-		EnsureHebSessionArgs,
-		"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
-	> & {
+	EnsureHebSessionArgs,
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+> & {
 	readonly checkpoint?: SessionCheckpointFn | undefined;
 	readonly readinessCheck?: boolean;
 	readonly surface: Exclude<HebAuthSurface, "live">;
