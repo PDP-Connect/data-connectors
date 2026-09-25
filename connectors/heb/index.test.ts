@@ -3350,6 +3350,99 @@ test("fetchOrderDetail: continuous remounts with matching count fail closed with
 	}
 });
 
+// ─── Large unattributed virtualized lists (0924 shortfall fix) ─────────────
+// A genuinely large H-E-B order (69-112 declared items, matching the live
+// evidence that produced 42/42 empty order_items) renders far more rows than
+// any single mounted window can hold. Its declared count can never match
+// rowLinks.length on any one snapshot, so `staticListEvidence` is always
+// null. Without a positional attribute, the pre-fix code threw on the very
+// first snapshot ("detail row has no explicit positional identity") before
+// scrolling ever had a chance to accumulate anything, and the whole order's
+// items were lost. These tests prove the content-identity fallback (see
+// inspectAndAdvanceDetailSurface's `content:href=` key and
+// collectDetailSurface's ambiguous-href guard) closes that gap without
+// weakening the existing fail-closed tests above (which never pass a large
+// expectedItemCount, so they are unaffected — see
+// canAttemptVirtualizedContentIdentity's guard in index.ts).
+
+test("fetchOrderDetail: a large unattributed virtualized order accumulates all declared items across scroll snapshots", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = readFileSync(
+			join(FIXTURES_DIR, "order-detail-unattributed-large-virtualized.html"),
+			"utf8",
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-LARGE-VIRTUAL",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+
+		// This is the exact shape that threw immediately before the fix: no
+		// data-index/aria-posinset anywhere, and expectedItemCount (80) can
+		// never equal any single snapshot's mounted row count (18), so
+		// staticListEvidence is always null and the old code had no path but
+		// to throw on row 1 of snapshot 1.
+		const result = await fetchOrderDetail(page, "HEB-LARGE-VIRTUAL", {
+			detailSurfaceTimeoutMs: 15_000,
+			expectedItemCount: 80,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "hydrated");
+		assert.equal(
+			result.detail?.items.length,
+			80,
+			"every declared item is collected across scroll snapshots, not truncated at one mounted window",
+		);
+		const hrefs = result.detail?.items.map((item) => item.productUrl) ?? [];
+		assert.equal(
+			new Set(hrefs).size,
+			80,
+			"no item is duplicated by the content-identity accumulation",
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("fetchOrderDetail: a repeated product that is never co-mounted under content identity fails closed instead of dropping one occurrence", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = readFileSync(
+			join(FIXTURES_DIR, "order-detail-virtualized-ambiguous-repeat.html"),
+			"utf8",
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-AMBIGUOUS-REPEAT",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+
+		// The repeated href's two true occurrences (positions 5 and 65) are
+		// never mounted in the same 18-row window, so content identity alone
+		// cannot prove they are two distinct purchased lines rather than one
+		// row re-observed. Silently keeping only one would under-report a
+		// real item; the connector must fail closed and say so distinctly
+		// rather than hydrate a wrong count.
+		const result = await fetchOrderDetail(page, "HEB-AMBIGUOUS-REPEAT", {
+			detailSurfaceTimeoutMs: 15_000,
+			expectedItemCount: 80,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "failed");
+		assert.equal(result.failureKind, "detail_surface_error");
+		assert.match(result.diagnostic ?? "", /ambiguous repeated product/);
+	} finally {
+		await browser.close();
+	}
+});
+
 // ─── collectProfile / collectNutrition ─────────────────────────────────────
 // SYNTHETIC: inline HTML fixtures, not a live capture — see the connector's
 // header comment / report for live-proof status.
