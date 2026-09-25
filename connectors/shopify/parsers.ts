@@ -48,6 +48,17 @@ function collectOrderRefs(nodes: unknown): string[] {
 	return refs;
 }
 
+/** True when `ROOT_QUERY` holds any orders connection key, even an empty one. */
+export function hasOrdersConnection(cache: ApolloCache): boolean {
+	const root = cache.ROOT_QUERY;
+	return (
+		isRecord(root) &&
+		Object.keys(root).some(
+			(key) => PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
+		)
+	);
+}
+
 /**
  * Every `Order:<id>` ref reachable from `ROOT_QUERY`, deduplicated, preferring
  * the paginated accumulation key (populated by scrolling; holds every page

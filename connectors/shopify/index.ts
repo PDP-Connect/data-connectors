@@ -47,6 +47,8 @@
  * orders no longer returned (full scan each run).
  *
  * CHANGES
+ *   v0.2.5 (2026-09-25) — require a live, visible empty-state marker before
+ *     confirming an account when Apollo has no orders connection.
  *   v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
  *     the session afterward.
  *   v0.2.0 (2026-09-22) — real Apollo-cache extraction wired (parsers.ts);
@@ -67,7 +69,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
-import { extractOrders, hasNextOrdersPage } from "./parsers.ts";
+import { extractOrders, hasNextOrdersPage, hasOrdersConnection } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
@@ -98,40 +100,34 @@ interface FiberProps {
 	client?: { cache?: { extract?: () => Record<string, unknown> } };
 }
 
-function isFiberHost(value: unknown): value is Record<string, FiberNode> {
-	return typeof value === "object" && value !== null;
-}
-
-function readApolloCacheInPage(): ApolloCache | null {
-	function getLiveApolloState(): Record<string, unknown> | null {
-		try {
-			const root: unknown = document.querySelector("#root") ?? document.body;
-			if (!isFiberHost(root)) {
-				return null;
-			}
-			const fiberKey = Object.keys(root).find(
-				(k) =>
-					k.startsWith("__reactFiber") ||
-					k.startsWith("__reactInternalInstance"),
+export function readApolloCacheInPage(): ApolloCache | null {
+	let liveState: Record<string, unknown> | null = null;
+	try {
+		const root: unknown = document.querySelector("#root") ?? document.body;
+		if (typeof root === "object" && root !== null) {
+			const rootObject = root as Record<string, FiberNode>;
+			const fiberKey = Object.keys(rootObject).find(
+				(key) =>
+					key.startsWith("__reactFiber") ||
+					key.startsWith("__reactInternalInstance"),
 			);
-			if (!fiberKey) {
-				return null;
-			}
-			let fiber: FiberNode | null | undefined = root[fiberKey];
+			let fiber: FiberNode | null | undefined = fiberKey
+				? rootObject[fiberKey]
+				: null;
 			let steps = 0;
 			while (fiber && steps < 300) {
 				steps += 1;
 				const props = fiber.memoizedProps ?? fiber.pendingProps;
 				const extracted = props?.client?.cache?.extract?.();
 				if (extracted) {
-					return extracted;
+					liveState = extracted;
+					break;
 				}
 				fiber = fiber.return;
 			}
-		} catch {
-			// Fall through to the SSR snapshot below.
 		}
-		return null;
+	} catch {
+		// Fall through to the SSR snapshot below.
 	}
 
 	interface WindowWithApolloState {
@@ -139,8 +135,97 @@ function readApolloCacheInPage(): ApolloCache | null {
 	}
 	const globalState = (window as Window & WindowWithApolloState)
 		.__APOLLO_STATE__;
-	const state = getLiveApolloState() ?? globalState ?? null;
+	const state = liveState ?? globalState ?? null;
 	return state && typeof state === "object" ? state : null;
+}
+
+/** True only for the signed-in order-history route with a live Apollo cache,
+ *  no orders connection, and a visible exact generic empty-state phrase. */
+export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
+	const allowedPhrases = new Set([
+		"no orders yet",
+		"no order history",
+		"no orders found",
+		"you haven't placed any orders",
+		"your order history is empty",
+	]);
+	if (
+		location.origin !== "https://shop.app" ||
+		location.pathname !== "/account/order-history" ||
+		document.querySelector(
+			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
+		)
+	) {
+		return false;
+	}
+	const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
+	const hasOrderContext =
+		headings.some((heading) => /orders?|order history/i.test(heading.textContent ?? "")) ||
+		Boolean(
+			document.querySelector(
+				'[data-test*="order"], [data-testid*="order"], a[href*="/orders/"], a[href*="/order/"]',
+			),
+		);
+	if (!hasOrderContext) return false;
+
+	const root: unknown = document.querySelector("#root") ?? document.body;
+	if (typeof root !== "object" || root === null) return false;
+	const rootObject = root as Record<string, FiberNode>;
+	const fiberKey = Object.keys(rootObject).find(
+		(key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
+	);
+	if (!fiberKey) return false;
+	let fiber: FiberNode | null | undefined = rootObject[fiberKey];
+	let liveState: Record<string, unknown> | null = null;
+	let steps = 0;
+	while (fiber && steps < 300) {
+		steps += 1;
+		const props = fiber.memoizedProps ?? fiber.pendingProps;
+		try {
+			const extracted = props?.client?.cache?.extract?.();
+			if (extracted && typeof extracted === "object") {
+				liveState = extracted;
+				break;
+			}
+		} catch {
+			return false;
+		}
+		fiber = fiber.return;
+	}
+	const query = liveState?.ROOT_QUERY;
+	if (!query || typeof query !== "object" || Array.isArray(query)) return false;
+	const hasOrderRef = Object.entries(query).some(([key, value]) => {
+		if (!/^deliveriesOrdersList[:(]/.test(key)) return false;
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+		const nodes = (value as { nodes?: unknown }).nodes;
+		return (
+			Array.isArray(nodes) &&
+			nodes.some(
+				(node) =>
+					typeof node === "object" &&
+					node !== null &&
+					"__ref" in node &&
+					typeof node.__ref === "string" &&
+					node.__ref.startsWith("Order:"),
+			)
+		);
+	});
+	if (hasOrderRef) return false;
+	return Array.from(document.querySelectorAll("body *")).some((element) => {
+		if (element.children.length > 0) return false;
+		const rect = element.getBoundingClientRect();
+		const style = getComputedStyle(element);
+		if (
+			rect.width <= 0 ||
+			rect.height <= 0 ||
+			style.display === "none" ||
+			style.visibility === "hidden"
+		) {
+			return false;
+		}
+		const phrase = (element.textContent ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+		return allowedPhrases.has(phrase);
+	});
 }
 
 function scrollToBottomInPage(): void {
@@ -203,6 +288,7 @@ export interface CollectShopifyArgs {
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: BrowserCollectContext["progress"];
 	readCache: () => Promise<ApolloCache | null>;
+	readVerifiedEmptyState?: () => Promise<boolean>;
 	requested: BrowserCollectContext["requested"];
 	scroll: () => Promise<void>;
 	state: BrowserCollectContext["state"];
@@ -212,7 +298,7 @@ export interface CollectShopifyArgs {
  *  `readCache`/`scroll` are injected so integration tests can drive this with
  *  a fake page. `collect()` below binds them to a real `page`. */
 export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
-	const { emit, emitRecord, progress, readCache, requested, scroll, state } =
+	const { emit, emitRecord, progress, readCache, readVerifiedEmptyState, requested, scroll, state } =
 		args;
 	if (!requested.has(ORDERS_STREAM)) {
 		return;
@@ -229,9 +315,36 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		});
 		return;
 	}
+	// Fail closed: a missing reader, a false result, or a page error all skip.
+	if (
+		!hasOrdersConnection(cache) &&
+		!(await readVerifiedEmptyState?.().catch(() => false))
+	) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ORDERS_STREAM,
+			reason: "shopify_order_history_unconfirmed",
+			message:
+				"Shop Orders (orders) could not be confirmed: the page had no order connection or verified empty-state marker. Confirm order history is loaded, then try again.",
+		});
+		return;
+	}
 
 	await progress("Loading Shop order history", { stream: ORDERS_STREAM });
 	const orders = extractOrders(cache);
+	if (
+		orders.length === 0 &&
+		!(await readVerifiedEmptyState?.().catch(() => false))
+	) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ORDERS_STREAM,
+			reason: "shopify_order_history_unconfirmed",
+			message:
+				"Shop Orders (orders) could not be confirmed: the page had no loaded orders or verified empty-state marker. Confirm order history is loaded, then try again.",
+		});
+		return;
+	}
 
 	const cursor = openFingerprintCursor(state[ORDERS_STREAM]);
 	for (const order of orders) {
@@ -380,6 +493,7 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 		requested,
 		state,
 		readCache: () => page.evaluate(readApolloCacheInPage),
+		readVerifiedEmptyState: () => page.evaluate(hasVerifiedEmptyOrderHistoryInPage),
 		scroll: async () => {
 			await page.evaluate(scrollToBottomInPage);
 			await politeDelay(SCROLL_STEP_DELAY_MS);

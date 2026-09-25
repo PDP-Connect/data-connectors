@@ -1645,10 +1645,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/index.ts",
-			line: 240,
+			line: 353,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectShopify(): emitRecord() per order, fingerprint-gated, must land before the run's single STATE message",
+		},
+		{
+			path: "connectors/shopify/index.test.ts",
+			line: 539,
+			column: 3,
+			category: "test_assertion_sequencing",
+			note: "collectShopify(): test drives each unconfirmed empty-cache case through a separate protocol recorder.",
+		},
+		{
+			path: "connectors/shopify/index.test.ts",
+			line: 585,
+			column: 3,
+			category: "test_assertion_sequencing",
+			note: "collectShopify(): test drives each missing or throwing empty-state reader through a separate protocol recorder.",
 		},
 		{
 			path: "connectors/slack/fail-open.test.ts",
