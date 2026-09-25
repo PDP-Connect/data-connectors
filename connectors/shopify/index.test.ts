@@ -531,6 +531,22 @@ test("collectShopify confirms an empty account only with verified page evidence 
 	assert.equal(skip.reason, "shopify_order_history_unconfirmed");
 });
 
+test("collectShopify fails closed when the empty-state reader is missing or throws", async () => {
+	for (const readVerifiedEmptyState of [undefined, () => Promise.reject(new Error("page closed"))]) {
+		const run = makeRecordingEmit(validateRecord);
+		await collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
+			readVerifiedEmptyState, scroll: () => Promise.resolve(),
+		});
+		const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+		assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
+	}
+});
+
 test("collectShopify discloses truncation when the scroll ceiling is hit with more pages advertised", async () => {
 	const { emit, emitRecord, protocolMessages } =
 		makeRecordingEmit(validateRecord);

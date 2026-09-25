@@ -48,8 +48,8 @@
  *
  * CHANGES
  *   v0.2.5 (2026-09-25) — require a live, visible empty-state marker before
-    confirming an account when Apollo has no orders connection.
-  v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
+ *     confirming an account when Apollo has no orders connection.
+ *   v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
  *     the session afterward.
  *   v0.2.0 (2026-09-22) — real Apollo-cache extraction wired (parsers.ts);
  *     fingerprint-cursor incremental gate; added order_number,
@@ -300,9 +300,10 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		});
 		return;
 	}
+	// Fail closed: a missing reader, a false result, or a page error all skip.
 	if (
 		!hasOrdersConnection(cache) &&
-		!(await readVerifiedEmptyState?.())
+		!(await readVerifiedEmptyState?.().catch(() => false))
 	) {
 		await emit({
 			type: "SKIP_RESULT",
