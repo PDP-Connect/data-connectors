@@ -156,7 +156,7 @@ test("A-T1b refuses a lock entry that carries no digest, without contacting the 
 test("A-T1c resolves a tag only for an explicit first pin, and reports the digest", async () => {
   await withRegistry({ challenge: true }, async (registry) => {
     const signer = createSigner();
-    const { digest } = publishArtifact(registry, { signer });
+    const { digest, config } = publishArtifact(registry, { signer });
     const installRoot = mkdtempSync(join(tmpdir(), "oci-firstpin-"));
 
     try {
@@ -177,8 +177,13 @@ test("A-T1c resolves a tag only for an explicit first pin, and reports the diges
           registry: registry.registry,
           repository: "pdp-connect/connector/ynab",
           digest,
+          sourceDeclarationPath: "collection-profiles/ynab-pdpp/source-declaration.json",
+          sourceDeclarationSha256: config.source_declaration_digest,
         },
       ]);
+      // The retained declaration is the layer the signed config pins.
+      const retained = readFileSync(join(installRoot, result.pinned[0].sourceDeclarationPath));
+      assert.equal(sha256(retained), config.source_declaration_digest);
     } finally {
       rmSync(installRoot, { recursive: true, force: true });
     }
