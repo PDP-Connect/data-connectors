@@ -147,7 +147,6 @@ describe("W28 — the source declaration layer is a normative PDPP SourceDeclara
 		// The literal shape scripts/build-connector-oci-artifact.mjs used to
 		// emit (connector_key/connector_id/version/source.repository/
 		// canonical_inputs) — a provenance-like object, not a SourceDeclaration.
-		// See local/captain-0924/w28-oci-declaration-review.md.
 		const target = join(workspace, "invalid-declaration-shape");
 		rmSync(target, { recursive: true, force: true });
 		cpSync(ouraArtifact, target, { recursive: true });

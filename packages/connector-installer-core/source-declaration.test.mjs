@@ -130,8 +130,7 @@ describe("validateSourceDeclaration — positive", () => {
 
 describe("validateSourceDeclaration — negative", () => {
   it("rejects the previously-shipped provenance-like object (the P0 regression this fix closes)", () => {
-    // The exact shape scripts/build-connector-oci-artifact.mjs used to emit,
-    // per the review at local/captain-0924/w28-oci-declaration-review.md.
+    // The exact shape scripts/build-connector-oci-artifact.mjs used to emit.
     const provenanceLookalike = {
       declaration_version: "1.0",
       connector_key: "oura",
