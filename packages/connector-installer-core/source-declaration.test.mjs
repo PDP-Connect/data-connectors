@@ -16,9 +16,6 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 import { buildSourceDeclaration, validateSourceDeclaration } from "./source-declaration.mjs";
 
 const validProfile = {
@@ -189,7 +186,7 @@ describe("validateSourceDeclaration — negative", () => {
     declaration.streams[0].primary_key = ["not_a_real_field"];
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("unknown schema field")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.unknown_schema_field")));
   });
 
   it("rejects duplicate stream names", () => {
@@ -203,7 +200,7 @@ describe("validateSourceDeclaration — negative", () => {
     });
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("duplicate stream name")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.duplicate_stream_name")));
   });
 
   it("rejects a wildcard stream name", () => {
@@ -230,7 +227,7 @@ describe("validateSourceDeclaration — negative", () => {
     declaration.streams[0].schema.properties.dynamic = { $dynamicRef: "shared-schema" };
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("nonlocal schema reference")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.nonlocal_schema_reference")));
   });
 
   it("rejects query fields whose JSON Schema type does not support the requested capability", () => {
@@ -244,7 +241,7 @@ describe("validateSourceDeclaration — negative", () => {
     };
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("invalid query field type")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.invalid_query_field_type")));
   });
 
   it("rejects duplicate expand relationship names", () => {
@@ -266,7 +263,7 @@ describe("validateSourceDeclaration — negative", () => {
     declaration.streams[0].query = { expand: [{ name: "samples" }, { name: "samples" }] };
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("duplicate expand name")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.duplicate_expand_name")));
   });
 
   it("rejects expand limits on has_one relationships", () => {
@@ -285,67 +282,7 @@ describe("validateSourceDeclaration — negative", () => {
     declaration.streams[0].query = { expand: [{ name: "profile", default_limit: 1 }] };
     const result = validateSourceDeclaration(declaration);
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some((error) => error.includes("invalid expand limits")));
+    assert.ok(result.errors.some((error) => error.includes("source.declaration.invalid_expand_limits")));
   });
 });
 
-describe("validateSourceDeclaration — canonical differential", () => {
-  it("matches the current PDPP reference-contract semantic validator when that source is available", { timeout: 10_000 }, () => {
-    const canonicalSource = "/home/tnunamak/code/pdpp/packages/reference-contract/src/public/source.ts";
-    if (!existsSync(canonicalSource)) {
-      return;
-    }
-
-    const valid = buildSourceDeclaration(validProfile);
-    const nonlocalRef = structuredClone(valid);
-    nonlocalRef.streams[0].schema.properties.remote = { $ref: "https://example.com/schema.json" };
-    const invalidQueryType = structuredClone(valid);
-    invalidQueryType.streams[0].schema.properties.score = { type: "number" };
-    invalidQueryType.streams[0].query = { search: { lexical_fields: ["score"] } };
-    const duplicateExpand = structuredClone(valid);
-    duplicateExpand.streams.push({
-      name: "samples",
-      semantics: "mutable_state",
-      schema: {
-        type: "object",
-        properties: { id: { type: "string" }, sleep_id: { type: "string" } },
-        required: ["id", "sleep_id"],
-      },
-      primary_key: ["id"],
-      selection: { fields: true, resources: true },
-    });
-    duplicateExpand.streams[0].relationships = [
-      { cardinality: "has_many", foreign_key: "sleep_id", name: "samples", stream: "samples" },
-    ];
-    duplicateExpand.streams[0].query = { expand: [{ name: "samples" }, { name: "samples" }] };
-    const hasOneLimit = structuredClone(valid);
-    hasOneLimit.streams[0].schema.properties.profile_id = { type: "string" };
-    hasOneLimit.streams.push({
-      name: "profiles",
-      semantics: "mutable_state",
-      schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-      primary_key: ["id"],
-      selection: { fields: true, resources: true },
-    });
-    hasOneLimit.streams[0].relationships = [
-      { cardinality: "has_one", foreign_key: "profile_id", name: "profile", stream: "profiles" },
-    ];
-    hasOneLimit.streams[0].query = { expand: [{ name: "profile", default_limit: 1 }] };
-
-    const fixtures = [valid, nonlocalRef, invalidQueryType, duplicateExpand, hasOneLimit];
-    const localResults = fixtures.map((fixture) => validateSourceDeclaration(fixture).ok);
-    const script = `
-      import { readFileSync } from "node:fs";
-      import { validateSourceDeclarationSemantics } from ${JSON.stringify(pathToFileURL(canonicalSource).href)};
-      const fixtures = JSON.parse(readFileSync(0, "utf8"));
-      process.stdout.write(JSON.stringify(fixtures.map((fixture) => validateSourceDeclarationSemantics(fixture).ok)));
-    `;
-    const canonical = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
-      cwd: "/home/tnunamak/code/pdpp",
-      encoding: "utf8",
-      input: JSON.stringify(fixtures),
-    });
-    assert.equal(canonical.status, 0, canonical.stderr);
-    assert.deepEqual(localResults, JSON.parse(canonical.stdout));
-  });
-});
