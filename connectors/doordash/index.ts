@@ -403,8 +403,10 @@ export async function doorDashEnsureSession(
 	args: EnsureSessionArgs,
 ): Promise<void> {
 	await ensureDoorDashSession({
+		assist: args.assist,
 		capture: args.capture,
 		checkpoint: args.checkpoint,
+		completeAssistance: args.completeAssistance,
 		context: args.context,
 		credentials: args.credentials,
 		onCredentialSubmit: args.onCredentialSubmit,
