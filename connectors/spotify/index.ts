@@ -243,17 +243,12 @@ async function openSpotify(page: BrowserCollectContext["page"]): Promise<void> {
 	await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "domcontentloaded" });
 }
 
-function spotifyTotp(timestampMs: number): string {
+export function spotifyTotp(timestampMs: number): string {
 	const encodedSecret = ',7/*F("rLJ2oxaKL^f+E1xvP@N';
-	const secret = Buffer.from(
-		encodedSecret
-			.split("")
-			.map((character, index) =>
-				String.fromCharCode(character.charCodeAt(0) ^ ((index % 33) + 9)),
-			)
-			.join(""),
-		"utf8",
-	);
+	const xored = encodedSecret
+		.split("")
+		.map((character, index) => character.charCodeAt(0) ^ ((index % 33) + 9));
+	const secret = Buffer.from(xored.join(""), "utf8");
 	const counter = BigInt(Math.floor(timestampMs / 1000 / 30));
 	const message = Buffer.alloc(8);
 	message.writeBigUInt64BE(counter);

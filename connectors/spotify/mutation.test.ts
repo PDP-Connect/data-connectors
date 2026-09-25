@@ -13,6 +13,7 @@ import {
 	hasSpotifySession,
 	spotifyCollect,
 	spotifyRetryablePattern,
+	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
 
@@ -107,6 +108,10 @@ const webFixture = {
 	saved_tracks: [],
 	warnings: [],
 };
+
+test("spotifyTotp preserves the provider's decimal-text XOR secret encoding", () => {
+	assert.equal(spotifyTotp(1_700_000_000_000), "371599");
+});
 
 test("Spotify readiness checks the shared cookie-backed token endpoint without navigating a page", async () => {
 	const requests: string[] = [];
