@@ -1806,6 +1806,17 @@ async function runInBrowser(args: {
 				},
 			),
 		);
+		// Sign-in can open an OAuth/SSO popup or intermediate redirect tab
+		// (github.com, accounts.google.com for YouTube/Spotify, LinkedIn, etc. —
+		// see browser-handoff.ts's doc comment on popup creation) that the
+		// provider leaves behind at "about:blank" or mid-reload once the flow
+		// completes and control returns to `page`. The pre-sign-in sweep at
+		// closeBrowserContextPagesExcept above only catches pages that existed
+		// BEFORE establishSession ran; nothing swept the context again after, so
+		// that stray popup rode along for the rest of the run as a second
+		// visible tab. Sweep again now that sign-in is the one thing known to
+		// have just run.
+		await closeBrowserContextPagesExcept(ctx, page);
 		await minimizeBrowserWindow(page as Page);
 		await captureBrowserPage(
 			baseCtx.capture,
