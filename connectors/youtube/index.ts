@@ -296,7 +296,7 @@ async function waitForChannelAbout(
 async function skipUnreadable(
 	ctx: BrowserContext,
 	stream: string,
-	reason = "page_unreadable",
+	reason: string,
 ): Promise<void> {
 	await ctx.emit({
 		type: "SKIP_RESULT",
@@ -349,7 +349,7 @@ async function readableVideos(
 	try {
 		return await visibleVideos(ctx.page, url, rounds, mode);
 	} catch {
-		await skipUnreadable(ctx, stream);
+		await skipUnreadable(ctx, stream, "page_unreadable");
 		return null;
 	}
 }
@@ -491,7 +491,8 @@ export async function collectYoutubeBrowser(
 	if (requested.has("subscriptions")) {
 		await page.goto(`${HOME}feed/channels`, { waitUntil: "domcontentloaded" });
 		const state = await waitForContent(page, "ytd-channel-renderer");
-		if (state === "unreadable") await skipUnreadable(ctx, "subscriptions");
+		if (state === "unreadable")
+			await skipUnreadable(ctx, "subscriptions", "page_unreadable");
 		else {
 			await scroll(page, SCROLLS.subscriptions);
 			const subscriptions =
@@ -531,7 +532,8 @@ export async function collectYoutubeBrowser(
 		if (state === "unreadable") {
 			playlistIndexReadable = false;
 			for (const stream of ["playlists", "playlist_items"])
-				if (requested.has(stream)) await skipUnreadable(ctx, stream);
+				if (requested.has(stream))
+					await skipUnreadable(ctx, stream, "page_unreadable");
 		} else if (state === "content") {
 			await scroll(page, SCROLLS.playlists);
 			playlistLinks = await page.evaluate(
@@ -555,7 +557,8 @@ export async function collectYoutubeBrowser(
 				)) !== "content"
 			) {
 				for (const stream of ["playlists", "playlist_items"])
-					if (requested.has(stream)) await skipUnreadable(ctx, stream);
+					if (requested.has(stream))
+						await skipUnreadable(ctx, stream, "page_unreadable");
 				continue;
 			}
 			const header = await page.evaluate(
