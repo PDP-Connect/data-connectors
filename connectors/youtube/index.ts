@@ -296,11 +296,12 @@ async function waitForChannelAbout(
 async function skipUnreadable(
 	ctx: BrowserContext,
 	stream: string,
+	reason = "page_unreadable",
 ): Promise<void> {
 	await ctx.emit({
 		type: "SKIP_RESULT",
 		stream,
-		reason: "page_unreadable",
+		reason,
 		message: "YouTube content did not appear before the page-read deadline.",
 	});
 }
@@ -393,7 +394,7 @@ export async function collectYoutubeBrowser(
 			"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
 		);
 		if (homeState !== "content") {
-			await skipUnreadable(ctx, "profile");
+			await skipUnreadable(ctx, "profile", "youtube_profile_home_not_ready");
 		} else {
 			let profileEmitted = false;
 			await page
@@ -416,7 +417,7 @@ export async function collectYoutubeBrowser(
 				await ctx.emit({
 					type: "SKIP_RESULT",
 					stream: "profile",
-					reason: "page_unreadable",
+					reason: "youtube_profile_channel_link_unavailable",
 					message:
 						"The signed-in account header did not expose an own-channel link.",
 				});
@@ -424,7 +425,11 @@ export async function collectYoutubeBrowser(
 				await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
 				const channelState = await waitForChannelIdentity(page);
 				if (channelState !== "content") {
-					await skipUnreadable(ctx, "profile");
+					await skipUnreadable(
+						ctx,
+						"profile",
+						"youtube_profile_channel_page_unreadable",
+					);
 				} else {
 					const channel = await page.evaluate(
 						readChannelPage as () => ReturnType<typeof readChannelPage>,
@@ -437,14 +442,22 @@ export async function collectYoutubeBrowser(
 						});
 						const aboutState = await waitForChannelAbout(page);
 						if (aboutState === "unreadable") {
-							await skipUnreadable(ctx, "profile");
+							await skipUnreadable(
+								ctx,
+								"profile",
+								"youtube_profile_about_page_unreadable",
+							);
 							aboutUnreadable = true;
 						} else if (aboutState === "content")
 							about = await page.evaluate(
 								readChannelAbout as () => ReturnType<typeof readChannelAbout>,
 							);
 					} catch {
-						await skipUnreadable(ctx, "profile");
+						await skipUnreadable(
+							ctx,
+							"profile",
+							"youtube_profile_about_page_unreadable",
+						);
 						aboutUnreadable = true;
 					}
 					if (!aboutUnreadable) {

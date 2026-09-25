@@ -20,6 +20,18 @@ const VIDEO = {
 
 class FixturePage {
 	url = "";
+	private readonly waitStates: Array<"content" | "empty" | "unreadable">;
+	private readonly ownAccount: { channel_url: string | null; email: string | null };
+	constructor(
+		waitStates: Array<"content" | "empty" | "unreadable"> = [],
+		ownAccount: { channel_url: string | null; email: string | null } = {
+			channel_url: "https://www.youtube.com/@owner",
+			email: "owner@example.com",
+		},
+	) {
+		this.waitStates = waitStates;
+		this.ownAccount = ownAccount;
+	}
 	async goto(url: string) {
 		this.url = url;
 	}
@@ -30,14 +42,12 @@ class FixturePage {
 		/* fixture has no renderer delay */
 	}
 	async waitForFunction() {
-		return { jsonValue: async () => "content", dispose: async () => undefined };
+		const state = this.waitStates.shift() ?? "content";
+		if (state === "unreadable") throw new Error("fixture page read timed out");
+		return { jsonValue: async () => state, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function): Promise<any> {
-		if (fn.name === "readOwnAccount")
-			return {
-				channel_url: "https://www.youtube.com/@owner",
-				email: "owner@example.com",
-			};
+		if (fn.name === "readOwnAccount") return this.ownAccount;
 		if (fn.name === "readChannelPage")
 			return {
 				channel_id: "UCowner",
@@ -75,6 +85,50 @@ class FixturePage {
 		return undefined;
 	}
 }
+
+test("profile skips report a redacted branch code for each unreadable page", async () => {
+	const scenarios = [
+		{
+			name: "home page is not ready",
+			page: new FixturePage(["empty"]),
+			reason: "youtube_profile_home_not_ready",
+		},
+		{
+			name: "account menu has no channel link",
+			page: new FixturePage(["content", "content"], {
+				channel_url: null,
+				email: null,
+			}),
+			reason: "youtube_profile_channel_link_unavailable",
+		},
+		{
+			name: "channel page identity is unreadable",
+			page: new FixturePage(["content", "content", "unreadable"]),
+			reason: "youtube_profile_channel_page_unreadable",
+		},
+		{
+			name: "channel About page is unreadable",
+			page: new FixturePage(["content", "content", "content", "unreadable"]),
+			reason: "youtube_profile_about_page_unreadable",
+		},
+	];
+
+	for (const scenario of scenarios) {
+		const skips: Array<Record<string, unknown>> = [];
+		await collectYoutubeBrowser({
+			page: scenario.page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async () => undefined,
+			emit: async (event) => skips.push(event as Record<string, unknown>),
+			progress: async () => undefined,
+		});
+
+		assert.equal(skips.length, 1, scenario.name);
+		assert.equal(skips[0]?.type, "SKIP_RESULT", scenario.name);
+		assert.equal(skips[0]?.reason, scenario.reason, scenario.name);
+		assert.doesNotMatch(JSON.stringify(skips[0]), /youtube\.com|owner@example\.com/);
+	}
+});
 
 test("browser collector emits schema-valid records for all seven scopes without a Takeout directory", async () => {
 	const streams = [
