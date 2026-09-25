@@ -101,32 +101,33 @@ interface FiberProps {
 }
 
 export function readApolloCacheInPage(): ApolloCache | null {
-	function isFiberHostLocal(value: unknown): value is Record<string, FiberNode> {
-		return typeof value === "object" && value !== null;
-	}
-	function getLiveApolloState(): Record<string, unknown> | null {
-		try {
-			const root: unknown = document.querySelector("#root") ?? document.body;
-			if (!isFiberHostLocal(root)) return null;
-			const fiberKey = Object.keys(root).find(
+	let liveState: Record<string, unknown> | null = null;
+	try {
+		const root: unknown = document.querySelector("#root") ?? document.body;
+		if (typeof root === "object" && root !== null) {
+			const rootObject = root as Record<string, FiberNode>;
+			const fiberKey = Object.keys(rootObject).find(
 				(key) =>
 					key.startsWith("__reactFiber") ||
 					key.startsWith("__reactInternalInstance"),
 			);
-			if (!fiberKey) return null;
-			let fiber: FiberNode | null | undefined = root[fiberKey];
+			let fiber: FiberNode | null | undefined = fiberKey
+				? rootObject[fiberKey]
+				: null;
 			let steps = 0;
 			while (fiber && steps < 300) {
 				steps += 1;
 				const props = fiber.memoizedProps ?? fiber.pendingProps;
 				const extracted = props?.client?.cache?.extract?.();
-				if (extracted) return extracted;
+				if (extracted) {
+					liveState = extracted;
+					break;
+				}
 				fiber = fiber.return;
 			}
-		} catch {
-			// Fall through to the SSR snapshot below.
 		}
-		return null;
+	} catch {
+		// Fall through to the SSR snapshot below.
 	}
 
 	interface WindowWithApolloState {
@@ -134,7 +135,7 @@ export function readApolloCacheInPage(): ApolloCache | null {
 	}
 	const globalState = (window as Window & WindowWithApolloState)
 		.__APOLLO_STATE__;
-	const state = getLiveApolloState() ?? globalState ?? null;
+	const state = liveState ?? globalState ?? null;
 	return state && typeof state === "object" ? state : null;
 }
 

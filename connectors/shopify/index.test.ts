@@ -249,6 +249,21 @@ function makeCache(orderRefs: string[], hasNextPage: boolean): ApolloCache {
 	return entries;
 }
 
+function installApolloFixtureInPage(apolloState: ApolloCache): void {
+	const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
+	root["__reactFiber$fixture"] = {
+		memoizedProps: {
+			client: {
+				cache: {
+					extract() {
+						return apolloState;
+					},
+				},
+			},
+		},
+	};
+}
+
 function recordsOf(
 	events: Array<{ data: RecordData; stream: string }>,
 	stream: string,
@@ -432,46 +447,22 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 			}),
 		);
 		await page.goto("https://shop.app/account/order-history");
-		await page.evaluate(() => {
-			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
-			root["__reactFiber$fixture"] = {
-				memoizedProps: {
-					client: { cache: { extract: () => ({ ROOT_QUERY: { viewer: {} } }) } },
-				},
-			};
-		});
+		assert.doesNotMatch(String(installApolloFixtureInPage), /__name/);
+		assert.doesNotMatch(String(readApolloCacheInPage), /__name/);
+		assert.doesNotMatch(String(hasVerifiedEmptyOrderHistoryInPage), /__name/);
+		await page.evaluate(installApolloFixtureInPage, { ROOT_QUERY: { viewer: {} } });
 		assert.deepEqual(await page.evaluate(readApolloCacheInPage), {
 			ROOT_QUERY: { viewer: {} },
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
-		await page.evaluate(() => {
-			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
-			root["__reactFiber$fixture"] = {
-				memoizedProps: {
-					client: {
-						cache: {
-							extract: () => ({ ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } } }),
-						},
-					},
-				},
-			};
+		await page.evaluate(installApolloFixtureInPage, {
+			ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } },
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
-		await page.evaluate(() => {
-			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
-			root["__reactFiber$fixture"] = {
-				memoizedProps: {
-					client: {
-						cache: {
-							extract: () => ({
-								ROOT_QUERY: {
-									'deliveriesOrdersList:{}': { nodes: [{ __ref: "Order:1" }] },
-								},
-							}),
-						},
-					},
-				},
-			};
+		await page.evaluate(installApolloFixtureInPage, {
+			ROOT_QUERY: {
+				'deliveriesOrdersList:{}': { nodes: [{ __ref: "Order:1" }] },
+			},
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
 	} finally {
