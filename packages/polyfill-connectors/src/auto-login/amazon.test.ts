@@ -79,13 +79,7 @@ function makeChallengePage({
 
 	const emptyLocator: Pick<
 		Locator,
-		| "count"
-		| "first"
-		| "isVisible"
-		| "inputValue"
-		| "nth"
-		| "fill"
-		| "waitFor"
+		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill" | "waitFor"
 	> = {
 		count: (): Promise<number> => Promise.resolve(0),
 		first(): Locator {
@@ -323,10 +317,9 @@ test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async
 			ordersPageReadinessChecks,
 			page,
 			readinessPageCreations,
-		} =
-			makeChallengePage({
-				becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
-			});
+		} = makeChallengePage({
+			becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
+		});
 		let completionStatus: string | undefined;
 
 		const ok = await ensureAmazonSession({
