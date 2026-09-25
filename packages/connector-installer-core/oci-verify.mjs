@@ -106,6 +106,7 @@ export const OCI_LAYER_MEDIA_TYPES = {
   code: "application/vnd.pdpp.connector.code.v1.tar+gzip",
   assets: "application/vnd.pdpp.connector.assets.v1.tar+gzip",
   licenses: "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+  sourceDeclaration: "application/vnd.pdpp.connector.source-declaration.v1+json",
   provenance: "application/vnd.pdpp.connector.provenance.v1+json",
 };
 
@@ -116,7 +117,7 @@ const KNOWN_LAYER_MEDIA_TYPES = new Set(Object.values(OCI_LAYER_MEDIA_TYPES));
 
 // Which layers an artifact cannot be without. `assets` is deliberately absent
 // from this list, and that absence is the thing A-T6 pins.
-const REQUIRED_LAYERS = ["profile", "code", "licenses", "provenance"];
+const REQUIRED_LAYERS = ["profile", "code", "licenses", "sourceDeclaration", "provenance"];
 
 export const DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
@@ -704,7 +705,14 @@ export function indexLayersByMediaType(manifest, { repository = "" } = {}) {
  * consumer that trusts the publisher ran the check is storing them twice for
  * no reason.
  */
-export function assertConfigMatchesProfile({ config, profileBytes, profile, repository = "" }) {
+export function assertConfigMatchesProfile({
+  config,
+  profileBytes,
+  profile,
+  sourceDeclarationBytes = null,
+  sourceDeclaration = null,
+  repository = "",
+}) {
   const profileDigest = sha256Digest(profileBytes);
   if (config?.profile_digest !== profileDigest) {
     throw new OciRegistryError(
@@ -714,10 +722,36 @@ export function assertConfigMatchesProfile({ config, profileBytes, profile, repo
     );
   }
 
+  if (sourceDeclarationBytes) {
+    const declarationDigest = sha256Digest(sourceDeclarationBytes);
+    if (config?.source_declaration_digest !== declarationDigest) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: config.source_declaration_digest is ${config?.source_declaration_digest}, ` +
+          `but the source declaration layer hashes to ${declarationDigest}`,
+        "tampered"
+      );
+    }
+    if (sourceDeclaration?.canonical_inputs?.manifest?.sha256 !== profileDigest) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: source declaration manifest digest does not match the profile layer`,
+        "tampered"
+      );
+    }
+  }
+
   for (const field of ["connector_key", "connector_id", "protocol_version", "version"]) {
     if (config?.[field] !== profile?.[field]) {
       throw new OciRegistryError(
         `Refusing ${repository}: config.${field} is ${JSON.stringify(config?.[field])}, ` +
+          `but the profile declares ${JSON.stringify(profile?.[field])}`,
+        "tampered"
+      );
+    }
+  }
+  for (const field of ["connector_key", "connector_id", "version"]) {
+    if (sourceDeclaration && sourceDeclaration?.[field] !== profile?.[field]) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: source-declaration.${field} is ${JSON.stringify(sourceDeclaration?.[field])}, ` +
           `but the profile declares ${JSON.stringify(profile?.[field])}`,
         "tampered"
       );

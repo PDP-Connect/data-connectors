@@ -909,6 +909,10 @@ async function fetchOciArtifact(entry, options = {}) {
   const configBytes = await fetchBlob({ ...transport, digest: manifest.config.digest });
   const profileBytes = await fetchBlob({ ...transport, digest: layers.profile.digest });
   const codeBytes = await fetchBlob({ ...transport, digest: layers.code.digest });
+  const sourceDeclarationBytes = await fetchBlob({
+    ...transport,
+    digest: layers.sourceDeclaration.digest,
+  });
   const provenanceBytes = await fetchBlob({ ...transport, digest: layers.provenance.digest });
   const licensesBytes = await fetchBlob({ ...transport, digest: layers.licenses.digest });
   const assetsBytes = layers.assets
@@ -917,12 +921,14 @@ async function fetchOciArtifact(entry, options = {}) {
 
   let config;
   let profile;
+  let sourceDeclaration;
   try {
     config = JSON.parse(configBytes.toString("utf8"));
     profile = JSON.parse(profileBytes.toString("utf8"));
+    sourceDeclaration = JSON.parse(sourceDeclarationBytes.toString("utf8"));
   } catch (error) {
     throw new OciRegistryError(
-      `Refusing ${reference.repository}: config or profile is not JSON (${error.message})`,
+      `Refusing ${reference.repository}: config, profile, or source declaration is not JSON (${error.message})`,
       "tampered"
     );
   }
@@ -931,6 +937,8 @@ async function fetchOciArtifact(entry, options = {}) {
     config,
     profileBytes,
     profile,
+    sourceDeclarationBytes,
+    sourceDeclaration,
     repository: reference.repository,
   });
 

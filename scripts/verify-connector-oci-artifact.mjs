@@ -275,11 +275,20 @@ function main() {
 	);
 	const profileBytes = readFileSync(join(artifactRoot, "collection-profile.json"));
 	const profile = JSON.parse(profileBytes);
+	const sourceDeclarationBytes = readFileSync(
+		join(artifactRoot, "source-declaration.json"),
+	);
+	const sourceDeclaration = JSON.parse(sourceDeclarationBytes);
 
 	// 1. Config/profile cross-check.
 	if (config.profile_digest !== sha256(profileBytes)) {
 		throw new Error(
 			`config.profile_digest ${config.profile_digest} does not match the profile layer ${sha256(profileBytes)}`,
+		);
+	}
+	if (config.source_declaration_digest !== sha256(sourceDeclarationBytes)) {
+		throw new Error(
+			`config.source_declaration_digest ${config.source_declaration_digest} does not match the source declaration layer ${sha256(sourceDeclarationBytes)}`,
 		);
 	}
 	// `version` is in this list because the builder copies the profile layer
@@ -289,7 +298,6 @@ function main() {
 	for (const field of [
 		"connector_key",
 		"connector_id",
-		"protocol_version",
 		"version",
 	]) {
 		if (config[field] !== profile[field]) {
@@ -297,6 +305,24 @@ function main() {
 				`config.${field} is '${config[field]}' but the profile says '${profile[field]}'`,
 			);
 		}
+		if (sourceDeclaration[field] !== profile[field]) {
+			throw new Error(
+				`source-declaration.${field} is '${sourceDeclaration[field]}' but the profile says '${profile[field]}'`,
+			);
+		}
+	}
+	if (config.protocol_version !== profile.protocol_version) {
+		throw new Error(
+			`config.protocol_version is '${config.protocol_version}' but the profile says '${profile.protocol_version}'`,
+		);
+	}
+	if (
+		sourceDeclaration.canonical_inputs?.manifest?.sha256 !==
+		sha256(profileBytes)
+	) {
+		throw new Error(
+			"source-declaration.canonical_inputs.manifest.sha256 does not match the profile layer",
+		);
 	}
 
 	// 2. Archive safety, on every tarball present.
@@ -363,6 +389,7 @@ function main() {
 
 		console.log(`${config.connector_key}@${config.version} verified`);
 		console.log(`  profile digest cross-check   ok`);
+		console.log(`  source declaration pinned    ok`);
 		console.log(`  archive members safe         ok`);
 		console.log(`  version agrees with profile  ok`);
 		console.log(`  entrypoint ${config.entrypoint}`);

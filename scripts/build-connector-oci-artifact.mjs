@@ -18,6 +18,7 @@
  *   code.tar.gz               esbuild single-file ESM bundle    (code layer)
  *   assets.tar.gz             brand icon, when the manifest declares one
  *   licenses.tar.gz           licence texts that must travel with the bytes
+ *   source-declaration.json   source facts derived from canonical inputs
  *   provenance.json           what was built, from what, with what
  *   config.json               the small metadata blob a resolve reads (config)
  *   layers.json               media types + titles, for `oras push` to consume
@@ -445,6 +446,32 @@ async function main() {
 			sha256: sha256(readFileSync(join(repoRoot, input))),
 		}));
 
+	const sourceDeclaration = {
+		declaration_version: "1.0",
+		connector_key: connectorKey,
+		connector_id: profile.connector_id,
+		version,
+		source: {
+			repository: "https://github.com/PDP-Connect/data-connectors",
+			revision,
+			package: `connectors/${connectorDirectoryName}`,
+		},
+		canonical_inputs: {
+			manifest: {
+				path: relative(repoRoot, manifestPath),
+				sha256: sha256(profileBytes),
+			},
+			source_inventory: inputInventory,
+		},
+	};
+	const sourceDeclarationBytes = Buffer.from(
+		`${JSON.stringify(sourceDeclaration, null, 2)}\n`,
+	);
+	writeFileSync(
+		join(outputRoot, "source-declaration.json"),
+		sourceDeclarationBytes,
+	);
+
 	const provenance = {
 		generated_file_notice:
 			"GENERATED FILE — DO NOT HAND-EDIT. Rebuild with scripts/build-connector-oci-artifact.mjs.",
@@ -504,6 +531,7 @@ async function main() {
 			"code.tar.gz": sha256(codeTarball),
 			"assets.tar.gz": assetsTarball ? sha256(assetsTarball) : null,
 			"licenses.tar.gz": sha256(licensesTarball),
+			"source-declaration.json": sha256(sourceDeclarationBytes),
 		},
 	};
 	const provenanceBytes = Buffer.from(
@@ -526,6 +554,7 @@ async function main() {
 		tier: profile.capabilities?.public_listing?.tier ?? "development",
 		platform: { os: "any", architecture: "any" },
 		profile_digest: sha256(profileBytes),
+		source_declaration_digest: sha256(sourceDeclarationBytes),
 		entrypoint: "code/collection-profile.mjs",
 		runtime: {
 			node: JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"))
@@ -579,6 +608,10 @@ async function main() {
 		{
 			file: "licenses.tar.gz",
 			mediaType: "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+		},
+		{
+			file: "source-declaration.json",
+			mediaType: "application/vnd.pdpp.connector.source-declaration.v1+json",
 		},
 		{
 			file: "provenance.json",

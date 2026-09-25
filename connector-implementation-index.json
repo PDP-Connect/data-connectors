@@ -12285,7 +12285,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/oura",
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Oura",
 				"runtime_requirements": {
 					"bindings": {

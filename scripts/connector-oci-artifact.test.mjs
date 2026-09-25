@@ -16,6 +16,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	cpSync,
 	existsSync,
@@ -56,6 +57,9 @@ const build = (args) =>
 	run(builder, [...args, "--esbuild", esbuildLib]);
 
 const verify = (artifact) => run(verifier, ["--artifact", artifact]);
+
+const sha256 = (value) =>
+	`sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 /**
  * A copy of the real Oura artifact whose code layer is replaced by `source`.
@@ -187,6 +191,49 @@ describe("P1-4 — the artifact stands on its own", () => {
 			assert.ok(
 				["dynamic-import", "require-call"].includes(entry.loaded),
 				`${entry.package} must be reached only through a deferred import (got '${entry.loaded}'), or its bytes must ship`,
+			);
+		}
+	});
+
+	it("emits a deterministic source declaration layer pinned by config", () => {
+		const secondArtifact = join(workspace, "oura-second");
+		const rebuilt = build(["--connector", "oura", "--out", secondArtifact]);
+		assert.equal(rebuilt.status, 0, `${rebuilt.stdout}\n${rebuilt.stderr}`);
+
+		for (const artifact of [ouraArtifact, secondArtifact]) {
+			const config = JSON.parse(readFileSync(join(artifact, "config.json"), "utf8"));
+			const layers = JSON.parse(readFileSync(join(artifact, "layers.json"), "utf8"));
+			const declarationBytes = readFileSync(
+				join(artifact, "source-declaration.json"),
+			);
+			const declaration = JSON.parse(declarationBytes.toString("utf8"));
+			const profileBytes = readFileSync(
+				join(artifact, "collection-profile.json"),
+			);
+
+			assert.equal(
+				config.source_declaration_digest,
+				sha256(declarationBytes),
+			);
+			assert.equal(
+				declaration.canonical_inputs.manifest.sha256,
+				sha256(profileBytes),
+			);
+			assert.ok(
+				layers.layers.some(
+					(layer) =>
+						layer.file === "source-declaration.json" &&
+						layer.mediaType ===
+							"application/vnd.pdpp.connector.source-declaration.v1+json",
+				),
+			);
+		}
+
+		for (const file of ["config.json", "layers.json", "source-declaration.json"]) {
+			assert.deepEqual(
+				readFileSync(join(secondArtifact, file)),
+				readFileSync(join(ouraArtifact, file)),
+				`${file} must be reproducible for the same source revision`,
 			);
 		}
 	});
