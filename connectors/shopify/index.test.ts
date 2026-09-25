@@ -394,7 +394,7 @@ test("collectShopify re-emits a changed order (fingerprint mismatch) on the next
 	assert.equal(order?.status, "DELIVERED");
 });
 
-test("verified empty Shop page requires route, live cache, no order connection, and visible exact marker", () => {
+test("verified empty Shop page requires route, live cache, no order refs, and visible exact marker", () => {
 	const prior = {
 		document: Object.getOwnPropertyDescriptor(globalThis, "document"),
 		location: Object.getOwnPropertyDescriptor(globalThis, "location"),
@@ -456,6 +456,23 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 				},
 			};
 		});
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
+		await page.evaluate(() => {
+			const root = document.querySelector("#root") as HTMLElement & Record<string, unknown>;
+			root["__reactFiber$fixture"] = {
+				memoizedProps: {
+					client: {
+						cache: {
+							extract: () => ({
+								ROOT_QUERY: {
+									'deliveriesOrdersList:{}': { nodes: [{ __ref: "Order:1" }] },
+								},
+							}),
+						},
+					},
+				},
+			};
+		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
 	} finally {
 		await browser.close();
@@ -482,11 +499,7 @@ test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache n
 	assert.equal(skip.reason, "shopify_apollo_state_unavailable");
 });
 
-test("collectShopify emits a clean empty STATE (no SKIP_RESULT) for a genuinely empty account", async () => {
-	// Distinguishes a hydrated Apollo cache with zero orders (a real empty
-	// account) from a cache that never resolved at all. Only the latter is
-	// `shopify_apollo_state_unavailable`; an empty `deliveriesOrdersList`
-	// connection is a legitimate zero-order result.
+test("collectShopify emits a clean empty STATE only with verified empty-history page evidence", async () => {
 	const { emit, emitRecord, emitted, events, protocolMessages } =
 		makeRecordingEmit(validateRecord);
 	await collectShopify({
@@ -496,6 +509,7 @@ test("collectShopify emits a clean empty STATE (no SKIP_RESULT) for a genuinely 
 		requested: requestedMap(["orders"]),
 		state: {},
 		readCache: () => Promise.resolve(makeCache([], false)),
+		readVerifiedEmptyState: () => Promise.resolve(true),
 		scroll: () => Promise.resolve(),
 	});
 	const skip = protocolMessages.find(
@@ -508,7 +522,40 @@ test("collectShopify emits a clean empty STATE (no SKIP_RESULT) for a genuinely 
 	assert.ok(last && last.kind === "message" && last.message.type === "STATE");
 });
 
-test("collectShopify confirms an empty account only with verified page evidence when cache has no orders connection", async () => {
+test("collectShopify does not prune prior fingerprints from an unconfirmed empty connection", async () => {
+	const priorState = {
+		orders: {
+			fingerprints: {
+				"Order:1": "existing-fingerprint",
+			},
+		},
+	};
+	for (const readVerifiedEmptyState of [
+		undefined,
+		() => Promise.resolve(false),
+		() => Promise.reject(new Error("page closed")),
+	]) {
+		const run = makeRecordingEmit(validateRecord);
+		const args = {
+			emit: run.emit,
+			emitRecord: run.emitRecord,
+			progress: async () => undefined,
+			requested: requestedMap(["orders"]),
+			state: priorState,
+			readCache: () => Promise.resolve(makeCache([], false)),
+			scroll: () => Promise.resolve(),
+		};
+		await collectShopify(
+			readVerifiedEmptyState ? { ...args, readVerifiedEmptyState } : args,
+		);
+		const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+		assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
+	}
+});
+
+test("collectShopify confirms an empty account with verified page evidence when cache has no orders connection", async () => {
 	const confirmed = makeRecordingEmit(validateRecord);
 	await collectShopify({
 		emit: confirmed.emit, emitRecord: confirmed.emitRecord,
@@ -517,7 +564,11 @@ test("collectShopify confirms an empty account only with verified page evidence 
 		readVerifiedEmptyState: () => Promise.resolve(true), scroll: () => Promise.resolve(),
 	});
 	assert.equal(confirmed.protocolMessages.some((m) => m.type === "SKIP_RESULT"), false);
-	assert.equal(confirmed.events.at(-1)?.kind === "message" && confirmed.events.at(-1)?.message.type === "STATE", true);
+	const confirmedLast = confirmed.events.at(-1);
+	assert.equal(
+		confirmedLast?.kind === "message" && confirmedLast.message.type === "STATE",
+		true,
+	);
 
 	const unconfirmed = makeRecordingEmit(validateRecord);
 	await collectShopify({
@@ -534,12 +585,15 @@ test("collectShopify confirms an empty account only with verified page evidence 
 test("collectShopify fails closed when the empty-state reader is missing or throws", async () => {
 	for (const readVerifiedEmptyState of [undefined, () => Promise.reject(new Error("page closed"))]) {
 		const run = makeRecordingEmit(validateRecord);
-		await collectShopify({
+		const args = {
 			emit: run.emit, emitRecord: run.emitRecord,
 			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
 			readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
-			readVerifiedEmptyState, scroll: () => Promise.resolve(),
-		});
+			scroll: () => Promise.resolve(),
+		};
+		await collectShopify(
+			readVerifiedEmptyState ? { ...args, readVerifiedEmptyState } : args,
+		);
 		const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
 		assert.ok(skip && skip.type === "SKIP_RESULT");
 		assert.equal(skip.reason, "shopify_order_history_unconfirmed");

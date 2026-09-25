@@ -193,9 +193,23 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 	}
 	const query = liveState?.ROOT_QUERY;
 	if (!query || typeof query !== "object" || Array.isArray(query)) return false;
-	if (Object.keys(query).some((key) => /^deliveriesOrdersList[:(]/.test(key))) {
-		return false;
-	}
+	const hasOrderRef = Object.entries(query).some(([key, value]) => {
+		if (!/^deliveriesOrdersList[:(]/.test(key)) return false;
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+		const nodes = (value as { nodes?: unknown }).nodes;
+		return (
+			Array.isArray(nodes) &&
+			nodes.some(
+				(node) =>
+					typeof node === "object" &&
+					node !== null &&
+					"__ref" in node &&
+					typeof node.__ref === "string" &&
+					node.__ref.startsWith("Order:"),
+			)
+		);
+	});
+	if (hasOrderRef) return false;
 	return Array.from(document.querySelectorAll("body *")).some((element) => {
 		if (element.children.length > 0) return false;
 		const rect = element.getBoundingClientRect();
@@ -317,6 +331,19 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 
 	await progress("Loading Shop order history", { stream: ORDERS_STREAM });
 	const orders = extractOrders(cache);
+	if (
+		orders.length === 0 &&
+		!(await readVerifiedEmptyState?.().catch(() => false))
+	) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ORDERS_STREAM,
+			reason: "shopify_order_history_unconfirmed",
+			message:
+				"Shop Orders (orders) could not be confirmed: the page had no loaded orders or verified empty-state marker. Confirm order history is loaded, then try again.",
+		});
+		return;
+	}
 
 	const cursor = openFingerprintCursor(state[ORDERS_STREAM]);
 	for (const order of orders) {
