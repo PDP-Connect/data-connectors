@@ -360,6 +360,51 @@ test("a nonzero search summary with no parsed orders fails rather than reporting
 	);
 });
 
+test("order-search progress reports page and duplicate counts without order identifiers", async () => {
+	let currentUrl = "https://www.amazon.com/";
+	const html = `<html><body>
+		<div class="a-fixed-left-grid"><div class="a-row">
+			<a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a>
+			<span>Ordered on March 3, 2026</span>
+		</div></div>
+		<div class="a-fixed-left-grid"><div class="a-row">
+			<a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a>
+			<span>Ordered on March 3, 2026</span>
+		</div></div>
+	</body></html>`;
+	const page = {
+		content: () => Promise.resolve(html),
+		goto: (url: string) => {
+			currentUrl = url;
+			return Promise.resolve(null);
+		},
+		locator: () => ({
+			first: () => ({ waitFor: () => Promise.resolve() }),
+		}),
+		url: () => currentUrl,
+	} as unknown as Page;
+	const diagnostics: unknown[] = [];
+
+	const result = await discoverOrderStubs(page, (diagnostic) => {
+		diagnostics.push(diagnostic);
+		return Promise.resolve();
+	});
+
+	assert.equal(result.stubs.length, 1);
+	assert.deepEqual(diagnostics, [
+		{
+			pageNumber: 1,
+			actualPageNumber: 1,
+			pageOrderCount: 1,
+			pageItemRowCount: 2,
+			newOrderCount: 1,
+			repeatedOrderCount: 0,
+			hasNextPage: false,
+			nextPageNumber: null,
+		},
+	]);
+});
+
 test("HTTP 503 product navigation plus empty USDA results emits error", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>

@@ -91,8 +91,9 @@ test("parseOrderSearchPageDom reports hasNextPage from the pagination control", 
     ${searchResultRow("111-1111111-1111111", "Ordered on March 3, 2026")}
     <ul class="a-pagination"><li class="a-last"><a href="?page=2">Next</a></li></ul>
   </body></html>`;
-	const { hasNextPage } = parseOrderSearchPageDom(html);
+	const { hasNextPage, nextPageHref } = parseOrderSearchPageDom(html);
 	assert.equal(hasNextPage, true);
+	assert.equal(nextPageHref, "?page=2");
 });
 
 // ─── Order detail page ────────────────────────────────────────────────────

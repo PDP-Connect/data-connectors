@@ -106,6 +106,7 @@ export function parseAmazonProfileDom(html: string): WholeFoodsProfile {
  */
 export function parseOrderSearchPageDom(html: string): {
 	hasNextPage: boolean;
+	nextPageHref: string | null;
 	stubs: OrderStub[];
 } {
 	const { document } = parseHTML(html);
@@ -151,10 +152,11 @@ export function parseOrderSearchPageDom(html: string): {
 			orderUrl: absoluteAmazonUrl(href),
 		});
 	}
-	const hasNextPage = Boolean(
-		document.querySelector("ul.a-pagination li.a-last a"),
-	);
-	return { hasNextPage, stubs };
+	const nextPageHref =
+		document
+			.querySelector<HTMLAnchorElement>("ul.a-pagination li.a-last a")
+			?.getAttribute("href") ?? null;
+	return { hasNextPage: nextPageHref !== null, nextPageHref, stubs };
 }
 
 // ─── Order detail page ────────────────────────────────────────────────────
