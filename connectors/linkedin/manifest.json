@@ -9,7 +9,7 @@
 	},
 	"connector_key": "linkedin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-	"version": "0.3.7",
+	"version": "0.3.8",
 	"display_name": "LinkedIn",
 	"brand": {
 		"icon": "icon.svg",

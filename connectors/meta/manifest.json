@@ -9,7 +9,7 @@
 	},
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-	"version": "0.4.6",
+	"version": "0.4.7",
 	"display_name": "Instagram (Meta)",
 	"brand": {
 		"icon": "icon.svg",
