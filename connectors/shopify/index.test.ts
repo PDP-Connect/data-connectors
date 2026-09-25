@@ -28,6 +28,7 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import {
 	collectShopify,
 	ensureShopifySession,
+	hasVerifiedEmptyOrderHistoryInPage,
 	hasShopOrderHistoryContextInPage,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -218,6 +219,10 @@ test("Shop order-page signal rejects a login form even when the page has an orde
 	}
 });
 
+function makeCacheWithoutOrdersConnection(): ApolloCache {
+	return { ROOT_QUERY: { viewer: { __ref: "Customer:current" } } };
+}
+
 function makeCache(orderRefs: string[], hasNextPage: boolean): ApolloCache {
 	const entries: Record<string, unknown> = {
 		ROOT_QUERY: {
@@ -388,6 +393,32 @@ test("collectShopify re-emits a changed order (fingerprint mismatch) on the next
 	assert.equal(order?.status, "DELIVERED");
 });
 
+test("verified empty Shop page requires route, live cache, no order connection, and visible exact marker", () => {
+	const prior = {
+		document: Object.getOwnPropertyDescriptor(globalThis, "document"),
+		location: Object.getOwnPropertyDescriptor(globalThis, "location"),
+		getComputedStyle: Object.getOwnPropertyDescriptor(globalThis, "getComputedStyle"),
+	};
+	const empty = { textContent: "No orders yet", children: [], getBoundingClientRect: () => ({ width: 10, height: 10 }) };
+	const root = { "__reactFiber$fixture": { memoizedProps: { client: { cache: { extract: () => makeCacheWithoutOrdersConnection() } } } } };
+	Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://shop.app", pathname: "/account/order-history" } });
+	Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: () => ({ display: "block", visibility: "visible" }) });
+	Object.defineProperty(globalThis, "document", { configurable: true, value: {
+		querySelector: (selector: string) => selector === "#root" ? root : null,
+		querySelectorAll: (selector: string) => selector === "body *" ? [empty] : selector === "h1, h2, h3" ? [{ textContent: "Your orders" }] : [],
+	} });
+	try {
+		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), true);
+		Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://shop.app", pathname: "/account/login" } });
+		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), false);
+	} finally {
+		for (const [key, descriptor] of Object.entries(prior)) {
+			if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+			else Reflect.deleteProperty(globalThis, key);
+		}
+	}
+});
+
 test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache never resolves", async () => {
 	const { emit, emitRecord, protocolMessages } =
 		makeRecordingEmit(validateRecord);
@@ -432,6 +463,29 @@ test("collectShopify emits a clean empty STATE (no SKIP_RESULT) for a genuinely 
 	assert.equal(recordsOf(emitted, "orders").length, 0);
 	const last = events.at(-1);
 	assert.ok(last && last.kind === "message" && last.message.type === "STATE");
+});
+
+test("collectShopify confirms an empty account only with verified page evidence when cache has no orders connection", async () => {
+	const confirmed = makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit: confirmed.emit, emitRecord: confirmed.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
+		readVerifiedEmptyState: () => Promise.resolve(true), scroll: () => Promise.resolve(),
+	});
+	assert.equal(confirmed.protocolMessages.some((m) => m.type === "SKIP_RESULT"), false);
+	assert.equal(confirmed.events.at(-1)?.kind === "message" && confirmed.events.at(-1)?.message.type === "STATE", true);
+
+	const unconfirmed = makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit: unconfirmed.emit, emitRecord: unconfirmed.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
+		readVerifiedEmptyState: () => Promise.resolve(false), scroll: () => Promise.resolve(),
+	});
+	const skip = unconfirmed.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_history_unconfirmed");
 });
 
 test("collectShopify discloses truncation when the scroll ceiling is hit with more pages advertised", async () => {

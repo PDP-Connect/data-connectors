@@ -54,6 +54,16 @@ function collectOrderRefs(nodes: unknown): string[] {
  * loaded so far) and falling back to the cursor-paginated keys (present on
  * first load, before any scroll has happened).
  */
+export function hasOrdersConnection(cache: ApolloCache): boolean {
+	const root = cache.ROOT_QUERY;
+	return (
+		isRecord(root) &&
+		Object.keys(root).some(
+			(key) => PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
+		)
+	);
+}
+
 export function collectAllOrderRefs(cache: ApolloCache): string[] {
 	const root = cache.ROOT_QUERY;
 	if (!isRecord(root)) {

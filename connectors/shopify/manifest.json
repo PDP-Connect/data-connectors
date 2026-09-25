@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",
@@ -112,6 +112,7 @@
 	],
 	"reason_display_messages": {
 		"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
+		"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
 		"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 	}
 }

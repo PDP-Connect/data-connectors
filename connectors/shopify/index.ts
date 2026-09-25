@@ -47,7 +47,9 @@
  * orders no longer returned (full scan each run).
  *
  * CHANGES
- *   v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
+ *   v0.2.5 (2026-09-25) — require a live, visible empty-state marker before
+    confirming an account when Apollo has no orders connection.
+  v0.2.1 (2026-09-24) — open Shop before manual sign-in handoff and verify
  *     the session afterward.
  *   v0.2.0 (2026-09-22) — real Apollo-cache extraction wired (parsers.ts);
  *     fingerprint-cursor incremental gate; added order_number,
@@ -67,7 +69,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
-import { extractOrders, hasNextOrdersPage } from "./parsers.ts";
+import { extractOrders, hasNextOrdersPage, hasOrdersConnection } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
@@ -143,6 +145,69 @@ function readApolloCacheInPage(): ApolloCache | null {
 	return state && typeof state === "object" ? state : null;
 }
 
+const VERIFIED_EMPTY_ORDER_PHRASES = new Set([
+	"no orders yet",
+	"no order history",
+	"no orders found",
+	"you haven't placed any orders",
+	"your order history is empty",
+]);
+
+/** True only for the signed-in order-history route with a live Apollo cache,
+ *  no orders connection, and a visible exact generic empty-state phrase. */
+export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
+	if (
+		location.origin !== "https://shop.app" ||
+		location.pathname !== "/account/order-history" ||
+		!hasShopOrderHistoryContextInPage()
+	) {
+		return false;
+	}
+	const root = document.querySelector("#root") ?? document.body;
+	if (!isFiberHost(root)) return false;
+	const fiberKey = Object.keys(root).find(
+		(key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
+	);
+	if (!fiberKey) return false;
+	let fiber: FiberNode | null | undefined = root[fiberKey];
+	let liveState: Record<string, unknown> | null = null;
+	let steps = 0;
+	while (fiber && steps < 300) {
+		steps += 1;
+		const props = fiber.memoizedProps ?? fiber.pendingProps;
+		try {
+			const extracted = props?.client?.cache?.extract?.();
+			if (extracted && typeof extracted === "object") {
+				liveState = extracted;
+				break;
+			}
+		} catch {
+			return false;
+		}
+		fiber = fiber.return;
+	}
+	const query = liveState?.ROOT_QUERY;
+	if (!query || typeof query !== "object" || Array.isArray(query)) return false;
+	if (Object.keys(query).some((key) => /^deliveriesOrdersList[:(]/.test(key))) {
+		return false;
+	}
+	return Array.from(document.querySelectorAll("body *")).some((element) => {
+		if (element.children.length > 0) return false;
+		const rect = element.getBoundingClientRect();
+		const style = getComputedStyle(element);
+		if (
+			rect.width <= 0 ||
+			rect.height <= 0 ||
+			style.display === "none" ||
+			style.visibility === "hidden"
+		) {
+			return false;
+		}
+		const phrase = (element.textContent ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+		return VERIFIED_EMPTY_ORDER_PHRASES.has(phrase);
+	});
+}
+
 function scrollToBottomInPage(): void {
 	window.scrollTo(0, document.body.scrollHeight);
 }
@@ -203,6 +268,7 @@ export interface CollectShopifyArgs {
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: BrowserCollectContext["progress"];
 	readCache: () => Promise<ApolloCache | null>;
+	readVerifiedEmptyState?: () => Promise<boolean>;
 	requested: BrowserCollectContext["requested"];
 	scroll: () => Promise<void>;
 	state: BrowserCollectContext["state"];
@@ -212,7 +278,7 @@ export interface CollectShopifyArgs {
  *  `readCache`/`scroll` are injected so integration tests can drive this with
  *  a fake page. `collect()` below binds them to a real `page`. */
 export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
-	const { emit, emitRecord, progress, readCache, requested, scroll, state } =
+	const { emit, emitRecord, progress, readCache, readVerifiedEmptyState, requested, scroll, state } =
 		args;
 	if (!requested.has(ORDERS_STREAM)) {
 		return;
@@ -226,6 +292,19 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			reason: "shopify_apollo_state_unavailable",
 			message:
 				"Shop order-history page did not expose an Apollo cache (client not mounted or session not live).",
+		});
+		return;
+	}
+	if (
+		!hasOrdersConnection(cache) &&
+		!(await readVerifiedEmptyState?.())
+	) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ORDERS_STREAM,
+			reason: "shopify_order_history_unconfirmed",
+			message:
+				"Shop Orders (orders) could not be confirmed: the page had no order connection or verified empty-state marker. Confirm order history is loaded, then try again.",
 		});
 		return;
 	}
@@ -380,6 +459,7 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 		requested,
 		state,
 		readCache: () => page.evaluate(readApolloCacheInPage),
+		readVerifiedEmptyState: () => page.evaluate(hasVerifiedEmptyOrderHistoryInPage),
 		scroll: async () => {
 			await page.evaluate(scrollToBottomInPage);
 			await politeDelay(SCROLL_STEP_DELAY_MS);
