@@ -1674,5 +1674,24 @@ export async function verifyInstalled({
     expectedCount: writes.length,
     missing,
     mismatched,
+    // The declaration digest each OCI artifact's signed config pins, taken
+    // from the layer this call just re-fetched and checked against that
+    // config, not from the installed file. A host passes this value through;
+    // `installedMatches` says whether the file on disk still has those bytes.
+    sourceDeclarations: resolved
+      .filter((artifact) => artifact.oci && artifact.sourceDeclarationPath)
+      .map((artifact) => {
+        const sourceDeclarationPath = `collection-profiles/${artifact.connectorId}/${artifact.sourceDeclarationPath}`;
+        return {
+          connectorId: artifact.connectorId,
+          version: artifact.version,
+          digest: artifact.oci.digest,
+          sourceDeclarationPath,
+          sourceDeclarationSha256: artifact.checksums.sourceDeclaration,
+          installedMatches:
+            !missing.includes(sourceDeclarationPath) &&
+            !mismatched.includes(sourceDeclarationPath),
+        };
+      }),
   };
 }

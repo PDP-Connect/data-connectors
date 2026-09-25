@@ -31,7 +31,7 @@ import {
   sha256,
   tarball,
 } from "./oci-fixture.mjs";
-import { fetchResolvedArtifact, installFromLock } from "./index.mjs";
+import { fetchResolvedArtifact, installFromLock, verifyInstalled } from "./index.mjs";
 import {
   classifyManifestResponse,
   lookupManifest,
@@ -185,6 +185,42 @@ test("A-T1c resolves a tag only for an explicit first pin, and reports the diges
       // The retained declaration is the layer the signed config pins.
       const retained = readFileSync(join(installRoot, result.pinned[0].sourceDeclarationPath));
       assert.equal(sha256(retained), config.source_declaration_digest);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("verifyInstalled reports the signed declaration digest, not the installed file's", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest, config } = publishArtifact(registry, { signer });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-verify-declaration-"));
+    const lock = { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] };
+    const options = { lock, source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer) };
+
+    try {
+      await installFromLock(options);
+      const expected = {
+        connectorId: "ynab-pdpp",
+        version: "0.3.0",
+        digest,
+        sourceDeclarationPath: "collection-profiles/ynab-pdpp/source-declaration.json",
+        sourceDeclarationSha256: config.source_declaration_digest,
+      };
+      const clean = await verifyInstalled(options);
+      assert.equal(clean.ok, true);
+      assert.deepEqual(clean.sourceDeclarations, [{ ...expected, installedMatches: true }]);
+
+      // Tamper with the installed declaration: the reported digest stays the
+      // signed one, and the tampered file is flagged instead of attested.
+      const path = join(installRoot, expected.sourceDeclarationPath);
+      writeFileSync(path, readFileSync(path, "utf8").replace("}", ',"tampered":true}'));
+      const tampered = await verifyInstalled(options);
+      assert.equal(tampered.ok, false);
+      assert.deepEqual(tampered.mismatched, [expected.sourceDeclarationPath]);
+      assert.deepEqual(tampered.sourceDeclarations, [{ ...expected, installedMatches: false }]);
+      assert.notEqual(sha256(readFileSync(path)), config.source_declaration_digest);
     } finally {
       rmSync(installRoot, { recursive: true, force: true });
     }
