@@ -256,7 +256,7 @@ test("ensureLinkedInSession: read-only readiness probe uses the login tab", asyn
 		newPage: async () => {
 			throw new Error("LinkedIn readiness must stay in the login tab");
 		},
-	} as BrowserContext;
+	} as unknown as BrowserContext;
 	const page = {
 		context: () => context,
 		evaluate: evaluateVoyagerMe(() => liveSession),
