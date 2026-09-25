@@ -1090,12 +1090,12 @@ test("manualBrowserLogin keeps watching after the initial fast window and self-r
 	assert.equal(requests.length, 0);
 });
 
-test("manualBrowserLogin escalates structured assistance before propagating a rejected readiness probe", async () => {
+test("manualBrowserLogin retries a transient readiness probe error during structured assistance", async () => {
 	const page = makeMockPage();
 	const completions: { id: string; status: string }[] = [];
+	let probeCalls = 0;
 
-	await assert.rejects(
-		manualBrowserLogin({
+	const result = await manualBrowserLogin({
 			assist: () => Promise.resolve("assist_req_rejected"),
 			completeAssistance: (id, status) => {
 				completions.push({ id, status });
@@ -1103,19 +1103,54 @@ test("manualBrowserLogin escalates structured assistance before propagating a re
 			},
 			isProbeSuccessful: (ready: boolean) => ready,
 			message: "Finish sign-in in the secure browser.",
+			autoProbeIntervalMs: 1,
+			autoProbeWindowMs: 100,
 			page,
 			probe: (): Promise<boolean> => Promise.resolve(false),
-			readinessProbe: (): Promise<boolean> =>
-				Promise.reject(new Error("probe page closed")),
+			readinessProbe: (): Promise<boolean> => {
+				probeCalls += 1;
+				return probeCalls === 1
+					? Promise.reject(new Error("navigation in progress"))
+					: Promise.resolve(true);
+			},
+			sendInteraction: () =>
+				Promise.reject(new Error("manual interaction must not run")),
+		});
+
+	assert.equal(result, true);
+	assert.equal(probeCalls, 2);
+	assert.deepEqual(completions, [{ id: "assist_req_rejected", status: "resolved" }]);
+});
+
+test("manualBrowserLogin retains the last probe error when the readiness window expires", async () => {
+	const completions: { id: string; status: string }[] = [];
+	const sourceError = new Error("navigation in progress");
+
+	await assert.rejects(
+		manualBrowserLogin({
+			assist: () => Promise.resolve("assist_req_timeout"),
+			completeAssistance: (id, status) => {
+				completions.push({ id, status });
+				return Promise.resolve();
+			},
+			isProbeSuccessful: (ready: boolean) => ready,
+			message: "Finish sign-in in the secure browser.",
+			autoProbeIntervalMs: 1,
+			autoProbeWindowMs: 0,
+			page: makeMockPage(),
+			probe: (): Promise<boolean> => Promise.resolve(false),
+			readinessProbe: (): Promise<boolean> => Promise.reject(sourceError),
 			sendInteraction: () =>
 				Promise.reject(new Error("manual interaction must not run")),
 		}),
-		/probe page closed/,
+		(error: Error) => {
+			assert.equal(error.message, "browser_handoff_readiness_probe_failed");
+			assert.equal(error.cause, sourceError);
+			return true;
+		},
 	);
 
-	assert.deepEqual(completions, [
-		{ id: "assist_req_rejected", status: "escalated" },
-	]);
+	assert.deepEqual(completions, [{ id: "assist_req_timeout", status: "escalated" }]);
 });
 
 test("manualBrowserLogin keeps the legacy click-first behavior when isProbeSuccessful is omitted, even if assist is supplied", async () => {
