@@ -87,6 +87,27 @@ function wholeFoodsSearchUrl(page: number): string {
 	return `${AMAZON_SEARCH_BASE}&page=${page}`;
 }
 
+function pageNumberFromUrl(url: string, baseUrl?: string): number | null {
+	try {
+		const page = new URL(url, baseUrl);
+		const value = Number(page.searchParams.get("page"));
+		return Number.isSafeInteger(value) && value > 0 ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+interface OrderSearchPageDiagnostic {
+	pageNumber: number;
+	actualPageNumber: number | null;
+	pageOrderCount: number;
+	pageItemRowCount: number;
+	newOrderCount: number;
+	repeatedOrderCount: number;
+	hasNextPage: boolean;
+	nextPageNumber: number | null;
+}
+
 /** Navigation and a known page-ready signal must succeed before parsing. */
 async function navigateAndSettle(
 	page: Page,
@@ -140,7 +161,10 @@ async function collectProfile(
 
 // ─── Orders: discovery ────────────────────────────────────────────────────
 
-async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
+async function discoverOrderStubs(
+	page: Page,
+	onPageDiagnostic?: (diagnostic: OrderSearchPageDiagnostic) => Promise<void>,
+): Promise<{ stubs: OrderStub[] }> {
 	const stubs: OrderStub[] = [];
 	const seen = new Set<string>();
 	for (let pageNum = 1; pageNum <= MAX_SEARCH_PAGES; pageNum += 1) {
@@ -153,7 +177,11 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
 			throw new Error("Whole Foods order search was blocked or signed out");
 		}
-		const { hasNextPage, stubs: pageStubs } = parseOrderSearchPageDom(html);
+		const {
+			hasNextPage,
+			nextPageHref,
+			stubs: pageStubs,
+		} = parseOrderSearchPageDom(html);
 		if (
 			pageStubs.length === 0 &&
 			!/no-orders|\b(?:0|no)\s+(?:orders|results)\b/i.test(html)
@@ -163,8 +191,11 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 			);
 		}
 		let sawNewOrder = false;
+		let newOrderCount = 0;
+		let repeatedOrderCount = 0;
 		for (const stub of pageStubs) {
 			if (seen.has(stub.orderId)) {
+				repeatedOrderCount += 1;
 				const existing = stubs.find((s) => s.orderId === stub.orderId);
 				if (existing) {
 					existing.expectedItemCount += stub.expectedItemCount;
@@ -174,7 +205,26 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 			seen.add(stub.orderId);
 			stubs.push(stub);
 			sawNewOrder = true;
+			newOrderCount += 1;
 		}
+		const currentUrl = page.url();
+		let nextPageNumber: number | null = null;
+		if (nextPageHref) {
+			nextPageNumber = pageNumberFromUrl(nextPageHref, currentUrl);
+		}
+		await onPageDiagnostic?.({
+			pageNumber: pageNum,
+			actualPageNumber: pageNumberFromUrl(currentUrl),
+			pageOrderCount: pageStubs.length,
+			pageItemRowCount: pageStubs.reduce(
+				(total, stub) => total + stub.expectedItemCount,
+				0,
+			),
+			newOrderCount,
+			repeatedOrderCount,
+			hasNextPage,
+			nextPageNumber,
+		});
 		if (hasNextPage && !sawNewOrder) {
 			throw new Error(
 				"Whole Foods order pagination repeated without new orders",
@@ -557,7 +607,12 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			const ordersCursor = openFingerprintCursor(state.orders);
-			const { stubs } = await discoverOrderStubs(page);
+			const { stubs } = await discoverOrderStubs(page, (diagnostic) =>
+				progress("Scanned Whole Foods order-search page", {
+					stream: "orders",
+					...diagnostic,
+				}),
+			);
 			await progress(`Found ${stubs.length} Whole Foods order(s)`, {
 				count: stubs.length,
 				stream: "orders",
@@ -698,10 +753,10 @@ if (isMainModule(import.meta.url)) {
 // Exported for tests — kept free of the isMainModule guard so integration
 // tests can call them directly without spawning a subprocess/browser.
 export {
+	assertCompleteOrderDetail,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
-	assertCompleteOrderDetail,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,
