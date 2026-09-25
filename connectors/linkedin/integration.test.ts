@@ -246,20 +246,17 @@ function buildCtx(
 
 // ─── Session establishment ────────────────────────────────────────────────
 
-test("ensureLinkedInSession: login becoming ready resumes without an interaction", async () => {
+test("ensureLinkedInSession: read-only readiness probe uses the login tab", async () => {
 	const gotoUrls: string[] = [];
 	const assistanceStatuses: string[] = [];
 	let liveSession = false;
-	const readinessPage = {
-		close: async () => undefined,
-		evaluate: evaluateVoyagerMe(() => liveSession),
-		goto: async () => null,
-	} as unknown as Page;
 	const context = {
 		cookies: async () =>
 			liveSession ? [{ name: "li_at", value: "token" }] : [],
-		newPage: async () => readinessPage,
-	} as BrowserContext;
+		newPage: async () => {
+			throw new Error("LinkedIn readiness must stay in the login tab");
+		},
+	} as unknown as BrowserContext;
 	const page = {
 		context: () => context,
 		evaluate: evaluateVoyagerMe(() => liveSession),

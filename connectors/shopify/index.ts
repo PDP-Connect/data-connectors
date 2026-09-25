@@ -352,10 +352,9 @@ export async function ensureShopifySession({
 				"Sign in to Shop in the secure browser. PDPP will continue when your order history is available.",
 			page,
 			probe: () => hasShopOrderHistorySession(page),
-			readinessProbe: async (readinessPage) => {
-				await openOrderHistory(readinessPage);
-				return await hasShopOrderHistorySession(readinessPage);
-			},
+			readinessProbe: (readinessPage) =>
+				hasShopOrderHistorySession(readinessPage),
+			readinessProbeOnHandoffPage: true,
 			sendInteraction,
 			timeoutSeconds: 1800,
 		});

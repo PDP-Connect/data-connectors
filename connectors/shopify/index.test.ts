@@ -33,16 +33,19 @@ import {
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache } from "./types.ts";
 
-test("Shop sign-in opens order history before the manual handoff and checks the returned page", async () => {
+test("Shop sign-in returns from the provider redirect to order history and checks that page", async () => {
 	const navigations: string[] = [];
 	let liveSession = false;
+	let currentUrl = "about:blank";
 	const page = Object.assign({} as Page, {
 		goto: async (url: string) => {
 			navigations.push(url);
+			currentUrl = url;
 			return null;
 		},
-		url: () => navigations.at(-1) ?? "about:blank",
+		url: () => currentUrl,
 		waitForFunction: async () => {
+			assert.equal(currentUrl, "https://shop.app/account/order-history");
 			if (!liveSession) throw new Error("order history not visible");
 			return {};
 		},
@@ -53,6 +56,7 @@ test("Shop sign-in opens order history before the manual handoff and checks the 
 		page,
 		manualLogin: async () => {
 			assert.deepEqual(navigations, ["https://shop.app/account/order-history"]);
+			currentUrl = "https://shop.app/account/login?return_to=%2Faccount%2Forder-history";
 			liveSession = true;
 		},
 		sendInteraction: async (): Promise<never> => {
@@ -140,28 +144,32 @@ test("Shop sign-in self-resolves through an order-page readiness probe", async (
 	let ownerReady = false;
 	let responseContract: string | undefined;
 	let completionStatus: string | undefined;
-	const readinessPage = Object.assign({} as Page, {
-		goto: async () => null,
-		url: () => "https://shop.app/account/order-history",
-		waitForFunction: async () => {
-			ownerReady = true;
-			return {};
-		},
-		close: async () => undefined,
-	});
+	let currentUrl = "about:blank";
+	const navigations: string[] = [];
 	const page = Object.assign({} as Page, {
-		goto: async () => null,
-		url: () => "https://shop.app/account/order-history",
+		goto: async (url: string) => {
+			navigations.push(url);
+			currentUrl = url;
+			return null;
+		},
+		url: () => currentUrl,
 		waitForFunction: async () => {
 			if (!ownerReady) throw new Error("sign-in needed");
 			return {};
 		},
-		context: () => ({ newPage: async () => readinessPage }),
+		context: () => ({
+			newPage: async () => {
+				throw new Error("Shop readiness must stay in the sign-in tab");
+			},
+		}),
 	});
 
 	await ensureShopifySession({
 		assist: async (request) => {
 			responseContract = request.response_contract;
+			assert.equal(currentUrl, "https://shop.app/account/order-history");
+			assert.deepEqual(navigations, ["https://shop.app/account/order-history"]);
+			ownerReady = true;
 			return "shop-assistance";
 		},
 		capture: null,
@@ -176,6 +184,10 @@ test("Shop sign-in self-resolves through an order-page readiness probe", async (
 	});
 	assert.equal(responseContract, "none");
 	assert.equal(completionStatus, "resolved");
+	assert.deepEqual(navigations, [
+		"https://shop.app/account/order-history",
+		"https://shop.app/account/order-history",
+	]);
 });
 
 test("Shop order-page signal rejects a login form even when the page has an orders heading", () => {

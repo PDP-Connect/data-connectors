@@ -11034,7 +11034,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.4",
+				"version": "0.3.5",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -13588,7 +13588,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.2",
+				"version": "0.2.3",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
