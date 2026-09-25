@@ -142,6 +142,7 @@ export async function ensureICloudNotesSession({
 		page,
 		probe: () => probeICloudSession(page),
 		readinessProbe: probeICloudSession,
+		readinessProbeOnHandoffPage: true,
 		reason: "login",
 		sendInteraction,
 		timeoutSeconds: 1800,

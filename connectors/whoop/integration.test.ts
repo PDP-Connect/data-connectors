@@ -5,14 +5,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { Page } from "playwright";
+import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectWhoop,
 	ensureWhoopSession,
 	makeWhoopPageFetch,
 	parseFetchTextForTest,
+	probeWhoopReadinessOnOwnerPage,
 	probeWhoopReadinessPage,
 	type WhoopFetch,
 	whoopAllowsInteractiveAuthRepair,
@@ -254,10 +255,32 @@ test("WHOOP readiness probe treats unauthenticated responses as not ready only",
 	status = 403;
 	assert.equal(await probeWhoopReadinessPage(page), null);
 	status = 429;
-	await assert.rejects(
-		probeWhoopReadinessPage(page),
-		/whoop_rate_limited/u,
-	);
+	await assert.rejects(probeWhoopReadinessPage(page), /whoop_rate_limited/u);
+});
+
+test("WHOOP owner-page readiness waits for the app redirect without navigating", async () => {
+	let currentUrl = "https://identity.whoop.com/login";
+	let navigationCount = 0;
+	let evaluateCount = 0;
+	const bootstrap = await fixture("bootstrap.json");
+	const page = {
+		url: () => currentUrl,
+		goto: () => {
+			navigationCount += 1;
+			return Promise.resolve(null);
+		},
+		evaluate: () => {
+			evaluateCount += 1;
+			return Promise.resolve({ status: 200, json: bootstrap });
+		},
+	} as unknown as Page;
+
+	assert.equal(await probeWhoopReadinessOnOwnerPage(page), null);
+	assert.equal(evaluateCount, 0);
+	currentUrl = "https://app.whoop.com/";
+	assert.ok(await probeWhoopReadinessOnOwnerPage(page));
+	assert.equal(navigationCount, 0);
+	assert.equal(evaluateCount, 1);
 });
 
 test("page fetch keeps Cognito token inside browser evaluation and wrong-origin storage fails typed", async () => {

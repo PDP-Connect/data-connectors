@@ -8,8 +8,8 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
-	type EnsureSessionArgs,
 	type EmittedMessage,
+	type EnsureSessionArgs,
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -162,6 +162,25 @@ export async function probeWhoopReadinessPage(
 	);
 }
 
+/** Readiness check for the owner's sign-in tab. Do not navigate it: while
+ *  WHOOP auth can open an identity-provider popup, the opener may remain on
+ *  the app origin with refreshed cookie/localStorage credentials. Probe only
+ *  after that page is back on the app origin. */
+export async function probeWhoopReadinessOnOwnerPage(
+	page: Page,
+): Promise<WhoopBootstrap | null> {
+	try {
+		if (new URL(page.url()).origin !== APP_URL) return null;
+	} catch {
+		return null;
+	}
+	const result = await makeWhoopPageFetch(page)(BOOTSTRAP_PATH);
+	if (result.status === 401 || result.status === 403) return null;
+	return parseBootstrapResponse(
+		assertSourceResponse(result, "bootstrap-after-owner-login"),
+	);
+}
+
 export function whoopAllowsInteractiveAuthRepair(
 	env: NodeJS.ProcessEnv = process.env,
 ): boolean {
@@ -214,7 +233,8 @@ export async function ensureWhoopSession(args: {
 					assertSourceResponse(reprobe, "bootstrap-after-owner-login"),
 				);
 			},
-			readinessProbe: probeWhoopReadinessPage,
+			readinessProbe: probeWhoopReadinessOnOwnerPage,
+			readinessProbeOnHandoffPage: true,
 			reason: "login",
 			sendInteraction: args.sendInteraction,
 			timeoutSeconds: 1800,

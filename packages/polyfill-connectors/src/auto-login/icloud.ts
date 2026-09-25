@@ -40,73 +40,53 @@ import type { Page } from "playwright";
 const VALIDATE_URL = "https://setup.icloud.com/setup/ws/1/validate";
 
 export interface CloudKitLiveConfig {
-	ckBaseUrl: string;
-	dsid: string;
-	fullName: string | null;
+  ckBaseUrl: string;
+  dsid: string;
+  fullName: string | null;
 }
 
-interface RawValidateResult {
-	dsid?: string;
-	ckBaseUrl?: string;
-	fullName?: string | null;
-}
-
-/** POST the setup/validate endpoint from the page context (cookie-session
- *  auth — must run same-origin, which `page.evaluate` already guarantees
- *  since it executes in the page's own JS context). Never throws: any
- *  transport/parse failure reads as "not live", matching the legacy
- *  script's `try { ... } catch { return null }` shape. */
-export async function probeCloudKitConfig(
-	page: Page,
-): Promise<CloudKitLiveConfig | null> {
-	const result = (await page
-		.evaluate(async (url) => {
-			try {
-				const res = await fetch(url, {
-					method: "POST",
-					credentials: "include",
-				});
-				if (!res.ok) {
-					return null;
-				}
-				const data = (await res.json()) as {
-					dsInfo?: { dsid?: string | number; fullName?: string };
-					webservices?: { ckdatabasews?: { url?: string } };
-				};
-				const dsid = data?.dsInfo?.dsid;
-				const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
-				if (dsid === undefined || dsid === null || !ckBaseUrl) {
-					return null;
-				}
-				return {
-					dsid: String(dsid),
-					ckBaseUrl,
-					fullName: data?.dsInfo?.fullName ?? null,
-				};
-			} catch {
-				return null;
-			}
-		}, VALIDATE_URL)
-		.catch(() => null)) as RawValidateResult | null;
-	if (!result?.dsid || !result.ckBaseUrl) {
-		return null;
-	}
-	return {
-		dsid: result.dsid,
-		ckBaseUrl: result.ckBaseUrl,
-		fullName: result.fullName ?? null,
-	};
-}
-
-const NOTES_URL = "https://www.icloud.com/notes";
-const ICLOUD_HOST_RE = /(?:^|\.)icloud\.com$/;
-
-function isOnICloudOrigin(page: Page): boolean {
-	try {
-		return ICLOUD_HOST_RE.test(new URL(page.url()).hostname);
-	} catch {
-		return false;
-	}
+/** POST the setup/validate endpoint through the browser context's request
+ *  client. It shares the browser cookie jar and does not navigate or depend
+ *  on the owner's current login redirect origin. Never throws: any
+ *  transport/parse failure reads as "not live", matching the legacy probe. */
+export async function probeCloudKitConfig(page: Page): Promise<CloudKitLiveConfig | null> {
+  let response:
+    | {
+        ok: () => boolean;
+        json: () => Promise<unknown>;
+        dispose: () => Promise<void>;
+      }
+    | undefined;
+  try {
+    response = await page.context().request.post(VALIDATE_URL, {
+      headers: {
+        origin: "https://www.icloud.com",
+        referer: "https://www.icloud.com/notes",
+      },
+      timeout: 15_000,
+    });
+    if (!response.ok()) {
+      return null;
+    }
+    const data = (await response.json()) as {
+      dsInfo?: { dsid?: string | number; fullName?: string };
+      webservices?: { ckdatabasews?: { url?: string } };
+    };
+    const dsid = data?.dsInfo?.dsid;
+    const ckBaseUrl = data?.webservices?.ckdatabasews?.url;
+    if (dsid === undefined || dsid === null || !ckBaseUrl) {
+      return null;
+    }
+    return {
+      dsid: String(dsid),
+      ckBaseUrl,
+      fullName: data?.dsInfo?.fullName ?? null,
+    };
+  } catch {
+    return null;
+  } finally {
+    await response?.dispose().catch((): undefined => undefined);
+  }
 }
 
 /**
@@ -118,27 +98,10 @@ function isOnICloudOrigin(page: Page): boolean {
  * all, so it can decide whether to hand off to the owner before `collect()`
  * ever runs.
  *
- * MUST navigate to an icloud.com origin before probing IF the page is not
- * already there. The runtime hands this hook a fresh page (about:blank on
- * the very first probe of a run), and `probeCloudKitConfig`'s
- * cookie-authenticated fetch to setup.icloud.com/setup/ws/1/validate has no
- * icloud.com session cookie to send from a non-icloud.com origin —
- * confirmed live 2026-09-22: an unnavigated first probe reported a live
- * profile as dead (`icloud_notes_session_required`) purely because of the
- * missing navigation, not because the session was actually gone.
- *
- * The runtime also calls this hook a SECOND time, on the same page, right
- * after the owner completes a `manual_action` sign-in handoff
- * (`session-establish.ts`'s probe-after-manual). That page is already on an
- * icloud.com origin at that point — re-navigating to NOTES_URL would
- * needlessly reload a page the owner just finished interacting with, so
- * navigation is skipped whenever the page is already on icloud.com.
+ * This probe must not navigate: Apple sign-in can remain on an identity
+ * redirect while 2FA is in progress. The context request client uses the
+ * shared cookie jar and can validate the session from any owner-page origin.
  */
 export async function probeICloudSession(page: Page): Promise<boolean> {
-	if (!isOnICloudOrigin(page)) {
-		await page
-			.goto(NOTES_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
-			.catch((): undefined => undefined);
-	}
-	return (await probeCloudKitConfig(page)) !== null;
+  return (await probeCloudKitConfig(page)) !== null;
 }
