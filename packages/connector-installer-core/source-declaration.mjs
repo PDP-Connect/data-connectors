@@ -6,23 +6,19 @@
  * an installer can refuse the same invalid shape rather than each holding
  * its own idea of what a SourceDeclaration is.
  *
- * The JSON Schema in ./source-declaration-schema-data.mjs is a byte-for-byte
- * copy of `SourceDeclarationSchema` in
- * pdpp/packages/reference-contract/src/public/source.ts (as of commit
- * a3b1902ff5, "spec(source): define declarations and resolved grants (#102)").
- * The semantic checks below are a direct JavaScript port of
- * `validateSourceDeclarationSemantics` from the same file. The checked-in
- * `@pdpp/reference-contract` tarball available to this repository is an
- * older stand-in that does not export `./public/source`, and the current
- * source package is private and TypeScript-only, so the installer cannot
- * import the canonical validator at runtime without adding a TS loader to the
- * shipped package. Regenerate `source-declaration.schema.json` (and re-port
- * the semantics below) from that file if the normative schema changes; do not
- * hand-edit either into a shape the upstream source does not have.
+ * Both the JSON Schema and the semantic validator come from
+ * ./pdpp-source-contract.mjs, which is generated from the PDPP reference
+ * contract's own `source.ts` at a pinned commit (see
+ * scripts/generate-pdpp-source-contract.mjs). Nothing here re-implements
+ * them.
  */
 
 import Ajv2020 from "ajv/dist/2020.js";
-import schema from "./source-declaration-schema-data.mjs";
+import addFormats from "ajv-formats";
+import {
+  SourceDeclarationSchema,
+  validateSourceDeclarationSemantics,
+} from "./pdpp-source-contract.mjs";
 
 // The identity this repository's connectors are published under. Not a
 // per-connector value: `publisher.id` is a self-declared attribution claim
@@ -83,299 +79,12 @@ export function buildSourceDeclaration(profile) {
   };
 }
 
-function isUri(value) {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol.length > 1;
-  } catch {
-    return false;
-  }
-}
-
-// `strictRequired: false` because the upstream schema's mutual-exclusion
-// idiom — `allOf: [{ not: { required: ["fields", "view"] } }]` on the preset
-// stream selection — trips ajv's strict-mode "required property not defined"
-// check inside a `not`, which is a false positive for this valid pattern
-// (both `fields` and `view` ARE defined as siblings; `not` just makes them
-// mutually exclusive). Every other strict check stays on.
-const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
-ajv.addFormat("uri", { type: "string", validate: isUri });
-const validateSchema = ajv.compile(schema);
-
-function schemaFieldNames(stream) {
-  const properties = stream?.schema?.properties;
-  if (!(properties && typeof properties === "object" && !Array.isArray(properties))) {
-    return new Set();
-  }
-  return new Set(Object.keys(properties));
-}
-
-function validateEmbeddedSchemaNode(value, path, errors) {
-  if (Array.isArray(value)) {
-    for (const [index, item] of value.entries()) {
-      validateEmbeddedSchemaNode(item, `${path}/${index}`, errors);
-    }
-    return;
-  }
-  if (!(value && typeof value === "object")) {
-    return;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    const childPath = `${path}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`;
-    if ((key === "$ref" || key === "$dynamicRef") && (typeof child !== "string" || !child.startsWith("#"))) {
-      errors.push(`${childPath}: nonlocal schema reference '${typeof child === "string" ? child : String(child)}'`);
-    }
-    validateEmbeddedSchemaNode(child, childPath, errors);
-  }
-}
-
-function schemaProperty(stream, field) {
-  const properties = stream?.schema?.properties;
-  if (!(properties && typeof properties === "object" && !Array.isArray(properties))) {
-    return undefined;
-  }
-  return properties[field];
-}
-
-function nonNullSchemaTypes(schemaNode) {
-  const rawType = schemaNode?.type;
-  if (Array.isArray(rawType)) {
-    return rawType.filter((type) => type !== "null");
-  }
-  if (rawType === undefined || rawType === null) {
-    return [];
-  }
-  return [rawType].filter((type) => type !== "null");
-}
-
-function hasOneNonNullType(schemaNode, allowed) {
-  const types = nonNullSchemaTypes(schemaNode);
-  return types.length === 1 && allowed.has(types[0]);
-}
-
-function isSearchableStringSchema(schemaNode) {
-  return hasOneNonNullType(schemaNode, new Set(["string"]));
-}
-
-function isRangeSchema(schemaNode) {
-  if (hasOneNonNullType(schemaNode, new Set(["integer", "number"]))) {
-    return true;
-  }
-  return (
-    hasOneNonNullType(schemaNode, new Set(["string"])) &&
-    (schemaNode?.format === "date" || schemaNode?.format === "date-time")
-  );
-}
-
-function isScalarGroupSchema(schemaNode) {
-  return hasOneNonNullType(schemaNode, new Set(["boolean", "integer", "number", "string"]));
-}
-
-function isTimeBucketSchema(schemaNode) {
-  return (
-    hasOneNonNullType(schemaNode, new Set(["string"])) &&
-    (schemaNode?.format === "date" || schemaNode?.format === "date-time")
-  );
-}
-
-function pushInvalidQueryFieldType(errors, stream, fields, predicate, path) {
-  for (const field of fields) {
-    if (schemaFieldNames(stream).has(field) && !predicate(schemaProperty(stream, field))) {
-      errors.push(`${path}: invalid query field type '${field}'`);
-    }
-  }
-}
-
-function pushUnknownFields(errors, fields, knownFields, path) {
-  for (const field of fields) {
-    if (!knownFields.has(field)) {
-      errors.push(`${path}: unknown schema field '${field}'`);
-    }
-  }
-}
-
-function validateStreamFieldReferences(stream, streamIndex, errors) {
-  const basePath = `/streams/${streamIndex}`;
-  const fields = schemaFieldNames(stream);
-  pushUnknownFields(errors, stream.primary_key, fields, `${basePath}/primary_key`);
-  for (const member of ["cursor_field", "consent_time_field"]) {
-    const field = stream[member];
-    if (field) pushUnknownFields(errors, [field], fields, `${basePath}/${member}`);
-  }
-  for (const [viewIndex, view] of (stream.views ?? []).entries()) {
-    pushUnknownFields(errors, view.fields, fields, `${basePath}/views/${viewIndex}/fields`);
-  }
-  const query = stream.query;
-  pushUnknownFields(errors, Object.keys(query?.range_filters ?? {}), fields, `${basePath}/query/range_filters`);
-  pushUnknownFields(errors, query?.search?.lexical_fields ?? [], fields, `${basePath}/query/search/lexical_fields`);
-  pushUnknownFields(errors, query?.search?.semantic_fields ?? [], fields, `${basePath}/query/search/semantic_fields`);
-  for (const member of ["count_distinct", "group_by", "group_by_time", "max", "min", "sum"]) {
-    pushUnknownFields(errors, query?.aggregations?.[member] ?? [], fields, `${basePath}/query/aggregations/${member}`);
-  }
-  pushInvalidQueryFieldType(
-    errors,
-    stream,
-    query?.search?.lexical_fields ?? [],
-    isSearchableStringSchema,
-    `${basePath}/query/search/lexical_fields`,
-  );
-  pushInvalidQueryFieldType(
-    errors,
-    stream,
-    query?.search?.semantic_fields ?? [],
-    isSearchableStringSchema,
-    `${basePath}/query/search/semantic_fields`,
-  );
-  pushInvalidQueryFieldType(
-    errors,
-    stream,
-    Object.keys(query?.range_filters ?? {}),
-    isRangeSchema,
-    `${basePath}/query/range_filters`,
-  );
-  for (const member of ["count_distinct", "group_by"]) {
-    pushInvalidQueryFieldType(
-      errors,
-      stream,
-      query?.aggregations?.[member] ?? [],
-      isScalarGroupSchema,
-      `${basePath}/query/aggregations/${member}`,
-    );
-  }
-  pushInvalidQueryFieldType(
-    errors,
-    stream,
-    query?.aggregations?.group_by_time ?? [],
-    isTimeBucketSchema,
-    `${basePath}/query/aggregations/group_by_time`,
-  );
-  for (const member of ["min", "max"]) {
-    pushInvalidQueryFieldType(
-      errors,
-      stream,
-      query?.aggregations?.[member] ?? [],
-      isRangeSchema,
-      `${basePath}/query/aggregations/${member}`,
-    );
-  }
-  pushInvalidQueryFieldType(
-    errors,
-    stream,
-    query?.aggregations?.sum ?? [],
-    (schemaNode) => hasOneNonNullType(schemaNode, new Set(["integer", "number"])),
-    `${basePath}/query/aggregations/sum`,
-  );
-}
-
-function validateUniqueStreamMembers(stream, streamIndex, errors) {
-  const viewIds = new Set();
-  for (const [viewIndex, view] of (stream.views ?? []).entries()) {
-    if (viewIds.has(view.id)) {
-      errors.push(`/streams/${streamIndex}/views/${viewIndex}/id: duplicate view id '${view.id}'`);
-    }
-    viewIds.add(view.id);
-  }
-  const relationshipNames = new Set();
-  for (const [relationshipIndex, relationship] of (stream.relationships ?? []).entries()) {
-    if (relationshipNames.has(relationship.name)) {
-      errors.push(
-        `/streams/${streamIndex}/relationships/${relationshipIndex}/name: duplicate relationship name '${relationship.name}'`,
-      );
-    }
-    relationshipNames.add(relationship.name);
-  }
-}
-
-function validateRelationships(declaration, streamsByName, errors) {
-  for (const [streamIndex, stream] of declaration.streams.entries()) {
-    const relationships = new Map((stream.relationships ?? []).map((relationship) => [relationship.name, relationship]));
-    for (const [relationshipIndex, relationship] of (stream.relationships ?? []).entries()) {
-      const relatedStream = streamsByName.get(relationship.stream);
-      const basePath = `/streams/${streamIndex}/relationships/${relationshipIndex}`;
-      if (!relatedStream) {
-        errors.push(`${basePath}/stream: unknown stream '${relationship.stream}'`);
-        continue;
-      }
-      const foreignKeyStream = relationship.cardinality === "has_many" ? relatedStream : stream;
-      pushUnknownFields(
-        errors,
-        [relationship.foreign_key],
-        schemaFieldNames(foreignKeyStream),
-        `${basePath}/foreign_key`,
-      );
-    }
-    validateExpandCapabilities(stream, streamIndex, relationships, errors);
-  }
-}
-
-function validateExpandCapabilities(stream, streamIndex, relationships, errors) {
-  const expands = stream.query?.expand ?? [];
-  for (const [expandIndex, expand] of expands.entries()) {
-    const path = `/streams/${streamIndex}/query/expand/${expandIndex}`;
-    const firstIndex = expands.findIndex((candidate) => candidate.name === expand.name);
-    if (firstIndex !== expandIndex) {
-      errors.push(`${path}/name: duplicate expand name '${expand.name}'`);
-    }
-    const relationship = relationships.get(expand.name);
-    if (!relationship) {
-      errors.push(`${path}/name: unknown relationship '${expand.name}'`);
-      continue;
-    }
-    const limitsAreReversed =
-      expand.default_limit !== undefined && expand.max_limit !== undefined && expand.default_limit > expand.max_limit;
-    const hasOneDeclaresLimits =
-      relationship.cardinality === "has_one" && (expand.default_limit !== undefined || expand.max_limit !== undefined);
-    if (limitsAreReversed || hasOneDeclaresLimits) {
-      errors.push(`${path}: invalid expand limits '${expand.name}'`);
-    }
-  }
-}
-
-function validatePresets(declaration, streamsByName, errors) {
-  const presetIds = new Set();
-  for (const [presetIndex, preset] of (declaration.selection_presets ?? []).entries()) {
-    if (presetIds.has(preset.id)) {
-      errors.push(`/selection_presets/${presetIndex}/id: duplicate preset id '${preset.id}'`);
-    }
-    presetIds.add(preset.id);
-    const presetStreamNames = new Set();
-    for (const [selectionIndex, selection] of preset.streams.entries()) {
-      const basePath = `/selection_presets/${presetIndex}/streams/${selectionIndex}`;
-      if (presetStreamNames.has(selection.name)) {
-        errors.push(`${basePath}/name: duplicate stream name '${selection.name}' in preset '${preset.id}'`);
-      }
-      presetStreamNames.add(selection.name);
-      const stream = streamsByName.get(selection.name);
-      if (!stream) {
-        errors.push(`${basePath}/name: unknown stream '${selection.name}'`);
-        continue;
-      }
-      if (selection.view && !(stream.views ?? []).some((view) => view.id === selection.view)) {
-        errors.push(`${basePath}/view: unknown view '${selection.view}'`);
-      }
-      pushUnknownFields(errors, selection.fields ?? [], schemaFieldNames(stream), `${basePath}/fields`);
-    }
-  }
-}
-
-/** Invariants JSON Schema cannot express, ported from validateSourceDeclarationSemantics. */
-function validateSemantics(declaration) {
-  const errors = [];
-  const streamsByName = new Map();
-  for (const [streamIndex, stream] of declaration.streams.entries()) {
-    if (streamsByName.has(stream.name)) {
-      errors.push(`/streams/${streamIndex}/name: duplicate stream name '${stream.name}'`);
-    } else {
-      streamsByName.set(stream.name, stream);
-    }
-    validateUniqueStreamMembers(stream, streamIndex, errors);
-    validateStreamFieldReferences(stream, streamIndex, errors);
-    validateEmbeddedSchemaNode(stream.schema, `/streams/${streamIndex}/schema`, errors);
-  }
-  validateRelationships(declaration, streamsByName, errors);
-  validatePresets(declaration, streamsByName, errors);
-  return errors;
-}
+// Configured as the PDPP reference contract's own SourceDeclaration tests
+// configure ajv (`reference-contract/test/source-contract.test.ts`): draft
+// 2020-12, non-strict, standard formats.
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
+const validateSchema = ajv.compile(SourceDeclarationSchema);
 
 /**
  * Validate a SourceDeclaration against the normative JSON Schema plus the
@@ -391,7 +100,14 @@ export function validateSourceDeclaration(declaration) {
   // Semantic checks assume the schema-required shape (streams is an array of
   // objects, etc.), so they only run once the schema itself is satisfied.
   if (errors.length === 0) {
-    errors.push(...validateSemantics(declaration));
+    const semantics = validateSourceDeclarationSemantics(declaration);
+    if (!semantics.ok) {
+      errors.push(
+        ...semantics.failures.map(({ code, path, reference }) =>
+          `${code} at ${path}${reference === undefined ? "" : ` (${reference})`}`,
+        ),
+      );
+    }
   }
   return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
 }
