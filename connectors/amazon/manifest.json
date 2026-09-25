@@ -3,7 +3,7 @@
 	"connector_id": "https://registry.pdpp.dev/connectors/amazon",
 	"connector_key": "amazon",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Amazon",
 	"brand": {
 		"icon": "icon.svg",
