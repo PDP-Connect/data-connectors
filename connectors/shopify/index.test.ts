@@ -408,6 +408,32 @@ test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache n
 	assert.equal(skip.reason, "shopify_apollo_state_unavailable");
 });
 
+test("collectShopify emits a clean empty STATE (no SKIP_RESULT) for a genuinely empty account", async () => {
+	// Distinguishes a hydrated Apollo cache with zero orders (a real empty
+	// account) from a cache that never resolved at all. Only the latter is
+	// `shopify_apollo_state_unavailable`; an empty `deliveriesOrdersList`
+	// connection is a legitimate zero-order result.
+	const { emit, emitRecord, emitted, events, protocolMessages } =
+		makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit,
+		emitRecord,
+		progress: async () => undefined,
+		requested: requestedMap(["orders"]),
+		state: {},
+		readCache: () => Promise.resolve(makeCache([], false)),
+		scroll: () => Promise.resolve(),
+	});
+	const skip = protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+	assert.equal(skip, undefined);
+	assert.equal(recordsOf(emitted, "orders").length, 0);
+	const last = events.at(-1);
+	assert.ok(last && last.kind === "message" && last.message.type === "STATE");
+});
+
 test("collectShopify discloses truncation when the scroll ceiling is hit with more pages advertised", async () => {
 	const { emit, emitRecord, protocolMessages } =
 		makeRecordingEmit(validateRecord);
