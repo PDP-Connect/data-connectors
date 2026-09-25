@@ -405,12 +405,8 @@ export async function ensureLinkedInSession(
 			"Sign in to LinkedIn in the secure browser. PDPP will verify the session and continue automatically.",
 		page,
 		probe: () => checkApiAuth(page, capture),
-		readinessProbe: async (readinessPage) => {
-			await readinessPage
-				.goto(LINKEDIN_FEED_URL, { waitUntil: "domcontentloaded" })
-				.catch((): undefined => undefined);
-			return checkApiAuth(readinessPage, capture);
-		},
+		readinessProbe: (readinessPage) => checkApiAuth(readinessPage, capture),
+		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds,
 	});
