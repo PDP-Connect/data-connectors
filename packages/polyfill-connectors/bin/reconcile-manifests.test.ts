@@ -30,13 +30,15 @@ import {
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 
 function listSchemaConnectors(): string[] {
-	return readdirSync(CONNECTORS_DIR)
-		// connector-init.test.ts creates and removes this reserved test fixture
-		// in the live tree. A concurrent snapshot can observe its directory
-		// during cleanup (schemas before manifest), which is not connector drift.
-		.filter((name) => !name.startsWith("zz_init_smoke_"))
-		.filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
-		.sort();
+	return (
+		readdirSync(CONNECTORS_DIR)
+			// connector-init.test.ts creates and removes this reserved test fixture
+			// in the live tree. A concurrent snapshot can observe its directory
+			// during cleanup (schemas before manifest), which is not connector drift.
+			.filter((name) => !name.startsWith("zz_init_smoke_"))
+			.filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
+			.sort()
+	);
 }
 
 function emitSourcePathsFor(name: string): string[] {
