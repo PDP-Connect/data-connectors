@@ -981,9 +981,9 @@ export function buildOrderItemRecord(
 
 const HEB_PROFILE_RECORD_ID = "profile";
 // legacy connectors/heb/heb-playwright.js scrapeProfile(): an address card is
-// distinguished from other `main > div > div` cards by containing a US state
-// abbreviation + 5-digit zip (e.g. "Austin, TX 78701") — the only structural
-// signal available since address cards carry no data-qe-id/aria markers.
+// distinguished by a paragraph containing a US state abbreviation + 5-digit
+// zip (e.g. "Austin, TX 78701"). The address text itself must carry the
+// signal; other profile fields can share the same card.
 const STATE_ZIP_RE = /[A-Z]{2}\s+\d{5}/;
 
 function labeledFieldValue(document: Document, label: string): string | null {
@@ -996,20 +996,19 @@ function labeledFieldValue(document: Document, label: string): string | null {
 
 /** Delivery addresses on /my-account/profile. Mirrors legacy
  *  connectors/heb/heb-playwright.js scrapeProfile()'s address-card scan:
- *  each `main > div > div` card that contains a `<p>` and a state+zip pattern
- *  is an address card; `isPrimary` comes from the literal word "Primary"
- *  appearing anywhere in the card (legacy behavior, kept as-is). */
+ *  each `main > div > div` card with a paragraph containing a state+zip
+ *  pattern is an address card; `isPrimary` comes from the literal word
+ *  "Primary" appearing anywhere in the card (legacy behavior, kept as-is). */
 function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
 	const addresses: DeliveryAddress[] = [];
 	for (const card of document.querySelectorAll("main > div > div")) {
-		const addrEl = card.querySelector("p");
+		const addrEl = [...card.querySelectorAll("p")].find((paragraph) =>
+			STATE_ZIP_RE.test(normText(paragraph)),
+		);
 		if (!addrEl) {
 			continue;
 		}
 		const cardText = card.textContent ?? "";
-		if (!STATE_ZIP_RE.test(cardText)) {
-			continue;
-		}
 		const labelEl = card.querySelector("div");
 		const address = normText(addrEl).replace(WHITESPACE_RE, " ").trim();
 		if (!address) {

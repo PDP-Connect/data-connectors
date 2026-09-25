@@ -1203,6 +1203,23 @@ test("parseProfileDom extracts name, email, phone, and delivery addresses from l
 	});
 });
 
+test("parseProfileDom does not use a profile field label as an address", () => {
+	const result = parseProfileDom(`
+		<html><body><main><div><div>
+			<p>Name</p><p>Jamie Shopper</p>
+			<div><span>Home</span><p>123 Fictional Ave, Austin, TX 78701</p><span>Primary</span></div>
+		</div></div></main></body></html>
+	`);
+
+	assert.deepEqual(result.deliveryAddresses, [
+		{
+			address: "123 Fictional Ave, Austin, TX 78701",
+			is_primary: true,
+			label: "Home",
+		},
+	]);
+});
+
 test("parseProfileDom returns nulls and an empty address list when labels are absent", () => {
 	const result = parseProfileDom("<html><body><main></main></body></html>");
 	assert.deepEqual(result, {
