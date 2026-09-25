@@ -18,10 +18,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { chromium } from "patchright";
 import type { Page } from "playwright";
-import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type {
+	BrowserCollectContext,
+	EnsureSessionArgs,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams } from "./index.ts";
+import { collectAllStreams, ensureICloudNotesSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -281,4 +285,78 @@ test("collectAllStreams: throws when the CloudKit config cannot be resolved (aut
 	const ctx = makeCtx(page, harness, ["notes"]);
 
 	await assert.rejects(collectAllStreams(ctx), /icloud_auth_failed/);
+});
+
+test("iCloud sign-in keeps one Patchright tab and collection reuses the authenticated page", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		await context.route("https://www.icloud.com/**", (route) =>
+			route.fulfill({
+				contentType: "text/html",
+				body: "<!doctype html><title>iCloud fixture</title>",
+			}),
+		);
+		let validateCalls = 0;
+		await context.route("https://setup.icloud.com/**", (route) => {
+			validateCalls += 1;
+			const cors = {
+				"access-control-allow-credentials": "true",
+				"access-control-allow-origin": "https://www.icloud.com",
+			};
+			const hasSession = Boolean(
+				route
+					.request()
+					.headers()
+					.cookie?.includes("icloud-fixture-session=live"),
+			);
+			return route.fulfill({
+				status: hasSession ? 200 : 401,
+				headers: cors,
+				contentType: "application/json",
+				body: JSON.stringify(hasSession ? VALIDATE_RESPONSE : {}),
+			});
+		});
+		let openedPages = 0;
+		context.on("page", () => {
+			openedPages += 1;
+		});
+		const page = (await context.newPage()) as unknown as Page;
+		openedPages = 0;
+		const completions: string[] = [];
+		await ensureICloudNotesSession({
+			assist: async () => {
+				await page.evaluate(() => {
+					document.cookie =
+						"icloud-fixture-session=live; domain=.icloud.com; path=/; Secure";
+				});
+				return "icloud_fixture_handoff";
+			},
+			completeAssistance: async (_id, status) => {
+				completions.push(status);
+			},
+			capture: null,
+			checkpoint: async () => undefined,
+			context: context as unknown as EnsureSessionArgs["context"],
+			credentials: {},
+			onCredentialSubmit: () => undefined,
+			page,
+			progress: async () => undefined,
+			sendInteraction: async () => {
+				throw new Error("unexpected manual-action fallback");
+			},
+		});
+
+		assert.deepEqual(completions, ["resolved"]);
+		assert.equal(openedPages, 0);
+		assert.equal(context.pages().length, 1);
+		assert.equal(new URL(page.url()).origin, "https://www.icloud.com");
+		const harness = makeRecordingEmit(validateRecord);
+		await collectAllStreams(makeCtx(page, harness, []));
+		assert.ok(validateCalls >= 3);
+		assert.equal(context.pages().length, 1);
+		await context.close();
+	} finally {
+		await browser.close();
+	}
 });

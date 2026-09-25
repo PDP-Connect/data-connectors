@@ -3,14 +3,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Page } from "playwright";
 import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	createSpotifyCycleDetector,
+	hasSpotifySession,
 	spotifyCollect,
 	spotifyRetryablePattern,
+	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
 
@@ -105,6 +108,44 @@ const webFixture = {
 	saved_tracks: [],
 	warnings: [],
 };
+
+test("spotifyTotp preserves the provider's decimal-text XOR secret encoding", () => {
+	assert.equal(spotifyTotp(1_700_000_000_000), "371599");
+});
+
+test("Spotify readiness checks the shared cookie-backed token endpoint without navigating a page", async () => {
+	const requests: string[] = [];
+	let navigations = 0;
+	const page = {
+		context: () => ({
+			request: {
+				get: async (url: string) => {
+					requests.push(url);
+					return {
+						json: async () =>
+							url.endsWith("/api/server-time")
+								? { serverTime: 1_700_000_000 }
+								: { accessToken: "fixture-token", isAnonymous: false },
+						ok: () => true,
+						dispose: async () => undefined,
+					};
+				},
+			},
+		}),
+		goto: async () => {
+			navigations += 1;
+		},
+	} as unknown as Page;
+
+	assert.equal(await hasSpotifySession(page), true);
+	assert.equal(requests.length, 2);
+	assert.equal(requests[0], "https://open.spotify.com/api/server-time");
+	assert.match(
+		requests[1] ?? "",
+		/^https:\/\/open\.spotify\.com\/api\/token\?/u,
+	);
+	assert.equal(navigations, 0);
+});
 
 test("spotify browser collect emits modern profile, playlists, and playlist_items schemas", async () => {
 	const { ctx, emittedRecords, messages, visited } = makeContext(webFixture);

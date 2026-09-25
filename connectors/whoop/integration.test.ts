@@ -5,14 +5,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import { chromium } from "patchright";
 import type { Page } from "playwright";
+import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectWhoop,
 	ensureWhoopSession,
 	makeWhoopPageFetch,
 	parseFetchTextForTest,
+	probeWhoopReadinessOnOwnerPage,
 	probeWhoopReadinessPage,
 	type WhoopFetch,
 	whoopAllowsInteractiveAuthRepair,
@@ -254,10 +256,110 @@ test("WHOOP readiness probe treats unauthenticated responses as not ready only",
 	status = 403;
 	assert.equal(await probeWhoopReadinessPage(page), null);
 	status = 429;
-	await assert.rejects(
-		probeWhoopReadinessPage(page),
-		/whoop_rate_limited/u,
-	);
+	await assert.rejects(probeWhoopReadinessPage(page), /whoop_rate_limited/u);
+});
+
+test("WHOOP owner-page readiness waits for the app redirect without navigating", async () => {
+	let currentUrl = "https://identity.whoop.com/login";
+	let navigationCount = 0;
+	let evaluateCount = 0;
+	const bootstrap = await fixture("bootstrap.json");
+	const page = {
+		url: () => currentUrl,
+		goto: () => {
+			navigationCount += 1;
+			return Promise.resolve(null);
+		},
+		evaluate: () => {
+			evaluateCount += 1;
+			return Promise.resolve({ status: 200, json: bootstrap });
+		},
+	} as unknown as Page;
+
+	assert.equal(await probeWhoopReadinessOnOwnerPage(page), null);
+	assert.equal(evaluateCount, 0);
+	currentUrl = "https://app.whoop.com/";
+	assert.ok(await probeWhoopReadinessOnOwnerPage(page));
+	assert.equal(navigationCount, 0);
+	assert.equal(evaluateCount, 1);
+});
+
+test("WHOOP owner-page readiness treats navigation races and status zero as not ready", async () => {
+	let evaluate: () => Promise<unknown> = () =>
+		Promise.reject(new Error("context destroyed"));
+	const page = {
+		url: () => "https://app.whoop.com/",
+		evaluate: () => evaluate(),
+	} as unknown as Page;
+	assert.equal(await probeWhoopReadinessOnOwnerPage(page), null);
+	evaluate = () => Promise.resolve({ status: 0, json: null });
+	assert.equal(await probeWhoopReadinessOnOwnerPage(page), null);
+});
+
+test("WHOOP streamed sign-in keeps one Patchright tab through collection entry", async () => {
+	const bootstrap = await fixture("bootstrap.json");
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		await context.route("https://app.whoop.com/**", (route) =>
+			route.fulfill({
+				contentType: "text/html",
+				body: "<!doctype html><title>WHOOP fixture</title>",
+			}),
+		);
+		await context.route("https://api.prod.whoop.com/**", (route) => {
+			const cors = {
+				"access-control-allow-credentials": "true",
+				"access-control-allow-headers": "accept, authorization",
+				"access-control-allow-origin": "https://app.whoop.com",
+			};
+			if (route.request().method() === "OPTIONS") {
+				return route.fulfill({ status: 204, headers: cors });
+			}
+			const hasSession =
+				route.request().headers().authorization === "bearer fixture-token";
+			return route.fulfill({
+				status: hasSession ? 200 : 401,
+				headers: cors,
+				contentType: "application/json",
+				body: JSON.stringify(hasSession ? bootstrap : {}),
+			});
+		});
+		let openedPages = 0;
+		context.on("page", () => {
+			openedPages += 1;
+		});
+		const page = (await context.newPage()) as unknown as Page;
+		openedPages = 0;
+		const completions: string[] = [];
+		await ensureWhoopSession({
+			assist: async () => {
+				await page.goto("https://app.whoop.com/login");
+				await page.evaluate(() => {
+					document.cookie = "whoop-auth-token=fixture-token; path=/";
+				});
+				await page.goto("https://app.whoop.com/");
+				return "whoop_fixture_handoff";
+			},
+			completeAssistance: async (_id, status) => {
+				completions.push(status);
+			},
+			fetchPath: makeWhoopPageFetch(page),
+			interactive: true,
+			page,
+			sendInteraction: async () => {
+				throw new Error("unexpected manual-action fallback");
+			},
+		});
+
+		assert.deepEqual(completions, ["resolved"]);
+		assert.equal(openedPages, 0);
+		assert.equal(context.pages().length, 1);
+		assert.equal(new URL(page.url()).origin, "https://app.whoop.com");
+		await context.close();
+	} finally {
+		await browser.close();
+	}
 });
 
 test("page fetch keeps Cognito token inside browser evaluation and wrong-origin storage fails typed", async () => {

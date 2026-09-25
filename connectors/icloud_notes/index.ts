@@ -88,7 +88,10 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { probeICloudSession } from "../../packages/polyfill-connectors/src/auto-login/icloud.ts";
+import {
+	probeICloudSession,
+	probeICloudSessionInPlace,
+} from "../../packages/polyfill-connectors/src/auto-login/icloud.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import type {
 	BrowserCollectContext,
@@ -140,8 +143,9 @@ export async function ensureICloudNotesSession({
 		message:
 			"Sign in to iCloud Notes. The connector will continue automatically once the session is live.",
 		page,
-		probe: () => probeICloudSession(page),
-		readinessProbe: probeICloudSession,
+		probe: () => probeICloudSessionInPlace(page),
+		readinessProbe: probeICloudSessionInPlace,
+		readinessProbeOnHandoffPage: true,
 		reason: "login",
 		sendInteraction,
 		timeoutSeconds: 1800,

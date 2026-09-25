@@ -11,28 +11,33 @@ import { probeGitHubBrowserSession } from "./probe.ts";
 
 function handoffPages(readinessPage: Page): Page {
 	return {
-		context: () => ({ newPage: async () => readinessPage }),
+		context: () => readinessPage.context(),
 	} as Page;
 }
 
 function readinessPage(navigations: string[], loggedIn: boolean): Page {
 	return {
-		close: async () => {},
-		goto: async (url: string) => {
-			navigations.push(url);
-			return null;
-		},
-		content: async () =>
-			loggedIn
-				? '<meta name="user-login" content="sample-user">'
-				: "<html></html>",
+		context: () => ({
+			request: {
+				get: async (url: string) => {
+					navigations.push(url);
+					return {
+						text: async () =>
+							loggedIn
+								? '<meta name="user-login" content="sample-user">'
+								: "<html></html>",
+						dispose: async () => undefined,
+					};
+				},
+			},
+		}),
 	} as Page;
 }
 
-test("GitHub readiness probe navigates the temporary handoff page to the origin before checking login", async () => {
-	const navigations: string[] = [];
+test("GitHub readiness probe uses shared context cookies without navigating the owner page", async () => {
+	const requests: string[] = [];
 	const completions: string[] = [];
-	const page = readinessPage(navigations, true);
+	const page = readinessPage(requests, true);
 	const result = await manualBrowserLogin({
 		assist: async () => "github_handoff",
 		autoProbeIntervalMs: 1,
@@ -47,18 +52,19 @@ test("GitHub readiness probe navigates the temporary handoff page to the origin 
 			throw new Error("owner page probe is not used by watcher");
 		},
 		readinessProbe: probeGitHubBrowserSession,
+		readinessProbeOnHandoffPage: true,
 		sendInteraction: async () => {
 			throw new Error("unexpected manual action fallback");
 		},
 	});
 	assert.equal(result, true);
-	assert.deepEqual(navigations, ["https://github.com/"]);
+	assert.deepEqual(requests, ["https://github.com/"]);
 	assert.deepEqual(completions, ["resolved"]);
 });
 
 test("GitHub readiness timeout rejects instead of resolving the handoff as successful", async () => {
-	const navigations: string[] = [];
-	const page = readinessPage(navigations, false);
+	const requests: string[] = [];
+	const page = readinessPage(requests, false);
 	const login = manualBrowserLogin({
 		assist: async () => "github_handoff",
 		autoProbeIntervalMs: 1,
@@ -71,12 +77,13 @@ test("GitHub readiness timeout rejects instead of resolving the handoff as succe
 			throw new Error("owner page probe is not used by watcher");
 		},
 		readinessProbe: probeGitHubBrowserSession,
+		readinessProbeOnHandoffPage: true,
 		sendInteraction: async () => {
 			throw new Error("unexpected manual action fallback");
 		},
 	});
 	await assert.rejects(login, /browser_handoff_readiness_timed_out/u);
-	assert.deepEqual(navigations, ["https://github.com/"]);
+	assert.deepEqual(requests, ["https://github.com/"]);
 });
 
 test("browser profile identity meets the OCI builder key and ID checks", async () => {

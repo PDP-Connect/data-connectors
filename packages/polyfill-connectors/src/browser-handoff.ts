@@ -719,14 +719,37 @@ function pollBrowserReadiness<Result>(
 	}: { intervalMs: number; now?: () => number; windowMs: number },
 ): Promise<Result | undefined> {
 	const deadline = now() + windowMs;
+	let lastProbeError: unknown;
+	const finishTimedOutProbe = (): undefined => {
+		if (lastProbeError !== undefined) {
+			throw new Error("browser_handoff_readiness_probe_failed", {
+				cause: lastProbeError,
+			});
+		}
+		return undefined;
+	};
 
 	const attempt = async (): Promise<Result | undefined> => {
-		const result = await probe();
+		let result: Result;
+		try {
+			result = await probe();
+		} catch (error) {
+			// Readiness probes can race page navigation or transient network state.
+			// Retry probe errors to the handoff deadline; page setup errors remain
+			// outside this loop and fail immediately.
+			lastProbeError = error;
+			if (now() >= deadline) {
+				return finishTimedOutProbe();
+			}
+			await waitForProbeInterval(intervalMs);
+			return attempt();
+		}
+		lastProbeError = undefined;
 		if (isProbeSuccessful(result)) {
 			return result;
 		}
 		if (now() >= deadline) {
-			return undefined;
+			return finishTimedOutProbe();
 		}
 		await waitForProbeInterval(intervalMs);
 		return attempt();
