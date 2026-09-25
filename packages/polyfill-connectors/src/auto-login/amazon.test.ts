@@ -64,14 +64,22 @@ function makeChallengePage({
 	becomeLoggedInAfterGoto: number;
 }): {
 	gotoCalls: string[];
+	markLoggedIn: () => void;
+	markOrdersPageReady: () => void;
+	ordersPageReadinessChecks: () => number;
+	readinessPageCreations: () => number;
 	page: Page;
 } {
 	const gotoCalls: string[] = [];
 	let currentUrl = SIGNIN_URL;
+	let ownerLoggedIn = false;
+	let ordersPageReady = false;
+	let readinessChecks = 0;
+	let newPageCalls = 0;
 
 	const emptyLocator: Pick<
 		Locator,
-		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill"
+		"count" | "first" | "isVisible" | "inputValue" | "nth" | "fill" | "waitFor"
 	> = {
 		count: (): Promise<number> => Promise.resolve(0),
 		first(): Locator {
@@ -83,11 +91,39 @@ function makeChallengePage({
 			return emptyLocator as Locator;
 		},
 		fill: (): Promise<void> => Promise.resolve(),
+		waitFor(): Promise<void> {
+			readinessChecks += 1;
+			const start = Date.now();
+			return new Promise((resolve, reject) => {
+				const poll = (): void => {
+					if (ordersPageReady) {
+						resolve();
+					} else if (Date.now() - start >= 100) {
+						reject(new Error("orders page marker not attached"));
+					} else {
+						setTimeout(poll, 1);
+					}
+				};
+				poll();
+			});
+		},
 	};
 
-	const loggedIn = (): boolean => gotoCalls.length >= becomeLoggedInAfterGoto;
+	const loggedIn = (): boolean =>
+		ownerLoggedIn || gotoCalls.length >= becomeLoggedInAfterGoto;
 
-	const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
+	const page: Pick<
+		Page,
+		"context" | "goto" | "locator" | "url" | "waitForTimeout"
+	> = {
+		context() {
+			return {
+				newPage: () => {
+					newPageCalls += 1;
+					return Promise.resolve(page as Page);
+				},
+			} as ReturnType<Page["context"]>;
+		},
 		goto(url: string): ReturnType<Page["goto"]> {
 			gotoCalls.push(url);
 			// The orders-page deep probe is the only navigation that flips us to a
@@ -98,6 +134,9 @@ function makeChallengePage({
 			return Promise.resolve(null);
 		},
 		locator(_selector: string): Locator {
+			if (_selector.includes("orderTypeMenuContainer")) {
+				return emptyLocator as Locator;
+			}
 			// signIn form is "visible" only while still parked on the sign-in URL.
 			if (_selector.includes("signIn")) {
 				const formVisible = !loggedIn();
@@ -118,7 +157,19 @@ function makeChallengePage({
 			return Promise.resolve();
 		},
 	};
-	return { gotoCalls, page: page as Page };
+	return {
+		gotoCalls,
+		markLoggedIn: () => {
+			ownerLoggedIn = true;
+			currentUrl = ORDERS_URL;
+		},
+		markOrdersPageReady: () => {
+			ordersPageReady = true;
+		},
+		ordersPageReadinessChecks: () => readinessChecks,
+		page: page as Page,
+		readinessPageCreations: () => newPageCalls,
+	};
 }
 
 function makeVisibleFieldFillFailurePage(): {
@@ -254,6 +305,48 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 			/password|test-user|example\.com/u,
 		);
 		assert.ok(gotoCalls.includes(ORDERS_URL));
+	});
+});
+
+test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async () => {
+	await withClearedStreamingEnv(async () => {
+		const {
+			gotoCalls,
+			markLoggedIn,
+			markOrdersPageReady,
+			ordersPageReadinessChecks,
+			page,
+			readinessPageCreations,
+		} = makeChallengePage({
+			becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
+		});
+		let completionStatus: string | undefined;
+
+		const ok = await ensureAmazonSession({
+			assist: () => {
+				markLoggedIn();
+				// Amazon can change the URL before rendering its orders page. The
+				// readiness probe must wait for positive page evidence in that gap.
+				setTimeout(markOrdersPageReady, 15);
+				return Promise.resolve("amazon-assistance");
+			},
+			completeAssistance: (_id, status) => {
+				completionStatus = status;
+				return Promise.resolve();
+			},
+			context: makeContext(),
+			page,
+			sendInteraction: () =>
+				Promise.reject(
+					new Error("automatic readiness must not request a button click"),
+				),
+		});
+
+		assert.equal(ok, true);
+		assert.equal(completionStatus, "resolved");
+		assert.equal(readinessPageCreations(), 0);
+		assert.equal(ordersPageReadinessChecks(), 1);
+		assert.deepEqual(gotoCalls, [ORDERS_URL]);
 	});
 });
 
