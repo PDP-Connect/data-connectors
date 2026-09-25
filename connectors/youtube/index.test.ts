@@ -102,6 +102,16 @@ test("profile skips report a redacted branch code for each unreadable page", asy
 			reason: "youtube_profile_channel_link_unavailable",
 		},
 		{
+			name: "account header is empty",
+			page: new FixturePage(["content", "empty"]),
+			reason: "youtube_profile_account_header_unreadable",
+		},
+		{
+			name: "account header is unreadable",
+			page: new FixturePage(["content", "unreadable"]),
+			reason: "youtube_profile_account_header_unreadable",
+		},
+		{
 			name: "channel page identity is unreadable",
 			page: new FixturePage(["content", "content", "unreadable"]),
 			reason: "youtube_profile_channel_page_unreadable",
@@ -119,7 +129,9 @@ test("profile skips report a redacted branch code for each unreadable page", asy
 			page: scenario.page as never,
 			requested: new Map([["profile", { name: "profile" }]]) as never,
 			emitRecord: async () => undefined,
-			emit: async (event) => skips.push(event as Record<string, unknown>),
+			emit: async (event) => {
+				skips.push(event as Record<string, unknown>);
+			},
 			progress: async () => undefined,
 		});
 

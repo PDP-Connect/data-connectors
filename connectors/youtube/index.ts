@@ -407,12 +407,17 @@ export async function collectYoutubeBrowser(
 				page,
 				"ytd-active-account-header-renderer",
 			);
-			const own =
-				headerState === "content"
-					? await page.evaluate(
-							readOwnAccount as () => ReturnType<typeof readOwnAccount>,
-						)
-					: { channel_url: null, email: null };
+			if (headerState !== "content") {
+				await skipUnreadable(
+					ctx,
+					"profile",
+					"youtube_profile_account_header_unreadable",
+				);
+				return;
+			}
+			const own = await page.evaluate(
+				readOwnAccount as () => ReturnType<typeof readOwnAccount>,
+			);
 			if (!own.channel_url) {
 				await ctx.emit({
 					type: "SKIP_RESULT",
