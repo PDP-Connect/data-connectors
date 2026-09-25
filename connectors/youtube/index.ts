@@ -296,11 +296,12 @@ async function waitForChannelAbout(
 async function skipUnreadable(
 	ctx: BrowserContext,
 	stream: string,
+	reason: string,
 ): Promise<void> {
 	await ctx.emit({
 		type: "SKIP_RESULT",
 		stream,
-		reason: "page_unreadable",
+		reason,
 		message: "YouTube content did not appear before the page-read deadline.",
 	});
 }
@@ -348,7 +349,7 @@ async function readableVideos(
 	try {
 		return await visibleVideos(ctx.page, url, rounds, mode);
 	} catch {
-		await skipUnreadable(ctx, stream);
+		await skipUnreadable(ctx, stream, "page_unreadable");
 		return null;
 	}
 }
@@ -393,7 +394,7 @@ export async function collectYoutubeBrowser(
 			"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
 		);
 		if (homeState !== "content") {
-			await skipUnreadable(ctx, "profile");
+			await skipUnreadable(ctx, "profile", "youtube_profile_home_not_ready");
 		} else {
 			let profileEmitted = false;
 			await page
@@ -406,64 +407,81 @@ export async function collectYoutubeBrowser(
 				page,
 				"ytd-active-account-header-renderer",
 			);
-			const own =
-				headerState === "content"
-					? await page.evaluate(
-							readOwnAccount as () => ReturnType<typeof readOwnAccount>,
-						)
-					: { channel_url: null, email: null };
-			if (!own.channel_url) {
-				await ctx.emit({
-					type: "SKIP_RESULT",
-					stream: "profile",
-					reason: "page_unreadable",
-					message:
-						"The signed-in account header did not expose an own-channel link.",
-				});
+			if (headerState !== "content") {
+				await skipUnreadable(
+					ctx,
+					"profile",
+					"youtube_profile_account_header_unreadable",
+				);
 			} else {
-				await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
-				const channelState = await waitForChannelIdentity(page);
-				if (channelState !== "content") {
-					await skipUnreadable(ctx, "profile");
+				const own = await page.evaluate(
+					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
+				);
+				if (!own.channel_url) {
+					await ctx.emit({
+						type: "SKIP_RESULT",
+						stream: "profile",
+						reason: "youtube_profile_channel_link_unavailable",
+						message:
+							"The signed-in account header did not expose an own-channel link.",
+					});
 				} else {
-					const channel = await page.evaluate(
-						readChannelPage as () => ReturnType<typeof readChannelPage>,
-					);
-					let about: ReturnType<typeof readChannelAbout> | null = null;
-					let aboutUnreadable = false;
-					try {
-						await page.goto(`${own.channel_url.replace(/\/$/, "")}/about`, {
-							waitUntil: "domcontentloaded",
-						});
-						const aboutState = await waitForChannelAbout(page);
-						if (aboutState === "unreadable") {
-							await skipUnreadable(ctx, "profile");
-							aboutUnreadable = true;
-						} else if (aboutState === "content")
-							about = await page.evaluate(
-								readChannelAbout as () => ReturnType<typeof readChannelAbout>,
+					await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
+					const channelState = await waitForChannelIdentity(page);
+					if (channelState !== "content") {
+						await skipUnreadable(
+							ctx,
+							"profile",
+							"youtube_profile_channel_page_unreadable",
+						);
+					} else {
+						const channel = await page.evaluate(
+							readChannelPage as () => ReturnType<typeof readChannelPage>,
+						);
+						let about: ReturnType<typeof readChannelAbout> | null = null;
+						let aboutUnreadable = false;
+						try {
+							await page.goto(`${own.channel_url.replace(/\/$/, "")}/about`, {
+								waitUntil: "domcontentloaded",
+							});
+							const aboutState = await waitForChannelAbout(page);
+							if (aboutState === "unreadable") {
+								await skipUnreadable(
+									ctx,
+									"profile",
+									"youtube_profile_about_page_unreadable",
+								);
+								aboutUnreadable = true;
+							} else if (aboutState === "content")
+								about = await page.evaluate(
+									readChannelAbout as () => ReturnType<typeof readChannelAbout>,
+								);
+						} catch {
+							await skipUnreadable(
+								ctx,
+								"profile",
+								"youtube_profile_about_page_unreadable",
 							);
-					} catch {
-						await skipUnreadable(ctx, "profile");
-						aboutUnreadable = true;
-					}
-					if (!aboutUnreadable) {
-						await emit("profile", {
-							id: channel.channel_id ?? own.channel_url,
-							channel_id: channel.channel_id,
-							channel_url: own.channel_url,
-							title: channel.title,
-							handle: channel.handle,
-							email: own.email,
-							joined_at: about?.joined_at ?? null,
-							avatar_url: channel.avatar_url,
-							description: about?.description ?? null,
-							country: about?.country ?? null,
-							subscriber_count: parseCount(about?.subscriber_count_text),
-							view_count: parseCount(about?.view_count_text),
-							video_count: parseCount(about?.video_count_text),
-						});
-						profileEmitted = true;
+							aboutUnreadable = true;
+						}
+						if (!aboutUnreadable) {
+							await emit("profile", {
+								id: channel.channel_id ?? own.channel_url,
+								channel_id: channel.channel_id,
+								channel_url: own.channel_url,
+								title: channel.title,
+								handle: channel.handle,
+								email: own.email,
+								joined_at: about?.joined_at ?? null,
+								avatar_url: channel.avatar_url,
+								description: about?.description ?? null,
+								country: about?.country ?? null,
+								subscriber_count: parseCount(about?.subscriber_count_text),
+								view_count: parseCount(about?.view_count_text),
+								video_count: parseCount(about?.video_count_text),
+							});
+							profileEmitted = true;
+						}
 					}
 				}
 			}
@@ -473,7 +491,8 @@ export async function collectYoutubeBrowser(
 	if (requested.has("subscriptions")) {
 		await page.goto(`${HOME}feed/channels`, { waitUntil: "domcontentloaded" });
 		const state = await waitForContent(page, "ytd-channel-renderer");
-		if (state === "unreadable") await skipUnreadable(ctx, "subscriptions");
+		if (state === "unreadable")
+			await skipUnreadable(ctx, "subscriptions", "page_unreadable");
 		else {
 			await scroll(page, SCROLLS.subscriptions);
 			const subscriptions =
@@ -513,7 +532,8 @@ export async function collectYoutubeBrowser(
 		if (state === "unreadable") {
 			playlistIndexReadable = false;
 			for (const stream of ["playlists", "playlist_items"])
-				if (requested.has(stream)) await skipUnreadable(ctx, stream);
+				if (requested.has(stream))
+					await skipUnreadable(ctx, stream, "page_unreadable");
 		} else if (state === "content") {
 			await scroll(page, SCROLLS.playlists);
 			playlistLinks = await page.evaluate(
@@ -537,7 +557,8 @@ export async function collectYoutubeBrowser(
 				)) !== "content"
 			) {
 				for (const stream of ["playlists", "playlist_items"])
-					if (requested.has(stream)) await skipUnreadable(ctx, stream);
+					if (requested.has(stream))
+						await skipUnreadable(ctx, stream, "page_unreadable");
 				continue;
 			}
 			const header = await page.evaluate(

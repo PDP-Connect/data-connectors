@@ -20568,7 +20568,7 @@
 				"connector_id": "https://registry.pdpp.dev/connectors/youtube",
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.2",
+				"version": "0.2.3",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -21120,7 +21120,11 @@
 				],
 				"reason_display_messages": {
 					"bounded_browser_snapshot": "This is a bounded browser snapshot. More items may exist beyond the visible list or scroll limit.",
-					"page_unreadable": "The signed-in page did not expose a trustworthy record."
+					"page_unreadable": "The signed-in page did not expose a trustworthy record.",
+					"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
+					"youtube_profile_channel_link_unavailable": "The YouTube account menu did not expose the owner's channel link.",
+					"youtube_profile_channel_page_unreadable": "The owner's YouTube channel page did not expose a readable identity.",
+					"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading."
 				}
 			}
 		},

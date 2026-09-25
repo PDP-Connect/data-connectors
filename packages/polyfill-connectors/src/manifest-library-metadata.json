@@ -634,7 +634,12 @@
 			"connector_key": "youtube",
 			"reason_display_messages": {
 				"bounded_browser_snapshot": "This is a bounded browser snapshot. More items may exist beyond the visible list or scroll limit.",
-				"page_unreadable": "The signed-in page did not expose a trustworthy record."
+				"page_unreadable": "The signed-in page did not expose a trustworthy record.",
+				"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
+				"youtube_profile_account_header_unreadable": "The signed-in YouTube account menu did not finish loading.",
+				"youtube_profile_channel_link_unavailable": "The YouTube account menu did not expose the owner's channel link.",
+				"youtube_profile_channel_page_unreadable": "The owner's YouTube channel page did not expose a readable identity.",
+				"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading."
 			}
 		}
 	},
