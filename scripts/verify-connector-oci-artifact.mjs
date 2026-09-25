@@ -41,6 +41,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import assert from "node:assert/strict";
+import {
+	buildSourceDeclaration,
+	validateSourceDeclaration,
+} from "../packages/connector-installer-core/source-declaration.mjs";
 
 // Deliberately no reference to packages/polyfill-connectors: the verifier must
 // not be able to reach the publisher's installed dependency tree, because
@@ -295,19 +300,10 @@ function main() {
 	// byte-for-byte while accepting a `--version` override: without this check a
 	// config claiming 9.9.9 verifies happily beside a profile saying 0.1.0, and
 	// the artifact carries two answers to "which version is this?" under one digest.
-	for (const field of [
-		"connector_key",
-		"connector_id",
-		"version",
-	]) {
+	for (const field of ["connector_key", "connector_id", "version"]) {
 		if (config[field] !== profile[field]) {
 			throw new Error(
 				`config.${field} is '${config[field]}' but the profile says '${profile[field]}'`,
-			);
-		}
-		if (sourceDeclaration[field] !== profile[field]) {
-			throw new Error(
-				`source-declaration.${field} is '${sourceDeclaration[field]}' but the profile says '${profile[field]}'`,
 			);
 		}
 	}
@@ -316,12 +312,23 @@ function main() {
 			`config.protocol_version is '${config.protocol_version}' but the profile says '${profile.protocol_version}'`,
 		);
 	}
-	if (
-		sourceDeclaration.canonical_inputs?.manifest?.sha256 !==
-		sha256(profileBytes)
-	) {
+
+	// 1b. The source declaration is a normative PDPP SourceDeclaration, not
+	// merely present. Schema and semantics first...
+	const declarationValidity = validateSourceDeclaration(sourceDeclaration);
+	if (!declarationValidity.ok) {
 		throw new Error(
-			"source-declaration.canonical_inputs.manifest.sha256 does not match the profile layer",
+			`source-declaration.json is not a valid PDPP SourceDeclaration:\n  - ${declarationValidity.errors.join("\n  - ")}`,
+		);
+	}
+	// ...then that it is THIS profile's declaration: recomputed independently
+	// from the profile layer and compared structurally, rather than trusting a
+	// digest the builder could compute from anything.
+	try {
+		assert.deepStrictEqual(sourceDeclaration, buildSourceDeclaration(profile));
+	} catch {
+		throw new Error(
+			"source-declaration.json does not match the declaration derived from collection-profile.json",
 		);
 	}
 
@@ -389,7 +396,7 @@ function main() {
 
 		console.log(`${config.connector_key}@${config.version} verified`);
 		console.log(`  profile digest cross-check   ok`);
-		console.log(`  source declaration pinned    ok`);
+		console.log(`  source declaration valid     ok`);
 		console.log(`  archive members safe         ok`);
 		console.log(`  version agrees with profile  ok`);
 		console.log(`  entrypoint ${config.entrypoint}`);

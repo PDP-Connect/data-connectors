@@ -57,6 +57,10 @@ import {
 	hostNodeRange,
 	packageNameOf,
 } from "./connector-host-runtime-contract.mjs";
+import {
+	buildSourceDeclaration,
+	validateSourceDeclaration,
+} from "../packages/connector-installer-core/source-declaration.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
@@ -446,24 +450,13 @@ async function main() {
 			sha256: sha256(readFileSync(join(repoRoot, input))),
 		}));
 
-	const sourceDeclaration = {
-		declaration_version: "1.0",
-		connector_key: connectorKey,
-		connector_id: profile.connector_id,
-		version,
-		source: {
-			repository: "https://github.com/PDP-Connect/data-connectors",
-			revision,
-			package: `connectors/${connectorDirectoryName}`,
-		},
-		canonical_inputs: {
-			manifest: {
-				path: relative(repoRoot, manifestPath),
-				sha256: sha256(profileBytes),
-			},
-			source_inventory: inputInventory,
-		},
-	};
+	const sourceDeclaration = buildSourceDeclaration(profile);
+	const sourceDeclarationValidation = validateSourceDeclaration(sourceDeclaration);
+	if (!sourceDeclarationValidation.ok) {
+		throw new Error(
+			`${connectorKey}: generated source declaration is invalid:\n  - ${sourceDeclarationValidation.errors.join("\n  - ")}`,
+		);
+	}
 	const sourceDeclarationBytes = Buffer.from(
 		`${JSON.stringify(sourceDeclaration, null, 2)}\n`,
 	);

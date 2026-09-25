@@ -56,6 +56,8 @@
 //
 // `ctLogThreshold` stays at the default too: real Fulcio leaves embed an SCT.
 
+import assert from "node:assert/strict";
+
 import {
   BUNDLE_V01_MEDIA_TYPE,
   BUNDLE_V03_MEDIA_TYPE,
@@ -73,6 +75,7 @@ import {
   isValidDigest,
   sha256Digest,
 } from "./oci-registry.mjs";
+import { buildSourceDeclaration, validateSourceDeclaration } from "./source-declaration.mjs";
 
 // THE PIN IS A REGULAR EXPRESSION, SO IT MUST BE ANCHORED. sigstore matches
 // `certificateIdentityURI` with `signerIdentity.match(policyIdentity)` — an
@@ -731,9 +734,25 @@ export function assertConfigMatchesProfile({
         "tampered"
       );
     }
-    if (sourceDeclaration?.canonical_inputs?.manifest?.sha256 !== profileDigest) {
+
+    // The layer must be a normative PDPP SourceDeclaration, not merely
+    // present (schema + semantics)...
+    const declarationValidity = validateSourceDeclaration(sourceDeclaration);
+    if (!declarationValidity.ok) {
       throw new OciRegistryError(
-        `Refusing ${repository}: source declaration manifest digest does not match the profile layer`,
+        `Refusing ${repository}: source declaration is not a valid PDPP SourceDeclaration: ` +
+          declarationValidity.errors.join("; "),
+        "tampered"
+      );
+    }
+    // ...then that it is THIS profile's declaration: recomputed independently
+    // from the profile this consumer fetched and compared structurally,
+    // rather than trusting a digest the artifact could compute from anything.
+    try {
+      assert.deepStrictEqual(sourceDeclaration, buildSourceDeclaration(profile));
+    } catch {
+      throw new OciRegistryError(
+        `Refusing ${repository}: source declaration does not match the declaration derived from the profile layer`,
         "tampered"
       );
     }
@@ -743,15 +762,6 @@ export function assertConfigMatchesProfile({
     if (config?.[field] !== profile?.[field]) {
       throw new OciRegistryError(
         `Refusing ${repository}: config.${field} is ${JSON.stringify(config?.[field])}, ` +
-          `but the profile declares ${JSON.stringify(profile?.[field])}`,
-        "tampered"
-      );
-    }
-  }
-  for (const field of ["connector_key", "connector_id", "version"]) {
-    if (sourceDeclaration && sourceDeclaration?.[field] !== profile?.[field]) {
-      throw new OciRegistryError(
-        `Refusing ${repository}: source-declaration.${field} is ${JSON.stringify(sourceDeclaration?.[field])}, ` +
           `but the profile declares ${JSON.stringify(profile?.[field])}`,
         "tampered"
       );

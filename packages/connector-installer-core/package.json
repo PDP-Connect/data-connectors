@@ -12,6 +12,7 @@
     "./oci-verify.mjs": "./oci-verify.mjs",
     "./oci-catalog.mjs": "./oci-catalog.mjs",
     "./catalog-schema.mjs": "./catalog-schema.mjs",
+    "./source-declaration.mjs": "./source-declaration.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -25,7 +26,9 @@
     "NOTICE",
     "oci-catalog.mjs",
     "catalog-schema.mjs",
-    "catalog-schema-data.mjs"
+    "catalog-schema-data.mjs",
+    "source-declaration.mjs",
+    "source-declaration-schema-data.mjs"
   ],
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
