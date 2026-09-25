@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/google_maps_data_portability",
+		"display": {
+			"name": "Google Maps Data Portability"
+		}
+	},
 	"connector_key": "google-maps-data-portability",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Google Maps Data Portability",
 	"brand": {
 		"icon": "icon.svg",

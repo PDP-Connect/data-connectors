@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/twitter-archive",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/twitter_archive",
+		"display": {
+			"name": "Twitter/X Archive"
+		}
+	},
 	"connector_key": "twitter-archive",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Twitter/X Archive",
 	"brand": {
 		"icon": "icon.svg",

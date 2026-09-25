@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-maps",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/google_maps",
+		"display": {
+			"name": "Google Maps Timeline Import"
+		}
+	},
 	"connector_key": "google-maps",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Google Maps Timeline Import",
 	"brand": {
 		"icon": "icon.svg",

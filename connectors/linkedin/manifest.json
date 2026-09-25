@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/linkedin",
+		"display": {
+			"name": "LinkedIn"
+		}
+	},
 	"connector_key": "linkedin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-	"version": "0.3.6",
+	"version": "0.3.7",
 	"display_name": "LinkedIn",
 	"brand": {
 		"icon": "icon.svg",

@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/chatgpt",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/chatgpt",
+		"display": {
+			"name": "ChatGPT"
+		}
+	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"display_name": "ChatGPT",
 	"brand": {
 		"icon": "icon.svg",

@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/groupme",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/groupme",
+		"display": {
+			"name": "GroupMe"
+		}
+	},
 	"connector_key": "groupme",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "GroupMe",
 	"brand": {
 		"icon": "icon.svg",

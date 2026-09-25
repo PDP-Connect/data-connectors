@@ -409,6 +409,10 @@ export function publishArtifact(
     version,
     protocol_version: protocolVersion,
     display_name: displayName,
+    source: {
+      id: `https://registry.pdpp.dev/sources/${connectorKey.replaceAll("-", "_")}`,
+      display: { name: displayName },
+    },
     runtime_requirements: { bindings: runtimeBindings },
     setup: { modality: setupModality },
     capabilities: { public_listing: { tier } },
@@ -437,7 +441,7 @@ export function publishArtifact(
   // exercise the real shape. `sourceDeclarationOverride` lets a negative test
   // substitute an invalid object without every other fixture caller having to
   // know what an invalid one looks like.
-  const sourceDeclarationBytes = canonicalJson(sourceDeclarationOverride ?? buildSourceDeclaration(profile));
+  const sourceDeclarationBytes = canonicalJson(sourceDeclarationOverride ?? buildSourceDeclaration([profile]));
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
   // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the

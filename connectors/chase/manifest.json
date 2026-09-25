@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/chase",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/chase",
+		"display": {
+			"name": "Chase"
+		}
+	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",

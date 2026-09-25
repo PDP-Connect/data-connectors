@@ -41,11 +41,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import assert from "node:assert/strict";
 import {
 	buildSourceDeclaration,
+	profileDeclarationErrors,
+	serializeSourceDeclaration,
 	validateSourceDeclaration,
 } from "../packages/connector-installer-core/source-declaration.mjs";
+import { sourceDeclarationMembers } from "./source-declaration-members.mjs";
 
 // Deliberately no reference to packages/polyfill-connectors: the verifier must
 // not be able to reach the publisher's installed dependency tree, because
@@ -321,14 +323,21 @@ function main() {
 			`source-declaration.json is not a valid PDPP SourceDeclaration:\n  - ${declarationValidity.errors.join("\n  - ")}`,
 		);
 	}
-	// ...then that it is THIS profile's declaration: recomputed independently
-	// from the profile layer and compared structurally, rather than trusting a
-	// digest the builder could compute from anything.
-	try {
-		assert.deepStrictEqual(sourceDeclaration, buildSourceDeclaration(profile));
-	} catch {
+	// ...then that it is the declaration of THIS profile's source: the profile
+	// is a member of it, and the bytes are exactly those every artifact of
+	// the source carries, recomputed from this checkout's manifests.
+	const membershipErrors = profileDeclarationErrors(profile, sourceDeclaration);
+	if (membershipErrors.length > 0) {
 		throw new Error(
-			"source-declaration.json does not match the declaration derived from collection-profile.json",
+			`source-declaration.json does not declare collection-profile.json:\n  - ${membershipErrors.join("\n  - ")}`,
+		);
+	}
+	const expectedBytes = serializeSourceDeclaration(
+		buildSourceDeclaration(sourceDeclarationMembers(profile)),
+	);
+	if (!sourceDeclarationBytes.equals(expectedBytes)) {
+		throw new Error(
+			"source-declaration.json is not the source declaration built from this checkout's manifests",
 		);
 	}
 

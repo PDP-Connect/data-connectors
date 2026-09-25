@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/whatsapp",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/whatsapp",
+		"display": {
+			"name": "WhatsApp"
+		}
+	},
 	"connector_key": "whatsapp",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"display_name": "WhatsApp (chat export)",
 	"brand": {
 		"icon": "icon.svg",

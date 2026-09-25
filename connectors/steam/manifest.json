@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/steam",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/steam",
+		"display": {
+			"name": "Steam"
+		}
+	},
 	"connector_key": "steam",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Steam",
 	"brand": {
 		"icon": "icon.svg",

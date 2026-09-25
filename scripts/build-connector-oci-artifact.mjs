@@ -59,8 +59,10 @@ import {
 } from "./connector-host-runtime-contract.mjs";
 import {
 	buildSourceDeclaration,
+	serializeSourceDeclaration,
 	validateSourceDeclaration,
 } from "../packages/connector-installer-core/source-declaration.mjs";
+import { sourceDeclarationMembers } from "./source-declaration-members.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
@@ -450,16 +452,15 @@ async function main() {
 			sha256: sha256(readFileSync(join(repoRoot, input))),
 		}));
 
-	const sourceDeclaration = buildSourceDeclaration(profile);
+	// One declaration per source, byte-identical in every artifact of it.
+	const sourceDeclaration = buildSourceDeclaration(sourceDeclarationMembers(profile));
 	const sourceDeclarationValidation = validateSourceDeclaration(sourceDeclaration);
 	if (!sourceDeclarationValidation.ok) {
 		throw new Error(
 			`${connectorKey}: generated source declaration is invalid:\n  - ${sourceDeclarationValidation.errors.join("\n  - ")}`,
 		);
 	}
-	const sourceDeclarationBytes = Buffer.from(
-		`${JSON.stringify(sourceDeclaration, null, 2)}\n`,
-	);
+	const sourceDeclarationBytes = serializeSourceDeclaration(sourceDeclaration);
 	writeFileSync(
 		join(outputRoot, "source-declaration.json"),
 		sourceDeclarationBytes,

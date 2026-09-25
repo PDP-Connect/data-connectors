@@ -33,7 +33,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { classifyExternals } from "./connector-host-runtime-contract.mjs";
 import {
-	buildSourceDeclaration,
+	declarationVersion,
+	profileDeclarationErrors,
 	validateSourceDeclaration,
 } from "../packages/connector-installer-core/source-declaration.mjs";
 
@@ -182,6 +183,39 @@ describe("W28 — the source declaration layer is a normative PDPP SourceDeclara
 		assert.notEqual(result.status, 0, "a provenance-like source declaration must not verify");
 		assert.match(result.stderr, /not a valid PDPP SourceDeclaration/);
 	});
+
+	it("every artifact of one source carries the same declaration bytes", () => {
+		const browserArtifact = join(workspace, "oura-browser");
+		const built = build(["--connector", "oura_browser", "--out", browserArtifact]);
+		assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`);
+		assert.ok(
+			readFileSync(join(browserArtifact, "source-declaration.json")).equals(
+				readFileSync(join(ouraArtifact, "source-declaration.json")),
+			),
+		);
+		assert.equal(verify(browserArtifact).status, 0);
+	});
+
+	it("local verification rejects a valid declaration that omits a profile stream", () => {
+		const target = join(workspace, "narrowed-declaration");
+		rmSync(target, { recursive: true, force: true });
+		cpSync(ouraArtifact, target, { recursive: true });
+
+		const declaration = JSON.parse(readFileSync(join(target, "source-declaration.json"), "utf8"));
+		declaration.streams = declaration.streams.slice(1);
+		declaration.declaration_version = declarationVersion(declaration);
+		const narrowed = Buffer.from(`${JSON.stringify(declaration, null, 2)}\n`);
+		assert.equal(validateSourceDeclaration(declaration).ok, true);
+		writeFileSync(join(target, "source-declaration.json"), narrowed);
+
+		const config = JSON.parse(readFileSync(join(target, "config.json"), "utf8"));
+		config.source_declaration_digest = `sha256:${createHash("sha256").update(narrowed).digest("hex")}`;
+		writeFileSync(join(target, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+
+		const result = verify(target);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /does not declare collection-profile.json/);
+	});
 });
 
 describe("P1-4 — the artifact stands on its own", () => {
@@ -280,11 +314,7 @@ describe("P1-4 — the artifact stands on its own", () => {
 				sha256(declarationBytes),
 			);
 			const profile = JSON.parse(profileBytes.toString("utf8"));
-			assert.deepEqual(
-				declaration,
-				buildSourceDeclaration(profile),
-				"the shipped layer must equal the declaration derived from the profile layer",
-			);
+			assert.deepEqual(profileDeclarationErrors(profile, declaration), []);
 			assert.ok(
 				layers.layers.some(
 					(layer) =>

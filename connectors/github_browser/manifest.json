@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/github-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/github",
+		"display": {
+			"name": "GitHub"
+		}
+	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",

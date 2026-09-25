@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/signal",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/signal",
+		"display": {
+			"name": "Signal"
+		}
+	},
 	"connector_key": "signal",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
 	"version": "0.1.0",

@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/notion",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/notion",
+		"display": {
+			"name": "Notion"
+		}
+	},
 	"connector_key": "notion",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Notion",
 	"brand": {
 		"icon": "icon.svg",
