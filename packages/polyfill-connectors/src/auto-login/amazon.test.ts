@@ -64,10 +64,14 @@ function makeChallengePage({
 	becomeLoggedInAfterGoto: number;
 }): {
 	gotoCalls: string[];
+	markLoggedIn: () => void;
+	readinessPageCreations: () => number;
 	page: Page;
 } {
 	const gotoCalls: string[] = [];
 	let currentUrl = SIGNIN_URL;
+	let ownerLoggedIn = false;
+	let newPageCalls = 0;
 
 	const emptyLocator: Pick<
 		Locator,
@@ -85,9 +89,21 @@ function makeChallengePage({
 		fill: (): Promise<void> => Promise.resolve(),
 	};
 
-	const loggedIn = (): boolean => gotoCalls.length >= becomeLoggedInAfterGoto;
+	const loggedIn = (): boolean =>
+		ownerLoggedIn || gotoCalls.length >= becomeLoggedInAfterGoto;
 
-	const page: Pick<Page, "goto" | "locator" | "url" | "waitForTimeout"> = {
+	const page: Pick<
+		Page,
+		"context" | "goto" | "locator" | "url" | "waitForTimeout"
+	> = {
+		context() {
+			return {
+				newPage: () => {
+					newPageCalls += 1;
+					return Promise.resolve(page as Page);
+				},
+			} as ReturnType<Page["context"]>;
+		},
 		goto(url: string): ReturnType<Page["goto"]> {
 			gotoCalls.push(url);
 			// The orders-page deep probe is the only navigation that flips us to a
@@ -118,7 +134,15 @@ function makeChallengePage({
 			return Promise.resolve();
 		},
 	};
-	return { gotoCalls, page: page as Page };
+	return {
+		gotoCalls,
+		markLoggedIn: () => {
+			ownerLoggedIn = true;
+			currentUrl = ORDERS_URL;
+		},
+		page: page as Page,
+		readinessPageCreations: () => newPageCalls,
+	};
 }
 
 function makeVisibleFieldFillFailurePage(): {
@@ -254,6 +278,38 @@ test("ensureAmazonSession hands off to the secure browser when optional credenti
 			/password|test-user|example\.com/u,
 		);
 		assert.ok(gotoCalls.includes(ORDERS_URL));
+	});
+});
+
+test("ensureAmazonSession polls manual Amazon sign-in in the owner's tab", async () => {
+	await withClearedStreamingEnv(async () => {
+		const { gotoCalls, markLoggedIn, page, readinessPageCreations } =
+			makeChallengePage({
+				becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
+			});
+		let completionStatus: string | undefined;
+
+		const ok = await ensureAmazonSession({
+			assist: () => {
+				markLoggedIn();
+				return Promise.resolve("amazon-assistance");
+			},
+			completeAssistance: (_id, status) => {
+				completionStatus = status;
+				return Promise.resolve();
+			},
+			context: makeContext(),
+			page,
+			sendInteraction: () =>
+				Promise.reject(
+					new Error("automatic readiness must not request a button click"),
+				),
+		});
+
+		assert.equal(ok, true);
+		assert.equal(completionStatus, "resolved");
+		assert.equal(readinessPageCreations(), 0);
+		assert.deepEqual(gotoCalls, [ORDERS_URL]);
 	});
 });
 

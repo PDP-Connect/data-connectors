@@ -168,6 +168,24 @@ async function probeAmazonSession(page: Page): Promise<boolean> {
 }
 
 /**
+ * Check the page the owner is already using during sign-in. Readiness polling
+ * must not navigate this page: Amazon redirects it back to orders after login,
+ * and a navigation on every poll interrupts the owner's sign-in flow.
+ */
+async function probeAmazonOrdersPageInPlace(page: Page): Promise<boolean> {
+	const url = page.url();
+	if (SIGNIN_CHALLENGE_URL.test(url) || !ORDER_URL.test(url)) {
+		return false;
+	}
+	const loginForm = await page
+		.locator('form[name="signIn"]')
+		.first()
+		.isVisible()
+		.catch((): boolean => false);
+	return !loginForm;
+}
+
+/**
  * Hand the unexpected/Cloudflare-or-CAPTCHA sign-in UI to the operator, then
  * re-probe the session. Returns `true` when the operator completed login in
  * the streaming companion (or on a host desktop) and the session is now
@@ -254,7 +272,8 @@ async function waitForManualLogin({
 			await page.waitForTimeout(3000);
 			return await probeAmazonSession(page);
 		},
-		readinessProbe: probeAmazonSession,
+		readinessProbe: probeAmazonOrdersPageInPlace,
+		readinessProbeOnHandoffPage: true,
 		reason: handoffReason,
 		sendInteraction,
 		timeoutSeconds: 1800,
