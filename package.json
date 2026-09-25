@@ -9,6 +9,8 @@
     "packages/polyfill-connectors"
   ],
   "files": [
+    "dist/runtime-support.mjs",
+    "dist/runtime-support.d.ts",
     "packages/connector-installer-core/index.mjs",
     "packages/connector-installer-core/retry.mjs",
     "packages/connector-installer-core/oci-registry.mjs",
@@ -24,7 +26,11 @@
     "schemas/connector-catalog.schema.json"
   ],
   "exports": {
-    "./installer-core": "./packages/connector-installer-core/index.mjs"
+    "./installer-core": "./packages/connector-installer-core/index.mjs",
+    "./runtime-support": {
+      "types": "./dist/runtime-support.d.ts",
+      "default": "./dist/runtime-support.mjs"
+    }
   },
   "bin": {
     "connector-installer": "./packages/connector-installer-cli/index.mjs"
@@ -41,6 +47,9 @@
     "historical-contract:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
     "historical-contract:test": "node --test ./scripts/brand-icon-fleet.test.mjs",
     "installer:test": "npm run catalog-schema:check && node --test ./packages/connector-installer-core/index.test.mjs ./packages/connector-installer-core/signer-identity.test.mjs ./schemas/connector-index.schema.test.mjs ./scripts/manager-engines.test.mjs ./packages/connector-installer-core/packaging.test.mjs ./packages/connector-installer-core/oci-registry.test.mjs ./packages/connector-installer-core/oci.test.mjs ./packages/connector-installer-core/oci-identity.test.mjs ./packages/connector-installer-cli/cli.test.mjs ./packages/connector-installer-core/tar-stream.test.mjs ./packages/connector-installer-core/oci-catalog.test.mjs ./scripts/generate-connector-catalog.test.mjs ./scripts/publish-connector-catalog.test.mjs ./scripts/publish-ref-gate.test.mjs ./scripts/connector-publish-allowlist.test.mjs ./scripts/select-publish-connectors.test.mjs",
+    "prepare": "npm run runtime-support:build",
+    "runtime-support:build": "node ./scripts/build-runtime-support.mjs",
+    "runtime-support:test": "node --test ./scripts/runtime-support-package.test.mjs",
     "cross-repo-integrity:test": "node --test ./.github/scripts/cross-repo-integrity/pin-backed-paths.test.mjs ./.github/scripts/cross-repo-integrity/workflow-shape.test.mjs ./.github/scripts/cross-repo-integrity/pin-freshness.test.mjs ./.github/scripts/cross-repo-integrity/repin-branch-policy.test.mjs",
     "catalog-schema:generate": "node ./scripts/generate-catalog-schema-module.mjs",
     "catalog-schema:check": "node ./scripts/generate-catalog-schema-module.mjs --check",

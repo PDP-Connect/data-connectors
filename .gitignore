@@ -4,6 +4,7 @@
 .fetch-cache.json
 .env
 node_modules/
+/dist/runtime-support.buildinfo.json
 
 # Test runner output
 connector-result.json
