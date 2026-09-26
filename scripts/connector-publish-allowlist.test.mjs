@@ -94,5 +94,5 @@ test("C-T4 the workflow matrix and the allowlist module agree", () => {
   assert.match(aggregate, /BUILD_RESULT: \$\{\{ needs\.artifact-builds\.result \}\}/);
   assert.match(aggregate, /run: test "\$BUILD_RESULT" = success/);
   assert.doesNotMatch(aggregate, /continue-on-error:/);
-  assert.doesNotMatch(gate, /(?:id-token|packages): write|oras push|cosign sign/);
+  assert.doesNotMatch(gate, /(?:id-token|packages): write|oras push|oras attach|cosign sign/);
 });

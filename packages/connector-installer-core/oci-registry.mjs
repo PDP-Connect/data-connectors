@@ -54,6 +54,8 @@ const ABSENCE_CODES = new Set(["MANIFEST_UNKNOWN", "NAME_UNKNOWN"]);
 // because the body is accumulated in memory.
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 
+const MAX_REFERRERS_PAGES = 32;
+
 // A connector artifact's layers are code and a brand icon, not container images.
 // 64 MiB bounds a single blob well above anything the builder emits while still
 // refusing to buffer an unbounded stream from a peer.
@@ -459,6 +461,61 @@ export function classifyReferrersResponse(response) {
     outcome: "unknown",
     reason: `the referrers endpoint returned HTTP ${status}${said ? ` (registry said: ${said})` : ""}`,
   };
+}
+
+function parseLinkHeader(link) {
+  if (typeof link !== "string" || link.length === 0) return [];
+  return link.split(",").map((part) => {
+    const match = /^\s*<([^>]*)>\s*(?:;(.*))?$/.exec(part);
+    if (!match) return null;
+    const params = new Map();
+    for (const rawParam of (match[2] ?? "").split(";")) {
+      const param = rawParam.trim();
+      if (!param) continue;
+      const [name, ...valueParts] = param.split("=");
+      const value = valueParts.join("=").trim();
+      params.set(name.toLowerCase(), value.replace(/^"|"$/g, ""));
+    }
+    return { target: match[1], params };
+  }).filter(Boolean);
+}
+
+function nextReferrersPathFromLink({ link, registry, repository, digest, artifactType, scheme, currentPath }) {
+  const next = parseLinkHeader(link).find((entry) => entry.params.get("rel") === "next");
+  if (!next) return null;
+
+  let url;
+  try {
+    url = new URL(next.target, `${scheme}://${registry}/v2/${repository}/${currentPath}`);
+  } catch {
+    throw new Error("referrers next Link is not a valid URL");
+  }
+
+  if (url.origin !== `${scheme}://${registry}`) {
+    throw new Error("referrers next Link leaves the registry origin");
+  }
+
+  const prefix = `/v2/${repository}/referrers/`;
+  if (!url.pathname.startsWith(prefix)) {
+    throw new Error("referrers next Link leaves the repository or digest being queried");
+  }
+
+  const linkedDigest = decodeURIComponent(url.pathname.slice(prefix.length));
+  if (linkedDigest !== digest) {
+    throw new Error("referrers next Link leaves the repository or digest being queried");
+  }
+
+  if (artifactType) {
+    const linkedArtifactTypes = url.searchParams.getAll("artifactType");
+    // Filtering is optional in OCI registries. A next link may list all
+    // referrers; callers still filter every returned descriptor locally.
+    if (linkedArtifactTypes.length > 1 ||
+        (linkedArtifactTypes.length === 1 && linkedArtifactTypes[0] !== artifactType)) {
+      throw new Error("referrers next Link changes the artifactType filter");
+    }
+  }
+
+  return `referrers/${url.pathname.slice(prefix.length)}${url.search}`;
 }
 
 /**
@@ -880,26 +937,61 @@ export async function lookupReferrers({
   fetchImpl = fetch,
   retryOptions = {},
 }) {
-  let result;
-  try {
-    result = await registryGet({
-      registry,
-      repository,
-      path: `referrers/${encodeURIComponent(digest)}${artifactType ? `?artifactType=${encodeURIComponent(artifactType)}` : ""}`,
-      accept: "application/vnd.oci.image.index.v1+json",
-      scheme,
-      timeoutMs,
-      maxBytes: MAX_MANIFEST_BYTES,
-      fetchImpl,
-      retryOptions,
-    });
-  } catch (error) {
-    return { outcome: "unknown", reason: `referrers request failed: ${error.message}` };
+  const manifests = [];
+  const seenPaths = new Set();
+  let path = `referrers/${encodeURIComponent(digest)}${artifactType ? `?artifactType=${encodeURIComponent(artifactType)}` : ""}`;
+  for (let page = 0; page < MAX_REFERRERS_PAGES; page += 1) {
+    if (seenPaths.has(path)) {
+      return { outcome: "unknown", reason: "referrers pagination looped" };
+    }
+    seenPaths.add(path);
+
+    let result;
+    try {
+      result = await registryGet({
+        registry,
+        repository,
+        path,
+        accept: "application/vnd.oci.image.index.v1+json",
+        scheme,
+        timeoutMs,
+        maxBytes: MAX_MANIFEST_BYTES,
+        fetchImpl,
+        retryOptions,
+      });
+    } catch (error) {
+      return { outcome: "unknown", reason: `referrers request failed: ${error.message}` };
+    }
+    if (result.tokenFailure) {
+      return { outcome: "unknown", reason: result.tokenFailure };
+    }
+
+    const pageResult = classifyReferrersResponse(result.response);
+    if (pageResult.outcome !== "supported") return pageResult;
+    manifests.push(...pageResult.index.manifests);
+
+    try {
+      path = nextReferrersPathFromLink({
+        link: result.response.headers.link,
+        registry,
+        repository,
+        digest,
+        artifactType,
+        scheme,
+        currentPath: path,
+      });
+    } catch (error) {
+      return { outcome: "unknown", reason: error.message };
+    }
+    if (!path) {
+      return {
+        outcome: "supported",
+        index: { ...pageResult.index, manifests },
+      };
+    }
   }
-  if (result.tokenFailure) {
-    return { outcome: "unknown", reason: result.tokenFailure };
-  }
-  return classifyReferrersResponse(result.response);
+
+  return { outcome: "unknown", reason: `referrers pagination exceeded ${MAX_REFERRERS_PAGES} pages` };
 }
 
 /**
@@ -1214,6 +1306,62 @@ export async function discoverCosignBundleReferrers({
     );
   }
   return candidatesFromReferrerIndex(index, { registry, repository, digest });
+}
+
+/** Find declaration manifests attached to one immutable connector digest. */
+export async function discoverSourceDeclarationReferrers({
+  registry,
+  repository,
+  digest,
+  artifactType,
+  scheme = "https",
+  timeoutMs = 30000,
+  fetchImpl = fetch,
+  retryOptions = {},
+}) {
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+  const result = await lookupReferrers({ ...shared, digest, artifactType });
+  if (result.outcome === "unknown") {
+    throw new OciRegistryError(
+      `Could not query declaration referrers for ${registry}/${repository}@${digest}: ${result.reason}`,
+      "unverifiable"
+    );
+  }
+
+  let index;
+  if (result.outcome === "supported") {
+    index = result.index;
+  } else {
+    // OCI tag-schema fallback. This index can also contain cosign bundles;
+    // filter by artifactType below rather than assuming a private tag.
+    const tag = cosignBundleTag(digest);
+    const fallback = await lookupManifest({ ...shared, reference: tag });
+    if (fallback.outcome === "absent") return [];
+    if (fallback.outcome === "unknown") {
+      throw new OciRegistryError(
+        `Could not determine whether declaration fallback ${registry}/${repository}:${tag} exists: ${fallback.reason}`,
+        "unverifiable"
+      );
+    }
+    try {
+      index = JSON.parse(fallback.body);
+    } catch (error) {
+      throw new OciRegistryError(`Declaration fallback ${tag} is not JSON: ${error.message}`, "tampered");
+    }
+  }
+
+  if (index?.mediaType !== "application/vnd.oci.image.index.v1+json" || !Array.isArray(index?.manifests)) {
+    throw new OciRegistryError(`Refusing ${repository}: declaration lookup did not return an OCI image index`, "tampered");
+  }
+  return index.manifests
+    .filter((entry) => entry?.artifactType === artifactType)
+    .map((entry) => {
+      if (!isValidDigest(entry.digest) || !Number.isSafeInteger(entry.size) || entry.size < 1 ||
+          entry.mediaType !== "application/vnd.oci.image.manifest.v1+json") {
+        throw new OciRegistryError(`Refusing ${repository}: invalid declaration referrer descriptor`, "tampered");
+      }
+      return { digest: entry.digest, size: entry.size };
+    });
 }
 
 /**

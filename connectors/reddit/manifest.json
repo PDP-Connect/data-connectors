@@ -9,7 +9,7 @@
 	},
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",

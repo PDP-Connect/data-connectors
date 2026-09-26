@@ -761,6 +761,284 @@ test("W28 accepts a real, normative PDPP SourceDeclaration derived from the prof
   });
 });
 
+test("source declaration referrer installs with the same output path as the legacy layer", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest, config, sourceDeclarationBytes } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-source-referrer-"));
+
+    try {
+      const artifact = await fetchResolvedArtifact(
+        null,
+        ociLockEntry(registry, digest),
+        fixtureOptions(registry, signer)
+      );
+      assert.deepEqual(artifact.sourceDeclarationBuffer, sourceDeclarationBytes);
+
+      const installOptions = {
+        lock: { connectors: [ociLockEntry(registry, digest)] },
+        source: null,
+        installRoot,
+        layout: "source",
+        ...fixtureOptions(registry, signer),
+      };
+      const result = await installFromLock(installOptions);
+
+      assert.equal(result.pinned[0].sourceDeclarationPath, "collection-profiles/ynab-pdpp/source-declaration.json");
+      assert.equal(result.pinned[0].sourceDeclarationSha256, config.source_declaration_digest);
+      assert.deepEqual(
+        readFileSync(join(installRoot, "collection-profiles/ynab-pdpp/source-declaration.json")),
+        sourceDeclarationBytes
+      );
+      const verified = await verifyInstalled(installOptions);
+      assert.equal(verified.ok, true);
+      assert.deepEqual(verified.sourceDeclarations, [{
+        connectorId: "ynab-pdpp",
+        version: "0.3.0",
+        digest,
+        sourceDeclarationPath: "collection-profiles/ynab-pdpp/source-declaration.json",
+        sourceDeclarationSha256: config.source_declaration_digest,
+        installedMatches: true,
+      }]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("source declaration referrer is discovered through the referrers API when present", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest, sourceDeclarationBytes, sourceDeclarationReferrer } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+    });
+    registry.referrersIndex = sourceDeclarationReferrer.index;
+    registry.tags.delete(digest.replace(":", "-"));
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+
+    assert.deepEqual(artifact.sourceDeclarationBuffer, sourceDeclarationBytes);
+    assert.ok(
+      registry.requests.some((url) => url.includes(`/referrers/${encodeURIComponent(digest)}`)),
+      "expected installer-core to query the referrers API"
+    );
+  });
+});
+
+test("legacy layer and referrer forms return and install byte-identical source declarations", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const legacy = publishArtifact(registry, { signer, version: "0.3.0" });
+    const referrer = publishArtifact(registry, {
+      signer,
+      version: "0.3.1",
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+    });
+    assert.deepEqual(legacy.sourceDeclarationBytes, referrer.sourceDeclarationBytes);
+
+    const legacyArtifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, legacy.digest),
+      fixtureOptions(registry, signer)
+    );
+    const referrerArtifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, referrer.digest, { version: "0.3.1" }),
+      fixtureOptions(registry, signer)
+    );
+    assert.deepEqual(legacyArtifact.sourceDeclarationBuffer, referrerArtifact.sourceDeclarationBuffer);
+
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-source-identity-"));
+    try {
+      await installFromLock({
+        lock: {
+          connectors: [
+            ociLockEntry(registry, legacy.digest),
+            ociLockEntry(registry, referrer.digest, {
+              connectorId: "ynab-pdpp-referrer",
+              version: "0.3.1",
+            }),
+          ],
+        },
+        source: null,
+        installRoot,
+        layout: "source",
+        ...fixtureOptions(registry, signer),
+      });
+
+      const legacyFile = readFileSync(join(installRoot, "collection-profiles/ynab-pdpp/source-declaration.json"));
+      const referrerFile = readFileSync(join(installRoot, "collection-profiles/ynab-pdpp-referrer/source-declaration.json"));
+      assert.deepEqual(legacyFile, legacyArtifact.sourceDeclarationBuffer);
+      assert.deepEqual(referrerFile, referrerArtifact.sourceDeclarationBuffer);
+      assert.deepEqual(legacyFile, referrerFile);
+      assert.deepEqual(
+        readdirSync(join(installRoot, "collection-profiles/ynab-pdpp"), { recursive: true }).sort(),
+        readdirSync(join(installRoot, "collection-profiles/ynab-pdpp-referrer"), { recursive: true }).sort()
+      );
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("source declaration referrer whose subject names another manifest is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const other = publishArtifact(registry, { signer, connectorKey: "other", version: "9.9.9" });
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerSubjectDigest: other.digest,
+    });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "misidentified");
+        assert.match(error.message, /does not bind to connector/);
+        return true;
+      }
+    );
+  });
+});
+
+test("unsigned source declaration referrer is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerSigner: null,
+    });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "unsigned");
+        return true;
+      }
+    );
+  });
+});
+
+test("source declaration referrer layer size mismatch is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest, sourceDeclarationBytes } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerLayerSize: 1,
+    });
+    assert.notEqual(sourceDeclarationBytes.length, 1);
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /claims 1 bytes/);
+        return true;
+      }
+    );
+  });
+});
+
+test("source declaration referrer accepts ORAS inline empty config descriptors", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest, sourceDeclarationBytes } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerInlineConfig: true,
+    });
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+
+    assert.deepEqual(artifact.sourceDeclarationBuffer, sourceDeclarationBytes);
+  });
+});
+
+test("source declaration referrer rejects tampered inline config descriptors", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationLayer: false,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerInlineConfig: true,
+      sourceDeclarationReferrerInlineConfigData: Buffer.from("{\"tampered\":true}").toString("base64"),
+    });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /invalid inline data/);
+        return true;
+      }
+    );
+  });
+});
+
+test("legacy layer and source declaration referrer with different bytes are refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerBytes: canonicalJson(buildSourceDeclaration([
+        {
+          connector_key: "ynab",
+          connector_id: "https://github.com/PDP-Connect/data-connectors/connector/ynab",
+          version: "0.3.0",
+          protocol_version: "1.0",
+          display_name: "YNAB",
+          source: { id: "https://registry.pdpp.dev/sources/ynab", display: { name: "YNAB" } },
+          runtime_requirements: { bindings: { network: { required: true } } },
+          setup: { modality: "static_secret" },
+          capabilities: { public_listing: { tier: "supported" } },
+          streams: [
+            {
+              name: "different",
+              semantics: "append_only",
+              schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+              primary_key: ["id"],
+              selection: { fields: true, resources: true },
+            },
+          ],
+        },
+      ])),
+    });
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /bytes disagree/);
+        return true;
+      }
+    );
+  });
+});
+
 test("A-T9 refuses unsafe archive members by type as well as name, and cleans up temp dirs", async () => {
   const signer = createSigner();
 

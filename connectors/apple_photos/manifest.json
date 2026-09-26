@@ -9,7 +9,7 @@
 	},
 	"connector_key": "apple-photos",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"display_name": "Apple Photos",
 	"brand": {
 		"icon": "icon.svg",

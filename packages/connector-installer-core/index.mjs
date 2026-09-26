@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_OCI_REGISTRY as DEFAULT_OCI_REGISTRY_NAME,
   OciRegistryError,
+  discoverSourceDeclarationReferrers,
   fetchBlob,
   fetchManifestByDigest,
   isValidConnectorKey,
@@ -44,6 +45,7 @@ import {
 } from "./oci-registry.mjs";
 import {
   OCI_CONFIG_MEDIA_TYPE,
+  OCI_LAYER_MEDIA_TYPES,
   assertConfigMatchesProfile,
   defaultOciCertificateIdentityResolver,
   indexLayersByMediaType,
@@ -69,7 +71,7 @@ export { fetchCatalog } from "./oci-catalog.mjs";
 
 export const DEFAULT_CONNECTOR_INDEX_URL =
   "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
-// Where an OCI install writes the artifact's SourceDeclaration layer, relative
+// Where an OCI install writes the verified SourceDeclaration, relative
 // to the connector's collection-profile directory.
 export const SOURCE_DECLARATION_PATH = "source-declaration.json";
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
@@ -840,6 +842,98 @@ async function readLayerArchive(
  * Returns the same shape `unpackAndVerifyArtifact` returns for a tarball, so
  * everything downstream — install writes, prune, verify — is untouched.
  */
+async function fetchOciDescriptorBlob(transport, descriptor, label) {
+  if (!Number.isSafeInteger(descriptor?.size) || descriptor.size < 0) {
+    throw new OciRegistryError(`Refusing ${transport.repository}: ${label} has an invalid size`, "tampered");
+  }
+  // OCI permits a small blob to travel inline in its descriptor. ORAS uses
+  // this for the empty config in some attached artifact manifests.
+  let bytes;
+  if (typeof descriptor.data === "string") {
+    bytes = Buffer.from(descriptor.data, "base64");
+    if (bytes.toString("base64") !== descriptor.data || sha256Digest(bytes) !== descriptor.digest) {
+      throw new OciRegistryError(`Refusing ${transport.repository}: ${label} has invalid inline data`, "tampered");
+    }
+  } else {
+    bytes = await fetchBlob({ ...transport, digest: descriptor.digest });
+  }
+  if (bytes.length !== descriptor.size) {
+    throw new OciRegistryError(
+      `Refusing ${transport.repository}: ${label} claims ${descriptor.size} bytes but returned ${bytes.length}`,
+      "tampered"
+    );
+  }
+  return bytes;
+}
+
+async function fetchDeclarationReferrerBytes({ transport, imageDigest, imageManifest, imageManifestBytes, options }) {
+  const artifactType = OCI_LAYER_MEDIA_TYPES.sourceDeclaration;
+  const candidates = await discoverSourceDeclarationReferrers({
+    ...transport,
+    digest: imageDigest,
+    artifactType,
+  });
+  let acceptedBytes = null;
+
+  for (const candidate of candidates) {
+    const { manifest, bytes: manifestBytes } = await fetchManifestByDigest({
+      ...transport,
+      digest: candidate.digest,
+    });
+    if (manifestBytes.length !== candidate.size ||
+        manifest?.mediaType !== "application/vnd.oci.image.manifest.v1+json" ||
+        manifest?.artifactType !== artifactType ||
+        manifest?.subject?.digest !== imageDigest ||
+        manifest?.subject?.mediaType !== imageManifest.mediaType ||
+        manifest?.subject?.size !== imageManifestBytes.length) {
+      throw new OciRegistryError(
+        `Refusing ${transport.repository}: declaration referrer ${candidate.digest} does not bind to connector ${imageDigest}`,
+        "misidentified"
+      );
+    }
+
+    const config = manifest.config;
+    const layer = Array.isArray(manifest.layers) && manifest.layers.length === 1
+      ? manifest.layers[0]
+      : null;
+    if (config?.mediaType !== "application/vnd.oci.empty.v1+json" ||
+        layer?.mediaType !== artifactType ||
+        !Number.isSafeInteger(config?.size) || config.size < 1 ||
+        !Number.isSafeInteger(layer?.size) || layer.size < 1) {
+      throw new OciRegistryError(
+        `Refusing ${transport.repository}: declaration referrer ${candidate.digest} has invalid config or layer descriptors`,
+        "tampered"
+      );
+    }
+
+    // The declaration's own manifest needs its own trusted signature. A
+    // signature on the connector image does not authenticate a later referrer.
+    await verifyOciSignature({
+      ...transport,
+      digest: candidate.digest,
+      certificateIdentityResolver:
+        options.ociCertificateIdentityResolver ?? defaultOciCertificateIdentityResolver,
+      sigstoreVerifier: options.sigstoreVerifier,
+    });
+    const configBytes = await fetchOciDescriptorBlob(transport, config, "declaration config");
+    const declarationBytes = await fetchOciDescriptorBlob(transport, layer, "declaration layer");
+    if (configBytes.toString("utf8") !== "{}") {
+      throw new OciRegistryError(
+        `Refusing ${transport.repository}: declaration referrer ${candidate.digest} descriptor size or config disagrees with its blob`,
+        "tampered"
+      );
+    }
+    if (acceptedBytes && !acceptedBytes.equals(declarationBytes)) {
+      throw new OciRegistryError(
+        `Refusing ${transport.repository}: multiple declaration referrers disagree`,
+        "tampered"
+      );
+    }
+    acceptedBytes = declarationBytes;
+  }
+  return acceptedBytes;
+}
+
 async function fetchOciArtifact(entry, options = {}) {
   const connectorKey = entry.connectorKey;
   // Checked before any network call: a key that could never have been
@@ -887,7 +981,7 @@ async function fetchOciArtifact(entry, options = {}) {
   }
   const digest = reference.digest ?? (await resolveVersionToDigest({ ...transport, version: entry.version }));
 
-  const { manifest } = await fetchManifestByDigest({ ...transport, digest });
+  const { manifest, bytes: manifestBytes } = await fetchManifestByDigest({ ...transport, digest });
 
   // Before any layer is written — or fetched (C3.1).
   const trust = await verifyOciSignature({
@@ -909,17 +1003,37 @@ async function fetchOciArtifact(entry, options = {}) {
 
   // Every one of these is digest-verified inside `fetchBlob` against the
   // descriptor that named it (C4.1).
-  const configBytes = await fetchBlob({ ...transport, digest: manifest.config.digest });
-  const profileBytes = await fetchBlob({ ...transport, digest: layers.profile.digest });
-  const codeBytes = await fetchBlob({ ...transport, digest: layers.code.digest });
-  const sourceDeclarationBytes = await fetchBlob({
-    ...transport,
-    digest: layers.sourceDeclaration.digest,
+  const configBytes = await fetchOciDescriptorBlob(transport, manifest.config, "connector config");
+  const profileBytes = await fetchOciDescriptorBlob(transport, layers.profile, "profile layer");
+  const codeBytes = await fetchOciDescriptorBlob(transport, layers.code, "code layer");
+  const layerDeclarationBytes = layers.sourceDeclaration
+    ? await fetchOciDescriptorBlob(transport, layers.sourceDeclaration, "source declaration layer")
+    : null;
+  const referrerDeclarationBytes = await fetchDeclarationReferrerBytes({
+    transport,
+    imageDigest: digest,
+    imageManifest: manifest,
+    imageManifestBytes: manifestBytes,
+    options,
   });
-  const provenanceBytes = await fetchBlob({ ...transport, digest: layers.provenance.digest });
-  const licensesBytes = await fetchBlob({ ...transport, digest: layers.licenses.digest });
+  if (layerDeclarationBytes && referrerDeclarationBytes &&
+      !layerDeclarationBytes.equals(referrerDeclarationBytes)) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: declaration layer and referrer bytes disagree`,
+      "tampered"
+    );
+  }
+  const sourceDeclarationBytes = layerDeclarationBytes ?? referrerDeclarationBytes;
+  if (!sourceDeclarationBytes) {
+    throw new OciRegistryError(
+      `Refusing ${reference.repository}: artifact has no signed source declaration layer or referrer`,
+      "unsigned"
+    );
+  }
+  const provenanceBytes = await fetchOciDescriptorBlob(transport, layers.provenance, "provenance layer");
+  const licensesBytes = await fetchOciDescriptorBlob(transport, layers.licenses, "licenses layer");
   const assetsBytes = layers.assets
-    ? await fetchBlob({ ...transport, digest: layers.assets.digest })
+    ? await fetchOciDescriptorBlob(transport, layers.assets, "assets layer")
     : null;
 
   let config;
@@ -1675,8 +1789,8 @@ export async function verifyInstalled({
     missing,
     mismatched,
     // The declaration digest each OCI artifact's signed config pins, taken
-    // from the layer this call just re-fetched and checked against that
-    // config, not from the installed file. A host passes this value through;
+    // from the layer or referrer this call just re-fetched and checked against
+    // that config, not from the installed file. A host passes this value through;
     // `installedMatches` says whether the file on disk still has those bytes.
     sourceDeclarations: resolved
       .filter((artifact) => artifact.oci && artifact.sourceDeclarationPath)

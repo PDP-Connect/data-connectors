@@ -106,8 +106,10 @@ function extractPushAndSign() {
 function startRegistry(root) {
   const manifestDir = join(root, "manifests");
   const tagDir = join(root, "tags");
+  const blobDir = join(root, "blobs");
   mkdirSync(manifestDir, { recursive: true });
   mkdirSync(tagDir, { recursive: true });
+  mkdirSync(blobDir, { recursive: true });
 
   // A tag is one file whose contents are a digest, which is what a tag IS.
   const tagFile = (name, tag) => join(tagDir, `${name}:${tag}`.replace(/\//g, "__"));
@@ -138,6 +140,7 @@ function startRegistry(root) {
     close: () => server.close(),
     manifestDir,
     tagDir,
+    blobDir,
   };
 }
 
@@ -317,6 +320,7 @@ const flag = (name) => flagAll(name)[0];
 
 const root = process.env.SUBSTITUTE_REGISTRY;
 const manifestFile = (digest) => join(root, "manifests", digest.replace(":", "_"));
+const blobFile = (digest) => join(root, "blobs", digest.replace(":", "_"));
 const tagFile = (name, tag) => join(root, "tags", (name + ":" + tag).replace(/\//g, "__"));
 
 // Split "host/name[:tag|@digest]" into the repository name and the reference.
@@ -389,6 +393,65 @@ if (verb === "push") {
   // writes content-addressed bytes and moves nothing.
   if (ref) writeFileSync(tagFile(name, ref), digest);
 
+  process.stdout.write(JSON.stringify({ reference: argv[1], digest, size: manifest.length }) + "\n");
+  process.exit(0);
+}
+
+if (verb === "attach") {
+  const { name, ref } = split(argv[1]);
+  if (!ref?.startsWith("sha256:") || !existsSync(manifestFile(ref))) {
+    console.error("attach: subject not found");
+    process.exit(1);
+  }
+
+  const annotations = {};
+  for (const a of flagAll("--annotation")) {
+    const eq = a.indexOf("=");
+    annotations[a.slice(0, eq)] = a.slice(eq + 1);
+  }
+
+  const configBytes = Buffer.from("{}");
+  const configDigest = sha256(configBytes);
+  writeFileSync(blobFile(configDigest), configBytes);
+
+  const layers = [];
+  for (const spec of argv.slice(2)) {
+    if (spec.startsWith("-")) continue;
+    const idx = spec.lastIndexOf(":");
+    if (idx === -1) continue;
+    const file = spec.slice(0, idx);
+    if (!existsSync(file)) continue;
+    const bytes = readFileSync(file);
+    const digest = sha256(bytes);
+    writeFileSync(blobFile(digest), bytes);
+    layers.push({
+      mediaType: spec.slice(idx + 1),
+      digest,
+      size: bytes.length,
+      annotations: { "org.opencontainers.image.title": file },
+    });
+  }
+
+  const subjectBytes = readFileSync(manifestFile(ref));
+  const manifest = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    artifactType: flag("--artifact-type"),
+    config: {
+      mediaType: "application/vnd.oci.empty.v1+json",
+      digest: configDigest,
+      size: configBytes.length,
+    },
+    layers,
+    annotations,
+    subject: {
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: ref,
+      size: subjectBytes.length,
+    },
+  }));
+  const digest = sha256(manifest);
+  writeFileSync(manifestFile(digest), manifest);
   process.stdout.write(JSON.stringify({ reference: argv[1], digest, size: manifest.length }) + "\n");
   process.exit(0);
 }
@@ -637,22 +700,39 @@ test("a first publish of a new version tags and signs the digest it pushed", () 
     assert.ok(reported, `expected the step to report a published digest\n${result.output}`);
     assert.equal(tagged, reported, "the tag must resolve to the digest the push reported");
 
-    // Two signatures during the cosign v3 transition: the default bundle
-    // format and the legacy `.sig` format that data-connect desktop builds
-    // still read. When the legacy bridge is removed, this becomes one call.
+    const attaches = result.calls.filter((call) => call[0] === "attach");
+    assert.equal(attaches.length, 1, "a publish attaches one SourceDeclaration referrer");
+    assert.ok(
+      attaches[0].includes("source-declaration.json:application/vnd.pdpp.connector.source-declaration.v1+json"),
+      `the SourceDeclaration sidecar must be attached with its artifact media type: ${attaches[0].join(" ")}`,
+    );
+
+    // Four signatures during the cosign v3 transition: default bundle and
+    // legacy `.sig` for the SourceDeclaration referrer, then both formats for
+    // the connector manifest. When the legacy bridge is removed, this becomes
+    // two calls.
     const signed = result.calls.filter((call) => call[0] === "cosign");
-    assert.equal(signed.length, 2, "a publish signs once per signature format");
+    assert.equal(signed.length, 4, "a publish signs both manifests once per signature format");
     assert.equal(
       signed.filter((call) => call.includes("--new-bundle-format=false")).length,
-      1,
-      "exactly one of the signatures is the legacy format",
+      2,
+      "exactly one signature for each manifest is the legacy format",
     );
-    for (const call of signed) {
+    const connectorSigned = signed.filter((call) =>
+      call.some((arg) => arg.endsWith(`@${tagged}`)),
+    );
+    assert.equal(connectorSigned.length, 2, "both connector signature formats must sign the connector digest");
+    for (const call of connectorSigned) {
       assert.ok(
         call.some((arg) => arg.endsWith(`@${tagged}`)),
         `cosign must sign the published digest by digest, not by tag: ${call.join(" ")}`,
       );
     }
+    const referrerSigned = signed.filter((call) =>
+      call.some((arg) => /^127\.0\.0\.1:\d+\/connector\/ynab@sha256:[0-9a-f]{64}$/.test(arg)) &&
+        !call.some((arg) => arg.endsWith(`@${tagged}`)),
+    );
+    assert.equal(referrerSigned.length, 2, "both SourceDeclaration signature formats must sign the referrer digest");
   });
 });
 
@@ -886,17 +966,19 @@ test("the push that precedes the guard writes no tag", () => {
   );
 
   const lookupLine = lines.findIndex((line) => /lookup-manifest\.mjs/.test(line));
+  const attachLine = lines.findIndex((line) => /^\s*oras attach\b/.test(line));
   const tagLine = lines.findIndex((line) => /^\s*oras tag\b/.test(line));
   const refusalLine = lines.findIndex((line) => /refusing to redefine it/.test(line));
 
   assert.notEqual(lookupLine, -1, "expected the typed manifest lookup");
+  assert.notEqual(attachLine, -1, "expected the SourceDeclaration referrer attach");
   assert.notEqual(tagLine, -1, "expected an explicit `oras tag` for the version");
   assert.notEqual(refusalLine, -1, "expected the refusal");
 
   assert.ok(
-    lookupLine < refusalLine && refusalLine < tagLine,
-    `the lookup and refusal must both precede the tag write ` +
-      `(lookup ${lookupLine}, refusal ${refusalLine}, tag ${tagLine})`,
+    lookupLine < refusalLine && refusalLine < attachLine && attachLine < tagLine,
+    `the lookup, refusal and SourceDeclaration attach must precede the tag write ` +
+      `(lookup ${lookupLine}, refusal ${refusalLine}, attach ${attachLine}, tag ${tagLine})`,
   );
 
   // AND the signature precedes the tag. Both act on the same captured digest,
@@ -910,5 +992,9 @@ test("the push that precedes the guard writes no tag", () => {
   assert.ok(
     signLine < tagLine,
     `the signature must precede the version tag (sign ${signLine}, tag ${tagLine})`,
+  );
+  assert.ok(
+    attachLine < signLine,
+    `the SourceDeclaration referrer must be attached before signatures complete (attach ${attachLine}, sign ${signLine})`,
   );
 });

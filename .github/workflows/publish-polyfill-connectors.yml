@@ -453,6 +453,27 @@ jobs:
             exit 1
           fi
 
+          # Attach the SourceDeclaration as an OCI referrer to the connector
+          # manifest digest. This keeps old installers compatible with new
+          # artifacts: the connector image has only the layers old installers
+          # know how to parse, while referrer-aware installers discover this
+          # sidecar by subject digest. ORAS defaults to the referrers API where
+          # a registry supports it and the OCI tag-schema fallback where it does
+          # not; the installer follows the same API-then-tag order.
+          oras attach "${REPOSITORY}@${DIGEST}" \
+            --artifact-type application/vnd.pdpp.connector.source-declaration.v1+json \
+            --annotation "org.opencontainers.image.created=${CREATED}" \
+            --format json \
+            source-declaration.json:application/vnd.pdpp.connector.source-declaration.v1+json \
+            > source-declaration-referrer-result.json
+
+          SOURCE_DECLARATION_DIGEST="$(node -e 'console.log(JSON.parse(require("fs").readFileSync("source-declaration-referrer-result.json","utf8")).digest)')"
+
+          case "$SOURCE_DECLARATION_DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::source declaration referrer did not report a sha256 digest (got '${SOURCE_DECLARATION_DIGEST}')"; exit 1 ;;
+          esac
+
           # Step 2: SIGN, and only then expose the version identifier.
           #
           # This order is deliberate and it is the cheaper half of a previously
@@ -469,6 +490,8 @@ jobs:
           # token's identity — this repository, this workflow file, and (layer 1
           # of the ref restriction) refs/heads/main — and the signature is logged
           # to Rekor. There is no private key in this repo.
+          cosign sign --yes "${REPOSITORY}@${SOURCE_DECLARATION_DIGEST}"
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false "${REPOSITORY}@${SOURCE_DECLARATION_DIGEST}"
           cosign sign --yes "${REPOSITORY}@${DIGEST}"
           # Bridge: also write the legacy `.sig` signature. cosign v3 signs with a
           # Sigstore bundle stored as an OCI referrer by default. The data-connect
@@ -484,6 +507,7 @@ jobs:
           oras tag "${REPOSITORY}@${DIGEST}" "${VERSION}"
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "source_declaration_digest=${SOURCE_DECLARATION_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "published ${REPOSITORY}@${DIGEST}"
 
           {
@@ -491,6 +515,7 @@ jobs:
             echo
             echo "\`\`\`"
             echo "${REPOSITORY}@${DIGEST}"
+            echo "${REPOSITORY}@${SOURCE_DECLARATION_DIGEST}"
             echo "\`\`\`"
             echo
             echo "Verify:"
@@ -526,6 +551,7 @@ jobs:
         env:
           REPOSITORY: ${{ steps.target.outputs.repository }}
           DIGEST: ${{ steps.publish.outputs.digest }}
+          SOURCE_DECLARATION_DIGEST: ${{ steps.publish.outputs.source_declaration_digest }}
         run: |
           set -euo pipefail
 
@@ -537,13 +563,19 @@ jobs:
             echo "::error::no digest was carried from the push step — refusing to verify"
             exit 1
           fi
+          if [ -z "${SOURCE_DECLARATION_DIGEST:-}" ]; then
+            echo "::error::no source declaration digest was carried from the publish step — refusing to verify"
+            exit 1
+          fi
 
           # Verify both formats while the legacy bridge in the publish step exists.
-          for bundle_format in true false; do
-            cosign verify "${REPOSITORY}@${DIGEST}" \
-              --new-bundle-format="${bundle_format}" \
-              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          for signed_digest in "$SOURCE_DECLARATION_DIGEST" "$DIGEST"; do
+            for bundle_format in true false; do
+              cosign verify "${REPOSITORY}@${signed_digest}" \
+                --new-bundle-format="${bundle_format}" \
+                --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            done
           done
 
   catalog:

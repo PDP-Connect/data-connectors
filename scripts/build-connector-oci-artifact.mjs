@@ -604,10 +604,6 @@ async function main() {
 			mediaType: "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
 		},
 		{
-			file: "source-declaration.json",
-			mediaType: "application/vnd.pdpp.connector.source-declaration.v1+json",
-		},
-		{
 			file: "provenance.json",
 			mediaType: "application/vnd.pdpp.connector.provenance.v1+json",
 		},

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.5",
+	"version": "0.2.6",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",

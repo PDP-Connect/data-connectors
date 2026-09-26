@@ -125,7 +125,23 @@ after(() => {
 	if (workspace) rmSync(workspace, { recursive: true, force: true });
 });
 
-describe("W28 — the source declaration layer is a normative PDPP SourceDeclaration", () => {
+describe("W28 — the source declaration is a normative PDPP SourceDeclaration", () => {
+	it("keeps the published image layer set compatible with installers before #212", () => {
+		const payload = JSON.parse(readFileSync(join(ouraArtifact, "layers.json"), "utf8"));
+		const supported = new Set([
+			"application/vnd.pdpp.connector.profile.v1+json",
+			"application/vnd.pdpp.connector.code.v1.tar+gzip",
+			"application/vnd.pdpp.connector.assets.v1.tar+gzip",
+			"application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+			"application/vnd.pdpp.connector.provenance.v1+json",
+		]);
+		assert.ok(payload.layers.every(({ mediaType }) => supported.has(mediaType)));
+		assert.equal(
+			payload.layers.length,
+			4 + Number(payload.layers.some(({ file }) => file === "assets.tar.gz")),
+		);
+	});
+
 	it("the real Oura source declaration is schema- and semantics-valid", () => {
 		const declaration = JSON.parse(
 			readFileSync(join(ouraArtifact, "source-declaration.json"), "utf8"),
@@ -293,7 +309,7 @@ describe("P1-4 — the artifact stands on its own", () => {
 		}
 	});
 
-	it("emits a deterministic source declaration layer pinned by config", () => {
+	it("emits a deterministic source declaration sidecar pinned by config", () => {
 		const secondArtifact = join(workspace, "oura-second");
 		const rebuilt = build(["--connector", "oura", "--out", secondArtifact]);
 		assert.equal(rebuilt.status, 0, `${rebuilt.stdout}\n${rebuilt.stderr}`);
@@ -315,14 +331,7 @@ describe("P1-4 — the artifact stands on its own", () => {
 			);
 			const profile = JSON.parse(profileBytes.toString("utf8"));
 			assert.deepEqual(profileDeclarationErrors(profile, declaration), []);
-			assert.ok(
-				layers.layers.some(
-					(layer) =>
-						layer.file === "source-declaration.json" &&
-						layer.mediaType ===
-							"application/vnd.pdpp.connector.source-declaration.v1+json",
-				),
-			);
+			assert.ok(layers.layers.every((layer) => layer.file !== "source-declaration.json"));
 		}
 
 		for (const file of ["config.json", "layers.json", "source-declaration.json"]) {
