@@ -13,6 +13,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type BrowserVideo,
+	CHANNEL_TITLE_SELECTOR,
 	readChannelAbout,
 	readChannelPage,
 	readOwnAccount,
@@ -222,12 +223,10 @@ async function waitForChannelIdentity(
 ): Promise<"content" | "unreadable"> {
 	try {
 		const handle = await page.waitForFunction(
-			() => {
-				const title = document
-					.querySelector(
-						"ytd-channel-name yt-formatted-string, #channel-name yt-formatted-string, h1",
-					)
-					?.textContent?.trim();
+			(titleSelector) => {
+				const title = Array.from(document.querySelectorAll(titleSelector))
+					.map((node) => node.textContent?.trim() ?? "")
+					.find(Boolean);
 				const hasIdentity = Boolean(
 					document.querySelector(
 						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
@@ -242,7 +241,7 @@ async function waitForChannelIdentity(
 					? true
 					: false;
 			},
-			undefined,
+			CHANNEL_TITLE_SELECTOR,
 			{ timeout: 10_000 },
 		);
 		await handle.dispose();
@@ -261,26 +260,25 @@ async function waitForChannelAbout(
 				const about = document.querySelector(
 					"ytd-channel-about-metadata-renderer, yt-about-this-channel-renderer",
 				);
-				if (!about) return false;
+				const aboutRoot = about ?? document;
 				const text = Array.from(
-					about.querySelectorAll("yt-formatted-string, span, td, dd"),
+					aboutRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
 				)
 					.filter((node) => node.children.length === 0)
 					.map((node) => node.textContent?.trim() ?? "")
 					.filter((value) => value && !/^(loading|please wait)$/i.test(value));
-				const hasSettledField = text.some(
-					(value) =>
-						/^joined\s+/i.test(value) ||
-						(/subscriber|view|video/i.test(value) && /\d/.test(value)),
+				const hasJoinedDate = text.some((value) => /^joined\s+/i.test(value));
+				const hasStatsInAbout = Boolean(about) && text.some(
+					(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
 				);
 				const hasDescription = Boolean(
-					about
+					aboutRoot
 						.querySelector(
 							"#description-container yt-formatted-string, #description yt-formatted-string, #description",
 						)
 						?.textContent?.trim(),
 				);
-				return hasSettledField || hasDescription ? "content" : false;
+				return hasJoinedDate || hasStatsInAbout || hasDescription ? "content" : false;
 			},
 			undefined,
 			{ timeout: 10_000 },
@@ -418,13 +416,32 @@ export async function collectYoutubeBrowser(
 					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
 				);
 				if (!own.channel_url) {
-					await ctx.emit({
-						type: "SKIP_RESULT",
-						stream: "profile",
-						reason: "youtube_profile_channel_link_unavailable",
-						message:
-							"The signed-in account header did not expose an own-channel link.",
-					});
+					if (own.email) {
+						await emit("profile", {
+							id: own.email,
+							channel_id: null,
+							channel_url: null,
+							title: null,
+							handle: null,
+							email: own.email,
+							joined_at: null,
+							avatar_url: null,
+							description: null,
+							country: null,
+							subscriber_count: null,
+							view_count: null,
+							video_count: null,
+						});
+						profileEmitted = true;
+					} else {
+						await ctx.emit({
+							type: "SKIP_RESULT",
+							stream: "profile",
+							reason: "youtube_profile_channel_link_unavailable",
+							message:
+								"The signed-in account header did not expose an own-channel link.",
+						});
+					}
 				} else {
 					await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
 					const channelState = await waitForChannelIdentity(page);

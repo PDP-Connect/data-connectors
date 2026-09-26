@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.7",
+	"version": "0.2.8",
 	"display_name": "YouTube",
 	"brand": {
 		"icon": "icon.svg",
@@ -44,10 +44,10 @@
 		{
 			"name": "profile",
 			"required": false,
-			"description": "Signed-in owner channel identity from the account menu and channel page.",
+			"description": "Signed-in owner account identity from the account menu, plus channel fields when YouTube exposes an owner channel.",
 			"display": {
 				"label": "Your YouTube channel",
-				"detail": "The owner channel ID, URL, title, handle, avatar and account email when visible."
+				"detail": "The owner channel ID, URL, title, handle and avatar when visible, plus the signed-in account email when visible."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -55,7 +55,7 @@
 				"properties": {
 					"id": {
 						"type": "string",
-						"description": "Stable browser-observed channel identity: native channel ID when present, otherwise the owner channel URL."
+						"description": "Stable browser-observed owner identity: native channel ID when present, otherwise the owner channel URL or signed-in account email."
 					},
 					"channel_url": {
 						"type": ["string", "null"],

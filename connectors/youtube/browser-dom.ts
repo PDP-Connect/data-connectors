@@ -17,6 +17,16 @@ export interface BrowserVideo {
 	description?: string | null;
 }
 
+export const CHANNEL_TITLE_SELECTOR = [
+	"yt-page-header-view-model h1 span",
+	".yt-page-header-view-model__page-header-title h1 span",
+	"ytd-channel-name yt-formatted-string",
+	"#channel-name yt-formatted-string",
+	"h1#title",
+	"h1 yt-formatted-string",
+	"h1",
+].join(", ");
+
 export function readOwnAccount(doc: Document = document): {
 	channel_url: string | null;
 	email: string | null;
@@ -88,15 +98,26 @@ export function readChannelPage(doc: Document = document): {
 		doc.querySelector<HTMLMetaElement>('meta[itemprop="channelId"]')?.content ??
 		null;
 	const handle = /\/@([^/?#]+)/.exec(url)?.[1];
+	const title =
+		Array.from(
+			doc.querySelectorAll(
+				[
+					"yt-page-header-view-model h1 span",
+					".yt-page-header-view-model__page-header-title h1 span",
+					"ytd-channel-name yt-formatted-string",
+					"#channel-name yt-formatted-string",
+					"h1#title",
+					"h1 yt-formatted-string",
+					"h1",
+				].join(", "),
+			),
+		)
+			.map((node) => node.textContent?.trim() ?? "")
+			.find(Boolean) ?? null;
 	return {
 		channel_id,
 		channel_url: url,
-		title:
-			doc
-				.querySelector(
-					"ytd-channel-name yt-formatted-string, #channel-name yt-formatted-string, h1",
-				)
-				?.textContent?.trim() || null,
+		title,
 		handle: handle ? `@${handle}` : null,
 		avatar_url:
 			doc.querySelector<HTMLImageElement>(
@@ -116,11 +137,18 @@ export function readChannelAbout(doc: Document = document): {
 	const about = doc.querySelector(
 		"ytd-channel-about-metadata-renderer, yt-about-this-channel-renderer",
 	);
+	const aboutRoot = about ?? doc;
+	const statsRoot = about;
 	const text = Array.from(
-		about?.querySelectorAll("yt-formatted-string, span, td, dd") ?? [],
+		aboutRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
 	)
 		.filter((node) => node.children.length === 0)
 		.map((node) => node.textContent?.trim() ?? "");
+	const statsText = statsRoot
+		? Array.from(statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"))
+				.filter((node) => node.children.length === 0)
+				.map((node) => node.textContent?.trim() ?? "")
+		: [];
 	const joined = text.find((value) => /^joined\s+/i.test(value));
 	const country =
 		about
@@ -129,19 +157,19 @@ export function readChannelAbout(doc: Document = document): {
 	return {
 		joined_at: joined?.replace(/^joined\s+/i, "") ?? null,
 		description:
-			about
-				?.querySelector(
+			aboutRoot
+				.querySelector(
 					"#description-container yt-formatted-string, #description yt-formatted-string, #description",
 				)
 				?.textContent?.trim() || null,
 		country,
 		subscriber_count_text:
-			text.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
+			statsText.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
 			null,
 		view_count_text:
-			text.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
 		video_count_text:
-			text.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
 	};
 }
 

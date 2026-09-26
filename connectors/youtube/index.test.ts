@@ -168,6 +168,46 @@ test("profile account-header skips do not suppress later requested streams", asy
 	assert.equal(records.get("watch_history")?.length, 1);
 });
 
+test("profile emits an email-only record when the account has no channel link", async () => {
+	const skips: Array<Record<string, unknown>> = [];
+	const records: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: new FixturePage(["content", "content"], {
+			channel_url: null,
+			email: "owner@example.com",
+		}) as never,
+		requested: new Map([["profile", { name: "profile" }]]) as never,
+		emitRecord: async (stream, data) => {
+			assert.equal(stream, "profile");
+			assert.equal(validateRecord(stream, data).ok, true);
+			records.push(data);
+		},
+		emit: async (event) => {
+			skips.push(event as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.equal(skips.length, 0);
+	assert.deepEqual(records, [
+		{
+			id: "owner@example.com",
+			channel_id: null,
+			channel_url: null,
+			title: null,
+			handle: null,
+			email: "owner@example.com",
+			joined_at: null,
+			avatar_url: null,
+			description: null,
+			country: null,
+			subscriber_count: null,
+			view_count: null,
+			video_count: null,
+		},
+	]);
+});
+
 test("browser collector emits schema-valid records for all seven scopes without a Takeout directory", async () => {
 	const streams = [
 		"profile",
