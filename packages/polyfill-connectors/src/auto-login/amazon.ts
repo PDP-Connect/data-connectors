@@ -51,8 +51,8 @@ const ORDER_URL = /\/your-orders|\/order-history/;
 const TFA_PROMPT_TEXT =
 	/verification|two.?step|authenticator|passcode|code we sent|sent a text/i;
 const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
-const ORDER_PAGE_READY_SELECTOR =
-	'#orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"]';
+export const ORDER_PAGE_READY_SELECTOR =
+	'#orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"], .your-orders-content-container, #searchOrdersInput, .order-card, .js-order-card';
 const ORDER_PAGE_READY_TIMEOUT_MS = 15_000;
 
 /**

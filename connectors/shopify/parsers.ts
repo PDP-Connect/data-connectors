@@ -17,10 +17,69 @@
 
 import type { ApolloCache, ApolloCacheEntry, ParsedOrder } from "./types.ts";
 import { isApolloRef } from "./types.ts";
+import { parseHTML } from "linkedom";
 
 const CENTS_PER_UNIT = 100;
 const PAGINATED_LIST_KEY_RE = /^deliveriesOrdersList:/;
 const CURSOR_LIST_KEY_RE = /^deliveriesOrdersList\(/;
+const SHOP_MONEY_RE = /\$\s*([\d,]+(?:\.\d{1,2})?)/;
+const SHOP_ITEM_COUNT_RE = /\b(\d+)\s*items?\b/i;
+const SHOP_STATUS_RE = /\b(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled)\b/i;
+
+/**
+ * Legacy-parity DOM fallback for cards visible when Apollo has not hydrated
+ * its order connection. This follows the prior connector's Shop link/card
+ * walk and maps only fields that the visible card supports; item titles and
+ * dates stay absent instead of being inferred.
+ */
+export function parseDomOrderCards(html: string): ParsedOrder[] {
+	const { document } = parseHTML(html);
+	const orders: ParsedOrder[] = [];
+	const seen = new Set<string>();
+	for (const link of document.querySelectorAll<HTMLAnchorElement>(
+		'a[href*="shop.app"]',
+	)) {
+		const href = link.getAttribute("href") ?? "";
+		let url: URL;
+		try {
+			url = new URL(href, SHOP_ORDER_HISTORY_URL);
+		} catch {
+			continue;
+		}
+		if (url.origin !== "https://shop.app" || seen.has(url.href)) continue;
+		const card = link.closest<HTMLElement>(
+			'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
+		) ?? link;
+		const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
+		if (text.length < 10) continue;
+		const money = text.match(SHOP_MONEY_RE);
+		const itemCount = text.match(SHOP_ITEM_COUNT_RE);
+		if (!money && !itemCount) continue;
+		seen.add(url.href);
+
+		const merchantName = (card.textContent ?? "")
+			.split(/[\n·•]/)
+			.map((part) => part.replace(/\s+/g, " ").trim())
+			.find((part) => part.length > 2 && part.length < 80 &&
+				!/^\d+\s*items?\b/i.test(part) && !/^\$/.test(part) &&
+				!/orders?|order history/i.test(part)) ?? null;
+		const amount = money ? Number(money[1]?.replaceAll(",", "")) : Number.NaN;
+		const status = text.match(SHOP_STATUS_RE)?.[0] ?? null;
+		orders.push({
+			currency: money ? "USD" : null,
+			detailUrl: url.href,
+			id: url.href,
+			itemCount: itemCount ? Number(itemCount[1]) : null,
+			lineItemTitles: [],
+			merchantName,
+			orderNumber: null,
+			placedAt: null,
+			status,
+			totalCents: Number.isFinite(amount) ? Math.round(amount * 100) : null,
+		});
+	}
+	return orders;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);

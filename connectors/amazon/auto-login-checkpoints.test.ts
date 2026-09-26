@@ -16,9 +16,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { parseHTML } from "linkedom";
 import type { BrowserContext, Locator, Page } from "playwright";
 
-import { ensureAmazonSession } from "../../packages/polyfill-connectors/src/auto-login/amazon.ts";
+import {
+	ensureAmazonSession,
+	ORDER_PAGE_READY_SELECTOR,
+} from "../../packages/polyfill-connectors/src/auto-login/amazon.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -106,6 +110,30 @@ const FAKE_CREDENTIALS: Readonly<Record<string, string | undefined>> = {
 	AMAZON_USERNAME: "owner@example.test",
 	AMAZON_PASSWORD: "correct-horse",
 };
+
+test("Amazon shared session readiness recognizes old, current, and empty order layouts", () => {
+	const layouts = [
+		{
+			name: "legacy order list",
+			html: '<div id="orderTypeMenuContainer"></div>',
+		},
+		{
+			name: "current order cards",
+			html: '<div class="your-orders-content-container"><div class="order-card js-order-card"></div></div>',
+		},
+		{
+			name: "signed-in empty orders view",
+			html: '<div class="your-orders-content-container"><input id="searchOrdersInput"></div>',
+		},
+	];
+	for (const layout of layouts) {
+		const { document } = parseHTML(layout.html);
+		assert.ok(
+			document.querySelector(ORDER_PAGE_READY_SELECTOR),
+			`${layout.name} must satisfy the shared session readiness selector`,
+		);
+	}
+});
 
 test("ensureAmazonSession invokes the checkpoint hook at each auth phase (non-2FA path)", async () => {
 	// URL sequence:

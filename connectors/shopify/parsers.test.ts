@@ -21,6 +21,7 @@ import {
 	collectAllOrderRefs,
 	extractOrders,
 	hasNextOrdersPage,
+	parseDomOrderCards,
 	parseOrderRef,
 } from "./parsers.ts";
 import type { ApolloCache } from "./types.ts";
@@ -59,6 +60,28 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 		...overrides,
 	};
 }
+
+test("parseDomOrderCards maps legacy-shaped order cards to Shop records when Apollo is unavailable", () => {
+	const fixture = `
+		<div class="order-card">
+			<a href="https://shop.app/orders/order-123">Acme Goods</a>
+			<div>2 items · $19.99</div>
+			<div>Delivered</div>
+		</div>`;
+	const [order] = parseDomOrderCards(fixture);
+	assert.deepEqual(order, {
+		currency: "USD",
+		detailUrl: "https://shop.app/orders/order-123",
+		id: "https://shop.app/orders/order-123",
+		itemCount: 2,
+		lineItemTitles: [],
+		merchantName: "Acme Goods",
+		orderNumber: null,
+		placedAt: null,
+		status: "Delivered",
+		totalCents: 1999,
+	});
+});
 
 test("extractOrders parses every order reachable from ROOT_QUERY", () => {
 	const orders = extractOrders(synthCache());

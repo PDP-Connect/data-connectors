@@ -195,6 +195,35 @@ test("parseOrdersListDom: empty page returns []", () => {
 	assert.deepEqual(parseOrdersListDom(""), []);
 });
 
+test("parseOrdersListDom: current order-card.js-order-card markup parses its header fields", () => {
+	const html = `<!doctype html><html><body><div id="ordersContainer">
+	  <div class="order-card js-order-card">
+	    <div class="order-header">
+	      <ul>
+	        <li class="order-header__header-list-item">
+	          <span class="a-color-secondary a-text-caps">Order placed</span>
+	          <span>October 17, 2023</span>
+	        </li>
+	        <li class="order-header__header-list-item">
+	          <span class="a-color-secondary a-text-caps">Total</span>
+	          <span>$24.68</span>
+	        </li>
+	        <li class="order-header__header-list-item">
+	          <span class="a-color-secondary a-text-caps">Order #</span>
+	          <div class="yohtmlc-order-id"><span dir="ltr">114-0000000-0000000</span></div>
+	        </li>
+	      </ul>
+	    </div>
+	    <div class="delivery-box__primary-text">Delivered</div>
+	  </div>
+	</div></body></html>`;
+	const orders = parseOrdersListDom(html);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.orderId, "114-0000000-0000000");
+	assert.equal(orders[0]?.orderDateRaw, "October 17, 2023");
+	assert.equal(orders[0]?.orderTotal, "$24.68");
+});
+
 // A card that matches `.order-card`/`.js-order-card` but has no
 // `.yohtmlc-order-id` (e.g. a never-shipped/cancelled Subscribe & Save order
 // rendering under a variant Amazon uses for that order type) is dropped by

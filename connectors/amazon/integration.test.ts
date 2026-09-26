@@ -690,6 +690,67 @@ test("scrapeListPage: a failed list navigation cannot reuse the prior page as a 
 	assert.doesNotMatch(JSON.stringify(messages), /orders-list-minimal|B0/);
 });
 
+test("scrapeListPage: list readiness timeout is bounded and explained before parsing", async () => {
+	const staleListHtml = readFileSync(
+		new URL("./__fixtures__/orders-list-minimal.html", import.meta.url),
+		"utf8",
+	);
+	const messages: EmittedMessage[] = [];
+	const page = Object.assign({} as Page, {
+		content: (): Promise<string> => Promise.resolve(staleListHtml),
+		goto: (): Promise<null> => Promise.resolve(null),
+		locator: (): { first: () => { waitFor: () => Promise<never> } } => ({
+			first: () => ({
+				waitFor: (): Promise<never> =>
+					Promise.reject(new Error("locator timed out")),
+			}),
+		}),
+	});
+
+	await assert.rejects(
+		scrapeListPage(page, null, 2026, 0, (message) => {
+			messages.push(message);
+			return Promise.resolve();
+		}),
+		/amazon_list_page_readiness_timeout/,
+	);
+
+	const skip = messages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip, "readiness timeout must produce a durable diagnostic");
+	assert.equal(skip?.reason, "list_page_readiness_timeout");
+	assert.deepEqual(skip?.diagnostics, {
+		start_index: 0,
+		timeout_ms: 10_000,
+		year: 2026,
+	});
+});
+
+test("scrapeListPage accepts the signed-in current empty-orders shell without cards", async () => {
+	const html = '<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders found</p></div>';
+	let readinessSelector = "";
+	const page = Object.assign({} as Page, {
+		content: (): Promise<string> => Promise.resolve(html),
+		goto: (): Promise<null> => Promise.resolve(null),
+		locator: (selector: string) => ({
+			first: () => ({
+				waitFor: (options: { timeout: number }) => {
+					readinessSelector = selector;
+					assert.equal(options.timeout, 10_000);
+					assert.match(selector, /your-orders-content-container/);
+					assert.match(selector, /searchOrdersInput/);
+					return Promise.resolve();
+				},
+			}),
+		}),
+		evaluate: (): Promise<ListPageDiagnostics> => Promise.resolve(
+			makeEmptyPageDiagnostics({ no_orders_text: "true" }),
+		),
+	});
+	const result = await scrapeListPage(page, null, 2024, 0, () => Promise.resolve());
+	assert.deepEqual(result, []);
+	assert.notEqual(readinessSelector, "");
+});
+
 test("scrapeListPage: a card with no parseable order id is dropped AND reported, alongside a card that survives", async () => {
 	// The "prove the drop happens today, is invisible today" half of the pair.
 	// One card has a normal `.yohtmlc-order-id`; the other (modeling a

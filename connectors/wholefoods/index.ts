@@ -79,8 +79,8 @@ const AMAZON_SEARCH_BASE =
 // these first. Mirrors connectors/amazon/index.ts's `deepSessionCheck`
 // wait list (`form[name="signIn"]` covers a session that quietly expired
 // mid-run).
-const ORDERS_PAGE_READY_SELECTOR =
-	'form[name="signIn"], .order-card, .js-order-card, .hzsearch-results-summary, [class*="no-orders" i]';
+export const ORDERS_PAGE_READY_SELECTOR =
+	'form[name="signIn"], .order-card, .js-order-card, .your-orders-content-container, #searchOrdersInput, .hzsearch-results-summary, [class*="no-orders" i]';
 const NAV_READY_WAIT_MS = 15_000;
 
 function wholeFoodsSearchUrl(page: number): string {
@@ -104,10 +104,17 @@ async function navigateAndSettle(
 		);
 	}
 	if (readySelector) {
-		await page.locator(readySelector).first().waitFor({
-			state: "attached",
-			timeout: NAV_READY_WAIT_MS,
-		});
+		try {
+			await page.locator(readySelector).first().waitFor({
+				state: "attached",
+				timeout: NAV_READY_WAIT_MS,
+			});
+		} catch (error) {
+			throw new Error(
+				`wholefoods_order_page_readiness_timeout after ${String(NAV_READY_WAIT_MS)}ms`,
+				{ cause: error },
+			);
+		}
 	}
 	await politeDelay(NAV_SETTLE_MS);
 	return response?.status() ?? null;
