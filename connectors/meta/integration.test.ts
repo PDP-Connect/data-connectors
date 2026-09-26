@@ -27,6 +27,7 @@ import type {
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	classifyAdsDialogInPage,
 	collectAllStreams,
 	scrapeAdTopics,
 	scrapeAdvertisers,
@@ -294,6 +295,33 @@ function makeFakePage(options: {
 			}
 			if (fnSource.includes("View all")) {
 				return Promise.resolve(undefined);
+			}
+			if (fnSource.includes('aria-label="Close"')) {
+				dialogQueue.shift();
+				dialogReachedQueue.shift();
+				adsListWait++;
+				return Promise.resolve(undefined);
+			}
+			if (fnSource.includes("uiOnlyPatternSource")) {
+				const items = dialogQueue[0];
+				if (items === undefined) {
+					return Promise.resolve({ kind: "unavailable" });
+				}
+				if (
+					dialogScrapeCount++ === 0 &&
+					options.delayFirstDialogItems &&
+					!firstDialogItemsReady
+				) {
+					firstDialogItemsReady = true;
+					return Promise.resolve({ kind: "unavailable" });
+				}
+				if (dialogReachedQueue[0] === false) {
+					return Promise.resolve({ kind: "unavailable" });
+				}
+				if (items.length > 0) {
+					return Promise.resolve({ items, kind: "data" });
+				}
+				return Promise.resolve({ kind: "verified_empty" });
 			}
 			if (fnSource.includes("hasVerifiedEmpty") && fnSource.includes("hasList")) {
 				const hasList = options.categoryDestinationReached !== false;
@@ -798,7 +826,6 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
 	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
-	assert.equal(waitConditions.length, 8);
 	assert.ok(
 		waitConditions.some((condition) => condition.includes("advertiser")),
 	);
@@ -1016,7 +1043,7 @@ test("collectAllStreams: settled empty advertiser and ad-topic lists complete as
 });
 
 test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
-	const { page, waitConditions } = makeFakePage({
+	const { page } = makeFakePage({
 		delayFirstDialogItems: true,
 		dialogScrapes: [["Acme Corp"]],
 		fetchScript: {},
@@ -1028,14 +1055,10 @@ test("scrapeAdvertisers waits for items that arrive after the list shell", async
 		step: null,
 		surface: "advertisers",
 	});
-	assert.ok(
-		waitConditions.some((condition) => condition.includes('[role="listitem"]')),
-		"the scrape must wait for list items after the dialog list mounts",
-	);
 });
 
 test("scrapeAdvertisers accepts a settled blank list as verified empty", async () => {
-	const { page, waitTimeouts } = makeFakePage({
+	const { page } = makeFakePage({
 		dialogScrapes: [[]],
 		fetchScript: {},
 		waitEmptySettle: true,
@@ -1049,7 +1072,6 @@ test("scrapeAdvertisers accepts a settled blank list as verified empty", async (
 		surface: "advertisers",
 	});
 	assert.ok(Date.now() - startedAt >= 2_500);
-	assert.ok(waitTimeouts.includes(2_500));
 });
 
 test("scrapeAdvertisers rejects visible rows when an advertiser error is present", async () => {
@@ -1298,7 +1320,7 @@ test("scrapeAdTopics collects visible rows when another list row is hidden", asy
 	}
 });
 
-test("scrapeAdTopics keeps hidden final-snapshot data unavailable after a visible row won readiness", async () => {
+test("scrapeAdTopics keeps a transient topic followed by hidden data unavailable", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1313,15 +1335,7 @@ test("scrapeAdTopics keeps hidden final-snapshot data unavailable after a visibl
 							<div>No ad topics</div>
 							</div>
 							<script>
-								const visibleTopic = document.querySelector('#visible-topic');
-								const text = visibleTopic.textContent;
-								Object.defineProperty(visibleTopic, 'textContent', {
-									get() {
-										setTimeout(() => visibleTopic.remove(), 0);
-										return text;
-									},
-									configurable: true
-								});
+				setTimeout(() => document.querySelector('#visible-topic')?.remove(), 150);
 							</script>
 					</body></html>`,
 				status: 200,
@@ -1339,7 +1353,7 @@ test("scrapeAdTopics keeps hidden final-snapshot data unavailable after a visibl
 	}
 });
 
-test("scrapeAdTopics keeps hidden blank final-snapshot list unavailable after a visible row won readiness", async () => {
+test("scrapeAdTopics keeps a transient topic followed by a hidden blank list unavailable", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1354,15 +1368,7 @@ test("scrapeAdTopics keeps hidden blank final-snapshot list unavailable after a 
 							<div>No ad topics</div>
 							</div>
 							<script>
-								const visibleTopic = document.querySelector('#visible-topic');
-								const text = visibleTopic.textContent;
-								Object.defineProperty(visibleTopic, 'textContent', {
-									get() {
-										setTimeout(() => visibleTopic.remove(), 0);
-										return text;
-									},
-									configurable: true
-								});
+				setTimeout(() => document.querySelector('#visible-topic')?.remove(), 150);
 							</script>
 					</body></html>`,
 				status: 200,
@@ -1443,6 +1449,104 @@ test("scrapeAdTopics ignores hidden list rows and hidden empty marker", async ()
 			reached: false,
 			step: "destination_list_not_found",
 			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("classifyAdTopicDialogInPage returns closed states for reviewer fixtures", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const cases: Array<{
+			body: string;
+			expected: Awaited<ReturnType<typeof classifyAdsDialogInPage>>;
+			name: string;
+		}> = [
+			{
+				body: '<div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"><div role="listitem">Travel</div></div></div>',
+				expected: { kind: "unavailable" },
+				name: "hidden list",
+			},
+			{
+				body: '<div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div>',
+				expected: { kind: "loading" },
+				name: "progressbar",
+			},
+			{
+				body: '<div role="dialog"><div role="list" style="min-height:40px"></div><div role="list"><div role="listitem">Travel</div></div></div>',
+				expected: { items: ["Travel"], kind: "data" },
+				name: "later populated list",
+			},
+			{
+				body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+				expected: { kind: "verified_empty" },
+				name: "ui-only list",
+			},
+			{
+				body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div></div></div>',
+				expected: { kind: "loading" },
+				name: "hidden Travel plus known control",
+			},
+			{
+				body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div><div role="listitem">Travel</div></div></div>',
+				expected: { items: ["Travel"], kind: "data" },
+				name: "visible topic wins over hidden unresolved sibling",
+			},
+			{
+				body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem" style="display:none">Hidden topic</div><div role="listitem">Travel</div></div></div>',
+				expected: { items: ["Travel"], kind: "data" },
+				name: "visible topic wins over hidden listitem sibling",
+			},
+			{
+				body: '<div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div>',
+				expected: { kind: "verified_empty" },
+				name: "live ui-only structure with empty copy",
+			},
+		];
+
+		for (const fixture of cases) {
+			await page.setContent(`<html><body>${fixture.body}</body></html>`);
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, {
+					uiOnlyPatternSource: "^(?:special topic|see less)$",
+				}),
+				fixture.expected,
+				fixture.name,
+			);
+		}
+
+		await page.setContent(`
+			<html><body>
+				<div role="dialog"><h2>Ad topics</h2><div role="list">
+					<div role="listitem">Special topic</div>
+					<div role="listitem"><span id="topic" style="display:none">Travel</span><button>See less</button></div>
+				</div></div>
+			</body></html>`);
+		assert.deepEqual(
+			await page.evaluate(classifyAdsDialogInPage, {
+				uiOnlyPatternSource: "^(?:special topic|see less)$",
+			}),
+			{ kind: "loading" },
+		);
+		await page.evaluate(() => {
+			const topic = document.querySelector("#topic") as HTMLElement | null;
+			if (topic) topic.style.display = "inline";
+		});
+		assert.deepEqual(
+			await page.evaluate(classifyAdsDialogInPage, {
+				uiOnlyPatternSource: "^(?:special topic|see less)$",
+			}),
+			{ items: ["Travel"], kind: "data" },
+		);
+
+		await page.setContent(
+			'<html><body><div role="dialog"><div role="list"><div role="listitem"><button>Acme Corp</button></div></div></div></body></html>',
+		);
+		assert.deepEqual(await page.evaluate(classifyAdsDialogInPage, {}), {
+			items: ["Acme Corp"],
+			kind: "data",
 		});
 	} finally {
 		await browser.close();
@@ -1623,6 +1727,44 @@ test("scrapeAdTopics ignores hidden text beside visible controls", async () => {
 			step: "destination_list_not_found",
 			surface: "ad_topics",
 		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics waits for hidden topic text beside known controls to settle visible", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="dialog"><h2>Ad topics</h2><div role="list">
+							<div role="listitem">Special topic</div>
+							<div role="listitem">
+								<span id="topic" style="display:none">Travel</span><button>See less</button>
+							</div>
+						</div></div>
+						<script>
+							setTimeout(() => {
+								document.getElementById('topic').style.display = 'inline';
+							}, 800);
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const startedAt = Date.now();
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: ["Travel"],
+			reached: true,
+			step: null,
+			surface: "ad_topics",
+		});
+		assert.ok(Date.now() - startedAt >= 2_500);
 	} finally {
 		await browser.close();
 	}

@@ -649,474 +649,6 @@ export async function fetchAllFollowing(
 
 // ─── Ads (Accounts Center DOM scrape) ──────────────────────────────────────
 
-/**
- * Scrape visible `[role="listitem"]` text within the visible ARIA dialog.
- * Shared by advertisers and ad-topics collection; both surfaces use the
- * same Accounts Center dialog shape.
- */
-async function scrapeDialogListItems(
-	page: Page,
-	emptyLabels: readonly string[],
-	excludedItemPattern?: RegExp,
-): Promise<{
-	hasVerifiedEmpty: boolean;
-	items: string[];
-	reached: boolean;
-	step: AdsSurfaceStep | null;
-}> {
-	const result = await page.evaluate((args) => {
-		const labels = args.emptyLabels;
-		const excludedItemPattern = args.excludedItemPatternSource
-			? new RegExp(args.excludedItemPatternSource, "i")
-			: null;
-		// Keep browser-local predicates anonymous. The tsx/esbuild test loader
-		// injects `__name` into named nested functions before Playwright
-		// serializes them into the page.
-		const visible = [
-			(element: Element): boolean => {
-				const rect = element.getBoundingClientRect();
-				const style = getComputedStyle(element);
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const currentStyle = getComputedStyle(current);
-					if (
-						currentStyle.display === "none" ||
-						currentStyle.visibility === "hidden" ||
-						currentStyle.opacity === "0"
-					) {
-						return false;
-					}
-				}
-				return (
-					rect.width > 0 &&
-					rect.height > 0 &&
-					style.display !== "none" &&
-					style.visibility !== "hidden" &&
-					style.opacity !== "0"
-				);
-			},
-		][0]!;
-		const displayed = [
-			(element: Element): boolean => {
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const style = getComputedStyle(current);
-					if (style.display === "none" || style.visibility === "hidden") {
-						return false;
-					}
-				}
-				return true;
-			},
-		][0]!;
-		const loading = [
-			(element: Element): boolean => {
-				const role = element.getAttribute("role") ?? "";
-				const label = element.getAttribute("aria-label") ?? "";
-				return (
-					displayed(element) &&
-					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
-				);
-			},
-		][0]!;
-		const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-			visible,
-		);
-		if (!dialog) {
-			return { hasVerifiedEmpty: false, items: [], reached: false };
-		}
-		const busy = Boolean(
-			dialog.matches('[aria-busy="true"]') ||
-				dialog.querySelector('[aria-busy="true"]') ||
-				Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-label]')).some(
-					loading,
-				) ||
-				/loading|please wait/i.test(dialog.textContent ?? ""),
-		);
-		const hasError =
-			Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
-			/could not be loaded|try again|temporarily unavailable/i.test(
-				dialog.textContent ?? "",
-			);
-		if (busy || hasError) {
-			return { hasVerifiedEmpty: false, items: [], reached: false };
-		}
-		const lists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
-			visible,
-		);
-		if (lists.length === 0) {
-			return { hasVerifiedEmpty: false, items: [], reached: false };
-		}
-		const hasVerifiedEmpty = Array.from(dialog.querySelectorAll('*')).some(
-			(element) => {
-				if (!visible(element)) return false;
-				const role = element.getAttribute('role');
-				if (
-					role &&
-					['alert', 'button', 'dialog', 'link', 'list', 'listitem', 'tab'].includes(
-						role,
-					)
-				) {
-					return false;
-				}
-				return labels.includes(((element as HTMLElement).innerText ?? "").trim());
-			},
-			);
-			const listItems = lists.flatMap((list) =>
-				Array.from(list.querySelectorAll('[role="listitem"]')),
-			);
-			const rows = listItems
-				.filter(visible)
-				.map((item) => {
-					const text = ((item as HTMLElement).innerText ?? "").trim();
-					if (!excludedItemPattern) {
-						return { dataText: text, hasControl: false, text };
-					}
-					const controlSelector = 'a, button, [role="button"], [role="link"]';
-					const hasControl = Array.from(
-						item.querySelectorAll(controlSelector),
-					).some(visible);
-					if (!hasControl) {
-						return { dataText: text, hasControl, text };
-					}
-					const texts: string[] = [];
-					const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
-					for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-						const parent = node.parentElement;
-						if (parent && visible(parent) && !parent.closest(controlSelector)) {
-							const value = node.textContent?.trim() ?? "";
-							if (value.length > 0) {
-								texts.push(value);
-							}
-						}
-					}
-					return { dataText: texts.join(" ").trim(), hasControl, text };
-				});
-			const values = rows.map((row) => row.dataText).filter((t) => t.length > 0);
-			const dataValues = excludedItemPattern
-				? values.filter((value) => !excludedItemPattern.test(value))
-				: values;
-			if (dataValues.length > 0) {
-				return {
-					hasVerifiedEmpty,
-					items: dataValues,
-					reached: true,
-				};
-			}
-			if (Array.from(dialog.querySelectorAll('[role="list"]')).some((list) => !visible(list))) {
-				return { hasVerifiedEmpty: false, items: [], reached: false };
-			}
-			if (listItems.some((item) => !visible(item))) {
-				return { hasVerifiedEmpty: false, items: [], reached: false };
-			}
-			if (
-				excludedItemPattern &&
-				rows.length > 0 &&
-				rows.some(
-					(row) =>
-						row.hasControl &&
-						row.text.length > 0 &&
-						row.dataText.length === 0 &&
-						!(excludedItemPattern?.test(row.text) ?? false),
-				)
-			) {
-				return { hasVerifiedEmpty: false, items: [], reached: false };
-			}
-			if (
-				excludedItemPattern &&
-				rows.length > 0 &&
-				rows.every((row) => excludedItemPattern?.test(row.text) ?? false)
-			) {
-				return { hasVerifiedEmpty: true, items: [], reached: true };
-			}
-			if (listItems.length > 0) {
-				return { hasVerifiedEmpty: false, items: [], reached: false };
-			}
-		return { hasVerifiedEmpty: true, items: [], reached: true };
-	}, {
-		emptyLabels,
-		excludedItemPatternSource: excludedItemPattern?.source,
-	});
-	return {
-		...result,
-		step: !result.reached
-			? "destination_list_not_found"
-			: result.items.length === 0
-				? "reached_empty"
-				: null,
-	};
-}
-
-/** A mounted list is only a shell. Prefer data rows; after a bounded
- * settle, accept only a rendered blank list when busy/error signals are absent. */
-async function waitForAdsList(
-	page: Page,
-	excludedItemPattern?: RegExp,
-): Promise<boolean> {
-	const shellReady = await waitForAdsCondition(page, () => {
-		const visible = [
-			(element: Element): boolean => {
-				const rect = element.getBoundingClientRect();
-				const style = getComputedStyle(element);
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const currentStyle = getComputedStyle(current);
-					if (
-						currentStyle.display === "none" ||
-						currentStyle.visibility === "hidden" ||
-						currentStyle.opacity === "0"
-					) {
-						return false;
-					}
-				}
-				return (
-					rect.width > 0 &&
-					rect.height > 0 &&
-					style.display !== "none" &&
-					style.visibility !== "hidden" &&
-					style.opacity !== "0"
-				);
-			},
-		][0]!;
-			const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-				visible,
-			);
-		return Boolean(
-			dialog &&
-				Array.from(dialog.querySelectorAll('[role="list"]')).some(visible),
-		);
-	});
-	if (!shellReady) {
-		return false;
-	}
-
-	const itemsReady = await page
-		.waitForFunction(
-			(excludedItemPatternSource?: string) => {
-				const visible = [
-					(element: Element): boolean => {
-						const rect = element.getBoundingClientRect();
-						const style = getComputedStyle(element);
-						for (
-							let current: Element | null = element;
-							current;
-							current = current.parentElement
-						) {
-							const currentStyle = getComputedStyle(current);
-							if (
-								currentStyle.display === "none" ||
-								currentStyle.visibility === "hidden" ||
-								currentStyle.opacity === "0"
-							) {
-								return false;
-							}
-						}
-						return (
-							rect.width > 0 &&
-							rect.height > 0 &&
-							style.display !== "none" &&
-							style.visibility !== "hidden" &&
-							style.opacity !== "0"
-						);
-					},
-				][0]!;
-				const displayed = [
-					(element: Element): boolean => {
-						for (
-							let current: Element | null = element;
-							current;
-							current = current.parentElement
-						) {
-							const style = getComputedStyle(current);
-							if (style.display === "none" || style.visibility === "hidden") {
-								return false;
-							}
-						}
-						return true;
-					},
-				][0]!;
-				const loading = [
-					(element: Element): boolean => {
-						const role = element.getAttribute("role") ?? "";
-						const label = element.getAttribute("aria-label") ?? "";
-						return (
-							displayed(element) &&
-							(role.toLowerCase() === "progressbar" ||
-								/loading|please wait/i.test(label))
-						);
-					},
-				][0]!;
-				const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-					visible,
-				);
-				const busy = Boolean(
-					dialog &&
-						(dialog.matches('[aria-busy="true"]') ||
-							dialog.querySelector('[aria-busy="true"]') ||
-							Array.from(
-								dialog.querySelectorAll('[role="progressbar"], [aria-label]'),
-							).some(loading) ||
-							/loading|please wait/i.test(dialog.textContent ?? "")),
-				);
-				const hasError = Boolean(
-					dialog &&
-						(Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
-							/could not be loaded|try again|temporarily unavailable/i.test(
-								dialog.textContent ?? "",
-							)),
-				);
-				const excludedItemPattern = excludedItemPatternSource
-					? new RegExp(excludedItemPatternSource, "i")
-					: null;
-				const lists = dialog
-					? Array.from(dialog.querySelectorAll('[role="list"]')).filter(visible)
-					: [];
-				return Boolean(
-					lists.length > 0 &&
-						!busy &&
-						!hasError &&
-						lists
-							.flatMap((list) => Array.from(list.querySelectorAll('[role="listitem"]')))
-							.some((item) => {
-								const text = (item.textContent ?? "").trim();
-								return (
-									visible(item) &&
-									text.length > 0 &&
-									!excludedItemPattern?.test(text)
-								);
-							}),
-				);
-			},
-			excludedItemPattern?.source,
-			{ timeout: ADS_EMPTY_LIST_SETTLE_MS },
-		)
-		.then(async (handle) => {
-			if (typeof handle === "object" && handle && "dispose" in handle) {
-				await handle.dispose();
-			}
-			return true;
-		})
-		.catch(() => false);
-	if (itemsReady) {
-		return true;
-	}
-
-	return await page.evaluate((excludedItemPatternSource?: string) => {
-		const visible = [
-			(element: Element): boolean => {
-				const rect = element.getBoundingClientRect();
-				const style = getComputedStyle(element);
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const currentStyle = getComputedStyle(current);
-					if (
-						currentStyle.display === "none" ||
-						currentStyle.visibility === "hidden" ||
-						currentStyle.opacity === "0"
-					) {
-						return false;
-					}
-				}
-				return (
-					rect.width > 0 &&
-					rect.height > 0 &&
-					style.display !== "none" &&
-					style.visibility !== "hidden" &&
-					style.opacity !== "0"
-				);
-			},
-		][0]!;
-		const displayed = [
-			(element: Element): boolean => {
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const style = getComputedStyle(current);
-					if (style.display === "none" || style.visibility === "hidden") {
-						return false;
-					}
-				}
-				return true;
-			},
-		][0]!;
-		const loading = [
-			(element: Element): boolean => {
-				const role = element.getAttribute("role") ?? "";
-				const label = element.getAttribute("aria-label") ?? "";
-				return (
-					displayed(element) &&
-					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
-				);
-			},
-		][0]!;
-		const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-			visible,
-		);
-		if (!dialog) {
-			return false;
-		}
-		const lists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
-			visible,
-		);
-		if (lists.length === 0) {
-			return false;
-		}
-		const busy = Boolean(
-			dialog.matches('[aria-busy="true"]') ||
-				dialog.querySelector('[aria-busy="true"]') ||
-				Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-label]')).some(
-					loading,
-				) ||
-				/loading|please wait/i.test(dialog.textContent ?? ""),
-		);
-		const hasError =
-			Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
-			/could not be loaded|try again|temporarily unavailable/i.test(
-				dialog.textContent ?? "",
-			);
-		if (busy || hasError) {
-			return false;
-		}
-		const excludedItemPattern = excludedItemPatternSource
-			? new RegExp(excludedItemPatternSource, "i")
-			: null;
-		const allListItems = Array.from(dialog.querySelectorAll('[role="listitem"]'));
-		const listItems = lists.flatMap((list) =>
-			Array.from(list.querySelectorAll('[role="listitem"]')),
-		);
-		const visibleItems = listItems.filter(visible);
-		if (listItems.length > 0 && visibleItems.length === 0) {
-			return false;
-		}
-		if (
-			visibleItems.some((item) => {
-				const text = (item.textContent ?? "").trim();
-				return text.length > 0 && !(excludedItemPattern?.test(text) ?? false);
-			})
-		) {
-			return false;
-		}
-		if (allListItems.some((item) => !visible(item))) {
-			return false;
-		}
-		return true;
-	}, excludedItemPattern?.source);
-
-}
-
 /** Wait for a DOM condition that identifies the intended Accounts Center
  * control or list. Navigation's `domcontentloaded` event only covers the
  * document shell; these surfaces are populated asynchronously afterward. */
@@ -1221,8 +753,8 @@ export async function scrapeAdvertisers(
 			surface: "advertisers",
 		};
 	}
-	const listReady = await waitForAdsList(page);
-	if (!listReady) {
+	const stableClassification = await waitForStableAdsDialog(page);
+	if (!stableClassification) {
 		await closeDialog(page);
 		return {
 			items: [],
@@ -1231,14 +763,242 @@ export async function scrapeAdvertisers(
 			surface: "advertisers",
 		};
 	}
-	const { hasVerifiedEmpty: _hasVerifiedEmpty, ...result } =
-		await scrapeDialogListItems(page, ["No advertisers"]);
+	const finalClassification = await classifyAdsDialog(page);
+	if (JSON.stringify(finalClassification) !== JSON.stringify(stableClassification)) {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "advertisers",
+		};
+	}
+	if (finalClassification.kind === "data") {
+		await closeDialog(page);
+		return {
+			items: finalClassification.items,
+			reached: true,
+			step: null,
+			surface: "advertisers",
+		};
+	}
+	if (finalClassification.kind === "verified_empty") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "advertisers",
+		};
+	}
 	await closeDialog(page);
-	return { ...result, surface: "advertisers" };
+	return {
+		items: [],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "advertisers",
+	};
 }
 
 const NON_TOPIC_RE = /^(?:special topic|see less)$/i;
 const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
+const ADS_DIALOG_TIMEOUT_MS = 12_000;
+
+type AdsDialogClassification =
+	| { items: string[]; kind: "data" }
+	| { kind: "verified_empty" }
+	| { kind: "loading" }
+	| { kind: "unavailable" };
+
+export function classifyAdsDialogInPage(args: {
+	uiOnlyPatternSource?: string;
+}): AdsDialogClassification {
+	const uiOnlyPattern = args?.uiOnlyPatternSource
+		? new RegExp(args.uiOnlyPatternSource, "i")
+		: null;
+	const controlSelector = 'a, button, [role="button"], [role="link"]';
+	const visible = [
+		(element: Element): boolean => {
+			if (!element.isConnected) return false;
+			const rect = element.getBoundingClientRect();
+			for (
+				let current: Element | null = element;
+				current;
+				current = current.parentElement
+			) {
+				const style = getComputedStyle(current);
+				if (
+					style.display === "none" ||
+					style.visibility === "hidden" ||
+					style.visibility === "collapse" ||
+					style.opacity === "0"
+				) {
+					return false;
+				}
+			}
+			return rect.width > 0 || rect.height > 0;
+		},
+	][0]!;
+	const hasPositiveArea = [
+		(element: Element): boolean => {
+			const rect = element.getBoundingClientRect();
+			return visible(element) && rect.width > 0 && rect.height > 0;
+		},
+	][0]!;
+	const normalize = [(text: string): string => text.replace(/\s+/g, " ").trim()][0]!;
+	const visibleText = [
+		(element: Element, excludeControls = false): string => {
+			const texts: string[] = [];
+			const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				const parent = node.parentElement;
+				if (!parent || !visible(parent)) continue;
+				if (excludeControls && parent.closest(controlSelector)) continue;
+				const value = normalize(node.textContent ?? "");
+				if (value.length > 0) texts.push(value);
+			}
+			return normalize(texts.join(" "));
+		},
+	][0]!;
+	const hasHiddenRealText = [
+		(element: Element): boolean => {
+			const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				const parent = node.parentElement;
+				const value = normalize(node.textContent ?? "");
+				if (
+					value.length > 0 &&
+					parent &&
+					!visible(parent) &&
+					!(uiOnlyPattern?.test(value) ?? false)
+				) {
+					return true;
+				}
+			}
+			return false;
+		},
+	][0]!;
+	const hasVisibleLoading = [
+		(root: Element): boolean =>
+			Array.from(root.querySelectorAll('[role="progressbar"], [aria-label]')).some(
+				(element) => {
+				const role = element.getAttribute("role") ?? "";
+				const label = element.getAttribute("aria-label") ?? "";
+				return (
+					visible(element) &&
+					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
+				);
+				},
+			) || /loading|please wait/i.test(visibleText(root)),
+	][0]!;
+	const hasVisibleError = [
+		(root: Element): boolean =>
+			Array.from(root.querySelectorAll('[role="alert"]')).some(visible) ||
+			/could not be loaded|try again|temporarily unavailable/i.test(visibleText(root)),
+	][0]!;
+	const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(
+		visible,
+	);
+	const dialog =
+		dialogs.find((candidate) =>
+			Boolean(
+				candidate.querySelector('[role="list"], [role="progressbar"], [aria-label]'),
+			),
+		) ?? null;
+	if (!dialog) return { kind: "unavailable" };
+	if (
+		dialog.matches('[aria-busy="true"]') ||
+		Array.from(dialog.querySelectorAll('[aria-busy="true"]')).some(visible) ||
+		hasVisibleLoading(dialog)
+	) {
+		return { kind: "loading" };
+	}
+	if (hasVisibleError(dialog)) return { kind: "unavailable" };
+	const visibleLists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
+		hasPositiveArea,
+	);
+	if (visibleLists.length === 0) return { kind: "unavailable" };
+	const hiddenLists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
+		(list) => !hasPositiveArea(list),
+	);
+	const listItems = visibleLists.flatMap((list) =>
+		Array.from(list.querySelectorAll('[role="listitem"]')),
+	);
+	const visibleItems = listItems.filter(hasPositiveArea);
+	const sawHiddenListItem = listItems.some((item) => !hasPositiveArea(item));
+	const dataItems = [];
+	let sawUnknownVisibleControlOnlyRow = false;
+	let sawHiddenUnresolvedText = false;
+	for (const item of visibleItems) {
+		if (hasHiddenRealText(item)) {
+			sawHiddenUnresolvedText = true;
+		}
+		const fullText = visibleText(item);
+		if (fullText.length === 0) continue;
+		const hasControl = Array.from(item.querySelectorAll(controlSelector)).some(
+			visible,
+		);
+		const dataText = uiOnlyPattern && hasControl ? visibleText(item, true) : fullText;
+		if (
+			dataText.length > 0 &&
+			!(uiOnlyPattern?.test(dataText) ?? false)
+		) {
+			dataItems.push(dataText);
+			continue;
+		}
+		if (uiOnlyPattern && !uiOnlyPattern.test(fullText)) {
+			sawUnknownVisibleControlOnlyRow = true;
+		}
+	}
+	if (dataItems.length > 0) return { items: dataItems, kind: "data" };
+	if (sawHiddenUnresolvedText) return { kind: "loading" };
+	if (sawHiddenListItem) return { kind: "unavailable" };
+	if (hiddenLists.length > 0) return { kind: "unavailable" };
+	if (sawUnknownVisibleControlOnlyRow) return { kind: "unavailable" };
+	return { kind: "verified_empty" };
+}
+
+async function classifyAdsDialog(
+	page: Page,
+	uiOnlyPattern?: RegExp,
+): Promise<AdsDialogClassification> {
+	return await page.evaluate<AdsDialogClassification, { uiOnlyPatternSource?: string }>(
+		classifyAdsDialogInPage,
+		uiOnlyPattern ? { uiOnlyPatternSource: uiOnlyPattern.source } : {},
+	);
+}
+
+async function classifyAdTopicDialog(
+	page: Page,
+): Promise<AdsDialogClassification> {
+	return await classifyAdsDialog(page, NON_TOPIC_RE);
+}
+
+async function waitForStableAdsDialog(
+	page: Page,
+	uiOnlyPattern?: RegExp,
+): Promise<AdsDialogClassification | null> {
+	const deadline = Date.now() + ADS_DIALOG_TIMEOUT_MS;
+	let lastSignature: string | null = null;
+	let firstSeenAt = 0;
+	while (Date.now() < deadline) {
+		const classification = await classifyAdsDialog(page, uiOnlyPattern);
+		if (classification.kind === "loading" || classification.kind === "unavailable") {
+			lastSignature = null;
+			firstSeenAt = 0;
+		} else {
+			const signature = JSON.stringify(classification);
+			if (signature !== lastSignature) {
+				lastSignature = signature;
+				firstSeenAt = Date.now();
+			} else if (Date.now() - firstSeenAt >= ADS_EMPTY_LIST_SETTLE_MS) {
+				return classification;
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	return null;
+}
 
 export async function scrapeAdTopics(
 	page: Page,
@@ -1256,8 +1016,9 @@ export async function scrapeAdTopics(
 			surface: "ad_topics",
 		};
 	}
-	const listReady = await waitForAdsList(page, NON_TOPIC_RE);
-	if (!listReady) {
+	const stableClassification = await waitForStableAdsDialog(page, NON_TOPIC_RE);
+	if (!stableClassification) {
+		await closeDialog(page);
 		return {
 			items: [],
 			reached: false,
@@ -1265,17 +1026,39 @@ export async function scrapeAdTopics(
 			surface: "ad_topics",
 		};
 	}
-	const result = await scrapeDialogListItems(page, ["No ad topics"], NON_TOPIC_RE);
-	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
-	const reached = result.reached && (items.length > 0 || result.hasVerifiedEmpty);
+	const finalClassification = await classifyAdTopicDialog(page);
+	if (JSON.stringify(finalClassification) !== JSON.stringify(stableClassification)) {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		};
+	}
+	if (finalClassification.kind === "data") {
+		await closeDialog(page);
+		return {
+			items: finalClassification.items,
+			reached: true,
+			step: null,
+			surface: "ad_topics",
+		};
+	}
+	if (finalClassification.kind === "verified_empty") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		};
+	}
+	await closeDialog(page);
 	return {
-		items,
-		reached,
-		step: !reached
-			? "destination_list_not_found"
-			: items.length === 0 && result.hasVerifiedEmpty
-				? "reached_empty"
-				: null,
+		items: [],
+		reached: false,
+		step: "destination_list_not_found",
 		surface: "ad_topics",
 	};
 }
