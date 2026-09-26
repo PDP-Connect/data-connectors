@@ -262,6 +262,31 @@ test("a scoped import reports only the records and window that survived time_ran
 	);
 });
 
+test("a scoped import applies timestamp bounds within the same day", async () => {
+	await withImportDir(
+		{ "activities.csv": `${HEADER}\n${ROW_RIDE}\n` },
+		async (dir) => {
+			const since = await run(dir, undefined, {
+				since: "2024-06-01T08:00:00+01:00",
+			});
+			assert.equal(
+				recordsOf(since, "activities").length,
+				0,
+				"the activity is before the equivalent 07:00Z since instant",
+			);
+
+			const until = await run(dir, undefined, {
+				until: "2024-06-01T15:00:00+01:00",
+			});
+			assert.equal(
+				recordsOf(until, "activities").length,
+				1,
+				"the activity is before the equivalent 14:00Z until instant",
+			);
+		},
+	);
+});
+
 test("an export with no activities still emits a diagnostic, and it is not failure-shaped", async () => {
 	await withImportDir({ "activities.csv": `${HEADER}\n` }, async (dir) => {
 		const result = await run(dir);

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "whoop",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"display_name": "WHOOP",
 	"runtime_requirements": {
 		"bindings": {

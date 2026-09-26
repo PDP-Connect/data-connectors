@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.5.11",
+	"version": "0.5.12",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {

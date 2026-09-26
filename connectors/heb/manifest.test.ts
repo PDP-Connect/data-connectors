@@ -30,7 +30,7 @@ test("heb first-time setup allows browser login with optional saved credentials"
 	const manifest = JSON.parse(
 		readFileSync(MANIFEST_PATH, "utf8"),
 	) as HebManifest;
-	assert.equal(manifest.version, "0.5.11");
+	assert.match(manifest.version as string, /^\d+\.\d+\.\d+$/);
 	assert.equal(manifest.setup?.modality, "static_secret");
 	assert.equal(manifest.setup?.credential_capture?.required, false);
 	assert.deepEqual(

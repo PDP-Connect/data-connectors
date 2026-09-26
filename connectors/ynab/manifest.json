@@ -9,7 +9,7 @@
 	},
 	"connector_key": "ynab",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"display_name": "YNAB",
 	"runtime_requirements": {
 		"bindings": {

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "twitter-archive",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Twitter/X Archive",
 	"brand": {
 		"icon": "icon.svg",

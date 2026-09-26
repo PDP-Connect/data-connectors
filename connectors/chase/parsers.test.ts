@@ -758,6 +758,28 @@ test("chooseActivity: explicit time_range → date_range", () => {
 	assert.deepEqual(choice.dateRange, { from: "2026-01-01", to: "2026-04-01" });
 });
 
+test("chooseActivity: offset bounds become UTC source dates", () => {
+	const requested = new Map([
+		[
+			"transactions",
+			{
+				time_range: {
+					since: "2026-03-01T00:30:00+05:30",
+					until: "2026-04-01T00:30:00+05:30",
+				},
+			},
+		],
+	]);
+	const choice = chooseActivity(
+		requested,
+		{},
+		"transactions",
+		"ID",
+		"2026-08-13T12:00:00Z",
+	);
+	assert.deepEqual(choice.dateRange, { from: "2026-02-28", to: "2026-03-31" });
+});
+
 test("chooseActivity: a since-only scope closes at the deterministic run date", () => {
 	const requested = new Map([
 		["transactions", { time_range: { since: "2026-05-01T00:00:00Z" } }],

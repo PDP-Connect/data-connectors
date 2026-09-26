@@ -2938,7 +2938,11 @@ async function runTransactionsStream(
 	fingerprintCursor?: FingerprintCursor,
 ): Promise<TransactionsStreamCursor> {
 	const stream = requested.get("transactions");
-	const sinceDateCfg = stream?.time_range?.since?.slice(0, 10);
+	const rawSince = stream?.time_range?.since;
+	const parsedSince = rawSince ? Date.parse(rawSince) : Number.NaN;
+	const sinceDateCfg = !Number.isNaN(parsedSince)
+		? new Date(parsedSince).toISOString().slice(0, 10)
+		: undefined;
 	const seventeenMonthsAgo = new Date(Date.now() - BACKFILL_17MO)
 		.toISOString()
 		.slice(0, 10);
