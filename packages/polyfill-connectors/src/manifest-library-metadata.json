@@ -627,6 +627,7 @@
 		"manifest": {
 			"connector_key": "wholefoods",
 			"reason_display_messages": {
+				"wholefoods_profile_identity_unavailable": "We reached Amazon, but couldn't confirm which account was signed in",
 				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet"
 			}
 		}

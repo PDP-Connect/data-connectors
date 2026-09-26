@@ -18694,7 +18694,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.10",
+				"version": "0.3.11",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -18972,6 +18972,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"wholefoods_profile_identity_unavailable": "We reached Amazon, but couldn't confirm which account was signed in",
 					"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet"
 				}
 			}

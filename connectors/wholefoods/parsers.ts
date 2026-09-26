@@ -27,6 +27,7 @@ const ORDERED_ON_RE = /Ordered on\s+(.+)/i;
 const ASIN_FROM_HREF_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 const REF_PARAM_RE = /[?&]ref_=[^&]*/;
 const CUSTOMER_ID_RE = /"customerId":"([A-Z0-9]+)"/;
+const NAV_SIGN_IN_RE = /^\s*hello,\s*sign\s+in\s*$/i;
 const WHITESPACE_RE = /\s+/g;
 const QTY_RE = /(?:Qty|Quantity)[:\s]*(\d+(?:\.\d+)?)/i;
 const PRICE_RE = /\$(\d+(?:\.\d{2})?)/;
@@ -88,10 +89,13 @@ function textOf(el: Element | null | undefined): string {
  */
 export function parseAmazonProfileDom(html: string): WholeFoodsProfile {
 	const { document } = parseHTML(html);
+	const greeting = textOf(
+		document.querySelector("#nav-link-accountList-nav-line-1"),
+	);
 	const name =
-		textOf(document.querySelector("#nav-link-accountList-nav-line-1"))
-			.replace(/^hello,\s*/i, "")
-			.trim() || null;
+		greeting && !NAV_SIGN_IN_RE.test(greeting)
+			? greeting.replace(/^hello,\s*/i, "").trim() || null
+			: null;
 	const customerId = CUSTOMER_ID_RE.exec(html)?.[1] ?? null;
 	return { customerId, name };
 }
