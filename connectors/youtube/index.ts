@@ -416,13 +416,32 @@ export async function collectYoutubeBrowser(
 					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
 				);
 				if (!own.channel_url) {
-					await ctx.emit({
-						type: "SKIP_RESULT",
-						stream: "profile",
-						reason: "youtube_profile_channel_link_unavailable",
-						message:
-							"The signed-in account header did not expose an own-channel link.",
-					});
+					if (own.email) {
+						await emit("profile", {
+							id: own.email,
+							channel_id: null,
+							channel_url: null,
+							title: null,
+							handle: null,
+							email: own.email,
+							joined_at: null,
+							avatar_url: null,
+							description: null,
+							country: null,
+							subscriber_count: null,
+							view_count: null,
+							video_count: null,
+						});
+						profileEmitted = true;
+					} else {
+						await ctx.emit({
+							type: "SKIP_RESULT",
+							stream: "profile",
+							reason: "youtube_profile_channel_link_unavailable",
+							message:
+								"The signed-in account header did not expose an own-channel link.",
+						});
+					}
 				} else {
 					await page.goto(own.channel_url, { waitUntil: "domcontentloaded" });
 					const channelState = await waitForChannelIdentity(page);

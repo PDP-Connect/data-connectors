@@ -138,11 +138,17 @@ export function readChannelAbout(doc: Document = document): {
 		"ytd-channel-about-metadata-renderer, yt-about-this-channel-renderer",
 	);
 	const aboutRoot = about ?? doc;
+	const statsRoot = about;
 	const text = Array.from(
 		aboutRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
 	)
 		.filter((node) => node.children.length === 0)
 		.map((node) => node.textContent?.trim() ?? "");
+	const statsText = statsRoot
+		? Array.from(statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"))
+				.filter((node) => node.children.length === 0)
+				.map((node) => node.textContent?.trim() ?? "")
+		: [];
 	const joined = text.find((value) => /^joined\s+/i.test(value));
 	const country =
 		about
@@ -158,12 +164,12 @@ export function readChannelAbout(doc: Document = document): {
 				?.textContent?.trim() || null,
 		country,
 		subscriber_count_text:
-			text.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
+			statsText.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
 			null,
 		view_count_text:
-			text.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
 		video_count_text:
-			text.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
 	};
 }
 

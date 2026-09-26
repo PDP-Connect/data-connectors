@@ -345,7 +345,92 @@ test("profile reads joined date when About fields are outside legacy renderers",
 		assert.equal(records.length, 1);
 		assert.equal(records[0]?.title, "Real Owner");
 		assert.equal(records[0]?.joined_at, "Jan 3, 2020");
-		assert.equal(records[0]?.video_count, 32);
+		assert.equal(records[0]?.video_count, null);
+		assert.equal(skips.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("profile emits email-only authenticated accounts without a channel link", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			const body =
+				url.pathname === "/"
+					? '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="email">owner@example.com</span></ytd-active-account-header-renderer>'
+					: "";
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		const skips: unknown[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				skips.push(message);
+			},
+			progress: async () => undefined,
+		});
+		assert.deepEqual(skips, []);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.id, "owner@example.com");
+		assert.equal(records[0]?.email, "owner@example.com");
+		assert.equal(records[0]?.channel_id, null);
+		assert.equal(records[0]?.channel_url, null);
+		assert.equal(records[0]?.title, null);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("profile never reads document-level counts outside About metadata", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/")
+				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+			else if (url.pathname === "/@owner")
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
+			else if (url.pathname === "/@owner/about")
+				body =
+					"<aside><span>999 views</span><span>77 videos</span></aside><span>Joined Jan 3, 2020</span>";
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		const skips: unknown[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				skips.push(message);
+			},
+			progress: async () => undefined,
+		});
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.joined_at, "Jan 3, 2020");
+		assert.equal(records[0]?.view_count, null);
+		assert.equal(records[0]?.video_count, null);
 		assert.equal(skips.length, 0);
 	} finally {
 		await browser.close();

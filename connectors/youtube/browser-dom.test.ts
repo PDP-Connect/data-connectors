@@ -69,7 +69,18 @@ test("own channel About fields can be read outside legacy renderers", () => {
 		dom("<span>Joined Jan 3, 2020</span><span>32 videos</span>"),
 	);
 	assert.equal(about.joined_at, "Jan 3, 2020");
-	assert.equal(about.video_count_text, "32 videos");
+	assert.equal(about.video_count_text, null);
+});
+
+test("document-level About fallback never reads unrelated counts", () => {
+	const about = readChannelAbout(
+		dom(
+			"<aside><span>999 views</span><span>77 videos</span></aside><span>Joined Jan 3, 2020</span>",
+		),
+	);
+	assert.equal(about.joined_at, "Jan 3, 2020");
+	assert.equal(about.view_count_text, null);
+	assert.equal(about.video_count_text, null);
 });
 
 test("channel page title skips empty headings before the page header title", () => {
