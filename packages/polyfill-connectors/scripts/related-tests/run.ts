@@ -10,9 +10,20 @@
 
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { packageRoot as PACKAGE_ROOT } from "../../src/connector-paths.ts";
+import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	connectorsDir as CONNECTORS_ROOT,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 
 const CLI_PATH = join(PACKAGE_ROOT, "scripts", "related-tests", "cli.ts");
+
+export function testFileArgument(testFile: string): string {
+	if (testFile.startsWith("connectors/")) {
+		return join(CONNECTORS_ROOT, testFile.slice("connectors/".length));
+	}
+	return testFile;
+}
 
 function main(): void {
 	const [baseRef] = process.argv.slice(2);
@@ -58,7 +69,7 @@ function main(): void {
 			"tsx",
 			"--test-concurrency=2",
 			"--test-timeout=120000",
-			...targets,
+			...targets.map(testFileArgument),
 		],
 		{
 			cwd: PACKAGE_ROOT,
@@ -67,4 +78,6 @@ function main(): void {
 	);
 }
 
-main();
+if (isMainModule(import.meta.url)) {
+	main();
+}

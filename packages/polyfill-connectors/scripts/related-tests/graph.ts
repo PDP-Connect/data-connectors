@@ -66,8 +66,56 @@ export interface DependencyGraph {
 
 export class UntrustworthyGraphError extends Error {}
 
-const SOURCE_ROOTS = ["bin", "connectors", "src"];
+const PACKAGE_SOURCE_ROOTS = ["bin", "src"];
+const CONNECTORS_ROOT = "connectors";
 const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+
+function repoRootForPackage(packageRoot: string): string {
+	return resolve(packageRoot, "..", "..");
+}
+
+function connectorsRootForPackage(packageRoot: string): string {
+	const rootConnectors = join(repoRootForPackage(packageRoot), CONNECTORS_ROOT);
+	if (existsSync(rootConnectors)) {
+		return rootConnectors;
+	}
+	return join(packageRoot, CONNECTORS_ROOT);
+}
+
+function absolutePathForSource(
+	packageRoot: string,
+	relativePath: string,
+): string {
+	if (relativePath.startsWith(`${CONNECTORS_ROOT}/`)) {
+		return join(
+			connectorsRootForPackage(packageRoot),
+			relativePath.slice(CONNECTORS_ROOT.length + 1),
+		);
+	}
+	return join(packageRoot, relativePath);
+}
+
+function sourceRelativePathForAbsolute(
+	packageRoot: string,
+	absolutePath: string,
+): string | null {
+	const packageRelative = relative(packageRoot, absolutePath);
+	if (
+		!packageRelative.startsWith("..") &&
+		PACKAGE_SOURCE_ROOTS.some((root) => packageRelative.startsWith(`${root}/`))
+	) {
+		return packageRelative;
+	}
+
+	const connectorsRelative = relative(
+		connectorsRootForPackage(packageRoot),
+		absolutePath,
+	);
+	if (!connectorsRelative.startsWith("..")) {
+		return `${CONNECTORS_ROOT}/${connectorsRelative}`;
+	}
+	return null;
+}
 
 /**
  * Fails closed (throws) rather than returning a graph that may have been
@@ -124,9 +172,9 @@ function isTypeScriptSource(fileName: string): boolean {
 }
 
 /**
- * Every `.ts` source under the package's source roots, package-relative.
+ * Every `.ts` source under the selector's source roots.
  *
- * Driven by SOURCE_ROOTS rather than by tsconfig's `include`/`exclude`, and
+ * Driven by source roots rather than by tsconfig's `include`/`exclude`, and
  * that difference is load-bearing: tsconfig deliberately excludes
  * `connectors/github/index.test.ts` (it imports the cross-repo reference
  * implementation, so it cannot be typechecked here). A tsconfig-driven walk
@@ -137,25 +185,29 @@ function isTypeScriptSource(fileName: string): boolean {
 function listSourceFiles(packageRoot: string): string[] {
 	const found: string[] = [];
 
-	function walk(dir: string): void {
+	function walk(dir: string, labelRoot: string, sourceRoot: string): void {
 		for (const entry of readdirSync(dir)) {
 			if (entry === "node_modules") {
 				continue;
 			}
 			const fullPath = join(dir, entry);
 			if (statSync(fullPath).isDirectory()) {
-				walk(fullPath);
+				walk(fullPath, labelRoot, sourceRoot);
 			} else if (isTypeScriptSource(entry)) {
-				found.push(relative(packageRoot, fullPath));
+				found.push(join(labelRoot, relative(sourceRoot, fullPath)));
 			}
 		}
 	}
 
-	for (const root of SOURCE_ROOTS) {
+	for (const root of PACKAGE_SOURCE_ROOTS) {
 		const rootPath = join(packageRoot, root);
 		if (existsSync(rootPath)) {
-			walk(rootPath);
+			walk(rootPath, root, rootPath);
 		}
+	}
+	const connectorsRoot = connectorsRootForPackage(packageRoot);
+	if (existsSync(connectorsRoot)) {
+		walk(connectorsRoot, CONNECTORS_ROOT, connectorsRoot);
 	}
 	return found;
 }
@@ -318,7 +370,10 @@ export function resolveWithinPackage(
 	if (!specifier.startsWith(".")) {
 		return null;
 	}
-	const fromDir = join(packageRoot, fromRelativePath, "..");
+	const fromDir = join(
+		absolutePathForSource(packageRoot, fromRelativePath),
+		"..",
+	);
 	const target = resolve(fromDir, specifier);
 
 	const candidates = [
@@ -331,13 +386,7 @@ export function resolveWithinPackage(
 		if (!(existsSync(candidate) && statSync(candidate).isFile())) {
 			continue;
 		}
-		const relativePath = relative(packageRoot, candidate);
-		// An import escaping the package root (e.g. into the cross-repo
-		// reference implementation) is outside this graph by definition.
-		if (relativePath.startsWith("..")) {
-			return null;
-		}
-		return relativePath;
+		return sourceRelativePathForAbsolute(packageRoot, candidate);
 	}
 	return null;
 }
@@ -359,7 +408,10 @@ export async function buildDependencyGraph(
 	}
 
 	for (const relativePath of sourceFiles) {
-		const sourceText = readFileSync(join(packageRoot, relativePath), "utf8");
+		const sourceText = readFileSync(
+			absolutePathForSource(packageRoot, relativePath),
+			"utf8",
+		);
 		const dependencies = dependenciesBySource.get(relativePath) ?? [];
 
 		const scannedImports = scanImports(sourceText);

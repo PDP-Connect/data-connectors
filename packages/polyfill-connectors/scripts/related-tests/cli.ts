@@ -27,16 +27,25 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
-import { packageRoot as PACKAGE_ROOT } from "../../src/connector-paths.ts";
+import {
+	connectorsDir as CONNECTORS_ROOT,
+	packageRoot as PACKAGE_ROOT,
+} from "../../src/connector-paths.ts";
 import { buildDependencyGraph, UntrustworthyGraphError } from "./graph.ts";
 import { FULL_SUITE, selectRelatedTests } from "./select.ts";
 
-const SOURCE_ROOTS = ["bin", "connectors", "src"];
+const PACKAGE_SOURCE_ROOTS = ["bin", "src"];
+const CONNECTORS_LABEL = "connectors";
 
-function listAllTsFiles(root: string, dir: string, out: string[]): void {
+function listAllTsFiles(
+	root: string,
+	dir: string,
+	labelRoot: string,
+	out: string[],
+): void {
 	for (const entry of readdirSync(dir)) {
 		if (entry === "node_modules") {
 			continue;
@@ -44,9 +53,9 @@ function listAllTsFiles(root: string, dir: string, out: string[]): void {
 		const fullPath = join(dir, entry);
 		const stat = statSync(fullPath);
 		if (stat.isDirectory()) {
-			listAllTsFiles(root, fullPath, out);
+			listAllTsFiles(root, fullPath, labelRoot, out);
 		} else if (entry.endsWith(".ts")) {
-			out.push(relative(root, fullPath));
+			out.push(join(labelRoot, relative(root, fullPath)));
 		}
 	}
 }
@@ -68,17 +77,21 @@ function listAllTsFiles(root: string, dir: string, out: string[]): void {
 function diffPathsInPackage(
 	packageRoot: string,
 	args: readonly string[],
+	{ cwd = packageRoot }: { readonly cwd?: string } = {},
 ): string[] {
+	const repoRoot = gitRoot(packageRoot);
 	const output = execFileSync("git", [...args], {
-		cwd: packageRoot,
+		cwd,
 		encoding: "utf8",
 	});
-	const packagePrefix = relative(gitRoot(packageRoot), packageRoot);
+	const packagePrefix = relative(repoRoot, packageRoot);
 	const requiredPrefix = packagePrefix === "" ? "" : `${packagePrefix}/`;
 	const paths = new Set<string>();
 	for (const entry of output.split("\0")) {
 		if (entry.length > 0 && entry.startsWith(requiredPrefix)) {
 			paths.add(relative(packagePrefix, entry));
+		} else if (entry.length > 0 && entry.startsWith(`${CONNECTORS_LABEL}/`)) {
+			paths.add(entry);
 		}
 	}
 	return [...paths];
@@ -115,6 +128,7 @@ export function getChangedFiles(
 	packageRoot: string,
 	baseRef: string,
 ): ChangedAndDeleted {
+	const repoRoot = gitRoot(packageRoot);
 	const changedRelativePaths = new Set<string>();
 	for (const path of [
 		...diffPathsInPackage(packageRoot, [
@@ -133,12 +147,11 @@ export function getChangedFiles(
 			"--diff-filter=ACMT",
 			"HEAD",
 		]),
-		...diffPathsInPackage(packageRoot, [
-			"ls-files",
-			"-z",
-			"--others",
-			"--exclude-standard",
-		]),
+		...diffPathsInPackage(
+			packageRoot,
+			["ls-files", "-z", "--others", "--exclude-standard"],
+			{ cwd: repoRoot },
+		),
 	]) {
 		changedRelativePaths.add(path);
 	}
@@ -228,8 +241,17 @@ function main(): void {
 	}
 
 	const allRelativePaths: string[] = [];
-	for (const root of SOURCE_ROOTS) {
-		listAllTsFiles(PACKAGE_ROOT, join(PACKAGE_ROOT, root), allRelativePaths);
+	for (const root of PACKAGE_SOURCE_ROOTS) {
+		const sourceRoot = join(PACKAGE_ROOT, root);
+		listAllTsFiles(sourceRoot, sourceRoot, root, allRelativePaths);
+	}
+	if (existsSync(CONNECTORS_ROOT)) {
+		listAllTsFiles(
+			CONNECTORS_ROOT,
+			CONNECTORS_ROOT,
+			CONNECTORS_LABEL,
+			allRelativePaths,
+		);
 	}
 
 	buildDependencyGraph(PACKAGE_ROOT)

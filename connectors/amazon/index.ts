@@ -209,7 +209,11 @@ const ORDERS_URL_RE = /\/your-orders|\/order-history/;
 const YEAR_VALUE_RE = /year-(\d{4})/;
 const DETAIL_URL_RE =
 	/\/(?:gp\/your-account|fopo|uff\/your-account)\/order-details/;
+export const AMAZON_SESSION_READY_SELECTOR =
+	'form[name="signIn"], #orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"], .your-orders-content-container, #searchOrdersInput, .order-card, .js-order-card';
 export const AMAZON_NO_ORDERS_TEXT_PATTERN = String.raw`you have not placed any orders|no orders found|0\s+orders\s+placed\s+in|looks like you didn['’]t place an order in`;
+const LIST_PAGE_READY_SELECTOR =
+	'.order-card, .js-order-card, .your-orders-content-container, #searchOrdersInput, #ordersContainer, #no-orders, [class*="no-orders" i]';
 
 export type AmazonDetailGapReason =
 	| "retry_exhausted"
@@ -352,11 +356,16 @@ async function deepSessionCheck(page: Page): Promise<boolean> {
 	// valid post-nav states; we branch on them).
 	await page
 		.locator(
-			'form[name="signIn"], #orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"]',
+			AMAZON_SESSION_READY_SELECTOR,
 		)
 		.first()
 		.waitFor({ state: "attached", timeout: DEEP_PROBE_WAIT_MS })
-		.catch((): undefined => undefined);
+		.catch((cause: unknown) => {
+			throw new Error(
+				`amazon_session_orders_readiness_timeout after ${String(DEEP_PROBE_WAIT_MS)}ms`,
+				{ cause },
+			);
+		});
 	const url = page.url();
 	if (SIGNIN_URL_RE.test(url)) {
 		return false;
@@ -1593,14 +1602,29 @@ export async function scrapeListPage(
 		});
 		throw new Error("amazon_list_page_navigation_failed", { cause: error });
 	}
-	// Wait for list-page signal. `.order-card` is the standard container
-	// in modern layouts; `#ordersContainer` catches legacy. Either appears
-	// when the orders list has rendered.
-	await page
-		.locator(".order-card, .js-order-card, #ordersContainer, #no-orders")
-		.first()
-		.waitFor({ state: "attached", timeout: LIST_PAGE_WAIT_MS })
-		.catch((): undefined => undefined);
+	// Wait for a bounded list-page signal before reading the DOM. The selector
+	// spans old card selectors, the current signed-in container/search control,
+	// the shared list wrapper, and explicit empty states.
+	try {
+		await page
+			.locator(LIST_PAGE_READY_SELECTOR)
+			.first()
+			.waitFor({ state: "attached", timeout: LIST_PAGE_WAIT_MS });
+	} catch (error) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "list_page_readiness_timeout",
+			message:
+				"Amazon order list did not render a recognized order or empty-history signal before the bounded wait expired.",
+			diagnostics: {
+				start_index: startIndex,
+				timeout_ms: LIST_PAGE_WAIT_MS,
+				year,
+			},
+		});
+		throw new Error("amazon_list_page_readiness_timeout", { cause: error });
+	}
 	// Fixture capture: one list-page snapshot per year (page 1 only).
 	if (capture && startIndex === 0) {
 		await capture.captureDom(page, `orders-list-${year}`);

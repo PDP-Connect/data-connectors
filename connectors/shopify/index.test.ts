@@ -29,8 +29,11 @@ import {
 	collectShopify,
 	ensureShopifySession,
 	hasVerifiedEmptyOrderHistoryInPage,
+	waitForApolloCache,
 	readApolloCacheInPage,
 	hasShopOrderHistoryContextInPage,
+	isShopOrderHistoryReadyInPage,
+	shopSkipDiagnosticsInPage,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache } from "./types.ts";
@@ -450,11 +453,18 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 		assert.doesNotMatch(String(installApolloFixtureInPage), /__name/);
 		assert.doesNotMatch(String(readApolloCacheInPage), /__name/);
 		assert.doesNotMatch(String(hasVerifiedEmptyOrderHistoryInPage), /__name/);
+		assert.doesNotMatch(String(isShopOrderHistoryReadyInPage), /__name/);
 		await page.evaluate(installApolloFixtureInPage, { ROOT_QUERY: { viewer: {} } });
 		assert.deepEqual(await page.evaluate(readApolloCacheInPage), {
 			ROOT_QUERY: { viewer: {} },
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
+		assert.equal(await page.evaluate(isShopOrderHistoryReadyInPage), true);
+		const pageDiagnostics = await page.evaluate(shopSkipDiagnosticsInPage);
+		assert.equal(pageDiagnostics.final_url_path, "/account/order-history");
+		assert.equal(pageDiagnostics.order_context_present, true);
+		assert.equal(pageDiagnostics.fiber_cache_present, true);
+		assert.equal(pageDiagnostics.ssr_cache_present, false);
 		await page.evaluate(installApolloFixtureInPage, {
 			ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } },
 		});
@@ -465,21 +475,197 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 			},
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
+		await page.setContent('<div class="order-card"><a href="https://shop.app/orders/fixture">Acme Goods</a><div>2 items · $19.99</div></div>');
+		assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).dom_card_count, 1);
+		await page.setContent('<div class="order-card"><a href="https://shop.app/orders/fixture">Acme Goods</a><div>19.99 EUR</div></div>');
+		assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).dom_card_count, 1);
 	} finally {
 		await browser.close();
 	}
 });
 
+test("verified empty Shop page accepts SSR cache without a React fiber", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) => route.fulfill({
+			status: 200,
+			contentType: "text/html",
+			body: '<div id="root"><h1>Orders</h1><span>No orders yet</span></div>',
+		}));
+		await page.goto("https://shop.app/account/order-history");
+		await page.evaluate(() => {
+			Object.assign(window, { __APOLLO_STATE__: { ROOT_QUERY: { viewer: {} } } });
+		});
+		assert.deepEqual(await page.evaluate(readApolloCacheInPage), { ROOT_QUERY: { viewer: {} } });
+		assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).fiber_cache_present, false);
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
+		const run = makeRecordingEmit(validateRecord);
+		await collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: () => page.evaluate(readApolloCacheInPage),
+			readVerifiedEmptyState: () => page.evaluate(hasVerifiedEmptyOrderHistoryInPage),
+			cacheWaitTimeoutMs: 1000, cachePollIntervalMs: 25,
+			scroll: async () => undefined,
+		});
+		assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), true);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("Shop cache reader sees SSR orders while the fiber cache is still an empty shell", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) => route.fulfill({
+			status: 200,
+			contentType: "text/html",
+			body: '<div id="root"><h1>Orders</h1><span>No orders yet</span></div>',
+		}));
+		await page.goto("https://shop.app/account/order-history");
+		const ssrOrders = makeCache(["Order:1"], false);
+		await page.evaluate(installApolloFixtureInPage, makeCacheWithoutOrdersConnection());
+		await page.evaluate((state) => { Object.assign(window, { __APOLLO_STATE__: state }); }, ssrOrders);
+		assert.deepEqual(await page.evaluate(readApolloCacheInPage), ssrOrders);
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
+		const liveEmpty = makeCache([], false);
+		await page.evaluate(installApolloFixtureInPage, liveEmpty);
+		assert.deepEqual(await page.evaluate(readApolloCacheInPage), liveEmpty);
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("collectShopify waits for a delayed empty marker after the first cache", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	let cacheReads = 0;
+	let markerReads = 0;
+	let clock = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => { cacheReads += 1; return makeCacheWithoutOrdersConnection(); },
+		readVerifiedEmptyState: async () => ++markerReads >= 3,
+		scroll: async () => undefined,
+		cacheWaitTimeoutMs: 500, cachePollIntervalMs: 50,
+		evidenceNow: () => clock,
+		evidenceWait: async (ms) => { clock += ms; },
+	});
+	assert.ok(cacheReads >= 4);
+	assert.ok(markerReads >= 4);
+	assert.equal(run.protocolMessages.some((m) => m.type === "SKIP_RESULT"), false);
+	assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), true);
+});
+
+test("collectShopify waits for a delayed Apollo order connection", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	let cacheReads = 0;
+	let clock = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => ++cacheReads < 3 ? makeCacheWithoutOrdersConnection() : makeCache(["Order:1"], false),
+		readVerifiedEmptyState: async () => false,
+		scroll: async () => undefined,
+		cacheWaitTimeoutMs: 500, cachePollIntervalMs: 50,
+		evidenceNow: () => clock,
+		evidenceWait: async (ms) => { clock += ms; },
+	});
+	assert.ok(cacheReads >= 3);
+	assert.equal(recordsOf(run.emitted, "orders").length, 1);
+	assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), true);
+});
+
+test("collectShopify rejects a transient empty marker", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	let markerReads = 0;
+	let clock = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => makeCacheWithoutOrdersConnection(),
+		readVerifiedEmptyState: async () => ++markerReads === 1,
+		scroll: async () => undefined,
+		cacheWaitTimeoutMs: 100, cachePollIntervalMs: 50,
+		evidenceNow: () => clock,
+		evidenceWait: async (ms) => { clock += ms; },
+	});
+	assert.ok(markerReads >= 2);
+	assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
+	const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
+});
+
+test("collectShopify explains order-history evidence deadline expiry", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	let clock = 0;
+	let cacheReads = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => { cacheReads += 1; return makeCacheWithoutOrdersConnection(); },
+		readVerifiedEmptyState: async () => false,
+		scroll: async () => undefined,
+		cacheWaitTimeoutMs: 120, cachePollIntervalMs: 50,
+		evidenceNow: () => clock,
+		evidenceWait: async (ms) => { clock += ms; },
+	});
+	assert.equal(clock, 120);
+	assert.ok(cacheReads >= 3);
+	const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
+	assert.match(skip.message, /120ms/);
+	assert.match(skip.message, /orders|empty/i);
+	assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
+});
+
+test("collectShopify expires when a page reader never returns", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const startedAt = Date.now();
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => makeCacheWithoutOrdersConnection(),
+		readDomOrders: () => new Promise(() => undefined),
+		readVerifiedEmptyState: async () => false,
+		cacheWaitTimeoutMs: 20, cachePollIntervalMs: 10,
+		scroll: async () => undefined,
+	});
+	assert.ok(Date.now() - startedAt < 500);
+	const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
+});
+
 test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache never resolves", async () => {
 	const { emit, emitRecord, protocolMessages } =
 		makeRecordingEmit(validateRecord);
+	const navigationStartedAt = Date.now();
 	await collectShopify({
 		emit,
 		emitRecord,
 		progress: async () => undefined,
 		requested: requestedMap(["orders"]),
 		state: {},
+		navigationStartedAt,
 		readCache: () => Promise.resolve(null),
+		cacheWaitTimeoutMs: 0,
+		readSkipDiagnostics: () => Promise.resolve({
+			final_url_path: "/account/order-history",
+			sign_in_page_detected: false,
+			order_context_present: true,
+			fiber_cache_present: false,
+			ssr_cache_present: false,
+			navigation_to_first_cache_attempt_ms: 0,
+			navigation_to_cache_success_ms: null,
+			dom_card_count: 0,
+		}),
 		scroll: () => Promise.resolve(),
 	});
 	const skip = protocolMessages.find(
@@ -488,6 +674,139 @@ test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache n
 	);
 	assert.ok(skip);
 	assert.equal(skip.reason, "shopify_apollo_state_unavailable");
+	assert.deepEqual(skip.diagnostics, {
+		final_url_path: "/account/order-history",
+		sign_in_page_detected: false,
+		order_context_present: true,
+		fiber_cache_present: false,
+		ssr_cache_present: false,
+		navigation_to_first_cache_attempt_ms: 0,
+		navigation_to_cache_success_ms: null,
+		dom_card_count: 0,
+	});
+	assert.doesNotMatch(JSON.stringify(skip.diagnostics), /@|gid|email|123/);
+});
+
+test("collectShopify does not poll Apollo when order-history readiness times out", async () => {
+	const { emit, emitRecord, protocolMessages } = makeRecordingEmit(validateRecord);
+	let cacheReads = 0;
+	await collectShopify({
+		emit,
+		emitRecord,
+		progress: async () => undefined,
+		requested: requestedMap(["orders"]),
+		state: {},
+		orderHistoryReady: false,
+		readCache: async () => { cacheReads += 1; return null; },
+		readSkipDiagnostics: () => Promise.resolve({
+			final_url_path: "/account/order-history",
+			sign_in_page_detected: false,
+			order_context_present: false,
+			fiber_cache_present: false,
+			ssr_cache_present: false,
+			navigation_to_first_cache_attempt_ms: null,
+			navigation_to_cache_success_ms: null,
+			dom_card_count: 0,
+		}),
+		scroll: async () => undefined,
+	});
+	const skip = protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+	assert.ok(skip);
+	assert.equal(skip.reason, "shopify_order_history_readiness_timeout");
+	assert.equal(cacheReads, 0);
+	assert.deepEqual(skip.diagnostics, {
+		final_url_path: "/account/order-history",
+		sign_in_page_detected: false,
+		order_context_present: false,
+		fiber_cache_present: false,
+		ssr_cache_present: false,
+		navigation_to_first_cache_attempt_ms: null,
+		navigation_to_cache_success_ms: null,
+		dom_card_count: 0,
+	});
+});
+
+test("collectShopify falls back to parsed DOM orders when Apollo is missing", async () => {
+	const { emit, emitRecord, emitted, protocolMessages } =
+		makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit,
+		emitRecord,
+		progress: async () => undefined,
+		requested: requestedMap(["orders"]),
+		state: {},
+		readCache: () => Promise.resolve(null),
+		cacheWaitTimeoutMs: 0,
+		readDomOrders: () => Promise.resolve([{
+			currency: "USD", detailUrl: "https://shop.app/orders/order-123",
+			id: "https://shop.app/orders/order-123", itemCount: 2,
+			lineItemTitles: [], merchantName: "Acme Goods", orderNumber: null,
+			placedAt: null, status: "Delivered", totalCents: 1999,
+		}]),
+		scroll: () => Promise.resolve(),
+	});
+	assert.equal(recordsOf(emitted, "orders").length, 1);
+	assert.equal(protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+});
+
+test("collectShopify uses DOM orders when Apollo is readable but contains no order refs", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit: run.emit,
+		emitRecord: run.emitRecord,
+		progress: async () => undefined,
+		requested: requestedMap(["orders"]),
+		state: {},
+		readCache: () => Promise.resolve(makeCache([], false)),
+		cacheWaitTimeoutMs: 0,
+		readDomOrders: () => Promise.resolve([{
+			currency: "USD", detailUrl: "https://shop.app/orders/order-123",
+			id: "https://shop.app/orders/order-123", itemCount: 1,
+			lineItemTitles: [], merchantName: "Acme Goods", orderNumber: null,
+			placedAt: null, status: null, totalCents: 1999,
+		}]),
+		scroll: () => Promise.resolve(),
+	});
+	assert.equal(recordsOf(run.emitted, "orders").length, 1);
+	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+});
+
+test("waitForApolloCache retries until cache readiness, bounded by its deadline", async () => {
+	let attempts = 0;
+	let now = 0;
+	const waits: number[] = [];
+	const cache = makeCache(["Order:1"], false);
+	const result = await waitForApolloCache({
+		readCache: async () => ++attempts < 3 ? null : cache,
+		timeoutMs: 500,
+		pollIntervalMs: 100,
+		now: () => now,
+		wait: async (ms) => { waits.push(ms); now += ms; },
+	});
+	assert.equal(result.cache, cache);
+	assert.equal(attempts, 3);
+	assert.deepEqual(waits, [100, 100]);
+
+	const expired = await waitForApolloCache({
+		readCache: async () => null,
+		timeoutMs: 250,
+		pollIntervalMs: 100,
+		now: () => now,
+		wait: async (ms) => { now += ms; },
+	});
+	assert.equal(expired.cache, null);
+	assert.equal(expired.timedOut, true);
+	const startedAt = Date.now();
+	const hung = await waitForApolloCache({
+		readCache: () => new Promise(() => undefined),
+		timeoutMs: 20,
+		pollIntervalMs: 10,
+	});
+	assert.equal(hung.timedOut, true);
+	assert.ok(Date.now() - startedAt < 500);
 });
 
 test("collectShopify emits a clean empty STATE only with verified empty-history page evidence", async () => {
@@ -534,6 +853,7 @@ test("collectShopify does not prune prior fingerprints from an unconfirmed empty
 			requested: requestedMap(["orders"]),
 			state: priorState,
 			readCache: () => Promise.resolve(makeCache([], false)),
+			cacheWaitTimeoutMs: 0,
 			scroll: () => Promise.resolve(),
 		};
 		await collectShopify(
@@ -541,7 +861,17 @@ test("collectShopify does not prune prior fingerprints from an unconfirmed empty
 		);
 		const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
 		assert.ok(skip && skip.type === "SKIP_RESULT");
-		assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+		assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
+		assert.deepEqual(skip.diagnostics, {
+			final_url_path: "",
+			sign_in_page_detected: false,
+			order_context_present: false,
+			fiber_cache_present: false,
+			ssr_cache_present: false,
+			navigation_to_first_cache_attempt_ms: null,
+			navigation_to_cache_success_ms: null,
+			dom_card_count: 0,
+		});
 		assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
 	}
 });
@@ -567,10 +897,11 @@ test("collectShopify confirms an empty account with verified page evidence when 
 		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
 		readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
 		readVerifiedEmptyState: () => Promise.resolve(false), scroll: () => Promise.resolve(),
+		cacheWaitTimeoutMs: 0,
 	});
 	const skip = unconfirmed.protocolMessages.find((m) => m.type === "SKIP_RESULT");
 	assert.ok(skip && skip.type === "SKIP_RESULT");
-	assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+	assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
 });
 
 test("collectShopify fails closed when the empty-state reader is missing or throws", async () => {
@@ -580,6 +911,7 @@ test("collectShopify fails closed when the empty-state reader is missing or thro
 			emit: run.emit, emitRecord: run.emitRecord,
 			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
 			readCache: () => Promise.resolve(makeCacheWithoutOrdersConnection()),
+			cacheWaitTimeoutMs: 0,
 			scroll: () => Promise.resolve(),
 		};
 		await collectShopify(
@@ -587,7 +919,7 @@ test("collectShopify fails closed when the empty-state reader is missing or thro
 		);
 		const skip = run.protocolMessages.find((m) => m.type === "SKIP_RESULT");
 		assert.ok(skip && skip.type === "SKIP_RESULT");
-		assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+		assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
 		assert.equal(run.protocolMessages.some((m) => m.type === "STATE"), false);
 	}
 });

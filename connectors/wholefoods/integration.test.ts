@@ -360,6 +360,42 @@ test("a nonzero search summary with no parsed orders fails rather than reporting
 	);
 });
 
+test("order search readiness timeout is bounded and explained before parsing", async () => {
+	const shape = {
+		...fakePage(
+			'<html><body><div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a></div></body></html>',
+		),
+		locator: () => ({
+			first: () => ({
+				waitFor: () => Promise.reject(new Error("locator timed out")),
+			}),
+		}),
+	} as unknown as Page;
+
+	await assert.rejects(
+		discoverOrderStubs(shape),
+		/wholefoods_order_page_readiness_timeout/,
+	);
+});
+
+test("order search accepts the signed-in current empty-orders shell without cards", async () => {
+	const html = '<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders</p></div>';
+	const shape = {
+		...fakePage(html),
+		locator: (selector: string) => ({
+			first: () => ({
+				waitFor: (options: { timeout: number }) => {
+					assert.match(selector, /your-orders-content-container/);
+					assert.match(selector, /searchOrdersInput/);
+					assert.equal(options.timeout, 15_000);
+					return Promise.resolve();
+				},
+			}),
+		}),
+	} as unknown as Page;
+	assert.deepEqual(await discoverOrderStubs(shape), { stubs: [] });
+});
+
 test("HTTP 503 product navigation plus empty USDA results emits error", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>

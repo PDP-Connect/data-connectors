@@ -21,6 +21,7 @@ import {
 	collectAllOrderRefs,
 	extractOrders,
 	hasNextOrdersPage,
+	parseDomOrderCards,
 	parseOrderRef,
 } from "./parsers.ts";
 import type { ApolloCache } from "./types.ts";
@@ -59,6 +60,63 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 		...overrides,
 	};
 }
+
+test("parseDomOrderCards maps legacy-shaped order cards to Shop records when Apollo is unavailable", () => {
+	const fixture = `
+		<div class="order-card">
+			<a href="https://shop.app/orders/order-123">Acme Goods</a>
+			<div>2 items · $19.99</div>
+			<div>Delivered</div>
+		</div>`;
+	const [order] = parseDomOrderCards(fixture);
+	assert.deepEqual(order, {
+		currency: "USD",
+		detailUrl: "https://shop.app/orders/order-123",
+		id: "https://shop.app/orders/order-123",
+		itemCount: 2,
+		lineItemTitles: [],
+		merchantName: "Acme Goods",
+		orderNumber: null,
+		placedAt: null,
+		status: "Delivered",
+		totalCents: 1999,
+	});
+});
+
+test("parseDomOrderCards parses a legacy EUR-suffix card without item count", () => {
+	const fixture = `
+		<div class="order-card">
+			<a href="https://shop.app/orders/order-eur">Euro Goods</a>
+			<div>40.95 EUR</div>
+			<div>Delivered</div>
+		</div>`;
+	const [order] = parseDomOrderCards(fixture);
+	assert.deepEqual(order, {
+		currency: "EUR",
+		detailUrl: "https://shop.app/orders/order-eur",
+		id: "https://shop.app/orders/order-eur",
+		itemCount: null,
+		lineItemTitles: [],
+		merchantName: "Euro Goods",
+		orderNumber: null,
+		placedAt: null,
+		status: "Delivered",
+		totalCents: 4095,
+	});
+});
+
+test("parseDomOrderCards dedupes multiple Shop links in one card and keeps the order link", () => {
+	const fixture = `
+		<div class="order-card">
+			<a href="https://shop.app/merchant/acme">Acme Goods</a>
+			<div>1 item · $8.50</div>
+			<a href="https://shop.app/orders/order-card">View order</a>
+		</div>`;
+	const orders = parseDomOrderCards(fixture);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.detailUrl, "https://shop.app/orders/order-card");
+	assert.equal(orders[0]?.id, "https://shop.app/orders/order-card");
+});
 
 test("extractOrders parses every order reachable from ROOT_QUERY", () => {
 	const orders = extractOrders(synthCache());
