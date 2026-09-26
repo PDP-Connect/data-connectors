@@ -811,7 +811,7 @@ test("collectPullRequests: incremental run (cursor set) issues one unwindowed up
 		return Promise.resolve(jsonResponse({}));
 	});
 	const { ctx, records } = makeCtx(["pull_requests"], {
-		pull_requests: { last_updated_at: "2026-05-01T00:00:00Z" },
+		pull_requests: { last_updated_at: "2026-05-03T00:30:00+05:30" },
 	});
 
 	await collectPullRequests(ctx);
@@ -819,7 +819,7 @@ test("collectPullRequests: incremental run (cursor set) issues one unwindowed up
 	// One query only, carrying updated:>= and no created: window.
 	assert.equal(fetchHandle.searchPaths.length, 1);
 	const decoded = decodeURIComponent(fetchHandle.searchPaths[0] ?? "");
-	assert.match(decoded, /updated:>=2026-05-01/);
+	assert.match(decoded, /updated:>=2026-05-02/);
 	assert.doesNotMatch(decoded, /created:/);
 	assert.equal(records.filter((r) => r.stream === "pull_requests").length, 2);
 });

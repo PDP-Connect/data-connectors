@@ -878,10 +878,20 @@ export function isInTimeRange(
 	if (!range) {
 		return true;
 	}
-	if (range.since && receivedAt < range.since) {
+	const received = Date.parse(receivedAt);
+	const since = range.since ? Date.parse(range.since) : null;
+	const until = range.until ? Date.parse(range.until) : null;
+	if (
+		Number.isNaN(received) ||
+		(range.since && (since === null || Number.isNaN(since))) ||
+		(range.until && (until === null || Number.isNaN(until)))
+	) {
 		return false;
 	}
-	if (range.until && receivedAt >= range.until) {
+	if (since !== null && received < since) {
+		return false;
+	}
+	if (until !== null && received >= until) {
 		return false;
 	}
 	return true;

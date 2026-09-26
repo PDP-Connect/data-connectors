@@ -467,12 +467,11 @@ for (const connectorId of ["claude_code", "codex"] as const) {
 // reads every in-root file regardless of mtime; time bounding, where it
 // applies at all, is left to the emission gate rather than to discovery.
 //
-// This does NOT assert that the emission gate actually filters claude_code's
-// `sessions`/`messages` records by `since` — those record shapes carry no
-// `date` field, so `src/connector-runtime.ts`'s generic time-range gate
-// (`isOutsideTimeRange`) is a no-op for them today. That is a separate,
-// narrower fact than the one this test pins, and is not claimed here.
-test("claude_code: a declared `since` does not prune a file by its mtime — every in-root file is still opened", async () => {
+// `sessions` is requested without a time range so it can prove the stale file
+// was opened; `messages` is requested with a time range so it also proves the
+// generic gate fails closed when this connector does not declare that stream's
+// runtime time field.
+test("claude_code: a declared `since` does not prune a file by its mtime", async () => {
 	const claudeHome = await mkdtemp(
 		join(tmpdir(), "pdpp-horizon-claude-mtime-"),
 	);
@@ -484,8 +483,8 @@ test("claude_code: a declared `since` does not prune a file by its mtime — eve
 	// real, well-formed transcript line. A mtime-based pre-open prune would
 	// skip this file and silently lose the owner data it holds, which is
 	// exactly the risk the cited comment names. It is the ONLY source in this
-	// fixture, so the run can only succeed with records emitted if the file was
-	// actually opened and scanned despite its mtime.
+	// fixture, so the run can only succeed if discovery did not reject the file
+	// because of its mtime.
 	const staleMtimeFile = join(projectDir, "session.jsonl");
 	await writeFile(
 		staleMtimeFile,
@@ -527,11 +526,11 @@ test("claude_code: a declared `since` does not prune a file by its mtime — eve
 				},
 				protocol_capabilities: [],
 				runtime_requirements: { bindings: {} },
-				// Declaring these as time-scopable is what makes the runtime pass
+				// Declaring messages as time-scopable is what makes the runtime pass
 				// `time_range` down at all; if claude_code pruned by mtime, this is
 				// the configuration under which that bug would fire.
-				streams: ["sessions"],
-				timeScopableStreams: ["sessions"],
+				streams: ["sessions", "messages"],
+				timeScopableStreams: ["messages"],
 			},
 			deviceId: "device-1",
 			deviceToken: "device-token",
@@ -548,10 +547,20 @@ test("claude_code: a declared `since` does not prune a file by its mtime — eve
 		assert.equal(
 			harness.ingestedRecords.some(
 				(record) =>
+					record.stream === "sessions" &&
 					record.record_key === "44444444-4444-4444-8444-444444444444",
 			),
 			true,
-			"a file with an ancient mtime must still be opened, scanned, and its session emitted — mtime is not a discovery gate for claude_code",
+			"a file with an ancient mtime must still be opened, scanned, and its session emitted",
+		);
+		assert.equal(
+			harness.ingestedRecords.some(
+				(record) =>
+					record.stream === "messages" &&
+					record.record_key === "cccccccc-4444-4444-8444-444444444444",
+			),
+			false,
+			"the time-scoped messages stream has no declared runtime time field, so it fails closed",
 		);
 	} finally {
 		await harness.close();

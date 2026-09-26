@@ -1019,6 +1019,21 @@ test("isInTimeRange: since / until half-open interval [since, until)", () => {
 	assert.equal(isInTimeRange("2024-03-01T00:00:00.000Z", range), false);
 });
 
+test("isInTimeRange: compares offset bounds by instant", () => {
+	assert.equal(
+		isInTimeRange("2026-05-03T00:00:00Z", {
+			since: "2026-05-03T05:30:00+05:30",
+		}),
+		true,
+	);
+	assert.equal(
+		isInTimeRange("2026-05-02T23:59:59Z", {
+			until: "2026-05-02T17:00:00-07:00",
+		}),
+		true,
+	);
+});
+
 test("isInTimeRange: only-since / only-until", () => {
 	assert.equal(
 		isInTimeRange("2024-01-15T00:00:00.000Z", {
