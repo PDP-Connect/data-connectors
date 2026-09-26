@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/reddit",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/reddit",
+		"display": {
+			"name": "Reddit"
+		}
+	},
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.2.2",
+	"version": "0.2.3",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",

@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/usaa",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/usaa",
+		"display": {
+			"name": "USAA"
+		}
+	},
 	"connector_key": "usaa",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "USAA",
 	"runtime_requirements": {
 		"bindings": {
@@ -123,7 +129,7 @@
 				"label": "Your USAA account balances (daily)",
 				"detail": "Daily snapshot of balance and available balance (cents). Each record covers one calendar day for one account."
 			},
-			"semantics": "append",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
@@ -546,7 +552,7 @@
 				"label": "Your credit card balances (daily)",
 				"detail": "Daily snapshot of current balance, available credit, cash rewards (cents), and the cycle billing status / minimum-payment-met flag. Each record covers one calendar day for one card."
 			},
-			"semantics": "append",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {

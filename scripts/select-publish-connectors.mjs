@@ -128,7 +128,7 @@ function isFirstRootLayoutTransition(before, after, cwd) {
     readJsonAtCommit(after, INDEX_PATH, { cwd }) !== null);
 }
 
-export function selectChangedConnectors({
+export async function selectChangedConnectors({
   before,
   after,
   cwd = process.cwd(),
@@ -144,17 +144,18 @@ export function selectChangedConnectors({
   const beforeVersions = readCommitVersions(before ?? null, connectors, { cwd });
   const afterVersions = readCommitVersions(after, connectors, { cwd });
 
-  return connectors.flatMap(({ manifest, connectorKey }) => {
+  const selected = [];
+  for (const { manifest, connectorKey } of connectors) {
     const beforeVersion = beforeVersions.get(connectorKey);
     const afterVersion = afterVersions.get(connectorKey);
-    if (afterVersion === null) return [];
+    if (afterVersion === null) continue;
 
     if (beforeVersion === afterVersion) {
       let beforeHash;
       let afterHash;
       try {
-        beforeHash = artifactInputHash({ commit: before, manifest, cwd });
-        afterHash = artifactInputHash({ commit: after, manifest, cwd });
+        beforeHash = await artifactInputHash({ commit: before, manifest, cwd });
+        afterHash = await artifactInputHash({ commit: after, manifest, cwd });
       } catch (error) {
         if (error instanceof ArtifactInputError) {
           throw new PublishSelectionError(error.message);
@@ -166,10 +167,11 @@ export function selectChangedConnectors({
           `${connectorKey} shipped artifact content changed without a version bump; bump the manifest and connector-index.json version before publishing`,
         );
       }
-      return [];
+      continue;
     }
-    return [{ connector: connectorKey, manifest, version: afterVersion }];
-  });
+    selected.push({ connector: connectorKey, manifest, version: afterVersion });
+  }
+  return selected;
 }
 
 function connectorReference(owner, connector, version) {
@@ -249,7 +251,7 @@ async function main() {
     process.env.AFTER_SHA,
     process.cwd(),
   );
-  const candidates = selectChangedConnectors({
+  const candidates = await selectChangedConnectors({
     before: process.env.BEFORE_SHA ?? null,
     after: process.env.AFTER_SHA,
   });

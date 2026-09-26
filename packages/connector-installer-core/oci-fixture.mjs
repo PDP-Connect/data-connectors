@@ -33,6 +33,7 @@ import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildSourceDeclaration } from "./source-declaration.mjs";
 
 export const PINNED_IDENTITY =
   "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main";
@@ -397,6 +398,7 @@ export function publishArtifact(
     assetsBytes: assetsBytesOverride = null,
     tamperLayer = null,
     configOverrides = {},
+    sourceDeclarationOverride = null,
   } = {}
 ) {
   const resolvedConnectorId =
@@ -407,9 +409,22 @@ export function publishArtifact(
     version,
     protocol_version: protocolVersion,
     display_name: displayName,
+    source: {
+      id: `https://registry.pdpp.dev/sources/${connectorKey.replaceAll("-", "_")}`,
+      display: { name: displayName },
+    },
     runtime_requirements: { bindings: runtimeBindings },
     setup: { modality: setupModality },
     capabilities: { public_listing: { tier } },
+    streams: [
+      {
+        name: "records",
+        semantics: "append_only",
+        schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        primary_key: ["id"],
+        selection: { fields: true, resources: true },
+      },
+    ],
     ...(withAssets ? { brand: { icon: "icons/ynab.svg" } } : {}),
   };
   const profileBytes = canonicalJson(profile);
@@ -421,6 +436,12 @@ export function publishArtifact(
   const assetsBytes = withAssets
     ? (assetsBytesOverride ?? tarball({ "icons/ynab.svg": "<svg/>\n" }))
     : null;
+  // A real normative SourceDeclaration by default, derived the same way the
+  // publisher's builder derives one, so tests exercising the happy path
+  // exercise the real shape. `sourceDeclarationOverride` lets a negative test
+  // substitute an invalid object without every other fixture caller having to
+  // know what an invalid one looks like.
+  const sourceDeclarationBytes = canonicalJson(sourceDeclarationOverride ?? buildSourceDeclaration([profile]));
   const provenanceBytes = canonicalJson({ connector_key: connectorKey, version });
 
   // Contract: config.entrypoint is artifact-wide (`code/<member>`), while the
@@ -432,6 +453,7 @@ export function publishArtifact(
     version,
     protocol_version: protocolVersion,
     profile_digest: sha256(profileBytes),
+    source_declaration_digest: sha256(sourceDeclarationBytes),
     entrypoint: "code/collection-profile.mjs",
     entrypoint_kind: "import-safe",
     exports: ["collect"],
@@ -472,6 +494,7 @@ export function publishArtifact(
       ? [layer(assetsBytes, "application/vnd.pdpp.connector.assets.v1.tar+gzip", "assets.tar.gz")]
       : []),
     layer(licensesBytes, "application/vnd.pdpp.connector.licenses.v1.tar+gzip", "licenses.tar.gz"),
+    layer(sourceDeclarationBytes, "application/vnd.pdpp.connector.source-declaration.v1+json", "source-declaration.json"),
     layer(provenanceBytes, "application/vnd.pdpp.connector.provenance.v1+json", "provenance.json"),
     ...extraLayers,
   ];

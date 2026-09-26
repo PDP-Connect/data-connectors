@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/heb",
+		"display": {
+			"name": "H-E-B"
+		}
+	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.5.9",
+	"version": "0.5.10",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -359,7 +365,8 @@
 			},
 			"primary_key": ["id"],
 			"selection": {
-				"fields": true
+				"fields": true,
+				"resources": false
 			},
 			"incremental": false,
 			"query": {
@@ -530,7 +537,8 @@
 				}
 			],
 			"selection": {
-				"fields": true
+				"fields": true,
+				"resources": false
 			},
 			"incremental": true,
 			"query": {

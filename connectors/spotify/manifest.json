@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/spotify",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/spotify",
+		"display": {
+			"name": "Spotify"
+		}
+	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",

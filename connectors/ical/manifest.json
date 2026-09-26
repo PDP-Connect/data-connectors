@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/ical",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/ical",
+		"display": {
+			"name": "Calendar (iCal)"
+		}
+	},
 	"connector_key": "ical",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Calendar (iCal)",
 	"brand": {
 		"icon": "icon.svg",

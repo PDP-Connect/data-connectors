@@ -1,6 +1,12 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-messages",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/google_messages",
+		"display": {
+			"name": "Google Messages"
+		}
+	},
 	"connector_key": "google-messages",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
 	"version": "0.1.0",

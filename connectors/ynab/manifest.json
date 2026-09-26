@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/ynab",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/ynab",
+		"display": {
+			"name": "YNAB"
+		}
+	},
 	"connector_key": "ynab",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-	"version": "0.3.2",
+	"version": "0.3.3",
 	"display_name": "YNAB",
 	"runtime_requirements": {
 		"bindings": {
@@ -304,7 +310,7 @@
 				"label": "Account balances (daily)",
 				"detail": "Daily snapshot of balance, cleared_balance, and uncleared_balance (YNAB milliunits). Each record covers one calendar day for one account."
 			},
-			"semantics": "append",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {

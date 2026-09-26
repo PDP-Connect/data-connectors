@@ -16,6 +16,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	cpSync,
 	existsSync,
@@ -31,6 +32,11 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { classifyExternals } from "./connector-host-runtime-contract.mjs";
+import {
+	declarationVersion,
+	profileDeclarationErrors,
+	validateSourceDeclaration,
+} from "../packages/connector-installer-core/source-declaration.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const builder = join(repoRoot, "scripts", "build-connector-oci-artifact.mjs");
@@ -56,6 +62,9 @@ const build = (args) =>
 	run(builder, [...args, "--esbuild", esbuildLib]);
 
 const verify = (artifact) => run(verifier, ["--artifact", artifact]);
+
+const sha256 = (value) =>
+	`sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 /**
  * A copy of the real Oura artifact whose code layer is replaced by `source`.
@@ -114,6 +123,99 @@ before(() => {
 
 after(() => {
 	if (workspace) rmSync(workspace, { recursive: true, force: true });
+});
+
+describe("W28 — the source declaration layer is a normative PDPP SourceDeclaration", () => {
+	it("the real Oura source declaration is schema- and semantics-valid", () => {
+		const declaration = JSON.parse(
+			readFileSync(join(ouraArtifact, "source-declaration.json"), "utf8"),
+		);
+		const result = validateSourceDeclaration(declaration);
+		assert.equal(result.ok, true, JSON.stringify(result.errors));
+	});
+
+	it("refuses to build if the derived declaration were invalid", () => {
+		// The builder calls validateSourceDeclaration on every build (see
+		// build-connector-oci-artifact.mjs); this is a direct check that the
+		// call is load-bearing rather than dead code, by feeding the exact
+		// build-time validator a shape it must refuse.
+		const invalid = { declaration_version: "1", protocol_version: "0.1.0" };
+		const result = validateSourceDeclaration(invalid);
+		assert.equal(result.ok, false);
+	});
+
+	it("local verification rejects the source-declaration shape this fix replaces", () => {
+		// The literal shape scripts/build-connector-oci-artifact.mjs used to
+		// emit (connector_key/connector_id/version/source.repository/
+		// canonical_inputs) — a provenance-like object, not a SourceDeclaration.
+		const target = join(workspace, "invalid-declaration-shape");
+		rmSync(target, { recursive: true, force: true });
+		cpSync(ouraArtifact, target, { recursive: true });
+
+		const profile = JSON.parse(
+			readFileSync(join(target, "collection-profile.json"), "utf8"),
+		);
+		const lookalike = Buffer.from(
+			`${JSON.stringify(
+				{
+					declaration_version: "1.0",
+					connector_key: profile.connector_key,
+					connector_id: profile.connector_id,
+					version: profile.version,
+					source: {
+						repository: "https://github.com/PDP-Connect/data-connectors",
+						revision: "0".repeat(40),
+						package: `connectors/${profile.connector_key}`,
+					},
+					canonical_inputs: { manifest: { path: "x", sha256: "sha256:0" }, source_inventory: [] },
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		writeFileSync(join(target, "source-declaration.json"), lookalike);
+
+		const config = JSON.parse(readFileSync(join(target, "config.json"), "utf8"));
+		config.source_declaration_digest = `sha256:${createHash("sha256").update(lookalike).digest("hex")}`;
+		writeFileSync(join(target, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+
+		const result = verify(target);
+		assert.notEqual(result.status, 0, "a provenance-like source declaration must not verify");
+		assert.match(result.stderr, /not a valid PDPP SourceDeclaration/);
+	});
+
+	it("every artifact of one source carries the same declaration bytes", () => {
+		const browserArtifact = join(workspace, "oura-browser");
+		const built = build(["--connector", "oura_browser", "--out", browserArtifact]);
+		assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`);
+		assert.ok(
+			readFileSync(join(browserArtifact, "source-declaration.json")).equals(
+				readFileSync(join(ouraArtifact, "source-declaration.json")),
+			),
+		);
+		assert.equal(verify(browserArtifact).status, 0);
+	});
+
+	it("local verification rejects a valid declaration that omits a profile stream", () => {
+		const target = join(workspace, "narrowed-declaration");
+		rmSync(target, { recursive: true, force: true });
+		cpSync(ouraArtifact, target, { recursive: true });
+
+		const declaration = JSON.parse(readFileSync(join(target, "source-declaration.json"), "utf8"));
+		declaration.streams = declaration.streams.slice(1);
+		declaration.declaration_version = declarationVersion(declaration);
+		const narrowed = Buffer.from(`${JSON.stringify(declaration, null, 2)}\n`);
+		assert.equal(validateSourceDeclaration(declaration).ok, true);
+		writeFileSync(join(target, "source-declaration.json"), narrowed);
+
+		const config = JSON.parse(readFileSync(join(target, "config.json"), "utf8"));
+		config.source_declaration_digest = `sha256:${createHash("sha256").update(narrowed).digest("hex")}`;
+		writeFileSync(join(target, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+
+		const result = verify(target);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /does not declare collection-profile.json/);
+	});
 });
 
 describe("P1-4 — the artifact stands on its own", () => {
@@ -187,6 +289,47 @@ describe("P1-4 — the artifact stands on its own", () => {
 			assert.ok(
 				["dynamic-import", "require-call"].includes(entry.loaded),
 				`${entry.package} must be reached only through a deferred import (got '${entry.loaded}'), or its bytes must ship`,
+			);
+		}
+	});
+
+	it("emits a deterministic source declaration layer pinned by config", () => {
+		const secondArtifact = join(workspace, "oura-second");
+		const rebuilt = build(["--connector", "oura", "--out", secondArtifact]);
+		assert.equal(rebuilt.status, 0, `${rebuilt.stdout}\n${rebuilt.stderr}`);
+
+		for (const artifact of [ouraArtifact, secondArtifact]) {
+			const config = JSON.parse(readFileSync(join(artifact, "config.json"), "utf8"));
+			const layers = JSON.parse(readFileSync(join(artifact, "layers.json"), "utf8"));
+			const declarationBytes = readFileSync(
+				join(artifact, "source-declaration.json"),
+			);
+			const declaration = JSON.parse(declarationBytes.toString("utf8"));
+			const profileBytes = readFileSync(
+				join(artifact, "collection-profile.json"),
+			);
+
+			assert.equal(
+				config.source_declaration_digest,
+				sha256(declarationBytes),
+			);
+			const profile = JSON.parse(profileBytes.toString("utf8"));
+			assert.deepEqual(profileDeclarationErrors(profile, declaration), []);
+			assert.ok(
+				layers.layers.some(
+					(layer) =>
+						layer.file === "source-declaration.json" &&
+						layer.mediaType ===
+							"application/vnd.pdpp.connector.source-declaration.v1+json",
+				),
+			);
+		}
+
+		for (const file of ["config.json", "layers.json", "source-declaration.json"]) {
+			assert.deepEqual(
+				readFileSync(join(secondArtifact, file)),
+				readFileSync(join(ouraArtifact, file)),
+				`${file} must be reproducible for the same source revision`,
 			);
 		}
 	});

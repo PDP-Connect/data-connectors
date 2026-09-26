@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/claude_code",
+		"display": {
+			"name": "Claude Code"
+		}
+	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",

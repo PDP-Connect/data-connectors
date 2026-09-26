@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/apple-health",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/apple_health",
+		"display": {
+			"name": "Apple Health"
+		}
+	},
 	"connector_key": "apple-health",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Apple Health",
 	"brand": {
 		"icon": "icon.svg",

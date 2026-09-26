@@ -69,6 +69,9 @@ export { fetchCatalog } from "./oci-catalog.mjs";
 
 export const DEFAULT_CONNECTOR_INDEX_URL =
   "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
+// Where an OCI install writes the artifact's SourceDeclaration layer, relative
+// to the connector's collection-profile directory.
+export const SOURCE_DECLARATION_PATH = "source-declaration.json";
 export const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
 export const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY =
@@ -909,6 +912,10 @@ async function fetchOciArtifact(entry, options = {}) {
   const configBytes = await fetchBlob({ ...transport, digest: manifest.config.digest });
   const profileBytes = await fetchBlob({ ...transport, digest: layers.profile.digest });
   const codeBytes = await fetchBlob({ ...transport, digest: layers.code.digest });
+  const sourceDeclarationBytes = await fetchBlob({
+    ...transport,
+    digest: layers.sourceDeclaration.digest,
+  });
   const provenanceBytes = await fetchBlob({ ...transport, digest: layers.provenance.digest });
   const licensesBytes = await fetchBlob({ ...transport, digest: layers.licenses.digest });
   const assetsBytes = layers.assets
@@ -917,12 +924,14 @@ async function fetchOciArtifact(entry, options = {}) {
 
   let config;
   let profile;
+  let sourceDeclaration;
   try {
     config = JSON.parse(configBytes.toString("utf8"));
     profile = JSON.parse(profileBytes.toString("utf8"));
+    sourceDeclaration = JSON.parse(sourceDeclarationBytes.toString("utf8"));
   } catch (error) {
     throw new OciRegistryError(
-      `Refusing ${reference.repository}: config or profile is not JSON (${error.message})`,
+      `Refusing ${reference.repository}: config, profile, or source declaration is not JSON (${error.message})`,
       "tampered"
     );
   }
@@ -931,6 +940,8 @@ async function fetchOciArtifact(entry, options = {}) {
     config,
     profileBytes,
     profile,
+    sourceDeclarationBytes,
+    sourceDeclaration,
     repository: reference.repository,
   });
 
@@ -1008,6 +1019,10 @@ async function fetchOciArtifact(entry, options = {}) {
     entrypointPath: entry.entrypointPath,
     provenanceBuffer: provenanceBytes,
     provenancePath: entry.provenancePath,
+    // Retained next to the profile so the host can read back the exact
+    // declaration bytes the signed manifest pins.
+    sourceDeclarationBuffer: sourceDeclarationBytes,
+    sourceDeclarationPath: SOURCE_DECLARATION_PATH,
     artifactKind: entry.artifactKind,
     schemaFiles: [],
     assetFiles: [
@@ -1027,6 +1042,7 @@ async function fetchOciArtifact(entry, options = {}) {
       manifest: sha256Digest(profileBytes),
       entrypoint: sha256Digest(entrypointFile.buffer),
       provenance: sha256Digest(provenanceBytes),
+      sourceDeclaration: sha256Digest(sourceDeclarationBytes),
     },
   };
 }
@@ -1264,6 +1280,14 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
       relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
       buffer: resolved.provenanceBuffer,
     },
+    ...(resolved.sourceDeclarationBuffer
+      ? [
+          {
+            relativePath: `${artifactRoot}/${resolved.sourceDeclarationPath}`,
+            buffer: resolved.sourceDeclarationBuffer,
+          },
+        ]
+      : []),
     // Licences and brand assets, which the publisher ships unconditionally
     // because distributing the code requires distributing them (C5.4), so they
     // are written rather than dropped on the floor.
@@ -1489,6 +1513,12 @@ export async function generateLock({
               entrypointSha256: resolved.checksums.entrypoint,
               provenancePath: resolved.entry.provenancePath,
               provenanceSha256: resolved.checksums.provenance,
+              ...(resolved.sourceDeclarationPath
+                ? {
+                    sourceDeclarationPath: resolved.sourceDeclarationPath,
+                    sourceDeclarationSha256: resolved.checksums.sourceDeclaration,
+                  }
+                : {}),
             }
           : { scriptSha256: resolved.checksums.script }),
         sourceTag: resolved.entry.sourceTag ?? resolved.entry.gitRef ?? sourceMeta.sourceTag,
@@ -1600,6 +1630,8 @@ export async function installFromLock({
         registry: artifact.oci.registry,
         repository: artifact.oci.repository,
         digest: artifact.oci.digest,
+        sourceDeclarationPath: `collection-profiles/${artifact.connectorId}/${artifact.sourceDeclarationPath}`,
+        sourceDeclarationSha256: artifact.checksums.sourceDeclaration,
       })),
   };
 }
@@ -1642,5 +1674,24 @@ export async function verifyInstalled({
     expectedCount: writes.length,
     missing,
     mismatched,
+    // The declaration digest each OCI artifact's signed config pins, taken
+    // from the layer this call just re-fetched and checked against that
+    // config, not from the installed file. A host passes this value through;
+    // `installedMatches` says whether the file on disk still has those bytes.
+    sourceDeclarations: resolved
+      .filter((artifact) => artifact.oci && artifact.sourceDeclarationPath)
+      .map((artifact) => {
+        const sourceDeclarationPath = `collection-profiles/${artifact.connectorId}/${artifact.sourceDeclarationPath}`;
+        return {
+          connectorId: artifact.connectorId,
+          version: artifact.version,
+          digest: artifact.oci.digest,
+          sourceDeclarationPath,
+          sourceDeclarationSha256: artifact.checksums.sourceDeclaration,
+          installedMatches:
+            !missing.includes(sourceDeclarationPath) &&
+            !mismatched.includes(sourceDeclarationPath),
+        };
+      }),
   };
 }

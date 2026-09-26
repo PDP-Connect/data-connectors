@@ -18,8 +18,15 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const scriptPath = join(repoRoot, "scripts", "select-publish-connectors.mjs");
 const CONNECTORS = [
   { manifest: "oura", connectorKey: "oura" },
+  { manifest: "oura_browser", connectorKey: "oura_browser" },
   { manifest: "github", connectorKey: "github" },
 ];
+const SOURCES = {
+  oura: "https://registry.pdpp.dev/sources/oura",
+  oura_browser: "https://registry.pdpp.dev/sources/oura",
+  github: "https://registry.pdpp.dev/sources/github",
+};
+const VERSIONS = { oura: "0.1.0", oura_browser: "0.1.0", github: "0.5.1" };
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "select-publish-connectors-"));
@@ -35,14 +42,17 @@ function makeRepo() {
     writeFileSync(join(dir, path), content);
   }
 
-  function writeState(versions) {
+  function writeState(versionChanges, streams = {}) {
+    const versions = { ...VERSIONS, ...versionChanges };
     for (const connector of CONNECTORS) {
       write(
         `connectors/${connector.manifest}/manifest.json`,
         JSON.stringify({
           connector_key: connector.connectorKey,
+          source: { id: SOURCES[connector.connectorKey] },
           version: versions[connector.connectorKey],
           brand: { icon: "icon.svg" },
+          streams: streams[connector.connectorKey] ?? [],
         }),
       );
     }
@@ -72,26 +82,39 @@ function makeRepo() {
   write("package-lock.json", "{}\n");
   write("scripts/build-connector-oci-artifact.mjs", "builder\n");
   write("scripts/connector-host-runtime-contract.mjs", "contract\n");
+  write("packages/connector-installer-core/package.json", "{}\n");
+  write("packages/connector-installer-core/source-declaration.mjs", "declaration builder\n");
+  write("packages/connector-installer-core/pdpp-source-contract.mjs", "source contract\n");
+  write("scripts/source-declaration-members.mjs", "members\n");
+  write("vendor/pdpp-reference-contract/source.ts", "reference contract\n");
+  write(
+    "scripts/connector-publish-allowlist.mjs",
+    `export const CONNECTOR_PUBLISH_INVENTORY = ${JSON.stringify(
+      CONNECTORS.map((connector) => ({ ...connector, exclusionReason: null })),
+    )};\n`,
+  );
   write("packages/polyfill-connectors/package.json", "{}\n");
   write("packages/polyfill-connectors/package-lock.json", "{}\n");
   write("connectors/oura/icon.svg", "oura icon\n");
   write("connectors/github/icon.svg", "github icon\n");
+  write("connectors/oura_browser/icon.svg", "oura browser icon\n");
+  write("connectors/oura_browser/index.ts", "export const ouraBrowser = true;\n");
   write("packages/polyfill-connectors/src/runtime.ts", "export const runtime = 'before';\n");
   write("packages/polyfill-connectors/src/setup.ts", "globalThis.__publishSelectionFixture = 'before';\n");
   write("connectors/oura/index.ts", "import { runtime } from '../../packages/polyfill-connectors/src/runtime.ts'; export { runtime };\n");
   write("connectors/github/index.ts", "import '../../packages/polyfill-connectors/src/setup.ts'; export const github = true;\n");
-  writeState({ oura: "0.1.0", github: "0.5.1" });
+  writeState({});
   const before = commit("before");
-  writeState({ oura: "0.2.0", github: "0.5.1" });
+  writeState({ oura: "0.2.0" });
   const after = commit("bump oura");
   return { dir, before, after, commit, write, writeState };
 }
 
-test("a manifest and generated connector-index version bump is selected", () => {
+test("a manifest and generated connector-index version bump is selected", async () => {
   const repo = makeRepo();
   try {
     assert.deepEqual(
-      selectChangedConnectors({
+      await selectChangedConnectors({
         before: repo.before,
         after: repo.after,
         cwd: repo.dir,
@@ -104,10 +127,10 @@ test("a manifest and generated connector-index version bump is selected", () => 
   }
 });
 
-test("an unchanged connector version is not selected", () => {
+test("an unchanged connector version is not selected", async () => {
   const repo = makeRepo();
   try {
-    const selected = selectChangedConnectors({
+    const selected = await selectChangedConnectors({
       before: repo.before,
       after: repo.after,
       cwd: repo.dir,
@@ -119,12 +142,12 @@ test("an unchanged connector version is not selected", () => {
   }
 });
 
-test("shipped source changes without a version bump are refused", () => {
+test("shipped source changes without a version bump are refused", async () => {
   const repo = makeRepo();
   try {
     repo.write("packages/polyfill-connectors/src/runtime.ts", "export const runtime = 'after';\n");
     const after = repo.commit("change shipped source");
-    assert.throws(
+    await assert.rejects(
       () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed.*bump the manifest and connector-index\.json version/.test(error.message),
     );
@@ -133,12 +156,12 @@ test("shipped source changes without a version bump are refused", () => {
   }
 });
 
-test("side-effect imported source changes are refused", () => {
+test("side-effect imported source changes are refused", async () => {
   const repo = makeRepo();
   try {
     repo.write("packages/polyfill-connectors/src/setup.ts", "globalThis.__publishSelectionFixture = 'after';\n");
     const after = repo.commit("change side-effect source");
-    assert.throws(
+    await assert.rejects(
       () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       (error) => error instanceof PublishSelectionError && /github shipped artifact content changed/.test(error.message),
     );
@@ -147,12 +170,12 @@ test("side-effect imported source changes are refused", () => {
   }
 });
 
-test("builder toolchain metadata changes are refused without a version bump", () => {
+test("builder toolchain metadata changes are refused without a version bump", async () => {
   const repo = makeRepo();
   try {
     repo.write("package.json", "{\"build\":\"after\"}\n");
     const after = repo.commit("change builder metadata");
-    assert.throws(
+    await assert.rejects(
       () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
     );
@@ -161,13 +184,13 @@ test("builder toolchain metadata changes are refused without a version bump", ()
   }
 });
 
-test("an unrelated root file does not select a connector", () => {
+test("an unrelated root file does not select a connector", async () => {
   const repo = makeRepo();
   try {
     repo.write("README.md", "unrelated\n");
     const after = repo.commit("change readme");
     assert.deepEqual(
-      selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+      await selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       [],
     );
   } finally {
@@ -175,13 +198,13 @@ test("an unrelated root file does not select a connector", () => {
   }
 });
 
-test("an unreachable connector test does not select its connector", () => {
+test("an unreachable connector test does not select its connector", async () => {
   const repo = makeRepo();
   try {
     repo.write("connectors/oura/index.test.ts", "throw new Error('test only');\n");
     const after = repo.commit("change unreachable test");
     assert.deepEqual(
-      selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+      await selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       [],
     );
   } finally {
@@ -189,14 +212,14 @@ test("an unreachable connector test does not select its connector", () => {
   }
 });
 
-test("a shared source change selects only its importing connector when versioned", () => {
+test("a shared source change selects only its importing connector when versioned", async () => {
   const repo = makeRepo();
   try {
     repo.write("packages/polyfill-connectors/src/runtime.ts", "export const runtime = 'after';\n");
-    repo.writeState({ oura: "0.3.0", github: "0.5.1" });
+    repo.writeState({ oura: "0.3.0" });
     const after = repo.commit("version shipped oura source");
     assert.deepEqual(
-      selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+      await selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
       [{ connector: "oura", manifest: "oura", version: "0.3.0" }],
     );
   } finally {
@@ -204,7 +227,46 @@ test("a shared source change selects only its importing connector when versioned
   }
 });
 
-test("the layout transition skips once and later versioned releases select normally", () => {
+test("a sibling-only manifest change selects every member of the shared source", async () => {
+  const repo = makeRepo();
+  try {
+    const sleep = [{ name: "sleep" }];
+    repo.writeState({ oura: "0.2.0", oura_browser: "0.1.0" }, { oura_browser: sleep });
+    const unversioned = repo.commit("change only oura_browser streams");
+    await assert.rejects(
+      () => selectChangedConnectors({ before: repo.after, after: unversioned, cwd: repo.dir, connectors: CONNECTORS }),
+      (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
+    );
+
+    repo.writeState({ oura: "0.2.1", oura_browser: "0.1.1" }, { oura_browser: sleep });
+    const versioned = repo.commit("version both oura members");
+    assert.deepEqual(
+      await selectChangedConnectors({ before: repo.after, after: versioned, cwd: repo.dir, connectors: CONNECTORS }),
+      [
+        { connector: "oura", manifest: "oura", version: "0.2.1" },
+        { connector: "oura_browser", manifest: "oura_browser", version: "0.1.1" },
+      ],
+    );
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a source declaration validator change is refused without a version bump", async () => {
+  const repo = makeRepo();
+  try {
+    repo.write("packages/connector-installer-core/source-declaration.mjs", "declaration builder changed\n");
+    const after = repo.commit("change declaration builder");
+    await assert.rejects(
+      () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+      (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
+    );
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("the layout transition skips once and later versioned releases select normally", async () => {
   const repo = makeRepo();
   try {
     const oldIndex = "packages/polyfill-connectors/connector-index.json";
@@ -213,14 +275,14 @@ test("the layout transition skips once and later versioned releases select norma
     rmSync(join(repo.dir, oldIndex));
     const cut = repo.commit("remove old layout");
     assert.deepEqual(
-      selectChangedConnectors({ before: beforeMove, after: cut, cwd: repo.dir, connectors: CONNECTORS }),
+      await selectChangedConnectors({ before: beforeMove, after: cut, cwd: repo.dir, connectors: CONNECTORS }),
       [],
     );
 
-    repo.writeState({ oura: "0.3.0", github: "0.5.1" });
+    repo.writeState({ oura: "0.3.0" });
     const later = repo.commit("version oura after layout cut");
     assert.deepEqual(
-      selectChangedConnectors({ before: cut, after: later, cwd: repo.dir, connectors: CONNECTORS }),
+      await selectChangedConnectors({ before: cut, after: later, cwd: repo.dir, connectors: CONNECTORS }),
       [{ connector: "oura", manifest: "oura", version: "0.3.0" }],
     );
   } finally {
@@ -228,7 +290,7 @@ test("the layout transition skips once and later versioned releases select norma
   }
 });
 
-test("no changed version emits a clean no-op notice and an empty matrix", () => {
+test("no changed version emits a clean no-op notice and an empty matrix", async () => {
   const outputRoot = mkdtempSync(join(tmpdir(), "select-publish-noop-"));
   try {
     const sha = execFileSync("git", ["rev-parse", "HEAD"], {

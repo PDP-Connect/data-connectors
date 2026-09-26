@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/pocket",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/pocket",
+		"display": {
+			"name": "Pocket"
+		}
+	},
 	"connector_key": "pocket",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Pocket",
 	"runtime_requirements": {
 		"bindings": {

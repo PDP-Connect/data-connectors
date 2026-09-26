@@ -56,6 +56,7 @@
 //
 // `ctLogThreshold` stays at the default too: real Fulcio leaves embed an SCT.
 
+
 import {
   BUNDLE_V01_MEDIA_TYPE,
   BUNDLE_V03_MEDIA_TYPE,
@@ -73,6 +74,7 @@ import {
   isValidDigest,
   sha256Digest,
 } from "./oci-registry.mjs";
+import { profileDeclarationErrors, validateSourceDeclaration } from "./source-declaration.mjs";
 
 // THE PIN IS A REGULAR EXPRESSION, SO IT MUST BE ANCHORED. sigstore matches
 // `certificateIdentityURI` with `signerIdentity.match(policyIdentity)` — an
@@ -106,6 +108,7 @@ export const OCI_LAYER_MEDIA_TYPES = {
   code: "application/vnd.pdpp.connector.code.v1.tar+gzip",
   assets: "application/vnd.pdpp.connector.assets.v1.tar+gzip",
   licenses: "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+  sourceDeclaration: "application/vnd.pdpp.connector.source-declaration.v1+json",
   provenance: "application/vnd.pdpp.connector.provenance.v1+json",
 };
 
@@ -116,7 +119,7 @@ const KNOWN_LAYER_MEDIA_TYPES = new Set(Object.values(OCI_LAYER_MEDIA_TYPES));
 
 // Which layers an artifact cannot be without. `assets` is deliberately absent
 // from this list, and that absence is the thing A-T6 pins.
-const REQUIRED_LAYERS = ["profile", "code", "licenses", "provenance"];
+const REQUIRED_LAYERS = ["profile", "code", "licenses", "sourceDeclaration", "provenance"];
 
 export const DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
@@ -704,7 +707,14 @@ export function indexLayersByMediaType(manifest, { repository = "" } = {}) {
  * consumer that trusts the publisher ran the check is storing them twice for
  * no reason.
  */
-export function assertConfigMatchesProfile({ config, profileBytes, profile, repository = "" }) {
+export function assertConfigMatchesProfile({
+  config,
+  profileBytes,
+  profile,
+  sourceDeclarationBytes = null,
+  sourceDeclaration = null,
+  repository = "",
+}) {
   const profileDigest = sha256Digest(profileBytes);
   if (config?.profile_digest !== profileDigest) {
     throw new OciRegistryError(
@@ -712,6 +722,40 @@ export function assertConfigMatchesProfile({ config, profileBytes, profile, repo
         `but the profile layer hashes to ${profileDigest}`,
       "tampered"
     );
+  }
+
+  if (sourceDeclarationBytes) {
+    const declarationDigest = sha256Digest(sourceDeclarationBytes);
+    if (config?.source_declaration_digest !== declarationDigest) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: config.source_declaration_digest is ${config?.source_declaration_digest}, ` +
+          `but the source declaration layer hashes to ${declarationDigest}`,
+        "tampered"
+      );
+    }
+
+    // The layer must be a normative PDPP SourceDeclaration, not merely
+    // present (schema + semantics)...
+    const declarationValidity = validateSourceDeclaration(sourceDeclaration);
+    if (!declarationValidity.ok) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: source declaration is not a valid PDPP SourceDeclaration: ` +
+          declarationValidity.errors.join("; "),
+        "tampered"
+      );
+    }
+    // ...then that it declares THIS profile's source. The installer holds one
+    // artifact, not the source's other artifacts, so it checks membership:
+    // same source, content-derived version, every profile stream declared
+    // with the same contract.
+    const membershipErrors = profileDeclarationErrors(profile, sourceDeclaration);
+    if (membershipErrors.length > 0) {
+      throw new OciRegistryError(
+        `Refusing ${repository}: source declaration does not declare the profile layer: ` +
+          membershipErrors.join("; "),
+        "tampered"
+      );
+    }
   }
 
   for (const field of ["connector_key", "connector_id", "protocol_version", "version"]) {

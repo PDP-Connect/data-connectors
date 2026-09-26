@@ -31,7 +31,7 @@ import {
   sha256,
   tarball,
 } from "./oci-fixture.mjs";
-import { fetchResolvedArtifact, installFromLock } from "./index.mjs";
+import { fetchResolvedArtifact, installFromLock, verifyInstalled } from "./index.mjs";
 import {
   classifyManifestResponse,
   lookupManifest,
@@ -39,6 +39,7 @@ import {
   resolveVersionToDigest,
 } from "./oci-registry.mjs";
 import { indexLayersByMediaType } from "./oci-verify.mjs";
+import { buildSourceDeclaration } from "./source-declaration.mjs";
 
 /** Options that point installer-core at the fixture registry. */
 function fixtureOptions(registry, signer, overrides = {}) {
@@ -156,7 +157,7 @@ test("A-T1b refuses a lock entry that carries no digest, without contacting the 
 test("A-T1c resolves a tag only for an explicit first pin, and reports the digest", async () => {
   await withRegistry({ challenge: true }, async (registry) => {
     const signer = createSigner();
-    const { digest } = publishArtifact(registry, { signer });
+    const { digest, config } = publishArtifact(registry, { signer });
     const installRoot = mkdtempSync(join(tmpdir(), "oci-firstpin-"));
 
     try {
@@ -177,8 +178,49 @@ test("A-T1c resolves a tag only for an explicit first pin, and reports the diges
           registry: registry.registry,
           repository: "pdp-connect/connector/ynab",
           digest,
+          sourceDeclarationPath: "collection-profiles/ynab-pdpp/source-declaration.json",
+          sourceDeclarationSha256: config.source_declaration_digest,
         },
       ]);
+      // The retained declaration is the layer the signed config pins.
+      const retained = readFileSync(join(installRoot, result.pinned[0].sourceDeclarationPath));
+      assert.equal(sha256(retained), config.source_declaration_digest);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("verifyInstalled reports the signed declaration digest, not the installed file's", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest, config } = publishArtifact(registry, { signer });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-verify-declaration-"));
+    const lock = { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] };
+    const options = { lock, source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer) };
+
+    try {
+      await installFromLock(options);
+      const expected = {
+        connectorId: "ynab-pdpp",
+        version: "0.3.0",
+        digest,
+        sourceDeclarationPath: "collection-profiles/ynab-pdpp/source-declaration.json",
+        sourceDeclarationSha256: config.source_declaration_digest,
+      };
+      const clean = await verifyInstalled(options);
+      assert.equal(clean.ok, true);
+      assert.deepEqual(clean.sourceDeclarations, [{ ...expected, installedMatches: true }]);
+
+      // Tamper with the installed declaration: the reported digest stays the
+      // signed one, and the tampered file is flagged instead of attested.
+      const path = join(installRoot, expected.sourceDeclarationPath);
+      writeFileSync(path, readFileSync(path, "utf8").replace("}", ',"tampered":true}'));
+      const tampered = await verifyInstalled(options);
+      assert.equal(tampered.ok, false);
+      assert.deepEqual(tampered.mismatched, [expected.sourceDeclarationPath]);
+      assert.deepEqual(tampered.sourceDeclarations, [{ ...expected, installedMatches: false }]);
+      assert.notEqual(sha256(readFileSync(path)), config.source_declaration_digest);
     } finally {
       rmSync(installRoot, { recursive: true, force: true });
     }
@@ -506,11 +548,12 @@ test("A-T6 selects layers by media type with assets absent", async () => {
   await withRegistry({}, async (registry) => {
     const signer = createSigner();
 
-    // With no brand icon there is no assets layer, so licences and provenance
-    // sit at the positions assets and licences would otherwise occupy. A
-    // consumer indexing by position would read the wrong blob for both.
+    // With no brand icon there is no assets layer, so licences, the source
+    // declaration and provenance sit at the positions assets, licences and the
+    // source declaration would otherwise occupy. A consumer indexing by
+    // position would read the wrong blob for all three.
     const without = publishArtifact(registry, { signer, withAssets: false });
-    assert.equal(without.manifest.layers.length, 4);
+    assert.equal(without.manifest.layers.length, 5);
 
     const plain = await fetchResolvedArtifact(
       null,
@@ -524,7 +567,7 @@ test("A-T6 selects layers by media type with assets absent", async () => {
     assert.match(plain.entrypointBuffer.toString("utf8"), /export const collect/);
 
     const withAssets = publishArtifact(registry, { signer, withAssets: true, version: "0.4.0" });
-    assert.equal(withAssets.manifest.layers.length, 5);
+    assert.equal(withAssets.manifest.layers.length, 6);
     assert.equal(
       withAssets.manifest.layers[2].mediaType,
       "application/vnd.pdpp.connector.assets.v1.tar+gzip"
@@ -626,6 +669,96 @@ test("A-T8 refuses when config.profile_digest or any of the four cross-checked f
       );
     });
   }
+});
+
+test("W28 refuses an artifact whose source declaration is a provenance-like object rather than a normative PDPP SourceDeclaration", async () => {
+  const signer = createSigner();
+
+  // The exact shape scripts/build-connector-oci-artifact.mjs used to emit
+  // before this fix — connector_key/connector_id/version/source.repository/
+  // canonical_inputs instead of protocol_version/source/publisher/display/
+  // streams.
+  const provenanceLookalike = {
+    declaration_version: "1.0",
+    connector_key: "ynab",
+    connector_id: "https://github.com/PDP-Connect/data-connectors/connector/ynab",
+    version: "0.3.0",
+    source: {
+      repository: "https://github.com/PDP-Connect/data-connectors",
+      revision: "0".repeat(40),
+      package: "connectors/ynab",
+    },
+    canonical_inputs: { manifest: { path: "x", sha256: "sha256:0" }, source_inventory: [] },
+  };
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, {
+      signer,
+      sourceDeclarationOverride: provenanceLookalike,
+    });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /not a valid PDPP SourceDeclaration/);
+        return true;
+      },
+      "a provenance-like source declaration must refuse the install"
+    );
+  });
+});
+
+test("refuses a valid source declaration that declares another source", async () => {
+  const signer = createSigner();
+  const other = buildSourceDeclaration([
+    {
+      connector_key: "whoop",
+      source: { id: "https://registry.pdpp.dev/sources/whoop", display: { name: "WHOOP" } },
+      streams: [
+        {
+          name: "records",
+          semantics: "append_only",
+          schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          primary_key: ["id"],
+          selection: { fields: true, resources: true },
+        },
+      ],
+    },
+  ]);
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, { signer, sourceDeclarationOverride: other });
+
+    await assert.rejects(
+      () =>
+        fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /does not declare the profile layer: source\.id/);
+        return true;
+      }
+    );
+  });
+});
+
+test("W28 accepts a real, normative PDPP SourceDeclaration derived from the profile", async () => {
+  const signer = createSigner();
+
+  await withRegistry({}, async (registry) => {
+    const { digest } = publishArtifact(registry, { signer });
+
+    const resolved = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer)
+    );
+    // fetchResolvedArtifact does not surface the parsed declaration on its
+    // return value today, so this is a proxy for "assertConfigMatchesProfile
+    // accepted it": a real derived declaration installs cleanly at all.
+    assert.ok(resolved.manifest);
+  });
 });
 
 test("A-T9 refuses unsafe archive members by type as well as name, and cleans up temp dirs", async () => {

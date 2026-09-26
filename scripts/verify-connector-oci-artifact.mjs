@@ -41,6 +41,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	buildSourceDeclaration,
+	profileDeclarationErrors,
+	serializeSourceDeclaration,
+	validateSourceDeclaration,
+} from "../packages/connector-installer-core/source-declaration.mjs";
+import { sourceDeclarationMembers } from "./source-declaration-members.mjs";
 
 // Deliberately no reference to packages/polyfill-connectors: the verifier must
 // not be able to reach the publisher's installed dependency tree, because
@@ -275,6 +282,10 @@ function main() {
 	);
 	const profileBytes = readFileSync(join(artifactRoot, "collection-profile.json"));
 	const profile = JSON.parse(profileBytes);
+	const sourceDeclarationBytes = readFileSync(
+		join(artifactRoot, "source-declaration.json"),
+	);
+	const sourceDeclaration = JSON.parse(sourceDeclarationBytes);
 
 	// 1. Config/profile cross-check.
 	if (config.profile_digest !== sha256(profileBytes)) {
@@ -282,21 +293,52 @@ function main() {
 			`config.profile_digest ${config.profile_digest} does not match the profile layer ${sha256(profileBytes)}`,
 		);
 	}
+	if (config.source_declaration_digest !== sha256(sourceDeclarationBytes)) {
+		throw new Error(
+			`config.source_declaration_digest ${config.source_declaration_digest} does not match the source declaration layer ${sha256(sourceDeclarationBytes)}`,
+		);
+	}
 	// `version` is in this list because the builder copies the profile layer
 	// byte-for-byte while accepting a `--version` override: without this check a
 	// config claiming 9.9.9 verifies happily beside a profile saying 0.1.0, and
 	// the artifact carries two answers to "which version is this?" under one digest.
-	for (const field of [
-		"connector_key",
-		"connector_id",
-		"protocol_version",
-		"version",
-	]) {
+	for (const field of ["connector_key", "connector_id", "version"]) {
 		if (config[field] !== profile[field]) {
 			throw new Error(
 				`config.${field} is '${config[field]}' but the profile says '${profile[field]}'`,
 			);
 		}
+	}
+	if (config.protocol_version !== profile.protocol_version) {
+		throw new Error(
+			`config.protocol_version is '${config.protocol_version}' but the profile says '${profile.protocol_version}'`,
+		);
+	}
+
+	// 1b. The source declaration is a normative PDPP SourceDeclaration, not
+	// merely present. Schema and semantics first...
+	const declarationValidity = validateSourceDeclaration(sourceDeclaration);
+	if (!declarationValidity.ok) {
+		throw new Error(
+			`source-declaration.json is not a valid PDPP SourceDeclaration:\n  - ${declarationValidity.errors.join("\n  - ")}`,
+		);
+	}
+	// ...then that it is the declaration of THIS profile's source: the profile
+	// is a member of it, and the bytes are exactly those every artifact of
+	// the source carries, recomputed from this checkout's manifests.
+	const membershipErrors = profileDeclarationErrors(profile, sourceDeclaration);
+	if (membershipErrors.length > 0) {
+		throw new Error(
+			`source-declaration.json does not declare collection-profile.json:\n  - ${membershipErrors.join("\n  - ")}`,
+		);
+	}
+	const expectedBytes = serializeSourceDeclaration(
+		buildSourceDeclaration(sourceDeclarationMembers(profile)),
+	);
+	if (!sourceDeclarationBytes.equals(expectedBytes)) {
+		throw new Error(
+			"source-declaration.json is not the source declaration built from this checkout's manifests",
+		);
 	}
 
 	// 2. Archive safety, on every tarball present.
@@ -363,6 +405,7 @@ function main() {
 
 		console.log(`${config.connector_key}@${config.version} verified`);
 		console.log(`  profile digest cross-check   ok`);
+		console.log(`  source declaration valid     ok`);
 		console.log(`  archive members safe         ok`);
 		console.log(`  version agrees with profile  ok`);
 		console.log(`  entrypoint ${config.entrypoint}`);

@@ -1,9 +1,15 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/youtube-takeout",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/youtube",
+		"display": {
+			"name": "YouTube"
+		}
+	},
 	"connector_key": "youtube-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "YouTube Takeout",
 	"brand": {
 		"icon": "icon.svg",
@@ -313,7 +319,8 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "watched_at",
-			"selection": { "fields": true, "resources": true, "time_range": true },
+			"consent_time_field": "watched_at",
+			"selection": { "fields": true, "resources": true },
 			"incremental": true,
 			"query": {
 				"search": {
