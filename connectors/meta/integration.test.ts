@@ -16,7 +16,9 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { chromium } from "playwright";
 import type { Page } from "playwright";
 import type {
 	BrowserCollectContext,
@@ -24,7 +26,12 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, scrapeAdvertisers } from "./index.ts";
+import {
+	collectAllStreams,
+	scrapeAdTopics,
+	scrapeAdvertisers,
+	scrapeTargetingCategories,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -53,9 +60,11 @@ function makeFakePage(options: {
 	categoriesAvailable?: boolean;
 	categoryDestinationReached?: boolean;
 	categoryRows?: Array<{ description: string | null; name: string }>;
+	dialogViewAllAfterClick?: "hidden" | "removed" | "stuck";
 	dialogScrapes?: string[][];
 	dialogReached?: boolean[];
 	delayFirstDialogItems?: boolean;
+	positiveEmptyMarkers?: boolean;
 	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
 	navigationFailures?: string[];
@@ -143,10 +152,50 @@ function makeFakePage(options: {
 				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("View all")) {
-				return readiness(true);
+				return readiness(options.dialogViewAllAfterClick !== "stuck");
 			}
 			if (source.includes("advertiser")) {
 				return readiness(true);
+			}
+			if (source.includes("getBoundingClientRect") && source.includes('[role="listitem"]')) {
+				const index = adsListWait - 1;
+				const ready =
+					index < 2
+						? (dialogQueue[0]?.some((item) => item.trim().length > 0) ?? false)
+						: (options.categoryRows?.length ?? 0) > 0;
+				if (index === 0 && ready && options.delayFirstDialogItems) {
+					return new Promise((resolve) => {
+						setTimeout(() => {
+							firstDialogItemsReady = true;
+							resolve(true);
+						}, 5);
+					});
+				}
+				if (ready) {
+					return readiness(true);
+				}
+				if (options.waitEmptySettle) {
+					return new Promise((_, reject) => {
+						setTimeout(
+							() => reject(new Error("Timeout while waiting for fake DOM")),
+							waitOptions?.timeout ?? 0,
+						);
+					});
+				}
+				return readiness(false);
+			}
+			if (source.includes("getBoundingClientRect") && source.includes('[role="list"]')) {
+				const index = adsListWait++;
+				if (index < 2) {
+					const reached = dialogReachedQueue[0];
+					const ready = reached ?? dialogQueue[0] !== undefined;
+					if (!ready) {
+						dialogQueue.shift();
+						dialogReachedQueue.shift();
+					}
+					return readiness(ready);
+				}
+				return readiness(options.categoryDestinationReached !== false);
 			}
 			if (
 				source.includes('[role="dialog"] [role="list"]') &&
@@ -240,8 +289,24 @@ function makeFakePage(options: {
 			if (fnSource.includes("Categories used to reach you")) {
 				return Promise.resolve(options.categoriesAvailable === true);
 			}
+			if (fnSource.includes("View all") && fnSource.includes("click")) {
+				return Promise.resolve(options.dialogViewAllAfterClick !== undefined);
+			}
 			if (fnSource.includes("View all")) {
 				return Promise.resolve(undefined);
+			}
+			if (fnSource.includes("hasVerifiedEmpty") && fnSource.includes("hasList")) {
+				const hasList = options.categoryDestinationReached !== false;
+				return Promise.resolve({
+					busy: false,
+					hasVerifiedEmpty: (options.categoryRows?.length ?? 0) === 0,
+					hasList,
+					items: hasList ? (options.categoryRows ?? []) : [],
+					reached: hasList,
+				});
+			}
+			if (Array.isArray(arg) && fnSource.includes("dialog?.querySelector('[role=\"list\"]')")) {
+				return Promise.resolve(dialogQueue[0] !== undefined);
 			}
 			if (fnSource.includes("Removed categories")) {
 				return Promise.resolve({
@@ -250,15 +315,39 @@ function makeFakePage(options: {
 				});
 			}
 			if (
+				Array.isArray(arg) &&
+				fnSource.includes("labels.includes") &&
+				!fnSource.includes("const values")
+			) {
+				return Promise.resolve(options.positiveEmptyMarkers === true);
+			}
+			if (fnSource.includes("visibleItems.every")) {
+				const items = dialogQueue[0];
+				if (items === undefined) {
+					return Promise.resolve(false);
+				}
+				if (items.length === 0) {
+					return Promise.resolve(true);
+				}
+				if (typeof arg === "string") {
+					const excluded = new RegExp(arg, "i");
+					return Promise.resolve(items.every((item) => excluded.test(item)));
+				}
+				return Promise.resolve(false);
+			}
+			if (
 				fnSource.includes("querySelectorAll") &&
 				fnSource.includes("listitem")
 			) {
 				const items = dialogQueue[0];
 				if (dialogScrapeCount++ === 0 && !firstDialogItemsReady) {
-					return Promise.resolve({ items: [], reached: true });
+					return Promise.resolve({ hasVerifiedEmpty: false, items: [], reached: false });
 				}
 				dialogQueue.shift();
+				const hasRows = (items?.length ?? 0) > 0;
+				const hasVerifiedEmpty = !hasRows || (Array.isArray(arg) && options.positiveEmptyMarkers === true);
 				return Promise.resolve({
+					hasVerifiedEmpty,
 					items: items ?? [],
 					reached: dialogReachedQueue.shift() ?? items !== undefined,
 				});
@@ -344,6 +433,13 @@ const EMPTY_POSTS: ScriptedPostsPage = {
 };
 
 // ─── Invariant 1: only requested streams emit ──────────────────────────
+
+test("Meta browser-bound code does not use eval workarounds", async () => {
+	const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+	assert.equal(source.includes("new Function"), false);
+	assert.equal(source.includes("eval("), false);
+	assert.equal(source.includes("globalThis.__name"), false);
+});
 
 test("collectAllStreams: unrequested streams emit nothing", async () => {
 	const harness = makeRecordingEmit(validateRecord);
@@ -702,7 +798,7 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
 	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
-	assert.equal(waitConditions.length, 9);
+	assert.equal(waitConditions.length, 8);
 	assert.ok(
 		waitConditions.some((condition) => condition.includes("advertiser")),
 	);
@@ -737,7 +833,127 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	);
 });
 
-test("collectAllStreams: ads all reached with empty lists emits complete surface coverage", async () => {
+test("collectAllStreams: all positively empty ads surfaces complete without records", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [],
+		dialogScrapes: [[], []],
+		fetchScript: {},
+		positiveEmptyMarkers: true,
+		waitEmptySettle: true,
+		webInfoUser: WEB_INFO_USER,
+	});
+	const requested = new Map([["ads", { name: "ads" }]]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	assert.deepEqual(
+		buildRunSummary(harness.protocolMessages, {
+			connector: "meta",
+			finished_at: EMITTED_AT,
+			started_at: EMITTED_AT,
+			tool_version: "test",
+		}).done.coverage,
+		{ considered: 3, covered: 3, streams: ["ads"] },
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+
+test("collectAllStreams: verified empty ad topics completes ads when other surfaces are unavailable", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: false,
+		dialogReached: [false, true],
+		dialogScrapes: [[], []],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const requested = new Map([["ads", { name: "ads" }]]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["ad_topics"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
+	);
+});
+
+test("collectAllStreams: settled empty advertiser and ad-topic lists complete as verified empty", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -818,7 +1034,7 @@ test("scrapeAdvertisers waits for items that arrive after the list shell", async
 	);
 });
 
-test("scrapeAdvertisers preserves a genuine empty list after the settle window", async () => {
+test("scrapeAdvertisers accepts a settled blank list as verified empty", async () => {
 	const { page, waitTimeouts } = makeFakePage({
 		dialogScrapes: [[]],
 		fetchScript: {},
@@ -836,7 +1052,248 @@ test("scrapeAdvertisers preserves a genuine empty list after the settle window",
 	assert.ok(waitTimeouts.includes(2_500));
 });
 
-test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+test("scrapeAdvertisers rejects visible rows when an advertiser error is present", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
+						<script>
+							document.querySelector('[role="button"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem">Advertiser A</div></div><div role="alert">Some advertisers could not be loaded. Try again.</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdvertisers(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "advertisers",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdvertisers accepts a visible exact empty marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
+						<script>
+							document.querySelector('[role="button"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div>No advertisers</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdvertisers(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "advertisers",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics accepts a settled blank list as verified empty", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics ignores hidden list rows and hidden empty marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list"><div role="listitem" style="display:none">Hidden Topic</div></div><div><span style="display:none">No ad topics</span></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdvertisers keeps busy exact empty marker unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
+						<script>
+							document.querySelector('[role="button"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog" aria-busy="true"><div role="list"></div><div>No advertisers</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdvertisers(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "advertisers",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdvertisers keeps busy rows unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
+						<script>
+							document.querySelector('[role="button"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog" aria-busy="true"><div role="list"><div role="listitem">Advertiser A</div></div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdvertisers(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "advertisers",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics treats settled UI-only rows as verified empty without marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		const startedAt = Date.now();
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		});
+		assert.ok(Date.now() - startedAt >= 2_500);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics accepts UI-only rows with a visible exact empty marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics accepts a visible exact empty marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list"></div><div>No ad topics</div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("collectAllStreams: ads missing a surface emits partial coverage without SKIP_RESULT", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
@@ -890,25 +1347,19 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		}).done.coverage,
 		{ considered: 3, covered: 2, streams: ["ads"] },
 	);
-	const skip = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.stream === "ads",
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
 	);
-	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
-	assert.equal(skip.reason, "ads_surfaces_unavailable");
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["targeting_categories"],
-		surface_steps: [
-			{ surface: "targeting_categories", step: "control_not_found" },
-		],
-	});
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
 		"an unavailable Manage info tab must reject its Playwright-style wait",
 	);
 });
 
-test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
+test("collectAllStreams: dialog without its intended list reports partial coverage when another ads surface is reached", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -943,25 +1394,544 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 
 	await collectAllStreams(harnessCtx, NO_DELAY);
 
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["ad_topics", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
+	);
+});
+
+test("scrapeTargetingCategories keeps hidden View all without new rows unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<button role="button">View all</button>
+						<script>
+							document.querySelector('[role="tab"]').addEventListener('click', () => {});
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem"><span>Category</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>');
+								document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+									event.currentTarget.style.display = 'none';
+								});
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 1);
+	} finally {
+		await browser.close();
+	}
+});
+
+
+test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>');
+								document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+									event.currentTarget.style.display = 'none';
+									document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>');
+								});
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, true);
+		assert.equal(result.items.length, 2);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories waits for rows appended after View all hides", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>');
+								document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+									event.currentTarget.style.display = 'none';
+									setTimeout(() => {
+										document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category B</span><button role="button">Remove</button></div><div role="listitem"><span>Category C</span><button role="button">Remove</button></div>');
+									}, 500);
+								});
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, true);
+		assert.equal(result.items.length, 3);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories ignores hidden stale dialogs before the active categories dialog", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="dialog" style="display:none"><div role="list"><div role="listitem"><span>Stale Category</span><button role="button">Remove</button></div></div></div>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem"><span>Active Category</span><button role="button">Remove</button></div></div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, true);
+		assert.equal(result.items.length, 1);
+		assert.equal(result.items[0]?.name, "Active Category");
+	} finally {
+		await browser.close();
+	}
+});
+
+
+test("scrapeTargetingCategories returns unavailable when the dialog list is replaced by an error during settle", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog" style="min-height:40px"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div></div>');
+								setTimeout(() => { document.querySelector('[role="dialog"]').innerHTML = '<div role="alert">Temporarily unavailable</div>'; }, 300);
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories does not complete while category rows are still busy", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog" aria-busy="true"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>');
+								document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+									event.currentTarget.style.display = 'none';
+									document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category B</span><button role="button">Remove</button></div>');
+									setTimeout(() => {
+										document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category C</span><button role="button">Remove</button></div>');
+										document.querySelector('[role="dialog"]').setAttribute('aria-busy', 'false');
+									}, 3500);
+								});
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+	} finally {
+		await browser.close();
+	}
+});
+
+
+test("scrapeTargetingCategories ignores hidden empty categories marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div style="display:none">No categories</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories ignores visible wrapper with hidden empty text", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div><span style="display:none">No categories</span></div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories treats no-categories alert as unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div role="alert">No categories could not be loaded. Try again.</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories rejects rows when a visible category error is present", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><div role="alert">Some categories could not be loaded. Try again.</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories accepts explicit empty categories marker", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div>No categories</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, true);
+		assert.equal(result.step, "reached_empty");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories keeps blank categories list without empty marker unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("collectAllStreams: category View all ignores hidden page-wide buttons after dialog expansion", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [{ description: null, name: "Category" }],
+		dialogScrapes: [[], []],
+		dialogViewAllAfterClick: "hidden",
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested: new Map([["ads", { name: "ads" }]]),
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+	assert.ok(
+		harness.emitted.some(
+			(record) =>
+				record.stream === "ads" && record.data.kind === "ad_category",
+		),
+	);
+});
+
+
+test("collectAllStreams: category-only ads reach still emits ads unavailable", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [{ description: null, name: "Category" }],
+		dialogReached: [false, false],
+		dialogScrapes: [[], []],
+		dialogViewAllAfterClick: "hidden",
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested: new Map([["ads", { name: "ads" }]]),
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(harnessCtx, NO_DELAY);
+
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
+	);
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
-	assert.ok(
-		skip,
-		"a dialog without its list must not count as a reached surface",
-	);
+	assert.ok(skip);
+	assert.equal(skip.reason, "ads_surfaces_unavailable");
 	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["advertisers"],
+		missing_surfaces: ["advertisers", "ad_topics"],
 		surface_steps: [
 			{ surface: "advertisers", step: "destination_list_not_found" },
-			{ surface: "ad_topics", step: "reached_empty" },
-			{ surface: "targeting_categories", step: "reached_empty" },
+			{ surface: "ad_topics", step: "destination_list_not_found" },
 		],
 	});
 });
 
-test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
+test("collectAllStreams: successful core ads surfaces tolerate missing category destination list", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -996,25 +1966,23 @@ test("collectAllStreams: successful category clicks without a destination list e
 
 	await collectAllStreams(harnessCtx, NO_DELAY);
 
-	const skip = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.stream === "ads",
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["advertisers", "ad_topics"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
 	);
-	assert.ok(
-		skip,
-		"clicking through without a destination list must not count as reached",
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
 	);
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["targeting_categories"],
-		surface_steps: [
-			{ surface: "advertisers", step: "reached_empty" },
-			{ surface: "ad_topics", step: "reached_empty" },
-			{
-				surface: "targeting_categories",
-				step: "destination_list_not_found",
-			},
-		],
-	});
 });
 
 test("collectAllStreams: ads navigation failure reports only a bounded surface step", async () => {
@@ -1033,15 +2001,23 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 
 	await collectAllStreams(ctx, NO_DELAY);
 
-	const skip = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.stream === "ads",
+	assert.deepEqual(
+		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
+		{
+			hydrated_keys: ["advertisers", "targeting_categories"],
+			reference_only: true,
+			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+			state_stream: "ads",
+			stream: "ads",
+			type: "DETAIL_COVERAGE",
+		},
 	);
-	assert.ok(skip);
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["ad_topics"],
-		surface_steps: [{ surface: "ad_topics", step: "navigation_failed" }],
-	});
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
+	);
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["advertiser", "ad_category"],
