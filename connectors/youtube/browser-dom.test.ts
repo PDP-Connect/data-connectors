@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	readChannelAbout,
+	readChannelPage,
 	readOwnAccount,
 	readSubscriptions,
 	readPlaylistLinks,
@@ -61,6 +62,32 @@ test("own channel About fields retain their source text", () => {
 	assert.equal(about.joined_at, "Jan 3, 2020");
 	assert.equal(about.subscriber_count_text, "1.2K subscribers");
 	assert.equal(about.country, "United States");
+});
+
+test("own channel About fields can be read outside legacy renderers", () => {
+	const about = readChannelAbout(
+		dom("<span>Joined Jan 3, 2020</span><span>32 videos</span>"),
+	);
+	assert.equal(about.joined_at, "Jan 3, 2020");
+	assert.equal(about.video_count_text, "32 videos");
+});
+
+test("channel page title skips empty headings before the page header title", () => {
+	const doc = dom(`
+		<link rel="canonical" href="https://www.youtube.com/channel/UCowner">
+		<h1></h1>
+		<h1>   </h1>
+		<yt-page-header-view-model>
+			<div class="yt-page-header-view-model__page-header-title">
+				<h1><span>Real Owner</span></h1>
+			</div>
+		</yt-page-header-view-model>`);
+	Object.defineProperty(doc, "location", {
+		value: new URL("https://www.youtube.com/@owner"),
+		configurable: true,
+	});
+
+	assert.equal(readChannelPage(doc).title, "Real Owner");
 });
 
 test("subscription controls distinguish known false from missing evidence", () => {
