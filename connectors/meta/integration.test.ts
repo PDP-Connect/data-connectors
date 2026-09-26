@@ -321,26 +321,26 @@ function makeFakePage(options: {
 			) {
 				return Promise.resolve(options.positiveEmptyMarkers === true);
 			}
-			if (fnSource.includes("visibleItems.every")) {
+			if (
+				fnSource.includes("visibleItems") &&
+				fnSource.includes("listItems.length")
+			) {
 				const items = dialogQueue[0];
 				if (items === undefined) {
 					return Promise.resolve(false);
 				}
-				if (items.length === 0) {
-					return Promise.resolve(true);
-				}
-				if (typeof arg === "string") {
-					const excluded = new RegExp(arg, "i");
-					return Promise.resolve(items.every((item) => excluded.test(item)));
-				}
-				return Promise.resolve(false);
+				return Promise.resolve(items.length === 0);
 			}
 			if (
 				fnSource.includes("querySelectorAll") &&
 				fnSource.includes("listitem")
 			) {
 				const items = dialogQueue[0];
-				if (dialogScrapeCount++ === 0 && !firstDialogItemsReady) {
+				if (
+					dialogScrapeCount++ === 0 &&
+					options.delayFirstDialogItems &&
+					!firstDialogItemsReady
+				) {
 					return Promise.resolve({ hasVerifiedEmpty: false, items: [], reached: false });
 				}
 				dialogQueue.shift();
@@ -1095,7 +1095,7 @@ test("scrapeAdvertisers accepts a visible exact empty marker", async () => {
 						<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
 						<script>
 							document.querySelector('[role="button"]').addEventListener('click', () => {
-								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div>No advertisers</div></div>');
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list" style="min-height:40px"></div><div>No advertisers</div></div>');
 							});
 						</script>
 					</body></html>`,
@@ -1130,6 +1130,295 @@ test("scrapeAdTopics accepts a settled blank list as verified empty", async () =
 			items: [],
 			reached: true,
 			step: "reached_empty",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps a hidden blank list unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps an ancestor-hidden blank list unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><section style="display:none"><div role="list"></div></section></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps an opacity-hidden blank list unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list" style="opacity:0;min-height:40px"></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps an ancestor-opacity-hidden blank list unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><section style="opacity:0"><div role="list" style="min-height:40px"></div></section></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps a zero-size blank list unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps hidden later list data unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div role="list" style="display:none"><div role="listitem">Fixture topic</div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics collects visible rows when another list row is hidden", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: ["Visible topic"],
+			reached: true,
+			step: null,
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps hidden final-snapshot data unavailable after a visible row won readiness", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="dialog">
+							<div role="list" style="min-height:40px"><div role="listitem" id="visible-topic">Visible topic</div></div>
+							<div role="list" style="display:none"><div role="listitem">Hidden topic</div></div>
+							<div>No ad topics</div>
+							</div>
+							<script>
+								const visibleTopic = document.querySelector('#visible-topic');
+								const text = visibleTopic.textContent;
+								Object.defineProperty(visibleTopic, 'textContent', {
+									get() {
+										setTimeout(() => visibleTopic.remove(), 0);
+										return text;
+									},
+									configurable: true
+								});
+							</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps hidden blank final-snapshot list unavailable after a visible row won readiness", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="dialog">
+							<div role="list" style="min-height:40px"><div role="listitem" id="visible-topic">Visible topic</div></div>
+							<div role="list" style="display:none"></div>
+							<div>No ad topics</div>
+							</div>
+							<script>
+								const visibleTopic = document.querySelector('#visible-topic');
+								const text = visibleTopic.textContent;
+								Object.defineProperty(visibleTopic, 'textContent', {
+									get() {
+										setTimeout(() => visibleTopic.remove(), 0);
+										return text;
+									},
+									configurable: true
+								});
+							</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps semantic loading indicators unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics collects visible rows from later dialog lists", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div role="list"><div role="listitem">Travel</div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: ["Travel"],
+			reached: true,
+			step: null,
 			surface: "ad_topics",
 		});
 	} finally {
@@ -1222,7 +1511,7 @@ test("scrapeAdvertisers keeps busy rows unavailable", async () => {
 	}
 });
 
-test("scrapeAdTopics treats settled UI-only rows as verified empty without marker", async () => {
+test("scrapeAdTopics keeps settled UI-only rows unavailable without marker", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1237,8 +1526,8 @@ test("scrapeAdTopics treats settled UI-only rows as verified empty without marke
 		const startedAt = Date.now();
 		assert.deepEqual(await scrapeAdTopics(page), {
 			items: [],
-			reached: true,
-			step: "reached_empty",
+			reached: false,
+			step: "destination_list_not_found",
 			surface: "ad_topics",
 		});
 		assert.ok(Date.now() - startedAt >= 2_500);
@@ -1247,7 +1536,7 @@ test("scrapeAdTopics treats settled UI-only rows as verified empty without marke
 	}
 });
 
-test("scrapeAdTopics accepts UI-only rows with a visible exact empty marker", async () => {
+test("scrapeAdTopics keeps UI-only rows with an empty marker unavailable", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1261,8 +1550,8 @@ test("scrapeAdTopics accepts UI-only rows with a visible exact empty marker", as
 
 		assert.deepEqual(await scrapeAdTopics(page), {
 			items: [],
-			reached: true,
-			step: "reached_empty",
+			reached: false,
+			step: "destination_list_not_found",
 			surface: "ad_topics",
 		});
 	} finally {
@@ -1277,7 +1566,7 @@ test("scrapeAdTopics accepts a visible exact empty marker", async () => {
 		await page.route("https://accountscenter.instagram.com/**", async (route) => {
 			await route.fulfill({
 				contentType: "text/html",
-				body: '<html><body><div role="dialog"><div role="list"></div><div>No ad topics</div></div></body></html>',
+				body: '<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div>No ad topics</div></div></body></html>',
 				status: 200,
 			});
 		});
@@ -1655,6 +1944,37 @@ test("scrapeTargetingCategories ignores hidden empty categories marker", async (
 	}
 });
 
+test("scrapeTargetingCategories keeps display-none list with empty marker unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list" style="display:none"></div><div>No categories</div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
 test("scrapeTargetingCategories ignores visible wrapper with hidden empty text", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
@@ -1669,6 +1989,37 @@ test("scrapeTargetingCategories ignores visible wrapper with hidden empty text",
 						<script>
 							document.querySelector('[role="link"]').addEventListener('click', () => {
 								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div><span style="display:none">No categories</span></div></div>');
+							});
+						</script>
+					</body></html>`,
+				status: 200,
+			});
+		});
+
+		const result = await scrapeTargetingCategories(page);
+
+		assert.equal(result.reached, false);
+		assert.equal(result.step, "destination_list_not_found");
+		assert.equal(result.items.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeTargetingCategories keeps semantic loading indicator unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+						<script>
+							document.querySelector('[role="link"]').addEventListener('click', () => {
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="progressbar" aria-label="Loading categories"></div><div role="list" style="min-height:40px"></div><div>No categories</div></div>');
 							});
 						</script>
 					</body></html>`,
@@ -1761,7 +2112,7 @@ test("scrapeTargetingCategories accepts explicit empty categories marker", async
 						<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
 						<script>
 							document.querySelector('[role="link"]').addEventListener('click', () => {
-								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list"></div><div>No categories</div></div>');
+								document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list" style="min-height:40px"></div><div>No categories</div></div>');
 							});
 						</script>
 					</body></html>`,

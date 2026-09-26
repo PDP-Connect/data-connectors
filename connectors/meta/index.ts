@@ -671,11 +671,51 @@ async function scrapeDialogListItems(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
 					style.display !== "none" &&
-					style.visibility !== "hidden"
+					style.visibility !== "hidden" &&
+					style.opacity !== "0"
+				);
+			},
+		][0]!;
+		const displayed = [
+			(element: Element): boolean => {
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const style = getComputedStyle(current);
+					if (style.display === "none" || style.visibility === "hidden") {
+						return false;
+					}
+				}
+				return true;
+			},
+		][0]!;
+		const loading = [
+			(element: Element): boolean => {
+				const role = element.getAttribute("role") ?? "";
+				const label = element.getAttribute("aria-label") ?? "";
+				return (
+					displayed(element) &&
+					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
 				);
 			},
 		][0]!;
@@ -688,6 +728,9 @@ async function scrapeDialogListItems(
 		const busy = Boolean(
 			dialog.matches('[aria-busy="true"]') ||
 				dialog.querySelector('[aria-busy="true"]') ||
+				Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-label]')).some(
+					loading,
+				) ||
 				/loading|please wait/i.test(dialog.textContent ?? ""),
 		);
 		const hasError =
@@ -698,8 +741,10 @@ async function scrapeDialogListItems(
 		if (busy || hasError) {
 			return { hasVerifiedEmpty: false, items: [], reached: false };
 		}
-		const list = dialog.querySelector('[role="list"]');
-		if (!list) {
+		const lists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
+			visible,
+		);
+		if (lists.length === 0) {
 			return { hasVerifiedEmpty: false, items: [], reached: false };
 		}
 		const hasVerifiedEmpty = Array.from(dialog.querySelectorAll('*')).some(
@@ -716,18 +761,27 @@ async function scrapeDialogListItems(
 				}
 				return labels.includes(((element as HTMLElement).innerText ?? "").trim());
 			},
-		);
-		const values = Array.from(list.querySelectorAll('[role="listitem"]'))
+			);
+			const listItems = lists.flatMap((list) =>
+				Array.from(list.querySelectorAll('[role="listitem"]')),
+			);
+		const values = listItems
 			.filter(visible)
 			.map((el) => ((el as HTMLElement).innerText ?? "").trim())
 			.filter((t) => t.length > 0);
-		if (values.length > 0) {
-			return {
-				hasVerifiedEmpty,
-				items: values,
-				reached: true,
-			};
-		}
+			if (values.length > 0) {
+				return {
+					hasVerifiedEmpty,
+					items: values,
+					reached: true,
+				};
+			}
+			if (Array.from(dialog.querySelectorAll('[role="list"]')).some((list) => !visible(list))) {
+				return { hasVerifiedEmpty: false, items: [], reached: false };
+			}
+			if (listItems.length > 0) {
+				return { hasVerifiedEmpty: false, items: [], reached: false };
+			}
 		return { hasVerifiedEmpty: true, items: [], reached: true };
 	}, emptyLabels);
 	return {
@@ -741,8 +795,7 @@ async function scrapeDialogListItems(
 }
 
 /** A mounted list is only a shell. Prefer data rows; after a bounded
- * settle, accept a blank list or ad-topic list with only UI rows when
- * busy/error signals are absent. */
+ * settle, accept only a rendered blank list when busy/error signals are absent. */
 async function waitForAdsList(
 	page: Page,
 	excludedItemPattern?: RegExp,
@@ -752,19 +805,36 @@ async function waitForAdsList(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
 					style.display !== "none" &&
-					style.visibility !== "hidden"
+					style.visibility !== "hidden" &&
+					style.opacity !== "0"
 				);
 			},
 		][0]!;
-		const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-			visible,
+			const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
+				visible,
+			);
+		return Boolean(
+			dialog &&
+				Array.from(dialog.querySelectorAll('[role="list"]')).some(visible),
 		);
-		const list = dialog?.querySelector('[role="list"]');
-		return Boolean(list);
 	});
 	if (!shellReady) {
 		return false;
@@ -777,11 +847,52 @@ async function waitForAdsList(
 					(element: Element): boolean => {
 						const rect = element.getBoundingClientRect();
 						const style = getComputedStyle(element);
+						for (
+							let current: Element | null = element;
+							current;
+							current = current.parentElement
+						) {
+							const currentStyle = getComputedStyle(current);
+							if (
+								currentStyle.display === "none" ||
+								currentStyle.visibility === "hidden" ||
+								currentStyle.opacity === "0"
+							) {
+								return false;
+							}
+						}
 						return (
 							rect.width > 0 &&
 							rect.height > 0 &&
 							style.display !== "none" &&
-							style.visibility !== "hidden"
+							style.visibility !== "hidden" &&
+							style.opacity !== "0"
+						);
+					},
+				][0]!;
+				const displayed = [
+					(element: Element): boolean => {
+						for (
+							let current: Element | null = element;
+							current;
+							current = current.parentElement
+						) {
+							const style = getComputedStyle(current);
+							if (style.display === "none" || style.visibility === "hidden") {
+								return false;
+							}
+						}
+						return true;
+					},
+				][0]!;
+				const loading = [
+					(element: Element): boolean => {
+						const role = element.getAttribute("role") ?? "";
+						const label = element.getAttribute("aria-label") ?? "";
+						return (
+							displayed(element) &&
+							(role.toLowerCase() === "progressbar" ||
+								/loading|please wait/i.test(label))
 						);
 					},
 				][0]!;
@@ -792,6 +903,9 @@ async function waitForAdsList(
 					dialog &&
 						(dialog.matches('[aria-busy="true"]') ||
 							dialog.querySelector('[aria-busy="true"]') ||
+							Array.from(
+								dialog.querySelectorAll('[role="progressbar"], [aria-label]'),
+							).some(loading) ||
 							/loading|please wait/i.test(dialog.textContent ?? "")),
 				);
 				const hasError = Boolean(
@@ -804,12 +918,16 @@ async function waitForAdsList(
 				const excludedItemPattern = excludedItemPatternSource
 					? new RegExp(excludedItemPatternSource, "i")
 					: null;
-				const list = dialog?.querySelector('[role="list"]');
+				const lists = dialog
+					? Array.from(dialog.querySelectorAll('[role="list"]')).filter(visible)
+					: [];
 				return Boolean(
-					list &&
+					lists.length > 0 &&
 						!busy &&
 						!hasError &&
-						Array.from(list.querySelectorAll('[role="listitem"]')).some((item) => {
+						lists
+							.flatMap((list) => Array.from(list.querySelectorAll('[role="listitem"]')))
+							.some((item) => {
 							const text = (item.textContent ?? "").trim();
 							return (
 								visible(item) &&
@@ -833,16 +951,56 @@ async function waitForAdsList(
 		return true;
 	}
 
-	return await page.evaluate((excludedItemPatternSource?: string) => {
+	return await page.evaluate(() => {
 		const visible = [
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
 					style.display !== "none" &&
-					style.visibility !== "hidden"
+					style.visibility !== "hidden" &&
+					style.opacity !== "0"
+				);
+			},
+		][0]!;
+		const displayed = [
+			(element: Element): boolean => {
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const style = getComputedStyle(current);
+					if (style.display === "none" || style.visibility === "hidden") {
+						return false;
+					}
+				}
+				return true;
+			},
+		][0]!;
+		const loading = [
+			(element: Element): boolean => {
+				const role = element.getAttribute("role") ?? "";
+				const label = element.getAttribute("aria-label") ?? "";
+				return (
+					displayed(element) &&
+					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
 				);
 			},
 		][0]!;
@@ -852,13 +1010,18 @@ async function waitForAdsList(
 		if (!dialog) {
 			return false;
 		}
-		const list = dialog.querySelector('[role="list"]');
-		if (!list) {
+		const lists = Array.from(dialog.querySelectorAll('[role="list"]')).filter(
+			visible,
+		);
+		if (lists.length === 0) {
 			return false;
 		}
 		const busy = Boolean(
 			dialog.matches('[aria-busy="true"]') ||
 				dialog.querySelector('[aria-busy="true"]') ||
+				Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-label]')).some(
+					loading,
+				) ||
 				/loading|please wait/i.test(dialog.textContent ?? ""),
 		);
 		const hasError =
@@ -868,19 +1031,23 @@ async function waitForAdsList(
 			);
 		if (busy || hasError) {
 			return false;
-		}
-		const excludedItemPattern = excludedItemPatternSource
-			? new RegExp(excludedItemPatternSource, "i")
-			: null;
-		const listItems = Array.from(list.querySelectorAll('[role="listitem"]'));
+			}
+			const allListItems = Array.from(dialog.querySelectorAll('[role="listitem"]'));
+			const listItems = lists.flatMap((list) =>
+				Array.from(list.querySelectorAll('[role="listitem"]')),
+			);
 		const visibleItems = listItems.filter(visible);
 		if (listItems.length > 0 && visibleItems.length === 0) {
 			return false;
 		}
-		return visibleItems.every((item) =>
-			excludedItemPattern?.test((item.textContent ?? "").trim()),
-		);
-	}, excludedItemPattern?.source);
+			if (visibleItems.length > 0) {
+				return false;
+			}
+			if (allListItems.some((item) => !visible(item))) {
+				return false;
+			}
+			return true;
+		});
 
 }
 
@@ -907,6 +1074,20 @@ async function closeDialog(page: Page): Promise<void> {
 				(element: Element): boolean => {
 					const rect = element.getBoundingClientRect();
 					const style = getComputedStyle(element);
+					for (
+						let current: Element | null = element;
+						current;
+						current = current.parentElement
+					) {
+						const currentStyle = getComputedStyle(current);
+						if (
+							currentStyle.display === "none" ||
+							currentStyle.visibility === "hidden" ||
+							currentStyle.opacity === "0"
+						) {
+							return false;
+						}
+					}
 					return (
 						rect.width > 0 &&
 						rect.height > 0 &&
@@ -990,7 +1171,7 @@ export async function scrapeAdvertisers(
 	return { ...result, surface: "advertisers" };
 }
 
-const NON_TOPIC_RE = /special topic|see less/i;
+const NON_TOPIC_RE = /^(?:special topic|see less)$/i;
 const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
 
 export async function scrapeAdTopics(
@@ -1020,15 +1201,13 @@ export async function scrapeAdTopics(
 	}
 	const result = await scrapeDialogListItems(page, ["No ad topics"]);
 	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
-	const onlyNonTopicRows = result.items.length > 0 && items.length === 0;
-	const reached =
-		result.reached && (items.length > 0 || result.hasVerifiedEmpty || onlyNonTopicRows);
+	const reached = result.reached && (items.length > 0 || result.hasVerifiedEmpty);
 	return {
 		items,
 		reached,
 		step: !reached
 			? "destination_list_not_found"
-			: items.length === 0 && (result.hasVerifiedEmpty || onlyNonTopicRows)
+			: items.length === 0 && result.hasVerifiedEmpty
 				? "reached_empty"
 				: null,
 		surface: "ad_topics",
@@ -1165,6 +1344,20 @@ export async function scrapeTargetingCategories(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
@@ -1176,7 +1369,10 @@ export async function scrapeTargetingCategories(
 		const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
 			visible,
 		);
-		return Boolean(dialog?.querySelector('[role="list"]'));
+		return Boolean(
+			dialog &&
+				Array.from(dialog.querySelectorAll('[role="list"]')).some(visible),
+		);
 	});
 	if (!categoryListReady) {
 		await closeDialog(page);
@@ -1193,6 +1389,20 @@ export async function scrapeTargetingCategories(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
@@ -1220,6 +1430,20 @@ export async function scrapeTargetingCategories(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
@@ -1249,6 +1473,20 @@ export async function scrapeTargetingCategories(
 						(element: Element): boolean => {
 							const rect = element.getBoundingClientRect();
 							const style = getComputedStyle(element);
+							for (
+								let current: Element | null = element;
+								current;
+								current = current.parentElement
+							) {
+								const currentStyle = getComputedStyle(current);
+								if (
+									currentStyle.display === "none" ||
+									currentStyle.visibility === "hidden" ||
+									currentStyle.opacity === "0"
+								) {
+									return false;
+								}
+							}
 							return (
 								rect.width > 0 &&
 								rect.height > 0 &&
@@ -1297,6 +1535,20 @@ export async function scrapeTargetingCategories(
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
 				const style = getComputedStyle(element);
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const currentStyle = getComputedStyle(current);
+					if (
+						currentStyle.display === "none" ||
+						currentStyle.visibility === "hidden" ||
+						currentStyle.opacity === "0"
+					) {
+						return false;
+					}
+				}
 				return (
 					rect.width > 0 &&
 					rect.height > 0 &&
@@ -1305,14 +1557,49 @@ export async function scrapeTargetingCategories(
 				);
 			},
 		][0]!;
+		const displayed = [
+			(element: Element): boolean => {
+				for (
+					let current: Element | null = element;
+					current;
+					current = current.parentElement
+				) {
+					const style = getComputedStyle(current);
+					if (
+						style.display === "none" ||
+						style.visibility === "hidden" ||
+						style.opacity === "0"
+					) {
+						return false;
+					}
+				}
+				return true;
+			},
+		][0]!;
+		const loading = [
+			(element: Element): boolean => {
+				const role = element.getAttribute("role") ?? "";
+				const label = element.getAttribute("aria-label") ?? "";
+				return (
+					displayed(element) &&
+					(role.toLowerCase() === "progressbar" || /loading|please wait/i.test(label))
+				);
+			},
+		][0]!;
 		const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
 			visible,
 		);
-		const hasList = Boolean(dialog?.querySelector('[role="list"]'));
+		const lists = dialog
+			? Array.from(dialog.querySelectorAll('[role="list"]')).filter(visible)
+			: [];
+		const hasList = lists.length > 0;
 		const busy = Boolean(
 			dialog &&
 				(dialog.matches('[aria-busy="true"]') ||
 					dialog.querySelector('[aria-busy="true"]') ||
+					Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-label]')).some(
+						loading,
+					) ||
 					/loading|please wait/i.test(dialog.textContent ?? "")),
 		);
 		const hasError = Boolean(
@@ -1347,12 +1634,11 @@ export async function scrapeTargetingCategories(
 				items: [],
 				reached: false,
 			};
-		}
-		const items = Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(
-			(item) => visible(item),
-		);
-		const seen = new Set<string>();
-		const out: Array<{ description: string | null; name: string }> = [];
+			}
+			const allListItems = Array.from(dialog.querySelectorAll('[role="listitem"]'));
+			const items = allListItems.filter((item) => visible(item));
+			const seen = new Set<string>();
+			const out: Array<{ description: string | null; name: string }> = [];
 		for (const item of items) {
 			const removeBtn = Array.from(
 				item.querySelectorAll('button, [role="button"]'),
@@ -1383,9 +1669,19 @@ export async function scrapeTargetingCategories(
 			}
 			seen.add(name);
 			out.push({ description: texts[1] ?? null, name });
-		}
-		return { busy, hasError, hasVerifiedEmpty, hasList, items: out, reached: true };
-	});
+			}
+			if (out.length === 0 && allListItems.some((item) => !visible(item))) {
+				return {
+					busy,
+					hasError,
+					hasVerifiedEmpty,
+					hasList,
+					items: [],
+					reached: false,
+				};
+			}
+			return { busy, hasError, hasVerifiedEmpty, hasList, items: out, reached: true };
+		});
 	await closeDialog(page);
 	const reached =
 		categories.reached &&
