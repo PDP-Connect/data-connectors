@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.9)
+ * PDPP Shopify (Shop app) Connector (v0.2.10)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -11,15 +11,15 @@
  * fiber tree from the DOM root), falls back to `window.__APOLLO_STATE__`, and
  * parses visible order cards if Apollo does not expose the order connection.
  *
- * IMPLEMENTED FROM CONTRACT AND PRIOR ART, NOT FROM A LIVE RUN. Per
- * docs/migration/connector-cutover/CONTRACTS.md D10, this connector was
- * ported from the legacy Playwright connector
- * (connectors/shopify/shop-playwright.js — READ ONLY prior art, not a
- * fixture-proven capture) because no Shop app account was available to
- * capture real Apollo-cache output. There is no independent live evidence
- * that this extraction still matches shop.app's current Apollo schema.
- * Manifest `public_listing.tier` stays `development` until a live run
- * proves it (CONTRACTS.md D11).
+ * Ported from the legacy Playwright connector under
+ * docs/migration/connector-cutover/CONTRACTS.md D10. The legacy source
+ * (apps/desktop/connectors/shopify/shop-playwright.js in unity-surfaces)
+ * supplied the Apollo and DOM extraction strategy. A signed-in empty
+ * account was checked on five reloads on 2026-09-26; each emitted a
+ * zero-record STATE. No live nonempty cache was captured, so parsing
+ * current order fields remains fixture-proven rather than live-proven.
+ * Manifest `public_listing.tier` remains `development` pending that
+ * nonempty-order check (CONTRACTS.md D11).
  *
  * Streams:
  *   orders   Order history, one RECORD per Shop-app order, extracted from
@@ -46,6 +46,8 @@
  * orders no longer returned (full scan each run).
  *
  * CHANGES
+ *   v0.2.10 (2026-09-26) — recheck fiber, SSR, and DOM order evidence until
+ *     loaded orders or stable verified empty; report evidence deadline expiry.
  *   v0.2.9 (2026-09-26) — bounded cache readiness, legacy DOM-card fallback,
  *     and sanitized skip diagnostics; retain verified-empty semantics.
  *   v0.2.5 (2026-09-25) — require a live, visible empty-state marker before
@@ -70,7 +72,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
-import { extractOrders, hasNextOrdersPage, hasOrdersConnection, parseDomOrderCards } from "./parsers.ts";
+import { extractOrders, hasNextOrdersPage, parseDomOrderCards } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
@@ -150,7 +152,8 @@ export function shopSkipDiagnosticsInPage(): ShopSkipDiagnostics {
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
 			) ?? link;
 			const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
-			return /\$\s*[\d,]+(?:\.\d{1,2})?/.test(text) || /\b\d+\s*items?\b/i.test(text)
+			return /(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD)\b)/i.test(text) ||
+				/\b\d+\s*items?\b/i.test(text)
 				? [card]
 				: [];
 		}),
@@ -272,12 +275,23 @@ export function readApolloCacheInPage(): ApolloCache | null {
 	}
 	const globalState = (window as Window & WindowWithApolloState)
 		.__APOLLO_STATE__;
-	const state = liveState ?? globalState ?? null;
+	const ssrState = globalState && typeof globalState === "object" ? globalState : null;
+	const ssrQuery = ssrState?.ROOT_QUERY;
+	const liveQuery = liveState?.ROOT_QUERY;
+	const liveHasOrderConnection = typeof liveQuery === "object" && liveQuery !== null &&
+		!Array.isArray(liveQuery) && Object.keys(liveQuery).some((key) => /^deliveriesOrdersList[:(]/.test(key));
+	const ssrHasOrderConnection = typeof ssrQuery === "object" && ssrQuery !== null &&
+		!Array.isArray(ssrQuery) && Object.keys(ssrQuery).some((key) => /^deliveriesOrdersList[:(]/.test(key));
+	const state = liveState && liveHasOrderConnection
+		? liveState
+		: ssrState && ssrHasOrderConnection
+			? ssrState
+			: liveState ?? ssrState;
 	return state && typeof state === "object" ? state : null;
 }
 
-/** True only for the signed-in order-history route with a live Apollo cache,
- *  no orders connection, and a visible exact generic empty-state phrase. */
+/** True only for the signed-in order-history route with an Apollo cache,
+ *  no order refs, and a visible exact generic empty-state phrase. */
 export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 	const allowedPhrases = new Set([
 		"no orders yet",
@@ -305,31 +319,42 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 		);
 	if (!hasOrderContext) return false;
 
-	const root: unknown = document.querySelector("#root") ?? document.body;
-	if (typeof root !== "object" || root === null) return false;
-	const rootObject = root as Record<string, FiberNode>;
-	const fiberKey = Object.keys(rootObject).find(
-		(key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
-	);
-	if (!fiberKey) return false;
-	let fiber: FiberNode | null | undefined = rootObject[fiberKey];
-	let liveState: Record<string, unknown> | null = null;
-	let steps = 0;
-	while (fiber && steps < 300) {
-		steps += 1;
-		const props = fiber.memoizedProps ?? fiber.pendingProps;
-		try {
-			const extracted = props?.client?.cache?.extract?.();
-			if (extracted && typeof extracted === "object") {
-				liveState = extracted;
-				break;
+	let state: Record<string, unknown> | null = null;
+	try {
+		const root: unknown = document.querySelector("#root") ?? document.body;
+		if (typeof root === "object" && root !== null) {
+			const rootObject = root as Record<string, FiberNode>;
+			const fiberKey = Object.keys(rootObject).find(
+				(key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
+			);
+			let fiber: FiberNode | null | undefined = fiberKey ? rootObject[fiberKey] : null;
+			let steps = 0;
+			while (fiber && steps < 300) {
+				steps += 1;
+				const extracted = (fiber.memoizedProps ?? fiber.pendingProps)?.client?.cache?.extract?.();
+				if (extracted && typeof extracted === "object") {
+					state = extracted;
+					break;
+				}
+				fiber = fiber.return;
 			}
-		} catch {
-			return false;
 		}
-		fiber = fiber.return;
+	} catch {
+		// A broken live cache does not make an SSR snapshot authoritative.
+		return false;
 	}
-	const query = liveState?.ROOT_QUERY;
+	interface WindowWithApolloState { __APOLLO_STATE__?: Record<string, unknown> }
+	const ssr = typeof window === "undefined" ? undefined :
+		(window as Window & WindowWithApolloState).__APOLLO_STATE__;
+	const liveQuery = state?.ROOT_QUERY;
+	const liveHasOrderConnection = typeof liveQuery === "object" && liveQuery !== null &&
+		!Array.isArray(liveQuery) && Object.keys(liveQuery).some((key) => /^deliveriesOrdersList[:(]/.test(key));
+	const ssrQuery = ssr?.ROOT_QUERY;
+	const ssrHasOrderConnection = typeof ssrQuery === "object" && ssrQuery !== null &&
+		!Array.isArray(ssrQuery) && Object.keys(ssrQuery).some((key) => /^deliveriesOrdersList[:(]/.test(key));
+	if (ssr && typeof ssr === "object" &&
+		(!state || (!liveHasOrderConnection && ssrHasOrderConnection))) state = ssr;
+	const query = state?.ROOT_QUERY;
 	if (!query || typeof query !== "object" || Array.isArray(query)) return false;
 	const hasOrderRef = Object.entries(query).some(([key, value]) => {
 		if (!/^deliveriesOrdersList[:(]/.test(key)) return false;
@@ -431,11 +456,70 @@ export interface CollectShopifyArgs {
 	navigationStartedAt?: number;
 	cacheWaitTimeoutMs?: number;
 	cachePollIntervalMs?: number;
+	evidenceNow?: () => number;
+	evidenceWait?: (ms: number) => Promise<void>;
 	orderHistoryReady?: boolean;
 	readVerifiedEmptyState?: () => Promise<boolean>;
 	requested: BrowserCollectContext["requested"];
 	scroll: () => Promise<void>;
 	state: BrowserCollectContext["state"];
+}
+
+type OrderHistoryEvidence =
+	| { kind: "orders"; cache: ApolloCache | null; orders: ParsedOrder[] }
+	| { kind: "verified_empty"; cache: ApolloCache }
+	| { kind: "deadline_expired"; cache: ApolloCache | null };
+
+/** Keep inspecting the hydrated page until records or stable empty evidence appear. */
+async function waitForOrderHistoryEvidence({
+	readCache, readDomOrders, readVerifiedEmptyState, timeoutMs, pollIntervalMs,
+	now, wait,
+}: {
+	readCache: CollectShopifyArgs["readCache"];
+	readDomOrders: CollectShopifyArgs["readDomOrders"];
+	readVerifiedEmptyState: CollectShopifyArgs["readVerifiedEmptyState"];
+	timeoutMs: number;
+	pollIntervalMs: number;
+	now: () => number;
+	wait: (ms: number) => Promise<void>;
+}): Promise<OrderHistoryEvidence> {
+	const deadline = now() + timeoutMs;
+	let cache: ApolloCache | null = null;
+	let consecutiveEmptyReads = 0;
+	let firstRead = true;
+	while (firstRead || now() < deadline) {
+		firstRead = false;
+		const readWithinDeadline = async <T>(reader: () => Promise<T>, fallback: T): Promise<T> => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			return Promise.race([
+				reader().catch(() => fallback),
+				new Promise<T>((resolve) => {
+					timer = setTimeout(() => resolve(fallback), Math.max(0, deadline - now()));
+				}),
+			]).finally(() => {
+				if (timer) clearTimeout(timer);
+			});
+		};
+		const refreshed = await readWithinDeadline(readCache, null);
+		if (refreshed) cache = refreshed;
+		const cacheOrders = cache ? extractOrders(cache) : [];
+		if (cacheOrders.length > 0) return { kind: "orders", cache, orders: cacheOrders };
+		const domOrders = readDomOrders
+			? await readWithinDeadline(readDomOrders, [] as ParsedOrder[])
+			: [];
+		if (domOrders.length > 0) return { kind: "orders", cache, orders: domOrders };
+		const empty = refreshed && readVerifiedEmptyState
+			? await readWithinDeadline(readVerifiedEmptyState, false)
+			: false;
+		consecutiveEmptyReads = empty ? consecutiveEmptyReads + 1 : 0;
+		if (cache && consecutiveEmptyReads >= 2) {
+			return { kind: "verified_empty", cache };
+		}
+		const remaining = deadline - now();
+		if (remaining <= 0) break;
+		await wait(Math.min(pollIntervalMs, remaining));
+	}
+	return { kind: "deadline_expired", cache };
 }
 
 /** The connector's whole `orders` stream logic, independent of Playwright —
@@ -472,16 +556,25 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		firstAttemptMs: navigationStartedAt === undefined ? null : Math.max(0, Date.now() - navigationStartedAt),
 		successMs: null as number | null,
 	};
-	const firstRead = await waitForApolloCache({
-		readCache,
+	const evidence = await waitForOrderHistoryEvidence({
+		readCache: async () => {
+			const cache = await readCache();
+			if (cache && cacheTiming.successMs === null && navigationStartedAt !== undefined) {
+				cacheTiming.successMs = Math.max(0, Date.now() - navigationStartedAt);
+			}
+			return cache;
+		},
+		readDomOrders,
+		readVerifiedEmptyState: args.readVerifiedEmptyState,
 		timeoutMs: args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS,
 		pollIntervalMs: args.cachePollIntervalMs ?? APOLLO_POLL_INTERVAL_MS,
+		now: args.evidenceNow ?? Date.now,
+		wait: args.evidenceWait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
 	});
-	if (firstRead.cache && navigationStartedAt !== undefined) {
-		cacheTiming.successMs = Math.max(0, Date.now() - navigationStartedAt);
-	}
-	let { cache, truncated } = await walkOrdersCache({
-		initialCache: firstRead.cache,
+	let { cache, truncated } = evidence.kind === "deadline_expired"
+		? { cache: evidence.cache, truncated: false }
+		: await walkOrdersCache({
+		initialCache: evidence.cache,
 		readCache: async () => {
 			const refreshed = await readCache();
 			if (refreshed && cacheTiming.successMs === null && navigationStartedAt !== undefined) {
@@ -505,55 +598,21 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		};
 	};
 	let orders = cache ? extractOrders(cache) : [];
-	if (orders.length === 0 && readDomOrders) {
-		try {
-			orders = await readDomOrders();
-		} catch {
-			orders = [];
-		}
-	}
-	if (!cache && orders.length === 0) {
+	if (orders.length === 0 && evidence.kind === "orders") orders = evidence.orders;
+	if (evidence.kind === "deadline_expired") {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
-			reason: "shopify_apollo_state_unavailable",
-			message:
-				"Shop order-history page did not expose an Apollo cache (client not mounted or session not live).",
-			diagnostics: await diagnostics(),
-		});
-		return;
-	}
-	// Fail closed: a missing reader, a false result, or a page error all skip.
-	if (
-		cache && !hasOrdersConnection(cache) && orders.length === 0 &&
-		!(await args.readVerifiedEmptyState?.().catch(() => false))
-	) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: ORDERS_STREAM,
-			reason: "shopify_order_history_unconfirmed",
-			message:
-				"Shop Orders (orders) could not be confirmed: the page had no order connection or verified empty-state marker. Confirm order history is loaded, then try again.",
+			reason: cache ? "shopify_order_history_evidence_timeout" : "shopify_apollo_state_unavailable",
+			message: cache
+				? `Shop order history did not expose loaded orders or a stable verified empty marker within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`
+				: `Shop order history did not expose an Apollo cache, DOM orders, or verified empty evidence within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`,
 			diagnostics: await diagnostics(),
 		});
 		return;
 	}
 
 	await progress("Loading Shop order history", { stream: ORDERS_STREAM });
-	if (
-		orders.length === 0 &&
-		!(await args.readVerifiedEmptyState?.().catch(() => false))
-	) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: ORDERS_STREAM,
-			reason: "shopify_order_history_unconfirmed",
-			message:
-				"Shop Orders (orders) could not be confirmed: the page had no loaded orders or verified empty-state marker. Confirm order history is loaded, then try again.",
-			diagnostics: await diagnostics(),
-		});
-		return;
-	}
 
 	const cursor = openFingerprintCursor(state[ORDERS_STREAM]);
 	for (const order of orders) {

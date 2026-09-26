@@ -15,16 +15,20 @@
 // Each `Order:<id>` cache entry holds the order fields; `shop` and
 // `lineItems.nodes[].productTitle` are resolved through their own `__ref`s.
 
+import { parseHTML } from "linkedom";
 import type { ApolloCache, ApolloCacheEntry, ParsedOrder } from "./types.ts";
 import { isApolloRef } from "./types.ts";
-import { parseHTML } from "linkedom";
 
 const CENTS_PER_UNIT = 100;
 const PAGINATED_LIST_KEY_RE = /^deliveriesOrdersList:/;
 const CURSOR_LIST_KEY_RE = /^deliveriesOrdersList\(/;
-const SHOP_MONEY_RE = /\$\s*([\d,]+(?:\.\d{1,2})?)/;
+const SHOP_MONEY_RE =
+	/(?:\$\s*([\d,]+(?:\.\d{1,2})?)|([\d,]+(?:\.\d{1,2})?)\s*(USD|EUR|GBP|CAD)\b)/i;
 const SHOP_ITEM_COUNT_RE = /\b(\d+)\s*items?\b/i;
-const SHOP_STATUS_RE = /\b(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled)\b/i;
+const SHOP_STATUS_RE =
+	/\b(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled)\b/i;
+const SHOP_AMOUNT_LINE_RE =
+	/^(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD))\b/i;
 
 /**
  * Legacy-parity DOM fallback for cards visible when Apollo has not hydrated
@@ -46,29 +50,42 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		} catch {
 			continue;
 		}
-		if (url.origin !== "https://shop.app" || seen.has(url.href)) continue;
-		const card = link.closest<HTMLElement>(
-			'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
-		) ?? link;
+		if (url.origin !== "https://shop.app") continue;
+		const card =
+			link.closest<HTMLElement>(
+				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
+			) ?? link;
 		const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
 		if (text.length < 10) continue;
+		const key = text.slice(0, 120);
+		if (seen.has(key)) continue;
 		const money = text.match(SHOP_MONEY_RE);
 		const itemCount = text.match(SHOP_ITEM_COUNT_RE);
 		if (!money && !itemCount) continue;
-		seen.add(url.href);
+		seen.add(key);
 
-		const merchantName = (card.textContent ?? "")
-			.split(/[\n·•]/)
-			.map((part) => part.replace(/\s+/g, " ").trim())
-			.find((part) => part.length > 2 && part.length < 80 &&
-				!/^\d+\s*items?\b/i.test(part) && !/^\$/.test(part) &&
-				!/orders?|order history/i.test(part)) ?? null;
-		const amount = money ? Number(money[1]?.replaceAll(",", "")) : Number.NaN;
+		const orderUrl = resolveCardOrderUrl(card, url);
+
+		const merchantName =
+			(card.textContent ?? "")
+				.split(/[\n·•]/)
+				.map((part) => part.replace(/\s+/g, " ").trim())
+				.find(
+					(part) =>
+						part.length > 2 &&
+						part.length < 80 &&
+						!/^\d+\s*items?\b/i.test(part) &&
+						!SHOP_AMOUNT_LINE_RE.test(part) &&
+						!/orders?|order history/i.test(part),
+				) ?? null;
+		const amount = money
+			? Number((money[1] ?? money[2] ?? "").replaceAll(",", ""))
+			: Number.NaN;
 		const status = text.match(SHOP_STATUS_RE)?.[0] ?? null;
 		orders.push({
-			currency: money ? "USD" : null,
-			detailUrl: url.href,
-			id: url.href,
+			currency: money ? (money[3]?.toUpperCase() ?? "USD") : null,
+			detailUrl: orderUrl.href,
+			id: orderUrl.href,
 			itemCount: itemCount ? Number(itemCount[1]) : null,
 			lineItemTitles: [],
 			merchantName,
@@ -79,6 +96,24 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		});
 	}
 	return orders;
+}
+
+function resolveCardOrderUrl(card: Element, fallback: URL): URL {
+	for (const cardLink of card.querySelectorAll<HTMLAnchorElement>(
+		'a[href*="shop.app"]',
+	)) {
+		const href = cardLink.getAttribute("href") ?? "";
+		let url: URL;
+		try {
+			url = new URL(href, SHOP_ORDER_HISTORY_URL);
+		} catch {
+			continue;
+		}
+		if (url.origin === "https://shop.app" && /\/orders?\//.test(url.pathname)) {
+			return url;
+		}
+	}
+	return fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

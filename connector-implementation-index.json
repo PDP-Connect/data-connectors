@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -13815,7 +13815,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.9",
+				"version": "0.2.10",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -18691,7 +18691,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.9",
+				"version": "0.3.10",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {

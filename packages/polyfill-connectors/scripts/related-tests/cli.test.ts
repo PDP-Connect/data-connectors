@@ -300,6 +300,82 @@ describe("getChangedFiles: real git repository, real rename operations", () => {
 	});
 });
 
+describe("getChangedFiles: root connector layout", () => {
+	test("a root connectors/ change is reported when packageRoot is packages/polyfill-connectors", () => {
+		const repoRoot = mkdtempSync(
+			join(tmpdir(), "related-tests-cli-root-layout-"),
+		);
+		try {
+			initRepo(repoRoot);
+			const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
+			mkdirSync(join(packageRoot, "src"), { recursive: true });
+			mkdirSync(join(repoRoot, "connectors", "acme"), { recursive: true });
+			writeFileSync(
+				join(packageRoot, "src", "runtime.ts"),
+				"export const runtime = true;\n",
+			);
+			writeFileSync(
+				join(repoRoot, "connectors", "acme", "index.ts"),
+				"export const acme = 1;\n",
+			);
+			commitAll(repoRoot, "initial");
+			const baseRef = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+
+			writeFileSync(
+				join(repoRoot, "connectors", "acme", "index.ts"),
+				"export const acme = 2;\n",
+			);
+
+			const { changedRelativePaths, deletedRelativePaths } = getChangedFiles(
+				packageRoot,
+				baseRef,
+			);
+
+			assert.deepEqual(changedRelativePaths, ["connectors/acme/index.ts"]);
+			assert.deepEqual(deletedRelativePaths, []);
+		} finally {
+			rmSync(repoRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("an untracked root connectors/ file is reported when packageRoot is packages/polyfill-connectors", () => {
+		const repoRoot = mkdtempSync(
+			join(tmpdir(), "related-tests-cli-root-untracked-"),
+		);
+		try {
+			initRepo(repoRoot);
+			const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
+			mkdirSync(join(packageRoot, "src"), { recursive: true });
+			mkdirSync(join(repoRoot, "connectors", "acme"), { recursive: true });
+			writeFileSync(
+				join(packageRoot, "src", "runtime.ts"),
+				"export const runtime = true;\n",
+			);
+			writeFileSync(
+				join(repoRoot, "connectors", "acme", "index.ts"),
+				"export const acme = 1;\n",
+			);
+			commitAll(repoRoot, "initial");
+			const baseRef = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+
+			writeFileSync(
+				join(repoRoot, "connectors", "acme", "new.test.ts"),
+				"export const acmeTest = true;\n",
+			);
+
+			const { changedRelativePaths, deletedRelativePaths } = getChangedFiles(
+				packageRoot,
+				baseRef,
+			);
+
+			assert.deepEqual(changedRelativePaths, ["connectors/acme/new.test.ts"]);
+			assert.deepEqual(deletedRelativePaths, []);
+		} finally {
+			rmSync(repoRoot, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("getChangedFiles: unresolved Git index/worktree entries fail closed", () => {
 	let repoRoot: string;
 

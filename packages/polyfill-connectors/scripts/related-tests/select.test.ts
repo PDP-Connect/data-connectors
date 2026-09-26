@@ -67,6 +67,51 @@ describe("selectRelatedTests: direct connector edit selects only its related tes
 	});
 });
 
+describe("selectRelatedTests: root connector layout", () => {
+	test("changing root connectors/alpha/index.ts selects root connectors/alpha/index.test.ts", async () => {
+		const repoRoot = mkdtempSync(join(tmpdir(), "related-tests-root-layout-"));
+		try {
+			const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
+			mkdirSync(join(packageRoot, "src"), { recursive: true });
+			mkdirSync(join(repoRoot, "connectors", "alpha"), { recursive: true });
+			writeFileSync(
+				join(repoRoot, "connectors", "alpha", "index.ts"),
+				"export function runAlpha(): string { return 'alpha'; }\n",
+			);
+			writeFileSync(
+				join(repoRoot, "connectors", "alpha", "index.test.ts"),
+				[
+					'import assert from "node:assert/strict";',
+					'import { test } from "node:test";',
+					'import { runAlpha } from "./index.ts";',
+					'test("runAlpha returns alpha", () => {',
+					'  assert.equal(runAlpha(), "alpha");',
+					"});",
+				].join("\n"),
+			);
+
+			const allPaths = [
+				"connectors/alpha/index.ts",
+				"connectors/alpha/index.test.ts",
+			];
+			const graph = await buildDependencyGraph(packageRoot);
+			const result = selectRelatedTests({
+				packageRoot,
+				graph,
+				allRelativePaths: allPaths,
+				changedRelativePaths: ["connectors/alpha/index.ts"],
+				deletedRelativePaths: [],
+				unmergedRelativePaths: [],
+			});
+
+			assert.equal(result.kind, "related");
+			assert.deepEqual(result.testFiles, ["connectors/alpha/index.test.ts"]);
+		} finally {
+			rmSync(repoRoot, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("selectRelatedTests: shared runtime edit expands to every dependent connector's tests", () => {
 	let packageRoot: string;
 

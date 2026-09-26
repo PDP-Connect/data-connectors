@@ -19,7 +19,8 @@
  * the only way to know which files fall into that category.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 const FIXTURES_PATH_SEGMENT = /(^|\/)(fixtures|__fixtures__)(\/|$)/;
 const DYNAMIC_IMPORT_CALL = /\bimport\s*\(/;
@@ -65,11 +66,27 @@ export function buildFallbackInventory(
 			fixturePaths.add(relativePath);
 			continue;
 		}
-		const sourceText = readFileSync(`${packageRoot}/${relativePath}`, "utf8");
+		const sourceText = readFileSync(
+			absolutePathForSource(packageRoot, relativePath),
+			"utf8",
+		);
 		if (containsDynamicImportOrRequire(sourceText)) {
 			dynamicImportSites.add(relativePath);
 		}
 	}
 
 	return { fixturePaths, dynamicImportSites };
+}
+
+function absolutePathForSource(
+	packageRoot: string,
+	relativePath: string,
+): string {
+	if (relativePath.startsWith("connectors/")) {
+		const rootLayoutPath = join(resolve(packageRoot, "..", ".."), relativePath);
+		if (existsSync(rootLayoutPath)) {
+			return rootLayoutPath;
+		}
+	}
+	return join(packageRoot, relativePath);
 }
