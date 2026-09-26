@@ -13,7 +13,6 @@ import {
 	ensureChaseSession,
 	probeChaseSession,
 } from "./chase.ts";
-import { noStoredCredentialReason } from "./login-credentials.ts";
 
 const DASHBOARD_URL = "https://secure.chase.com/web/auth/dashboard";
 const STREAMING_ENV_KEYS = [
@@ -763,52 +762,40 @@ test("ensureChaseSession hands off when optional credentials are absent", async 
 	});
 });
 
-test("ensureChaseSession self-resolves the no-credentials manual handoff via assist/completeAssistance when the connector's own probe proves the session is live, without ever sending a manual_action interaction", async () => {
+test("ensureChaseSession resumes from the no-credentials manual handoff after the owner clicks Continue and the connector probe proves the session is live", async () => {
 	await withoutChaseCredentials(async () => {
 		// First probe call (ensureChaseSession's own initial check) reports not
-		// live; every call after that (manualBrowserLogin's self-probe) reports
-		// live — modeling the owner completing sign-in in the streaming companion
-		// before any click-gated interaction would even be requested.
+		// live; every call after that reports live, modeling the owner completing
+		// sign-in in the secure browser before clicking Continue.
 		let probeCalls = 0;
 		const { page } = makeLivePage(() => {
 			probeCalls += 1;
 			return probeCalls > 1;
 		});
 		const context = makeLiveContext(page);
-		const assistCalls: unknown[] = [];
-		const completions: { id: string; status: string }[] = [];
+		const requests: InteractionRequest[] = [];
 
 		const ok = await ensureChaseSession({
-			assist: (req) => {
-				assistCalls.push(req);
-				return Promise.resolve("assist_req_chase_1");
-			},
-			completeAssistance: (id, status) => {
-				completions.push({ id, status });
-				return Promise.resolve();
-			},
 			context,
 			page,
-			sendInteraction(): Promise<InteractionResponse> {
-				throw new Error(
-					"sendInteraction must not be called when the self-probe resolves the assistance",
-				);
+			sendInteraction(req): Promise<InteractionResponse> {
+				requests.push(req);
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
 			},
 		});
 
 		assert.equal(ok, true);
-		assert.equal(assistCalls.length, 1);
-		assert.deepEqual(assistCalls[0], {
-			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
-			message: `${noStoredCredentialReason("chase")} Sign in to Chase in the secure browser. PDPP continues automatically when the session is ready.`,
-			owner_action: "operate_attachment",
-			progress_posture: "blocked",
-			response_contract: "none",
-			timeout_seconds: 1800,
-		});
-		assert.deepEqual(completions, [
-			{ id: "assist_req_chase_1", status: "resolved" },
-		]);
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.match(
+			requests[0]?.message ?? "",
+			/No saved Chase sign-in is available/,
+		);
+		assert.match(requests[0]?.message ?? "", /secure browser/i);
 	});
 });
 

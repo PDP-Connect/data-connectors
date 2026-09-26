@@ -234,7 +234,9 @@ async function requestManualLoginForChallenge({
 		message:
 			`Amazon did not render the expected sign-in form (${reason}). ` +
 			"This usually means Amazon is showing a CAPTCHA/puzzle or an approve-on-device challenge to the automated browser. " +
-			"If this run opened a visible browser, complete Amazon sign-in there and respond success. " +
+			(assist && completeAssistance
+				? "Complete Amazon sign-in in the secure browser. The import will continue automatically when sign-in is detected. "
+				: "If this run opened a visible browser, complete Amazon sign-in there and respond success. ") +
 			"If it is headless, cancel this interaction and rerun with PDPP_BROWSER_HEADLESS=0 (or unset it) on a browser-capable deployment.",
 		page,
 		sendInteraction,
@@ -259,7 +261,9 @@ async function requestManualLoginWithoutCredentials({
 		handoffReason: "login",
 		message:
 			`${credentialReason} ` +
-			"Sign in to Amazon in the secure browser and complete any CAPTCHA, OTP, passkey, or other human verification there, then continue.",
+			(assist && completeAssistance
+				? "Sign in to Amazon in the secure browser and complete any CAPTCHA, OTP, passkey, or other human verification there. The import will continue automatically when sign-in is detected."
+				: "Sign in to Amazon in the secure browser and complete any CAPTCHA, OTP, passkey, or other human verification there, then continue."),
 		page,
 		sendInteraction,
 	});
@@ -287,7 +291,7 @@ async function waitForManualLogin({
 		page,
 		probe: async () => {
 			// Preserve the click-first fallback's former settle window. The streamed
-			// assistance path uses readinessProbe on a separate page instead.
+			// assistance path checks readiness on the owner's current page instead.
 			await page.waitForTimeout(3000);
 			return await probeAmazonSession(page);
 		},

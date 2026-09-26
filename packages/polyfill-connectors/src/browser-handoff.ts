@@ -650,11 +650,11 @@ export async function manualAction(
  * connector prove whether the session is live. The owner response is only a
  * signal to re-probe; site-specific session evidence stays with the connector.
  *
- * A streamed handoff uses a separate, temporary readiness page by default.
- * Connectors with a non-navigating session probe can opt to run it in the
- * owner's tab instead. The readiness watcher lasts for the handoff's declared
- * timeout; an owner who finishes after the first few seconds still resumes
- * collection automatically.
+ * A streamed handoff requires a non-navigating readiness probe on the owner's
+ * page. A navigation-capable probe runs only after the owner completes a
+ * manual_action interaction, so it cannot start a second sign-in flow while
+ * the owner is signing in. The readiness watcher lasts for the handoff's
+ * declared timeout.
  * Callers that cannot supply the complete streamed contract retain the legacy
  * click-first path.
  */
@@ -688,13 +688,13 @@ export interface ManualBrowserLoginArgs<Result> {
 	readonly page: Page;
 	readonly probe: () => Promise<Result>;
 	/**
-	 * Navigation-safe session evidence for streamed handoffs. The helper passes
-	 * a temporary sibling page, never the owner's streamed page.
+	 * Session evidence for streamed handoffs. It runs on the owner's page only
+	 * when readinessProbeOnHandoffPage is explicitly true.
 	 */
 	readonly readinessProbe?: (page: Page) => Promise<Result>;
 	/**
-	 * Reuse the owner's tab for readiness checks that only inspect the current
-	 * page and do not navigate. This keeps login in one visible tab.
+	 * Assert that readinessProbe does not navigate the owner's page. Without
+	 * this opt-in, the owner completes a manual_action before probe runs.
 	 */
 	readonly readinessProbeOnHandoffPage?: boolean;
 	readonly reason?: ManualActionReason;
@@ -705,8 +705,57 @@ export interface ManualBrowserLoginArgs<Result> {
 const DEFAULT_AUTO_PROBE_INTERVAL_MS = 3000;
 const DEFAULT_AUTO_PROBE_WINDOW_MS = 30 * 60_000;
 
-function waitForProbeInterval(intervalMs: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, intervalMs));
+export class BrowserSignInCancelledError extends Error {
+	readonly code = "browser_sign_in_cancelled";
+	constructor() {
+		super("browser_sign_in_cancelled");
+		this.name = "BrowserSignInCancelledError";
+	}
+}
+
+export class BrowserHandoffReadinessTimedOutError extends Error {
+	readonly code = "browser_handoff_readiness_timed_out";
+	constructor() {
+		super("browser_handoff_readiness_timed_out");
+		this.name = "BrowserHandoffReadinessTimedOutError";
+	}
+}
+
+function waitForProbeInterval(
+	intervalMs: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onAbort = (): void => {
+			clearTimeout(timer);
+			reject(signal?.reason);
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, intervalMs);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) {
+			onAbort();
+		}
+	});
+}
+
+async function awaitProbeOrCancellation<Result>(
+	probe: Promise<Result>,
+	signal?: AbortSignal,
+): Promise<Result> {
+	if (!signal) {
+		return await probe;
+	}
+	signal.throwIfAborted();
+	return await new Promise<Result>((resolve, reject) => {
+		const onAbort = (): void => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		probe.then(resolve, reject).finally(() => {
+			signal.removeEventListener("abort", onAbort);
+		});
+	});
 }
 
 function pollBrowserReadiness<Result>(
@@ -715,8 +764,14 @@ function pollBrowserReadiness<Result>(
 	{
 		intervalMs,
 		now = Date.now,
+		signal,
 		windowMs,
-	}: { intervalMs: number; now?: () => number; windowMs: number },
+	}: {
+		intervalMs: number;
+		now?: () => number;
+		signal?: AbortSignal;
+		windowMs: number;
+	},
 ): Promise<Result | undefined> {
 	const deadline = now() + windowMs;
 	let lastProbeError: unknown;
@@ -730,10 +785,14 @@ function pollBrowserReadiness<Result>(
 	};
 
 	const attempt = async (): Promise<Result | undefined> => {
+		signal?.throwIfAborted();
 		let result: Result;
 		try {
-			result = await probe();
+			result = await awaitProbeOrCancellation(probe(), signal);
 		} catch (error) {
+			if (signal?.aborted) {
+				throw signal.reason;
+			}
 			// Readiness probes can race page navigation or transient network state.
 			// Retry probe errors to the handoff deadline; page setup errors remain
 			// outside this loop and fail immediately.
@@ -741,7 +800,7 @@ function pollBrowserReadiness<Result>(
 			if (now() >= deadline) {
 				return finishTimedOutProbe();
 			}
-			await waitForProbeInterval(intervalMs);
+			await waitForProbeInterval(intervalMs, signal);
 			return attempt();
 		}
 		lastProbeError = undefined;
@@ -751,38 +810,29 @@ function pollBrowserReadiness<Result>(
 		if (now() >= deadline) {
 			return finishTimedOutProbe();
 		}
-		await waitForProbeInterval(intervalMs);
+		await waitForProbeInterval(intervalMs, signal);
 		return attempt();
 	};
 
 	return attempt();
 }
 
-async function pollNavigationSafeBrowserReadiness<Result>(
+async function pollHandoffPageBrowserReadiness<Result>(
 	handoffPage: Page,
 	readinessProbe: (page: Page) => Promise<Result>,
 	isProbeSuccessful: (result: Result) => boolean,
 	options: {
 		intervalMs: number;
 		now?: () => number;
-		probeOnHandoffPage?: boolean;
+		signal?: AbortSignal;
 		windowMs: number;
 	},
 ): Promise<Result | undefined> {
-	const readinessPage = options.probeOnHandoffPage
-		? handoffPage
-		: await handoffPage.context().newPage();
-	try {
-		return await pollBrowserReadiness(
-			() => readinessProbe(readinessPage),
-			isProbeSuccessful,
-			options,
-		);
-	} finally {
-		if (readinessPage !== handoffPage) {
-			await readinessPage.close().catch((): undefined => undefined);
-		}
-	}
+	return await pollBrowserReadiness(
+		() => readinessProbe(handoffPage),
+		isProbeSuccessful,
+		options,
+	);
 }
 
 export async function manualBrowserLogin<Result>({
@@ -803,7 +853,13 @@ export async function manualBrowserLogin<Result>({
 	sendInteraction,
 	timeoutSeconds,
 }: ManualBrowserLoginArgs<Result>): Promise<Result> {
-	if (assist && completeAssistance && isProbeSuccessful && readinessProbe) {
+	if (
+		assist &&
+		completeAssistance &&
+		isProbeSuccessful &&
+		readinessProbe &&
+		readinessProbeOnHandoffPage
+	) {
 		const assistanceRequestId = await assist({
 			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
 			message,
@@ -820,15 +876,23 @@ export async function manualBrowserLogin<Result>({
 				? DEFAULT_AUTO_PROBE_WINDOW_MS
 				: timeoutSeconds * 1000);
 		let autoResolved: Result | undefined;
+		const cancelled = new AbortController();
+		const onPageClose = (): void => {
+			cancelled.abort(new BrowserSignInCancelledError());
+		};
+		page.on?.("close", onPageClose);
+		if (page.isClosed?.()) {
+			onPageClose();
+		}
 		try {
-			autoResolved = await pollNavigationSafeBrowserReadiness(
+			autoResolved = await pollHandoffPageBrowserReadiness(
 				page,
 				readinessProbe,
 				isProbeSuccessful,
 				{
 					intervalMs: autoProbeIntervalMs,
 					...(now ? { now } : {}),
-					...(readinessProbeOnHandoffPage ? { probeOnHandoffPage: true } : {}),
+					signal: cancelled.signal,
 					windowMs: readinessWindowMs,
 				},
 			);
@@ -838,6 +902,8 @@ export async function manualBrowserLogin<Result>({
 					"Browser readiness could not be verified; collection stopped safely.",
 			});
 			throw error;
+		} finally {
+			page.off?.("close", onPageClose);
 		}
 		if (autoResolved !== undefined) {
 			await completeAssistance(assistanceRequestId, "resolved", {
@@ -850,7 +916,7 @@ export async function manualBrowserLogin<Result>({
 			message:
 				"Browser sign-in did not become ready before the handoff timed out.",
 		});
-		throw new Error("browser_handoff_readiness_timed_out");
+		throw new BrowserHandoffReadinessTimedOutError();
 	}
 
 	await manualAction(

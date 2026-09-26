@@ -1723,12 +1723,14 @@ async function runInBrowser(args: {
 		tracer.checkpoint(label),
 	);
 	let page: Page | null = null;
+	let stopPagePolicy: (() => Promise<void>) | null = null;
 	let runSucceeded = false;
 	let browserSurfaceAssistance: ReturnType<
 		typeof createBrowserSurfaceAssistanceLifecycle
 	> | null = null;
 	try {
 		page = await selectBrowserPageForRun(ctx, browser);
+		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page);
 		const surfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
 			assist,
 			completeAssistance,
@@ -1806,17 +1808,8 @@ async function runInBrowser(args: {
 				},
 			),
 		);
-		// Sign-in can open an OAuth/SSO popup or intermediate redirect tab
-		// (github.com, accounts.google.com for YouTube/Spotify, LinkedIn, etc. —
-		// see browser-handoff.ts's doc comment on popup creation) that the
-		// provider leaves behind at "about:blank" or mid-reload once the flow
-		// completes and control returns to `page`. The pre-sign-in sweep at
-		// closeBrowserContextPagesExcept above only catches pages that existed
-		// BEFORE establishSession ran; nothing swept the context again after, so
-		// that stray popup rode along for the rest of the run as a second
-		// visible tab. Sweep again now that sign-in is the one thing known to
-		// have just run.
-		await closeBrowserContextPagesExcept(ctx, page);
+		// Provider popups can carry an opener/postMessage callback after the
+		// initial sign-in probe. Keep them alive until run teardown.
 		await minimizeBrowserWindow(page as Page);
 		await captureBrowserPage(
 			baseCtx.capture,
@@ -1845,6 +1838,7 @@ async function runInBrowser(args: {
 		}
 		throw err;
 	} finally {
+		await stopPagePolicy?.();
 		await finalizeDiagnostics();
 		await browserSurfaceAssistance?.close();
 		if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
@@ -1886,6 +1880,35 @@ export async function selectBrowserPageForRun(
 		}
 	}
 	return await context.newPage();
+}
+
+/**
+ * Reserve context.newPage for the runtime's next run. Pages opened by the site
+ * remain visible with their native opener and are closed when this run ends.
+ */
+export async function installOwnedRunPagePolicy(
+	context: BrowserContext,
+	ownedPage: Page,
+): Promise<() => Promise<void>> {
+	const originalNewPage = context.newPage.bind(context);
+	context.newPage = () =>
+		Promise.reject(
+			new Error("additional_browser_page_forbidden: use the owned run page"),
+		);
+	const sitePopups = new Set<Page>();
+	const onPage = (openedPage: Page): void => {
+		if (openedPage !== ownedPage) {
+			sitePopups.add(openedPage);
+		}
+	};
+	context.on("page", onPage);
+	return async () => {
+		context.off("page", onPage);
+		context.newPage = originalNewPage;
+		await Promise.all([...sitePopups].map((popup) => closeBrowserPage(popup)));
+		await closeBrowserContextPagesExcept(context, ownedPage);
+		sitePopups.clear();
+	};
 }
 
 /**
@@ -1949,6 +1972,16 @@ export function shouldCloseBrowserPageAfterRun(
 	// recording run; it is a no-op change in shape (close happens a moment
 	// later, inside `release()`, instead of here).
 	if (browserRecordingRequested(env)) {
+		return false;
+	}
+	// Desktop owns the managed CDP lease. Closing its final page here would
+	// make the host interpret normal connector teardown as sign-in cancellation
+	// before the outer runtime has emitted DONE. The host closes the lease after
+	// DONE, so keep this page alive through that protocol boundary.
+	if (
+		env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim() &&
+		env.PDPP_BROWSER_SURFACE_LEASE_ID?.trim()
+	) {
 		return false;
 	}
 	if (runSucceeded && browser.preservePageOnSuccess) {

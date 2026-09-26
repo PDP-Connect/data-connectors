@@ -208,6 +208,7 @@ test("a self-resolved browser handoff registers before emission and unregisters 
 		page: ownerPage,
 		probe: (): Promise<boolean> => Promise.resolve(false),
 		readinessProbe: (): Promise<boolean> => Promise.resolve(true),
+		readinessProbeOnHandoffPage: true,
 		sendInteraction: () =>
 			Promise.reject(new Error("manual interaction must not run")),
 	});
@@ -407,6 +408,22 @@ test("shouldCloseBrowserPageAfterRun keeps the page open when --record-har is ac
 	);
 	// Normal (non-recording) runs are unaffected — same behavior as before.
 	assert.equal(shouldCloseBrowserPageAfterRun({}, true, {}), true);
+});
+
+test("shouldCloseBrowserPageAfterRun keeps a leased Desktop CDP page open through DONE", () => {
+	const leased = {
+		PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "http://127.0.0.1:9222",
+		PDPP_BROWSER_SURFACE_LEASE_ID: "lease-test",
+	};
+	assert.equal(shouldCloseBrowserPageAfterRun({}, true, leased), false);
+	assert.equal(shouldCloseBrowserPageAfterRun({}, false, leased), false);
+	assert.equal(
+		shouldCloseBrowserPageAfterRun({}, true, {
+			PDPP_BROWSER_SURFACE_REMOTE_CDP_URL:
+				leased.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL,
+		}),
+		true,
+	);
 });
 
 test("resolveBrowserRuntimeVisibility defaults every local browser session to headed", () => {

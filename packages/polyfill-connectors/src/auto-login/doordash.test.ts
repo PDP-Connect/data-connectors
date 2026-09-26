@@ -55,14 +55,6 @@ function makeLoginState(): SessionState {
 	};
 }
 
-function rejectUnexpectedInteraction(
-	request: InteractionRequest,
-): Promise<never> {
-	return Promise.reject(
-		new Error(`unexpected ${request.kind} interaction during automatic resume`),
-	);
-}
-
 // Shape captured live 2026-09-22 against the cut-doordash profile (identifying
 // query params stripped/replaced) — see the cut-doordash lane report's "Live
 // evidence" section. This is the exact bug: identity.doordash.com is a HOST,
@@ -97,54 +89,50 @@ test("isLoginChallengeUrl: malformed URL never throws, returns false", () => {
 	assert.equal(isLoginChallengeUrl("not a url"), false);
 });
 
-test("ensureDoorDashSession auto-resumes initial owner login from a temporary orders probe", async () => {
+test("ensureDoorDashSession resumes initial owner login after the visible Continue control and a live orders probe", async () => {
 	const state = makeLoginState();
 	const page = makePage(state, state.ownerNavigations);
-	const completions: { id: string; status: string }[] = [];
-	const assistanceMessages: string[] = [];
+	const requests: InteractionRequest[] = [];
 
 	const ready = await ensureDoorDashSession({
-		assist: async (request) => {
-			assistanceMessages.push(request.message);
+		sendInteraction: async (request) => {
+			requests.push(request);
 			state.authenticated = true;
-			return "doordash-login-assistance";
-		},
-		completeAssistance: async (id, status) => {
-			completions.push({ id, status });
+			return {
+				request_id: request.request_id ?? "test_interaction",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			};
 		},
 		context: page.context(),
 		credentials: {},
 		page,
-		sendInteraction: rejectUnexpectedInteraction,
 	});
 
 	assert.equal(ready, true);
-	assert.equal(completions.length, 1);
-	assert.deepEqual(completions[0], {
-		id: "doordash-login-assistance",
-		status: "resolved",
-	});
-	assert.match(assistanceMessages[0] ?? "", /sign in to DoorDash/i);
-	assert.deepEqual(state.ownerNavigations, [ORDERS_URL]);
-	assert.deepEqual(state.readinessNavigations, [ORDERS_URL]);
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0]?.kind, "manual_action");
+	assert.match(requests[0]?.message ?? "", /sign in to DoorDash/i);
+	assert.deepEqual(state.ownerNavigations, [ORDERS_URL, ORDERS_URL]);
+	assert.deepEqual(state.readinessNavigations, []);
 });
 
-test("ensureDoorDashSession hands a CAPTCHA recovery surface to the owner and auto-resumes after login", async () => {
+test("ensureDoorDashSession hands a CAPTCHA recovery surface to the owner and resumes after Continue plus live probe", async () => {
 	const state = makeLoginState();
 	const page = makePage(state, state.ownerNavigations);
-	const completions: { id: string; status: string }[] = [];
-	const assistanceMessages: string[] = [];
+	const requests: InteractionRequest[] = [];
 
 	const ready = await ensureDoorDashSession({
-		assist: async (request) => {
-			assistanceMessages.push(request.message);
+		sendInteraction: async (request) => {
+			requests.push(request);
 			state.authenticated = true;
-			return "doordash-challenge-assistance";
+			return {
+				request_id: request.request_id ?? "test_interaction",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			};
 		},
 		capture: null,
-		completeAssistance: async (id, status) => {
-			completions.push({ id, status });
-		},
 		context: page.context(),
 		credentials: {
 			DOORDASH_PASSWORD: "fixture-password",
@@ -152,19 +140,12 @@ test("ensureDoorDashSession hands a CAPTCHA recovery surface to the owner and au
 		},
 		fieldTimeoutMs: 0,
 		page,
-		sendInteraction: rejectUnexpectedInteraction,
 	});
 
 	assert.equal(ready, true);
-	assert.equal(completions.length, 1);
-	assert.deepEqual(completions[0], {
-		id: "doordash-challenge-assistance",
-		status: "resolved",
-	});
-	assert.match(
-		assistanceMessages[0] ?? "",
-		/Cloudflare is showing a challenge/,
-	);
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0]?.kind, "manual_action");
+	assert.match(requests[0]?.message ?? "", /Cloudflare is showing a challenge/);
 	assert.ok(state.ownerNavigations.includes(LOGIN_URL));
-	assert.deepEqual(state.readinessNavigations, [ORDERS_URL]);
+	assert.deepEqual(state.readinessNavigations, []);
 });

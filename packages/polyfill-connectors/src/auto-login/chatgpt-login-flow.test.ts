@@ -60,6 +60,7 @@ function makeChallengePage(sessionActive: () => boolean): Page {
 		| "getByText"
 		| "goto"
 		| "locator"
+		| "url"
 		| "waitForTimeout"
 	> = {
 		context(): BrowserContext {
@@ -89,6 +90,9 @@ function makeChallengePage(sessionActive: () => boolean): Page {
 		},
 		locator(): Locator {
 			return noopLocator as Locator;
+		},
+		url(): string {
+			return "https://auth.openai.com/login";
 		},
 		waitForTimeout(): Promise<void> {
 			return Promise.resolve();

@@ -184,6 +184,7 @@ test("ChatGPT push approval checkpoints while polling so the session watchdog se
 			}
 			return locator({ count: 1 });
 		},
+		url: () => "https://chatgpt.com/",
 		waitForTimeout: async () => undefined,
 	};
 
