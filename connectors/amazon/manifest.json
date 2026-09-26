@@ -9,7 +9,7 @@
 	},
 	"connector_key": "amazon",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"display_name": "Amazon",
 	"brand": {
 		"icon": "icon.svg",

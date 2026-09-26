@@ -9,7 +9,7 @@
 	},
 	"connector_key": "icloud-notes",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "iCloud Notes",
 	"brand": {
 		"icon": "icon.svg",

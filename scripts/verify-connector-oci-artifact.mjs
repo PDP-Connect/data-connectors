@@ -295,7 +295,7 @@ function main() {
 	}
 	if (config.source_declaration_digest !== sha256(sourceDeclarationBytes)) {
 		throw new Error(
-			`config.source_declaration_digest ${config.source_declaration_digest} does not match the source declaration layer ${sha256(sourceDeclarationBytes)}`,
+			`config.source_declaration_digest ${config.source_declaration_digest} does not match the source declaration sidecar ${sha256(sourceDeclarationBytes)}`,
 		);
 	}
 	// `version` is in this list because the builder copies the profile layer
