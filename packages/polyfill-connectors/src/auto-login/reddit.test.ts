@@ -879,97 +879,63 @@ function makePageBlockedButAlreadyLive(): Page {
 	return fake as Page;
 }
 
-test("ensureRedditSession self-resolves the Cloudflare-blocked handoff via assist/completeAssistance when the connector's own probe proves the session is live, without ever sending a manual_action interaction", async () => {
+test("ensureRedditSession resumes the Cloudflare-blocked handoff after the visible Continue control and a live probe", async () => {
 	await withRedditCredentials(async () => {
-		const assistCalls: unknown[] = [];
-		const completions: { id: string; status: string }[] = [];
+		const requests: InteractionRequest[] = [];
 
 		await ensureRedditSession({
-			assist: (req) => {
-				assistCalls.push(req);
-				return Promise.resolve("assist_req_reddit_1");
-			},
-			completeAssistance: (id, status) => {
-				completions.push({ id, status });
-				return Promise.resolve();
-			},
 			context: makeContext(),
 			page: makePageBlockedButAlreadyLive(),
-			sendInteraction(): Promise<InteractionResponse> {
-				throw new Error(
-					"sendInteraction must not be called when the self-probe resolves the assistance",
-				);
+			sendInteraction(req): Promise<InteractionResponse> {
+				requests.push(req);
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
 			},
 		});
 
-		assert.equal(assistCalls.length, 1);
-		assert.deepEqual(assistCalls[0], {
-			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
-			message:
-				"Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the secure browser. PDPP continues automatically when the session is ready.",
-			owner_action: "operate_attachment",
-			progress_posture: "blocked",
-			response_contract: "none",
-			timeout_seconds: 1800,
-		});
-		assert.deepEqual(completions, [
-			{ id: "assist_req_reddit_1", status: "resolved" },
-		]);
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.match(requests[0]?.message ?? "", /Log in to reddit\.com/);
 	});
 });
 
-/**
- * The WIRING, not the mechanism. The test above drives `ensureRedditSession`
- * directly and so passes whether or not production ever supplies the hooks —
- * which is exactly how the self-resolve above shipped inert: the connector's
- * own `redditEnsureSession` entry destructured `EnsureSessionArgs` without
- * `assist`/`completeAssistance`, so every run took the "ask the owner to click
- * Continue collection" path no matter what `ensureRedditSession` could do.
- *
- * This drives the PRODUCTION entry (`connectors/reddit/index.ts`'s
- * `redditEnsureSession`, the function the runtime actually calls) with the
- * same already-live blocked page. If the forwarding is dropped from that
- * entry, `assist` is never called, the handoff falls through to
- * `sendInteraction`, and this fails.
+/** Drive the production entry to verify that its visible Continue response
+ * reaches the session probe; the direct helper test above cannot prove wiring.
  */
-test("redditEnsureSession forwards assist/completeAssistance to ensureRedditSession — the self-resolve is reachable in production, not just from a test", async () => {
+test("redditEnsureSession reaches the visible Continue handoff in production and resumes after the connector probe is live", async () => {
 	await withRedditCredentials(async () => {
-		const assistCalls: unknown[] = [];
-		const completions: { id: string; status: string }[] = [];
+		const requests: InteractionRequest[] = [];
 
 		await redditEnsureSession({
-			assist: (req) => {
-				assistCalls.push(req);
-				return Promise.resolve("assist_req_reddit_wiring");
+			assist: () => {
+				throw new Error("navigational readiness must use visible Continue");
 			},
 			capture: null,
 			checkpoint: () => Promise.resolve(),
-			completeAssistance: (id, status) => {
-				completions.push({ id, status });
-				return Promise.resolve();
+			completeAssistance: () => {
+				throw new Error("navigational readiness cannot auto-resolve");
 			},
 			context: makeContext(),
 			credentials: {},
 			onCredentialSubmit: () => Promise.resolve(),
 			page: makePageBlockedButAlreadyLive(),
 			progress: () => Promise.resolve(),
-			sendInteraction(): Promise<InteractionResponse> {
-				throw new Error(
-					"sendInteraction must not be called: an unforwarded assist hook is the production defect this pins",
-				);
+			sendInteraction(req): Promise<InteractionResponse> {
+				requests.push(req);
+				return Promise.resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				});
 			},
 		});
 
-		assert.equal(
-			assistCalls.length,
-			1,
-			"redditEnsureSession must forward `assist` — without it the owner is asked to click Continue collection on a session that is already live",
-		);
-		assert.deepEqual(
-			completions,
-			[{ id: "assist_req_reddit_wiring", status: "resolved" }],
-			"redditEnsureSession must forward `completeAssistance` so the self-resolved handoff is closed out",
-		);
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0]?.kind, "manual_action");
+		assert.match(requests[0]?.message ?? "", /Log in to reddit\.com/);
 	});
 });
 

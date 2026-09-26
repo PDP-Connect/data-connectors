@@ -1730,7 +1730,7 @@ async function runInBrowser(args: {
 	> | null = null;
 	try {
 		page = await selectBrowserPageForRun(ctx, browser);
-		stopPagePolicy = await installSingleBrowserPagePolicy(ctx, page);
+		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page);
 		const surfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
 			assist,
 			completeAssistance,
@@ -1808,17 +1808,8 @@ async function runInBrowser(args: {
 				},
 			),
 		);
-		// Sign-in can open an OAuth/SSO popup or intermediate redirect tab
-		// (github.com, accounts.google.com for YouTube/Spotify, LinkedIn, etc. —
-		// see browser-handoff.ts's doc comment on popup creation) that the
-		// provider leaves behind at "about:blank" or mid-reload once the flow
-		// completes and control returns to `page`. The pre-sign-in sweep at
-		// closeBrowserContextPagesExcept above only catches pages that existed
-		// BEFORE establishSession ran; nothing swept the context again after, so
-		// that stray popup rode along for the rest of the run as a second
-		// visible tab. Sweep again now that sign-in is the one thing known to
-		// have just run.
-		await closeBrowserContextPagesExcept(ctx, page);
+		// Provider popups can carry an opener/postMessage callback after the
+		// initial sign-in probe. Keep them alive until run teardown.
 		await minimizeBrowserWindow(page as Page);
 		await captureBrowserPage(
 			baseCtx.capture,
@@ -1891,60 +1882,11 @@ export async function selectBrowserPageForRun(
 	return await context.newPage();
 }
 
-/** Keep provider popup navigation in the exact page owned by this run. */
-const contextsWithSinglePageInitScript = new WeakSet<BrowserContext>();
-
-function redirectNewPageRequestsIntoOwnerPage(): void {
-	if (Object.hasOwn(window, "__pdppSinglePagePolicyInstalled")) {
-		return;
-	}
-	Object.defineProperty(window, "__pdppSinglePagePolicyInstalled", {
-		value: true,
-	});
-	window.open = ((url?: string | URL) => {
-		if (url) {
-			window.location.assign(String(url));
-		}
-		return window;
-	}) as typeof window.open;
-	document.addEventListener(
-		"click",
-		(event) => {
-			if (event.target instanceof Element) {
-				const link = event.target.closest("a[target='_blank']");
-				if (link) {
-					link.setAttribute("target", "_self");
-				}
-			}
-		},
-		true,
-	);
-	document.addEventListener(
-		"submit",
-		(event) => {
-			if (
-				event.target instanceof HTMLFormElement &&
-				event.target.target === "_blank"
-			) {
-				event.target.target = "_self";
-			}
-		},
-		true,
-	);
-	const submit = HTMLFormElement.prototype.submit;
-	HTMLFormElement.prototype.submit = function (): void {
-		if (this.target === "_blank") {
-			this.target = "_self";
-		}
-		submit.call(this);
-	};
-}
-
 /**
- * Prevent the normal JavaScript/HTML popup paths before navigation starts.
- * Any page created outside those paths is closed as a last-resort guard.
+ * Reserve context.newPage for the runtime's next run. Pages opened by the site
+ * remain visible with their native opener and are closed when this run ends.
  */
-export async function installSingleBrowserPagePolicy(
+export async function installOwnedRunPagePolicy(
 	context: BrowserContext,
 	ownedPage: Page,
 ): Promise<() => Promise<void>> {
@@ -1953,53 +1895,19 @@ export async function installSingleBrowserPagePolicy(
 		Promise.reject(
 			new Error("additional_browser_page_forbidden: use the owned run page"),
 		);
-	const routeOtherPageNavigation: Parameters<BrowserContext["route"]>[1] =
-		async (route) => {
-			const request = route.request();
-			if (request.isNavigationRequest()) {
-				let requestPage: Page | null = null;
-				try {
-					requestPage = request.frame().page();
-				} catch {
-					// A navigation without an inspectable owner is not trusted.
-				}
-				if (requestPage !== ownedPage) {
-					await route.abort();
-					return;
-				}
-			}
-			await route.continue();
-		};
+	const sitePopups = new Set<Page>();
 	const onPage = (openedPage: Page): void => {
 		if (openedPage !== ownedPage) {
-			openedPage.close().catch((): undefined => undefined);
+			sitePopups.add(openedPage);
 		}
 	};
-	try {
-		await context.route("**/*", routeOtherPageNavigation);
-		if (!contextsWithSinglePageInitScript.has(context)) {
-			await context.addInitScript(redirectNewPageRequestsIntoOwnerPage);
-			contextsWithSinglePageInitScript.add(context);
-		}
-		for (const frame of ownedPage.frames()) {
-			await frame
-				.evaluate(redirectNewPageRequestsIntoOwnerPage)
-				.catch((): undefined => undefined);
-		}
-		context.on("page", onPage);
-	} catch (error) {
-		context.newPage = originalNewPage;
-		await context
-			.unroute("**/*", routeOtherPageNavigation)
-			.catch((): undefined => undefined);
-		throw error;
-	}
+	context.on("page", onPage);
 	return async () => {
 		context.off("page", onPage);
 		context.newPage = originalNewPage;
-		await context
-			.unroute("**/*", routeOtherPageNavigation)
-			.catch((): undefined => undefined);
+		await Promise.all([...sitePopups].map((popup) => closeBrowserPage(popup)));
+		await closeBrowserContextPagesExcept(context, ownedPage);
+		sitePopups.clear();
 	};
 }
 

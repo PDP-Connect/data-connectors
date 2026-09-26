@@ -712,6 +712,38 @@ test("the recovered code round-trips through the actual redaction the connector_
 	);
 });
 
+test("browser sign-in terminal codes survive production session establishment and message redaction", async () => {
+	const { boundConnectorErrorCode, boundConnectorErrorMessage } = await import(
+		"./reference-implementation-stand-in/runtime/connector-gap-bounding.ts"
+	);
+	await Promise.all(
+		["browser_sign_in_cancelled", "browser_handoff_readiness_timed_out"].map(
+			(code) =>
+				assert.rejects(
+					establishSession(
+						{
+							ensureSession: () => {
+								throw new Error(code);
+							},
+							probeSession: undefined,
+						},
+						makeEstablishArgs("heb"),
+					),
+					(err: unknown) => {
+						assert.ok(err instanceof Error);
+						assert.equal((err as { code?: string }).code, code);
+						assert.equal(
+							boundConnectorErrorMessage(err.message),
+							"heb_session_failed: [REDACTED]",
+						);
+						assert.equal(boundConnectorErrorCode(code), code);
+						return true;
+					},
+				),
+		),
+	);
+});
+
 // ─── bounded capture during teardown ────────────────────────────────────────
 
 test("captureBrowserPage returns within its deadline when captureDom hangs (wedged renderer)", async () => {
