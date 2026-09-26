@@ -1511,14 +1511,14 @@ test("scrapeAdvertisers keeps busy rows unavailable", async () => {
 	}
 });
 
-test("scrapeAdTopics keeps settled UI-only rows unavailable without marker", async () => {
+test("scrapeAdTopics accepts settled UI-only rows as verified empty", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
 		await page.route("https://accountscenter.instagram.com/**", async (route) => {
 			await route.fulfill({
 				contentType: "text/html",
-				body: '<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
 				status: 200,
 			});
 		});
@@ -1526,8 +1526,8 @@ test("scrapeAdTopics keeps settled UI-only rows unavailable without marker", asy
 		const startedAt = Date.now();
 		assert.deepEqual(await scrapeAdTopics(page), {
 			items: [],
-			reached: false,
-			step: "destination_list_not_found",
+			reached: true,
+			step: "reached_empty",
 			surface: "ad_topics",
 		});
 		assert.ok(Date.now() - startedAt >= 2_500);
@@ -1536,7 +1536,7 @@ test("scrapeAdTopics keeps settled UI-only rows unavailable without marker", asy
 	}
 });
 
-test("scrapeAdTopics keeps UI-only rows with an empty marker unavailable", async () => {
+test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1544,6 +1544,75 @@ test("scrapeAdTopics keeps UI-only rows with an empty marker unavailable", async
 			await route.fulfill({
 				contentType: "text/html",
 				body: '<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics collects visible real rows alongside UI-only rows", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: ["Travel"],
+			reached: true,
+			step: null,
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics keeps unknown control rows unavailable", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
+				status: 200,
+			});
+		});
+
+		assert.deepEqual(await scrapeAdTopics(page), {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "ad_topics",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrapeAdTopics ignores hidden text beside visible controls", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: '<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button type="button">Manage topic preferences</button></div></div></div></body></html>',
 				status: 200,
 			});
 		});

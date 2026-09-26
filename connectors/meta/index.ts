@@ -657,13 +657,18 @@ export async function fetchAllFollowing(
 async function scrapeDialogListItems(
 	page: Page,
 	emptyLabels: readonly string[],
+	excludedItemPattern?: RegExp,
 ): Promise<{
 	hasVerifiedEmpty: boolean;
 	items: string[];
 	reached: boolean;
 	step: AdsSurfaceStep | null;
 }> {
-	const result = await page.evaluate((labels) => {
+	const result = await page.evaluate((args) => {
+		const labels = args.emptyLabels;
+		const excludedItemPattern = args.excludedItemPatternSource
+			? new RegExp(args.excludedItemPatternSource, "i")
+			: null;
 		// Keep browser-local predicates anonymous. The tsx/esbuild test loader
 		// injects `__name` into named nested functions before Playwright
 		// serializes them into the page.
@@ -765,25 +770,78 @@ async function scrapeDialogListItems(
 			const listItems = lists.flatMap((list) =>
 				Array.from(list.querySelectorAll('[role="listitem"]')),
 			);
-		const values = listItems
-			.filter(visible)
-			.map((el) => ((el as HTMLElement).innerText ?? "").trim())
-			.filter((t) => t.length > 0);
-			if (values.length > 0) {
+			const rows = listItems
+				.filter(visible)
+				.map((item) => {
+					const text = ((item as HTMLElement).innerText ?? "").trim();
+					if (!excludedItemPattern) {
+						return { dataText: text, hasControl: false, text };
+					}
+					const controlSelector = 'a, button, [role="button"], [role="link"]';
+					const hasControl = Array.from(
+						item.querySelectorAll(controlSelector),
+					).some(visible);
+					if (!hasControl) {
+						return { dataText: text, hasControl, text };
+					}
+					const texts: string[] = [];
+					const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+					for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+						const parent = node.parentElement;
+						if (parent && visible(parent) && !parent.closest(controlSelector)) {
+							const value = node.textContent?.trim() ?? "";
+							if (value.length > 0) {
+								texts.push(value);
+							}
+						}
+					}
+					return { dataText: texts.join(" ").trim(), hasControl, text };
+				});
+			const values = rows.map((row) => row.dataText).filter((t) => t.length > 0);
+			const dataValues = excludedItemPattern
+				? values.filter((value) => !excludedItemPattern.test(value))
+				: values;
+			if (dataValues.length > 0) {
 				return {
 					hasVerifiedEmpty,
-					items: values,
+					items: dataValues,
 					reached: true,
 				};
 			}
 			if (Array.from(dialog.querySelectorAll('[role="list"]')).some((list) => !visible(list))) {
 				return { hasVerifiedEmpty: false, items: [], reached: false };
 			}
+			if (listItems.some((item) => !visible(item))) {
+				return { hasVerifiedEmpty: false, items: [], reached: false };
+			}
+			if (
+				excludedItemPattern &&
+				rows.length > 0 &&
+				rows.some(
+					(row) =>
+						row.hasControl &&
+						row.text.length > 0 &&
+						row.dataText.length === 0 &&
+						!(excludedItemPattern?.test(row.text) ?? false),
+				)
+			) {
+				return { hasVerifiedEmpty: false, items: [], reached: false };
+			}
+			if (
+				excludedItemPattern &&
+				rows.length > 0 &&
+				rows.every((row) => excludedItemPattern?.test(row.text) ?? false)
+			) {
+				return { hasVerifiedEmpty: true, items: [], reached: true };
+			}
 			if (listItems.length > 0) {
 				return { hasVerifiedEmpty: false, items: [], reached: false };
 			}
 		return { hasVerifiedEmpty: true, items: [], reached: true };
-	}, emptyLabels);
+	}, {
+		emptyLabels,
+		excludedItemPatternSource: excludedItemPattern?.source,
+	});
 	return {
 		...result,
 		step: !result.reached
@@ -928,13 +986,13 @@ async function waitForAdsList(
 						lists
 							.flatMap((list) => Array.from(list.querySelectorAll('[role="listitem"]')))
 							.some((item) => {
-							const text = (item.textContent ?? "").trim();
-							return (
-								visible(item) &&
-								text.length > 0 &&
-								!excludedItemPattern?.test(text)
-							);
-						}),
+								const text = (item.textContent ?? "").trim();
+								return (
+									visible(item) &&
+									text.length > 0 &&
+									!excludedItemPattern?.test(text)
+								);
+							}),
 				);
 			},
 			excludedItemPattern?.source,
@@ -951,7 +1009,7 @@ async function waitForAdsList(
 		return true;
 	}
 
-	return await page.evaluate(() => {
+	return await page.evaluate((excludedItemPatternSource?: string) => {
 		const visible = [
 			(element: Element): boolean => {
 				const rect = element.getBoundingClientRect();
@@ -1031,23 +1089,31 @@ async function waitForAdsList(
 			);
 		if (busy || hasError) {
 			return false;
-			}
-			const allListItems = Array.from(dialog.querySelectorAll('[role="listitem"]'));
-			const listItems = lists.flatMap((list) =>
-				Array.from(list.querySelectorAll('[role="listitem"]')),
-			);
+		}
+		const excludedItemPattern = excludedItemPatternSource
+			? new RegExp(excludedItemPatternSource, "i")
+			: null;
+		const allListItems = Array.from(dialog.querySelectorAll('[role="listitem"]'));
+		const listItems = lists.flatMap((list) =>
+			Array.from(list.querySelectorAll('[role="listitem"]')),
+		);
 		const visibleItems = listItems.filter(visible);
 		if (listItems.length > 0 && visibleItems.length === 0) {
 			return false;
 		}
-			if (visibleItems.length > 0) {
-				return false;
-			}
-			if (allListItems.some((item) => !visible(item))) {
-				return false;
-			}
-			return true;
-		});
+		if (
+			visibleItems.some((item) => {
+				const text = (item.textContent ?? "").trim();
+				return text.length > 0 && !(excludedItemPattern?.test(text) ?? false);
+			})
+		) {
+			return false;
+		}
+		if (allListItems.some((item) => !visible(item))) {
+			return false;
+		}
+		return true;
+	}, excludedItemPattern?.source);
 
 }
 
@@ -1199,7 +1265,7 @@ export async function scrapeAdTopics(
 			surface: "ad_topics",
 		};
 	}
-	const result = await scrapeDialogListItems(page, ["No ad topics"]);
+	const result = await scrapeDialogListItems(page, ["No ad topics"], NON_TOPIC_RE);
 	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
 	const reached = result.reached && (items.length > 0 || result.hasVerifiedEmpty);
 	return {
