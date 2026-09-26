@@ -232,7 +232,7 @@ async function waitForChannelIdentity(
 					document.querySelector(
 						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
 					) ||
-					/@[^/?#]+/.test(location.pathname),
+						/@[^/?#]+/.test(location.pathname),
 				);
 				const placeholderTitle =
 					/^(?:loading\b|please wait\b|home$|youtube$|channel$)/i.test(
@@ -629,6 +629,16 @@ export async function collectYoutubeBrowser(
 		await coverage(stream, videos.length, missingVideoTitles(videos));
 	}
 	if (requested.has("watch_history")) {
+		if (requested.get("watch_history")?.time_range) {
+			await ctx.emit({
+				type: "SKIP_RESULT",
+				stream: "watch_history",
+				reason: "scope_not_supported",
+				message:
+					"Watch history provides dates without watch times, so a time_range cannot be applied.",
+			});
+			return;
+		}
 		const videos = await readableVideos(
 			ctx,
 			`${HOME}feed/history`,
@@ -650,8 +660,6 @@ export async function collectYoutubeBrowser(
 					video.watched_date_label ?? null,
 					dateReference,
 				);
-				if (!watchedDate && requested.get("watch_history")?.time_range)
-					continue;
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
 					position,

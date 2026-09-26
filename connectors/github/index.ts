@@ -1156,7 +1156,7 @@ function buildPrSearchPath(
 	const qParts = ["type:pr", `author:${login}`];
 	if (sinceParam) {
 		// Search API date-precision; strict `since` still applied per-item.
-		qParts.push(`updated:>=${sinceParam.slice(0, 10)}`);
+		qParts.push(`updated:>=${new Date(sinceParam).toISOString().slice(0, 10)}`);
 	}
 	if (createdRange) {
 		// Immutable partitioning field: each PR falls in exactly one window, so
@@ -1714,7 +1714,11 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 		| { last_date?: string }
 		| undefined;
 	const priorDate = contribState?.last_date;
-	const sinceDate = req?.time_range?.since?.slice(0, 10) || priorDate || null;
+	const rawSince = req?.time_range?.since;
+	const parsedSince = rawSince ? Date.parse(rawSince) : Number.NaN;
+	const sinceDate = !Number.isNaN(parsedSince)
+		? new Date(parsedSince).toISOString().slice(0, 10)
+		: priorDate || null;
 
 	const { data: me } = await gh<GitHubUser>(ctx, "/user");
 	const userId = String(me.id);

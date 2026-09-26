@@ -117,7 +117,7 @@ test("browser fixture completes START to RECORD to DONE through the connector pr
 	assert.equal(messages.filter((message) => message.type === "DONE").length, 1);
 });
 
-test("production history field filters since inclusive, until exclusive, and unknown dates", async () => {
+test("bounded history reports its date precision as unsupported", async () => {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: packageRoot,
 		entrypoint: fileURLToPath(
@@ -129,7 +129,10 @@ test("production history field filters since inclusive, until exclusive, and unk
 				streams: [
 					{
 						name: "watch_history",
-						time_range: { since: "2026-09-22", until: "2026-09-23" },
+						time_range: {
+							since: "2026-09-22T00:00:00Z",
+							until: "2026-09-23T00:00:00Z",
+						},
 					},
 				],
 			},
@@ -139,10 +142,15 @@ test("production history field filters since inclusive, until exclusive, and unk
 		(message) =>
 			message.type === "RECORD" && message.stream === "watch_history",
 	);
-	assert.equal(records.length, 1);
+	assert.equal(records.length, 0);
 	assert.equal(
-		(records[0] as { data?: { watched_date?: string } })?.data?.watched_date,
-		"2026-09-22",
+		result.messages.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "watch_history" &&
+				message.reason === "scope_not_supported",
+		).length,
+		1,
 	);
 	assert.equal(
 		result.messages.filter((message) => message.type === "DONE").length,
@@ -191,12 +199,14 @@ test("profile waits past a generic h1 shell until channel identity and title arr
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
-				body = '<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Loading</h1><script>setTimeout(() => document.querySelector("h1").textContent = "Real Owner", 500)</script>';
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Loading</h1><script>setTimeout(() => document.querySelector("h1").textContent = "Real Owner", 500)</script>';
 			else if (url.pathname === "/@owner/about")
 				body =
-					'<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span><span>1.2K subscribers</span></ytd-channel-about-metadata-renderer>';
+					"<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span><span>1.2K subscribers</span></ytd-channel-about-metadata-renderer>";
 			await route.fulfill({
 				status: body ? 200 : 404,
 				contentType: "text/html",
@@ -232,7 +242,8 @@ test("profile waits past a generic About span shell until fields arrive", async 
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
 				body =
 					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
@@ -275,11 +286,14 @@ test("profile ignores channel chrome counts while About metadata is loading", as
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
-				body = '<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
 			else if (url.pathname === "/@owner/about")
-				body = '<span>32 videos</span><ytd-channel-about-metadata-renderer><span>Loading</span></ytd-channel-about-metadata-renderer><script>setTimeout(() => document.querySelector("ytd-channel-about-metadata-renderer").innerHTML = "<span>Joined Jan 3, 2020</span><span>1.2K subscribers</span>", 500)</script>';
+				body =
+					'<span>32 videos</span><ytd-channel-about-metadata-renderer><span>Loading</span></ytd-channel-about-metadata-renderer><script>setTimeout(() => document.querySelector("ytd-channel-about-metadata-renderer").innerHTML = "<span>Joined Jan 3, 2020</span><span>1.2K subscribers</span>", 500)</script>';
 			await route.fulfill({
 				status: body ? 200 : 404,
 				contentType: "text/html",
@@ -290,7 +304,9 @@ test("profile ignores channel chrome counts while About metadata is loading", as
 		await collectYoutubeBrowser({
 			page: page as never,
 			requested: new Map([["profile", { name: "profile" }]]) as never,
-			emitRecord: async (_stream, data) => { records.push(data); },
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
 			emit: async () => undefined,
 			progress: async () => undefined,
 		});

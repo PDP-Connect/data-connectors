@@ -461,7 +461,12 @@ export function isBeforeSince(
 	if (!(since && iso)) {
 		return false;
 	}
-	return iso < since;
+	const value = Date.parse(iso);
+	const bound = Date.parse(since);
+	if (Number.isNaN(value) || Number.isNaN(bound)) {
+		return true;
+	}
+	return value < bound;
 }
 
 export function isAtOrAfterUntil(
@@ -471,5 +476,10 @@ export function isAtOrAfterUntil(
 	if (!(until && iso)) {
 		return false;
 	}
-	return iso >= until;
+	const value = Date.parse(iso);
+	const bound = Date.parse(until);
+	if (Number.isNaN(value) || Number.isNaN(bound)) {
+		return true;
+	}
+	return value >= bound;
 }

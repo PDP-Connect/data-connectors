@@ -564,6 +564,10 @@ test("laterIso: null-tolerant", () => {
 test("isBeforeSince: true only when both values present and iso < since", () => {
 	assert.equal(isBeforeSince("2026-01-01", "2026-02-01"), true);
 	assert.equal(isBeforeSince("2026-03-01", "2026-02-01"), false);
+	assert.equal(
+		isBeforeSince("2026-05-03T00:00:00Z", "2026-05-03T05:30:00+05:30"),
+		false,
+	);
 	assert.equal(isBeforeSince(null, "2026-02-01"), false);
 	assert.equal(isBeforeSince("2026-03-01", null), false);
 });
@@ -572,6 +576,10 @@ test("isAtOrAfterUntil: true only when both present and iso >= until", () => {
 	assert.equal(isAtOrAfterUntil("2026-02-01", "2026-02-01"), true);
 	assert.equal(isAtOrAfterUntil("2026-03-01", "2026-02-01"), true);
 	assert.equal(isAtOrAfterUntil("2026-01-01", "2026-02-01"), false);
+	assert.equal(
+		isAtOrAfterUntil("2026-05-02T23:59:59Z", "2026-05-02T17:00:00-07:00"),
+		false,
+	);
 	assert.equal(isAtOrAfterUntil(null, "2026-02-01"), false);
 });
 

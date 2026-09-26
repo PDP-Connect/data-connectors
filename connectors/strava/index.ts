@@ -263,7 +263,7 @@ function emptyCoverage(
 	};
 }
 
-/** Match the runtime's inclusive-since/exclusive-until date filtering locally. */
+/** Match the runtime's inclusive-since/exclusive-until timestamp filtering locally. */
 function isOutsideRequestedTimeRange(
 	dateValue: string,
 	timeRange: { since?: string; until?: string } | undefined,
@@ -271,10 +271,20 @@ function isOutsideRequestedTimeRange(
 	if (!timeRange) {
 		return false;
 	}
-	if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
+	const timestamp = Date.parse(dateValue);
+	const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
+	const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+	if (
+		Number.isNaN(timestamp) ||
+		(since !== undefined && Number.isNaN(since)) ||
+		(until !== undefined && Number.isNaN(until))
+	) {
 		return true;
 	}
-	return Boolean(timeRange.until && dateValue >= timeRange.until.slice(0, 10));
+	return (
+		(since !== undefined && timestamp < since) ||
+		(until !== undefined && timestamp >= until)
+	);
 }
 
 async function collectActivities(
