@@ -1244,6 +1244,7 @@ export interface EmitDeps extends HydrationDeps {
 	progress: BrowserCollectContext["progress"];
 	sendInteraction: BrowserCollectContext["sendInteraction"];
 	wantsItems: boolean;
+	emitItems: boolean;
 	wantsOrders: boolean;
 }
 
@@ -1612,17 +1613,19 @@ async function emitOrderAndItems(
 	}
 	if (deps.wantsItems && detail) {
 		for (const [itemIndex, item] of detail.items.entries()) {
-			await deps.emitRecord(
-				"order_items",
-				buildOrderItemRecord(
-					listOrder.orderId,
-					orderDate,
-					item,
-					itemIndex,
-					deps.emittedAt,
-					detail.items,
-				),
-			);
+			if (deps.emitItems) {
+				await deps.emitRecord(
+					"order_items",
+					buildOrderItemRecord(
+						listOrder.orderId,
+						orderDate,
+						item,
+						itemIndex,
+						deps.emittedAt,
+						detail.items,
+					),
+				);
+			}
 			if (
 				deps.nutritionTargetSink &&
 				item.productId &&
@@ -2260,9 +2263,6 @@ export interface NutritionCoverageGateInput {
 export function nutritionCoverageBlockReason(
 	input: NutritionCoverageGateInput,
 ): string | null {
-	if (!input.ordersRequested || !input.orderItemsRequested) {
-		return "nutrition requires orders and order_items in the same run";
-	}
 	if (input.ordersTruncated) {
 		return "order history stopped at the page budget before all orders were scanned";
 	}
@@ -2465,24 +2465,14 @@ if (isMainModule(import.meta.url)) {
 			// order_items collection observes, and its historical completeness is
 			// anchored by the same run's order-history scan. With neither source
 			// stream requested, there is nothing to look up or prove.
-			if (wantsNutrition && !(wantsOrders || wantsItems)) {
-				await emitNutritionCoverageIncomplete(
-					{ emit },
-					"H-E-B nutrition lookup requires orders and order_items in the same run's scope; it has no independent product catalog to browse and cannot prove full historical coverage without the order-history coverage anchors.",
-					{
-						orders_requested: wantsOrders,
-						order_items_requested: wantsItems,
-					},
-				);
-			}
-
-			if (!(wantsOrders || wantsItems)) {
+			if (!(wantsOrders || wantsItems || wantsNutrition)) {
 				return;
 			}
 
 			const nutritionTargets: NutritionTarget[] = [];
 			const seenNutritionProductIds = new Set<string>();
-			const collectNutritionTargets = wantsNutrition && wantsItems;
+			const collectItemEvidence = wantsItems || wantsNutrition;
+			const collectNutritionTargets = wantsNutrition;
 
 			const ordersState = (state.orders ?? {}) as OrdersStateShape;
 			const boundary = resumeBoundary(ordersState.checkpoint);
@@ -2498,7 +2488,7 @@ if (isMainModule(import.meta.url)) {
 						excludeFromFingerprint: ["fetched_at"],
 					})
 				: undefined;
-			const orderItemsCoverage = wantsItems
+			const orderItemsCoverage = collectItemEvidence
 				? newOrderItemsCoverage()
 				: undefined;
 			// `orders` list-stream coverage is only meaningful when `orders` itself
@@ -2506,7 +2496,7 @@ if (isMainModule(import.meta.url)) {
 			const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
 			// Declared-vs-collected item tallies for the `order_items` anchor.
 			// Only meaningful when items are in scope.
-			const itemCountTallies: OrderItemTally[] | undefined = wantsItems
+			const itemCountTallies: OrderItemTally[] | undefined = collectItemEvidence
 				? []
 				: undefined;
 
@@ -2533,7 +2523,8 @@ if (isMainModule(import.meta.url)) {
 				ordersFingerprintCursor,
 				progress,
 				sendInteraction,
-				wantsItems,
+				wantsItems: collectItemEvidence,
+				emitItems: wantsItems,
 				wantsOrders,
 			};
 
@@ -2587,7 +2578,7 @@ if (isMainModule(import.meta.url)) {
 				await emit({ type: "STATE", stream: "orders", cursor });
 			}
 
-			if (orderItemsCoverage) {
+			if (orderItemsCoverage && wantsItems) {
 				await emitOrderItemsCoverage(deps, orderItemsCoverage);
 			}
 			// The `order_items` completeness anchor: every hydrated order's item
@@ -2630,8 +2621,8 @@ if (isMainModule(import.meta.url)) {
 					itemCountShort,
 					orderHistoryStoppedAtBoundary: stoppedAtBoundary,
 					orderItemsGapCount: orderItemsCoverage?.gap.length ?? 0,
-					orderItemsRequested: wantsItems,
-					ordersRequested: wantsOrders,
+					orderItemsRequested: collectItemEvidence,
+					ordersRequested: true,
 					ordersTruncated: truncated,
 					unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
 						? 1
@@ -2647,6 +2638,8 @@ if (isMainModule(import.meta.url)) {
 							order_items_gap_count: orderItemsCoverage?.gap.length ?? 0,
 							orders_requested: wantsOrders,
 							order_items_requested: wantsItems,
+							order_evidence_collected_internally: wantsNutrition && !wantsOrders,
+							order_item_evidence_collected_internally: wantsNutrition && !wantsItems,
 							orders_truncated: truncated,
 							unrecovered_prior_order_item_gap_count:
 								gapRecovery.stoppedWithPending ? 1 : 0,
@@ -2657,6 +2650,15 @@ if (isMainModule(import.meta.url)) {
 						emit,
 						emitRecord,
 						emittedAt,
+					});
+					await emit({
+						type: "STATE",
+						stream: "nutrition",
+						cursor: {
+							completed_at: emittedAt,
+							product_count: nutritionTargets.length,
+							source: "heb_order_history",
+						},
 					});
 				}
 			}

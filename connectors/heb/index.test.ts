@@ -121,6 +121,7 @@ function makeRecordingDeps(overrides: Partial<EmitDeps> = {}): RecordingDeps {
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		emittedAt: "2026-07-14T12:00:00.000Z",
+		emitItems: true,
 		orderItemsCoverage: undefined,
 		ordersCoverage: undefined,
 		ordersFingerprintCursor: undefined,
@@ -515,6 +516,46 @@ test("processListOrder: nothing recorded in ordersCoverage when orders is out of
 		"orders out of scope means no orders-coverage accounting at all",
 	);
 	assert.deepEqual(ordersCoverage.covered, []);
+});
+
+test("processListOrder: nutrition-only evidence hydrates details without emitting orders or order_items", async () => {
+	const orderItemsCoverage = newOrderItemsCoverage();
+	const targets: NutritionTarget[] = [];
+	const { deps, emitted } = makeRecordingDeps({
+		emitItems: false,
+		nutritionTargetSink: {
+			seenProductIds: new Set<string>(),
+			targets,
+		},
+		orderItemsCoverage,
+		ordersCoverage: undefined,
+		wantsItems: true,
+		wantsOrders: false,
+	});
+	const listOrder = makeListOrder({ orderId: "HEB1000000001" });
+
+	await processListOrder(
+		makePageStub({ content: DETAIL_HTML }),
+		deps,
+		makeRunFlags(),
+		listOrder,
+	);
+
+	assert.deepEqual(orderItemsCoverage.required, ["HEB1000000001"]);
+	assert.deepEqual(orderItemsCoverage.hydrated, ["HEB1000000001"]);
+	assert.deepEqual(orderItemsCoverage.gap, []);
+	assert.deepEqual(
+		emitted.map((record) => record.stream),
+		[],
+		"internal order evidence must not emit unrequested orders or order_items records",
+	);
+	assert.deepEqual(targets, [
+		{
+			name: "Widget",
+			productId: "500",
+			productUrl: "https://www.heb.com/product-detail/widget/500",
+		},
+	]);
 });
 
 test("processListOrder: a malformed order date is considered but not covered in ordersCoverage", async () => {
@@ -3533,7 +3574,7 @@ test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redi
 });
 
 
-test("nutritionCoverageBlockReason requires orders and order_items in the same run", () => {
+test("nutritionCoverageBlockReason accepts internally collected order evidence", () => {
 	assert.equal(
 		nutritionCoverageBlockReason({
 			itemCountShort: false,
@@ -3544,7 +3585,7 @@ test("nutritionCoverageBlockReason requires orders and order_items in the same r
 			ordersTruncated: false,
 			unrecoveredPriorOrderItemGapCount: 0,
 		}),
-		"nutrition requires orders and order_items in the same run",
+		null,
 	);
 });
 
