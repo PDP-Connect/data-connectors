@@ -119,7 +119,7 @@ const KNOWN_LAYER_MEDIA_TYPES = new Set(Object.values(OCI_LAYER_MEDIA_TYPES));
 
 // Which layers an artifact cannot be without. `assets` is deliberately absent
 // from this list, and that absence is the thing A-T6 pins.
-const REQUIRED_LAYERS = ["profile", "code", "licenses", "sourceDeclaration", "provenance"];
+const REQUIRED_LAYERS = ["profile", "code", "licenses", "provenance"];
 
 export const DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER =
   "https://token.actions.githubusercontent.com";
@@ -729,7 +729,7 @@ export function assertConfigMatchesProfile({
     if (config?.source_declaration_digest !== declarationDigest) {
       throw new OciRegistryError(
         `Refusing ${repository}: config.source_declaration_digest is ${config?.source_declaration_digest}, ` +
-          `but the source declaration layer hashes to ${declarationDigest}`,
+          `but the source declaration hashes to ${declarationDigest}`,
         "tampered"
       );
     }

@@ -399,6 +399,15 @@ export function publishArtifact(
     tamperLayer = null,
     configOverrides = {},
     sourceDeclarationOverride = null,
+    withSourceDeclarationLayer = true,
+    withSourceDeclarationReferrer = false,
+    sourceDeclarationReferrerSubjectDigest = null,
+    sourceDeclarationReferrerSigner = undefined,
+    sourceDeclarationReferrerBytes = null,
+    sourceDeclarationReferrerArtifactType = "application/vnd.pdpp.connector.source-declaration.v1+json",
+    sourceDeclarationReferrerLayerSize = null,
+    sourceDeclarationReferrerInlineConfig = false,
+    sourceDeclarationReferrerInlineConfigData = null,
   } = {}
 ) {
   const resolvedConnectorId =
@@ -494,7 +503,9 @@ export function publishArtifact(
       ? [layer(assetsBytes, "application/vnd.pdpp.connector.assets.v1.tar+gzip", "assets.tar.gz")]
       : []),
     layer(licensesBytes, "application/vnd.pdpp.connector.licenses.v1.tar+gzip", "licenses.tar.gz"),
-    layer(sourceDeclarationBytes, "application/vnd.pdpp.connector.source-declaration.v1+json", "source-declaration.json"),
+    ...(withSourceDeclarationLayer
+      ? [layer(sourceDeclarationBytes, "application/vnd.pdpp.connector.source-declaration.v1+json", "source-declaration.json")]
+      : []),
     layer(provenanceBytes, "application/vnd.pdpp.connector.provenance.v1+json", "provenance.json"),
     ...extraLayers,
   ];
@@ -515,7 +526,7 @@ export function publishArtifact(
     },
   };
 
-  const { digest } = registry.putManifest(manifest, version);
+  const { digest, bytes: manifestBytes } = registry.putManifest(manifest, version);
 
   // The cosign signature object: a manifest at `sha256-<hex>.sig` whose layers
   // are simple-signing payloads, the signature in one annotation and the
@@ -548,6 +559,91 @@ export function publishArtifact(
       },
       `${digest.replace(":", "-")}.sig`
     );
+  }
+
+  let sourceDeclarationReferrer = null;
+  if (withSourceDeclarationReferrer) {
+    const referrerBytes = sourceDeclarationReferrerBytes ?? sourceDeclarationBytes;
+    const subjectDigest = sourceDeclarationReferrerSubjectDigest ?? digest;
+    const emptyConfigBytes = Buffer.from("{}");
+    const referrerConfig = {
+      mediaType: "application/vnd.oci.empty.v1+json",
+      digest: sha256(emptyConfigBytes),
+      size: emptyConfigBytes.length,
+      ...(sourceDeclarationReferrerInlineConfig
+        ? { data: sourceDeclarationReferrerInlineConfigData ?? emptyConfigBytes.toString("base64") }
+        : {}),
+    };
+    if (!sourceDeclarationReferrerInlineConfig) {
+      registry.putBlob(emptyConfigBytes);
+    }
+    const referrerManifest = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      artifactType: sourceDeclarationReferrerArtifactType,
+      config: referrerConfig,
+      layers: [
+        {
+          mediaType: "application/vnd.pdpp.connector.source-declaration.v1+json",
+          digest: registry.putBlob(referrerBytes),
+          size: sourceDeclarationReferrerLayerSize ?? referrerBytes.length,
+          annotations: { "org.opencontainers.image.title": "source-declaration.json" },
+        },
+      ],
+      subject: {
+        mediaType: "application/vnd.oci.image.manifest.v1+json",
+        digest: subjectDigest,
+        size: subjectDigest === digest ? manifestBytes.length : 0,
+      },
+    };
+    const { digest: referrerDigest, bytes: referrerManifestBytes } = registry.putManifest(referrerManifest);
+    const index = {
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.index.v1+json",
+      manifests: [
+        {
+          mediaType: "application/vnd.oci.image.manifest.v1+json",
+          size: referrerManifestBytes.length,
+          digest: referrerDigest,
+          artifactType: sourceDeclarationReferrerArtifactType,
+        },
+      ],
+    };
+    registry.putManifest(index, digest.replace(":", "-"));
+
+    const referrerSigner =
+      sourceDeclarationReferrerSigner === undefined ? signer : sourceDeclarationReferrerSigner;
+    if (referrerSigner) {
+      const payload = canonicalJson({
+        critical: {
+          identity: { "docker-reference": `${registry.registry}/pdp-connect/connector/${connectorKey}` },
+          image: { "docker-manifest-digest": referrerDigest },
+          type: "cosign container image signature",
+        },
+        optional: null,
+      });
+      registry.putManifest(
+        {
+          schemaVersion: 2,
+          mediaType: "application/vnd.oci.image.manifest.v1+json",
+          config: {
+            mediaType: "application/vnd.oci.image.config.v1+json",
+            digest: registry.putBlob(Buffer.from("{}")),
+            size: 2,
+          },
+          layers: [
+            {
+              mediaType: "application/vnd.dev.cosign.simplesigning.v1+json",
+              digest: registry.putBlob(payload),
+              size: payload.length,
+              annotations: cosignSignatureAnnotations(referrerSigner, payload, { omitRekorBundle }),
+            },
+          ],
+        },
+        `${referrerDigest.replace(":", "-")}.sig`
+      );
+    }
+    sourceDeclarationReferrer = { manifestDigest: referrerDigest, manifest: referrerManifest, index };
   }
 
   // The cosign v3-default bundle. This is TWO objects, not one, matching the
@@ -636,8 +732,10 @@ export function publishArtifact(
     config,
     configBytes,
     codeBytes,
+    sourceDeclarationBytes,
     provenanceBytes,
     bundleReferrer,
+    sourceDeclarationReferrer,
   };
 }
 

@@ -17,6 +17,7 @@ import {
   cosignSignatureTag,
   fetchBlob,
   isValidConnectorKey,
+  lookupReferrers,
   lookupManifest,
   parseBearerChallenge,
   parseConnectorOciReference,
@@ -40,6 +41,23 @@ function present(bodyText) {
     status: 200,
     headers: { "docker-content-digest": sha256Digest(Buffer.from(bodyText, "utf8")) },
     body: bodyText,
+  };
+}
+
+function referrersIndex(manifests) {
+  return {
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.index.v1+json",
+    manifests,
+  };
+}
+
+function descriptor(digest, artifactType = "application/vnd.pdpp.connector.source-declaration.v1+json") {
+  return {
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    digest,
+    size: 123,
+    artifactType,
   };
 }
 
@@ -251,6 +269,138 @@ test("an exhausted lookup retry remains unknown, never absent", async () => {
   assert.match(result.reason, /HTTP 503/);
   assert.equal(calls.length, 3);
   assert.equal(retries.length, 2);
+});
+
+test("lookupReferrers follows authenticated same-repository next pages", async () => {
+  const digest = `sha256:${"1".repeat(64)}`;
+  const artifactType = "application/vnd.pdpp.connector.source-declaration.v1+json";
+  const firstPage = descriptor(`sha256:${"2".repeat(64)}`);
+  const secondPage = descriptor(`sha256:${"3".repeat(64)}`);
+  const calls = [];
+
+  const result = await lookupReferrers({
+    registry: "registry.example",
+    repository: "pdp-connect/connector/ynab",
+    digest,
+    artifactType,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, authorization: options.headers.authorization ?? null });
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        return new Response(JSON.stringify({ token: "fixture-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (!options.headers.authorization) {
+        return new Response(JSON.stringify({ errors: [{ code: "UNAUTHORIZED" }] }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": 'Bearer realm="https://registry.example/token",service="fixture"',
+          },
+        });
+      }
+      if (parsed.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify(referrersIndex([secondPage])), {
+          status: 200,
+          headers: { "content-type": "application/vnd.oci.image.index.v1+json" },
+        });
+      }
+      return new Response(JSON.stringify(referrersIndex([firstPage])), {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.oci.image.index.v1+json",
+          link: `<?page=2>; rel="next"`,
+        },
+      });
+    },
+    retryOptions: retryTestOptions(),
+  });
+
+  assert.equal(result.outcome, "supported");
+  assert.deepEqual(result.index.manifests, [firstPage, secondPage]);
+  assert.ok(
+    calls.some((call) => call.url.includes("page=2") && call.authorization === "Bearer fixture-token"),
+    "expected the later page to use the authenticated registry GET path"
+  );
+});
+
+test("lookupReferrers returns later-page declaration descriptors so callers can detect conflicts", async () => {
+  const digest = `sha256:${"4".repeat(64)}`;
+  const artifactType = "application/vnd.pdpp.connector.source-declaration.v1+json";
+  const firstDeclaration = descriptor(`sha256:${"5".repeat(64)}`);
+  const conflictingDeclaration = descriptor(`sha256:${"6".repeat(64)}`);
+
+  const result = await lookupReferrers({
+    registry: "ghcr.io",
+    repository: "pdp-connect/connector/ynab",
+    digest,
+    artifactType,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify(referrersIndex([conflictingDeclaration])), {
+          status: 200,
+          headers: { "content-type": "application/vnd.oci.image.index.v1+json" },
+        });
+      }
+      return new Response(JSON.stringify(referrersIndex([firstDeclaration])), {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.oci.image.index.v1+json",
+          link: `</v2/pdp-connect/connector/ynab/referrers/${encodeURIComponent(digest)}?artifactType=${encodeURIComponent(artifactType)}&page=2>; rel="next"`,
+        },
+      });
+    },
+    retryOptions: retryTestOptions(),
+  });
+
+  assert.equal(result.outcome, "supported");
+  assert.deepEqual(
+    result.index.manifests.filter((entry) => entry.artifactType === artifactType).map((entry) => entry.digest),
+    [firstDeclaration.digest, conflictingDeclaration.digest]
+  );
+});
+
+test("lookupReferrers follows same-repository next pages with a raw digest colon", async () => {
+  const digest = `sha256:${"7".repeat(64)}`;
+  const artifactType = "application/vnd.pdpp.connector.source-declaration.v1+json";
+  const firstDeclaration = descriptor(`sha256:${"8".repeat(64)}`);
+  const secondDeclaration = descriptor(`sha256:${"9".repeat(64)}`);
+  const calls = [];
+
+  const result = await lookupReferrers({
+    registry: "ghcr.io",
+    repository: "pdp-connect/connector/ynab",
+    digest,
+    artifactType,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const parsed = new URL(url);
+      if (parsed.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify(referrersIndex([secondDeclaration])), {
+          status: 200,
+          headers: { "content-type": "application/vnd.oci.image.index.v1+json" },
+        });
+      }
+      return new Response(JSON.stringify(referrersIndex([firstDeclaration])), {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.oci.image.index.v1+json",
+          link: `</v2/pdp-connect/connector/ynab/referrers/${digest}?artifactType=${encodeURIComponent(artifactType)}&page=2>; rel="next"`,
+        },
+      });
+    },
+    retryOptions: retryTestOptions(),
+  });
+
+  assert.equal(result.outcome, "supported");
+  assert.deepEqual(result.index.manifests, [firstDeclaration, secondDeclaration]);
+  assert.ok(
+    calls.some((url) => url.includes(`/referrers/${digest}`) && url.includes("page=2")),
+    "expected the raw-colon next Link to be followed"
+  );
 });
 
 test("a reference is split on @digest before :tag", () => {

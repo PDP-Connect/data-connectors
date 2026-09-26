@@ -11,7 +11,8 @@
 //      refuses one that is not — exercised against real throwaway git repos,
 //      for a tag push, a branch dispatch, and the degenerate inputs.
 //   2. .github/workflows/publish-polyfill-connectors.yml actually calls it,
-//      before every step that can reach `oras push` or `cosign sign`. A correct
+//      before every step that can reach `oras push`, `oras attach`, or
+//      `cosign sign`. A correct
 //      script that nothing invokes is the regression this half exists to catch.
 //
 // One non-security assertion rides along: that the workflow installs
@@ -600,11 +601,12 @@ test("the publish workflow runs the gate before every step that can publish", ()
     "the publish workflow must actually run `node scripts/assert-publish-ref.mjs`, not merely mention it",
   );
 
-  // Under OCI there are TWO verbs that create a release, not one: `oras push`
-  // writes the bytes and `cosign sign` attests to them. Both must sit after the
-  // gate. Guarding only the push would leave a path where an unreviewed commit
-  // cannot upload an artifact but can still put the org's signing identity
-  // behind a digest — which is the more valuable half to steal.
+  // Under OCI there are three verbs that create a release: `oras push` writes
+  // the connector bytes, `oras attach` writes the SourceDeclaration referrer,
+  // and `cosign sign` attests to them. All must sit after the gate. Guarding
+  // only the push would leave a path where an unreviewed commit cannot upload
+  // an artifact but can still put the org's signing identity behind a digest —
+  // which is the more valuable half to steal.
   //
   // Matched inside `run:` blocks rather than on `run:` lines, because both
   // commands live in multi-line scripts here.
@@ -612,11 +614,15 @@ test("the publish workflow runs the gate before every step that can publish", ()
     .map((line, index) => ({ line, index }))
     .filter(
       ({ line }) =>
-        !isComment(line) && /^\s*(oras push|cosign sign)\b/.test(line),
+        !isComment(line) && /^\s*(oras push|oras attach|cosign sign)\b/.test(line),
     );
   assert.ok(
     publishLines.some(({ line }) => /oras push/.test(line)),
     "expected an `oras push` step to guard",
+  );
+  assert.ok(
+    publishLines.some(({ line }) => /oras attach/.test(line)),
+    "expected an `oras attach` step to guard",
   );
   assert.ok(
     publishLines.some(({ line }) => /cosign sign/.test(line)),

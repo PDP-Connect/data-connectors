@@ -9,7 +9,7 @@
 	},
 	"connector_key": "whatsapp",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"display_name": "WhatsApp (chat export)",
 	"brand": {
 		"icon": "icon.svg",
