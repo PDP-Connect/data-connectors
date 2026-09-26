@@ -123,10 +123,16 @@ function makePushApprovalPage(opts: PushApprovalPageOptions): Page {
 	return fake as Page;
 }
 
-function makeProbeContext(probePage: Page): BrowserContext {
-	return {
-		newPage: () => Promise.resolve(probePage),
-	} as BrowserContext;
+function makeProbeContext(): BrowserContext {
+	return Object.assign(makeContext(), {
+		request: {
+			get: () =>
+				Promise.resolve({
+					ok: () => true,
+					json: () => Promise.resolve({ user: { id: "u" } }),
+				}),
+		},
+	});
 }
 
 // Logical clock: tests advance `value` so the watchdog's trip math (which reads
@@ -333,26 +339,15 @@ test("readiness during the non-blocking poll resolves the assistance and emits N
 	}
 });
 
-test("push-approval poll checks ChatGPT origin when approval page does not redirect", async () => {
+test("push-approval poll checks ChatGPT session without another page when approval page does not redirect", async () => {
 	const prior = process.env.PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS;
 	shortBudgetEnv();
 	try {
 		const interactions: InteractionRequest[] = [];
 		const primaryNavigations: string[] = [];
-		let probeOpened = 0;
 		let primaryOnChatGpt = false;
-		const chatGptProbePage = makePushApprovalPage({
-			sessionActive: () => true,
-			url: "https://chatgpt.com/",
-		});
 		const primaryPage = makePushApprovalPage({
-			context: makeProbeContext({
-				...chatGptProbePage,
-				close: () => {
-					probeOpened += 1;
-					return Promise.resolve();
-				},
-			} as Page),
+			context: makeProbeContext(),
 			onGoto: (url) => {
 				primaryNavigations.push(url);
 				primaryOnChatGpt = url === "https://chatgpt.com/";
@@ -381,11 +376,6 @@ test("push-approval poll checks ChatGPT origin when approval page does not redir
 			primaryNavigations,
 			["https://chatgpt.com/"],
 			"collector page is moved back to ChatGPT before collect()",
-		);
-		assert.equal(
-			probeOpened,
-			1,
-			"temporary ChatGPT-origin probe page is closed",
 		);
 	} finally {
 		clearBudgetEnv(prior);

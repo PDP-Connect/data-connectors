@@ -1494,6 +1494,10 @@ test("ensureHebSession auto-resumes after the owner establishes a session", asyn
 	const ready = await ensureHebSession({
 		assist: () => {
 			state.live = true;
+			state.url = ORDERS_URL;
+			state.html = LIVE_HTML;
+			state.view = "live";
+			state.forms = [];
 			return Promise.resolve("assist_heb_login");
 		},
 		completeAssistance: (id, status) => {

@@ -74,7 +74,7 @@ function makePage(loginError: Error, bodyText = "Log Off"): FakePageHarness {
 	};
 	const fake: Pick<
 		Page,
-		"close" | "context" | "goto" | "locator" | "waitForTimeout"
+		"close" | "context" | "goto" | "locator" | "url" | "waitForTimeout"
 	> = {
 		close: (): Promise<void> => Promise.resolve(),
 		context: (): BrowserContext =>
@@ -97,6 +97,7 @@ function makePage(loginError: Error, bodyText = "Log Off"): FakePageHarness {
 		): Locator {
 			return bodyLocator as Locator;
 		},
+		url: (): string => DASHBOARD_URL,
 		waitForTimeout(_ms: number): Promise<void> {
 			return Promise.resolve();
 		},

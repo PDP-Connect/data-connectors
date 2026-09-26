@@ -305,6 +305,25 @@ async function verifyLoggedIn(
 	return LOGGED_IN_TEXT.test(bodyText);
 }
 
+async function verifyLoggedInOnCurrentPage(
+	context: BrowserContext,
+	page: Page,
+): Promise<boolean> {
+	if (
+		!(await hasLoggedInCookie(context)) ||
+		!page.url().startsWith(USAA_ORIGIN)
+	) {
+		return false;
+	}
+	const bodyText = (
+		await page
+			.locator("body")
+			.innerText()
+			.catch((): string => "")
+	).slice(0, 500);
+	return LOGGED_IN_TEXT.test(bodyText);
+}
+
 async function requestManualLoginRecovery(
 	{
 		assist,
@@ -328,7 +347,9 @@ async function requestManualLoginRecovery(
 		message,
 		page,
 		probe: () => verifyLoggedIn(context, page),
-		readinessProbe: (probePage) => verifyLoggedIn(context, probePage),
+		readinessProbe: (probePage) =>
+			verifyLoggedInOnCurrentPage(context, probePage),
+		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 1800,
 	});
@@ -648,7 +669,9 @@ export async function ensureUsaaSession({
 				message: MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE,
 				page,
 				probe: () => verifyLoggedIn(context, page),
-				readinessProbe: (probePage) => verifyLoggedIn(context, probePage),
+				readinessProbe: (probePage) =>
+					verifyLoggedInOnCurrentPage(context, probePage),
+				readinessProbeOnHandoffPage: true,
 				sendInteraction,
 				timeoutSeconds: 1800,
 			})

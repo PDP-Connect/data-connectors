@@ -878,7 +878,7 @@ async function handOffToOwner({
 	if (assist && completeAssistance && readinessCheck) {
 		const automaticMessage = message.replace(
 			"then continue. PDPP will re-check the session afterward.",
-			"PDPP will continue automatically when the session is ready.",
+			"The import will continue automatically when sign-in is detected.",
 		);
 		return await manualBrowserLogin({
 			assist,
@@ -888,7 +888,9 @@ async function handOffToOwner({
 			message: automaticMessage,
 			page,
 			probe: () => probeHebSession(page),
-			readinessProbe: (readinessPage) => probeHebSession(readinessPage),
+			readinessProbe: async (readinessPage) =>
+				(await inspectAuthSurface(readinessPage)) === "live",
+			readinessProbeOnHandoffPage: true,
 			reason: "login",
 			sendInteraction,
 			timeoutSeconds: 1800,

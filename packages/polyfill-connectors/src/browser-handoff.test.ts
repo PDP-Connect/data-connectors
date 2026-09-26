@@ -904,6 +904,7 @@ test("manualBrowserLogin self-resolves via assist/completeAssistance when probe 
 			probeCalls += 1;
 			return Promise.resolve(true);
 		},
+		readinessProbeOnHandoffPage: true,
 		probe: (): Promise<boolean> => {
 			throw new Error(
 				"the streamed readiness probe must not use the owner page",
@@ -929,80 +930,113 @@ test("manualBrowserLogin self-resolves via assist/completeAssistance when probe 
 	assert.deepEqual(completions, [{ id: "assist_req_1", status: "resolved" }]);
 });
 
-test("manualBrowserLogin runs navigation-capable readiness evidence on a temporary page, never the streamed owner page", async () => {
-	const readinessNavigations: string[] = [];
-	let readinessClosed = 0;
-	const readinessPage = {
-		close: () => {
-			readinessClosed += 1;
-			return Promise.resolve();
-		},
-		goto: (url: string) => {
-			readinessNavigations.push(url);
-			return Promise.resolve(null);
-		},
-	} as Page;
-	const ownerPage = makeMockPage({ readinessPage });
-
-	const result = await manualBrowserLogin({
-		assist: () => Promise.resolve("assist_navigation_safe"),
-		completeAssistance: () => Promise.resolve(),
-		isProbeSuccessful: (ready: boolean) => ready,
-		message: "Finish sign-in in the secure browser.",
-		page: ownerPage,
-		probe: (): Promise<boolean> => Promise.resolve(false),
-		readinessProbe: async (probePage): Promise<boolean> => {
-			assert.notEqual(probePage, ownerPage);
-			await probePage.goto("https://example.test/session-ready");
-			return true;
-		},
-		sendInteraction: () =>
-			Promise.reject(new Error("manual interaction must not run")),
-	});
-
-	assert.equal(result, true);
-	assert.deepEqual(readinessNavigations, [
-		"https://example.test/session-ready",
-	]);
-	assert.equal(readinessClosed, 1);
-});
-
-test("manualBrowserLogin opens a sibling readiness tab unless owner-page mode is selected", async () => {
+test("manualBrowserLogin polls a declared non-navigating probe on the one owner page", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
-		for (const probeOnOwnerPage of [false, true]) {
-			const context = await browser.newContext();
-			const ownerPage = await context.newPage();
-			await ownerPage.goto("data:text/html,<title>sign-in</title>");
-			const pageCountsDuringProbe: number[] = [];
-			let pageCountWhenHandoffStarted = 0;
-			const result = await manualBrowserLogin({
-				assist: () => {
-					pageCountWhenHandoffStarted = context.pages().length;
-					return Promise.resolve("headless_tab_count");
-				},
-				autoProbeIntervalMs: 1,
-				completeAssistance: () => Promise.resolve(),
-				isProbeSuccessful: (ready: boolean) => ready,
-				message: "Finish sign-in in the secure browser.",
-				page: ownerPage,
-				probe: () => Promise.resolve(false),
-				readinessProbe: (readinessPage) => {
-					pageCountsDuringProbe.push(context.pages().length);
-					assert.equal(readinessPage === ownerPage, probeOnOwnerPage);
-					return Promise.resolve(true);
-				},
-				...(probeOnOwnerPage ? { readinessProbeOnHandoffPage: true } : {}),
-				sendInteraction: () =>
-					Promise.reject(new Error("manual interaction must not run")),
-			});
+		const context = await browser.newContext();
+		const ownerPage = await context.newPage();
+		await ownerPage.goto("data:text/html,<title>sign-in</title>");
+		const pageCountsDuringProbe: number[] = [];
+		const result = await manualBrowserLogin({
+			assist: () => Promise.resolve("headless_tab_count"),
+			completeAssistance: () => Promise.resolve(),
+			isProbeSuccessful: (ready: boolean) => ready,
+			message: "Finish sign-in in the secure browser.",
+			page: ownerPage,
+			probe: () => Promise.resolve(false),
+			readinessProbe: (readinessPage) => {
+				pageCountsDuringProbe.push(context.pages().length);
+				assert.equal(readinessPage, ownerPage);
+				return Promise.resolve(true);
+			},
+			readinessProbeOnHandoffPage: true,
+			sendInteraction: () =>
+				Promise.reject(new Error("manual interaction must not run")),
+		});
+		assert.equal(result, true);
+		assert.deepEqual(pageCountsDuringProbe, [1]);
+		assert.equal(context.pages().length, 1);
+		await context.close();
+	} finally {
+		await browser.close();
+	}
+});
 
-			assert.equal(result, true);
-			assert.equal(pageCountWhenHandoffStarted, 1);
-			assert.deepEqual(pageCountsDuringProbe, [probeOnOwnerPage ? 1 : 2]);
-			assert.equal(context.pages().length, 1);
-			await context.close();
-		}
+test("navigating readiness waits for owner completion without opening another sign-in page", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		const ownerPage = await context.newPage();
+		await ownerPage.goto("data:text/html,<title>sign-in</title>");
+		let interactionCount = 0;
+		let readinessCount = 0;
+		const pageCounts: number[] = [];
+		const result = await manualBrowserLogin({
+			assist: () => Promise.resolve("assistance_1"),
+			autoProbeIntervalMs: 1,
+			autoProbeWindowMs: 20,
+			completeAssistance: () => Promise.resolve(),
+			isProbeSuccessful: (ready: boolean) => ready,
+			message: "Finish sign-in.",
+			page: ownerPage,
+			probe: async () => {
+				assert.equal(interactionCount, 1);
+				pageCounts.push(context.pages().length);
+				return true;
+			},
+			readinessProbe: async () => {
+				readinessCount += 1;
+				return false;
+			},
+			sendInteraction: async (request) => {
+				interactionCount += 1;
+				pageCounts.push(context.pages().length);
+				return {
+					type: "INTERACTION_RESPONSE",
+					request_id: request.request_id ?? "",
+					status: "success",
+				};
+			},
+		});
+		assert.equal(result, true);
+		assert.equal(readinessCount, 0);
+		assert.deepEqual(pageCounts, [1, 1]);
+		await context.close();
+	} finally {
+		await browser.close();
+	}
+});
+
+test("closing the owner page cancels streamed sign-in instead of waiting for the readiness deadline", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		const page = await context.newPage();
+		const completions: string[] = [];
+		await assert.rejects(
+			manualBrowserLogin({
+				assist: () => {
+					setTimeout(() => void page.close(), 10);
+					return Promise.resolve("assistance-close");
+				},
+				completeAssistance: (_id, status) => {
+					completions.push(status);
+					return Promise.resolve();
+				},
+				isProbeSuccessful: (ready: boolean) => ready,
+				message: "Finish sign-in.",
+				page,
+				probe: () => Promise.resolve(false),
+				readinessProbe: () => new Promise<boolean>(() => undefined),
+				readinessProbeOnHandoffPage: true,
+				sendInteraction: () =>
+					Promise.reject(new Error("unexpected manual action")),
+				timeoutSeconds: 1800,
+			}),
+			/browser_sign_in_cancelled/,
+		);
+		assert.deepEqual(completions, ["escalated"]);
+		await context.close();
 	} finally {
 		await browser.close();
 	}
@@ -1062,6 +1096,7 @@ test("manualBrowserLogin keeps watching after the initial fast window and self-r
 			}
 			return Promise.resolve(probeCalls > 1);
 		},
+		readinessProbeOnHandoffPage: true,
 		probe: (): Promise<boolean> => {
 			throw new Error(
 				"the streamed readiness probe must not use the owner page",
@@ -1111,6 +1146,7 @@ test("manualBrowserLogin retries a transient readiness probe error during struct
 				? Promise.reject(new Error("navigation in progress"))
 				: Promise.resolve(true);
 		},
+		readinessProbeOnHandoffPage: true,
 		sendInteraction: () =>
 			Promise.reject(new Error("manual interaction must not run")),
 	});
@@ -1140,6 +1176,7 @@ test("manualBrowserLogin retains the last probe error when the readiness window 
 			page: makeMockPage(),
 			probe: (): Promise<boolean> => Promise.resolve(false),
 			readinessProbe: (): Promise<boolean> => Promise.reject(sourceError),
+			readinessProbeOnHandoffPage: true,
 			sendInteraction: () =>
 				Promise.reject(new Error("manual interaction must not run")),
 		}),
@@ -1180,6 +1217,7 @@ test("manualBrowserLogin drops old probe errors after a clean not-ready result",
 					? Promise.reject(new Error("navigation in progress"))
 					: Promise.resolve(false);
 			},
+			readinessProbeOnHandoffPage: true,
 			sendInteraction: () =>
 				Promise.reject(new Error("manual interaction must not run")),
 		}),

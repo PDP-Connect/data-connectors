@@ -1723,12 +1723,14 @@ async function runInBrowser(args: {
 		tracer.checkpoint(label),
 	);
 	let page: Page | null = null;
+	let stopPagePolicy: (() => Promise<void>) | null = null;
 	let runSucceeded = false;
 	let browserSurfaceAssistance: ReturnType<
 		typeof createBrowserSurfaceAssistanceLifecycle
 	> | null = null;
 	try {
 		page = await selectBrowserPageForRun(ctx, browser);
+		stopPagePolicy = await installSingleBrowserPagePolicy(ctx, page);
 		const surfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
 			assist,
 			completeAssistance,
@@ -1845,6 +1847,7 @@ async function runInBrowser(args: {
 		}
 		throw err;
 	} finally {
+		await stopPagePolicy?.();
 		await finalizeDiagnostics();
 		await browserSurfaceAssistance?.close();
 		if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
@@ -1886,6 +1889,118 @@ export async function selectBrowserPageForRun(
 		}
 	}
 	return await context.newPage();
+}
+
+/** Keep provider popup navigation in the exact page owned by this run. */
+const contextsWithSinglePageInitScript = new WeakSet<BrowserContext>();
+
+function redirectNewPageRequestsIntoOwnerPage(): void {
+	if (Object.hasOwn(window, "__pdppSinglePagePolicyInstalled")) {
+		return;
+	}
+	Object.defineProperty(window, "__pdppSinglePagePolicyInstalled", {
+		value: true,
+	});
+	window.open = ((url?: string | URL) => {
+		if (url) {
+			window.location.assign(String(url));
+		}
+		return window;
+	}) as typeof window.open;
+	document.addEventListener(
+		"click",
+		(event) => {
+			if (event.target instanceof Element) {
+				const link = event.target.closest("a[target='_blank']");
+				if (link) {
+					link.setAttribute("target", "_self");
+				}
+			}
+		},
+		true,
+	);
+	document.addEventListener(
+		"submit",
+		(event) => {
+			if (
+				event.target instanceof HTMLFormElement &&
+				event.target.target === "_blank"
+			) {
+				event.target.target = "_self";
+			}
+		},
+		true,
+	);
+	const submit = HTMLFormElement.prototype.submit;
+	HTMLFormElement.prototype.submit = function (): void {
+		if (this.target === "_blank") {
+			this.target = "_self";
+		}
+		submit.call(this);
+	};
+}
+
+/**
+ * Prevent the normal JavaScript/HTML popup paths before navigation starts.
+ * Any page created outside those paths is closed as a last-resort guard.
+ */
+export async function installSingleBrowserPagePolicy(
+	context: BrowserContext,
+	ownedPage: Page,
+): Promise<() => Promise<void>> {
+	const originalNewPage = context.newPage.bind(context);
+	context.newPage = () =>
+		Promise.reject(
+			new Error("additional_browser_page_forbidden: use the owned run page"),
+		);
+	const routeOtherPageNavigation: Parameters<BrowserContext["route"]>[1] =
+		async (route) => {
+			const request = route.request();
+			if (request.isNavigationRequest()) {
+				let requestPage: Page | null = null;
+				try {
+					requestPage = request.frame().page();
+				} catch {
+					// A navigation without an inspectable owner is not trusted.
+				}
+				if (requestPage !== ownedPage) {
+					await route.abort();
+					return;
+				}
+			}
+			await route.continue();
+		};
+	const onPage = (openedPage: Page): void => {
+		if (openedPage !== ownedPage) {
+			openedPage.close().catch((): undefined => undefined);
+		}
+	};
+	try {
+		await context.route("**/*", routeOtherPageNavigation);
+		if (!contextsWithSinglePageInitScript.has(context)) {
+			await context.addInitScript(redirectNewPageRequestsIntoOwnerPage);
+			contextsWithSinglePageInitScript.add(context);
+		}
+		for (const frame of ownedPage.frames()) {
+			await frame
+				.evaluate(redirectNewPageRequestsIntoOwnerPage)
+				.catch((): undefined => undefined);
+		}
+		context.on("page", onPage);
+	} catch (error) {
+		context.newPage = originalNewPage;
+		await context
+			.unroute("**/*", routeOtherPageNavigation)
+			.catch((): undefined => undefined);
+		throw error;
+	}
+	return async () => {
+		context.off("page", onPage);
+		context.newPage = originalNewPage;
+		await context
+			.unroute("**/*", routeOtherPageNavigation)
+			.catch((): undefined => undefined);
+	};
 }
 
 /**
@@ -1949,6 +2064,16 @@ export function shouldCloseBrowserPageAfterRun(
 	// recording run; it is a no-op change in shape (close happens a moment
 	// later, inside `release()`, instead of here).
 	if (browserRecordingRequested(env)) {
+		return false;
+	}
+	// Desktop owns the managed CDP lease. Closing its final page here would
+	// make the host interpret normal connector teardown as sign-in cancellation
+	// before the outer runtime has emitted DONE. The host closes the lease after
+	// DONE, so keep this page alive through that protocol boundary.
+	if (
+		env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim() &&
+		env.PDPP_BROWSER_SURFACE_LEASE_ID?.trim()
+	) {
 		return false;
 	}
 	if (runSucceeded && browser.preservePageOnSuccess) {
