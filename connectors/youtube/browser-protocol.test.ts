@@ -224,6 +224,48 @@ test("profile waits past a generic h1 shell until channel identity and title arr
 	}
 });
 
+test("profile accepts page-header title after empty channel headings", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/")
+				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+			else if (url.pathname === "/@owner")
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1></h1><h1> </h1><yt-page-header-view-model><div class="yt-page-header-view-model__page-header-title"><h1><span>Real Owner</span></h1></div></yt-page-header-view-model>';
+			else if (url.pathname === "/@owner/about")
+				body =
+					'<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span><span>1.2K subscribers</span></ytd-channel-about-metadata-renderer>';
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		const skips: unknown[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				skips.push(message);
+			},
+			progress: async () => undefined,
+		});
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.title, "Real Owner");
+		assert.equal(skips.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
 test("profile waits past a generic About span shell until fields arrive", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
@@ -261,6 +303,49 @@ test("profile waits past a generic About span shell until fields arrive", async 
 		assert.equal(records.length, 1);
 		assert.equal(records[0]?.subscriber_count, 1200);
 		assert.equal(records[0]?.joined_at, "Jan 3, 2020");
+		assert.equal(skips.length, 0);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("profile reads joined date when About fields are outside legacy renderers", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/")
+				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+			else if (url.pathname === "/@owner")
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><yt-page-header-view-model><div class="yt-page-header-view-model__page-header-title"><h1><span>Real Owner</span></h1></div></yt-page-header-view-model>';
+			else if (url.pathname === "/@owner/about")
+				body = "<span>Joined Jan 3, 2020</span><span>32 videos</span>";
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		const skips: unknown[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				skips.push(message);
+			},
+			progress: async () => undefined,
+		});
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.title, "Real Owner");
+		assert.equal(records[0]?.joined_at, "Jan 3, 2020");
+		assert.equal(records[0]?.video_count, 32);
 		assert.equal(skips.length, 0);
 	} finally {
 		await browser.close();
