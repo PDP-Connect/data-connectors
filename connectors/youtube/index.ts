@@ -196,17 +196,204 @@ async function scroll(
 const EMPTY_STATE =
 	"ytd-message-renderer, yt-message-renderer, ytd-background-promo-renderer";
 
+type PageReadiness = "content" | "empty" | false;
+
+export function readPageReadiness(args: {
+	content: string;
+	empty: string;
+}): PageReadiness {
+	const isObject = (value: unknown): value is Record<string, unknown> =>
+		typeof value === "object" && value !== null;
+	const textFragments = (value: unknown): string[] => {
+		if (typeof value === "string") return [value];
+		if (!isObject(value)) return [];
+		const out: string[] = [];
+		const simpleText = value.simpleText;
+		if (typeof simpleText === "string") out.push(simpleText);
+		const text = value.text;
+		if (isObject(text)) out.push(...textFragments(text));
+		const runs = value.runs;
+		if (Array.isArray(runs)) {
+			for (const run of runs) {
+				if (!isObject(run)) continue;
+				const runText = run.text;
+				if (typeof runText === "string") out.push(runText);
+			}
+		}
+		return out;
+	};
+	const isRecognizedEmptyText = (text: string): boolean =>
+		/(?:no|empty|haven't|has no|doesn't have).*(?:video|playlist|history)|nothing to show|no content/i.test(
+			text,
+		) &&
+		!/sign in|login|error|try again|unavailable|account|private|deleted|doesn't exist|not found/i.test(
+			text,
+		);
+	const hasEmptyRenderer = (value: unknown): boolean => {
+		if (!isObject(value)) return false;
+		for (const renderer of [
+			value.messageRenderer,
+			value.backgroundPromoRenderer,
+			value.ytdMessageRenderer,
+			value.ytdBackgroundPromoRenderer,
+		]) {
+			if (!isObject(renderer)) continue;
+			if (isRecognizedEmptyText(textFragments(renderer).join(" "))) return true;
+		}
+		for (const child of Object.values(value)) {
+			if (Array.isArray(child) && child.some(hasEmptyRenderer)) return true;
+			if (hasEmptyRenderer(child)) return true;
+		}
+		return false;
+	};
+	const hasEmptyContentsList = (value: unknown): boolean => {
+		if (!isObject(value)) return false;
+		for (const rendererName of [
+			"richGridRenderer",
+			"gridRenderer",
+			"playlistVideoListRenderer",
+		] as const) {
+			const renderer = value[rendererName];
+			if (!isObject(renderer)) continue;
+			const contents = renderer.contents ?? renderer.items;
+			if (Array.isArray(contents) && contents.length === 0) return true;
+		}
+		for (const child of Object.values(value)) {
+			if (Array.isArray(child) && child.some(hasEmptyContentsList)) return true;
+			if (hasEmptyContentsList(child)) return true;
+		}
+		return false;
+	};
+	const readJsonText = (scriptText: string): unknown | null => {
+		const markerIndex = scriptText.indexOf("ytInitialData");
+		if (markerIndex < 0) return null;
+		const start = scriptText.indexOf("{", markerIndex);
+		if (start < 0) return null;
+		let depth = 0;
+		for (let index = start; index < scriptText.length; index += 1) {
+			const char = scriptText[index];
+			if (char === "{") depth += 1;
+			if (char === "}") depth -= 1;
+			if (depth !== 0) continue;
+			try {
+				return JSON.parse(scriptText.slice(start, index + 1)) as unknown;
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	};
+	if (document.querySelector(args.content)) return "content";
+	if (document.querySelector(args.empty)) return "empty";
+	const pageWindow = window as typeof window & { ytInitialData?: unknown };
+	const candidates: unknown[] = [pageWindow.ytInitialData];
+	for (const script of Array.from(document.querySelectorAll("script"))) {
+		const parsed = readJsonText(script.textContent ?? "");
+		if (parsed) candidates.push(parsed);
+	}
+	return candidates.some(hasEmptyRenderer) ||
+		candidates.some(hasEmptyContentsList)
+		? "empty"
+		: false;
+}
+
+const PAGE_READINESS_FUNCTION = String.raw`({ content, empty }) => {
+	const isObject = (value) => typeof value === "object" && value !== null;
+	const textFragments = (value) => {
+		if (typeof value === "string") return [value];
+		if (!isObject(value)) return [];
+		const out = [];
+		const simpleText = value.simpleText;
+		if (typeof simpleText === "string") out.push(simpleText);
+		const text = value.text;
+		if (isObject(text)) out.push(...textFragments(text));
+		const runs = value.runs;
+		if (Array.isArray(runs)) {
+			for (const run of runs) {
+				if (!isObject(run)) continue;
+				const runText = run.text;
+				if (typeof runText === "string") out.push(runText);
+			}
+		}
+		return out;
+	};
+	const isRecognizedEmptyText = (text) =>
+		/(?:no|empty|haven't|has no|doesn't have).*(?:video|playlist|history)|nothing to show|no content/i.test(text) &&
+		!/sign in|login|error|try again|unavailable|account|private|deleted|doesn't exist|not found/i.test(text);
+	const hasEmptyRenderer = (value) => {
+		if (!isObject(value)) return false;
+		for (const renderer of [
+			value.messageRenderer,
+			value.backgroundPromoRenderer,
+			value.ytdMessageRenderer,
+			value.ytdBackgroundPromoRenderer,
+		]) {
+			if (!isObject(renderer)) continue;
+			if (isRecognizedEmptyText(textFragments(renderer).join(" "))) return true;
+		}
+		for (const child of Object.values(value)) {
+			if (Array.isArray(child) && child.some(hasEmptyRenderer)) return true;
+			if (hasEmptyRenderer(child)) return true;
+		}
+		return false;
+	};
+	const hasEmptyContentsList = (value) => {
+		if (!isObject(value)) return false;
+		for (const rendererName of ["richGridRenderer", "gridRenderer", "playlistVideoListRenderer"]) {
+			const renderer = value[rendererName];
+			if (!isObject(renderer)) continue;
+			const contents = renderer.contents ?? renderer.items;
+			if (Array.isArray(contents) && contents.length === 0) return true;
+		}
+		for (const child of Object.values(value)) {
+			if (Array.isArray(child) && child.some(hasEmptyContentsList)) return true;
+			if (hasEmptyContentsList(child)) return true;
+		}
+		return false;
+	};
+	const readJsonText = (scriptText) => {
+		const markerIndex = scriptText.indexOf("ytInitialData");
+		if (markerIndex < 0) return null;
+		const start = scriptText.indexOf("{", markerIndex);
+		if (start < 0) return null;
+		let depth = 0;
+		for (let index = start; index < scriptText.length; index += 1) {
+			const char = scriptText[index];
+			if (char === "{") depth += 1;
+			if (char === "}") depth -= 1;
+			if (depth !== 0) continue;
+			try {
+				return JSON.parse(scriptText.slice(start, index + 1));
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	};
+	if (document.querySelector(content)) return "content";
+	if (document.querySelector(empty)) return "empty";
+	const candidates = [window.ytInitialData];
+	for (const script of Array.from(document.querySelectorAll("script"))) {
+		const parsed = readJsonText(script.textContent ?? "");
+		if (parsed) candidates.push(parsed);
+	}
+	return candidates.some(hasEmptyRenderer) || candidates.some(hasEmptyContentsList)
+		? "empty"
+		: false;
+}`;
+
+const pageReadinessPredicate = new Function(
+	"args",
+	`return (${PAGE_READINESS_FUNCTION})(args);`,
+) as (args: { content: string; empty: string }) => PageReadiness;
+
 async function waitForContent(
 	page: BrowserCollectContext["page"],
 	selector: string,
 ): Promise<"content" | "empty" | "unreadable"> {
 	try {
 		const handle = await page.waitForFunction(
-			({ content, empty }) => {
-				if (document.querySelector(content)) return "content";
-				if (document.querySelector(empty)) return "empty";
-				return false;
-			},
+			pageReadinessPredicate,
 			{ content: selector, empty: EMPTY_STATE },
 			{ timeout: 10_000 },
 		);
@@ -230,16 +417,13 @@ async function waitForChannelIdentity(
 				const hasIdentity = Boolean(
 					document.querySelector(
 						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
-					) ||
-					/@[^/?#]+/.test(location.pathname),
+					) || /@[^/?#]+/.test(location.pathname),
 				);
 				const placeholderTitle =
 					/^(?:loading\b|please wait\b|home$|youtube$|channel$)/i.test(
 						title ?? "",
 					);
-				return title && !placeholderTitle && hasIdentity
-					? true
-					: false;
+				return title && !placeholderTitle && hasIdentity ? true : false;
 			},
 			CHANNEL_TITLE_SELECTOR,
 			{ timeout: 10_000 },
@@ -268,9 +452,11 @@ async function waitForChannelAbout(
 					.map((node) => node.textContent?.trim() ?? "")
 					.filter((value) => value && !/^(loading|please wait)$/i.test(value));
 				const hasJoinedDate = text.some((value) => /^joined\s+/i.test(value));
-				const hasStatsInAbout = Boolean(about) && text.some(
-					(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
-				);
+				const hasStatsInAbout =
+					Boolean(about) &&
+					text.some(
+						(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
+					);
 				const hasDescription = Boolean(
 					aboutRoot
 						.querySelector(
@@ -278,7 +464,9 @@ async function waitForChannelAbout(
 						)
 						?.textContent?.trim(),
 				);
-				return hasJoinedDate || hasStatsInAbout || hasDescription ? "content" : false;
+				return hasJoinedDate || hasStatsInAbout || hasDescription
+					? "content"
+					: false;
 			},
 			undefined,
 			{ timeout: 10_000 },
@@ -304,12 +492,32 @@ async function skipUnreadable(
 	});
 }
 
+async function emitVerifiedEmptyState(
+	ctx: BrowserContext,
+	stream: string,
+	capturedAt: string,
+): Promise<void> {
+	await ctx.emit({
+		type: "STATE",
+		stream,
+		cursor: {
+			verified_empty_at: capturedAt,
+			evidence: "youtube_page_data_empty",
+		},
+	});
+}
+
+interface VideoReadResult {
+	readonly videos: BrowserVideo[];
+	readonly verifiedEmpty: boolean;
+}
+
 async function visibleVideos(
 	page: BrowserCollectContext["page"],
 	url: string,
 	rounds: number,
 	mode: "playlist" | "history",
-): Promise<BrowserVideo[]> {
+): Promise<VideoReadResult> {
 	await page.goto(url, { waitUntil: "domcontentloaded" });
 	const state = await waitForContent(
 		page,
@@ -319,7 +527,7 @@ async function visibleVideos(
 	);
 	if (state === "unreadable")
 		throw new Error(`youtube_${mode}_page_unreadable`);
-	if (state === "empty") return [];
+	if (state === "empty") return { videos: [], verifiedEmpty: true };
 	const seen = new Set<string>();
 	const out: BrowserVideo[] = [];
 	for (let round = 0; round <= rounds; round += 1) {
@@ -334,7 +542,10 @@ async function visibleVideos(
 		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
 		if (round < rounds) await scroll(page, 1);
 	}
-	return mode === "history" ? out.slice(0, HISTORY_LIMIT) : out;
+	return {
+		videos: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
+		verifiedEmpty: false,
+	};
 }
 
 async function readableVideos(
@@ -343,7 +554,7 @@ async function readableVideos(
 	rounds: number,
 	mode: "playlist" | "history",
 	stream: string,
-): Promise<BrowserVideo[] | null> {
+): Promise<VideoReadResult | null> {
 	try {
 		return await visibleVideos(ctx.page, url, rounds, mode);
 	} catch {
@@ -543,6 +754,7 @@ export async function collectYoutubeBrowser(
 	}
 	let playlistLinks: Array<{ id: string; url: string }> = [];
 	let playlistIndexReadable = true;
+	let playlistIndexVerifiedEmpty = false;
 	if (requested.has("playlists") || requested.has("playlist_items")) {
 		await page.goto(`${HOME}feed/playlists`, { waitUntil: "domcontentloaded" });
 		const state = await waitForContent(page, 'a[href*="playlist?list="]');
@@ -556,6 +768,8 @@ export async function collectYoutubeBrowser(
 			playlistLinks = await page.evaluate(
 				readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
 			);
+		} else if (state === "empty") {
+			playlistIndexVerifiedEmpty = true;
 		}
 	}
 	if (
@@ -597,14 +811,15 @@ export async function collectYoutubeBrowser(
 				playlistCount += 1;
 			}
 			if (requested.has("playlist_items")) {
-				const videos = await readableVideos(
+				const result = await readableVideos(
 					ctx,
 					playlist.url,
 					SCROLLS.playlist_items,
 					"playlist",
 					"playlist_items",
 				);
-				if (videos) {
+				if (result) {
+					const { videos } = result;
 					itemTitlesMissing ||= missingVideoTitles(videos).length > 0;
 					for (const video of videos) {
 						await emit("playlist_items", {
@@ -617,43 +832,53 @@ export async function collectYoutubeBrowser(
 				}
 			}
 		}
-		if (requested.has("playlists")) await coverage("playlists", playlistCount);
+		if (requested.has("playlists")) {
+			await coverage("playlists", playlistCount);
+			if (playlistIndexVerifiedEmpty)
+				await emitVerifiedEmptyState(ctx, "playlists", capturedAt);
+		}
 		if (requested.has("playlist_items"))
 			await coverage(
 				"playlist_items",
 				itemCount,
 				itemTitlesMissing ? ["video_title"] : [],
 			);
+		if (requested.has("playlist_items") && playlistIndexVerifiedEmpty)
+			await emitVerifiedEmptyState(ctx, "playlist_items", capturedAt);
 	}
 	for (const [stream, list] of [
 		["likes", "LL"],
 		["watch_later", "WL"],
 	] as const) {
 		if (!requested.has(stream)) continue;
-		const videos = await readableVideos(
+		const result = await readableVideos(
 			ctx,
 			`${HOME}playlist?list=${list}`,
 			SCROLLS.playlist_items,
 			"playlist",
 			stream,
 		);
-		if (!videos) continue;
+		if (!result) continue;
+		const { videos } = result;
 		for (const video of videos)
 			await emit(stream, {
 				id: id(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
 			});
 		await coverage(stream, videos.length, missingVideoTitles(videos));
+		if (result.verifiedEmpty)
+			await emitVerifiedEmptyState(ctx, stream, capturedAt);
 	}
 	if (requested.has("watch_history")) {
-		const videos = await readableVideos(
+		const result = await readableVideos(
 			ctx,
 			`${HOME}feed/history`,
 			SCROLLS.history,
 			"history",
 			"watch_history",
 		);
-		if (videos) {
+		if (result) {
+			const { videos } = result;
 			const browserDate = await page.evaluate(() => {
 				const now = new Date();
 				return [now.getFullYear(), now.getMonth(), now.getDate()];
@@ -688,6 +913,8 @@ export async function collectYoutubeBrowser(
 				"watch_time_of_day",
 				...missingVideoTitles(videos),
 			]);
+			if (result.verifiedEmpty)
+				await emitVerifiedEmptyState(ctx, "watch_history", capturedAt);
 		}
 	}
 }

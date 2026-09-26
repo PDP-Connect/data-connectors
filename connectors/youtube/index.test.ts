@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collectYoutubeBrowser, resolveWatchedDate } from "./index.ts";
+import { parseHTML } from "linkedom";
+import {
+	collectYoutubeBrowser,
+	readPageReadiness,
+	resolveWatchedDate,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const VIDEO = {
@@ -18,12 +23,35 @@ const VIDEO = {
 	description: "Snippet",
 };
 
+function withBrowserGlobals(html: string, run: () => void): void {
+	const { document, window } = parseHTML(html);
+	const globals = globalThis as typeof globalThis & {
+		document?: Document;
+		window?: Window;
+	};
+	const previousDocument = globals.document;
+	const previousWindow = globals.window;
+	globals.document = document as unknown as Document;
+	globals.window = window as unknown as Window & typeof globalThis;
+	try {
+		run();
+	} finally {
+		globals.document = previousDocument;
+		globals.window = previousWindow;
+	}
+}
+
 class FixturePage {
 	url = "";
-	private readonly waitStates: Array<"content" | "empty" | "unreadable">;
-	private readonly ownAccount: { channel_url: string | null; email: string | null };
+	private readonly waitStates: Array<
+		"content" | "empty" | "json-empty" | "unreadable"
+	>;
+	private readonly ownAccount: {
+		channel_url: string | null;
+		email: string | null;
+	};
 	constructor(
-		waitStates: Array<"content" | "empty" | "unreadable"> = [],
+		waitStates: Array<"content" | "empty" | "json-empty" | "unreadable"> = [],
 		ownAccount: { channel_url: string | null; email: string | null } = {
 			channel_url: "https://www.youtube.com/@owner",
 			email: "owner@example.com",
@@ -44,6 +72,8 @@ class FixturePage {
 	async waitForFunction() {
 		const state = this.waitStates.shift() ?? "content";
 		if (state === "unreadable") throw new Error("fixture page read timed out");
+		if (state === "json-empty")
+			return { jsonValue: async () => "empty", dispose: async () => undefined };
 		return { jsonValue: async () => state, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function): Promise<any> {
@@ -138,7 +168,10 @@ test("profile skips report a redacted branch code for each unreadable page", asy
 		assert.equal(skips.length, 1, scenario.name);
 		assert.equal(skips[0]?.type, "SKIP_RESULT", scenario.name);
 		assert.equal(skips[0]?.reason, scenario.reason, scenario.name);
-		assert.doesNotMatch(JSON.stringify(skips[0]), /youtube\.com|owner@example\.com/);
+		assert.doesNotMatch(
+			JSON.stringify(skips[0]),
+			/youtube\.com|owner@example\.com/,
+		);
 	}
 });
 
@@ -383,4 +416,189 @@ test("unreadable list DOM emits a skip instead of a successful zero-row snapshot
 		[["SKIP_RESULT", "subscriptions", "page_unreadable"]],
 	);
 	assert.equal(records.length, 0);
+});
+
+test("page readiness treats ytInitialData empty contents as positive empty evidence", () => {
+	withBrowserGlobals(
+		`<script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"richGridRenderer":{"contents":[]}}}}]}}};</script>`,
+		() => {
+			assert.equal(
+				readPageReadiness({
+					content: "yt-lockup-view-model",
+					empty: "ytd-message-renderer",
+				}),
+				"empty",
+			);
+		},
+	);
+});
+
+test("page readiness treats explicit YouTube empty renderers in JSON as positive empty evidence", () => {
+	withBrowserGlobals(
+		`<script>var ytInitialData = {"contents":{"messageRenderer":{"text":{"runs":[{"text":"No videos yet"}]}}}};</script>`,
+		() => {
+			assert.equal(
+				readPageReadiness({
+					content: "yt-lockup-view-model",
+					empty: "ytd-message-renderer",
+				}),
+				"empty",
+			);
+		},
+	);
+});
+
+test("page readiness rejects sign-in and error message renderers as empty evidence", () => {
+	for (const text of [
+		"Sign in to confirm you're not a bot",
+		"Something went wrong. Try again later.",
+	]) {
+		withBrowserGlobals(
+			`<script>var ytInitialData = {"contents":{"messageRenderer":{"text":{"runs":[{"text":${JSON.stringify(text)}}]}}}};</script>`,
+			() => {
+				assert.equal(
+					readPageReadiness({
+						content: "yt-lockup-view-model",
+						empty: "ytd-message-renderer",
+					}),
+					false,
+					text,
+				);
+			},
+		);
+	}
+});
+
+test("empty YouTube page data completes requested empty browser lists", async () => {
+	const records = new Map<string, Record<string, unknown>[]>();
+	const messages: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: new FixturePage([
+			"json-empty",
+			"json-empty",
+			"json-empty",
+			"json-empty",
+		]) as never,
+		requested: new Map(
+			[
+				"playlists",
+				"playlist_items",
+				"likes",
+				"watch_later",
+				"watch_history",
+				"coverage_diagnostics",
+			].map((name) => [name, { name }]),
+		) as never,
+		emitRecord: async (stream, data) => {
+			records.set(stream, [...(records.get(stream) ?? []), data]);
+		},
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+
+	for (const stream of [
+		"playlists",
+		"playlist_items",
+		"likes",
+		"watch_later",
+		"watch_history",
+	])
+		assert.equal(records.get(stream)?.length ?? 0, 0, stream);
+	assert.deepEqual(
+		(records.get("coverage_diagnostics") ?? []).map((record) => [
+			record.stream,
+			record.record_count,
+		]),
+		[
+			["playlists", 0],
+			["playlist_items", 0],
+			["likes", 0],
+			["watch_later", 0],
+			["watch_history", 0],
+		],
+	);
+	assert.deepEqual(
+		messages.map((message) => [
+			message.type,
+			message.stream,
+			(message.cursor as Record<string, unknown> | undefined)?.evidence,
+		]),
+		[
+			["STATE", "playlists", "youtube_page_data_empty"],
+			["STATE", "playlist_items", "youtube_page_data_empty"],
+			["STATE", "likes", "youtube_page_data_empty"],
+			["STATE", "watch_later", "youtube_page_data_empty"],
+			["STATE", "watch_history", "youtube_page_data_empty"],
+		],
+	);
+});
+
+test("unreadable YouTube empty-target pages do not emit served STATE", async () => {
+	const page = new FixturePage();
+	page.waitForFunction = async () => {
+		throw new Error("read deadline");
+	};
+	const messages: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map(
+			["likes", "watch_later", "watch_history", "coverage_diagnostics"].map(
+				(name) => [name, { name }],
+			),
+		) as never,
+		emitRecord: async () => undefined,
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.deepEqual(
+		messages.map((message) => [message.type, message.stream, message.reason]),
+		[
+			["SKIP_RESULT", "likes", "page_unreadable"],
+			["SKIP_RESULT", "watch_later", "page_unreadable"],
+			["SKIP_RESULT", "watch_history", "page_unreadable"],
+		],
+	);
+	assert.equal(
+		messages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("content pages that parse zero videos are not verified empty", async () => {
+	const page = new FixturePage(["content"]);
+	page.evaluate = async (fn: Function) =>
+		fn.name === "readVideos" ? [] : undefined;
+	const records = new Map<string, Record<string, unknown>[]>();
+	const messages: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map(
+			["likes", "coverage_diagnostics"].map((name) => [name, { name }]),
+		) as never,
+		emitRecord: async (stream, data) => {
+			records.set(stream, [...(records.get(stream) ?? []), data]);
+		},
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.equal(records.get("likes")?.length ?? 0, 0);
+	assert.deepEqual(
+		(records.get("coverage_diagnostics") ?? []).map((record) => [
+			record.stream,
+			record.record_count,
+		]),
+		[["likes", 0]],
+	);
+	assert.equal(
+		messages.some((message) => message.type === "STATE"),
+		false,
+	);
 });
