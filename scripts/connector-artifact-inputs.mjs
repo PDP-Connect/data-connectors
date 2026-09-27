@@ -20,11 +20,11 @@ const SHARED_ARTIFACT_INPUTS = [
 	"scripts/build-connector-oci-artifact.mjs",
 	"scripts/connector-host-runtime-contract.mjs",
 	// The source declaration: its builder and validator, the pinned contract they
-	// check against, and the allowlist that decides which manifests share it.
+	// check against. The allowlist that decides which manifests share it is
+	// hashed per source; see sourceSliceInputs.
 	"packages/connector-installer-core/package.json",
 	"packages/connector-installer-core/source-declaration.mjs",
 	"packages/connector-installer-core/pdpp-source-contract.mjs",
-	"scripts/connector-publish-allowlist.mjs",
 	"scripts/source-declaration-members.mjs",
 	"vendor/pdpp-reference-contract/source.ts",
 ];
@@ -117,34 +117,46 @@ async function publishInventoryAtCommit(commit, options) {
   }
 }
 
+function readManifestAtCommit(commit, path, options) {
+  const bytes = readFileAtCommit(commit, path, options);
+  if (bytes === null) throw new ArtifactInputError(`cannot read manifest ${path} at ${commit}`);
+  try {
+    return JSON.parse(bytes);
+  } catch (error) {
+    throw new ArtifactInputError(`cannot parse manifest ${path} at ${commit}: ${error.message}`);
+  }
+}
+
 /**
- * The other manifests at `commit` that share `profile`'s source declaration,
- * with the same membership rule as source-declaration-members.mjs, read from
- * the allowlist at that commit. A change to any member changes the
- * declaration every member ships, so it must select every member. A sibling's
- * `version` is not declaration content, so it is left out: a sibling's release
- * does not force this artifact to release.
+ * The allowlist data at `commit` that can affect `profile`'s artifact: the
+ * rows of every connector with the same `source.id`, and the manifests of the
+ * publishable ones. Membership follows source-declaration-members.mjs. A
+ * change to a member changes the declaration every member ships, so it must
+ * select every member. Rows for other sources, and the allowlist's comments
+ * and formatting, are not inputs: adding a connector for a new source does not
+ * change any existing artifact. A sibling's `version` is not declaration
+ * content, so it is left out: a sibling's release does not force this
+ * artifact to release.
  */
-async function declarationSiblingInputs(commit, profile, options) {
+async function sourceSliceInputs(commit, profile, options) {
   const inventory = await publishInventoryAtCommit(commit, options);
-  const own = inventory.find(({ connectorKey }) => connectorKey === profile.connector_key);
-  if (!own || own.exclusionReason !== null) return [];
+  const ownRow = inventory.find(({ connectorKey }) => connectorKey === profile.connector_key);
+  // An unlisted or excluded artifact declares its source alone.
+  const declaresAlone = !ownRow || ownRow.exclusionReason !== null;
+  const rows = [];
   const inputs = [];
   for (const { manifest, connectorKey, exclusionReason } of inventory) {
-    if (exclusionReason !== null || connectorKey === profile.connector_key) continue;
+    const own = connectorKey === profile.connector_key;
     const path = `connectors/${manifest}/manifest.json`;
-    const bytes = readFileAtCommit(commit, path, options);
-    if (bytes === null) throw new ArtifactInputError(`cannot read member manifest ${path} at ${commit}`);
-    let member;
-    try {
-      member = JSON.parse(bytes);
-    } catch (error) {
-      throw new ArtifactInputError(`cannot parse manifest ${path} at ${commit}: ${error.message}`);
-    }
+    const member = own ? profile : readManifestAtCommit(commit, path, options);
     if (member.source?.id !== profile.source?.id) continue;
+    rows.push({ connectorKey, manifest, exclusionReason });
+    if (own || declaresAlone || exclusionReason !== null) continue;
     const { version: _version, ...declared } = member;
     inputs.push([`${path}#declaration-member`, Buffer.from(JSON.stringify(declared))]);
   }
+  rows.sort((a, b) => a.connectorKey.localeCompare(b.connectorKey));
+  inputs.push(["scripts/connector-publish-allowlist.mjs#source-slice", Buffer.from(JSON.stringify(rows))]);
   return inputs;
 }
 
@@ -186,7 +198,7 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
     }
     files.set(iconPath, iconBytes);
   }
-  for (const [path, bytes] of await declarationSiblingInputs(commit, profile, options)) {
+  for (const [path, bytes] of await sourceSliceInputs(commit, profile, options)) {
     files.set(path, bytes);
   }
   addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options);

@@ -13,6 +13,7 @@ import {
   PublishSelectionError,
   selectChangedConnectors,
 } from "./select-publish-connectors.mjs";
+import { artifactInputHash } from "./connector-artifact-inputs.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const scriptPath = join(repoRoot, "scripts", "select-publish-connectors.mjs");
@@ -107,7 +108,13 @@ function makeRepo() {
   const before = commit("before");
   writeState({ oura: "0.2.0" });
   const after = commit("bump oura");
-  return { dir, before, after, commit, write, writeState };
+  function writeAllowlist(rows, prefix = "") {
+    write(
+      "scripts/connector-publish-allowlist.mjs",
+      `${prefix}export const CONNECTOR_PUBLISH_INVENTORY = ${JSON.stringify(rows)};\n`,
+    );
+  }
+  return { dir, before, after, commit, write, writeState, writeAllowlist };
 }
 
 test("a manifest and generated connector-index version bump is selected", async () => {
@@ -368,4 +375,83 @@ test("only a definite absent lookup reaches the publish matrix", async () => {
   });
 
   assert.deepEqual(selected, [candidate]);
+});
+
+const ROWS = CONNECTORS.map((connector) => ({ ...connector, exclusionReason: null }));
+
+async function fleetHashes(repo, commit) {
+  const hashes = {};
+  for (const { manifest } of CONNECTORS) {
+    hashes[manifest] = await artifactInputHash({ commit, manifest, cwd: repo.dir });
+  }
+  return hashes;
+}
+
+function changedConnectors(before, after) {
+  return Object.keys(before).filter((manifest) => before[manifest] !== after[manifest]);
+}
+
+test("an allowlist row for a new source changes no existing artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await fleetHashes(repo, repo.after);
+    repo.write(
+      "connectors/strava/manifest.json",
+      JSON.stringify({ connector_key: "strava", source: { id: "https://registry.pdpp.dev/sources/strava" }, version: "0.1.0" }),
+    );
+    repo.writeAllowlist([...ROWS, { manifest: "strava", connectorKey: "strava", exclusionReason: null }]);
+    const after = await fleetHashes(repo, repo.commit("add strava"));
+    assert.deepEqual(changedConnectors(before, after), []);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("an allowlist row change for a source changes only that source's artifact hashes", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await fleetHashes(repo, repo.after);
+    repo.writeAllowlist(
+      ROWS.map((row) => (row.connectorKey === "oura_browser" ? { ...row, exclusionReason: "held" } : row)),
+    );
+    const excluded = await fleetHashes(repo, repo.commit("hold oura_browser"));
+    assert.deepEqual(changedConnectors(before, excluded), ["oura", "oura_browser"]);
+
+    repo.write(
+      "connectors/oura_ring/manifest.json",
+      JSON.stringify({ connector_key: "oura_ring", source: { id: SOURCES.oura }, version: "0.1.0" }),
+    );
+    repo.writeAllowlist([...ROWS, { manifest: "oura_ring", connectorKey: "oura_ring", exclusionReason: null }]);
+    const added = await fleetHashes(repo, repo.commit("add a third oura member"));
+    assert.deepEqual(changedConnectors(before, added), ["oura", "oura_browser"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a sibling manifest edit changes only its source's artifact hashes", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await fleetHashes(repo, repo.after);
+    repo.writeState({ oura: "0.2.0" }, { oura_browser: [{ name: "sleep" }] });
+    const after = await fleetHashes(repo, repo.commit("change oura_browser streams"));
+    assert.deepEqual(changedConnectors(before, after), ["oura", "oura_browser"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("allowlist comments, formatting, and row order change no artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await fleetHashes(repo, repo.after);
+    repo.write(
+      "scripts/connector-publish-allowlist.mjs",
+      `// A comment.\nexport const CONNECTOR_PUBLISH_INVENTORY = ${JSON.stringify([...ROWS].reverse(), null, 2)};\n`,
+    );
+    const after = await fleetHashes(repo, repo.commit("reformat allowlist"));
+    assert.deepEqual(changedConnectors(before, after), []);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
 });
