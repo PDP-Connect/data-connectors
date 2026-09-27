@@ -29,6 +29,7 @@ import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 const NO_DELAY = (): Promise<void> => Promise.resolve();
+const NO_POSTS_CLOCK = { sleep: NO_DELAY };
 
 interface ScriptedFetch {
 	json: unknown;
@@ -576,7 +577,7 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 		requestedStreams: ["profile"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	assert.deepEqual(
 		harness.emitted.map((e) => e.stream),
@@ -602,7 +603,7 @@ test("collectAllStreams: requesting posts+post_likes but not profile emits no pr
 		requestedStreams: ["posts", "post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	assert.ok(!harness.emitted.some((e) => e.stream === "profile"));
 });
@@ -617,7 +618,7 @@ test("collectAllStreams: profile stream emits one record from web_info", async (
 		requestedStreams: ["profile"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.id, "u1");
@@ -682,7 +683,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		requestedStreams: ["posts", "post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
 	const likes = harness.emitted.filter((e) => e.stream === "post_likes");
@@ -742,7 +743,7 @@ test("collectAllStreams: a post_likes-only request does not emit an unrequested 
 		requestedStreams: ["post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	assert.equal(
 		harness.protocolMessages.some(
@@ -761,7 +762,7 @@ test("collectAllStreams: an empty timeline response completes requested empty st
 		requestedStreams: ["posts", "post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	assert.deepEqual(harness.emitted, []);
 	assert.deepEqual(
@@ -798,7 +799,7 @@ test("collectAllStreams: profile media_count cannot turn a missing timeline into
 	});
 
 	await assert.rejects(
-		collectAllStreams(ctx, NO_DELAY),
+		collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK),
 		/meta_posts_response_not_observed/,
 	);
 	assert.equal(
@@ -1261,7 +1262,7 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 		requestedStreams: ["posts"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
 	assert.deepEqual(
@@ -1281,7 +1282,7 @@ test("collectAllStreams: posts request never observed is a terminal error, not a
 	});
 
 	await assert.rejects(
-		collectAllStreams(ctx, NO_DELAY),
+		collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK),
 		/meta_posts_response_not_observed/,
 	);
 });
@@ -1313,7 +1314,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		requestedStreams: ["following"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	const following = harness.emitted.filter((e) => e.stream === "following");
 	assert.deepEqual(
@@ -1349,7 +1350,7 @@ test("collectAllStreams: following hitting the page ceiling emits an honest SKIP
 		requestedStreams: ["following"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	const skip = harness.protocolMessages.find(
 		(m) =>
@@ -1732,7 +1733,7 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 		requestedStreams: ["ads"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(ctx, NO_DELAY, NO_POSTS_CLOCK);
 
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>

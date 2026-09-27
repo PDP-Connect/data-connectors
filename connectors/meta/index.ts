@@ -526,15 +526,47 @@ function isPostsTimelineResponseForPage(page: Page): (response: {
 	};
 }
 
-const POSTS_EMPTY_OBSERVATION_WINDOW_MS = 4_000;
+const POSTS_INITIAL_CAPTURE_DELAY_MS = 3_000;
+const POSTS_CAPTURE_POLL_INTERVAL_MS = 1_000;
+const POSTS_CAPTURE_MAX_POLLS = 30;
 
-/**
- * The legacy connector reads its capture after navigation plus three seconds
- * and one one-second loop tick. Its runner replaces the saved response on
- * each matching response from the active page.
- * Start the same observation window after navigation returns and keep the
- * empty decision open for four seconds so the last response controls it.
- */
+type PostsClock = { sleep: (ms: number, signal?: AbortSignal) => Promise<void> };
+
+const realPostsClock: PostsClock = {
+	sleep: (ms, signal) =>
+		new Promise((resolve) => {
+			if (signal?.aborted) {
+				resolve();
+				return;
+			}
+			const timer = setTimeout(resolve, ms);
+			signal?.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(timer);
+					resolve();
+				},
+				{ once: true },
+			);
+		}),
+};
+
+/** Mirror the legacy runner's first populated polling tick; its capture is last-wins. */
+export async function waitForLegacyPostsCapture(
+	matchingResponses: unknown[],
+	clock: PostsClock = realPostsClock,
+	signal?: AbortSignal,
+): Promise<unknown | null> {
+	await clock.sleep(POSTS_INITIAL_CAPTURE_DELAY_MS, signal);
+	if (signal?.aborted) return null;
+	for (let attempt = 0; attempt < POSTS_CAPTURE_MAX_POLLS; attempt += 1) {
+		await clock.sleep(POSTS_CAPTURE_POLL_INTERVAL_MS, signal);
+		if (signal?.aborted) return null;
+		const latest = matchingResponses.at(-1);
+		if (latest !== undefined) return latest;
+	}
+	return null;
+}
 
 function isLoginOrChallengeUrl(rawUrl: string): boolean {
 	try {
@@ -588,8 +620,9 @@ export async function fetchAllPosts(
 		extra?: Record<string, unknown>,
 	) => Promise<void> = async () => {},
 	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
 ): Promise<{ edges: InstagramTimelineEdge[]; sourceEdgeCount: number; truncated: boolean }> {
-	return fetchAllPostsWithEmptyProof(page, username, capture ?? null, progress, delay);
+	return fetchAllPostsWithEmptyProof(page, username, capture ?? null, progress, delay, postsClock);
 }
 
 // Empty-proof behavior is covered by the posts differential matrix.
@@ -1031,6 +1064,7 @@ export async function collectAllStreams(
 	/** Pacing delay between paginated pages. Defaults to politeDelay(800ms);
 	 *  tests inject a no-op so they don't sleep through the page ceiling. */
 	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
 ): Promise<void> {
 	const { capture, emit, emitRecord, page, progress, requested } = ctx;
 
@@ -1070,6 +1104,7 @@ export async function collectAllStreams(
 			capture ?? undefined,
 			progress,
 			delay,
+			postsClock,
 		);
 		verifiedEmptyPosts = sourceEdgeCount === 0 && edges.length === 0 && !truncated;
 		// Emit records before any empty completion state.
@@ -1222,6 +1257,7 @@ async function fetchAllPostsWithEmptyProof(
 		extra?: Record<string, unknown>,
 	) => Promise<void>,
 	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
 ): Promise<{
 	edges: InstagramTimelineEdge[];
 	sourceEdgeCount: number;
@@ -1234,8 +1270,9 @@ async function fetchAllPostsWithEmptyProof(
 	let sourceEdgeCount = 0;
 	let terminalResponse: unknown = null;
 	let initialPageWasTerminal = false;
-	let observationStartedAt: number | null = null;
 	const matchingResponses: unknown[] = [];
+	let legacyInitialCapture: Promise<unknown | null> | null = null;
+	const legacyCaptureController = new AbortController();
 	const onResponse = (response: unknown): void => {
 		if (isPostsTimelineResponseForPage(page)(response as Parameters<ReturnType<typeof isPostsTimelineResponseForPage>>[0])) {
 			matchingResponses.push(response);
@@ -1256,7 +1293,11 @@ async function fetchAllPostsWithEmptyProof(
 						waitUntil: "domcontentloaded",
 					},
 				);
-				observationStartedAt = Date.now();
+				legacyInitialCapture = waitForLegacyPostsCapture(
+					matchingResponses,
+					postsClock,
+					legacyCaptureController.signal,
+				);
 			} else {
 				await page.evaluate(() =>
 					window.scrollTo(0, document.body.scrollHeight),
@@ -1307,6 +1348,7 @@ async function fetchAllPostsWithEmptyProof(
 		},
 		maxPages: POSTS_MAX_PAGES,
 	});
+	if (!initialPageWasTerminal) legacyCaptureController.abort();
 
 	if (!sawAnyResponse) {
 		page.off("response", onResponse);
@@ -1315,9 +1357,8 @@ async function fetchAllPostsWithEmptyProof(
 		);
 	}
 	if (sawTerminalPage && initialPageWasTerminal) {
-		const elapsed = observationStartedAt === null ? 0 : Date.now() - observationStartedAt;
-		await delay(Math.max(0, POSTS_EMPTY_OBSERVATION_WINDOW_MS - elapsed));
-		const lastResponse = matchingResponses.at(-1) ?? terminalResponse;
+		const lastResponse = (await legacyInitialCapture) ?? terminalResponse;
+		legacyCaptureController.abort();
 		const settledConnection = lastResponse
 			? await readTimelineConnection(lastResponse as { json: () => Promise<unknown>; status: () => number })
 			: null;
