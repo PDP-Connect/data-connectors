@@ -703,8 +703,6 @@ export async function collectYoutubeBrowser(
 export const youtubeConnectorConfig = {
 	name: "youtube",
 	validateRecord,
-	timeRangeField: (stream) =>
-		stream === "watch_history" ? "watched_date" : "date",
 	browser: { profileName: "youtube" },
 	ensureSession: ensureYoutubeSession,
 	probeSession: async ({ page }) => probeYoutubeSession(page),

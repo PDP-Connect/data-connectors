@@ -3879,7 +3879,6 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "slack",
 		retryablePattern: SLACK_RETRYABLE_FAILURE_RE,
-		timeRangeField: "sent_at",
 		validateRecord,
 		isTombstone: isSlackMessageTombstone,
 		auth: {

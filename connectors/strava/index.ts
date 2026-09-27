@@ -571,7 +571,6 @@ runConnector({
 	// Without this the runtime falls back to a field named "date", which these
 	// records do not have, and any connection carrying an owner-declared time
 	// scope fails the whole run instead of filtering.
-	timeRangeField: "start_time",
 	async collect(ctx) {
 		const importDir =
 			process.env.STRAVA_EXPORT_DIR ||

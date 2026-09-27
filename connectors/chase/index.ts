@@ -176,17 +176,6 @@ export const CHASE_QFX_FILE_TYPE_SELECT_SELECTOR =
 	CHASE_QFX_FILE_TYPE_SELECT_SELECTORS.join(", ");
 export const CHASE_QFX_ACTIVITY_SELECT_SELECTOR =
 	CHASE_QFX_ACTIVITY_SELECT_SELECTORS.join(", ");
-const TIME_RANGE_FIELD_BY_STREAM: Record<string, string> = {
-	balances: "as_of",
-	current_activity: "activity_date",
-	statements: "date_delivered",
-	transactions: "date",
-};
-
-export function chaseTimeRangeField(stream: string): string {
-	return TIME_RANGE_FIELD_BY_STREAM[stream] ?? "date";
-}
-
 interface NoActivityConfirmation {
 	bodyPreview: string;
 	url: string;
@@ -3056,7 +3045,6 @@ if (isMainModule(import.meta.url)) {
 		// /#/logon/logon/error regardless of cookie state. See
 		// `design-notes/chase-anti-bot.md`. Isolated-per-connector profile works.
 		browser: { profileName: "chase" },
-		timeRangeField: chaseTimeRangeField,
 		unsupportedTimeRangeStreams: [
 			"transactions",
 			"current_activity",

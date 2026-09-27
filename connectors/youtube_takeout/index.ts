@@ -607,7 +607,6 @@ async function collectWatchHistory(
 runConnector({
 	name: "youtube-takeout",
 	validateRecord,
-	timeRangeField: "watched_at",
 	async collect(ctx) {
 		const importDir =
 			process.env.YOUTUBE_TAKEOUT_DIR ||

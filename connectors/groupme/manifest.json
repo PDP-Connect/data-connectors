@@ -9,7 +9,7 @@
 	},
 	"connector_key": "groupme",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "GroupMe",
 	"brand": {
 		"icon": "icon.svg",

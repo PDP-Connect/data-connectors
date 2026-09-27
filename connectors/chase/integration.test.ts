@@ -69,7 +69,6 @@ import {
 	CHASE_QFX_FILE_TYPE_SELECT_SELECTORS,
 	chaseLocatorProbesForLabel,
 	chaseNoAccountsDiagnosticMessage,
-	chaseTimeRangeField,
 	classifyChaseAccountsSurface,
 	collectChaseAccountInventory,
 	type EmitDeps,
@@ -663,12 +662,6 @@ test("emitCurrentActivityForAccount: emits pending and posted rows only to curre
 	assert.equal(pending.data.id, `${account.internal_id}|txn_20260514_A1`);
 	assert.equal(pending.data.posted_date, null);
 	assert.equal(pending.data.source, "chase_activity_ui");
-});
-
-test("chaseTimeRangeField: current_activity filters by activity_date without changing transactions", () => {
-	assert.equal(chaseTimeRangeField("current_activity"), "activity_date");
-	assert.equal(chaseTimeRangeField("transactions"), "date");
-	assert.equal(chaseTimeRangeField("unknown_stream"), "date");
 });
 
 test("chase manifest: current_activity nullable fields are required-present", () => {
