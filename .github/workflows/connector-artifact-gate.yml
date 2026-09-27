@@ -13,7 +13,8 @@
 # This job is deliberately powerless. `permissions: contents: read`, no
 # `packages: write`, no `id-token: write`, no registry login, no cosign. It
 # builds real bytes, verifies them against an independently constructed host,
-# and runs the negative controls. It cannot sign or push anything.
+# and runs the negative controls. It cannot sign or push anything. The build
+# shards also hold `packages: read`, only to read what GHCR already publishes.
 
 name: Connector artifact gate
 
@@ -48,6 +49,9 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -71,6 +75,46 @@ jobs:
         env:
           CONNECTOR_TEST_SHARD: ${{ matrix.shard }}
         run: node --test scripts/connector-publish-build.test.mjs
+
+      # ADVISORY. Compares each connector's content digest with what GHCR holds
+      # for its version: a published version must keep its content, and a new
+      # version must be higher than every published one. It reports and warns,
+      # and never fails the job; the publish selector still decides. The read
+      # is authenticated, because anonymously GHCR answers a repository that
+      # does not exist yet with a 403, not an absence.
+      - name: Advisory content check against GHCR
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        # A step timeout, so a slow registry cannot reach the job timeout.
+        timeout-minutes: 8
+        env:
+          CONNECTORS: ${{ toJSON(matrix.connectors) }}
+          SHARD: ${{ matrix.shard }}
+          LOOKUP_USERNAME: ${{ github.actor }}
+          LOOKUP_PASSWORD: ${{ github.token }}
+        run: |
+          out="${RUNNER_TEMP}/content-check"
+          mkdir -p "$out"
+          args=()
+          for manifest in $(jq -r '.[].manifest' <<<"$CONNECTORS"); do
+            if node scripts/build-connector-oci-artifact.mjs --connector "$manifest" --out "$out/$manifest" >/dev/null; then
+              args+=(--artifact "$out/$manifest")
+            else
+              echo "::warning::advisory content check: ${manifest} did not build"
+            fi
+          done
+          node scripts/published-state.mjs --report "$out/report-shard-${SHARD}.json" "${args[@]}" \
+            || echo "::warning::advisory content check did not complete"
+          cat "$out/report-shard-${SHARD}.json" || true
+
+      - name: Upload the advisory content report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: content-check-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/content-check/report-shard-${{ matrix.shard }}.json
+          if-no-files-found: warn
 
   artifact-contract:
     # Preserve the existing required check as the aggregate for all new shards.
@@ -112,3 +156,6 @@ jobs:
 
       - name: Manifest lookup classifier tests
         run: node --test scripts/lookup-manifest.test.mjs
+
+      - name: Advisory content check tests
+        run: node --test scripts/published-state.test.mjs
