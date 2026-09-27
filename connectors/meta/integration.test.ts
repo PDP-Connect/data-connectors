@@ -24,11 +24,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import {
-	collectAllStreams,
-	isLoginOrChallengeDomFacts,
-	scrapeAdvertisers,
-} from "./index.ts";
+import { collectAllStreams, scrapeAdvertisers } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -201,14 +197,38 @@ function makeFakePage(options: {
 			}
 			if (source.includes("verify you are human") || source.includes("security code")) {
 				const dom = options.postsChallengeDom;
-				const visible = dom
-					? isLoginOrChallengeDomFacts({
-							hasCaptchaSitekey: dom.hasCaptchaSitekey === true,
-							hasEmailInput: dom.hasEmailInput === true,
-							hasVerificationInput: dom.hasVerificationInput === true,
-							text: dom.text,
-						})
-					: false;
+				const documentDescriptor = Object.getOwnPropertyDescriptor(
+					globalThis,
+					"document",
+				);
+				Object.defineProperty(globalThis, "document", {
+					configurable: true,
+					value: {
+						body: { innerText: dom?.text ?? "" },
+						querySelector: (selector: string) => {
+							if (selector === "[data-sitekey]") {
+								return dom?.hasCaptchaSitekey ? {} : null;
+							}
+							if (selector.includes('input[type="email"]')) {
+								return dom?.hasEmailInput ? {} : null;
+							}
+							if (selector.includes('input[name="verificationCode"]')) {
+								return dom?.hasVerificationInput ? {} : null;
+							}
+							return null;
+						},
+					},
+				});
+				let visible: boolean;
+				try {
+					visible = (condition as () => boolean)();
+				} finally {
+					if (documentDescriptor) {
+						Object.defineProperty(globalThis, "document", documentDescriptor);
+					} else {
+						Reflect.deleteProperty(globalThis, "document");
+					}
+				}
 				return new Promise((resolve, reject) => {
 					setTimeout(() => {
 						if (visible) {

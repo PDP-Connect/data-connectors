@@ -1187,24 +1187,6 @@ export async function collectAllStreams(
 	}
 }
 
-export function isLoginOrChallengeDomFacts(facts: {
-	hasCaptchaSitekey: boolean;
-	hasEmailInput: boolean;
-	hasVerificationInput: boolean;
-	text: string;
-}): boolean {
-	const text = facts.text.toLowerCase();
-	return (
-		(text.includes("verify you are human") && facts.hasCaptchaSitekey) ||
-		(text.includes("welcome back") && facts.hasEmailInput) ||
-		facts.hasVerificationInput ||
-		text.includes("checkpoint") ||
-		text.includes("challenge") ||
-		text.includes("security code")
-	);
-}
-
-
 async function hasLoginOrChallengePageState(page: Page): Promise<boolean> {
 	if (isLoginOrChallengeUrl(page.url())) {
 		return true;
