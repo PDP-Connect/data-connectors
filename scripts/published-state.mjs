@@ -9,8 +9,8 @@
 //      NAME_UNKNOWN on the authenticated read) is a new connector with no
 //      versions. Anonymously, GHCR answers a missing repository with a
 //      token-endpoint 403, which is `unknown`, not absent.
-//   2. if the version is present, its manifest. A signed
-//      `dev.pdpp.connector.content-digest` annotation is the published digest.
+//   2. if the version is present, its manifest. The
+//      `dev.pdpp.connector.content-digest` annotation (written by the publisher, not verified here) is the published digest.
 //   3. otherwise the config blob, and each layer's diff_id. A layer whose
 //      compressed digest equals the local one has the local diff_id; only a
 //      differing layer is downloaded and gunzipped.
@@ -274,7 +274,7 @@ export async function readPublishedState(client, { repository, version }) {
 }
 
 /**
- * The published content digest of a present version. Prefers the signed
+ * The published content digest of a present version. Prefers the publisher
  * annotation; otherwise derives it, downloading only the layers whose
  * compressed digest differs from the local build's.
  */

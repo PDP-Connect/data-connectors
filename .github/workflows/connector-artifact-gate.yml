@@ -85,6 +85,8 @@ jobs:
       - name: Advisory content check against GHCR
         if: ${{ !cancelled() }}
         continue-on-error: true
+        # A step timeout, so a slow registry cannot reach the job timeout.
+        timeout-minutes: 8
         env:
           CONNECTORS: ${{ toJSON(matrix.connectors) }}
           SHARD: ${{ matrix.shard }}
