@@ -3099,4 +3099,25 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			category: "ordered_protocol_emission",
 			note: "collect(): emit missing-source skip results in stream order.",
 		},
+		{
+			path: "src/test-fixtures/surface-proof-conformance.ts",
+			line: 233,
+			column: 5,
+			category: "test_assertion_sequencing",
+			note: "DOM conformance cases use one browser and complete each page assertion before closing it.",
+		},
+		{
+			path: "src/test-fixtures/surface-proof-conformance.ts",
+			line: 425,
+			column: 5,
+			category: "test_assertion_sequencing",
+			note: "Network conformance cases use one browser and complete each page assertion before closing it.",
+		},
+		{
+			path: "src/surface-proof.ts",
+			line: 276,
+			column: 20,
+			category: "bounded_retry_polling",
+			note: "proveDom(): the next sample depends on the previous snapshot's settling signature.",
+		},
 	];
