@@ -24,7 +24,11 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, scrapeAdvertisers } from "./index.ts";
+import {
+	collectAllStreams,
+	isLoginOrChallengeDomFacts,
+	scrapeAdvertisers,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -44,6 +48,8 @@ type ScriptedPostsPage = {
 	json: unknown;
 	status: number;
 	postData?: string;
+	samePage?: boolean;
+	url?: string;
 } | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
@@ -63,6 +69,14 @@ function makeFakePage(options: {
 	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
 	navigationFailures?: string[];
+	pageUrlAfterGoto?: string;
+	postsAutoResolveWaitForResponseCall?: number;
+	postsChallengeDom?: {
+		hasCaptchaSitekey?: boolean;
+		hasEmailInput?: boolean;
+		hasVerificationInput?: boolean;
+		text: string;
+	};
 	postsScript?: ScriptedPostsPage[];
 	webInfoUser?: unknown;
 }): {
@@ -80,6 +94,8 @@ function makeFakePage(options: {
 	const dialogQueue = [...(options.dialogScrapes ?? [])];
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
+	let currentUrl = "about:blank";
+	let postsWaitForResponseCalls = 0;
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
@@ -110,12 +126,13 @@ function makeFakePage(options: {
 		const response = {
 			json: () => Promise.resolve(scripted.json),
 			request: () => ({
+				frame: () => ({ page: () => (scripted.samePage === false ? {} : page) }),
 				headers: () => ({ "x-fb-friendly-name": friendlyName }),
 				method: () => "POST",
 				postData: () => postData,
 			}),
 			status: () => scripted.status,
-			url: () => "https://www.instagram.com/graphql/query",
+			url: () => scripted.url ?? "https://www.instagram.com/graphql/query",
 		};
 		if (pendingPostsPredicate && !pendingPostsPredicate(response)) {
 			next(null);
@@ -132,17 +149,34 @@ function makeFakePage(options: {
 			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
+			currentUrl = options.pageUrlAfterGoto ?? url ?? currentUrl;
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-			waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
-				new Promise((resolve) => {
+		url: () => currentUrl,
+		waitForResponse: (predicate: unknown, opts?: { timeout?: number }): Promise<unknown> =>
+			new Promise((resolve) => {
+					postsWaitForResponseCalls += 1;
 					pendingPostsPredicate =
 						typeof predicate === "function"
 							? (value: unknown) => Boolean(predicate(value))
 							: null;
-					pendingPostsResolve = resolve;
-				}),
+				pendingPostsResolve = resolve;
+				if (
+					options.postsAutoResolveWaitForResponseCall ===
+					postsWaitForResponseCalls
+				) {
+					setTimeout(resolveNextPostsPage, 300);
+				}
+				if ((opts?.timeout ?? 0) <= 500) {
+					setTimeout(() => {
+						if (pendingPostsResolve === resolve) {
+							pendingPostsResolve = null;
+							resolve(null);
+						}
+					}, 510);
+				}
+			}),
 		waitForFunction: (
 			condition: unknown,
 			_arg?: unknown,
@@ -164,6 +198,27 @@ function makeFakePage(options: {
 			}
 			if (source.includes("Categories used to reach you")) {
 				return readiness(options.categoriesAvailable === true);
+			}
+			if (source.includes("verify you are human") || source.includes("security code")) {
+				const dom = options.postsChallengeDom;
+				const visible = dom
+					? isLoginOrChallengeDomFacts({
+							hasCaptchaSitekey: dom.hasCaptchaSitekey === true,
+							hasEmailInput: dom.hasEmailInput === true,
+							hasVerificationInput: dom.hasVerificationInput === true,
+							text: dom.text,
+						})
+					: false;
+				return new Promise((resolve, reject) => {
+					setTimeout(() => {
+						if (visible) {
+							resolve(true);
+							return;
+						}
+						waitRejections.push(source);
+						reject(new Error("Timeout while waiting for fake DOM"));
+					}, 300);
+				});
 			}
 			if (source.includes("View all")) {
 				return readiness(true);
@@ -308,6 +363,14 @@ const WEB_INFO_USER = {
 
 function makeCtx(args: {
 	pageOptions?: {
+		pageUrlAfterGoto?: string;
+		postsAutoResolveWaitForResponseCall?: number;
+		postsChallengeDom?: {
+			hasCaptchaSitekey?: boolean;
+			hasEmailInput?: boolean;
+			hasVerificationInput?: boolean;
+			text: string;
+		};
 		categoriesAvailable?: boolean;
 		categoryDestinationReached?: boolean;
 		categoryRows?: Array<{ description: string | null; name: string }>;
@@ -439,8 +502,12 @@ function legacyPostsDecisionFromPages(
 				} | null;
 			} | null;
 		}).data?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
-		if (connection?.page_info?.has_next_page !== true) {
-			return "empty";
+		if (
+			connection?.page_info?.has_next_page !== true ||
+			typeof connection.page_info.end_cursor !== "string" ||
+			connection.page_info.end_cursor.length === 0
+		) {
+			continue;
 		}
 	}
 	return sawEmptyPage ? "empty" : "not-proven";
@@ -855,36 +922,49 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			rejects: /meta_posts_response_not_observed/,
 		},
 		{
-			name: "stale unrelated GraphQL response",
-			source: "w28-pr226-review-fixtures2.test.ts T1 second-tab stale response",
+			name: "stale other-tab GraphQL response",
+			source: "w28-pr226-review-fixtures2.test.ts T1 other-tab stale response",
 			raw: legacyPostsEnvelope(
 				[{ node: { id: "stale", taken_at: 1_700_000_001 } }],
 				{ has_next_page: false },
 			),
 			expectedPdpp: "not-proven",
-			postData: "fb_api_req_friendly_name=UnrelatedQuery",
 			rejects: /meta_posts_response_not_observed/,
 		},
 		{
 			name: "target-empty first page then populated page",
 			source: "w28-pr226-review-fixtures.test.ts N1 target-empty then populated",
-			raw: legacyPostsEnvelope([], { end_cursor: "next", has_next_page: true }),
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
 			expectedPdpp: "data",
 		},
 		{
-			name: "late challenge after empty first page",
-			source: "w28-pr226-review-fixtures.test.ts N2 late challenge",
-			raw: legacyPostsEnvelope([], { end_cursor: "next", has_next_page: true }),
+			name: "terminal empty followed by authentication error",
+			source: "w28-pr226-review-fixtures.test.ts N3 delayed error after empty response",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
 			expectedPdpp: "not-proven",
 			rejects: /meta_posts_incomplete_pagination/,
+		},
+		{
+			name: "visible DOM challenge after empty response",
+			source: "w28-pr226-review-fixtures.test.ts N2 visible challenge after response",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_login_challenge/,
 		},
 		{
 			name: "redirect login payload carrying empty connection",
 			source: "w28-pr226-review-fixtures2.test.ts login redirect",
 			raw: legacyPostsEnvelope([], { has_next_page: false }),
 			expectedPdpp: "not-proven",
-			rejects: /meta_posts_response_not_observed/,
-			status: 302,
+			rejects: /meta_posts_login_challenge/,
+			status: 200,
+		},
+		{
+			name: "same-URL login email step with terminal empty response",
+			source: "w28-pr226-review-fixtures2.test.ts R3 same-URL login email-step UI",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_login_challenge/,
 		},
 		{
 			name: "delayed data on second page",
@@ -915,7 +995,11 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			firstPage.postData = fixture.postData;
 		}
 		const postsScript: ScriptedPostsPage[] = [firstPage];
+		if (fixture.name === "stale other-tab GraphQL response") {
+			firstPage.samePage = false;
+		}
 		if (fixture.name === "target-empty first page then populated page") {
+			firstPage.postData = "fb_api_req_friendly_name=PolarisProfilePostsQuery";
 			const raw = legacyPostsEnvelope(
 				[{ node: { id: "late-populated", taken_at: 1_700_000_008 } }],
 				{ has_next_page: false },
@@ -923,8 +1007,12 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			postsScript.push({ json: raw, status: 200 });
 			legacyPages = [...legacyPages, { raw }];
 		}
-		if (fixture.name === "late challenge after empty first page") {
-			const raw = legacyPostsEnvelope([], { has_next_page: false }, { errorCode: "checkpoint_required" });
+		if (fixture.name === "terminal empty followed by authentication error") {
+			const raw = legacyPostsEnvelope(
+				[],
+				{ has_next_page: false },
+				{ errors: [{ message: "authentication expired" }] },
+			);
 			postsScript.push({ json: raw, status: 200 });
 			legacyPages = [...legacyPages, { raw }];
 		}
@@ -937,12 +1025,42 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			legacyPages = [...legacyPages, { raw }];
 		}
 		const legacy = legacyPostsDecisionFromPages(legacyPages);
-		const { ctx } = makeCtx({
+		const ctxArgs: Parameters<typeof makeCtx>[0] = {
 			fetchScript: {},
 			harness,
 			postsScript,
 			requestedStreams: ["posts"],
-		});
+		};
+		if (
+			fixture.name === "target-empty first page then populated page" ||
+			fixture.name === "terminal empty followed by authentication error"
+		) {
+			ctxArgs.pageOptions = { postsAutoResolveWaitForResponseCall: 2 };
+		}
+		if (fixture.name === "redirect login payload carrying empty connection") {
+			ctxArgs.pageOptions = {
+				pageUrlAfterGoto: "https://www.instagram.com/accounts/login/",
+			};
+		}
+		if (fixture.name === "visible DOM challenge after empty response") {
+			ctxArgs.pageOptions = {
+				pageUrlAfterGoto: "https://www.instagram.com/testuser/",
+				postsChallengeDom: {
+					hasCaptchaSitekey: true,
+					text: "Verify you are human",
+				},
+			};
+		}
+		if (fixture.name === "same-URL login email step with terminal empty response") {
+			ctxArgs.pageOptions = {
+				pageUrlAfterGoto: "https://www.instagram.com/testuser/",
+				postsChallengeDom: {
+					hasEmailInput: true,
+					text: "Welcome back",
+				},
+			};
+		}
+		const { ctx } = makeCtx(ctxArgs);
 		if (fixture.rejects) {
 			await assert.rejects(collectAllStreams(ctx, NO_DELAY), fixture.rejects);
 		} else {
@@ -989,10 +1107,12 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			{ fixture: "benign null errors carrying empty terminal connection", legacy: "empty", pdpp: "empty" },
 			{ fixture: "partial page-not-terminal response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "challenge envelope with empty timeline", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
-			{ fixture: "stale unrelated GraphQL response", legacy: "not-proven", pdpp: "not-proven" },
+			{ fixture: "stale other-tab GraphQL response", legacy: "data", pdpp: "not-proven" },
 			{ fixture: "target-empty first page then populated page", legacy: "data", pdpp: "data" },
-			{ fixture: "late challenge after empty first page", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "terminal empty followed by authentication error", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "visible DOM challenge after empty response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "redirect login payload carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "same-URL login email step with terminal empty response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "delayed data on second page", legacy: "data", pdpp: "data" },
 		],
 	);
