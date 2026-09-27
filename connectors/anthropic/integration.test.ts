@@ -1559,3 +1559,137 @@ test("collectAnthropic: layout_unrecognized PROGRESS caps the entry names", asyn
 	assert.doesNotMatch(progressText, /entry-50\.json/);
 	assert.match(progressText, /30 more/);
 });
+
+async function runManifest(
+	parts: Array<{
+		category: string;
+		entries: Array<{ name: string; content: unknown }>;
+	}>,
+	streams: readonly string[] = ALL_EXPORT_STREAMS,
+) {
+	const tokens = parts.map((p, i) => ({
+		category: p.category,
+		token: `tok-${i}`,
+	}));
+	const zipBytes = await Promise.all(
+		parts.map((part) => buildManifestPartZip(part.entries)),
+	);
+	const zips = new Map(zipBytes.map((bytes, i) => [`tok-${i}`, bytes]));
+	const context = makeContext({
+		streams: [...streams],
+		fetchStub: manifestFetchStub(tokens),
+	});
+	serveDownloads(context.page, zips);
+	await collectAnthropic(context.ctx);
+	return context;
+}
+
+function assertNoSyncedAt(
+	messages: EmittedMessage[],
+	streams: readonly string[],
+): void {
+	for (const state of statesOf(messages)) {
+		if (streams.includes(state.stream)) {
+			assert.ok(
+				!("synced_at" in (state.cursor as Record<string, unknown>)),
+				`${state.stream} must not get synced_at`,
+			);
+		}
+	}
+}
+
+for (const scenario of [
+	{
+		label: "only a projects part",
+		parts: [
+			{
+				category: "projects",
+				entries: [{ name: "projects/p.json", content: PROJECT_JSON }],
+			},
+		],
+	},
+	{
+		label: "conversations under a renamed category",
+		parts: [
+			{
+				category: "chats",
+				entries: [{ name: "conversations.json", content: CONVERSATIONS_JSON }],
+			},
+			{
+				category: "projects",
+				entries: [{ name: "projects/p.json", content: PROJECT_JSON }],
+			},
+		],
+	},
+]) {
+	test(`collectAnthropic: manifest with ${scenario.label} skips conversations and messages, no synced_at`, async () => {
+		const { emitted, protocolMessages } = await runManifest(scenario.parts);
+
+		const skips = skipsOf(protocolMessages);
+		assert.deepEqual(skips.map((s) => s.stream).sort(), [
+			"conversations",
+			"messages",
+		]);
+		assert.ok(skips.every((s) => s.reason === "export_conversations_missing"));
+		assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+		assert.equal(emitted.filter((r) => r.stream === "conversations").length, 0);
+		assert.equal(emitted.filter((r) => r.stream === "projects").length, 1);
+		const conversationsState = statesOf(protocolMessages).findLast(
+			(m) => m.stream === "conversations",
+		);
+		assert.ok(
+			"last_export_requested_at" in
+				(conversationsState?.cursor as Record<string, unknown>),
+		);
+	});
+}
+
+test("collectAnthropic: manifest conversations entry with an unparseable item skips conversations and messages, count in PROGRESS", async () => {
+	const secret = "private-title-do-not-log";
+	const { emitted, protocolMessages } = await runManifest([
+		{
+			category: "conversations",
+			entries: [
+				{
+					name: "conversations.json",
+					content: [...CONVERSATIONS_JSON, { not: "a conversation", secret }],
+				},
+			],
+		},
+	]);
+
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(skips.map((s) => s.stream).sort(), [
+		"conversations",
+		"messages",
+	]);
+	assert.ok(skips.every((s) => s.reason === "export_items_unparseable"));
+	assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
+	const progressText = protocolMessages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message)
+		.join("\n");
+	assert.match(progressText, /1 conversations item\(s\)/);
+	assert.doesNotMatch(progressText, new RegExp(secret));
+});
+
+test("collectAnthropic: manifest conversation without chat_messages is imported like the nonce path", async () => {
+	const { emitted, protocolMessages } = await runManifest([
+		{
+			category: "conversations",
+			entries: [
+				{
+					name: "conversations.json",
+					content: [
+						...CONVERSATIONS_JSON,
+						{ uuid: "conv-2", name: "No messages key" },
+					],
+				},
+			],
+		},
+	]);
+
+	assert.equal(skipsOf(protocolMessages).length, 0);
+	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 2);
+});
