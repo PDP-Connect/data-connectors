@@ -40,7 +40,11 @@ interface ScriptedFetch {
  *  a fake Playwright Response exposing `.json()`/`.status()`. `null` means
  *  "the page never triggers this request" (used to prove the
  *  `meta_posts_response_not_observed` failure path). */
-type ScriptedPostsPage = { json: unknown; status: number } | null;
+type ScriptedPostsPage = {
+	json: unknown;
+	status: number;
+	postData?: string;
+} | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
  *  fetches keyed by URL path prefix, and scripted DOM-scrape results keyed
@@ -77,6 +81,7 @@ function makeFakePage(options: {
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
+	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
@@ -100,26 +105,44 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
-		next({
+		const postData = scripted.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery";
+		const friendlyName = /fb_api_req_friendly_name=([^&]+)/.exec(postData)?.[1] ?? "PolarisProfilePostsQuery";
+		const response = {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({ method: () => "POST" }),
+			request: () => ({
+				headers: () => ({ "x-fb-friendly-name": friendlyName }),
+				method: () => "POST",
+				postData: () => postData,
+			}),
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
-		});
+		};
+		if (pendingPostsPredicate && !pendingPostsPredicate(response)) {
+			next(null);
+			return;
+		}
+		next(response);
 	};
 
 	const page = {
 		goto: (url?: string): Promise<null> => {
-			if (url && options.navigationFailures?.some((path) => url.includes(path))) {
+			if (
+				url &&
+				options.navigationFailures?.some((path) => url.includes(path))
+			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-		waitForResponse: (_predicate: unknown, _opts?: unknown): Promise<unknown> =>
-			new Promise((resolve) => {
-				pendingPostsResolve = resolve;
-			}),
+			waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
+				new Promise((resolve) => {
+					pendingPostsPredicate =
+						typeof predicate === "function"
+							? (value: unknown) => Boolean(predicate(value))
+							: null;
+					pendingPostsResolve = resolve;
+				}),
 		waitForFunction: (
 			condition: unknown,
 			_arg?: unknown,
@@ -343,6 +366,102 @@ const EMPTY_POSTS: ScriptedPostsPage = {
 	status: 200,
 };
 
+const postsEnvelope = (
+	edges: Array<{ node: Record<string, unknown> }>,
+	pageInfo: Record<string, unknown> | null,
+	extras: Record<string, unknown> = {},
+): unknown => ({
+	...extras,
+	data: {
+		xdt_api__v1__feed__user_timeline_graphql_connection: {
+			edges,
+			...(pageInfo === null ? {} : { page_info: pageInfo }),
+		},
+	},
+});
+
+const stateStreams = (messages: EmittedMessage[]): Array<string | undefined> =>
+	messages
+		.filter((message) => message.type === "STATE")
+		.map((message) => message.stream)
+		.sort();
+
+type PostsDecision = "data" | "empty" | "not-proven";
+
+const LEGACY_POST_OPERATION_RE =
+	/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/;
+
+function legacyPostsDecision(raw: unknown): PostsDecision {
+	if (!raw) {
+		return "not-proven";
+	}
+	const envelope = raw as {
+		data?: {
+			data?: {
+				xdt_api__v1__feed__user_timeline_graphql_connection?: {
+					edges?: unknown;
+					page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null;
+				} | null;
+			} | null;
+		} | null;
+	};
+	const connection =
+		envelope.data?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+	if (!Array.isArray(connection?.edges)) {
+		return "not-proven";
+	}
+	return connection.edges.length === 0 ? "empty" : "data";
+}
+
+function legacyPostsDecisionFromPages(
+	pages: Array<{ postData?: string; raw: unknown }>,
+): PostsDecision {
+	let sawEmptyPage = false;
+	for (const page of pages) {
+		const postData = page.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery";
+		if (!LEGACY_POST_OPERATION_RE.test(postData)) {
+			continue;
+		}
+		const decision = legacyPostsDecision(page.raw);
+		if (decision === "data") {
+			return "data";
+		}
+		if (decision !== "empty") {
+			return "not-proven";
+		}
+		sawEmptyPage = true;
+		const connection = (page.raw as {
+			data?: {
+				data?: {
+					xdt_api__v1__feed__user_timeline_graphql_connection?: {
+						page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null;
+					} | null;
+				} | null;
+			} | null;
+		}).data?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+		if (connection?.page_info?.has_next_page !== true) {
+			return "empty";
+		}
+	}
+	return sawEmptyPage ? "empty" : "not-proven";
+}
+
+const legacyPostsEnvelope = (
+	edges: Array<{ node: Record<string, unknown> }>,
+	pageInfo: Record<string, unknown> | null,
+	extras: Record<string, unknown> = {},
+): unknown => ({
+	...extras,
+	data: { data: (postsEnvelope(edges, pageInfo) as { data: unknown }).data },
+});
+
+function summarizeLegacyResult(legacy: PostsDecision, pdpp: PostsDecision): string {
+	if (legacy === "empty" && pdpp === "not-proven") {
+		return "legacy fail-open; PDPP not-proven";
+	}
+	return legacy;
+}
+
 // ─── Invariant 1: only requested streams emit ──────────────────────────
 
 test("collectAllStreams: unrequested streams emit nothing", async () => {
@@ -510,7 +629,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	);
 });
 
-test("collectAllStreams: posts never emits STATE, requested or not", async () => {
+test("collectAllStreams: a post_likes-only request does not emit an unrequested posts STATE", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -526,6 +645,368 @@ test("collectAllStreams: posts never emits STATE, requested or not", async () =>
 			(m) => m.type === "STATE" && m.stream === "posts",
 		),
 		false,
+	);
+});
+
+test("collectAllStreams: an empty timeline response completes requested empty streams", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [EMPTY_POSTS],
+		requestedStreams: ["posts", "post_likes"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	assert.deepEqual(harness.emitted, []);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream)
+			.sort(),
+		["post_likes", "posts"],
+	);
+});
+
+test("collectAllStreams: profile media_count cannot turn a missing timeline into empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const profileZeroPosts: ScriptedPostsPage = {
+		json: {
+			data: {
+				data: {
+					user: {
+						follower_count: 0,
+						following_count: 0,
+						media_count: 0,
+					},
+				},
+			},
+		},
+		postData: "fb_api_req_friendly_name=ProfilePageQuery",
+		status: 200,
+	};
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [null, profileZeroPosts],
+		requestedStreams: ["posts"],
+	});
+
+	await assert.rejects(
+		collectAllStreams(ctx, NO_DELAY),
+		/meta_posts_response_not_observed/,
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: posts differential matrix matches legacy empty proof boundary", async () => {
+	/**
+	 * Legacy citations:
+	 * - `/home/tnunamak/code/unity-surfaces/apps/desktop/connectors/meta/instagram-playwright.js:752-770`
+	 *   reads `responseData.data.data.xdt_api__v1__feed__user_timeline_graphql_connection.edges`
+	 *   and omits `instagram.posts` when that exact edge value is absent or not an array.
+	 * - `.../instagram-playwright.js:1079-1082` emits `{posts}` when the
+	 *   posts issue is not omitted, so `{posts:[]}` is emitted for a captured
+	 *   response whose legacy source `edges` array is empty.
+	 *
+	 * Review fixture crosswalk:
+	 * - #226 fixture review: stale unrelated response, partial/degraded result,
+	 *   challenge/error envelopes.
+	 * - w28-pr218-221b / w28-pr221c / w28-pr221d: UI geometry and dialog timing
+	 *   cases are not applicable here because `instagram.posts` uses only the
+	 *   captured network timeline stream, not DOM geometry.
+	 * - w28-empty-batch-review: missing pagination, next-page non-terminal,
+	 *   error envelope, and malformed non-empty edge cases.
+	 */
+	const cases: Array<{
+		name: string;
+		source: string;
+		raw: unknown;
+		expectedPdpp: PostsDecision;
+		postData?: string;
+		rejects?: RegExp;
+		status?: number;
+	}> = [
+		{
+			name: "ordinary populated terminal timeline",
+			source: "baseline parity fixture",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "p1", taken_at: 1_700_000_000 } }],
+				{ has_next_page: false },
+			),
+			expectedPdpp: "data",
+		},
+		{
+			name: "legacy operation PolarisProfilePostsTabContentQuery_connection",
+			source: "legacy source lines 795-798 operation binding",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "tab-content", taken_at: 1_700_000_002 } }],
+				{ has_next_page: false },
+			),
+			expectedPdpp: "data",
+			postData: "fb_api_req_friendly_name=PolarisProfilePostsTabContentQuery_connection",
+		},
+		{
+			name: "legacy operation ProfilePostsQuery",
+			source: "legacy source lines 795-798 operation binding",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "profile-posts", taken_at: 1_700_000_003 } }],
+				{ has_next_page: false },
+			),
+			expectedPdpp: "data",
+			postData: "fb_api_req_friendly_name=ProfilePostsQuery",
+		},
+		{
+			name: "legacy operation UserMediaQuery",
+			source: "legacy source lines 795-798 operation binding",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "user-media", taken_at: 1_700_000_004 } }],
+				{ has_next_page: false },
+			),
+			expectedPdpp: "data",
+			postData: "fb_api_req_friendly_name=UserMediaQuery",
+		},
+		{
+			name: "genuine empty terminal timeline",
+			source: "baseline parity fixture",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "empty",
+		},
+		{
+			name: "empty connection with missing pagination",
+			source: "w28-empty-batch-review.md empty-batch pagination row",
+			raw: legacyPostsEnvelope([], null),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_incomplete_pagination/,
+		},
+		{
+			name: "empty connection with next page advertised",
+			source: "w28-empty-batch-review.md non-terminal page row",
+			raw: legacyPostsEnvelope([], { end_cursor: "next", has_next_page: true }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_incomplete_pagination/,
+		},
+		{
+			name: "nonempty source edges filtered by missing ids",
+			source: "w28-empty-batch-review.md malformed non-empty edge row",
+			raw: legacyPostsEnvelope([{ node: { caption: { text: "missing id" } } }], {
+				has_next_page: false,
+			}),
+			expectedPdpp: "not-proven",
+		},
+		{
+			name: "HTTP 500 carrying empty connection",
+			source: "w28-empty-batch-review.md error envelope row",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+			status: 500,
+		},
+		{
+			name: "GraphQL errors carrying empty connection",
+			source: "w28-empty-batch-review.md error-envelope row",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { errors: [{}] }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "ok false carrying empty connection",
+			source: "w28-pr226-review-fixtures.test.ts N3c ok:false",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { ok: false }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "401 body payload carrying empty connection",
+			source: "w28-pr226-review-fixtures.test.ts N3d body status:401 payload",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { status: 401 }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "extensions unauthenticated carrying empty connection",
+			source: "w28-pr226-review-fixtures.test.ts N3e extensions.code UNAUTHENTICATED",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { extensions: { code: "UNAUTHENTICATED" } }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "benign null errors carrying empty terminal connection",
+			source: "w28-pr226-review-fixtures.test.ts N3h errors:null",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { errors: null }),
+			expectedPdpp: "empty",
+		},
+		{
+			name: "partial page-not-terminal response",
+			source: "w28-pr226-review-fixtures.test.ts N3g partial/degraded result",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { extensions: { is_final: false, partial: true } }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "challenge envelope with empty timeline",
+			source: "w28-pr226-review-fixtures2.test.ts R3 same-URL email-step login",
+			raw: legacyPostsEnvelope([], { has_next_page: false }, { errorCode: "checkpoint_required" }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "stale unrelated GraphQL response",
+			source: "w28-pr226-review-fixtures2.test.ts T1 second-tab stale response",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "stale", taken_at: 1_700_000_001 } }],
+				{ has_next_page: false },
+			),
+			expectedPdpp: "not-proven",
+			postData: "fb_api_req_friendly_name=UnrelatedQuery",
+			rejects: /meta_posts_response_not_observed/,
+		},
+		{
+			name: "target-empty first page then populated page",
+			source: "w28-pr226-review-fixtures.test.ts N1 target-empty then populated",
+			raw: legacyPostsEnvelope([], { end_cursor: "next", has_next_page: true }),
+			expectedPdpp: "data",
+		},
+		{
+			name: "late challenge after empty first page",
+			source: "w28-pr226-review-fixtures.test.ts N2 late challenge",
+			raw: legacyPostsEnvelope([], { end_cursor: "next", has_next_page: true }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_incomplete_pagination/,
+		},
+		{
+			name: "redirect login payload carrying empty connection",
+			source: "w28-pr226-review-fixtures2.test.ts login redirect",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "not-proven",
+			rejects: /meta_posts_response_not_observed/,
+			status: 302,
+		},
+		{
+			name: "delayed data on second page",
+			source: "w28-pr218-221b-review.md delayed data adapted to posts pagination",
+			raw: legacyPostsEnvelope(
+				[{ node: { id: "page1", taken_at: 1_700_000_010 } }],
+				{ end_cursor: "next", has_next_page: true },
+			),
+			expectedPdpp: "data",
+		},
+	];
+
+	const matrix = await Promise.all(
+		cases.map(async (fixture) => {
+		const firstLegacyPage: { postData?: string; raw: unknown } = { raw: fixture.raw };
+		if (fixture.postData) {
+			firstLegacyPage.postData = fixture.postData;
+		}
+		let legacyPages: Array<{ postData?: string; raw: unknown }> = [
+			firstLegacyPage,
+		];
+		const harness = makeRecordingEmit(validateRecord);
+		const firstPage: ScriptedPostsPage = {
+			json: fixture.raw,
+			status: fixture.status ?? 200,
+		};
+		if (fixture.postData) {
+			firstPage.postData = fixture.postData;
+		}
+		const postsScript: ScriptedPostsPage[] = [firstPage];
+		if (fixture.name === "target-empty first page then populated page") {
+			const raw = legacyPostsEnvelope(
+				[{ node: { id: "late-populated", taken_at: 1_700_000_008 } }],
+				{ has_next_page: false },
+			);
+			postsScript.push({ json: raw, status: 200 });
+			legacyPages = [...legacyPages, { raw }];
+		}
+		if (fixture.name === "late challenge after empty first page") {
+			const raw = legacyPostsEnvelope([], { has_next_page: false }, { errorCode: "checkpoint_required" });
+			postsScript.push({ json: raw, status: 200 });
+			legacyPages = [...legacyPages, { raw }];
+		}
+		if (fixture.name === "delayed data on second page") {
+			const raw = legacyPostsEnvelope(
+				[{ node: { id: "page2", taken_at: 1_700_000_009 } }],
+				{ has_next_page: false },
+			);
+			postsScript.push({ json: raw, status: 200 });
+			legacyPages = [...legacyPages, { raw }];
+		}
+		const legacy = legacyPostsDecisionFromPages(legacyPages);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			postsScript,
+			requestedStreams: ["posts"],
+		});
+		if (fixture.rejects) {
+			await assert.rejects(collectAllStreams(ctx, NO_DELAY), fixture.rejects);
+		} else {
+			await collectAllStreams(ctx, NO_DELAY);
+		}
+		const states = stateStreams(harness.protocolMessages);
+		const pdpp: PostsDecision = states.includes("posts")
+			? "empty"
+			: harness.emitted.some((entry) => entry.stream === "posts")
+				? "data"
+				: "not-proven";
+		assert.equal(pdpp, fixture.expectedPdpp, fixture.name);
+		if (pdpp === "empty") {
+			assert.equal(legacy, "empty", `${fixture.name}: PDPP empty requires legacy empty`);
+		}
+		if (legacy === "data") {
+			assert.notEqual(pdpp, "empty", `${fixture.name}: legacy data must not become PDPP empty`);
+		}
+		return {
+			fixture: fixture.name,
+			legacy: summarizeLegacyResult(legacy, pdpp),
+			pdpp,
+			source: fixture.source,
+		};
+		}),
+	);
+
+	assert.deepEqual(
+		matrix.map(({ fixture, legacy, pdpp }) => ({ fixture, legacy, pdpp })),
+		[
+			{ fixture: "ordinary populated terminal timeline", legacy: "data", pdpp: "data" },
+			{ fixture: "legacy operation PolarisProfilePostsTabContentQuery_connection", legacy: "data", pdpp: "data" },
+			{ fixture: "legacy operation ProfilePostsQuery", legacy: "data", pdpp: "data" },
+			{ fixture: "legacy operation UserMediaQuery", legacy: "data", pdpp: "data" },
+			{ fixture: "genuine empty terminal timeline", legacy: "empty", pdpp: "empty" },
+			{ fixture: "empty connection with missing pagination", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "empty connection with next page advertised", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "nonempty source edges filtered by missing ids", legacy: "data", pdpp: "not-proven" },
+			{ fixture: "HTTP 500 carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "GraphQL errors carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "ok false carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "401 body payload carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "extensions unauthenticated carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "benign null errors carrying empty terminal connection", legacy: "empty", pdpp: "empty" },
+			{ fixture: "partial page-not-terminal response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "challenge envelope with empty timeline", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "stale unrelated GraphQL response", legacy: "not-proven", pdpp: "not-proven" },
+			{ fixture: "target-empty first page then populated page", legacy: "data", pdpp: "data" },
+			{ fixture: "late challenge after empty first page", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "redirect login payload carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
+			{ fixture: "delayed data on second page", legacy: "data", pdpp: "data" },
+		],
+	);
+	assert.deepEqual(
+		[
+			"w28-pr218-221b review DOM geometry rows: not applicable to the network-only posts stream",
+			"w28-pr221c review dialog geometry rows: ads/UI-only, not applicable to posts timeline capture",
+			"w28-pr221d review hidden/display-contents rows: ads/UI-only, not applicable to posts timeline capture",
+		],
+		[
+			"w28-pr218-221b review DOM geometry rows: not applicable to the network-only posts stream",
+			"w28-pr221c review dialog geometry rows: ads/UI-only, not applicable to posts timeline capture",
+			"w28-pr221d review hidden/display-contents rows: ads/UI-only, not applicable to posts timeline capture",
+		],
 	);
 });
 

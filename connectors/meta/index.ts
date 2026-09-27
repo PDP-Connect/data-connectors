@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.4)
+ * PDPP Meta (Instagram) Connector (v0.4.10)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -99,6 +99,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.10 (2026-09-26) — completes verified-empty posts from a successful,
+ *     terminal timeline response with an empty source edge array.
  *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
  *     in the owner's sign-in tab instead of opening a sibling about:blank tab.
  *   v0.4.3 (2026-09-24) — reports bounded failure steps for incomplete ads
@@ -178,6 +180,9 @@ const ADS_REQUIRED_SURFACES = [
 	"ad_topics",
 	"targeting_categories",
 ] as const;
+// Legacy source lines 795-798 bind these owner-posts GraphQL operations.
+const POSTS_TIMELINE_OPERATION_RE =
+	/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/;
 
 type AdsSurface = (typeof ADS_REQUIRED_SURFACES)[number];
 type AdsSurfaceStep =
@@ -472,6 +477,17 @@ export async function fetchProfileCounts(
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
 
 interface TimelineEnvelope {
+	ok?: unknown;
+	errors?: unknown;
+	error?: unknown;
+	errorCode?: unknown;
+	error_code?: unknown;
+	status?: unknown;
+	extensions?: {
+		code?: unknown;
+		is_final?: unknown;
+		partial?: unknown;
+	} | null;
 	data?: {
 		xdt_api__v1__feed__user_timeline_graphql_connection?: InstagramTimelineConnection | null;
 	} | null;
@@ -491,22 +507,52 @@ interface TimelineEnvelope {
  * `waitForResponse` instead of that bespoke shim.
  */
 function isPostsTimelineResponse(response: {
-	request: () => { method: () => string };
+	request: () => {
+		headers: () => Record<string, string>;
+		method: () => string;
+		postData: () => string | null;
+	};
 	url: () => string;
 }): boolean {
+	const request = response.request();
 	return (
 		response.url().includes("/graphql/") &&
-		response.request().method() === "POST"
+		request.method() === "POST" &&
+		(POSTS_TIMELINE_OPERATION_RE.test(request.headers()["x-fb-friendly-name"] ?? "") ||
+			POSTS_TIMELINE_OPERATION_RE.test(request.postData() ?? ""))
 	);
 }
 
 async function readTimelineConnection(response: {
 	json: () => Promise<unknown>;
+	status: () => number;
 }): Promise<InstagramTimelineConnection | null> {
+	if (response.status() < 200 || response.status() >= 300) {
+		return null;
+	}
 	try {
 		const body = (await response.json()) as TimelineEnvelope;
+		if (
+			body.ok === false ||
+			body.errors != null ||
+			body.error !== undefined ||
+			body.errorCode !== undefined ||
+			body.error_code !== undefined ||
+			body.status === 401 ||
+			body.extensions?.code === "UNAUTHENTICATED" ||
+			body.extensions?.is_final === false ||
+			body.extensions?.partial === true
+		) {
+			return null;
+		}
 		return (
-			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ?? null
+			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ??
+			(body?.data as {
+				data?: {
+					xdt_api__v1__feed__user_timeline_graphql_connection?: InstagramTimelineConnection | null;
+				} | null;
+			} | null)?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ??
+			null
 		);
 	} catch {
 		return null;
@@ -522,79 +568,32 @@ async function readTimelineConnection(response: {
 export async function fetchAllPosts(
 	page: Page,
 	username: string,
-	capture: CaptureSession | null,
-	progress?: (
+	capture?: CaptureSession,
+	progress: (
 		message: string,
 		extra?: Record<string, unknown>,
-	) => Promise<void>,
+	) => Promise<void> = async () => {},
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ edges: InstagramTimelineEdge[]; truncated: boolean }> {
-	const edges: InstagramTimelineEdge[] = [];
-	const seenIds = new Set<string>();
-	let sawAnyResponse = false;
-
-	const walk = await walkPagesWithCeiling({
-		fetchPage: async (pageNumber) => {
-			const responsePromise = page
-				.waitForResponse(isPostsTimelineResponse, { timeout: 15_000 })
-				.catch(() => null);
-			if (pageNumber === 1) {
-				await page.goto(
-					`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
-					{
-						timeout: 30_000,
-						waitUntil: "domcontentloaded",
-					},
-				);
-			} else {
-				await page.evaluate(() =>
-					window.scrollTo(0, document.body.scrollHeight),
-				);
-			}
-			const response = await responsePromise;
-			if (!response) {
-				return false;
-			}
-			sawAnyResponse = true;
-			const connection = await readTimelineConnection(response);
-			capture?.captureHttp(
-				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
-				connection,
-				{ status: response.status() },
-			);
-			const pageEdges = (connection?.edges ?? []).filter((edge) => {
-				const id =
-					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-				if (!id || seenIds.has(id)) {
-					return false;
-				}
-				seenIds.add(id);
-				return true;
-			});
-			edges.push(...pageEdges);
-			await progress?.("Fetched Instagram posts page", {
-				item_count: pageEdges.length,
-				page_index: pageNumber,
-				total_seen: edges.length,
-			});
-			const pageInfo = connection?.page_info;
-			if (!pageInfo?.has_next_page || pageEdges.length === 0) {
-				return false;
-			}
-			await delay(1500);
-			return true;
-		},
-		maxPages: POSTS_MAX_PAGES,
-	});
-
-	if (!sawAnyResponse) {
-		throw new Error(
-			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
-		);
-	}
-
-	return { edges, truncated: walk.truncated };
+): Promise<{ edges: InstagramTimelineEdge[]; sourceEdgeCount: number; truncated: boolean }> {
+	return fetchAllPostsWithEmptyProof(page, username, capture ?? null, progress, delay);
 }
+
+/**
+ * Posts empty-proof note:
+ * Instagram does not expose a stable REST endpoint for the owner timeline.
+ * The connector waits for the browser's own posts GraphQL operation and treats
+ * only a successful terminal timeline page with zero source edges as a proven
+ * empty posts inventory. The legacy connector treated several missing or
+ * degraded envelopes as empty because it only inspected the embedded edges
+ * array. This connector preserves the legacy data path while refusing to emit
+ * an empty STATE when the network evidence is incomplete.
+ *
+ * Cases covered by the differential tests include populated data, terminal
+ * empty data, HTTP and GraphQL error envelopes, partial or non-terminal
+ * responses, missing pagination, stale unrelated responses, and challenges.
+ * The invariant is that PDPP may emit empty only when the legacy edge decision
+ * is also empty and the modern network proof is complete.
+ */
 
 // ─── Following (paginated friendships listing) ─────────────────────────────
 
@@ -1063,16 +1062,17 @@ export async function collectAllStreams(
 		await emitRecord("profile", profile as RecordData);
 	}
 
+	let verifiedEmptyPosts = false;
 	if (wantsPosts || wantsPostLikes) {
 		await progress("Fetching Instagram posts");
-		const { edges, truncated } = await fetchAllPosts(
+		const { edges, sourceEdgeCount, truncated } = await fetchAllPosts(
 			page,
 			profile.username,
-			capture,
+			capture ?? undefined,
 			progress,
 			delay,
 		);
-
+		verifiedEmptyPosts = sourceEdgeCount === 0 && edges.length === 0 && !truncated;
 		if (wantsPosts) {
 			for (const edge of edges) {
 				const record = postRecord(edge);
@@ -1181,9 +1181,112 @@ export async function collectAllStreams(
 			});
 		}
 	}
+	if (verifiedEmptyPosts) {
+		if (wantsPosts) await emit({ cursor: {}, stream: "posts", type: "STATE" });
+		if (wantsPostLikes) await emit({ cursor: {}, stream: "post_likes", type: "STATE" });
+	}
 }
 
-// ─── Entry ──────────────────────────────────────────────────────────────
+async function fetchAllPostsWithEmptyProof(
+	page: Page,
+	username: string,
+	capture: CaptureSession | null,
+	progress?: (
+		message: string,
+		extra?: Record<string, unknown>,
+	) => Promise<void>,
+	delay: (ms: number) => Promise<void> = politeDelay,
+): Promise<{
+	edges: InstagramTimelineEdge[];
+	sourceEdgeCount: number;
+	truncated: boolean;
+}> {
+	const edges: InstagramTimelineEdge[] = [];
+	const seenIds = new Set<string>();
+	let sawAnyResponse = false;
+	let sawTerminalPage = false;
+	let sourceEdgeCount = 0;
+
+	const walk = await walkPagesWithCeiling({
+		fetchPage: async (pageNumber) => {
+			const responsePromise = page
+				.waitForResponse(isPostsTimelineResponse, { timeout: 15_000 })
+				.catch(() => null);
+			if (pageNumber === 1) {
+				await page.goto(
+					`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
+					{
+						timeout: 30_000,
+						waitUntil: "domcontentloaded",
+					},
+				);
+			} else {
+				await page.evaluate(() =>
+					window.scrollTo(0, document.body.scrollHeight),
+				);
+			}
+			const response = await responsePromise;
+			if (!response) {
+				return false;
+			}
+			const connection = await readTimelineConnection(response);
+			if (!connection || !Array.isArray(connection.edges)) {
+				return false;
+			}
+			sawAnyResponse = true;
+			sourceEdgeCount += connection.edges.length;
+			capture?.captureHttp(
+				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
+				connection,
+				{ status: response.status() },
+			);
+			const pageEdges = (connection?.edges ?? []).filter((edge) => {
+				const id =
+					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
+				if (!id || seenIds.has(id)) {
+					return false;
+				}
+				seenIds.add(id);
+				return true;
+			});
+			edges.push(...pageEdges);
+			await progress?.("Fetched Instagram posts page", {
+				item_count: pageEdges.length,
+				page_index: pageNumber,
+				total_seen: edges.length,
+			});
+			const pageInfo = connection?.page_info;
+			if (pageInfo?.has_next_page === false) {
+				sawTerminalPage = true;
+				return false;
+			}
+			if (pageInfo?.has_next_page !== true) {
+				return false;
+			}
+			await delay(1500);
+			return true;
+		},
+		maxPages: POSTS_MAX_PAGES,
+	});
+
+	if (!sawAnyResponse) {
+		throw new Error(
+			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
+		);
+	}
+	if (!sawTerminalPage && sourceEdgeCount === 0 && !walk.truncated) {
+		throw new Error(
+			"meta_posts_incomplete_pagination: posts timeline did not include a terminal page",
+		);
+	}
+
+	return {
+		edges,
+		sourceEdgeCount,
+		truncated: walk.truncated || !sawTerminalPage,
+	};
+}
+
 
 if (isMainModule(import.meta.url)) {
 	runConnector({
