@@ -1034,7 +1034,25 @@ test("statementRowOutsideTimeRange: dateIso on/after time_range.until returns tr
 	);
 });
 
-test("statementRowOutsideTimeRange: null dateIso is always considered in-range", () => {
+test("statementRowOutsideTimeRange: includes date-only days that overlap partial bounds", () => {
+	const { deps: sinceDeps } = makeHarness({
+		requestedStreams: [
+			{ name: "statements", time_range: { since: "2026-03-01T12:00:00Z" } },
+		],
+	});
+	assert.equal(statementRowOutsideTimeRange(sinceDeps, "2026-03-01"), false);
+	assert.equal(statementRowOutsideTimeRange(sinceDeps, "2026-02-28"), true);
+
+	const { deps: untilDeps } = makeHarness({
+		requestedStreams: [
+			{ name: "statements", time_range: { until: "2026-03-01T12:00:00Z" } },
+		],
+	});
+	assert.equal(statementRowOutsideTimeRange(untilDeps, "2026-03-01"), false);
+	assert.equal(statementRowOutsideTimeRange(untilDeps, "2026-03-02"), true);
+});
+
+test("statementRowOutsideTimeRange: null dateIso is excluded from a bounded run", () => {
 	const { deps } = makeHarness({
 		requestedStreams: [
 			{
@@ -1046,10 +1064,7 @@ test("statementRowOutsideTimeRange: null dateIso is always considered in-range",
 			},
 		],
 	});
-	// Null date can't be compared — we keep the row rather than silently drop it,
-	// so the PDF's content-addressed path is still the single source of truth
-	// and a bad date parse doesn't hide a statement that exists.
-	assert.equal(statementRowOutsideTimeRange(deps, null), false);
+	assert.equal(statementRowOutsideTimeRange(deps, null), true);
 });
 
 // ─── Invariant 8: transactions STATE is emitted iff there's something to say ─
