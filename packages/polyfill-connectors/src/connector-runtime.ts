@@ -493,42 +493,57 @@ export function describeUnexpectedFailure(err: unknown): string {
 }
 
 /** Returns true if the scope's half-open time_range excludes this record value. */
+const ISO_INSTANT_RE =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function isValidIsoInstantShape(match: RegExpMatchArray): boolean {
+	const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw] = match;
+	const year = Number(yearRaw);
+	const month = Number(monthRaw);
+	const day = Number(dayRaw);
+	const hour = Number(hourRaw);
+	const minute = Number(minuteRaw);
+	const second = Number(secondRaw);
+	if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) {
+		return false;
+	}
+	const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+	return day >= 1 && day <= daysInMonth;
+}
+
+function parseIsoInstant(value: unknown): number | null {
+	if (typeof value !== "string") {
+		return null;
+	}
+	const match = value.match(ISO_INSTANT_RE);
+	if (!match || !isValidIsoInstantShape(match)) {
+		return null;
+	}
+	const timestamp = Date.parse(value);
+	if (Number.isNaN(timestamp)) {
+		return null;
+	}
+	return timestamp;
+}
+
 function isOutsideTimeRange(
 	timeRange: { since?: string; until?: string },
 	dateValue: unknown,
 ): boolean {
-	if (typeof dateValue !== "string" || !dateValue) {
-		return false;
-	}
-	const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
-	const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+	const since = timeRange.since ? parseIsoInstant(timeRange.since) : null;
+	const until = timeRange.until ? parseIsoInstant(timeRange.until) : null;
 	if (
-		(since !== undefined && Number.isNaN(since)) ||
-		(until !== undefined && Number.isNaN(until))
+		(timeRange.since && since === null) ||
+		(timeRange.until && until === null)
 	) {
 		return true;
 	}
 
-	if (/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
-		const dayStart = Date.parse(`${dateValue}T00:00:00.000Z`);
-		if (
-			Number.isNaN(dayStart) ||
-			new Date(dayStart).toISOString().slice(0, 10) !== dateValue
-		) {
-			return true;
-		}
-		const dayEnd = dayStart + 86_400_000;
-		return (
-			(since !== undefined && dayEnd <= since) ||
-			(until !== undefined && dayStart >= until)
-		);
-	}
-
-	const timestamp = Date.parse(dateValue);
+	const timestamp = parseIsoInstant(dateValue);
 	return (
-		Number.isNaN(timestamp) ||
-		(since !== undefined && timestamp < since) ||
-		(until !== undefined && timestamp >= until)
+		timestamp === null ||
+		(since !== null && timestamp < since) ||
+		(until !== null && timestamp >= until)
 	);
 }
 

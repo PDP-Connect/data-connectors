@@ -1156,7 +1156,7 @@ function buildPrSearchPath(
 	const qParts = ["type:pr", `author:${login}`];
 	if (sinceParam) {
 		// Search API date-precision; strict `since` still applied per-item.
-		qParts.push(`updated:>=${sinceParam.slice(0, 10)}`);
+		qParts.push(`updated:>=${new Date(sinceParam).toISOString().slice(0, 10)}`);
 	}
 	if (createdRange) {
 		// Immutable partitioning field: each PR falls in exactly one window, so
