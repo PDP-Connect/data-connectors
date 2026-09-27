@@ -1174,6 +1174,8 @@ const CONTENT_STREAMS = [
 	"project_documents",
 ];
 
+const ALL_EXPORT_STREAMS = ["account_profile", ...CONTENT_STREAMS];
+
 function statesOf(messages: EmittedMessage[]) {
 	return messages.filter(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
@@ -1194,7 +1196,7 @@ test("collectAnthropic: ZIP with entries under a top-level folder -> layout_unre
 	]);
 	const counter = { exportRequests: 0 };
 	const { ctx, emitted, page, protocolMessages } = makeContext({
-		streams: CONTENT_STREAMS,
+		streams: ALL_EXPORT_STREAMS,
 		fetchStub: oldFormatFetchStub(counter),
 	});
 	serveDownload(page, zipBytes);
@@ -1205,7 +1207,7 @@ test("collectAnthropic: ZIP with entries under a top-level folder -> layout_unre
 	const skips = skipsOf(protocolMessages);
 	assert.deepEqual(
 		skips.map((s) => s.stream).sort(),
-		[...CONTENT_STREAMS].sort(),
+		[...ALL_EXPORT_STREAMS].sort(),
 	);
 	for (const skip of skips) {
 		assert.equal(skip.reason, "export_layout_unrecognized");
@@ -1263,6 +1265,7 @@ test("collectAnthropic: recognized ZIP with data -> records, and unparseable ite
 			content: [...CONVERSATIONS_JSON, { not: "a conversation" }],
 		},
 		{ name: "projects/proj-1.json", content: PROJECT_JSON },
+		{ name: "projects/proj-bad.json", content: { not: "a project" } },
 	]);
 	const counter = { exportRequests: 0 };
 	const { ctx, emitted, page, protocolMessages } = makeContext({
@@ -1276,9 +1279,16 @@ test("collectAnthropic: recognized ZIP with data -> records, and unparseable ite
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 	assert.equal(emitted.filter((r) => r.stream === "projects").length, 1);
 	const dropped = skipsOf(protocolMessages);
-	assert.equal(dropped.length, 1);
-	assert.equal(dropped[0]?.reason, "export_items_unparseable");
-	assert.equal(dropped[0]?.stream, "conversations");
+	// A dropped parent also drops its children: messages / project_documents
+	// must be skipped, not checkpointed as complete.
+	assert.deepEqual(
+		dropped.map((s) => s.stream).sort(),
+		[...CONTENT_STREAMS].sort(),
+	);
+	assert.ok(dropped.every((s) => s.reason === "export_items_unparseable"));
+	for (const state of statesOf(protocolMessages)) {
+		assert.ok(!("synced_at" in (state.cursor as Record<string, unknown>)));
+	}
 });
 
 test("collectAnthropic: pending nonce is kept across a layout-unrecognized run", async () => {
@@ -1372,7 +1382,8 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 		return Promise.reject(new Error(`unexpected fetch: ${url}`));
 	};
 	const { ctx, emitted, page, protocolMessages } = makeContext({
-		streams: CONTENT_STREAMS,
+		streams: ALL_EXPORT_STREAMS,
+		state: { conversations: { synced_at: "2026-01-01T00:00:00.000Z" } },
 		fetchStub,
 	});
 	serveDownload(page, memoriesZip);
@@ -1381,7 +1392,10 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 
 	assert.equal(emitted.length, 0);
 	const skips = skipsOf(protocolMessages);
-	assert.equal(skips.length, CONTENT_STREAMS.length);
+	assert.deepEqual(
+		skips.map((s) => s.stream).sort(),
+		[...ALL_EXPORT_STREAMS].sort(),
+	);
 	assert.ok(skips.every((s) => s.reason === "export_layout_unrecognized"));
 	for (const state of statesOf(protocolMessages)) {
 		assert.ok(!("synced_at" in (state.cursor as Record<string, unknown>)));
@@ -1392,4 +1406,156 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 		.join("\n");
 	assert.match(progressText, /memories\/memories\.json/);
 	assert.doesNotMatch(progressText, /not emitted/);
+});
+
+function manifestFetchStub(
+	parts: Array<{ category: string; token: string }>,
+): FetchStub {
+	const manifest = {
+		version: "1.0",
+		total_files: parts.length,
+		data_files: parts.map((p, i) => ({
+			batch_index: 0,
+			category: p.category,
+			part: i,
+			filename: `${p.category}-00${i}.zip`,
+			export_url: `https://claude.ai/export/org-1/download/${p.token}`,
+		})),
+	};
+	return (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data")) {
+			return Promise.resolve(jsonResponse(200, manifest));
+		}
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+}
+
+function serveDownloads(
+	page: FakePage,
+	zipsByToken: Map<string, Buffer>,
+): void {
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		for (const [token, bytes] of zipsByToken) {
+			if (url.includes(token)) {
+				const { download } = makeFakeDownload(bytes);
+				queueMicrotask(() => page.emit("download", download));
+			}
+		}
+		return result;
+	};
+}
+
+test("collectAnthropic: manifest conversations part with only unknown-shape content -> layout_unrecognized, no synced_at", async () => {
+	const zip = await buildManifestPartZip([
+		{ name: "conversations.json", content: [{ unknown: "shape" }] },
+	]);
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ALL_EXPORT_STREAMS,
+		fetchStub: manifestFetchStub([
+			{ category: "conversations", token: "tok-c" },
+		]),
+	});
+	serveDownloads(page, new Map([["tok-c", zip]]));
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((s) => s.stream).sort(),
+		[...ALL_EXPORT_STREAMS].sort(),
+	);
+	assert.ok(skips.every((s) => s.reason === "export_layout_unrecognized"));
+	for (const state of statesOf(protocolMessages)) {
+		assert.ok(!("synced_at" in (state.cursor as Record<string, unknown>)));
+	}
+});
+
+test("collectAnthropic: manifest with an empty conversations part is a verified empty", async () => {
+	const zip = await buildManifestPartZip([
+		{ name: "conversations.json", content: [] },
+	]);
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "messages"],
+		fetchStub: manifestFetchStub([
+			{ category: "conversations", token: "tok-c" },
+		]),
+	});
+	serveDownloads(page, new Map([["tok-c", zip]]));
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	assert.equal(skipsOf(protocolMessages).length, 0);
+	const final = statesOf(protocolMessages).findLast(
+		(m) => m.stream === "conversations",
+	);
+	assert.ok("synced_at" in (final?.cursor as Record<string, unknown>));
+});
+
+test("collectAnthropic: manifest projects part with unknown content skips projects and project_documents only", async () => {
+	const convZip = await buildManifestPartZip([
+		{ name: "conversations.json", content: CONVERSATIONS_JSON },
+	]);
+	const projZip = await buildManifestPartZip([
+		{ name: "projects/odd.json", content: { unknown: "shape" } },
+	]);
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: CONTENT_STREAMS,
+		fetchStub: manifestFetchStub([
+			{ category: "conversations", token: "tok-c" },
+			{ category: "projects", token: "tok-p" },
+		]),
+	});
+	serveDownloads(
+		page,
+		new Map([
+			["tok-c", convZip],
+			["tok-p", projZip],
+		]),
+	);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(skips.map((s) => s.stream).sort(), [
+		"project_documents",
+		"projects",
+	]);
+	assert.ok(skips.every((s) => s.reason === "export_items_unparseable"));
+	const projectStates = statesOf(protocolMessages).filter(
+		(m) => m.stream === "projects",
+	);
+	assert.equal(projectStates.length, 0);
+});
+
+test("collectAnthropic: layout_unrecognized PROGRESS caps the entry names", async () => {
+	const zipBytes = await buildManifestPartZip(
+		Array.from({ length: 80 }, (_, i) => ({
+			name: `folder/entry-${i}.json`,
+			content: [],
+		})),
+	);
+	const counter = { exportRequests: 0 };
+	const { ctx, page, protocolMessages } = makeContext({
+		streams: ["conversations"],
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownload(page, zipBytes);
+
+	await collectAnthropic(ctx);
+
+	const progressText = protocolMessages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message)
+		.join("\n");
+	assert.match(progressText, /entry-49\.json/);
+	assert.doesNotMatch(progressText, /entry-50\.json/);
+	assert.match(progressText, /30 more/);
 });

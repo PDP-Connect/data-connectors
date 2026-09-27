@@ -393,6 +393,14 @@ function readConversationsCursor(
 	return cursor as AnthropicCursorState;
 }
 
+function priorCursorWithoutSyncedAt(
+	cursor: AnthropicCursorState,
+): AnthropicCursorState {
+	const copy = { ...cursor };
+	delete copy.synced_at;
+	return copy;
+}
+
 function readPendingExport(
 	state: Record<string, unknown>,
 ): PendingExportState | null {
@@ -768,19 +776,17 @@ async function emitPendingSkip(
 	}
 }
 
-/** Streams whose content comes from the export archive. */
-const EXPORT_CONTENT_STREAMS = [
-	CONVERSATIONS_STREAM,
-	MESSAGES_STREAM,
-	PROJECTS_STREAM,
-	PROJECT_DOCUMENTS_STREAM,
-];
+/** At most this many entry names go into one PROGRESS event: names from an
+ * unknown layout can hold user-written titles, and an archive can hold
+ * thousands of entries. */
+const MAX_REPORTED_ENTRY_NAMES = 50;
 
 /**
  * The downloaded archive has no entry this connector recognizes. A missing
  * `conversations.json` is not an empty account, so fail closed: skip every
- * selected content stream and emit no `synced_at`. Only entry NAMES are
- * reported, never content.
+ * selected stream (account_profile too; with no record and no skip the host
+ * treats it as a verified empty) and emit no `synced_at`. Only entry NAMES
+ * are reported, never content.
  */
 async function emitLayoutUnrecognizedSkip(
 	emit: (msg: EmittedMessage) => Promise<void>,
@@ -788,12 +794,15 @@ async function emitLayoutUnrecognizedSkip(
 	requested: Map<string, unknown>,
 	entryNames: readonly string[],
 ): Promise<void> {
+	const shown = entryNames.slice(0, MAX_REPORTED_ENTRY_NAMES);
+	const hidden = entryNames.length - shown.length;
 	await progress(
 		`Export archive layout not recognized. Entry names (${entryNames.length}): ` +
-			`${entryNames.join(", ") || "(none)"}.`,
+			`${shown.join(", ") || "(none)"}` +
+			`${hidden > 0 ? `, and ${hidden} more` : ""}.`,
 		{ stream: CONVERSATIONS_STREAM },
 	);
-	for (const stream of EXPORT_CONTENT_STREAMS) {
+	for (const stream of ALL_STREAMS) {
 		if (!requested.has(stream)) {
 			continue;
 		}
@@ -802,7 +811,7 @@ async function emitLayoutUnrecognizedSkip(
 			stream,
 			reason: "export_layout_unrecognized",
 			message:
-				"The Claude export archive has no recognized conversations entry. " +
+				"The Claude export archive has no recognized conversations or projects content. " +
 				"No data was imported, and this run does not claim the account is empty.",
 			recovery_hint: { action: "terminal", retryable: false },
 		});
@@ -899,6 +908,12 @@ export async function collectAnthropic({
 			AnthropicCursorState,
 			"consumed_export" | "last_export_requested_at"
 		>,
+		/** In-scope manifest entries whose content matched no known shape,
+		 * counted by the parent stream they would have fed. */
+		unclassifiedEntries: { conversations: number; projects: number } = {
+			conversations: 0,
+			projects: 0,
+		},
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -1002,21 +1017,38 @@ export async function collectAnthropic({
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
-		const dropped: Array<[string, number]> = [
-			[CONVERSATIONS_STREAM, parsed.droppedConversations],
-			[PROJECTS_STREAM, parsed.droppedProjects],
+		// A dropped parent item also drops its child items (a conversation's
+		// messages, a project's documents), so skip the child stream too.
+		// A skipped stream keeps its prior snapshot and gets no synced_at.
+		const dropGroups: Array<[readonly string[], number]> = [
+			[
+				[CONVERSATIONS_STREAM, MESSAGES_STREAM],
+				parsed.droppedConversations + unclassifiedEntries.conversations,
+			],
+			[
+				[PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM],
+				parsed.droppedProjects + unclassifiedEntries.projects,
+			],
 		];
-		for (const [stream, count] of dropped) {
-			if (count === 0 || !requested.has(stream)) {
+		const skipped = new Set<string>();
+		for (const [streams, count] of dropGroups) {
+			if (count === 0) {
 				continue;
 			}
-			await emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: "export_items_unparseable",
-				message: `${count} ${stream} item(s) in the export could not be parsed and were not imported.`,
-				diagnostics: { dropped_count: count },
-			});
+			const [parent] = streams;
+			for (const stream of streams) {
+				if (!requested.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "export_items_unparseable",
+					message: `${count} ${parent} item(s) in the export could not be parsed, so ${stream} is incomplete and was not checkpointed.`,
+					diagnostics: { dropped_count: count },
+				});
+			}
 		}
 		const syncedAt = nowIso();
 		if (wantsConversations) {
@@ -1025,17 +1057,19 @@ export async function collectAnthropic({
 			await emit({
 				type: "STATE",
 				stream: CONVERSATIONS_STREAM,
-				cursor: { ...exportBookkeeping, synced_at: syncedAt },
+				cursor: skipped.has(CONVERSATIONS_STREAM)
+					? { ...exportBookkeeping }
+					: { ...exportBookkeeping, synced_at: syncedAt },
 			});
 		}
-		if (wantsMessages) {
+		if (wantsMessages && !skipped.has(MESSAGES_STREAM)) {
 			await emit({
 				type: "STATE",
 				stream: MESSAGES_STREAM,
 				cursor: { synced_at: syncedAt },
 			});
 		}
-		if (wantsProjects) {
+		if (wantsProjects && !skipped.has(PROJECTS_STREAM)) {
 			await emit({
 				type: "STATE",
 				stream: PROJECTS_STREAM,
@@ -1142,7 +1176,11 @@ export async function collectAnthropic({
 	await emit({
 		type: "STATE",
 		stream: CONVERSATIONS_STREAM,
-		cursor: { ...priorCursor, last_export_requested_at: manifestRequestedAt },
+		// No synced_at: nothing has been downloaded yet.
+		cursor: {
+			...priorCursorWithoutSyncedAt(priorCursor),
+			last_export_requested_at: manifestRequestedAt,
+		},
 	});
 	await downloadAndEmitManifest(req.manifest, manifestRequestedAt);
 
@@ -1253,6 +1291,8 @@ export async function collectAnthropic({
 		const rawProjects: unknown[] = [];
 		const rawUserProfiles: unknown[] = [];
 		const unclassified: string[] = [];
+		const unclassifiedEntries = { conversations: 0, projects: 0 };
+		let recognizedPart = false;
 		const outOfScopeByCategory = new Map<string, number>();
 		for (const result of results) {
 			const classified = classifyManifestPartEntries(
@@ -1263,6 +1303,22 @@ export async function collectAnthropic({
 			rawProjects.push(...classified.projects);
 			rawUserProfiles.push(...classified.userProfiles);
 			unclassified.push(...classified.unclassifiedEntryNames);
+			// A part is recognized by its classified content, never by its
+			// category name alone.
+			if (
+				classified.conversations.length > 0 ||
+				classified.projects.length > 0 ||
+				classified.emptyEntryNames.length > 0
+			) {
+				recognizedPart = true;
+			}
+			if (
+				result.category === "conversations" ||
+				result.category === "projects"
+			) {
+				unclassifiedEntries[result.category] +=
+					classified.unclassifiedEntryNames.length;
+			}
 			if (classified.outOfScopeEntryNames.length > 0) {
 				outOfScopeByCategory.set(
 					result.category,
@@ -1305,9 +1361,6 @@ export async function collectAnthropic({
 			);
 		}
 
-		const recognizedPart = results.some(
-			(r) => r.category === "conversations" || r.category === "projects",
-		);
 		if (!recognizedPart) {
 			await emitLayoutUnrecognizedSkip(
 				emit,
@@ -1319,9 +1372,14 @@ export async function collectAnthropic({
 		}
 
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
-		await emitParsed(parsed, organizationId, rawUserProfiles, true, {
-			last_export_requested_at: requestedAt,
-		});
+		await emitParsed(
+			parsed,
+			organizationId,
+			rawUserProfiles,
+			true,
+			{ last_export_requested_at: requestedAt },
+			unclassifiedEntries,
+		);
 	}
 }
 
