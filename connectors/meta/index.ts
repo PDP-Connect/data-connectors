@@ -520,13 +520,21 @@ function isPostsTimelineResponseForPage(page: Page): (response: {
 		const responsePage = request.frame?.().page?.();
 		return (
 			(responsePage === undefined || responsePage === page) &&
-			response.url().includes("/graphql/") &&
-			request.method() === "POST" &&
-			(POSTS_TIMELINE_OPERATION_RE.test(request.headers()["x-fb-friendly-name"] ?? "") ||
-				POSTS_TIMELINE_OPERATION_RE.test(request.postData() ?? ""))
+			response.url().includes("/graphql") &&
+			POSTS_TIMELINE_OPERATION_RE.test(request.postData() ?? "")
 		);
 	};
 }
+
+const POSTS_EMPTY_OBSERVATION_WINDOW_MS = 4_000;
+
+/**
+ * The legacy connector reads its capture after navigation plus three seconds
+ * and one one-second loop tick. Its runner replaces the saved response on
+ * each matching response from the active page.
+ * Start the same observation window after navigation returns and keep the
+ * empty decision open for four seconds so the last response controls it.
+ */
 
 function isLoginOrChallengeUrl(rawUrl: string): boolean {
 	try {
@@ -559,15 +567,7 @@ async function readTimelineConnection(response: {
 		) {
 			return null;
 		}
-		return (
-			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ??
-			(body?.data as {
-				data?: {
-					xdt_api__v1__feed__user_timeline_graphql_connection?: InstagramTimelineConnection | null;
-				} | null;
-			} | null)?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ??
-			null
-		);
+		return body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ?? null;
 	} catch {
 		return null;
 	}
@@ -1232,6 +1232,16 @@ async function fetchAllPostsWithEmptyProof(
 	let sawAnyResponse = false;
 	let sawTerminalPage = false;
 	let sourceEdgeCount = 0;
+	let terminalResponse: unknown = null;
+	let initialPageWasTerminal = false;
+	let observationStartedAt: number | null = null;
+	const matchingResponses: unknown[] = [];
+	const onResponse = (response: unknown): void => {
+		if (isPostsTimelineResponseForPage(page)(response as Parameters<ReturnType<typeof isPostsTimelineResponseForPage>>[0])) {
+			matchingResponses.push(response);
+		}
+	};
+	page.on("response", onResponse);
 
 	const walk = await walkPagesWithCeiling({
 		fetchPage: async (pageNumber) => {
@@ -1246,6 +1256,7 @@ async function fetchAllPostsWithEmptyProof(
 						waitUntil: "domcontentloaded",
 					},
 				);
+				observationStartedAt = Date.now();
 			} else {
 				await page.evaluate(() =>
 					window.scrollTo(0, document.body.scrollHeight),
@@ -1284,6 +1295,8 @@ async function fetchAllPostsWithEmptyProof(
 			const pageInfo = connection?.page_info;
 			if (pageInfo?.has_next_page === false) {
 				sawTerminalPage = true;
+				terminalResponse = response;
+				initialPageWasTerminal = initialPageWasTerminal || pageNumber === 1;
 				return false;
 			}
 			if (pageInfo?.has_next_page !== true) {
@@ -1296,26 +1309,28 @@ async function fetchAllPostsWithEmptyProof(
 	});
 
 	if (!sawAnyResponse) {
+		page.off("response", onResponse);
 		throw new Error(
 			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
 		);
 	}
-	if (sawTerminalPage && sourceEdgeCount === 0) {
-		const settledResponse = await page
-			.waitForResponse(isPostsTimelineResponseForPage(page), { timeout: 500 })
-			.catch(() => null);
-		const settledConnection = settledResponse
-			? await readTimelineConnection(settledResponse)
+	if (sawTerminalPage && initialPageWasTerminal) {
+		const elapsed = observationStartedAt === null ? 0 : Date.now() - observationStartedAt;
+		await delay(Math.max(0, POSTS_EMPTY_OBSERVATION_WINDOW_MS - elapsed));
+		const lastResponse = matchingResponses.at(-1) ?? terminalResponse;
+		const settledConnection = lastResponse
+			? await readTimelineConnection(lastResponse as { json: () => Promise<unknown>; status: () => number })
 			: null;
-		if (
-			settledResponse &&
-			(!settledConnection || !Array.isArray(settledConnection.edges))
-		) {
+		if (lastResponse && (!settledConnection || !Array.isArray(settledConnection.edges))) {
+			page.off("response", onResponse);
 			throw new Error(
-				"meta_posts_incomplete_pagination: a follow-up posts response did not prove a complete timeline page",
+				"meta_posts_incomplete_pagination: the last observed posts response did not prove a complete timeline page",
 			);
 		}
 		if (settledConnection && Array.isArray(settledConnection.edges)) {
+			edges.length = 0;
+			seenIds.clear();
+			sourceEdgeCount = 0;
 			sourceEdgeCount += settledConnection.edges.length;
 			for (const edge of settledConnection.edges) {
 				const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
@@ -1329,6 +1344,7 @@ async function fetchAllPostsWithEmptyProof(
 			}
 		}
 	}
+	page.off("response", onResponse);
 	if (!sawTerminalPage && sourceEdgeCount === 0 && !walk.truncated) {
 		throw new Error(
 			"meta_posts_incomplete_pagination: posts timeline did not include a terminal page",

@@ -44,6 +44,7 @@ type ScriptedPostsPage = {
 	json: unknown;
 	status: number;
 	postData?: string;
+	method?: string;
 	samePage?: boolean;
 	url?: string;
 } | null;
@@ -67,6 +68,7 @@ function makeFakePage(options: {
 	navigationFailures?: string[];
 	pageUrlAfterGoto?: string;
 	postsAutoResolveWaitForResponseCall?: number;
+	postsFollowUpDelayMs?: number;
 	postsChallengeDom?: {
 		hasCaptchaSitekey?: boolean;
 		hasEmailInput?: boolean;
@@ -94,6 +96,7 @@ function makeFakePage(options: {
 	let postsWaitForResponseCalls = 0;
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
+	const responseListeners = new Set<(response: unknown) => void>();
 	let adsListWait = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
@@ -124,7 +127,7 @@ function makeFakePage(options: {
 			request: () => ({
 				frame: () => ({ page: () => (scripted.samePage === false ? {} : page) }),
 				headers: () => ({ "x-fb-friendly-name": friendlyName }),
-				method: () => "POST",
+				method: () => scripted.method ?? "POST",
 				postData: () => postData,
 			}),
 			status: () => scripted.status,
@@ -134,6 +137,7 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
+		for (const listener of responseListeners) listener(response);
 		next(response);
 	};
 
@@ -147,6 +151,25 @@ function makeFakePage(options: {
 			}
 			currentUrl = options.pageUrlAfterGoto ?? url ?? currentUrl;
 			resolveNextPostsPage();
+			if (postsQueue.length > 0 && options.postsFollowUpDelayMs !== undefined) {
+				setTimeout(() => {
+					const scripted = postsQueue.shift();
+					if (!scripted) return;
+					const postData = scripted.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery";
+					const response = {
+						json: () => Promise.resolve(scripted.json),
+						request: () => ({
+							frame: () => ({ page: () => (scripted.samePage === false ? {} : page) }),
+							headers: () => ({}),
+							method: () => scripted.method ?? "POST",
+							postData: () => postData,
+						}),
+						status: () => scripted.status,
+						url: () => scripted.url ?? "https://www.instagram.com/graphql/query",
+					};
+					for (const listener of responseListeners) listener(response);
+				}, options.postsFollowUpDelayMs);
+			}
 			return Promise.resolve(null);
 		},
 		url: () => currentUrl,
@@ -173,6 +196,12 @@ function makeFakePage(options: {
 					}, 510);
 				}
 			}),
+		on: (event: string, listener: (response: unknown) => void): void => {
+			if (event === "response") responseListeners.add(listener);
+		},
+		off: (event: string, listener: (response: unknown) => void): void => {
+			if (event === "response") responseListeners.delete(listener);
+		},
 		waitForFunction: (
 			condition: unknown,
 			_arg?: unknown,
@@ -385,6 +414,7 @@ function makeCtx(args: {
 	pageOptions?: {
 		pageUrlAfterGoto?: string;
 		postsAutoResolveWaitForResponseCall?: number;
+		postsFollowUpDelayMs?: number;
 		postsChallengeDom?: {
 			hasCaptchaSitekey?: boolean;
 			hasEmailInput?: boolean;
@@ -480,16 +510,13 @@ function legacyPostsDecision(raw: unknown): PostsDecision {
 	}
 	const envelope = raw as {
 		data?: {
-			data?: {
-				xdt_api__v1__feed__user_timeline_graphql_connection?: {
-					edges?: unknown;
-					page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null;
-				} | null;
+			xdt_api__v1__feed__user_timeline_graphql_connection?: {
+				edges?: unknown;
+				page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null;
 			} | null;
 		} | null;
 	};
-	const connection =
-		envelope.data?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+	const connection = envelope.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
 	if (!Array.isArray(connection?.edges)) {
 		return "not-proven";
 	}
@@ -497,50 +524,40 @@ function legacyPostsDecision(raw: unknown): PostsDecision {
 }
 
 function legacyPostsDecisionFromPages(
-	pages: Array<{ postData?: string; raw: unknown }>,
+	pages: Array<{ postData?: string; raw: unknown; samePage?: boolean; paginated?: boolean }>,
 ): PostsDecision {
-	let sawEmptyPage = false;
-	for (const page of pages) {
+	const observed = pages.filter((page) => {
 		const postData = page.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery";
-		if (!LEGACY_POST_OPERATION_RE.test(postData)) {
-			continue;
-		}
-		const decision = legacyPostsDecision(page.raw);
-		if (decision === "data") {
-			return "data";
-		}
-		if (decision !== "empty") {
-			return "not-proven";
-		}
-		sawEmptyPage = true;
-		const connection = (page.raw as {
-			data?: {
-				data?: {
-					xdt_api__v1__feed__user_timeline_graphql_connection?: {
-						page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null;
-					} | null;
-				} | null;
-			} | null;
-		}).data?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
-		if (
-			connection?.page_info?.has_next_page !== true ||
-			typeof connection.page_info.end_cursor !== "string" ||
-			connection.page_info.end_cursor.length === 0
-		) {
-			continue;
-		}
+		return page.samePage !== false && !page.paginated && LEGACY_POST_OPERATION_RE.test(postData);
+	});
+	const latest = observed.at(-1);
+	if (!latest) return "not-proven";
+	let decision = legacyPostsDecision(latest.raw);
+	if (decision !== "empty") return decision;
+	const latestBody = latest.raw as {
+		data?: { xdt_api__v1__feed__user_timeline_graphql_connection?: { page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null } | null } | null;
+	};
+	let info = latestBody.data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info;
+	if (info?.has_next_page !== true || typeof info.end_cursor !== "string" || !info.end_cursor) return decision;
+	for (const page of pages.filter((item) => item.paginated && item.samePage !== false)) {
+		const postData = page.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery";
+		if (!LEGACY_POST_OPERATION_RE.test(postData)) continue;
+		decision = legacyPostsDecision(page.raw);
+		if (decision !== "empty") return decision;
+		const body = page.raw as {
+			data?: { xdt_api__v1__feed__user_timeline_graphql_connection?: { page_info?: { end_cursor?: unknown; has_next_page?: unknown } | null } | null } | null;
+		};
+		info = body.data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info;
+		if (info?.has_next_page !== true || typeof info.end_cursor !== "string" || !info.end_cursor) break;
 	}
-	return sawEmptyPage ? "empty" : "not-proven";
+	return decision;
 }
 
 const legacyPostsEnvelope = (
 	edges: Array<{ node: Record<string, unknown> }>,
 	pageInfo: Record<string, unknown> | null,
 	extras: Record<string, unknown> = {},
-): unknown => ({
-	...extras,
-	data: { data: (postsEnvelope(edges, pageInfo) as { data: unknown }).data },
-});
+): unknown => postsEnvelope(edges, pageInfo, extras);
 
 function summarizeLegacyResult(legacy: PostsDecision, pdpp: PostsDecision): string {
 	if (legacy === "empty" && pdpp === "not-proven") {
@@ -817,6 +834,8 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 		postData?: string;
 		rejects?: RegExp;
 		status?: number;
+		method?: string;
+		url?: string;
 	}> = [
 		{
 			name: "ordinary populated terminal timeline",
@@ -856,6 +875,23 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			),
 			expectedPdpp: "data",
 			postData: "fb_api_req_friendly_name=UserMediaQuery",
+		},
+		{
+			name: "legacy matcher accepts non-POST substring URL",
+			source: "w28-pr227-review.md N5 legacy response matching",
+			raw: legacyPostsEnvelope([{ node: { id: "legacy-match", taken_at: 1_700_000_005 } }], { has_next_page: false }),
+			expectedPdpp: "data",
+			postData: "fb_api_req_friendly_name=PolarisProfilePostsQuery",
+			method: "GET",
+			url: "https://www.instagram.com/graphqlLegacy",
+		},
+		{
+			name: "header-only operation is not a legacy match",
+			source: "w28-pr227-review.md N5 postData-only matching",
+			raw: legacyPostsEnvelope([{ node: { id: "header-only", taken_at: 1_700_000_006 } }], { has_next_page: false }),
+			expectedPdpp: "not-proven",
+			postData: "tracking=1",
+			rejects: /meta_posts_response_not_observed/,
 		},
 		{
 			name: "genuine empty terminal timeline",
@@ -958,6 +994,24 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			expectedPdpp: "data",
 		},
 		{
+			name: "terminal empty then populated at 3.5 seconds",
+			source: "w28-pr227-review.md B1 late-populated regression",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "data",
+		},
+		{
+			name: "terminal empty then populated at 1.5 seconds",
+			source: "w28-pr227-review.md B1 late-populated regression",
+			raw: legacyPostsEnvelope([], { has_next_page: false }),
+			expectedPdpp: "data",
+		},
+		{
+			name: "populated then terminal empty at 1.5 seconds",
+			source: "w28-pr227-review.md N1 last matching response wins",
+			raw: legacyPostsEnvelope([{ node: { id: "early-post", taken_at: 1_700_000_007 } }], { has_next_page: false }),
+			expectedPdpp: "empty",
+		},
+		{
 			name: "terminal empty followed by authentication error",
 			source: "w28-pr226-review-fixtures.test.ts N3 delayed error after empty response",
 			raw: legacyPostsEnvelope([], { has_next_page: false }),
@@ -999,11 +1053,11 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 
 	const matrix = await Promise.all(
 		cases.map(async (fixture) => {
-		const firstLegacyPage: { postData?: string; raw: unknown } = { raw: fixture.raw };
+		const firstLegacyPage: { postData?: string; raw: unknown; samePage?: boolean } = { raw: fixture.raw };
 		if (fixture.postData) {
 			firstLegacyPage.postData = fixture.postData;
 		}
-		let legacyPages: Array<{ postData?: string; raw: unknown }> = [
+		let legacyPages: Array<{ postData?: string; raw: unknown; samePage?: boolean; paginated?: boolean }> = [
 			firstLegacyPage,
 		];
 		const harness = makeRecordingEmit(validateRecord);
@@ -1014,14 +1068,17 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 		if (fixture.postData) {
 			firstPage.postData = fixture.postData;
 		}
+		if (fixture.method) firstPage.method = fixture.method;
+		if (fixture.url) firstPage.url = fixture.url;
 		const postsScript: ScriptedPostsPage[] = [firstPage];
 		if (fixture.name === "stale other-tab GraphQL response") {
 			firstPage.samePage = false;
+			firstLegacyPage.samePage = false;
 		}
-		if (fixture.name === "target-empty first page then populated page") {
+		if (fixture.name === "target-empty first page then populated page" || fixture.name === "terminal empty then populated at 3.5 seconds" || fixture.name === "terminal empty then populated at 1.5 seconds" || fixture.name === "populated then terminal empty at 1.5 seconds") {
 			firstPage.postData = "fb_api_req_friendly_name=PolarisProfilePostsQuery";
 			const raw = legacyPostsEnvelope(
-				[{ node: { id: "late-populated", taken_at: 1_700_000_008 } }],
+				fixture.name === "populated then terminal empty at 1.5 seconds" ? [] : [{ node: { id: "late-populated", taken_at: 1_700_000_008 } }],
 				{ has_next_page: false },
 			);
 			postsScript.push({ json: raw, status: 200 });
@@ -1042,7 +1099,7 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 				{ has_next_page: false },
 			);
 			postsScript.push({ json: raw, status: 200 });
-			legacyPages = [...legacyPages, { raw }];
+			legacyPages = [...legacyPages, { raw, paginated: true }];
 		}
 		const legacy = legacyPostsDecisionFromPages(legacyPages);
 		const ctxArgs: Parameters<typeof makeCtx>[0] = {
@@ -1053,9 +1110,19 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 		};
 		if (
 			fixture.name === "target-empty first page then populated page" ||
+			fixture.name === "terminal empty then populated at 3.5 seconds" ||
+			fixture.name === "terminal empty then populated at 1.5 seconds" ||
+			fixture.name === "populated then terminal empty at 1.5 seconds" ||
 			fixture.name === "terminal empty followed by authentication error"
 		) {
-			ctxArgs.pageOptions = { postsAutoResolveWaitForResponseCall: 2 };
+			ctxArgs.pageOptions = {
+				postsAutoResolveWaitForResponseCall: 2,
+				postsFollowUpDelayMs: fixture.name === "terminal empty then populated at 3.5 seconds"
+					? 3500
+					: fixture.name === "terminal empty then populated at 1.5 seconds" || fixture.name === "populated then terminal empty at 1.5 seconds"
+						? 1500
+						: 300,
+			};
 		}
 		if (fixture.name === "redirect login payload carrying empty connection") {
 			ctxArgs.pageOptions = {
@@ -1081,10 +1148,18 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			};
 		}
 		const { ctx } = makeCtx(ctxArgs);
+		const collectionDelay =
+			fixture.name === "target-empty first page then populated page" ||
+			fixture.name === "terminal empty then populated at 3.5 seconds" ||
+			fixture.name === "terminal empty then populated at 1.5 seconds" ||
+			fixture.name === "populated then terminal empty at 1.5 seconds" ||
+			fixture.name === "terminal empty followed by authentication error"
+				? (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+				: NO_DELAY;
 		if (fixture.rejects) {
-			await assert.rejects(collectAllStreams(ctx, NO_DELAY), fixture.rejects);
+			await assert.rejects(collectAllStreams(ctx, collectionDelay), fixture.rejects);
 		} else {
-			await collectAllStreams(ctx, NO_DELAY);
+			await collectAllStreams(ctx, collectionDelay);
 		}
 		const states = stateStreams(harness.protocolMessages);
 		const pdpp: PostsDecision = states.includes("posts")
@@ -1115,6 +1190,8 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			{ fixture: "legacy operation PolarisProfilePostsTabContentQuery_connection", legacy: "data", pdpp: "data" },
 			{ fixture: "legacy operation ProfilePostsQuery", legacy: "data", pdpp: "data" },
 			{ fixture: "legacy operation UserMediaQuery", legacy: "data", pdpp: "data" },
+			{ fixture: "legacy matcher accepts non-POST substring URL", legacy: "data", pdpp: "data" },
+			{ fixture: "header-only operation is not a legacy match", legacy: "not-proven", pdpp: "not-proven" },
 			{ fixture: "genuine empty terminal timeline", legacy: "empty", pdpp: "empty" },
 			{ fixture: "empty connection with missing pagination", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "empty connection with next page advertised", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
@@ -1127,8 +1204,11 @@ test("collectAllStreams: posts differential matrix matches legacy empty proof bo
 			{ fixture: "benign null errors carrying empty terminal connection", legacy: "empty", pdpp: "empty" },
 			{ fixture: "partial page-not-terminal response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "challenge envelope with empty timeline", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
-			{ fixture: "stale other-tab GraphQL response", legacy: "data", pdpp: "not-proven" },
+			{ fixture: "stale other-tab GraphQL response", legacy: "not-proven", pdpp: "not-proven" },
 			{ fixture: "target-empty first page then populated page", legacy: "data", pdpp: "data" },
+			{ fixture: "terminal empty then populated at 3.5 seconds", legacy: "data", pdpp: "data" },
+			{ fixture: "terminal empty then populated at 1.5 seconds", legacy: "data", pdpp: "data" },
+			{ fixture: "populated then terminal empty at 1.5 seconds", legacy: "empty", pdpp: "empty" },
 			{ fixture: "terminal empty followed by authentication error", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "visible DOM challenge after empty response", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
 			{ fixture: "redirect login payload carrying empty connection", legacy: "legacy fail-open; PDPP not-proven", pdpp: "not-proven" },
