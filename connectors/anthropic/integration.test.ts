@@ -1139,3 +1139,257 @@ test("collectAnthropic: multi-part manifest — one part's one-shot URL fails to
 		});
 	}
 });
+
+// ─── Archive recognition, nonce retention, export rate limit ─────────────
+
+function oldFormatFetchStub(counter: { exportRequests: number }): FetchStub {
+	return (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data")) {
+			counter.exportRequests += 1;
+			return Promise.resolve(jsonResponse(200, { nonce: "nonce-layout" }));
+		}
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+}
+
+function serveDownload(page: FakePage, zipBytes: Buffer): void {
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/")) {
+			const { download } = makeFakeDownload(zipBytes);
+			queueMicrotask(() => page.emit("download", download));
+		}
+		return result;
+	};
+}
+
+const CONTENT_STREAMS = [
+	"conversations",
+	"messages",
+	"projects",
+	"project_documents",
+];
+
+function statesOf(messages: EmittedMessage[]) {
+	return messages.filter(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
+	);
+}
+
+function skipsOf(messages: EmittedMessage[]) {
+	return messages.filter(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+}
+
+test("collectAnthropic: ZIP with entries under a top-level folder -> layout_unrecognized skips, no synced_at, entry names in PROGRESS", async () => {
+	const zipBytes = await buildManifestPartZip([
+		{ name: "data-2026/conversations.json", content: CONVERSATIONS_JSON },
+		{ name: "data-2026/projects/proj-1.json", content: PROJECT_JSON },
+	]);
+	const counter = { exportRequests: 0 };
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: CONTENT_STREAMS,
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownload(page, zipBytes);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((s) => s.stream).sort(),
+		[...CONTENT_STREAMS].sort(),
+	);
+	for (const skip of skips) {
+		assert.equal(skip.reason, "export_layout_unrecognized");
+		assert.equal(
+			(skip.recovery_hint as { retryable?: boolean }).retryable,
+			false,
+		);
+	}
+	for (const state of statesOf(protocolMessages)) {
+		assert.ok(
+			!("synced_at" in (state.cursor as Record<string, unknown>)),
+			"an unrecognized archive must not checkpoint synced_at",
+		);
+	}
+	const progressText = protocolMessages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message)
+		.join("\n");
+	assert.match(progressText, /data-2026\/conversations\.json/);
+	assert.doesNotMatch(progressText, /Test conversation/);
+});
+
+test("collectAnthropic: recognized ZIP with empty conversations.json -> verified empty (synced_at STATE, no skip)", async () => {
+	const zipBytes = await buildManifestPartZip([
+		{ name: "conversations.json", content: [] },
+	]);
+	const counter = { exportRequests: 0 };
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "messages"],
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownload(page, zipBytes);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	assert.equal(skipsOf(protocolMessages).length, 0);
+	const final = statesOf(protocolMessages).findLast(
+		(m) => m.stream === "conversations",
+	);
+	const cursor = final?.cursor as Record<string, unknown>;
+	assert.ok("synced_at" in cursor);
+	assert.ok(!("pending_export" in cursor));
+	assert.equal(
+		(cursor.consumed_export as { nonce: string }).nonce,
+		"nonce-layout",
+	);
+	assert.equal(typeof cursor.last_export_requested_at, "string");
+});
+
+test("collectAnthropic: recognized ZIP with data -> records, and unparseable items are reported", async () => {
+	const zipBytes = await buildManifestPartZip([
+		{
+			name: "conversations.json",
+			content: [...CONVERSATIONS_JSON, { not: "a conversation" }],
+		},
+		{ name: "projects/proj-1.json", content: PROJECT_JSON },
+	]);
+	const counter = { exportRequests: 0 };
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: CONTENT_STREAMS,
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownload(page, zipBytes);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
+	assert.equal(emitted.filter((r) => r.stream === "projects").length, 1);
+	const dropped = skipsOf(protocolMessages);
+	assert.equal(dropped.length, 1);
+	assert.equal(dropped[0]?.reason, "export_items_unparseable");
+	assert.equal(dropped[0]?.stream, "conversations");
+});
+
+test("collectAnthropic: pending nonce is kept across a layout-unrecognized run", async () => {
+	const zipBytes = await buildManifestPartZip([
+		{ name: "Claude export/conversations.json", content: CONVERSATIONS_JSON },
+	]);
+	const counter = { exportRequests: 0 };
+	const pending = {
+		organization_id: "org-1",
+		nonce: "kept-nonce",
+		requested_at: "2026-01-01T00:00:00.000Z",
+	};
+	const { ctx, page, protocolMessages } = makeContext({
+		streams: ["conversations"],
+		state: { conversations: { pending_export: pending } },
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownload(page, zipBytes);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(counter.exportRequests, 0);
+	assert.equal(
+		statesOf(protocolMessages).length,
+		0,
+		"no STATE may replace the pending export",
+	);
+	assert.equal(
+		skipsOf(protocolMessages)[0]?.reason,
+		"export_layout_unrecognized",
+	);
+});
+
+test("collectAnthropic: a run within 24 h of the last export request does not POST export_data", async () => {
+	const counter = { exportRequests: 0 };
+	const lastRequestedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+	const { ctx, emitted, protocolMessages } = makeContext({
+		streams: ["conversations", "projects"],
+		state: {
+			conversations: {
+				synced_at: lastRequestedAt,
+				last_export_requested_at: lastRequestedAt,
+			},
+		},
+		fetchStub: oldFormatFetchStub(counter),
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.equal(counter.exportRequests, 0);
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(skips.map((s) => s.stream).sort(), [
+		"conversations",
+		"projects",
+	]);
+	for (const skip of skips) {
+		assert.equal(skip.reason, "export_recently_requested");
+		assert.equal(
+			(skip.recovery_hint as { retryable?: boolean }).retryable,
+			true,
+		);
+	}
+	assert.equal(statesOf(protocolMessages).length, 0);
+});
+
+test("collectAnthropic: multi-part manifest with no recognized category part -> layout_unrecognized skips, no synced_at", async () => {
+	const memoriesZip = await buildManifestPartZip([
+		{ name: "memories.json", content: [{ private: "not emitted" }] },
+	]);
+	const manifest = {
+		version: "1.0",
+		total_files: 1,
+		data_files: [
+			{
+				batch_index: 0,
+				category: "memories",
+				part: 0,
+				filename: "memories-000.zip",
+				export_url: "https://claude.ai/export/org-1/download/part-token-mem",
+			},
+		],
+	};
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data")) {
+			return Promise.resolve(jsonResponse(200, manifest));
+		}
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: CONTENT_STREAMS,
+		fetchStub,
+	});
+	serveDownload(page, memoriesZip);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.equal(skips.length, CONTENT_STREAMS.length);
+	assert.ok(skips.every((s) => s.reason === "export_layout_unrecognized"));
+	for (const state of statesOf(protocolMessages)) {
+		assert.ok(!("synced_at" in (state.cursor as Record<string, unknown>)));
+	}
+	const progressText = protocolMessages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message)
+		.join("\n");
+	assert.match(progressText, /memories\/memories\.json/);
+	assert.doesNotMatch(progressText, /not emitted/);
+});

@@ -371,7 +371,26 @@ interface PendingExportState {
 
 interface AnthropicCursorState {
 	pending_export?: PendingExportState;
+	/** The export whose archive was last parsed successfully. */
+	consumed_export?: PendingExportState;
+	/** When this connector last sent `POST export_data` (each one emails
+	 * the user). Drives the EXPORT_REQUEST_MIN_INTERVAL_MS rate limit. */
+	last_export_requested_at?: string;
 	synced_at?: string;
+}
+
+/** Claude emails the user for every export request, so request at most
+ * once per 24 h. A pending export is still resumed at any time. */
+const EXPORT_REQUEST_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function readConversationsCursor(
+	state: Record<string, unknown>,
+): AnthropicCursorState {
+	const cursor = state[CONVERSATIONS_STREAM];
+	if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
+		return {};
+	}
+	return cursor as AnthropicCursorState;
 }
 
 function readPendingExport(
@@ -614,6 +633,11 @@ export function readExportZip(zipPath: string): {
 	conversationsJson: unknown;
 	projectFiles: ProjectZipFile[];
 	userFiles: unknown[];
+	/** True only when root `conversations.json` exists and parses to an
+	 * array. A missing entry is NOT an empty account. */
+	recognized: boolean;
+	/** Every entry name in the archive (names only, never content). */
+	entryNames: string[];
 } {
 	const fd = openSync(zipPath, "r");
 	try {
@@ -624,7 +648,7 @@ export function readExportZip(zipPath: string): {
 		);
 		const conversationsJson = conversationsEntry
 			? safeJsonParse(conversationsEntry.data().toString("utf8"))
-			: [];
+			: null;
 		const projectFiles = entries
 			.filter((e) => e.name.startsWith("projects/") && e.name.endsWith(".json"))
 			.map((e) => ({
@@ -638,6 +662,8 @@ export function readExportZip(zipPath: string): {
 			userFiles: usersEntry
 				? [safeJsonParse(usersEntry.data().toString("utf8"))]
 				: [],
+			recognized: Array.isArray(conversationsJson),
+			entryNames: entries.map((e) => e.name),
 		};
 	} finally {
 		closeSync(fd);
@@ -742,6 +768,47 @@ async function emitPendingSkip(
 	}
 }
 
+/** Streams whose content comes from the export archive. */
+const EXPORT_CONTENT_STREAMS = [
+	CONVERSATIONS_STREAM,
+	MESSAGES_STREAM,
+	PROJECTS_STREAM,
+	PROJECT_DOCUMENTS_STREAM,
+];
+
+/**
+ * The downloaded archive has no entry this connector recognizes. A missing
+ * `conversations.json` is not an empty account, so fail closed: skip every
+ * selected content stream and emit no `synced_at`. Only entry NAMES are
+ * reported, never content.
+ */
+async function emitLayoutUnrecognizedSkip(
+	emit: (msg: EmittedMessage) => Promise<void>,
+	progress: BrowserCollectContext["progress"],
+	requested: Map<string, unknown>,
+	entryNames: readonly string[],
+): Promise<void> {
+	await progress(
+		`Export archive layout not recognized. Entry names (${entryNames.length}): ` +
+			`${entryNames.join(", ") || "(none)"}.`,
+		{ stream: CONVERSATIONS_STREAM },
+	);
+	for (const stream of EXPORT_CONTENT_STREAMS) {
+		if (!requested.has(stream)) {
+			continue;
+		}
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "export_layout_unrecognized",
+			message:
+				"The Claude export archive has no recognized conversations entry. " +
+				"No data was imported, and this run does not claim the account is empty.",
+			recovery_hint: { action: "terminal", retryable: false },
+		});
+	}
+}
+
 /**
  * One or more manifest parts failed to download this run (one-shot URL
  * already used/expired, or the download never fired). Since the manifest
@@ -816,11 +883,22 @@ export async function collectAnthropic({
 		);
 	}
 
+	const priorCursor = readConversationsCursor(state);
+
+	/**
+	 * Emit the parsed export. Callers must first confirm the archive layout
+	 * was recognized; only then is an empty result real evidence of an empty
+	 * account, and only then may `synced_at` be checkpointed.
+	 */
 	async function emitParsed(
 		parsed: ParsedExport,
 		organizationId: string,
 		userFiles: readonly unknown[],
 		browserProfileAppliesToExport: boolean,
+		exportBookkeeping: Pick<
+			AnthropicCursorState,
+			"consumed_export" | "last_export_requested_at"
+		>,
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -924,12 +1002,30 @@ export async function collectAnthropic({
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
+		const dropped: Array<[string, number]> = [
+			[CONVERSATIONS_STREAM, parsed.droppedConversations],
+			[PROJECTS_STREAM, parsed.droppedProjects],
+		];
+		for (const [stream, count] of dropped) {
+			if (count === 0 || !requested.has(stream)) {
+				continue;
+			}
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "export_items_unparseable",
+				message: `${count} ${stream} item(s) in the export could not be parsed and were not imported.`,
+				diagnostics: { dropped_count: count },
+			});
+		}
 		const syncedAt = nowIso();
 		if (wantsConversations) {
+			// Keep the consumed nonce and request time: the next run needs
+			// last_export_requested_at for the rate limit.
 			await emit({
 				type: "STATE",
 				stream: CONVERSATIONS_STREAM,
-				cursor: { synced_at: syncedAt },
+				cursor: { ...exportBookkeeping, synced_at: syncedAt },
 			});
 		}
 		if (wantsMessages) {
@@ -958,6 +1054,32 @@ export async function collectAnthropic({
 	if (pending) {
 		await pollAndEmitOldFormat(pending, false);
 		return;
+	}
+
+	const lastRequestedAt = priorCursor.last_export_requested_at;
+	if (lastRequestedAt) {
+		const elapsedMs = Date.now() - Date.parse(lastRequestedAt);
+		if (elapsedMs >= 0 && elapsedMs < EXPORT_REQUEST_MIN_INTERVAL_MS) {
+			const nextAt = new Date(
+				Date.parse(lastRequestedAt) + EXPORT_REQUEST_MIN_INTERVAL_MS,
+			).toISOString();
+			for (const stream of ALL_STREAMS) {
+				if (!requested.has(stream)) {
+					continue;
+				}
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "export_recently_requested",
+					message:
+						`A Claude export was already requested at ${lastRequestedAt}. ` +
+						"Each request sends you an email, so a new one is not sent " +
+						`before ${nextAt}.`,
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				});
+			}
+			return;
+		}
 	}
 
 	const orgs = await fetchOrganizations(page);
@@ -1001,7 +1123,11 @@ export async function collectAnthropic({
 		await emit({
 			type: "STATE",
 			stream: CONVERSATIONS_STREAM,
-			cursor: { pending_export: newPending },
+			cursor: {
+				...priorCursor,
+				pending_export: newPending,
+				last_export_requested_at: newPending.requested_at,
+			},
 		});
 		await pollAndEmitOldFormat(newPending, true);
 		return;
@@ -1011,8 +1137,14 @@ export async function collectAnthropic({
 	// No pending-STATE checkpoint here — the manifest's export_url values
 	// are one-shot secrets and are never persisted (see module header). A
 	// crash between here and full consumption loses this job; the next run
-	// starts over with a fresh POST export_data.
-	await downloadAndEmitManifest(req.manifest);
+	// starts over with a fresh POST export_data (after the rate limit).
+	const manifestRequestedAt = nowIso();
+	await emit({
+		type: "STATE",
+		stream: CONVERSATIONS_STREAM,
+		cursor: { ...priorCursor, last_export_requested_at: manifestRequestedAt },
+	});
+	await downloadAndEmitManifest(req.manifest, manifestRequestedAt);
 
 	async function pollAndEmitOldFormat(
 		pendingExport: PendingExportState,
@@ -1059,9 +1191,18 @@ export async function collectAnthropic({
 			await progress("Reading downloaded export...", {
 				stream: CONVERSATIONS_STREAM,
 			});
-			const { conversationsJson, projectFiles, userFiles } = readExportZip(
-				attempt.zipPath,
-			);
+			const {
+				conversationsJson,
+				projectFiles,
+				userFiles,
+				recognized,
+				entryNames,
+			} = readExportZip(attempt.zipPath);
+			if (!recognized) {
+				// No STATE: pending_export stays so the same export is reused.
+				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+				return;
+			}
 			const parsed = parseExport(
 				conversationsJson,
 				projectFiles.map((f) => f.json),
@@ -1071,6 +1212,10 @@ export async function collectAnthropic({
 				pendingExport.organization_id,
 				userFiles,
 				pendingExportWasCreatedThisRun,
+				{
+					consumed_export: pendingExport,
+					last_export_requested_at: pendingExport.requested_at,
+				},
 			);
 		} finally {
 			await attempt.cleanup?.();
@@ -1079,6 +1224,7 @@ export async function collectAnthropic({
 
 	async function downloadAndEmitManifest(
 		manifest: ExportManifest,
+		requestedAt: string,
 	): Promise<void> {
 		const dataFiles = manifest.data_files.filter(isManifestDataFile);
 		await progress(`Downloading ${dataFiles.length} export part(s)...`, {
@@ -1159,8 +1305,23 @@ export async function collectAnthropic({
 			);
 		}
 
+		const recognizedPart = results.some(
+			(r) => r.category === "conversations" || r.category === "projects",
+		);
+		if (!recognizedPart) {
+			await emitLayoutUnrecognizedSkip(
+				emit,
+				progress,
+				requested,
+				results.flatMap((r) => r.entries.map((e) => `${r.category}/${e.name}`)),
+			);
+			return;
+		}
+
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
-		await emitParsed(parsed, organizationId, rawUserProfiles, true);
+		await emitParsed(parsed, organizationId, rawUserProfiles, true, {
+			last_export_requested_at: requestedAt,
+		});
 	}
 }
 

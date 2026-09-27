@@ -696,6 +696,9 @@ export interface ParsedExport {
 	projects: ProjectRecord[];
 	projectSources: SourceRecordEnvelope[];
 	projectDocuments: ProjectDocumentRecord[];
+	/** Raw items present in the archive that did not parse and were dropped. */
+	droppedConversations: number;
+	droppedProjects: number;
 }
 
 /** Lossless upstream record; the consumer owns any legacy projection. */
@@ -720,12 +723,15 @@ export function parseExport(
 	const conversations: ConversationRecord[] = [];
 	const conversationSources: SourceRecordEnvelope[] = [];
 	const messages: MessageRecord[] = [];
+	let droppedConversations = 0;
+	let droppedProjects = 0;
 	const rawConversations = Array.isArray(conversationsJson)
 		? conversationsJson
 		: [];
 	for (const rawConv of rawConversations) {
 		const parsed = parseConversation(rawConv);
 		if (!parsed) {
+			droppedConversations += 1;
 			continue;
 		}
 		conversations.push(parsed.conversation);
@@ -744,6 +750,7 @@ export function parseExport(
 	for (const rawProject of projectFiles) {
 		const parsed = parseProject(rawProject);
 		if (!parsed) {
+			droppedProjects += 1;
 			continue;
 		}
 		projects.push(parsed.project);
@@ -763,6 +770,8 @@ export function parseExport(
 		projectDocuments,
 		projects,
 		projectSources,
+		droppedConversations,
+		droppedProjects,
 	};
 }
 
