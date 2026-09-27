@@ -345,6 +345,8 @@ interface BaseRunConnectorConfig {
 	retryablePattern?: RegExp;
 	/** Record field that scope.time_range filters on. Default 'date'. */
 	timeRangeField?: string | ((stream: string) => string);
+	/** Streams whose date-precision consent values cannot satisfy timestamp bounds. */
+	unsupportedTimeRangeStreams?: readonly string[];
 	validateRecord?: ValidateRecord;
 }
 
@@ -494,7 +496,7 @@ export function describeUnexpectedFailure(err: unknown): string {
 
 /** Returns true if the scope's half-open time_range excludes this record value. */
 const ISO_INSTANT_RE =
-	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function isValidIsoInstantShape(match: RegExpMatchArray): boolean {
 	const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw] = match;
@@ -507,11 +509,27 @@ function isValidIsoInstantShape(match: RegExpMatchArray): boolean {
 	if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) {
 		return false;
 	}
-	const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-	return day >= 1 && day <= daysInMonth;
+	const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const daysInMonth = [
+		31,
+		leapYear ? 29 : 28,
+		31,
+		30,
+		31,
+		30,
+		31,
+		31,
+		30,
+		31,
+		30,
+		31,
+	][month - 1];
+	return daysInMonth !== undefined && day >= 1 && day <= daysInMonth;
 }
 
-function parseIsoInstant(value: unknown): number | null {
+type IsoInstant = { second: number; fraction: string };
+
+function parseIsoInstant(value: unknown): IsoInstant | null {
 	if (typeof value !== "string") {
 		return null;
 	}
@@ -519,22 +537,40 @@ function parseIsoInstant(value: unknown): number | null {
 	if (!match || !isValidIsoInstantShape(match)) {
 		return null;
 	}
-	const timestamp = Date.parse(value);
+	// Date.parse discards digits after milliseconds. Parse the whole second,
+	// then keep the source fraction for the half-open boundary comparison.
+	const fraction = match[7]?.slice(1) ?? "";
+	const wholeSecond = match[7] ? value.replace(match[7], "") : value;
+	const timestamp = Date.parse(wholeSecond);
 	if (Number.isNaN(timestamp)) {
 		return null;
 	}
-	return timestamp;
+	return { second: timestamp, fraction };
+}
+
+function compareIsoInstants(left: IsoInstant, right: IsoInstant): number {
+	if (left.second !== right.second) return left.second - right.second;
+	const length = Math.max(left.fraction.length, right.fraction.length);
+	const leftFraction = left.fraction.padEnd(length, "0");
+	const rightFraction = right.fraction.padEnd(length, "0");
+	return leftFraction < rightFraction
+		? -1
+		: leftFraction > rightFraction
+			? 1
+			: 0;
 }
 
 function isOutsideTimeRange(
 	timeRange: { since?: string; until?: string },
 	dateValue: unknown,
 ): boolean {
-	const since = timeRange.since ? parseIsoInstant(timeRange.since) : null;
-	const until = timeRange.until ? parseIsoInstant(timeRange.until) : null;
+	const since =
+		timeRange.since === undefined ? null : parseIsoInstant(timeRange.since);
+	const until =
+		timeRange.until === undefined ? null : parseIsoInstant(timeRange.until);
 	if (
-		(timeRange.since && since === null) ||
-		(timeRange.until && until === null)
+		(timeRange.since !== undefined && since === null) ||
+		(timeRange.until !== undefined && until === null)
 	) {
 		return true;
 	}
@@ -542,8 +578,8 @@ function isOutsideTimeRange(
 	const timestamp = parseIsoInstant(dateValue);
 	return (
 		timestamp === null ||
-		(since !== null && timestamp < since) ||
-		(until !== null && timestamp >= until)
+		(since !== null && compareIsoInstants(timestamp, since) < 0) ||
+		(until !== null && compareIsoInstants(timestamp, until) >= 0)
 	);
 }
 
@@ -941,6 +977,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		onDurableCommit,
 		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
 		timeRangeField = "date",
+		unsupportedTimeRangeStreams = [],
 		isTombstone,
 		auth,
 		authOptional = false,
@@ -1284,6 +1321,16 @@ export function runConnector(config: RunConnectorConfig): void {
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
 		const requested = buildRequested(startMsg);
+		for (const stream of unsupportedTimeRangeStreams) {
+			if (requested.get(stream)?.time_range) {
+				throw new TerminalError(
+					`time_range for ${stream} is unsupported because its consent time has date precision`,
+					{
+						code: "scope_not_supported",
+					},
+				);
+			}
+		}
 		// Deferred for browser connectors that declare BOTH `auth` and
 		// `probeSession`: a valid pre-authenticated browser profile must be
 		// sufficient on its own, so credential resolution (which can itself raise
@@ -1555,14 +1602,23 @@ export function makeEmitRecord(deps: {
 		const rs = resFilters.get(stream);
 		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
 			return "skip";
-		if (isTombstone?.(stream, data)) return "tombstone";
 		const streamScope = requested.get(stream);
 		const field = timeRangeFieldFor(stream);
+		if (
+			streamScope?.time_range &&
+			typeof data[field] === "string" &&
+			/^\d{4}-\d{2}-\d{2}$/.test(data[field])
+		) {
+			throw new TerminalError(
+				`time_range cannot be applied to date-precision consent value for ${stream}`,
+			);
+		}
 		if (
 			streamScope?.time_range &&
 			isOutsideTimeRange(streamScope.time_range, data[field])
 		)
 			return "skip";
+		if (isTombstone?.(stream, data)) return "tombstone";
 		return "record";
 	};
 

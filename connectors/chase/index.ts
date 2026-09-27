@@ -3057,6 +3057,11 @@ if (isMainModule(import.meta.url)) {
 		// `design-notes/chase-anti-bot.md`. Isolated-per-connector profile works.
 		browser: { profileName: "chase" },
 		timeRangeField: chaseTimeRangeField,
+		unsupportedTimeRangeStreams: [
+			"transactions",
+			"current_activity",
+			"statements",
+		],
 		async ensureSession({
 			assist,
 			completeAssistance,

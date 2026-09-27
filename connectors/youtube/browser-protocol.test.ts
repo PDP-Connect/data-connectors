@@ -117,7 +117,7 @@ test("browser fixture completes START to RECORD to DONE through the connector pr
 	assert.equal(messages.filter((message) => message.type === "DONE").length, 1);
 });
 
-test("production history field fails closed for date-only history under a time range", async () => {
+test("bounded history reports its date precision as unsupported", async () => {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: packageRoot,
 		entrypoint: fileURLToPath(
@@ -143,6 +143,15 @@ test("production history field fails closed for date-only history under a time r
 			message.type === "RECORD" && message.stream === "watch_history",
 	);
 	assert.equal(records.length, 0);
+	assert.equal(
+		result.messages.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "watch_history" &&
+				message.reason === "scope_not_supported",
+		).length,
+		1,
+	);
 	assert.equal(
 		result.messages.filter((message) => message.type === "DONE").length,
 		1,

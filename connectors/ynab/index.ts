@@ -2526,6 +2526,13 @@ export async function ynabCollect(
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "ynab",
+		unsupportedTimeRangeStreams: [
+			"account_stats",
+			"transactions",
+			"scheduled_transactions",
+			"months",
+			"month_categories",
+		],
 		// Transport vocabulary (`fetch failed`, `ECONN…`, `ETIMEDOUT`) plus YNAB's
 		// own `ynab_rate_limited`. `retryable status \d+` covers the retry layer's
 		// exhausted-5xx/408/429 wording: those statuses are retryable BY
