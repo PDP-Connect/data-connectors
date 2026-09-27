@@ -9,16 +9,15 @@
  * corresponding drift job compares.
  */
 
+import { isComparedConnectorFile } from "./compared-connector-file.mjs";
+
 const PIN_FILE = ".github/cross-repo-pins.json";
 
-const BUNDLED_CONNECTOR_DIRS = [
-	"connectors/apple_photos",
-	"connectors/claude_code",
-	"connectors/codex",
-	"connectors/google_messages",
-	"connectors/google_takeout",
-	"connectors/imessage",
-];
+// The bundled set comes from the canonical registry, the same source
+// check-connector-source-drift.mjs uses. Node 24 strips the registry's types on import.
+const registryUrl = new URL("../../../packages/polyfill-connectors/src/collector-registry.ts", import.meta.url);
+const { LOCAL_COLLECTOR_DEFINITIONS } = await import(registryUrl.href);
+const BUNDLED_CONNECTOR_DIRS = LOCAL_COLLECTOR_DEFINITIONS.map((definition) => `connectors/${definition.connector_id}`);
 
 const PIN_BACKED_ARTIFACTS = {
 	"data-connect": new Set([
@@ -32,17 +31,9 @@ const PIN_BACKED_ARTIFACTS = {
 	]),
 };
 
-function isUnder(path, directory) {
-	return path === directory || path.startsWith(`${directory}/`);
-}
-
 function isComparedConnectorPath(path) {
-	return (
-		BUNDLED_CONNECTOR_DIRS.some((directory) => isUnder(path, directory)) &&
-		!path.includes("/fixtures/") &&
-		!path.includes("/__fixtures__/") &&
-		!path.endsWith(".test.ts")
-	);
+	const directory = BUNDLED_CONNECTOR_DIRS.find((candidate) => path.startsWith(`${candidate}/`));
+	return directory !== undefined && isComparedConnectorFile(path.slice(directory.length + 1));
 }
 
 export function isPinBackedPath(path, repo) {
