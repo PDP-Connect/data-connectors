@@ -111,8 +111,17 @@ jobs:
 
           echo "$CHANGED"
 
-          echo "data_connect_pin_backed=$(printf '%s\n' "$CHANGED" | node .github/scripts/cross-repo-integrity/pin-backed-paths.mjs data-connect)" >> "$GITHUB_OUTPUT"
-          echo "pdpp_pin_backed=$(printf '%s\n' "$CHANGED" | node .github/scripts/cross-repo-integrity/pin-backed-paths.mjs pdpp)" >> "$GITHUB_OUTPUT"
+          # Assign first: a failing node call inside an echo argument would not stop the step.
+          DATA_CONNECT_PIN_BACKED="$(printf '%s\n' "$CHANGED" | node .github/scripts/cross-repo-integrity/pin-backed-paths.mjs data-connect)"
+          PDPP_PIN_BACKED="$(printf '%s\n' "$CHANGED" | node .github/scripts/cross-repo-integrity/pin-backed-paths.mjs pdpp)"
+          for value in "$DATA_CONNECT_PIN_BACKED" "$PDPP_PIN_BACKED"; do
+            if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+              echo "::error::pin-backed-paths.mjs returned '$value', expected true or false"
+              exit 1
+            fi
+          done
+          echo "data_connect_pin_backed=$DATA_CONNECT_PIN_BACKED" >> "$GITHUB_OUTPUT"
+          echo "pdpp_pin_backed=$PDPP_PIN_BACKED" >> "$GITHUB_OUTPUT"
 
           if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|\.github/cross-repo-pins\.json$|\.github/scripts/cross-repo-integrity/|\.github/workflows/cross-repo-integrity\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
