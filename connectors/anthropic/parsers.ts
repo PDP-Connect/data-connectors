@@ -529,6 +529,9 @@ export interface ClassifiedManifestPart {
 	 * content matched neither known shape — a real anomaly, surfaced via
 	 * PROGRESS, never silently dropped. */
 	unclassifiedEntryNames: string[];
+	/** In-scope entries whose content is a literal empty array: recognized
+	 * content that holds no items (a real empty, not an unknown shape). */
+	emptyEntryNames: string[];
 }
 
 /** Resolve a display name only when the browser profile belongs to this export. */
@@ -630,6 +633,7 @@ export function classifyManifestPartEntries(
 	const userProfiles: unknown[] = [];
 	const outOfScopeEntryNames: string[] = [];
 	const unclassifiedEntryNames: string[] = [];
+	const emptyEntryNames: string[] = [];
 
 	if (category === "light_metadata") {
 		for (const entry of entries) {
@@ -643,6 +647,7 @@ export function classifyManifestPartEntries(
 			userProfiles,
 			outOfScopeEntryNames,
 			unclassifiedEntryNames,
+			emptyEntryNames,
 		};
 	}
 
@@ -657,10 +662,15 @@ export function classifyManifestPartEntries(
 			userProfiles,
 			outOfScopeEntryNames,
 			unclassifiedEntryNames,
+			emptyEntryNames,
 		};
 	}
 
 	for (const entry of entries) {
+		if (Array.isArray(entry.json) && entry.json.length === 0) {
+			emptyEntryNames.push(entry.name);
+			continue;
+		}
 		const items = Array.isArray(entry.json) ? entry.json : [entry.json];
 		let matchedAny = false;
 		for (const item of items) {
@@ -684,6 +694,7 @@ export function classifyManifestPartEntries(
 		userProfiles,
 		outOfScopeEntryNames,
 		unclassifiedEntryNames,
+		emptyEntryNames,
 	};
 }
 
@@ -696,6 +707,9 @@ export interface ParsedExport {
 	projects: ProjectRecord[];
 	projectSources: SourceRecordEnvelope[];
 	projectDocuments: ProjectDocumentRecord[];
+	/** Raw items present in the archive that did not parse and were dropped. */
+	droppedConversations: number;
+	droppedProjects: number;
 }
 
 /** Lossless upstream record; the consumer owns any legacy projection. */
@@ -720,12 +734,15 @@ export function parseExport(
 	const conversations: ConversationRecord[] = [];
 	const conversationSources: SourceRecordEnvelope[] = [];
 	const messages: MessageRecord[] = [];
+	let droppedConversations = 0;
+	let droppedProjects = 0;
 	const rawConversations = Array.isArray(conversationsJson)
 		? conversationsJson
 		: [];
 	for (const rawConv of rawConversations) {
 		const parsed = parseConversation(rawConv);
 		if (!parsed) {
+			droppedConversations += 1;
 			continue;
 		}
 		conversations.push(parsed.conversation);
@@ -744,6 +761,7 @@ export function parseExport(
 	for (const rawProject of projectFiles) {
 		const parsed = parseProject(rawProject);
 		if (!parsed) {
+			droppedProjects += 1;
 			continue;
 		}
 		projects.push(parsed.project);
@@ -763,6 +781,8 @@ export function parseExport(
 		projectDocuments,
 		projects,
 		projectSources,
+		droppedConversations,
+		droppedProjects,
 	};
 }
 

@@ -31,7 +31,10 @@
 				"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
 				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 				"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically.",
-				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically."
+				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically within 24 hours.",
+				"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
+				"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
+				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported."
 			}
 		}
 	},
