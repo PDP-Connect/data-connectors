@@ -20,10 +20,8 @@
  * non-test file and its path at that revision. A later connector revision is reported
  * as lag, not as byte parity with the current tree.
  *
- * Deliberately excluded from comparison: `*.test.ts` (data-connect does not carry this
- * repo's test suite) and anything under a `fixtures/` or `__fixtures__/` directory (test
- * fixture trees, not connector logic — data-connect vendors only what its local-collector
- * bundle executes).
+ * Which files are compared is decided by `isComparedConnectorFile`
+ * (compared-connector-file.mjs), shared with pin-backed-paths.mjs.
  *
  * Usage:
  *   node --experimental-strip-types check-connector-source-drift.mjs <data-connect-checkout> <data-connectors-checkout>
@@ -34,6 +32,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isComparedConnectorFile } from "./compared-connector-file.mjs";
 
 const [, , dataConnectDir, dataConnectorsDir] = process.argv;
 
@@ -128,7 +127,7 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-/** Recursively list files under `dir`, skipping fixtures dirs and *.test.ts, returned as paths relative to `dir`. */
+/** Recursively list the compared files under `dir`, returned as paths relative to `dir`. */
 function listComparableFiles(dir) {
   const out = [];
   const stack = [dir];
@@ -137,12 +136,11 @@ function listComparableFiles(dir) {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const full = join(current, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "fixtures" || entry.name === "__fixtures__") continue;
         stack.push(full);
         continue;
       }
-      if (entry.name.endsWith(".test.ts")) continue;
-      out.push(relative(dir, full));
+      const rel = relative(dir, full);
+      if (isComparedConnectorFile(rel)) out.push(rel);
     }
   }
   return out.sort();
@@ -167,7 +165,7 @@ for (const connectorId of BUNDLED_CONNECTORS) {
       .split("\n")
       .filter(Boolean)
       .map((path) => path.slice(canonicalPrefix.length))
-      .filter((path) => !path.endsWith(".test.ts") && !path.split("/").some((part) => part === "fixtures" || part === "__fixtures__")),
+      .filter(isComparedConnectorFile),
   );
   if (canonicalFiles.size === 0) {
     console.error(`FAIL: ${connectorId} — no source files at ${provenance.revision}:${canonicalPrefix}`);
