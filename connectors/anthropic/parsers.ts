@@ -672,19 +672,26 @@ export function classifyManifestPartEntries(
 			continue;
 		}
 		const items = Array.isArray(entry.json) ? entry.json : [entry.json];
-		let matchedAny = false;
+		const unmatched: unknown[] = [];
 		for (const item of items) {
 			if (looksLikeConversation(item)) {
 				conversations.push(item);
-				matchedAny = true;
 			} else if (looksLikeProject(item)) {
 				projects.push(item);
-				matchedAny = true;
+			} else {
+				unmatched.push(item);
 			}
 		}
-		if (!matchedAny) {
+		if (unmatched.length === items.length) {
 			unclassifiedEntryNames.push(entry.name);
+			continue;
 		}
+		// The entry is recognized, so an unmatched item belongs to the
+		// entry's own category. The parser then imports it or counts it as
+		// dropped; it is never lost silently.
+		(category === "conversations" ? conversations : projects).push(
+			...unmatched,
+		);
 	}
 
 	return {

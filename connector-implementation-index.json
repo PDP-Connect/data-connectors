@@ -385,7 +385,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.10",
+				"version": "0.2.11",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -855,7 +855,8 @@
 					"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically within 24 hours.",
 					"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 					"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
-					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported."
+					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
+					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 				}
 			}
 		},
@@ -4416,7 +4417,7 @@
 					{
 						"name": "rules",
 						"required": true,
-						"description": "Personal trust-registry rules recorded in ~/.codex/rules/*.rules — the de-facto log of approval decisions. One record per rule line. The stream is named `rules` to match the real local directory; `approval_rules` was backlog shorthand, not an on-disk source name.",
+						"description": "Personal trust-registry rules recorded in ~/.codex/rules/*.rules ��� the de-facto log of approval decisions. One record per rule line. The stream is named `rules` to match the real local directory; `approval_rules` was backlog shorthand, not an on-disk source name.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},

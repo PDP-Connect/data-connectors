@@ -914,6 +914,9 @@ export async function collectAnthropic({
 			conversations: 0,
 			projects: 0,
 		},
+		/** The manifest has no recognized conversations source. That is not
+		 * an empty account, so conversations and messages are skipped. */
+		conversationsSourceMissing = false,
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -1031,13 +1034,34 @@ export async function collectAnthropic({
 			],
 		];
 		const skipped = new Set<string>();
+		if (conversationsSourceMissing) {
+			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
+				if (!requested.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "export_conversations_missing",
+					message:
+						"The Claude export has no recognized conversations entry, so " +
+						`${stream} was not imported and was not checkpointed.`,
+					recovery_hint: { action: "terminal", retryable: false },
+				});
+			}
+		}
 		for (const [streams, count] of dropGroups) {
 			if (count === 0) {
 				continue;
 			}
 			const [parent] = streams;
+			await progress(
+				`Warning: ${count} ${parent} item(s) in the export could not be parsed and were not imported.`,
+				{ stream: parent ?? CONVERSATIONS_STREAM },
+			);
 			for (const stream of streams) {
-				if (!requested.has(stream)) {
+				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
 				}
 				skipped.add(stream);
@@ -1293,6 +1317,10 @@ export async function collectAnthropic({
 		const unclassified: string[] = [];
 		const unclassifiedEntries = { conversations: 0, projects: 0 };
 		let recognizedPart = false;
+		// Like the nonce reader, only a conversations source proves the
+		// conversations stream: a conversation item, or a literal `[]` entry
+		// in a conversations part.
+		let conversationsSourceFound = false;
 		const outOfScopeByCategory = new Map<string, number>();
 		for (const result of results) {
 			const classified = classifyManifestPartEntries(
@@ -1311,6 +1339,13 @@ export async function collectAnthropic({
 				classified.emptyEntryNames.length > 0
 			) {
 				recognizedPart = true;
+			}
+			if (
+				classified.conversations.length > 0 ||
+				(result.category === "conversations" &&
+					classified.emptyEntryNames.length > 0)
+			) {
+				conversationsSourceFound = true;
 			}
 			if (
 				result.category === "conversations" ||
@@ -1379,6 +1414,7 @@ export async function collectAnthropic({
 			true,
 			{ last_export_requested_at: requestedAt },
 			unclassifiedEntries,
+			!conversationsSourceFound,
 		);
 	}
 }
