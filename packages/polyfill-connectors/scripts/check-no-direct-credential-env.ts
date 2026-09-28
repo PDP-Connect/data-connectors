@@ -66,7 +66,6 @@ const CREDENTIAL_ENV_PATTERN =
  *
  * Each entry is a path relative to the package root. The `heb`/`chase`/
  * `amazon`/`chatgpt` entries have been migrated and removed. What remains is
- * `github` (a token/device flow with no manifest-declared sign-in pair) plus
  * `reddit` and `jellyfin`, whose STORED credentials predate their current
  * manifest shape — see LEGACY_CREDENTIAL_KIND_MIGRATIONS in
  * ../static-secret-injection.ts. Those need a credential-kind migration, not
@@ -75,7 +74,6 @@ const CREDENTIAL_ENV_PATTERN =
 const MIGRATION_ALLOWLIST: ReadonlySet<string> = new Set([
 	"connectors/jellyfin/index.ts",
 	"connectors/reddit/index.ts",
-	"src/auto-login/github.ts",
 	"src/auto-login/reddit.ts",
 ]);
 
