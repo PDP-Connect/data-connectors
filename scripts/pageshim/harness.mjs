@@ -1,0 +1,328 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Runs a pageshim bundle the way the mobile host does, in Playwright Chromium.
+//
+// Model: vana-com/unity-surfaces apps/mobile-shell/lib/connect/page_shim.dart.
+//   - RUNNER page: executes the bundle as `new AsyncFunction('page', 'process', code)`
+//     after the host's transform (the last top-level `(async () => {` is returned).
+//   - TARGET page: the provider WebView. Its traffic is served from fixtures.
+//   - `page`: the shim's method set and nothing else. Reading any other member
+//     throws, so a bundle that needs more than the host offers fails here.
+//     Host behaviour kept from page_shim.dart: evaluate turns a page error
+//     into null; goto waits after the load starts; setData("result") crosses
+//     as one JSON string; waitForSelector throws on timeout; promptUser polls
+//     the check and throws when the login wait runs out.
+//
+// This is a re-implementation from the Dart source, not a vendored copy. It
+// is not a device run.
+
+import { readFileSync } from "node:fs";
+import { chromium } from "playwright";
+
+// page_shim.dart harnessJs `page` members. Nothing else is exposed.
+export const SHIM_METHODS = [
+	"requestedScopes",
+	"evaluate",
+	"goto",
+	"sleep",
+	"setData",
+	"setProgress",
+	"showBrowser",
+	"goHeadless",
+	"closeBrowser",
+	"httpFetch",
+	"url",
+	"html",
+	"click",
+	"fill",
+	"press",
+	"waitForSelector",
+	"captureNetwork",
+	"clearNetworkCaptures",
+	"getCapturedResponse",
+	"hasCapturedResponse",
+	"captureDownload",
+	"extractZipEntries",
+	"promptUser",
+];
+
+// Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
+async function hostMain({ source, scopes, methods, loginWaitMs }) {
+	const call = async (m, a) => {
+		const r = await window.__pageApi(m, a || []);
+		if (r && typeof r === "object" && typeof r.__shimError === "string")
+			throw new Error(r.__shimError);
+		return r;
+	};
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const captured = new Set();
+	const impl = {
+		requestedScopes: () => scopes,
+		evaluate: (code) => call("evaluate", [String(code)]),
+		goto: (url) => call("goto", [url]),
+		sleep,
+		setData: (k, v) =>
+			call("setData", [k, k === "result" ? JSON.stringify(v) : v]),
+		setProgress: (p) => call("setProgress", [p]),
+		showBrowser: (url) => call("showBrowser", [url || null]),
+		goHeadless: () => call("goHeadless", []),
+		closeBrowser: () => call("closeBrowser", []),
+		httpFetch: (url, opts) => call("httpFetch", [url, opts || null]),
+		url: () => call("url", []),
+		html: () => call("evaluate", ["document.documentElement.outerHTML"]),
+		click: (s) => call("click", [String(s)]),
+		fill: (s, v) => call("fill", [String(s), String(v)]),
+		press: (s, k) => call("press", [String(s), String(k)]),
+		waitForSelector: async (selector, options) => {
+			const timeout = options?.timeout ?? 30000;
+			const state = options?.state || "visible";
+			const started = Date.now();
+			for (;;) {
+				if (await call("selectorState", [String(selector), state])) return;
+				if (Date.now() - started >= timeout)
+					throw new Error(
+						`waitForSelector timed out after ${timeout}ms: ${selector}`,
+					);
+				await sleep(200);
+			}
+		},
+		captureNetwork: (c) => call("captureNetwork", [c || {}]),
+		clearNetworkCaptures: async () => {
+			captured.clear();
+			return call("clearNetworkCaptures", []);
+		},
+		getCapturedResponse: (k) => call("getCapturedResponse", [String(k)]),
+		hasCapturedResponse: (k) => captured.has(String(k)),
+		captureDownload: (u, o) => call("captureDownload", [String(u), o || null]),
+		extractZipEntries: (h, o) => call("extractZipEntries", [h, o || null]),
+		promptUser: async (msg, check, interval) => {
+			await call("setData", ["status", msg]);
+			await call("promptUser", []);
+			const started = Date.now();
+			while (Date.now() - started < loginWaitMs) {
+				let ok = false;
+				try {
+					ok = await check();
+				} catch {}
+				if (ok) {
+					await call("phase", ["login-detected"]);
+					return true;
+				}
+				await sleep(interval || 2000);
+			}
+			await call("phase", ["login-timed-out"]);
+			throw new Error("login wait timed out");
+		},
+	};
+	if (Object.keys(impl).join() !== methods.join())
+		throw new Error("harness shim drifted from SHIM_METHODS");
+	const page = new Proxy(impl, {
+		get(t, k) {
+			if (typeof k === "symbol" || k === "then") return undefined;
+			if (!Object.hasOwn(t, k))
+				throw new Error(`page.${k} is not part of the PageShim API`);
+			return t[k];
+		},
+	});
+
+	const re = /(?:^|\n)\(async\s*\(\)\s*=>\s*\{/g;
+	const matches = [...source.matchAll(re)];
+	if (matches.length === 0)
+		return { ok: false, error: "no IIFE found in connector source" };
+	const last = matches.at(-1);
+	const lead = last[0].charAt(0) === "\n" ? "\n" : "";
+	const code = `${source.slice(0, last.index)}${lead}return (async () => {${source.slice(last.index + last[0].length)}`;
+	try {
+		const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+		await new AsyncFunction("page", "process", code)(
+			page,
+			Object.freeze({ env: Object.freeze({}) }),
+		);
+		return { ok: true };
+	} catch (e) {
+		return { ok: false, error: String(e?.message ?? e) };
+	}
+}
+
+/**
+ * @param {object} o
+ * @param {string} o.bundle path to the built bundle
+ * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
+ * @param {string[]} o.scopes
+ * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay
+ */
+export async function runHarness({
+	bundle,
+	fixtures,
+	scopes,
+	loginAfterMs = 0,
+	gotoDelayMs = 2000,
+	loginWaitMs = 120_000,
+}) {
+	const source = readFileSync(bundle, "utf8");
+	const log = [];
+	const calls = {};
+	const data = {};
+	let result = null;
+
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		await context.route(fixtures.hosts, (route) => {
+			const f = fixtures.resolve(route.request().url());
+			return route.fulfill({
+				...f,
+				headers: { "access-control-allow-origin": "*" },
+			});
+		});
+		const target = await context.newPage();
+		await target.goto(fixtures.loginUrl);
+
+		const evaluateInPage = async (code) => {
+			const attempt = (body) =>
+				target.evaluate(async (b) => {
+					const AsyncFunction = Object.getPrototypeOf(
+						async () => {},
+					).constructor;
+					try {
+						return { ok: true, value: await new AsyncFunction(b)() };
+					} catch (e) {
+						return { ok: false, error: String(e?.message ?? e) };
+					}
+				}, body);
+			try {
+				const trimmed = code.trim();
+				const r1 = await attempt(`return await (${trimmed});`);
+				if (r1.ok) return r1.value ?? null;
+				const r2 = await attempt(trimmed);
+				if (r2.ok) return r2.value ?? null;
+				log.push(`evaluate failed: ${r2.error}`);
+			} catch (e) {
+				log.push(`evaluate threw: ${e}`);
+			}
+			return null;
+		};
+
+		const dispatch = async (method, a) => {
+			calls[method] = (calls[method] || 0) + 1;
+			switch (method) {
+				case "evaluate":
+					return evaluateInPage(String(a[0] ?? ""));
+				case "goto":
+					if (a[0]) {
+						await target
+							.goto(a[0], { waitUntil: "commit" })
+							.catch((e) => log.push(`goto error ${e.message}`));
+						await new Promise((r) => setTimeout(r, gotoDelayMs));
+					}
+					return null;
+				case "setData":
+					if (a[0] === "result")
+						result = a[1] == null ? null : JSON.parse(a[1]);
+					else data[a[0]] = a[1];
+					return null;
+				case "setProgress":
+				case "phase":
+				case "promptUser":
+				case "log":
+				case "goHeadless":
+				case "closeBrowser":
+					return null;
+				case "showBrowser":
+					return { headed: true };
+				case "url":
+					return target.url();
+				case "httpFetch": {
+					const r = await target.evaluate(
+						async ({ url, opts }) => {
+							try {
+								const res = await fetch(url, {
+									method: opts?.method || "GET",
+									credentials: "include",
+									headers: opts?.headers,
+									body: opts?.body ? String(opts.body) : undefined,
+								});
+								const h = {};
+								res.headers.forEach((v, k) => {
+									h[k.toLowerCase()] = v;
+								});
+								return {
+									status: res.status,
+									text: await res.text(),
+									headers: h,
+									error: null,
+								};
+							} catch (e) {
+								return {
+									status: 0,
+									text: "",
+									headers: {},
+									error: String(e?.message ?? e),
+								};
+							}
+						},
+						{ url: String(a[0]), opts: a[1] },
+					);
+					let json = null;
+					try {
+						json = JSON.parse(r.text);
+					} catch {}
+					return { ok: r.status >= 200 && r.status < 300, json, ...r };
+				}
+				default:
+					// click/fill/press/selectorState/capture*/extractZipEntries exist
+					// on the host but no enabled connector uses them yet. Fail loudly
+					// rather than fake a result.
+					return {
+						__shimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
+					};
+			}
+		};
+
+		const runner = await context.newPage();
+		await runner.route("https://runner.local/", (r) =>
+			r.fulfill({
+				contentType: "text/html",
+				body: "<!doctype html><body></body>",
+			}),
+		);
+		await runner.exposeBinding("__pageApi", (_src, method, args) =>
+			dispatch(method, args),
+		);
+		runner.on("console", (m) => log.push(`[bundle] ${m.text().slice(0, 300)}`));
+		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
+		await runner.goto("https://runner.local/");
+
+		if (loginAfterMs > 0) {
+			fixtures.setLoggedIn(false);
+			setTimeout(() => {
+				log.push("[user] signs in");
+				fixtures.setLoggedIn(true);
+				target.goto(fixtures.homeUrl, { waitUntil: "commit" }).catch(() => {});
+			}, loginAfterMs);
+		} else {
+			fixtures.setLoggedIn(true);
+		}
+
+		const started = Date.now();
+		const ret = await runner.evaluate(hostMain, {
+			source,
+			scopes,
+			methods: SHIM_METHODS,
+			loginWaitMs,
+		});
+		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
+		return {
+			ret,
+			elapsedMs: Date.now() - started,
+			calls,
+			data,
+			result,
+			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
+			log,
+		};
+	} finally {
+		await browser.close();
+	}
+}
