@@ -613,11 +613,19 @@ function parseRetryAfterSeconds(
 ): number | null {
 	if (value === undefined) return null;
 	const trimmed = value.trim();
-	if (/^\d+$/.test(trimmed)) return Number(trimmed);
-	const dateMs = Date.parse(trimmed);
-	if (Number.isNaN(dateMs)) return null;
-	return Math.max(0, Math.ceil((dateMs - nowMs) / 1000));
+	let seconds: number;
+	if (/^\d+$/.test(trimmed)) {
+		seconds = Number(trimmed);
+	} else {
+		const dateMs = Date.parse(trimmed);
+		if (Number.isNaN(dateMs)) return null;
+		seconds = Math.max(0, Math.ceil((dateMs - nowMs) / 1000));
+	}
+	// A huge value would overflow Date; no wait is honored past 7 days.
+	return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
 }
+
+const MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60;
 
 interface ExportRequestFailure {
 	reason:
@@ -630,6 +638,9 @@ interface ExportRequestFailure {
 	diagnostics: Record<string, number | string | string[]>;
 	/** ISO time before which no new export may be requested. */
 	retryNotBefore?: string;
+	/** Claude answered 2xx, so it may have started an export and emailed
+	 * the owner: the request counts for the 24 h interval. */
+	exportMayHaveStarted?: boolean;
 }
 
 /** Map a failed `POST export_data` to a reason code and safe structured
@@ -643,11 +654,18 @@ export function classifyExportRequestFailure(
 	if (status === 429) {
 		const retryAfter = parseRetryAfterSeconds(req.retryAfter, nowMs);
 		if (retryAfter === null) {
+			// No Retry-After: wait the normal request interval, not zero.
+			const retryNotBefore = new Date(
+				nowMs + EXPORT_REQUEST_MIN_INTERVAL_MS,
+			).toISOString();
 			return {
 				reason: "export_rate_limited",
-				message: "Claude rate-limited the export request (HTTP 429).",
+				message:
+					"Claude rate-limited the export request (HTTP 429) and gave no " +
+					`Retry-After. A new one is not sent before ${retryNotBefore}.`,
 				recoveryHint: { action: "retry_by_runtime", retryable: true },
-				diagnostics: { http_status: status },
+				diagnostics: { http_status: status, retry_not_before: retryNotBefore },
+				retryNotBefore,
 			};
 		}
 		const retryNotBefore = new Date(nowMs + retryAfter * 1000).toISOString();
@@ -681,6 +699,7 @@ export function classifyExportRequestFailure(
 				"that has neither nonce nor data_files.",
 			recoveryHint: { action: "retry_on_connector_upgrade", retryable: false },
 			diagnostics: { http_status: status, body_keys: req.bodyKeys },
+			exportMayHaveStarted: status >= 200 && status < 300,
 		};
 	}
 	return {
@@ -1274,14 +1293,21 @@ export async function collectAnthropic({
 	const orgs = await fetchOrganizations(page);
 	const org = selectChatOrganization(orgs);
 	if (!org) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: CONVERSATIONS_STREAM,
-			reason: "no_chat_organization",
-			message:
-				"No chat-capable Claude organization could be resolved from the session.",
-			recovery_hint: { action: "refresh_credentials", retryable: false },
-		});
+		// Every export-derived stream is skipped: a stream with no record and
+		// no skip counts as complete and empty.
+		for (const stream of ALL_STREAMS) {
+			if (!requested.has(stream)) {
+				continue;
+			}
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "no_chat_organization",
+				message:
+					"No chat-capable Claude organization could be resolved from the session.",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
+			});
+		}
 		return;
 	}
 	const organizationId = org.uuid;
@@ -1292,24 +1318,35 @@ export async function collectAnthropic({
 	const req = await requestExport(page, org.uuid);
 	if (!req.ok) {
 		const failure = classifyExportRequestFailure(req, Date.now());
-		if (failure.retryNotBefore) {
+		if (failure.retryNotBefore || failure.exportMayHaveStarted) {
 			await emit({
 				type: "STATE",
 				stream: CONVERSATIONS_STREAM,
 				cursor: {
 					...priorCursor,
-					export_retry_not_before: failure.retryNotBefore,
+					...(failure.retryNotBefore
+						? { export_retry_not_before: failure.retryNotBefore }
+						: {}),
+					...(failure.exportMayHaveStarted
+						? { last_export_requested_at: nowIso() }
+						: {}),
 				},
 			});
 		}
-		await emit({
-			type: "SKIP_RESULT",
-			stream: CONVERSATIONS_STREAM,
-			reason: failure.reason,
-			message: failure.message,
-			recovery_hint: failure.recoveryHint,
-			diagnostics: failure.diagnostics,
-		});
+		// Skip every export-derived stream, as the guard paths above do.
+		for (const stream of ALL_STREAMS) {
+			if (!requested.has(stream)) {
+				continue;
+			}
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: failure.reason,
+				message: failure.message,
+				recovery_hint: failure.recoveryHint,
+				diagnostics: failure.diagnostics,
+			});
+		}
 		return;
 	}
 
