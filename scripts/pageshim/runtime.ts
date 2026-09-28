@@ -274,6 +274,7 @@ export async function runOnPageShim(
 		await connector.collect({
 			emit,
 			emitRecord: emitRecord.emit,
+			isRecordSelected: emitRecord.isSelected,
 			page,
 			progress: (message: string) =>
 				shim.setProgress({ phase: { label: "collect" }, message }),

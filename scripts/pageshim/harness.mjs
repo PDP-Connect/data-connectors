@@ -13,11 +13,13 @@
 //     into null; goto waits after the load starts; setData("result") crosses
 //     as one JSON string; waitForSelector throws on timeout; promptUser polls
 //     the check and throws when the login wait runs out.
+//   - captureDownload / extractZipEntries: see exportArchive() below.
 //
 // This is a re-implementation from the Dart source, not a vendored copy. It
 // is not a device run.
 
 import { readFileSync } from "node:fs";
+import { inflateRawSync } from "node:zlib";
 import { chromium } from "playwright";
 
 // page_shim.dart harnessJs `page` members. Nothing else is exposed.
@@ -95,7 +97,15 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 		getCapturedResponse: (k) => call("getCapturedResponse", [String(k)]),
 		hasCapturedResponse: (k) => captured.has(String(k)),
 		captureDownload: (u, o) => call("captureDownload", [String(u), o || null]),
-		extractZipEntries: (h, o) => call("extractZipEntries", [h, o || null]),
+		extractZipEntries: async (h, o) => {
+			const r = await call("extractZipEntries", [
+				h == null ? null : String(h),
+				o || null,
+			]);
+			if (r?.ok !== true)
+				return r || { ok: false, error: "extractZipEntries returned nothing" };
+			return { ok: true, names: r.names, json: JSON.parse(r.jsonText) };
+		},
 		promptUser: async (msg, check, interval) => {
 			await call("setData", ["status", msg]);
 			await call("promptUser", []);
@@ -145,10 +155,140 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 	}
 }
 
+/** The .json entries of a ZIP, as page_shim.dart's readZipJsonEntries
+ * returns them: every central-directory name, and the selected entries as
+ * one JSON text. `include` is a list of substrings. Stored and deflate only;
+ * an entry that does not parse is skipped. */
+function readZipJsonEntries(bytes, include) {
+	let eocd = -1;
+	for (
+		let i = bytes.length - 22;
+		i >= Math.max(0, bytes.length - 22 - 0xffff);
+		i--
+	)
+		if (bytes.readUInt32LE(i) === 0x06054b50) {
+			eocd = i;
+			break;
+		}
+	if (eocd < 0) return { ok: false, error: "not a zip (no EOCD)" };
+	const count = bytes.readUInt16LE(eocd + 10);
+	let off = bytes.readUInt32LE(eocd + 16);
+	const names = [];
+	const json = {};
+	for (let n = 0; n < count; n++) {
+		if (bytes.readUInt32LE(off) !== 0x02014b50) break;
+		const method = bytes.readUInt16LE(off + 10);
+		const compSize = bytes.readUInt32LE(off + 20);
+		const nameLen = bytes.readUInt16LE(off + 28);
+		const extraLen = bytes.readUInt16LE(off + 30);
+		const commentLen = bytes.readUInt16LE(off + 32);
+		const local = bytes.readUInt32LE(off + 42);
+		const name = bytes.toString("utf8", off + 46, off + 46 + nameLen);
+		off += 46 + nameLen + extraLen + commentLen;
+		names.push(name);
+		if (name.endsWith("/") || !name.endsWith(".json")) continue;
+		if (include && !include.some((needle) => name.includes(needle))) continue;
+		if (method !== 0 && method !== 8) continue;
+		const start =
+			local +
+			30 +
+			bytes.readUInt16LE(local + 26) +
+			bytes.readUInt16LE(local + 28);
+		const raw = bytes.subarray(start, start + compSize);
+		try {
+			json[name] = JSON.parse(
+				(method === 0 ? raw : inflateRawSync(raw)).toString("utf8"),
+			);
+		} catch {}
+	}
+	return { ok: true, names, jsonText: JSON.stringify(json) };
+}
+
+/**
+ * captureDownload + extractZipEntries, modelled on page_shim.dart
+ * (_captureDownload, _mintSignedUrl, _fetchArchive, _extractZipEntries):
+ *   - the URL must be /export/{org}/download/{nonce}, else a terminal error;
+ *   - the signed URL is minted ONCE per run by a credentialed POST to
+ *     /api/organizations/{org}/export_signed_url/{nonce} in the provider
+ *     document; 401/403 and a "consumed" body are terminal; any other
+ *     refusal is "not ready";
+ *   - the archive is fetched outside the page (fixtures.resolve, no cookies);
+ *     5xx or a 2xx that is not a ZIP is "not ready"; other non-2xx is terminal;
+ *   - "not ready" returns {ok:false, ready:false}; a terminal outcome makes the
+ *     call throw, and the host sets data.error.
+ */
+function exportArchive({ fixtures, evaluateInPage, data, log }) {
+	let signedUrl = null;
+	let minted = false;
+	let stash = null;
+	const notReady = (why) => {
+		log.push(`[capture] not ready: ${why}`);
+		return { ok: false, ready: false, error: "export not ready" };
+	};
+	const terminal = (outcome) => {
+		const message = `The Claude export could not be downloaded (${outcome}).`;
+		log.push(`[capture] fail: ${outcome}`);
+		data.error = message;
+		return { __shimError: message };
+	};
+	return {
+		async captureDownload(url) {
+			const m = /\/export\/([^/]+)\/download\/([^/?#]+)/.exec(url);
+			if (!m) return terminal("badurl");
+			if (!signedUrl) {
+				if (minted) return terminal("consumed");
+				const mint = await evaluateInPage(`(async () => {
+					const r = await fetch("/api/organizations/" + ${JSON.stringify(encodeURIComponent(m[1]))} +
+						"/export_signed_url/" + ${JSON.stringify(encodeURIComponent(m[2]))},
+						{ method: "POST", credentials: "include",
+						  headers: { "content-type": "application/json" }, body: "{}" });
+					const body = await r.text();
+					let j = null; try { j = JSON.parse(body); } catch {}
+					return { status: r.status, ok: r.ok, body: body.slice(0, 4096),
+					  url: j && (j.signed_url || j.signedUrl || j.url) };
+				})()`);
+				if (!mint) return notReady("bridge");
+				if (mint.status === 401 || mint.status === 403) return terminal("auth");
+				if (!mint.ok)
+					return mint.body.toLowerCase().includes("consumed")
+						? terminal("consumed")
+						: notReady(`mint ${mint.status}`);
+				minted = true;
+				if (typeof mint.url !== "string" || !mint.url) return notReady("nourl");
+				signedUrl = mint.url;
+			}
+			const res = fixtures.resolve(signedUrl);
+			if (res.status >= 500) return notReady(`storage ${res.status}`);
+			if (res.status < 200 || res.status >= 300) return terminal("httpfail");
+			const bytes = Buffer.from(res.body);
+			if (bytes.readUInt32LE(0) !== 0x04034b50)
+				return notReady("not a zip yet");
+			stash = bytes;
+			return {
+				ok: true,
+				ready: true,
+				path: null,
+				name: "claude-export.zip",
+				size: bytes.length,
+			};
+		},
+		extractZipEntries(options) {
+			if (!stash)
+				return { ok: false, error: "no captured download in this run" };
+			const bytes = stash;
+			stash = null;
+			return readZipJsonEntries(
+				bytes,
+				Array.isArray(options?.include) ? options.include.map(String) : null,
+			);
+		},
+	};
+}
+
 /**
  * @param {object} o
  * @param {string} o.bundle path to the built bundle
- * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
+ * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
@@ -205,6 +345,7 @@ export async function runHarness({
 			return null;
 		};
 
+		const archive = exportArchive({ fixtures, evaluateInPage, data, log });
 		const dispatch = async (method, a) => {
 			calls[method] = (calls[method] || 0) + 1;
 			switch (method) {
@@ -234,6 +375,10 @@ export async function runHarness({
 					return { headed: true };
 				case "url":
 					return target.url();
+				case "captureDownload":
+					return archive.captureDownload(String(a[0] ?? ""));
+				case "extractZipEntries":
+					return archive.extractZipEntries(a[1]);
 				case "httpFetch": {
 					const r = await target.evaluate(
 						async ({ url, opts }) => {
@@ -272,7 +417,7 @@ export async function runHarness({
 					return { ok: r.status >= 200 && r.status < 300, json, ...r };
 				}
 				default:
-					// click/fill/press/selectorState/capture*/extractZipEntries exist
+					// click/fill/press/selectorState/captureNetwork etc. exist
 					// on the host but no enabled connector uses them yet. Fail loudly
 					// rather than fake a result.
 					return {
