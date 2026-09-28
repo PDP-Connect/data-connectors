@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
+import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
 
 const out = mkdtempSync(join(tmpdir(), "pageshim-"));
@@ -197,6 +198,23 @@ test("harness rejects a page member the host does not offer", {
 	);
 });
 
+test("anthropic shim copies the desktop ZIP entry-name regexes exactly", () => {
+	const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+	const desktop = source(
+		"../../packages/polyfill-connectors/src/bounded-zip-archive.ts",
+	);
+	const shim = source("./shims/anthropic-export.ts");
+	for (const name of [
+		"UNSAFE_ZIP_ENTRY_NAME_RE",
+		"WHITESPACE_PADDED_DOT_DOT_SEGMENT_RE",
+	]) {
+		const literal = (text) =>
+			text.match(new RegExp(`const ${name} =\\s*(/.+/[a-z]*);`))?.[1];
+		assert.ok(literal(desktop), `${name} not found in bounded-zip-archive.ts`);
+		assert.equal(literal(shim), literal(desktop), name);
+	}
+});
+
 test("anthropic: export paths on the PageShim host", {
 	timeout: 300_000,
 }, async (t) => {
@@ -224,29 +242,59 @@ test("anthropic: export paths on the PageShim host", {
 		for (const scope of c.scopes) assert.equal(r.result[scope], undefined);
 	};
 
-	await t.test("records match the desktop ZIP reader", async () => {
+	const streams = c.scopes.map((scope) => scope.replace(/^claude\./, ""));
+	const pageshimRecords = (r) =>
+		Object.fromEntries(
+			c.scopes.map((scope) => [
+				scope,
+				(r.result[scope]?.records ?? []).map(({ blob_ref: _, ...x }) => x),
+			]),
+		);
+
+	await t.test("records deep-equal the desktop collectAnthropic", async () => {
 		const r = await run();
 		assertCleanRun(r);
 		assert.deepEqual(r.result.errors, []);
 		assert.equal(r.calls.captureDownload, 1);
 		assert.equal(r.calls.extractZipEntries, 1);
 		assert.deepEqual(fx.counts, { exportRequests: 1, mints: 1 });
-		const conversations = r.result["claude.conversations"].records;
-		assert.deepEqual(
-			conversations.map((x) => x.id),
-			[
-				"syn-conv-0000-0000-0000-000000000001",
-				"syn-conv-0000-0000-0000-000000000002",
-			],
-		);
 		// No blob store on this host, so no blob_ref.
-		for (const x of conversations) assert.equal(x.blob_ref, undefined);
-		assert.ok(
-			r.result["claude.messages"].records.every(
-				(m) => typeof m.conversation_id === "string",
+		for (const x of r.result["claude.conversations"].records)
+			assert.equal(x.blob_ref, undefined);
+		const desktop = await desktopRecords(fx.syntheticExport, streams);
+		assert.deepEqual(
+			Object.fromEntries(
+				streams.map((s) => [s, desktop[`claude.${s}`].length]),
 			),
+			c.exportSummary.details,
 		);
+		assert.deepEqual(pageshimRecords(r), desktop);
 	});
+
+	// Archives the desktop reader refuses. The shim must refuse them too.
+	const refused = {
+		"a duplicate entry name": [
+			["conversations.json", []],
+			["conversations.json", []],
+		],
+		"a traversal entry name": [
+			["../evil.json", {}],
+			["conversations.json", []],
+		],
+		"an absolute entry name": [
+			["/abs.json", {}],
+			["conversations.json", []],
+		],
+		"an entry that does not inflate": [
+			["conversations.json", Buffer.from([0xff, 0xff, 0xff, 0xff])],
+		],
+	};
+	for (const [label, entries] of Object.entries(refused))
+		await t.test(`${label}: fatal, as on desktop`, async () => {
+			const zip = fx.zipOf(entries);
+			await assert.rejects(desktopRecords(zip, streams));
+			assertFatalReason(await run({ zip }), /./);
+		});
 
 	await t.test("layout not recognized: fail closed, no records", async () => {
 		const r = await run({

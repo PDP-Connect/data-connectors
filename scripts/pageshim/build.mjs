@@ -39,7 +39,9 @@ export const PAGESHIM_CONNECTORS = ["github_browser", "anthropic"];
 /**
  * Per-connector ports. `modules`: for imports made by `importer` only, these
  * specifiers resolve to a shim that maps them onto the host (instead of the
- * throwing stub or the real module). `inject`: extra bundle-local globals.
+ * throwing stub or the real module). `inject`: extra globals. Unlike
+ * `modules`, esbuild applies them to every free reference in the whole
+ * connector bundle, not only to code under `importer`.
  */
 const CONNECTOR_PORTS = {
 	anthropic: {

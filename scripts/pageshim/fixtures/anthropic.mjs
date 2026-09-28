@@ -103,14 +103,19 @@ export function resolveFixture(raw) {
 	return json({ error: "not found" }, 404);
 }
 
-/** A stored ZIP of JSON entries, for layouts the fixture archive lacks. */
+/** A deflated ZIP of JSON entries, for layouts the fixture archive lacks.
+ * `entries` is an object or a list of [name, value] pairs (the list form can
+ * repeat a name). A Buffer value is written as the raw deflate data. */
 export function zipOf(entries) {
 	const locals = [];
 	const centrals = [];
 	let offset = 0;
-	for (const [name, value] of Object.entries(entries)) {
+	const pairs = Array.isArray(entries) ? entries : Object.entries(entries);
+	for (const [name, value] of pairs) {
 		const nameBytes = Buffer.from(name);
-		const data = deflateRawSync(Buffer.from(JSON.stringify(value)));
+		const data = Buffer.isBuffer(value)
+			? value
+			: deflateRawSync(Buffer.from(JSON.stringify(value)));
 		const local = Buffer.alloc(30);
 		local.writeUInt32LE(0x04034b50, 0);
 		local.writeUInt16LE(8, 8);
