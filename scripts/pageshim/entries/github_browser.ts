@@ -8,6 +8,9 @@ import { probeGitHubBrowserSession } from "../../../connectors/github_browser/pr
 import { validateRecord } from "../../../connectors/github_browser/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
+// Defined by build.mjs from connectors/github_browser/manifest.json.
+declare const PAGESHIM_CONNECTOR_VERSION: string;
+
 const length = (scope: unknown, key: string): number => {
 	const value = (scope as Record<string, unknown> | undefined)?.[key];
 	return Array.isArray(value) ? value.length : 0;
@@ -16,7 +19,15 @@ const length = (scope: unknown, key: string): number => {
 (globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
 	runOnPageShim(page, {
 		platform: "github",
-		version: "pdpp-github_browser",
+		scopes: [
+			"profile",
+			"repositories",
+			"starred",
+			"events",
+			"contributions",
+			"history",
+		].map((s) => `github.${s}`),
+		version: PAGESHIM_CONNECTOR_VERSION,
 		loginUrl: "https://github.com/login",
 		loginMessage: "Sign in to GitHub, then return here.",
 		validateRecord,
