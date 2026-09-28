@@ -34,10 +34,11 @@
 				"export_rate_limited": "Claude is limiting export requests for this account. No new export is requested before the time Claude gave, or for 24 hours if Claude gave no time.",
 				"export_auth_rejected": "Claude rejected the export request. Sign in to Claude again, then retry.",
 				"export_response_unrecognized": "Claude answered the export request in a format this connector does not recognize. Your existing data was not changed.",
-				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A new export will be requested automatically within 24 hours.",
+				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A later run downloads the same export again when it can, or requests a new one after 24 hours.",
 				"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 				"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
+				"export_items_too_large": "A Claude conversation or project in your export is too large to import. The other items were imported.",
 				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 			}
 		}

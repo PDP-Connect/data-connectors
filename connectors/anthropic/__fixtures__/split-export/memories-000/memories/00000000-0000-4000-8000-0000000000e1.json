@@ -1,0 +1,11 @@
+{
+	"conversations_memory": "Synthetic memory.",
+	"memory_files": [
+		{
+			"path": "synthetic.md",
+			"content": "Synthetic.",
+			"updated_at": "2026-01-02T03:04:05.000000Z"
+		}
+	],
+	"account_uuid": "00000000-0000-4000-8000-0000000000aa"
+}
