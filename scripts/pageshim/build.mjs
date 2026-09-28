@@ -110,7 +110,18 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		// The host passes a frozen `process = {env: {}}`. Bundled Node code
 		// reads more than that, so every reference goes to a bundle-local copy.
 		inject: [join(HERE, "shims", "process.js")],
-		define: { "import.meta.url": '"file:///pageshim/bundle.js"' },
+		define: {
+			"import.meta.url": '"file:///pageshim/bundle.js"',
+			// The export's `version` is the connector manifest's semver.
+			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
+				JSON.parse(
+					readFileSync(
+						join(REPO, "connectors", connector, "manifest.json"),
+						"utf8",
+					),
+				).version,
+			),
+		},
 		plugins: [stubPlugin(stubbed)],
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.

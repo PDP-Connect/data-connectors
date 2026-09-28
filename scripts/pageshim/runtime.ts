@@ -6,6 +6,9 @@
 //   RECORD   -> buffered, then one page.setData("result", ...) at the end
 //   PROGRESS -> page.setProgress
 //   SKIP_RESULT -> an entry in result.errors
+// Failure output matches mobile's legacy github-1.5.0.js: bad requestedScopes
+// is a fatal protocol_violation, and a fatal error yields an empty result
+// whose only error is that one, with the class inferred from its message.
 //   STATE    -> dropped (the host has no cursor store between runs)
 //
 // It does not call runConnector(): that is the stdio + Patchright runtime.
@@ -108,6 +111,9 @@ export function playwrightPageFacade(shim: ShimPage) {
 export interface PageshimConnector {
 	/** Scope prefix, e.g. "github". */
 	platform: string;
+	/** Every scope the connector serves, e.g. "github.profile". */
+	scopes: string[];
+	/** The connector manifest's semver. */
 	version: string;
 	loginUrl: string;
 	loginMessage: string;
@@ -124,12 +130,69 @@ export interface PageshimConnector {
 	};
 }
 
+type ConnectorError = {
+	errorClass: string;
+	reason: string;
+	disposition: string;
+	scope?: string;
+	phase: string;
+};
+
+class FatalRunError extends Error {
+	constructor(readonly telemetryError: ConnectorError) {
+		super(telemetryError.reason);
+	}
+}
+
+/** github-1.5.0.js inferErrorClass. */
+function inferErrorClass(message: string, fallback = "runtime_error"): string {
+	const text = message.toLowerCase();
+	if (["auth", "login", "credential"].some((w) => text.includes(w)))
+		return "auth_failed";
+	if (text.includes("timeout") || text.includes("timed out")) return "timeout";
+	if (["network", "fetch", "net::"].some((w) => text.includes(w)))
+		return "network_error";
+	return fallback;
+}
+
+/** github-1.5.0.js resolveRequestedScopes. */
+function resolveRequestedScopes(
+	raw: unknown,
+	connector: PageshimConnector,
+): string[] {
+	if (raw == null) return [...connector.scopes];
+	const fatal = (reason: string) =>
+		new FatalRunError({
+			errorClass: "protocol_violation",
+			reason,
+			disposition: "fatal",
+			phase: "init",
+		});
+	if (!Array.isArray(raw) || raw.length === 0)
+		throw fatal(
+			`${connector.platform} connector received an empty or invalid requestedScopes array.`,
+		);
+	const deduped = [...new Set(raw as string[])];
+	const invalid = deduped.filter((s) => !connector.scopes.includes(s));
+	if (invalid.length > 0)
+		throw fatal(
+			`${connector.platform} connector received unsupported requestedScopes: ${invalid.join(", ")}.`,
+		);
+	return deduped;
+}
+
 export async function runOnPageShim(
 	shim: ShimPage,
 	connector: PageshimConnector,
 ): Promise<void> {
 	const page = playwrightPageFacade(shim);
-	const requestedScopes = shim.requestedScopes();
+	let requestedScopes = [...connector.scopes];
+	let initError: unknown = null;
+	try {
+		requestedScopes = resolveRequestedScopes(shim.requestedScopes(), connector);
+	} catch (error) {
+		initError = error;
+	}
 	const prefix = `${connector.platform}.`;
 	const requested = new Map(
 		requestedScopes
@@ -137,7 +200,7 @@ export async function runOnPageShim(
 			.map((s) => [s.slice(prefix.length), { name: s.slice(prefix.length) }]),
 	);
 	const records: Record<string, Rec[]> = {};
-	const errors: unknown[] = [];
+	const errors: ConnectorError[] = [];
 	const state: Record<string, unknown> = {};
 	const emit = async (msg: Msg): Promise<void> => {
 		switch (msg.type) {
@@ -150,15 +213,18 @@ export async function runOnPageShim(
 			case "STATE":
 				state[String(msg.stream)] = msg.cursor;
 				return;
-			case "SKIP_RESULT":
+			case "SKIP_RESULT": {
+				const stream = String(msg.stream);
+				const reason = String(msg.message ?? msg.reason);
 				errors.push({
-					errorClass: "incomplete",
-					reason: String(msg.message ?? msg.reason),
-					disposition: "omitted",
-					scope: `${prefix}${String(msg.stream)}`,
+					errorClass: inferErrorClass(reason),
+					reason,
+					disposition: records[stream]?.length ? "degraded" : "omitted",
+					scope: `${prefix}${stream}`,
 					phase: "collect",
 				});
 				return;
+			}
 			case "PROGRESS":
 				await shim.setProgress({
 					phase: { label: String(msg.stream ?? "collect") },
@@ -178,17 +244,21 @@ export async function runOnPageShim(
 		isTombstone: undefined,
 		timeRangeFieldFor: () => "date",
 	});
-	const result = (scopes: Record<string, unknown>) => ({
-		requestedScopes,
+	const result = (
+		scopes: Record<string, unknown>,
+		resultErrors: ConnectorError[],
+	) => ({
+		requestedScopes: [...requestedScopes],
 		timestamp: new Date().toISOString(),
 		version: connector.version,
 		platform: connector.platform,
 		exportSummary: connector.summarize(scopes),
-		errors,
+		errors: resultErrors,
 		...scopes,
 	});
 
 	try {
+		if (initError) throw initError;
 		await shim.setData("status", `Checking ${connector.platform} login...`);
 		if (!(await connector.probe(page))) {
 			await page.goto(connector.loginUrl);
@@ -213,7 +283,7 @@ export async function runOnPageShim(
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
-		const done = result(scopes);
+		const done = result(scopes, errors);
 		await shim.setData("result", done);
 		await shim.setData(
 			"status",
@@ -221,14 +291,17 @@ export async function runOnPageShim(
 		);
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		errors.push({
-			errorClass: "runtime_error",
-			reason,
-			disposition: "fatal",
-			phase: "collect",
-		});
-		await shim.setData("result", result({}));
-		await shim.setData("error", reason);
+		const fatal =
+			error instanceof FatalRunError
+				? error.telemetryError
+				: {
+						errorClass: inferErrorClass(reason),
+						reason,
+						disposition: "fatal",
+						phase: "collect",
+					};
+		await shim.setData("result", result({}, [fatal]));
+		await shim.setData("error", fatal.reason);
 	} finally {
 		const hits = [
 			...new Set(

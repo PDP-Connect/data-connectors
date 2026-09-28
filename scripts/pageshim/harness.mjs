@@ -150,7 +150,8 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
  * @param {string} o.bundle path to the built bundle
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
- * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay
+ * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
+ * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  */
 export async function runHarness({
 	bundle,
@@ -294,7 +295,9 @@ export async function runHarness({
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
 
-		if (loginAfterMs > 0) {
+		if (loginAfterMs === Number.POSITIVE_INFINITY) {
+			fixtures.setLoggedIn(false); // the user never signs in
+		} else if (loginAfterMs > 0) {
 			fixtures.setLoggedIn(false);
 			setTimeout(() => {
 				log.push("[user] signs in");

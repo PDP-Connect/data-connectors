@@ -117,3 +117,26 @@ export const githubBrowserFixtures = {
 	loginUrl: "https://github.com/login",
 	homeUrl: "https://github.com/",
 };
+
+/** What pageshim.test.mjs needs to gate github_browser. */
+export const pageshimCase = {
+	fixtures: githubBrowserFixtures,
+	scopes: [
+		"profile",
+		"repositories",
+		"starred",
+		"events",
+		"contributions",
+		"history",
+	].map((s) => `github.${s}`),
+	exportSummary: {
+		count: 2,
+		label: "items",
+		details: { repositories: 1, starred: 0, events: 1, contributions: 1234 },
+	},
+	emptyExportSummary: {
+		count: 0,
+		label: "items",
+		details: { repositories: 0, starred: 0, events: 0, contributions: 0 },
+	},
+};
