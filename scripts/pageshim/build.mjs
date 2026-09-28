@@ -34,7 +34,11 @@ const REPO = join(HERE, "..", "..");
 const require = createRequire(import.meta.url);
 
 /** Connectors enabled for the pageshim target. One entry file each. */
-export const PAGESHIM_CONNECTORS = ["github_browser", "anthropic"];
+export const PAGESHIM_CONNECTORS = [
+	"github_browser",
+	"anthropic",
+	"strava_browser",
+];
 
 /**
  * Per-connector ports. `modules`: for imports made by `importer` only, these

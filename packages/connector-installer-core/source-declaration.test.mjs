@@ -412,6 +412,19 @@ describe("source declarations — connector fleet", () => {
     assert.deepEqual(invalid, []);
   });
 
+  it("strava-browser fits the published strava declaration without changing it", () => {
+    const profileOf = (name) => manifests.find(({ manifest }) => manifest === name).profile;
+    const file = profileOf("strava");
+    const browser = profileOf("strava_browser");
+    const published = buildSourceDeclaration(sourceDeclarationMembers(file));
+    assert.deepEqual(profileDeclarationErrors(browser, published), []);
+    // Publishing strava-browser beside strava later must not change the bytes.
+    assert.deepEqual(
+      serializeSourceDeclaration(buildSourceDeclaration([file, browser])),
+      serializeSourceDeclaration(published),
+    );
+  });
+
   it("every publishable artifact of one source carries byte-identical declaration bytes", () => {
     const bySource = new Map();
     for (const { manifest, exclusionReason, profile } of manifests) {

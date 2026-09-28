@@ -1938,6 +1938,27 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "streamCsvRows(): the final CSV row is emitted before the parser returns",
 		},
 		{
+			path: "connectors/strava_browser/index.ts",
+			line: 309,
+			column: 20,
+			category: "bounded_retry_polling",
+			note: "A rate-limited Strava list page is retried at most twice, each after the previous attempt's 429.",
+		},
+		{
+			path: "connectors/strava_browser/index.ts",
+			line: 388,
+			column: 4,
+			category: "dependent_pagination",
+			note: "Strava list pages are read one at a time; whether to read the next page depends on the previous page's total and dates.",
+		},
+		{
+			path: "connectors/strava_browser/index.ts",
+			line: 446,
+			column: 4,
+			category: "ordered_protocol_emission",
+			note: "Strava activities are emitted in list order before the page's progress and the run's checkpoint.",
+		},
+		{
 			path: "connectors/twitter_archive/index.ts",
 			line: 150,
 			column: 3,

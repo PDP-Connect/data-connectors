@@ -346,3 +346,68 @@ test("anthropic: export paths on the PageShim host", {
 		assert.equal(r.calls.goto, 1);
 	});
 });
+
+test("strava_browser: records and fail-closed paths on the PageShim host", {
+	timeout: 180_000,
+}, async (t) => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/strava_browser.mjs"
+	);
+	const built = await buildPageshim({
+		connector: "strava_browser",
+		outfile: join(out, "strava_browser-paths.js"),
+	});
+	const run = (resolve = resolveFixture) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve },
+			scopes: c.scopes,
+		});
+
+	await t.test(
+		"activities cross as live records with a coverage receipt",
+		async () => {
+			const r = await run();
+			assertCleanRun(r);
+			assert.deepEqual(r.result.errors, []);
+			const activities = r.result["strava.activities"].records;
+			assert.deepEqual(
+				activities.map((a) => [a.id, a.activity_type, a.freshness]),
+				[
+					["90000000005", "Ride", "live"],
+					["90000000004", "Run", "live"],
+					["90000000003", "Yoga", "live"],
+					["90000000002", "EBikeRide", "live"],
+					["90000000001", "Swim", "live"],
+				],
+			);
+			const [receipt] = r.result["strava.coverage_diagnostics"].records;
+			assert.equal(receipt.reason, "covered_in_full");
+			assert.equal(receipt.record_count, 5);
+		},
+	);
+
+	await t.test(
+		"an unrecognised list fails closed: no activities, one omitted error",
+		async () => {
+			const r = await run((raw) =>
+				new URL(raw).pathname === "/athlete/training_activities"
+					? {
+							status: 200,
+							contentType: "application/json",
+							body: '{"activities":[]}',
+						}
+					: resolveFixture(raw),
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.result["strava.activities"], undefined);
+			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+			assert.equal(r.result.errors[0].scope, "strava.activities");
+			assert.equal(r.result.errors[0].disposition, "omitted");
+			const [receipt] = r.result["strava.coverage_diagnostics"].records;
+			assert.equal(receipt.reason, "source_unreadable");
+			assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
+		},
+	);
+});

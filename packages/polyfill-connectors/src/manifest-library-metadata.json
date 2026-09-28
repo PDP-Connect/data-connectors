@@ -557,6 +557,21 @@
 		}
 	},
 	{
+		"file": "strava_browser.json",
+		"manifest": {
+			"connector_key": "strava-browser",
+			"reason_display_messages": {
+				"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
+				"covered_in_full": "Every activity in your Strava list was collected.",
+				"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
+				"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
+				"sign_in_required": "Strava needs you to sign in again before this can continue.",
+				"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
+				"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "twitter_archive.json",
 		"manifest": {
 			"connector_key": "twitter-archive",

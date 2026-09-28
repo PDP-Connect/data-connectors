@@ -1,0 +1,274 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/strava-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/strava",
+		"display": {
+			"name": "Strava"
+		}
+	},
+	"connector_key": "strava-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
+	"version": "0.1.0",
+	"display_name": "Strava (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FC4C02"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			},
+			"browser": {
+				"required": true
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Pages are fetched one at a time with a pause between them, and one run reads at most 100 pages."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "activities",
+			"required": false,
+			"description": "Workouts recorded on Strava, read from the activity list strava.com shows the signed-in owner. Location data and free text are excluded at the schema.",
+			"display": {
+				"label": "Your Strava activities",
+				"detail": "Sport, start time, distance, moving and elapsed time and elevation gain. Heart rate, calories and gear are not in the list strava.com serves and arrive empty from this profile. No route, no GPS coordinates, no activity titles or notes."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Strava's own numeric activity id, stable across exports."
+					},
+					"activity_type": {
+						"type": ["string", "null"],
+						"description": "The export's Activity Type (Ride, Run, Swim, Hike). This is Strava's coarse type, not the API's finer sport_type; the export does not carry the latter.",
+						"x_pdpp_role": "primary-title"
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date",
+						"description": "The calendar day of the activity, YYYY-MM-DD. Carried separately because start_time deliberately does not claim to be an instant: filtering and grouping need a field a server can treat as a date without inventing a timezone to do it. Derived from the same value as start_time, so it INHERITS start_time_basis — under basis 'utc' this is the UTC day, which is the wrong calendar day for any activity between local midnight and the owner's offset. Aggregates over a window (longest, furthest, how many) are safe on any basis; anything anchored to a particular day, including a same-day join against another source, is only safe under basis 'local'."
+					},
+					"start_time": {
+						"type": "string",
+						"description": "Activity start, ISO-8601. Carries a UTC offset only when the archive stated one; Strava's own rendering does not, so a zoneless value is normal. Read start_time_basis before treating this as an instant or making any claim about time of day.",
+						"x_pdpp_role": "event-time"
+					},
+					"start_time_basis": {
+						"type": "string",
+						"enum": ["utc", "local", "unknown"],
+						"description": "Which clock start_time is on. The export carries a single date column and does not state its basis, so this records what was determined rather than what was assumed. On 'unknown' or 'utc', a reader must not make time-of-day claims: an evening ride in one timezone is an afternoon one in another."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"description": "Metres. Taken from the second Distance column, which is canonical; the first is in the athlete's own display units and may be miles."
+					},
+					"moving_time_s": {
+						"type": ["number", "null"],
+						"description": "Seconds."
+					},
+					"elapsed_time_s": {
+						"type": ["number", "null"],
+						"description": "Seconds. Taken from the second Elapsed Time column, which is canonical."
+					},
+					"total_elevation_gain_m": {
+						"type": ["number", "null"],
+						"description": "Metres."
+					},
+					"average_heartrate": {
+						"type": ["number", "null"],
+						"description": "Beats per minute. Null when no monitor was worn, which is the common case — never zero."
+					},
+					"max_heartrate": {
+						"type": ["number", "null"],
+						"description": "Beats per minute. Null when no monitor was worn."
+					},
+					"calories_kcal": {
+						"type": ["number", "null"],
+						"description": "Kilocalories as Strava recorded them. Null is common, particularly for manually entered activities."
+					},
+					"gear": {
+						"type": ["string", "null"],
+						"description": "The owner's own name for the bike or shoes used, from Activity Gear. Null when no gear was assigned."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"],
+						"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the archive. Present in the payload because a reader holds records, not the manifest, and a source collected two ways must be distinguishable per reading."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When Strava generated the archive these records came from. Always present as a key; null only when the archive carried no determinable generation date. Required alongside freshness 'snapshot' so age can be stated rather than inferred."
+					}
+				},
+				"required": [
+					"id",
+					"start_date",
+					"start_time",
+					"start_time_basis",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["activity_type"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "coverage_diagnostics",
+			"required": false,
+			"description": "What this collection covered and why it stops where it does. One record per stream per run.",
+			"display": {
+				"label": "What your Strava collection covered",
+				"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"stream": {
+						"type": ["string", "null"],
+						"description": "The stream this record accounts for."
+					},
+					"status": {
+						"type": "string",
+						"enum": ["complete", "partial", "empty"],
+						"description": "Whether the covered window matches the requested window. 'empty' is an ordinary outcome, not a failure."
+					},
+					"reason": {
+						"type": "string",
+						"enum": [
+							"covered_in_full",
+							"nothing_in_range",
+							"awaiting_upload",
+							"source_unreadable",
+							"source_limit_reached",
+							"collection_interrupted",
+							"records_unreadable",
+							"sign_in_required",
+							"window_unavailable"
+						],
+						"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner, and each has a reason_display_messages entry.",
+						"x_pdpp_role": "primary-title"
+					},
+					"record_count": {
+						"type": ["integer", "null"],
+						"description": "Records emitted for this stream in this import."
+					},
+					"fields_unavailable": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Fields the schema declares that this particular archive did not carry, so a column of nulls is never mistaken for a column of absent readings. Calories and gear are optional columns in the export and are the two this path exists to deliver."
+					},
+					"window_requested_from": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"window_requested_to": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"window_covered_from": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
+					},
+					"window_covered_to": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"]
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": [
+					"id",
+					"status",
+					"reason",
+					"fields_unavailable",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"window_requested_from": ["gte", "gt", "lte", "lt"],
+					"window_requested_to": ["gte", "gt", "lte", "lt"],
+					"window_covered_from": ["gte", "gt", "lte", "lt"],
+					"window_covered_to": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_policy": "inventory_only",
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
+		"covered_in_full": "Every activity in your Strava list was collected.",
+		"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
+		"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
+		"sign_in_required": "Strava needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
+		"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+	}
+}

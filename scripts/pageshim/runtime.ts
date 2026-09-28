@@ -80,8 +80,14 @@ export function playwrightPageFacade(shim: ShimPage) {
 		},
 		context: () => ({
 			request: {
-				get: async (url: string, _opts?: unknown) => {
-					const r = await shim.httpFetch(url, { method: "GET" });
+				get: async (
+					url: string,
+					opts?: { headers?: Record<string, string> },
+				) => {
+					const r = await shim.httpFetch(url, {
+						method: "GET",
+						...(opts?.headers ? { headers: opts.headers } : {}),
+					});
 					return {
 						ok: () => r.ok,
 						status: () => r.status,

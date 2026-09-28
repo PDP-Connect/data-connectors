@@ -84,6 +84,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	twitter_archive: c("twitter_archive"),
 	imessage: c("imessage"),
 	strava: c("strava"),
+	strava_browser: c("strava_browser"),
 	notion: c("notion"),
 	reddit: c("reddit"),
 	whoop: c("whoop"),
