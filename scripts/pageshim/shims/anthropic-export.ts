@@ -134,6 +134,14 @@ export async function savePlaywrightDownload(
 
 // ── bounded-zip-archive.ts ───────────────────────────────────────────────
 
+// Copied from bounded-zip-archive.ts, which does not export them;
+// pageshim.test.mjs fails if the copies drift. Desktop refuses the whole
+// archive on any of these names, on a duplicate name, or on a symlink. The
+// host does not report symlink bits, so that one check is not ported.
+const UNSAFE_ZIP_ENTRY_NAME_RE =
+	/(^[/\\])|(\.\.[/\\])|(\.\.$)|(^[A-Za-z]:)|(\\\\)|\0/;
+const WHITESPACE_PADDED_DOT_DOT_SEGMENT_RE = /(^|[/\\])\s*\.\.\s*($|[/\\])/;
+
 export function readZipEntriesFromFile(
 	fd: number,
 	_fileSize: number,
@@ -141,11 +149,25 @@ export function readZipEntriesFromFile(
 ) {
 	const archive = archives.get(openFiles.get(fd) ?? "");
 	if (!archive) throw new Error("pageshim: no extracted archive for this file");
-	const files = archive.names.filter((name) => !name.endsWith("/"));
-	if (files.length > policy.maxEntries)
+	// Desktop counts every central-directory record, directories included.
+	if (archive.names.length > policy.maxEntries)
 		throw new Error(
-			`ZIP has ${files.length} entries, more than the ${policy.maxEntries} allowed`,
+			`ZIP has ${archive.names.length} entries, more than the ${policy.maxEntries} allowed`,
 		);
+	const seen = new Set<string>();
+	for (const name of archive.names) {
+		if (
+			UNSAFE_ZIP_ENTRY_NAME_RE.test(name) ||
+			WHITESPACE_PADDED_DOT_DOT_SEGMENT_RE.test(name)
+		)
+			throw new Error(
+				`zip entry '${name}' has an unsafe name (path traversal, absolute path, drive/UNC root, or embedded NUL)`,
+			);
+		if (seen.has(name))
+			throw new Error(`zip declares more than one entry named '${name}'`);
+		seen.add(name);
+	}
+	const files = archive.names.filter((name) => !name.endsWith("/"));
 	return files.map((name) => ({
 		name,
 		data: () => {

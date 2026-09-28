@@ -158,7 +158,8 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 /** The .json entries of a ZIP, as page_shim.dart's readZipJsonEntries
  * returns them: every central-directory name, and the selected entries as
  * one JSON text. `include` is a list of substrings. Stored and deflate only;
- * an entry that does not parse is skipped. */
+ * an entry that does not parse is skipped; one that does not inflate fails
+ * the archive. */
 function readZipJsonEntries(bytes, include) {
 	let eocd = -1;
 	for (
@@ -195,10 +196,15 @@ function readZipJsonEntries(bytes, include) {
 			bytes.readUInt16LE(local + 26) +
 			bytes.readUInt16LE(local + 28);
 		const raw = bytes.subarray(start, start + compSize);
+		let text;
 		try {
-			json[name] = JSON.parse(
-				(method === 0 ? raw : inflateRawSync(raw)).toString("utf8"),
-			);
+			text = (method === 0 ? raw : inflateRawSync(raw)).toString("utf8");
+		} catch {
+			// Dart fails the whole archive when an entry does not inflate.
+			return { ok: false, error: "noinflate" };
+		}
+		try {
+			json[name] = JSON.parse(text);
 		} catch {}
 	}
 	return { ok: true, names, jsonText: JSON.stringify(json) };
@@ -261,7 +267,8 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 			if (res.status >= 500) return notReady(`storage ${res.status}`);
 			if (res.status < 200 || res.status >= 300) return terminal("httpfail");
 			const bytes = Buffer.from(res.body);
-			if (bytes.readUInt32LE(0) !== 0x04034b50)
+			// Dart classifyArchive: empty is not ready; a "PK" prefix is a ZIP.
+			if (bytes.length < 2 || bytes[0] !== 0x50 || bytes[1] !== 0x4b)
 				return notReady("not a zip yet");
 			stash = bytes;
 			return {
