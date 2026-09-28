@@ -355,7 +355,7 @@ test("a nonzero search summary with no parsed orders fails rather than reporting
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
 	} as unknown as Page;
 	await assert.rejects(
-		discoverOrderStubs(shape),
+		discoverOrderStubs(shape, noProgress),
 		/no recognizable results or empty-state evidence/,
 	);
 });
@@ -373,13 +373,14 @@ test("order search readiness timeout is bounded and explained before parsing", a
 	} as unknown as Page;
 
 	await assert.rejects(
-		discoverOrderStubs(shape),
+		discoverOrderStubs(shape, noProgress),
 		/wholefoods_order_page_readiness_timeout/,
 	);
 });
 
 test("order search accepts the signed-in current empty-orders shell without cards", async () => {
-	const html = '<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders</p></div>';
+	const html =
+		'<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders</p></div>';
 	const shape = {
 		...fakePage(html),
 		locator: (selector: string) => ({
@@ -393,7 +394,7 @@ test("order search accepts the signed-in current empty-orders shell without card
 			}),
 		}),
 	} as unknown as Page;
-	assert.deepEqual(await discoverOrderStubs(shape), { stubs: [] });
+	assert.deepEqual(await discoverOrderStubs(shape, noProgress), { stubs: [] });
 });
 
 test("HTTP 503 product navigation plus empty USDA results emits error", async () => {
@@ -625,6 +626,8 @@ function pagedSearch(pages: string[]): Page {
 	} as unknown as Page;
 }
 
+const noProgress = () => Promise.resolve();
+
 const rowsOf = (orderId: string, first: number, count: number) =>
 	Array.from(
 		{ length: count },
@@ -642,7 +645,7 @@ test("order search walks pages that only continue an order already seen", async 
 		searchPage(4, rowsOf(c, 18, 10), true),
 		searchPage(5, rowsOf(c, 28, 3), false),
 	];
-	const { stubs } = await discoverOrderStubs(pagedSearch(pages));
+	const { stubs } = await discoverOrderStubs(pagedSearch(pages), noProgress);
 	assert.deepEqual(
 		stubs.map((s) => [s.orderId, s.expectedItemCount]),
 		[
@@ -653,11 +656,38 @@ test("order search walks pages that only continue an order already seen", async 
 	);
 });
 
+test("order search sends progress for every page it walks", async () => {
+	const a = "111-1111111-1111111";
+	const pageCount = 6;
+	const pages = Array.from({ length: pageCount }, (_, i) =>
+		searchPage(i + 1, rowsOf(a, i * 10, 10), i + 1 < pageCount),
+	);
+	const messages: Array<{ message: string; extra: unknown }> = [];
+	const { stubs } = await discoverOrderStubs(
+		pagedSearch(pages),
+		(message, extra) => {
+			messages.push({ message, extra });
+			return Promise.resolve();
+		},
+	);
+	assert.equal(stubs.length, 1);
+	assert.deepEqual(
+		messages.map((m) => m.message),
+		Array.from(
+			{ length: pageCount },
+			(_, i) => `Scanned Whole Foods search page ${i + 1}`,
+		),
+	);
+	for (const m of messages) {
+		assert.deepEqual(m.extra, { count: 1, stream: "orders" });
+	}
+});
+
 test("order search fails when Amazon serves the same page again", async () => {
 	const a = "111-1111111-1111111";
 	const page1 = searchPage(1, rowsOf(a, 0, 10), true);
 	await assert.rejects(
-		discoverOrderStubs(pagedSearch([page1])),
+		discoverOrderStubs(pagedSearch([page1]), noProgress),
 		/pagination repeated/,
 	);
 });
