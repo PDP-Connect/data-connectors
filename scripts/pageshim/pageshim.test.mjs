@@ -196,3 +196,105 @@ test("harness rejects a page member the host does not offer", {
 		/page\.requestInput is not part of the PageShim API/,
 	);
 });
+
+test("anthropic: export paths on the PageShim host", {
+	timeout: 300_000,
+}, async (t) => {
+	const fx = await import("./fixtures/anthropic.mjs");
+	const c = fx.pageshimCase;
+	const built = await buildPageshim({
+		connector: "anthropic",
+		outfile: join(out, "anthropic-paths.js"),
+	});
+	const run = (o) => {
+		fx.reset(o);
+		return runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes,
+		});
+	};
+	const assertFatalReason = (r, pattern) => {
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+		assert.equal(r.result.errors[0].disposition, "fatal");
+		assert.match(r.result.errors[0].reason, pattern);
+		assert.equal(r.data.error, r.result.errors[0].reason);
+		for (const scope of c.scopes) assert.equal(r.result[scope], undefined);
+	};
+
+	await t.test("records match the desktop ZIP reader", async () => {
+		const r = await run();
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(r.calls.captureDownload, 1);
+		assert.equal(r.calls.extractZipEntries, 1);
+		assert.deepEqual(fx.counts, { exportRequests: 1, mints: 1 });
+		const conversations = r.result["claude.conversations"].records;
+		assert.deepEqual(
+			conversations.map((x) => x.id),
+			[
+				"syn-conv-0000-0000-0000-000000000001",
+				"syn-conv-0000-0000-0000-000000000002",
+			],
+		);
+		// No blob store on this host, so no blob_ref.
+		for (const x of conversations) assert.equal(x.blob_ref, undefined);
+		assert.ok(
+			r.result["claude.messages"].records.every(
+				(m) => typeof m.conversation_id === "string",
+			),
+		);
+	});
+
+	await t.test("layout not recognized: fail closed, no records", async () => {
+		const r = await run({
+			zip: fx.zipOf({
+				"memories.json": [{ id: "m1" }],
+				"users.json": [{ uuid: "u1" }],
+			}),
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		for (const scope of c.scopes) assert.equal(r.result[scope], undefined);
+		assert.deepEqual(
+			r.result.errors.map((e) => [e.scope, e.disposition]),
+			c.scopes.map((s) => [s, "omitted"]),
+		);
+		for (const e of r.result.errors)
+			assert.match(e.reason, /does not claim the account is empty/);
+		assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
+	});
+
+	await t.test(
+		"export not ready, then ready: polls the same nonce",
+		async () => {
+			const r = await run({ notReadyPolls: 1 });
+			assertCleanRun(r);
+			assert.deepEqual(r.result.errors, []);
+			assert.deepEqual(r.result.exportSummary, c.exportSummary);
+			assert.equal(r.calls.captureDownload, 2);
+			assert.deepEqual(fx.counts, { exportRequests: 1, mints: 2 });
+		},
+	);
+
+	await t.test("spent nonce: the host error ends the run", async () => {
+		const r = await run({ mintFailure: { error: "nonce consumed" } });
+		assertFatalReason(r, /could not be downloaded \(consumed\)/);
+		assert.equal(r.calls.captureDownload, 1);
+	});
+
+	await t.test("multi-part export format: fatal, named", async () => {
+		const r = await run({ exportFormat: "new" });
+		assertFatalReason(r, /multi-part export format/);
+		assert.equal(r.calls.captureDownload, undefined);
+		// The storage URL is never loaded in the WebView.
+		assert.ok(
+			!r.log.some((l) => l.includes("claude-export.test")),
+			r.log.join("\n"),
+		);
+		assert.equal(r.calls.goto, 1);
+	});
+});
