@@ -2764,13 +2764,6 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "assert.rejects(): test drives/asserts an ordered per-case side effect",
 		},
 		{
-			path: "src/scheduler-runner.ts",
-			line: 288,
-			column: 4,
-			category: "devtool_sequential_output",
-			note: "registerManifest(): manual dev-tool script printing ordered per-item console output",
-		},
-		{
 			path: "src/test-fixtures/browser-har-replay-e2e-connector.ts",
 			line: 90,
 			column: 4,
