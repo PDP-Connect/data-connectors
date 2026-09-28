@@ -95,6 +95,28 @@ test("parseOrderSearchPageDom reports hasNextPage from the pagination control", 
 	assert.equal(hasNextPage, true);
 });
 
+test("parseOrderSearchPageDom gives a continued order's next page a new row signature and reads the selected page", () => {
+	// Live 2026-09-28: search pages hold ~10 item rows, so one large order
+	// fills whole pages with no new order id. Its item links still differ.
+	const row = (asin: string) =>
+		searchResultRow("111-1111111-1111111", "Ordered on March 3, 2026").replace(
+			"</div>\n    </div>",
+			`<a href="/dp/${asin}">item</a></div>\n    </div>`,
+		);
+	const pager = (n: number) =>
+		`<ul class="a-pagination"><li class="a-selected"><a href="?page=${n}">${n}</a></li><li class="a-last"><a href="?page=${n + 1}">Next</a></li></ul>`;
+	const page4 = parseOrderSearchPageDom(
+		`<html><body>${row("A1")}${pager(4)}</body></html>`,
+	);
+	const page5 = parseOrderSearchPageDom(
+		`<html><body>${row("A2")}${pager(5)}</body></html>`,
+	);
+	assert.equal(page4.stubs[0]?.orderId, page5.stubs[0]?.orderId);
+	assert.notEqual(page4.rowSignature, page5.rowSignature);
+	assert.equal(page4.selectedPage, 4);
+	assert.equal(page5.selectedPage, 5);
+});
+
 // ─── Order detail page ────────────────────────────────────────────────────
 //
 // Shapes confirmed against a live capture 2026-09-22 (see parsers.ts's
