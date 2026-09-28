@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.4)
+ * PDPP Meta (Instagram) Connector (v0.4.10)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -99,6 +99,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.10 (2026-09-26) — completes verified-empty posts from a successful,
+ *     terminal timeline response with an empty source edge array.
  *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
  *     in the owner's sign-in tab instead of opening a sibling about:blank tab.
  *   v0.4.3 (2026-09-24) — reports bounded failure steps for incomplete ads
@@ -178,6 +180,9 @@ const ADS_REQUIRED_SURFACES = [
 	"ad_topics",
 	"targeting_categories",
 ] as const;
+// Legacy source lines 795-798 bind these owner-posts GraphQL operations.
+const POSTS_TIMELINE_OPERATION_RE =
+	/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/;
 
 type AdsSurface = (typeof ADS_REQUIRED_SURFACES)[number];
 type AdsSurfaceStep =
@@ -472,6 +477,17 @@ export async function fetchProfileCounts(
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
 
 interface TimelineEnvelope {
+	ok?: unknown;
+	errors?: unknown;
+	error?: unknown;
+	errorCode?: unknown;
+	error_code?: unknown;
+	status?: unknown;
+	extensions?: {
+		code?: unknown;
+		is_final?: unknown;
+		partial?: unknown;
+	} | null;
 	data?: {
 		xdt_api__v1__feed__user_timeline_graphql_connection?: InstagramTimelineConnection | null;
 	} | null;
@@ -490,24 +506,100 @@ interface TimelineEnvelope {
  * `page.captureNetwork`/`getCapturedResponse` pattern, using Playwright's own
  * `waitForResponse` instead of that bespoke shim.
  */
-function isPostsTimelineResponse(response: {
-	request: () => { method: () => string };
+function isPostsTimelineResponseForPage(page: Page): (response: {
+	request: () => {
+		frame?: () => { page?: () => Page };
+		headers: () => Record<string, string>;
+		method: () => string;
+		postData: () => string | null;
+	};
 	url: () => string;
-}): boolean {
-	return (
-		response.url().includes("/graphql/") &&
-		response.request().method() === "POST"
-	);
+}) => boolean {
+	return (response) => {
+		const request = response.request();
+		const responsePage = request.frame?.().page?.();
+		return (
+			(responsePage === undefined || responsePage === page) &&
+			response.url().includes("/graphql") &&
+			POSTS_TIMELINE_OPERATION_RE.test(request.postData() ?? "")
+		);
+	};
+}
+
+const POSTS_INITIAL_CAPTURE_DELAY_MS = 3_000;
+const POSTS_CAPTURE_POLL_INTERVAL_MS = 1_000;
+const POSTS_CAPTURE_MAX_POLLS = 30;
+
+type PostsClock = { sleep: (ms: number, signal?: AbortSignal) => Promise<void> };
+
+const realPostsClock: PostsClock = {
+	sleep: (ms, signal) =>
+		new Promise((resolve) => {
+			if (signal?.aborted) {
+				resolve();
+				return;
+			}
+			const timer = setTimeout(resolve, ms);
+			signal?.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(timer);
+					resolve();
+				},
+				{ once: true },
+			);
+		}),
+};
+
+/** Mirror the legacy runner's first populated polling tick; its capture is last-wins. */
+export async function waitForLegacyPostsCapture(
+	matchingResponses: unknown[],
+	clock: PostsClock = realPostsClock,
+	signal?: AbortSignal,
+): Promise<unknown | null> {
+	await clock.sleep(POSTS_INITIAL_CAPTURE_DELAY_MS, signal);
+	if (signal?.aborted) return null;
+	for (let attempt = 0; attempt < POSTS_CAPTURE_MAX_POLLS; attempt += 1) {
+		await clock.sleep(POSTS_CAPTURE_POLL_INTERVAL_MS, signal);
+		if (signal?.aborted) return null;
+		const latest = matchingResponses.at(-1);
+		if (latest !== undefined) return latest;
+	}
+	return null;
+}
+
+function isLoginOrChallengeUrl(rawUrl: string): boolean {
+	try {
+		const url = new URL(rawUrl);
+		return /\/(accounts\/login|challenge|challenge_action|accounts\/onetap)\b/.test(url.pathname);
+	} catch {
+		return false;
+	}
 }
 
 async function readTimelineConnection(response: {
 	json: () => Promise<unknown>;
+	status: () => number;
 }): Promise<InstagramTimelineConnection | null> {
+	if (response.status() < 200 || response.status() >= 300) {
+		return null;
+	}
 	try {
 		const body = (await response.json()) as TimelineEnvelope;
-		return (
-			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ?? null
-		);
+		if (
+			body.ok === false ||
+			body.errors != null ||
+			body.error !== undefined ||
+			body.errorCode !== undefined ||
+			body.error_code !== undefined ||
+			body.status === 401 ||
+			body.extensions?.code === "UNAUTHENTICATED" ||
+			body.extensions?.is_final === false ||
+			body.extensions?.partial === true
+		) {
+			return null;
+		}
+		return body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ?? null;
 	} catch {
 		return null;
 	}
@@ -522,79 +614,18 @@ async function readTimelineConnection(response: {
 export async function fetchAllPosts(
 	page: Page,
 	username: string,
-	capture: CaptureSession | null,
-	progress?: (
+	capture?: CaptureSession,
+	progress: (
 		message: string,
 		extra?: Record<string, unknown>,
-	) => Promise<void>,
+	) => Promise<void> = async () => {},
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ edges: InstagramTimelineEdge[]; truncated: boolean }> {
-	const edges: InstagramTimelineEdge[] = [];
-	const seenIds = new Set<string>();
-	let sawAnyResponse = false;
-
-	const walk = await walkPagesWithCeiling({
-		fetchPage: async (pageNumber) => {
-			const responsePromise = page
-				.waitForResponse(isPostsTimelineResponse, { timeout: 15_000 })
-				.catch(() => null);
-			if (pageNumber === 1) {
-				await page.goto(
-					`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
-					{
-						timeout: 30_000,
-						waitUntil: "domcontentloaded",
-					},
-				);
-			} else {
-				await page.evaluate(() =>
-					window.scrollTo(0, document.body.scrollHeight),
-				);
-			}
-			const response = await responsePromise;
-			if (!response) {
-				return false;
-			}
-			sawAnyResponse = true;
-			const connection = await readTimelineConnection(response);
-			capture?.captureHttp(
-				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
-				connection,
-				{ status: response.status() },
-			);
-			const pageEdges = (connection?.edges ?? []).filter((edge) => {
-				const id =
-					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-				if (!id || seenIds.has(id)) {
-					return false;
-				}
-				seenIds.add(id);
-				return true;
-			});
-			edges.push(...pageEdges);
-			await progress?.("Fetched Instagram posts page", {
-				item_count: pageEdges.length,
-				page_index: pageNumber,
-				total_seen: edges.length,
-			});
-			const pageInfo = connection?.page_info;
-			if (!pageInfo?.has_next_page || pageEdges.length === 0) {
-				return false;
-			}
-			await delay(1500);
-			return true;
-		},
-		maxPages: POSTS_MAX_PAGES,
-	});
-
-	if (!sawAnyResponse) {
-		throw new Error(
-			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
-		);
-	}
-
-	return { edges, truncated: walk.truncated };
+	postsClock: PostsClock = realPostsClock,
+): Promise<{ edges: InstagramTimelineEdge[]; sourceEdgeCount: number; truncated: boolean }> {
+	return fetchAllPostsWithEmptyProof(page, username, capture ?? null, progress, delay, postsClock);
 }
+
+// Empty-proof behavior is covered by the posts differential matrix.
 
 // ─── Following (paginated friendships listing) ─────────────────────────────
 
@@ -1033,6 +1064,7 @@ export async function collectAllStreams(
 	/** Pacing delay between paginated pages. Defaults to politeDelay(800ms);
 	 *  tests inject a no-op so they don't sleep through the page ceiling. */
 	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
 ): Promise<void> {
 	const { capture, emit, emitRecord, page, progress, requested } = ctx;
 
@@ -1063,16 +1095,19 @@ export async function collectAllStreams(
 		await emitRecord("profile", profile as RecordData);
 	}
 
+	let verifiedEmptyPosts = false;
 	if (wantsPosts || wantsPostLikes) {
 		await progress("Fetching Instagram posts");
-		const { edges, truncated } = await fetchAllPosts(
+		const { edges, sourceEdgeCount, truncated } = await fetchAllPosts(
 			page,
 			profile.username,
-			capture,
+			capture ?? undefined,
 			progress,
 			delay,
+			postsClock,
 		);
-
+		verifiedEmptyPosts = sourceEdgeCount === 0 && edges.length === 0 && !truncated;
+		// Emit records before any empty completion state.
 		if (wantsPosts) {
 			for (const edge of edges) {
 				const record = postRecord(edge);
@@ -1098,7 +1133,8 @@ export async function collectAllStreams(
 			});
 		}
 		// `posts` declares incremental: false / coverage_strategy:
-		// full_inventory (manifests/meta.json) and emits no STATE: every run
+		// full_inventory (manifests/meta.json) and emits empty STATE only
+		// after a successful terminal empty timeline; otherwise every run
 		// walks the full timeline (scroll-triggered pagination has no
 		// server-provided early-stop cursor this connector has confirmed
 		// live — see the header's posts-endpoint note). A `taken_at`
@@ -1109,7 +1145,6 @@ export async function collectAllStreams(
 		// re-emit of unchanged posts an idempotent upsert, not a duplicate —
 		// see the connector cutover report's second-run evidence.
 	}
-
 	if (wantsFollowing) {
 		await progress("Fetching Instagram following list");
 		const { truncated, users } = await fetchAllFollowing(
@@ -1181,9 +1216,194 @@ export async function collectAllStreams(
 			});
 		}
 	}
+	if (verifiedEmptyPosts) {
+		if (wantsPosts) await emit({ cursor: {}, stream: "posts", type: "STATE" });
+		if (wantsPostLikes) await emit({ cursor: {}, stream: "post_likes", type: "STATE" });
+	}
 }
 
-// ─── Entry ──────────────────────────────────────────────────────────────
+async function hasLoginOrChallengePageState(page: Page): Promise<boolean> {
+	if (isLoginOrChallengeUrl(page.url())) {
+		return true;
+	}
+	try {
+		await page.waitForFunction(
+			() => {
+				const text = document.body?.innerText.toLowerCase() ?? "";
+				return (
+					(text.includes("verify you are human") && Boolean(document.querySelector("[data-sitekey]"))) ||
+					(text.includes("welcome back") && Boolean(document.querySelector('input[type="email"], input[name="email"]'))) ||
+					Boolean(document.querySelector('input[name="verificationCode"], input[name="security_code"]')) ||
+					text.includes("checkpoint") ||
+					text.includes("challenge") ||
+					text.includes("security code")
+				);
+			},
+			undefined,
+			{ timeout: 500 },
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function fetchAllPostsWithEmptyProof(
+	page: Page,
+	username: string,
+	capture: CaptureSession | null,
+	progress?: (
+		message: string,
+		extra?: Record<string, unknown>,
+	) => Promise<void>,
+	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
+): Promise<{
+	edges: InstagramTimelineEdge[];
+	sourceEdgeCount: number;
+	truncated: boolean;
+}> {
+	const edges: InstagramTimelineEdge[] = [];
+	const seenIds = new Set<string>();
+	let sawAnyResponse = false;
+	let sawTerminalPage = false;
+	let sourceEdgeCount = 0;
+	let terminalResponse: unknown = null;
+	let initialPageWasTerminal = false;
+	const matchingResponses: unknown[] = [];
+	let legacyInitialCapture: Promise<unknown | null> | null = null;
+	const legacyCaptureController = new AbortController();
+	const onResponse = (response: unknown): void => {
+		if (isPostsTimelineResponseForPage(page)(response as Parameters<ReturnType<typeof isPostsTimelineResponseForPage>>[0])) {
+			matchingResponses.push(response);
+		}
+	};
+	page.on("response", onResponse);
+
+	const walk = await walkPagesWithCeiling({
+		fetchPage: async (pageNumber) => {
+			const responsePromise = page
+				.waitForResponse(isPostsTimelineResponseForPage(page), { timeout: 15_000 })
+				.catch(() => null);
+			if (pageNumber === 1) {
+				await page.goto(
+					`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
+					{
+						timeout: 30_000,
+						waitUntil: "domcontentloaded",
+					},
+				);
+				legacyInitialCapture = waitForLegacyPostsCapture(
+					matchingResponses,
+					postsClock,
+					legacyCaptureController.signal,
+				);
+			} else {
+				await page.evaluate(() =>
+					window.scrollTo(0, document.body.scrollHeight),
+				);
+			}
+			const response = await responsePromise;
+			if (!response) {
+				return false;
+			}
+			const connection = await readTimelineConnection(response);
+			if (!connection || !Array.isArray(connection.edges)) {
+				return false;
+			}
+			sawAnyResponse = true;
+			sourceEdgeCount += connection.edges.length;
+			capture?.captureHttp(
+				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
+				connection,
+				{ status: response.status() },
+			);
+			const pageEdges = (connection?.edges ?? []).filter((edge) => {
+				const id =
+					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
+				if (!id || seenIds.has(id)) {
+					return false;
+				}
+				seenIds.add(id);
+				return true;
+			});
+			edges.push(...pageEdges);
+			await progress?.("Fetched Instagram posts page", {
+				item_count: pageEdges.length,
+				page_index: pageNumber,
+				total_seen: edges.length,
+			});
+			const pageInfo = connection?.page_info;
+			if (pageInfo?.has_next_page === false) {
+				sawTerminalPage = true;
+				terminalResponse = response;
+				initialPageWasTerminal = initialPageWasTerminal || pageNumber === 1;
+				return false;
+			}
+			if (pageInfo?.has_next_page !== true) {
+				return false;
+			}
+			await delay(1500);
+			return true;
+		},
+		maxPages: POSTS_MAX_PAGES,
+	});
+	if (!initialPageWasTerminal) legacyCaptureController.abort();
+
+	if (!sawAnyResponse) {
+		page.off("response", onResponse);
+		throw new Error(
+			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
+		);
+	}
+	if (sawTerminalPage && initialPageWasTerminal) {
+		const lastResponse = (await legacyInitialCapture) ?? terminalResponse;
+		legacyCaptureController.abort();
+		const settledConnection = lastResponse
+			? await readTimelineConnection(lastResponse as { json: () => Promise<unknown>; status: () => number })
+			: null;
+		if (lastResponse && (!settledConnection || !Array.isArray(settledConnection.edges))) {
+			page.off("response", onResponse);
+			throw new Error(
+				"meta_posts_incomplete_pagination: the last observed posts response did not prove a complete timeline page",
+			);
+		}
+		if (settledConnection && Array.isArray(settledConnection.edges)) {
+			edges.length = 0;
+			seenIds.clear();
+			sourceEdgeCount = 0;
+			sourceEdgeCount += settledConnection.edges.length;
+			for (const edge of settledConnection.edges) {
+				const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
+				if (id && !seenIds.has(id)) {
+					seenIds.add(id);
+					edges.push(edge);
+				}
+			}
+			if (settledConnection.page_info?.has_next_page === true) {
+				sawTerminalPage = false;
+			}
+		}
+	}
+	page.off("response", onResponse);
+	if (!sawTerminalPage && sourceEdgeCount === 0 && !walk.truncated) {
+		throw new Error(
+			"meta_posts_incomplete_pagination: posts timeline did not include a terminal page",
+		);
+	}
+	if (sawTerminalPage && sourceEdgeCount === 0 && (await hasLoginOrChallengePageState(page))) {
+		throw new Error(
+			"meta_posts_login_challenge: empty posts timeline observed while page is showing login or challenge state",
+		);
+	}
+
+	return {
+		edges,
+		sourceEdgeCount,
+		truncated: walk.truncated || !sawTerminalPage,
+	};
+}
+
 
 if (isMainModule(import.meta.url)) {
 	runConnector({
