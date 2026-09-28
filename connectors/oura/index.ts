@@ -319,7 +319,10 @@ function sinceFor(
 	const streamState = state[stream] as { last_day?: string } | undefined;
 	const priorDay = streamState?.last_day;
 	const scopeReq = requested.get(stream);
-	const scopeSince = scopeReq?.time_range?.since?.slice(0, 10);
+	const rawScopeSince = scopeReq?.time_range?.since;
+	const scopeSince = rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
+		? new Date(Date.parse(rawScopeSince)).toISOString().slice(0, 10)
+		: undefined;
 	return priorDay || scopeSince || null;
 }
 

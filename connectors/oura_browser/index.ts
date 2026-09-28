@@ -175,6 +175,12 @@ function day(value: string): Date {
   return new Date(`${value}T00:00:00.000Z`);
 }
 
+function requestedUtcDay(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? undefined : new Date(timestamp).toISOString().slice(0, 10);
+}
+
 export function initialStartDate(now = new Date()): string {
   const start = new Date(now);
   start.setUTCDate(start.getUTCDate() - INITIAL_LOOKBACK_DAYS);
@@ -196,7 +202,7 @@ interface OuraCursor {
 
 function startDateFor(ctx: BrowserCollectContext, stream: string, endDate: string): string {
   const cursor = ctx.state[stream] as OuraCursor | undefined;
-  const requestedSince = ctx.requested.get(stream)?.time_range?.since?.slice(0, 10);
+  const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
   if (ctx.collectionMode === "full_refresh") return requestedSince ?? initialStartDate(day(endDate));
   if (requestedSince) {
     return cursor?.requested_since === requestedSince && cursor.next_day && cursor.next_day > requestedSince
@@ -341,9 +347,15 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
   for (const stream of ["sleep", "readiness", "activity"] as const) {
     if (!ctx.requested.has(stream)) continue;
     const previous = ctx.state[stream] as OuraCursor | undefined;
-    const requestedSince = ctx.requested.get(stream)?.time_range?.since?.slice(0, 10);
-    const until = ctx.requested.get(stream)?.time_range?.until?.slice(0, 10);
-    const untilEnd = until ? addDays(until, -1) : today;
+    const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
+    const rawUntil = ctx.requested.get(stream)?.time_range?.until;
+    const until = requestedUtcDay(rawUntil);
+    // Daily records overlap a partial-day bound, so fetch its UTC date and let
+    // the shared range filter decide whether the day is in range.
+    const untilTimestamp = rawUntil ? Date.parse(rawUntil) : Number.NaN;
+    const untilEnd = until
+      ? (untilTimestamp % 86_400_000 === 0 ? addDays(until, -1) : until)
+      : today;
     const requestedEnd = untilEnd < today ? untilEnd : today;
     const startDate = startDateFor(ctx, stream, today);
     if (startDate > requestedEnd) continue;

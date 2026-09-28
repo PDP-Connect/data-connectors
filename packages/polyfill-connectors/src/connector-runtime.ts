@@ -83,6 +83,7 @@ import {
 	type CaptureSession,
 	createCaptureSession,
 } from "./fixture-capture.ts";
+import { CONSENT_TIME_FIELDS } from "./generated/consent-time-fields.generated.ts";
 import {
 	DEFAULT_RETRYABLE_PATTERN,
 	type EnsureSessionArgs,
@@ -343,8 +344,14 @@ interface BaseRunConnectorConfig {
 	 */
 	onDurableCommit?: (log: (message: string) => void) => void | Promise<void>;
 	retryablePattern?: RegExp;
-	/** Record field that scope.time_range filters on. Default 'date'. */
+	/**
+	 * Record field that scope.time_range filters on, for a connector with no
+	 * shipped manifest (test fixtures). A shipped connector must not set it:
+	 * its manifest's per-stream `consent_time_field` is the only authority.
+	 */
 	timeRangeField?: string | ((stream: string) => string);
+	/** Streams whose date-precision consent values cannot satisfy timestamp bounds. */
+	unsupportedTimeRangeStreams?: readonly string[];
 	validateRecord?: ValidateRecord;
 }
 
@@ -492,21 +499,93 @@ export function describeUnexpectedFailure(err: unknown): string {
 		: combined;
 }
 
-/** Returns true if the scope's time_range excludes this record's date value. */
+/** Returns true if the scope's half-open time_range excludes this record value. */
+const ISO_INSTANT_RE =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function isValidIsoInstantShape(match: RegExpMatchArray): boolean {
+	const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw] = match;
+	const year = Number(yearRaw);
+	const month = Number(monthRaw);
+	const day = Number(dayRaw);
+	const hour = Number(hourRaw);
+	const minute = Number(minuteRaw);
+	const second = Number(secondRaw);
+	if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) {
+		return false;
+	}
+	const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const daysInMonth = [
+		31,
+		leapYear ? 29 : 28,
+		31,
+		30,
+		31,
+		30,
+		31,
+		31,
+		30,
+		31,
+		30,
+		31,
+	][month - 1];
+	return daysInMonth !== undefined && day >= 1 && day <= daysInMonth;
+}
+
+type IsoInstant = { second: number; fraction: string };
+
+function parseIsoInstant(value: unknown): IsoInstant | null {
+	if (typeof value !== "string") {
+		return null;
+	}
+	const match = value.match(ISO_INSTANT_RE);
+	if (!match || !isValidIsoInstantShape(match)) {
+		return null;
+	}
+	// Date.parse discards digits after milliseconds. Parse the whole second,
+	// then keep the source fraction for the half-open boundary comparison.
+	const fraction = match[7]?.slice(1) ?? "";
+	const wholeSecond = match[7] ? value.replace(match[7], "") : value;
+	const timestamp = Date.parse(wholeSecond);
+	if (Number.isNaN(timestamp)) {
+		return null;
+	}
+	return { second: timestamp, fraction };
+}
+
+function compareIsoInstants(left: IsoInstant, right: IsoInstant): number {
+	if (left.second !== right.second) return left.second - right.second;
+	const length = Math.max(left.fraction.length, right.fraction.length);
+	const leftFraction = left.fraction.padEnd(length, "0");
+	const rightFraction = right.fraction.padEnd(length, "0");
+	return leftFraction < rightFraction
+		? -1
+		: leftFraction > rightFraction
+			? 1
+			: 0;
+}
+
 function isOutsideTimeRange(
 	timeRange: { since?: string; until?: string },
 	dateValue: unknown,
 ): boolean {
-	if (typeof dateValue !== "string" || !dateValue) {
-		return false;
-	}
-	if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
+	const since =
+		timeRange.since === undefined ? null : parseIsoInstant(timeRange.since);
+	const until =
+		timeRange.until === undefined ? null : parseIsoInstant(timeRange.until);
+	if (
+		(timeRange.since !== undefined && since === null) ||
+		(timeRange.until !== undefined && until === null)
+	) {
 		return true;
 	}
-	if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
-		return true;
-	}
-	return false;
+
+	const timestamp = parseIsoInstant(dateValue);
+	return (
+		timestamp === null ||
+		(since !== null && compareIsoInstants(timestamp, since) < 0) ||
+		(until !== null && compareIsoInstants(timestamp, until) >= 0)
+	);
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
@@ -902,7 +981,8 @@ export function runConnector(config: RunConnectorConfig): void {
 		): TerminalErrorDetails => error,
 		onDurableCommit,
 		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
-		timeRangeField = "date",
+		timeRangeField,
+		unsupportedTimeRangeStreams = [],
 		isTombstone,
 		auth,
 		authOptional = false,
@@ -915,10 +995,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		? config.probeSessionIsAuthoritative
 		: undefined;
 
-	const timeRangeFieldFor: (stream: string) => string =
-		typeof timeRangeField === "function"
-			? timeRangeField
-			: (): string => timeRangeField;
+	const timeRangeFieldFor = consentTimeFieldResolver(name, timeRangeField);
 
 	// Capture session: null unless PDPP_CAPTURE_FIXTURES=1.
 	const capture = createCaptureSession(name);
@@ -1245,7 +1322,34 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
-		const requested = buildRequested(startMsg);
+		const scopeRequested = buildRequested(startMsg);
+		for (const stream of unsupportedTimeRangeStreams) {
+			if (scopeRequested.get(stream)?.time_range) {
+				throw new TerminalError(
+					`time_range for ${stream} is unsupported because its consent time has date precision`,
+					{
+						code: "scope_not_supported",
+					},
+				);
+			}
+		}
+		// §5.1: a bounded stream with no timestamp consent field cannot apply
+		// the bound. Report it and withhold it from collection rather than
+		// returning an empty success. The emitter keeps the full scope, so a
+		// record for a withheld stream is still dropped.
+		const requested = new Map(scopeRequested);
+		for (const [stream, streamScope] of scopeRequested) {
+			if (!streamScope.time_range || timeRangeFieldFor(stream) !== null) {
+				continue;
+			}
+			requested.delete(stream);
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "scope_not_supported",
+				message: `time_range cannot be applied to ${stream}: its manifest declares no timestamp consent_time_field`,
+			});
+		}
 		// Deferred for browser connectors that declare BOTH `auth` and
 		// `probeSession`: a valid pre-authenticated browser profile must be
 		// sufficient on its own, so credential resolution (which can itself raise
@@ -1278,7 +1382,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		}
 
 		const emitRecord = makeEmitRecord({
-			requested,
+			requested: scopeRequested,
 			emit,
 			emittedAt: nowIso(),
 			validateRecord,
@@ -1381,6 +1485,40 @@ async function parseStart(
 	return startMsg;
 }
 
+/**
+ * Resolve each stream's `scope.time_range` field. A shipped connector's
+ * manifest `consent_time_field` is the only authority (via the generated
+ * table); `null` means the stream has no timestamp consent field. Only a
+ * connector with no shipped manifest (a test fixture) may name its field in
+ * config, and one that has neither resolves every stream to `null`.
+ */
+export function consentTimeFieldResolver(
+	name: string,
+	timeRangeField?: string | ((stream: string) => string),
+): (stream: string) => string | null {
+	const manifestFields = Object.hasOwn(
+		CONSENT_TIME_FIELDS,
+		name.replaceAll("-", "_"),
+	)
+		? CONSENT_TIME_FIELDS[name.replaceAll("-", "_")]
+		: undefined;
+	if (manifestFields) {
+		if (timeRangeField !== undefined) {
+			throw new Error(
+				`runConnector: ${name} has a shipped manifest; remove timeRangeField and declare consent_time_field there`,
+			);
+		}
+		return (stream) =>
+			Object.hasOwn(manifestFields, stream)
+				? (manifestFields[stream] ?? null)
+				: null;
+	}
+	if (timeRangeField === undefined) return () => null;
+	return typeof timeRangeField === "function"
+		? timeRangeField
+		: () => timeRangeField;
+}
+
 /** Build the requested-streams map; the runtime requires at least one stream. */
 function buildRequested(startMsg: StartMessage): Map<string, StreamScope> {
 	const requested = new Map<string, StreamScope>(
@@ -1474,7 +1612,7 @@ export function makeEmitRecord(deps: {
 	emittedAt: string;
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
-	timeRangeFieldFor: (stream: string) => string;
+	timeRangeFieldFor: (stream: string) => string | null;
 }): {
 	emit: (
 		stream: string,
@@ -1517,14 +1655,26 @@ export function makeEmitRecord(deps: {
 		const rs = resFilters.get(stream);
 		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
 			return "skip";
-		if (isTombstone?.(stream, data)) return "tombstone";
 		const streamScope = requested.get(stream);
 		const field = timeRangeFieldFor(stream);
+		if (streamScope?.time_range && field === null) return "skip";
 		if (
 			streamScope?.time_range &&
+			field !== null &&
+			typeof data[field] === "string" &&
+			/^\d{4}-\d{2}-\d{2}$/.test(data[field])
+		) {
+			throw new TerminalError(
+				`time_range cannot be applied to date-precision consent value for ${stream}`,
+			);
+		}
+		if (
+			streamScope?.time_range &&
+			field !== null &&
 			isOutsideTimeRange(streamScope.time_range, data[field])
 		)
 			return "skip";
+		if (isTombstone?.(stream, data)) return "tombstone";
 		return "record";
 	};
 

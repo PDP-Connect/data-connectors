@@ -176,17 +176,6 @@ export const CHASE_QFX_FILE_TYPE_SELECT_SELECTOR =
 	CHASE_QFX_FILE_TYPE_SELECT_SELECTORS.join(", ");
 export const CHASE_QFX_ACTIVITY_SELECT_SELECTOR =
 	CHASE_QFX_ACTIVITY_SELECT_SELECTORS.join(", ");
-const TIME_RANGE_FIELD_BY_STREAM: Record<string, string> = {
-	balances: "as_of",
-	current_activity: "activity_date",
-	statements: "date_delivered",
-	transactions: "date",
-};
-
-export function chaseTimeRangeField(stream: string): string {
-	return TIME_RANGE_FIELD_BY_STREAM[stream] ?? "date";
-}
-
 interface NoActivityConfirmation {
 	bodyPreview: string;
 	url: string;
@@ -1883,32 +1872,37 @@ export async function emitCurrentActivityForAccount(
 }
 
 /**
- * True iff this statement's delivered date falls outside the
- * `statements` stream's time_range. The comparison intentionally
- * slices to yyyy-mm-dd so a user-specified `since=2025-01-01T00:00Z`
- * still includes statements delivered 2025-01-01 (the date_delivered
- * field is date-only).
+ * True iff this statement's delivered UTC day does not overlap the
+ * `statements` stream's half-open time_range.
  */
 export function statementRowOutsideTimeRange(
 	deps: EmitDeps,
 	dateIso: string | null,
 ): boolean {
 	const stmtScope = deps.requested.get("statements");
+	const timeRange = stmtScope?.time_range;
+	if (!timeRange) {
+		return false;
+	}
+	if (!dateIso) {
+		return true;
+	}
+	const dayStart = Date.parse(`${dateIso}T00:00:00.000Z`);
 	if (
-		stmtScope?.time_range?.since &&
-		dateIso &&
-		dateIso < stmtScope.time_range.since.slice(0, 10)
+		Number.isNaN(dayStart) ||
+		new Date(dayStart).toISOString().slice(0, 10) !== dateIso
 	) {
 		return true;
 	}
-	if (
-		stmtScope?.time_range?.until &&
-		dateIso &&
-		dateIso >= stmtScope.time_range.until.slice(0, 10)
-	) {
-		return true;
-	}
-	return false;
+	const dayEnd = dayStart + 86_400_000;
+	const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
+	const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+	return (
+		(since !== undefined && Number.isNaN(since)) ||
+		(until !== undefined && Number.isNaN(until)) ||
+		(since !== undefined && dayEnd <= since) ||
+		(until !== undefined && dayStart >= until)
+	);
 }
 
 /**
@@ -3051,7 +3045,11 @@ if (isMainModule(import.meta.url)) {
 		// /#/logon/logon/error regardless of cookie state. See
 		// `design-notes/chase-anti-bot.md`. Isolated-per-connector profile works.
 		browser: { profileName: "chase" },
-		timeRangeField: chaseTimeRangeField,
+		unsupportedTimeRangeStreams: [
+			"transactions",
+			"current_activity",
+			"statements",
+		],
 		async ensureSession({
 			assist,
 			completeAssistance,

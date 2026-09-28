@@ -515,13 +515,32 @@ function withinTimeRange(
 	if (!timeRange) {
 		return true;
 	}
-	if (timeRange.since && dateStr < timeRange.since.slice(0, 10)) {
+	const dayStart = Date.parse(`${dateStr}T00:00:00.000Z`);
+	if (
+		Number.isNaN(dayStart) ||
+		new Date(dayStart).toISOString().slice(0, 10) !== dateStr
+	) {
 		return false;
 	}
-	if (timeRange.until && dateStr >= timeRange.until.slice(0, 10)) {
+	const dayEnd = dayStart + 86_400_000;
+	const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
+	const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+	if (
+		(since !== undefined && Number.isNaN(since)) ||
+		(until !== undefined && Number.isNaN(until)) ||
+		(since !== undefined && dayEnd <= since) ||
+		(until !== undefined && dayStart >= until)
+	) {
 		return false;
 	}
 	return true;
+}
+
+function utcDateForTimestamp(value: string): string | undefined {
+	const timestamp = Date.parse(value);
+	return Number.isNaN(timestamp)
+		? undefined
+		: new Date(timestamp).toISOString().slice(0, 10);
 }
 
 function priorKnowledge(
@@ -1565,7 +1584,9 @@ async function collectTransactions(ctx: BudgetCtx): Promise<CoverageFact> {
 		| Record<string, { server_knowledge?: number; since_date?: string }>
 		| undefined;
 	const priorSinceDate = txnState?.[budgetId]?.since_date;
-	const scopeSince = stream?.time_range?.since?.slice(0, 10);
+	const scopeSince = stream?.time_range?.since
+		? utcDateForTimestamp(stream.time_range.since)
+		: undefined;
 	const sinceDate =
 		knowledge === undefined
 			? scopeSince || priorSinceDate || undefined
@@ -1984,7 +2005,9 @@ export async function collectMonthCategories(
 		| Record<string, { last_fetched_month?: string }>
 		| undefined;
 	const lastFetchedMonth = priorCutoff?.[ctx.budgetId]?.last_fetched_month;
-	const scopeSince = monthCategoriesStream.time_range?.since?.slice(0, 10);
+	const scopeSince = monthCategoriesStream.time_range?.since
+		? utcDateForTimestamp(monthCategoriesStream.time_range.since)
+		: undefined;
 	// Active months: exclude soft-deleted and apply the requested time range.
 	const activeMonths = monthList.filter((m) => {
 		if (m.deleted) {
@@ -2503,6 +2526,13 @@ export async function ynabCollect(
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "ynab",
+		unsupportedTimeRangeStreams: [
+			"account_stats",
+			"transactions",
+			"scheduled_transactions",
+			"months",
+			"month_categories",
+		],
 		// Transport vocabulary (`fetch failed`, `ECONN…`, `ETIMEDOUT`) plus YNAB's
 		// own `ynab_rate_limited`. `retryable status \d+` covers the retry layer's
 		// exhausted-5xx/408/429 wording: those statuses are retryable BY

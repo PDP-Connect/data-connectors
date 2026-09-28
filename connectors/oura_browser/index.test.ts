@@ -161,6 +161,22 @@ test("browser schema accepts offset timestamps and preserves every daily score d
   });
 });
 
+test("partial-day until includes its UTC date in the daily source window", async () => {
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    return Response.json({ daily_activities: [] });
+  }, async () => {
+    const h = harness(["activity"], page(HOME), {}, {
+      since: "2020-01-01",
+      until: "2020-01-03T12:00:00Z",
+    });
+    await collectOuraBrowser(h.ctx);
+    assert.equal(savedCursor(h.messages).next_day, "2020-01-04");
+  });
+  assert.ok(requests.at(-1)?.includes("start=2020-01-01&end=2020-01-03"));
+});
+
 test("failed required window reports runtime failure and saves retry state", async () => {
   const today = new Date().toISOString().slice(0, 10);
   let retryState: unknown;
