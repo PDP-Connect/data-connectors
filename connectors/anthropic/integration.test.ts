@@ -1693,3 +1693,147 @@ test("collectAnthropic: manifest conversation without chat_messages is imported 
 	assert.equal(skipsOf(protocolMessages).length, 0);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 2);
 });
+
+// ─── export_data refusal: structured status diagnostics ───────────────────
+
+async function runExportRefusal(
+	exportResponse: () => Response | Promise<Response>,
+	state?: Record<string, unknown>,
+): Promise<{
+	skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }>;
+	states: Extract<EmittedMessage, { type: "STATE" }>[];
+	exportPosts: number;
+}> {
+	let exportPosts = 0;
+	const fetchStub: FetchStub = async (url) => {
+		if (url.includes("/export_data")) {
+			exportPosts += 1;
+			return await exportResponse();
+		}
+		if (url.includes("/api/organizations")) {
+			return jsonResponse(200, ORG_RESPONSE);
+		}
+		throw new Error(`unexpected fetch: ${url}`);
+	};
+	const { ctx, protocolMessages } = makeContext({
+		streams: ["conversations"],
+		fetchStub,
+		...(state ? { state } : {}),
+	});
+	await collectAnthropic(ctx);
+	const skips = protocolMessages.filter(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+	const [skip] = skips;
+	assert.ok(skip && skips.length === 1, "exactly one SKIP_RESULT expected");
+	return {
+		skip,
+		states: protocolMessages.filter(
+			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+				m.type === "STATE",
+		),
+		exportPosts,
+	};
+}
+
+test("collectAnthropic: export_data 429 with Retry-After -> export_rate_limited with http_status, retry_after and a not-before checkpoint", async () => {
+	const before = Date.now();
+	const { skip, states } = await runExportRefusal(
+		() =>
+			new Response("{}", { status: 429, headers: { "retry-after": "3600" } }),
+	);
+	assert.equal(skip.reason, "export_rate_limited");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	const diagnostics = skip.diagnostics as Record<string, unknown>;
+	assert.equal(diagnostics.http_status, 429);
+	assert.equal(diagnostics.retry_after, 3600);
+	const notBefore = Date.parse(diagnostics.retry_not_before as string);
+	assert.ok(notBefore >= before + 3_600_000);
+	const [state] = states;
+	assert.ok(state && states.length === 1);
+	assert.equal(
+		(state.cursor as Record<string, unknown>).export_retry_not_before,
+		diagnostics.retry_not_before,
+	);
+});
+
+test("collectAnthropic: export_data 429 without Retry-After -> export_rate_limited, no not-before checkpoint", async () => {
+	const { skip, states } = await runExportRefusal(
+		() => new Response("", { status: 429 }),
+	);
+	assert.equal(skip.reason, "export_rate_limited");
+	assert.deepEqual(skip.diagnostics, { http_status: 429 });
+	assert.equal(states.length, 0);
+});
+
+test("collectAnthropic: a stored export_retry_not_before in the future blocks POST export_data", async () => {
+	const notBefore = new Date(Date.now() + 60_000).toISOString();
+	const { skip, exportPosts } = await runExportRefusal(
+		() => {
+			throw new Error("export_data must not be requested");
+		},
+		{ conversations: { export_retry_not_before: notBefore } },
+	);
+	assert.equal(exportPosts, 0);
+	assert.equal(skip.reason, "export_rate_limited");
+	assert.deepEqual(skip.diagnostics, { retry_not_before: notBefore });
+});
+
+test("collectAnthropic: an expired export_retry_not_before does not block POST export_data", async () => {
+	const notBefore = new Date(Date.now() - 60_000).toISOString();
+	const { exportPosts, skip } = await runExportRefusal(
+		() => new Response("", { status: 500 }),
+		{ conversations: { export_retry_not_before: notBefore } },
+	);
+	assert.equal(exportPosts, 1);
+	assert.equal(skip.reason, "export_request_failed");
+});
+
+for (const status of [401, 403]) {
+	test(`collectAnthropic: export_data ${status} -> export_auth_rejected with refresh_credentials`, async () => {
+		const { skip } = await runExportRefusal(() => new Response("", { status }));
+		assert.equal(skip.reason, "export_auth_rejected");
+		assert.deepEqual(skip.recovery_hint, {
+			action: "refresh_credentials",
+			retryable: false,
+		});
+		assert.deepEqual(skip.diagnostics, { http_status: status });
+	});
+}
+
+test("collectAnthropic: export_data 2xx without nonce or data_files -> export_response_unrecognized with key names only", async () => {
+	const { skip } = await runExportRefusal(() =>
+		jsonResponse(200, { status: "queued", job: { id: "secret-value" } }),
+	);
+	assert.equal(skip.reason, "export_response_unrecognized");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_on_connector_upgrade",
+		retryable: false,
+	});
+	assert.deepEqual(skip.diagnostics, {
+		http_status: 200,
+		body_keys: ["job", "status"],
+	});
+	assert.ok(!JSON.stringify(skip).includes("secret-value"));
+});
+
+test("collectAnthropic: export_data 500 and network error keep export_request_failed with http_status", async () => {
+	const server = await runExportRefusal(
+		() => new Response("", { status: 500 }),
+	);
+	assert.equal(server.skip.reason, "export_request_failed");
+	assert.deepEqual(server.skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	assert.deepEqual(server.skip.diagnostics, { http_status: 500 });
+	const network = await runExportRefusal(() => {
+		throw new TypeError("fetch failed");
+	});
+	assert.equal(network.skip.reason, "export_request_failed");
+	assert.deepEqual(network.skip.diagnostics, { http_status: 0 });
+});
