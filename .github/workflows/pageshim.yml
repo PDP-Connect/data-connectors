@@ -1,0 +1,45 @@
+name: PageShim target
+
+# Builds every connector enabled for the `pageshim` target (the Vana mobile
+# host) and runs it in the PageShim harness against recorded fixtures.
+# See scripts/pageshim/build.mjs. No path filter, so the check never sits
+# pending on a PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pageshim-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    name: PageShim harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: packages/polyfill-connectors/package.json
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Install Chromium for the harness
+        run: npx playwright install --with-deps chromium
+
+      - name: Build and run the harness
+        run: node --test scripts/pageshim/pageshim.test.mjs
