@@ -377,6 +377,9 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       await ctx.emit({
         type: "SKIP_RESULT", stream, reason: "oura_browser_window_deferred",
         message: `Oura ${stream} stopped at ${endDate}; later days remain for the next run.`,
+        // Deferred work, not unavailable data: the STATE cursor below resumes at
+        // the next day, so the host must treat this stream as retryable.
+        recovery_hint: { action: "retry_by_runtime", retryable: true },
       });
     }
     await ctx.emit({

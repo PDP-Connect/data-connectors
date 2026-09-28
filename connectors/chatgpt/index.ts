@@ -2283,7 +2283,7 @@ export async function runCustomInstructionsStream(
  * NEVER exceeded it, so equality is the right contract and a shortfall is real.
  *
  * Emitted as a SKIP_RESULT rather than a DETAIL_GAP for the same reason
- * `empty_detail` is: the fetch SUCCEEDED and the conversation is genuinely
+ * `empty_detail` is not a DETAIL_GAP: the fetch SUCCEEDED and the conversation is genuinely
  * hydrated. Re-fetching returns the same truncated graph, so a retryable gap
  * would spin forever. The honest report is "we reached it, and what it gave us
  * is internally inconsistent".
@@ -2440,21 +2440,17 @@ export async function processConversationDetail(
 		//
 		// It is NOT a fetch failure (the conversation record still emitted and the
 		// conversation still counts as hydrated/covered — we successfully reached
-		// it), so this is a SKIP_RESULT diagnostic, not a DETAIL_GAP. It exists so
-		// an empty conversation is observable rather than silent, which matters
-		// more as detail concurrency rises and partial/interleaved states become
-		// more likely. The `node_count` lets a reviewer distinguish a genuinely
-		// empty graph (0) from one whose every node was synthetic/role-less (>0).
+		// it), so this is not a DETAIL_GAP. It is also NOT a SKIP_RESULT: a
+		// stream-level SKIP_RESULT tells the host that the whole `messages` stream
+		// is unavailable, and Desktop then drops every message of the run because
+		// of one odd conversation. This fact is about one record, so it is a
+		// PROGRESS diagnostic that names the conversation id. The `node_count` lets a
+		// reviewer distinguish a genuinely empty graph (0) from one whose every
+		// node was synthetic/role-less (>0).
 		deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "messages",
-			reason: "empty_detail",
-			message: `conversation ${c.id} returned http 200 with a mapping but no message-bearing nodes`,
-			diagnostics: {
-				http_status: 200,
-				conversation_id: c.id,
-				node_count: Object.keys(mapping).length,
-			},
+			message: `empty_detail: conversation ${c.id} returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
 		});
 	}
 }

@@ -1696,11 +1696,13 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 	});
 });
 
-test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — emits empty_detail SKIP", async () => {
+test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — records a record-level empty_detail diagnostic, not a stream SKIP", async () => {
 	// Completeness guard for the silent-empty class (dataconnect audit rec #5):
 	// a 200-with-mapping whose graph has only synthetic/role-less nodes lands a
-	// bare conversation row with no messages. Without the guard there is no
-	// signal at all and it is indistinguishable from data loss downstream.
+	// bare conversation row with no messages. The emptiness must stay observable,
+	// but it is a fact about ONE conversation. A stream-level SKIP_RESULT on
+	// `messages` makes Desktop drop every message of the run, so the signal is a
+	// PROGRESS diagnostic keyed by conversation id.
 	const { deps, emitted, messages } = makeHarness();
 	const emptyGraph: ChatGptFetchResult = {
 		status: 200,
@@ -1733,42 +1735,32 @@ test("processConversationDetail: detail=200 with mapping but zero message-bearin
 	);
 	// No message records — the graph had nothing message-bearing.
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 0);
-	// ...but the emptiness is now OBSERVABLE via a diagnostic.
-	const skip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT",
-	);
-	assert.ok(
-		skip,
-		"200-with-mapping but zero messages must emit an empty_detail SKIP",
-	);
+	// No stream-level skip: one empty conversation must not mark `messages` unavailable.
 	assert.equal(
-		skip.stream,
-		"messages",
-		"the empty-detail signal is charged to the messages stream",
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"an empty conversation must not emit a stream-level SKIP_RESULT",
 	);
-	assert.equal(skip.reason, "empty_detail");
+	// ...but the emptiness is OBSERVABLE via a record-level diagnostic.
+	const diag = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("empty_detail:"),
+	);
+	assert.ok(diag, "200-with-mapping but zero messages must emit an empty_detail diagnostic");
+	assert.equal(diag.stream, "messages");
+	assert.match(diag.message, /convo-abc/, "message carries the conversation id");
+	assert.match(diag.message, /no message-bearing nodes/, "message names the empty-graph cause");
 	assert.match(
-		skip.message,
-		/convo-abc/,
-		"message carries the conversation id",
-	);
-	assert.match(
-		skip.message,
-		/no message-bearing nodes/,
-		"message names the empty-graph cause",
-	);
-	assert.deepEqual(
-		skip.diagnostics,
-		{ http_status: 200, conversation_id: "convo-abc", node_count: 2 },
+		diag.message,
+		/node_count=2\)/,
 		"node_count distinguishes a genuinely empty graph from one with only role-less nodes",
 	);
 });
 
-test("processConversationDetail: detail=200 with at least one message — no empty_detail SKIP fires", async () => {
+test("processConversationDetail: detail=200 with at least one message — no empty_detail diagnostic fires", async () => {
 	// The guard must NOT fire on a normal conversation. Pins that the common
-	// path stays diagnostic-free so empty_detail SKIPs are a real signal, not
-	// noise on every conversation.
+	// path stays diagnostic-free so empty_detail diagnostics are a real signal,
+	// not noise on every conversation.
 	const { deps, emitted, messages } = makeHarness();
 	await processConversationDetail(
 		deps,
@@ -1780,14 +1772,15 @@ test("processConversationDetail: detail=200 with at least one message — no emp
 		emitted.filter((r) => r.stream === "messages").length > 0,
 		"messages emit on the normal path",
 	);
-	const emptySkip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.reason === "empty_detail",
+	const emptyDiag = messages.find(
+		(m) =>
+			(m.type === "SKIP_RESULT" && m.reason === "empty_detail") ||
+			(m.type === "PROGRESS" && m.message.startsWith("empty_detail:")),
 	);
 	assert.equal(
-		emptySkip,
+		emptyDiag,
 		undefined,
-		"a conversation with messages must not emit an empty_detail SKIP",
+		"a conversation with messages must not emit an empty_detail diagnostic",
 	);
 });
 
