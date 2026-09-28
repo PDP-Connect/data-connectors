@@ -66,6 +66,8 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 
 **D12. Unregistered legacy code** (`tinder`, `goodreads`, and the legacy Playwright `_conformance`) is not an advertised capability. It is deleted at the hard cut and recorded in the capability map.
 
+**D13. Mobile vendoring gate (2026-09-28).** The stage-2 hard cut must not delete any legacy single-file Playwright script that Vana mobile vendors until a mobile path exists. Mobile hand-vendors the standalone Playwright-runtime release scripts of chatgpt, github, icloud-notes, instagram, linkedin, oura and spotify (`vana-com/unity-surfaces` `apps/mobile/public/connectors/`; see `unity-surfaces` #949). Desktop's `apps/desktop/connectors/lock.json` pins a larger set of legacy scripts, but only these seven ship to mobile. Either keep those seven files, or first ship a PageShim-compatible build target from the PDPP connectors that mobile can vendor instead. The hard-cut review commit `862da2e0e0` deletes those sources; it must be revised before it lands.
+
 ## Layout during the parallel phase
 
 During parallel porting, connector lanes used `packages/polyfill-connectors/connectors/<key>/` and `manifests/<key>.json`. The hard cut moved each implementation and manifest to root `connectors/<key>/`. That root directory is the current source layout.
