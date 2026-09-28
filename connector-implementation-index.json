@@ -18994,7 +18994,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "WHOOP",
 				"runtime_requirements": {
 					"bindings": {
@@ -19021,8 +19021,8 @@
 						"rationale": "The owner signs in through an isolated WHOOP browser profile. A live owner run proved the full backfill and a second checkpointed run reused the saved session without prompting, so scheduled refresh reuses that session. assisted_after_owner_auth:true means a background run may ask the owner for bounded help if the session lapses."
 					},
 					"public_listing": {
-						"tier": "preview",
-						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile."
+						"tier": "supported",
+						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in production Vana Desktop."
 					}
 				},
 				"streams": [
