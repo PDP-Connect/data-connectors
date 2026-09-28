@@ -2361,7 +2361,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.7",
+				"version": "0.2.8",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -12803,7 +12803,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {

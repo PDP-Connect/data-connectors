@@ -205,7 +205,13 @@ test("long requested ranges stop at 90 days and declare deferred coverage", asyn
   await withBrowser(async () => Response.json({ daily_activities: [] }), async () => {
     const h = harness(["activity"], page(HOME), {}, { since: "2020-01-01", until: "2021-01-01" });
     await collectOuraBrowser(h.ctx);
-    assert.ok(h.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "oura_browser_window_deferred"));
+    const skip = h.messages.find(
+      (m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+        m.type === "SKIP_RESULT" && m.reason === "oura_browser_window_deferred",
+    );
+    assert.ok(skip);
+    // Without a retry hint the host reads the deferral as final and drops the stream.
+    assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
     assert.equal(savedCursor(h.messages).next_day, "2020-03-31");
   });
 });
