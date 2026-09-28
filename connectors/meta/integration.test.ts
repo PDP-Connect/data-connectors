@@ -40,7 +40,11 @@ interface ScriptedFetch {
  *  a fake Playwright Response exposing `.json()`/`.status()`. `null` means
  *  "the page never triggers this request" (used to prove the
  *  `meta_posts_response_not_observed` failure path). */
-type ScriptedPostsPage = { json: unknown; status: number } | null;
+type ScriptedPostsPage = {
+	json: unknown;
+	status: number;
+	postData?: string;
+} | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
  *  fetches keyed by URL path prefix, and scripted DOM-scrape results keyed
@@ -102,7 +106,11 @@ function makeFakePage(options: {
 		}
 		next({
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({ method: () => "POST" }),
+			request: () => ({
+				method: () => "POST",
+				postData: () =>
+					scripted.postData ?? "fb_api_req_friendly_name=PolarisProfilePostsQuery",
+			}),
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
 		});
@@ -510,7 +518,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	);
 });
 
-test("collectAllStreams: posts never emits STATE, requested or not", async () => {
+test("collectAllStreams: a post_likes-only request does not emit an unrequested posts STATE", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -525,6 +533,93 @@ test("collectAllStreams: posts never emits STATE, requested or not", async () =>
 		harness.protocolMessages.some(
 			(m) => m.type === "STATE" && m.stream === "posts",
 		),
+		false,
+	);
+});
+
+test("collectAllStreams: an empty timeline response completes requested empty streams", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [EMPTY_POSTS],
+		requestedStreams: ["posts", "post_likes"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	assert.deepEqual(harness.emitted, []);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream)
+			.sort(),
+		["post_likes", "posts"],
+	);
+});
+
+test("collectAllStreams: explicit profile media_count zero proves empty when timeline is absent", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const profileZeroPosts: ScriptedPostsPage = {
+		json: {
+			data: {
+				data: {
+					user: {
+						follower_count: 0,
+						following_count: 0,
+						media_count: 0,
+					},
+				},
+			},
+		},
+		postData: "fb_api_req_friendly_name=ProfilePageQuery",
+		status: 200,
+	};
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [null, profileZeroPosts],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	assert.deepEqual(harness.emitted, []);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream),
+		["posts"],
+	);
+});
+
+test("collectAllStreams: a positive profile media_count does not turn a missing timeline into empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const profileHasPosts: ScriptedPostsPage = {
+		json: {
+			data: {
+				data: {
+					user: {
+						follower_count: 0,
+						following_count: 0,
+						media_count: 1,
+					},
+				},
+			},
+		},
+		postData: "fb_api_req_friendly_name=ProfilePageQuery",
+		status: 200,
+	};
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [null, profileHasPosts],
+		requestedStreams: ["posts"],
+	});
+
+	await assert.rejects(collectAllStreams(ctx, NO_DELAY), /meta_posts_response_not_observed/);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
 	);
 });

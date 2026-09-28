@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.4)
+ * PDPP Meta (Instagram) Connector (v0.4.10)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -40,9 +40,12 @@
  *                cannot be constructed from a bare `fetch()` call (confirmed
  *                live; see `fetchAllPosts`'s header note). Declared
  *                `incremental: false` / `coverage_strategy: full_inventory`
- *                (manifests/meta.json) and emits no STATE: every run walks
- *                the full timeline (no server-provided early-stop cursor is
- *                confirmed) — a second run's re-emit of unchanged posts is
+ *                (manifests/meta.json). Every run walks the full timeline
+ *                (no server-provided early-stop cursor is confirmed). An
+ *                empty timeline response, or the profile's own GraphQL
+ *                `media_count: 0` when no timeline response is emitted,
+ *                completes the empty stream with STATE. A second run's
+ *                re-emit of unchanged posts is
  *                an idempotent id-keyed upsert, not incremental savings yet.
  *   post_likes   child stream of posts (D3): (post, liker) pairs from each
  *                post's `facepile_top_likers` sample. Instagram's web
@@ -99,6 +102,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.10 (2026-09-26) — completes verified-empty posts from the timeline
+ *     response or the profile's explicit zero media count.
  *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
  *     in the owner's sign-in tab instead of opening a sibling about:blank tab.
  *   v0.4.3 (2026-09-24) — reports bounded failure steps for incomplete ads
@@ -491,12 +496,19 @@ interface TimelineEnvelope {
  * `waitForResponse` instead of that bespoke shim.
  */
 function isPostsTimelineResponse(response: {
-	request: () => { method: () => string };
+	request: () => {
+		headers: () => Record<string, string>;
+		method: () => string;
+		postData: () => string | null;
+	};
 	url: () => string;
 }): boolean {
+	const request = response.request();
 	return (
 		response.url().includes("/graphql/") &&
-		response.request().method() === "POST"
+		request.method() === "POST" &&
+		(request.headers()["x-fb-friendly-name"] === "PolarisProfilePostsQuery" ||
+			request.postData()?.includes("PolarisProfilePostsQuery") === true)
 	);
 }
 
@@ -555,8 +567,11 @@ export async function fetchAllPosts(
 			if (!response) {
 				return false;
 			}
-			sawAnyResponse = true;
 			const connection = await readTimelineConnection(response);
+			if (!connection || !Array.isArray(connection.edges)) {
+				return false;
+			}
+			sawAnyResponse = true;
 			capture?.captureHttp(
 				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
 				connection,
@@ -1056,22 +1071,47 @@ export async function collectAllStreams(
 	const userId = identity.id;
 
 	let profile = identity;
+	let profileCounts: ReturnType<typeof profileCountsFromGraphQL> | null = null;
 	if (wantsProfile) {
 		await progress("Fetching Instagram profile counts");
-		const counts = await fetchProfileCounts(page, identity.username, capture);
-		profile = profileRecord(user, counts) ?? identity;
+		profileCounts = await fetchProfileCounts(page, identity.username, capture);
+		profile = profileRecord(user, profileCounts) ?? identity;
 		await emitRecord("profile", profile as RecordData);
 	}
 
 	if (wantsPosts || wantsPostLikes) {
 		await progress("Fetching Instagram posts");
-		const { edges, truncated } = await fetchAllPosts(
-			page,
-			profile.username,
-			capture,
-			progress,
-			delay,
-		);
+		let edges: InstagramTimelineEdge[];
+		let truncated: boolean;
+		let verifiedEmpty = false;
+		try {
+			({ edges, truncated } = await fetchAllPosts(
+				page,
+				profile.username,
+				capture,
+				progress,
+				delay,
+			));
+			verifiedEmpty = edges.length === 0 && !truncated;
+		} catch (error) {
+			const timelineUnavailable =
+				error instanceof Error &&
+				error.message.includes("meta_posts_response_not_observed");
+			if (!timelineUnavailable) {
+				throw error;
+			}
+			profileCounts ??= await fetchProfileCounts(
+				page,
+				identity.username,
+				capture,
+			);
+			if (profileCounts.post_count !== 0) {
+				throw error;
+			}
+			edges = [];
+			truncated = false;
+			verifiedEmpty = true;
+		}
 
 		if (wantsPosts) {
 			for (const edge of edges) {
@@ -1097,17 +1137,16 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 			});
 		}
-		// `posts` declares incremental: false / coverage_strategy:
-		// full_inventory (manifests/meta.json) and emits no STATE: every run
-		// walks the full timeline (scroll-triggered pagination has no
-		// server-provided early-stop cursor this connector has confirmed
-		// live — see the header's posts-endpoint note). A `taken_at`
-		// high-water mark could support a stop-at-seen boundary IF Instagram's
-		// timeline connection is confirmed newest-first, but no code or
-		// fixture here confirms that ordering — a live-account run is needed
-		// first. `postRecord`'s id-keyed emit already makes a second run's
-		// re-emit of unchanged posts an idempotent upsert, not a duplicate —
-		// see the connector cutover report's second-run evidence.
+		if (verifiedEmpty && !truncated) {
+			if (wantsPosts) {
+				await emit({ cursor: {}, stream: "posts", type: "STATE" });
+			}
+			if (wantsPostLikes) {
+				await emit({ cursor: {}, stream: "post_likes", type: "STATE" });
+			}
+		}
+		// This STATE marks successful empty completion. It carries no resume
+		// cursor; non-empty runs still walk the full inventory and upsert by id.
 	}
 
 	if (wantsFollowing) {
