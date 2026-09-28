@@ -27,7 +27,9 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * profile stream (manifest required: id). One record per run — the Amazon
  * account whose order history was scraped. `id` is Amazon's own stable
- * opaque customer id (see parsers.ts's parseAmazonProfileDom), not email:
+ * opaque customer id when available, otherwise the legacy singleton id
+ * `me` when the authenticated greeting is the only positive identity
+ * evidence (see parsers.ts's parseAmazonProfileDom), not email:
  * live evidence (2026-09-22) showed the capability map's assumed `email`
  * field is not safely obtainable without crossing a re-authentication gate
  * — see the connector's report CONTRACT-CHANGE-REQUEST. `email` is kept in

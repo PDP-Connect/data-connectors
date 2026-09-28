@@ -54,7 +54,7 @@ function fakePage(html: string): Page {
 
 test("collectProfile emits a profile record keyed by Amazon's stable customerId", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	await collectProfile(fakePage(PROFILE_HTML), harness.emitRecord);
+	await collectProfile(fakePage(PROFILE_HTML), harness.emit, harness.emitRecord);
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.stream, "profile");
 	assert.equal(harness.emitted[0]?.data.id, "A39M9I106DZZ8N");
@@ -62,13 +62,40 @@ test("collectProfile emits a profile record keyed by Amazon's stable customerId"
 	assert.equal(harness.emitted[0]?.data.email, null);
 });
 
-test("collectProfile emits nothing when the account page has no scrapeable customerId", async () => {
+test("collectProfile emits a legacy-compatible profile from the authenticated greeting when customerId is missing", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	await collectProfile(
-		fakePage("<html><body>no account info</body></html>"),
+		fakePage(
+			'<html><body><span id="nav-link-accountList-nav-line-1">Hello, Jane Owner</span></body></html>',
+		),
+		harness.emit,
+		harness.emitRecord,
+	);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.stream, "profile");
+	assert.equal(harness.emitted[0]?.data.id, "me");
+	assert.equal(harness.emitted[0]?.data.name, "Jane Owner");
+	assert.equal(harness.emitted[0]?.data.email, null);
+});
+
+test("collectProfile emits SKIP_RESULT when the account page has no authenticated identity evidence", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectProfile(
+		fakePage(
+			'<html><body><span id="nav-link-accountList-nav-line-1">Hello, sign in</span></body></html>',
+		),
+		harness.emit,
 		harness.emitRecord,
 	);
 	assert.equal(harness.emitted.length, 0);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT",
+	);
+	assert.ok(skip, "expected an explicit profile SKIP_RESULT");
+	if (skip?.type === "SKIP_RESULT") {
+		assert.equal(skip.stream, "profile");
+		assert.equal(skip.reason, "wholefoods_profile_identity_unavailable");
+	}
 });
 
 const STUB: OrderStub = {

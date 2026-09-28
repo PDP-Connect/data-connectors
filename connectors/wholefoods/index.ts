@@ -124,24 +124,35 @@ async function navigateAndSettle(
 
 async function collectProfile(
 	page: Page,
+	emit: BrowserCollectContext["emit"],
 	emitRecord: BrowserCollectContext["emitRecord"],
 ): Promise<void> {
 	await navigateAndSettle(page, AMAZON_ORDER_HISTORY_URL);
 	const html = await page.content();
 	const { customerId, name } = parseAmazonProfileDom(html);
-	// A profile record needs a real primary key. Live evidence (2026-09-22,
-	// see the connector's report CONTRACT-CHANGE-REQUEST) showed the
-	// capability map's assumed `email` field is not safely obtainable — no
-	// reachable page renders it without crossing a re-authentication gate.
-	// `customerId` (Amazon's own stable opaque account id, parsed from the
-	// page's inline analytics payload) is the real identity used instead.
-	// When even that is unavailable there is no honest identity to key a
-	// record on; skip rather than invent one (D3: only a real per-entity
-	// identity becomes a record).
-	if (!customerId) {
+	// Live evidence (2026-09-22, see the connector's report
+	// CONTRACT-CHANGE-REQUEST) showed the capability map's assumed `email`
+	// field is not safely obtainable — no reachable page renders it without
+	// crossing a re-authentication gate. Prefer Amazon's stable opaque
+	// `customerId` when present. If the authenticated nav greeting is the only
+	// available identity, emit the legacy singleton profile instead of going
+	// silent; this preserves the old connector's `{ name, email }` profile
+	// parity for accounts/pages that omit the analytics id.
+	if (!(customerId || name)) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "wholefoods_profile_identity_unavailable",
+			message:
+				"Whole Foods reached the Amazon account page, but the page did not expose an authenticated account identity.",
+			diagnostics: {
+				customer_id_present: false,
+				greeting_name_present: false,
+			},
+		});
 		return;
 	}
-	const record: ProfileRecord = { email: null, id: customerId, name };
+	const record: ProfileRecord = { email: null, id: customerId ?? "me", name };
 	await emitRecord("profile", record);
 }
 
@@ -556,7 +567,7 @@ if (isMainModule(import.meta.url)) {
 			const wantsNutrition = requested.has("nutrition");
 
 			if (wantsProfile) {
-				await collectProfile(page, emitRecord);
+				await collectProfile(page, emit, emitRecord);
 			}
 
 			if (!(wantsOrders || wantsItems || wantsNutrition)) {
