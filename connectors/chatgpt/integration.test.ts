@@ -1748,7 +1748,7 @@ test("processConversationDetail: detail=200 with mapping but zero message-bearin
 	);
 	assert.ok(diag, "200-with-mapping but zero messages must emit an empty_detail diagnostic");
 	assert.equal(diag.stream, "messages");
-	assert.match(diag.message, /convo-abc/, "message carries the conversation id");
+	assert.doesNotMatch(diag.message, /convo-/, "PROGRESS is display text and must not leak conversation ids");
 	assert.match(diag.message, /no message-bearing nodes/, "message names the empty-graph cause");
 	assert.match(
 		diag.message,

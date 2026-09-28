@@ -2444,13 +2444,13 @@ export async function processConversationDetail(
 		// stream-level SKIP_RESULT tells the host that the whole `messages` stream
 		// is unavailable, and Desktop then drops every message of the run because
 		// of one odd conversation. This fact is about one record, so it is a
-		// PROGRESS diagnostic that names the conversation id. The `node_count` lets a
+		// PROGRESS diagnostic. PROGRESS is display text, so it carries no conversation id. The `node_count` lets a
 		// reviewer distinguish a genuinely empty graph (0) from one whose every
 		// node was synthetic/role-less (>0).
 		deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `empty_detail: conversation ${c.id} returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
+			message: `empty_detail: a conversation returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
 		});
 	}
 }
