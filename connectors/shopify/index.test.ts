@@ -19,6 +19,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, type Page } from "playwright";
+import { chromium as patchrightChromium } from "patchright";
 import type {
 	EmittedMessage,
 	RecordData,
@@ -27,6 +28,7 @@ import type {
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectShopify,
+	evaluateShopReaderInMainWorld,
 	ensureShopifySession,
 	hasVerifiedEmptyOrderHistoryInPage,
 	waitForApolloCache,
@@ -479,6 +481,41 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 		assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).dom_card_count, 1);
 		await page.setContent('<div class="order-card"><a href="https://shop.app/orders/fixture">Acme Goods</a><div>19.99 EUR</div></div>');
 		assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).dom_card_count, 1);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("Shop Apollo readers see main-world state under Patchright", async () => {
+	const browser = await patchrightChromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const apolloState = { ROOT_QUERY: { viewer: {} } };
+		await page.route("https://shop.app/**", (route) =>
+			route.fulfill({
+				status: 200,
+				contentType: "text/html",
+				body: '<div id="root"><h1>Your orders</h1><span>No orders found</span></div>',
+			}),
+		);
+		await page.addInitScript((state) => {
+			Object.assign(window, { __APOLLO_STATE__: state });
+		}, apolloState);
+		await page.goto("https://shop.app/account/order-history");
+
+		assert.deepEqual(
+			await evaluateShopReaderInMainWorld(page as unknown as Page, readApolloCacheInPage),
+			apolloState,
+		);
+		assert.equal(
+			(await evaluateShopReaderInMainWorld(page as unknown as Page, shopSkipDiagnosticsInPage))
+				.ssr_cache_present,
+			true,
+		);
+		assert.equal(
+			await evaluateShopReaderInMainWorld(page as unknown as Page, hasVerifiedEmptyOrderHistoryInPage),
+			true,
+		);
 	} finally {
 		await browser.close();
 	}
