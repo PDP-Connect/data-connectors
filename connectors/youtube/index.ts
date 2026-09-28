@@ -300,6 +300,7 @@ async function skipUnreadable(
 		type: "SKIP_RESULT",
 		stream,
 		reason,
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message: "YouTube content did not appear before the page-read deadline.",
 	});
 }
@@ -438,6 +439,7 @@ export async function collectYoutubeBrowser(
 							type: "SKIP_RESULT",
 							stream: "profile",
 							reason: "youtube_profile_channel_link_unavailable",
+							recovery_hint: { action: "retry_by_runtime", retryable: true },
 							message:
 								"The signed-in account header did not expose an own-channel link.",
 						});

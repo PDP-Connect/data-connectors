@@ -458,6 +458,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "notes",
 				reason: "older_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `iCloud Notes stopped at the ${MAX_PAGES}-page limit with more pages still listed`,
 				diagnostics: { page_limit: MAX_PAGES, total_seen: raw.length },
 			});

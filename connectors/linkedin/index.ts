@@ -509,6 +509,7 @@ export async function collectLinkedIn(
 				type: "SKIP_RESULT",
 				stream: "profile",
 				reason: "linkedin_dash_profile_unavailable",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
 					"Every dash profile decoration attempt failed; only /me was reachable",
 			});
@@ -579,6 +580,10 @@ export async function collectLinkedIn(
 				type: "SKIP_RESULT",
 				stream: "connections",
 				reason: "older_connections_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `LinkedIn connections stopped at the ${CONNECTIONS_MAX}-connection cap`,
 				diagnostics: {
 					connections_cap: CONNECTIONS_MAX,

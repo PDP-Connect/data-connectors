@@ -2364,7 +2364,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.8",
+				"version": "0.2.9",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -5013,7 +5013,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.7",
+				"version": "0.2.8",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -6367,7 +6367,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.7",
+				"version": "0.2.8",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9777,7 +9777,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.5.12",
+				"version": "0.5.13",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -10519,7 +10519,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -11200,7 +11200,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.10",
+				"version": "0.3.11",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -11583,7 +11583,7 @@
 				},
 				"connector_key": "loom",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Loom",
 				"brand": {
 					"icon": "icon.svg",
@@ -11749,7 +11749,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.9",
+				"version": "0.4.10",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -12088,7 +12088,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -12481,7 +12481,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.6",
+				"version": "0.1.7",
 				"display_name": "Oura",
 				"runtime_requirements": {
 					"bindings": {
@@ -13823,7 +13823,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.11",
+				"version": "0.2.12",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -15878,7 +15878,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -17372,7 +17372,7 @@
 				},
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "1.0.5",
+				"version": "1.0.6",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -21167,7 +21167,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.8",
+				"version": "0.2.9",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",

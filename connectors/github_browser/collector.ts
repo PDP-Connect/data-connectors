@@ -53,6 +53,7 @@ export async function collectGitHubBrowser(
 			type: "SKIP_RESULT",
 			stream,
 			reason: "github_browser_incomplete",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: "GitHub did not return a complete result for this stream.",
 		});
 	};

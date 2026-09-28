@@ -1093,6 +1093,10 @@ export async function collectAllStreams(
 				diagnostics: { page_limit: POSTS_MAX_PAGES, total_seen: edges.length },
 				message: `Instagram posts stopped at the ${POSTS_MAX_PAGES}-page limit with more pages still listed`,
 				reason: "posts_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				stream: wantsPosts ? "posts" : "post_likes",
 				type: "SKIP_RESULT",
 			});
@@ -1135,6 +1139,10 @@ export async function collectAllStreams(
 				},
 				message: `Instagram following stopped at the ${FOLLOWING_MAX_PAGES}-page limit (${users.length} accounts) with more pages still listed`,
 				reason: "following_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				stream: "following",
 				type: "SKIP_RESULT",
 			});
@@ -1176,6 +1184,7 @@ export async function collectAllStreams(
 				},
 				message: `Instagram ads scan could not reach ${missingSurfaces.join(", ")}`,
 				reason: "ads_surfaces_unavailable",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				stream: "ads",
 				type: "SKIP_RESULT",
 			});

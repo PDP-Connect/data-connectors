@@ -288,15 +288,16 @@ export async function collectAllStreams(
 		const order = orderRecord(node);
 		if (!order) {
 			// No orderUuid — the platform's own primary key is absent; skip
-			// silently is wrong here, report it as a shape anomaly via SKIP_RESULT
-			// so drift is visible rather than swallowed.
+			// silently is wrong here, report it as a record-level shape anomaly
+			// (PROGRESS, not a stream SKIP_RESULT: one bad node must not drop every
+			// order) so drift is visible rather than swallowed. The node still
+			// counts as considered and not covered.
 			ordersConsidered += 1;
 			if (wantsOrders) {
 				await emit({
-					type: "SKIP_RESULT",
+					type: "PROGRESS",
 					stream: "orders",
-					reason: "shape_check_failed",
-					message: "order node missing orderUuid",
+					message: "shape_check_failed: order node missing orderUuid",
 				});
 			}
 			continue;
@@ -330,6 +331,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason: "older_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message,
 				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
 			});
@@ -339,6 +344,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "order_items",
 				reason: "older_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message,
 				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
 			});
@@ -355,6 +364,7 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream,
 				reason: "doordash_orders_response_not_observed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
 					"No getConsumerOrdersWithDetails response was observed on the orders page; the account may have no orders, or DoorDash's endpoint/shape has changed.",
 			});

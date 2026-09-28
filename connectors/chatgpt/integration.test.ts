@@ -33,8 +33,9 @@
  *     no message records (scope suppresses one stream cleanly),
  *   - all streams disabled → nothing emits,
  *   - detail.status !== 200 or missing mapping → still emit the
- *     conversation record (detail=null), and a SKIP_RESULT on the
- *     messages stream; the conversation is never silently dropped,
+ *     conversation record (detail=null), and a record-level PROGRESS
+ *     diagnostic (not a stream SKIP_RESULT) on the messages stream; the
+ *     conversation is never silently dropped,
  *   - processConversationDetail is faithful to its inputs: same
  *     conversation processed twice yields two emits (dedup is upstream,
  *     at the listConversationsSinceCursor cursor layer),
@@ -1369,6 +1370,11 @@ test("runMemoriesStream: 500 → SKIP_RESULT('http_error') with status diagnosti
 	assert.ok(skip);
 	assert.equal(skip.reason, "http_error");
 	assert.deepEqual(skip.diagnostics, { http_status: 500 });
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "retry_by_runtime", retryable: true },
+		"a transient list-fetch error must keep the request open for a retry",
+	);
 });
 
 function memoriesCoverage(
@@ -1595,21 +1601,24 @@ test("runMemoriesStream: a rejected entry counts toward considered but NOT cover
 	assert.equal(coverage.considered, 2, "both listed entries were weighed");
 	assert.equal(coverage.covered, 1, "covered excludes the rejected entry");
 
-	const shapeCheckSkip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.reason === "shape_check_failed",
+	assert.equal(
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"a rejected entry must not emit a stream-level SKIP_RESULT",
 	);
-	assert.ok(shapeCheckSkip, "the drop must be diagnosable, not silent");
-	assert.equal(shapeCheckSkip.stream, "memories");
-	const diag = shapeCheckSkip.diagnostics as
-		| { raw_keys?: string[] }
-		| undefined;
-	assert.ok(
-		diag?.raw_keys?.includes("content"),
+	const shapeCheck = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
+	);
+	assert.ok(shapeCheck, "the drop must be diagnosable, not silent");
+	assert.equal(shapeCheck.stream, "memories");
+	assert.match(
+		shapeCheck.message,
+		/raw_keys=content\b/,
 		"diagnostic carries structural keys, not values",
 	);
 	assert.equal(
-		shapeCheckSkip.message.includes("no id on this one"),
+		shapeCheck.message.includes("no id on this one"),
 		false,
 		"diagnostic must not leak entry content",
 	);
@@ -1617,7 +1626,7 @@ test("runMemoriesStream: a rejected entry counts toward considered but NOT cover
 
 // ─── Invariant 4: null-enrichment fallback ───────────────────────────────
 
-test("processConversationDetail: detail.status=404 — still emits conversation (list-only) + SKIP on messages", async () => {
+test("processConversationDetail: detail.status=404 — still emits conversation (list-only) + a record-level http_error diagnostic, not a stream SKIP", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	const missing: ChatGptFetchResult = { status: 404, json: null };
 	await processConversationDetail(
@@ -1645,30 +1654,31 @@ test("processConversationDetail: detail.status=404 — still emits conversation 
 	// No message records — detail had no mapping.
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 0);
 
-	// SKIP_RESULT carries the http status in the message.
-	const skip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT",
-	);
-	assert.ok(skip, "SKIP_RESULT must emit when detail fetch failed");
+	// One conversation's failure is record-level: a stream SKIP_RESULT would
+	// make Desktop drop every message of the run.
 	assert.equal(
-		skip.stream,
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"a failed detail must not emit a stream-level SKIP_RESULT",
+	);
+	const diagnostic = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("http_error: "),
+	);
+	assert.ok(diagnostic, "a diagnostic must emit when detail fetch failed");
+	assert.equal(
+		diagnostic.stream,
 		"messages",
 		"detail failure is charged to the messages stream",
 	);
-	assert.equal(skip.reason, "http_error");
 	assert.match(
-		skip.message,
+		diagnostic.message,
 		/convo-abc http 404/,
 		"message carries the conversation id + http status",
 	);
-	assert.deepEqual(skip.diagnostics, {
-		http_status: 404,
-		conversation_id: "convo-abc",
-	});
 });
 
-test("processConversationDetail: detail=200 with missing mapping — list-only fallback + SKIP on messages", async () => {
+test("processConversationDetail: detail=200 with missing mapping — list-only fallback + a record-level missing_mapping diagnostic, not a stream SKIP", async () => {
 	// 200 OK but the body has no `mapping` field (observed when the server
 	// 200s a stub). Guard path must still fall back, not crash.
 	const { deps, emitted, messages } = makeHarness();
@@ -1684,16 +1694,18 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 	);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 0);
-	const skip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT",
+	assert.equal(
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"a missing mapping must not emit a stream-level SKIP_RESULT",
 	);
-	assert.ok(skip, "missing mapping must SKIP messages");
-	assert.equal(skip.reason, "missing_mapping");
-	assert.deepEqual(skip.diagnostics, {
-		http_status: 200,
-		conversation_id: "convo-abc",
-	});
+	const diagnostic = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("missing_mapping: "),
+	);
+	assert.ok(diagnostic, "missing mapping must be diagnosable");
+	assert.equal(diagnostic.stream, "messages");
+	assert.match(diagnostic.message, /convo-abc http 200/);
 });
 
 test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — records a record-level empty_detail diagnostic, not a stream SKIP", async () => {
@@ -7208,6 +7220,11 @@ test("runCustomInstructionsStream: 404 → SKIP_RESULT('not_available'), no reco
 		"not_available",
 		"404/403 flag feature-disabled for the account",
 	);
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "not_retriable", retryable: false },
+		"a feature the account does not have is final",
+	);
 	assert.equal(
 		messages.filter((m) => m.type === "STATE").length,
 		0,
@@ -7232,6 +7249,11 @@ test("runCustomInstructionsStream: 500 → SKIP_RESULT('http_error'), no record"
 		"non-200 non-404/403 uses the generic http_error bucket",
 	);
 	assert.deepEqual(skip.diagnostics, { http_status: 500 });
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "retry_by_runtime", retryable: true },
+		"a transient http error must keep the request open for a retry",
+	);
 });
 
 test("runCustomInstructionsStream: http 200 with an unreadable body is a failure, not a synthetic cleared-instructions record", async () => {
@@ -7261,6 +7283,10 @@ test("runCustomInstructionsStream: http 200 with an unreadable body is a failure
 	assert.ok(skip);
 	assert.equal(skip.stream, "custom_instructions");
 	assert.equal(skip.reason, "parse_error");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
 });
 
 test("runCustomInstructionsStream: a genuinely cleared/empty body still emits its record and STATE (distinguishable from parse_error)", async () => {
@@ -7800,12 +7826,17 @@ test("runCustomGptsStream: considered counts enumerated items, and covered exclu
 	assert.equal(coverage.considered, 2, "both listed items were weighed");
 	assert.equal(coverage.covered, 1, "covered excludes the rejected item");
 
-	const shapeCheckSkip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.reason === "shape_check_failed",
+	assert.equal(
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"a rejected item must not emit a stream-level SKIP_RESULT",
 	);
-	assert.ok(shapeCheckSkip, "the drop must be diagnosable, not silent");
-	assert.equal(shapeCheckSkip.stream, "custom_gpts");
+	const shapeCheck = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
+	);
+	assert.ok(shapeCheck, "the drop must be diagnosable, not silent");
+	assert.equal(shapeCheck.stream, "custom_gpts");
 });
 
 // Live shape drift, run_1786417045973 (see unwrapGizmo doc-comment): drives
@@ -8349,24 +8380,27 @@ test("runSharedConversationsStream: a rejected record counts toward considered b
 		"covered excludes the rejected item — it was neither emitted nor suppressed",
 	);
 
-	const shapeCheckSkip = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.reason === "shape_check_failed",
+	assert.equal(
+		messages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"a rejected record must not emit a stream-level SKIP_RESULT",
+	);
+	const shapeCheck = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
 	);
 	assert.ok(
-		shapeCheckSkip,
+		shapeCheck,
 		"a bounded diagnostic must exist so the drop is not silent",
 	);
-	assert.equal(shapeCheckSkip.stream, "shared_conversations");
-	const diag = shapeCheckSkip.diagnostics as
-		| { raw_keys?: string[] }
-		| undefined;
-	assert.ok(
-		diag?.raw_keys?.includes("conversation_id"),
+	assert.equal(shapeCheck.stream, "shared_conversations");
+	assert.match(
+		shapeCheck.message,
+		/raw_keys=[^)]*\bconversation_id\b/,
 		"diagnostic carries structural keys, not values",
 	);
 	assert.equal(
-		shapeCheckSkip.message.includes("Malformed"),
+		shapeCheck.message.includes("Malformed"),
 		false,
 		"diagnostic must not leak the raw title text",
 	);

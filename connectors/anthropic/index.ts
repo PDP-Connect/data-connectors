@@ -1015,7 +1015,7 @@ async function emitLayoutUnrecognizedSkip(
 			message:
 				"The Claude export archive has no recognized conversations or projects content. " +
 				"No data was imported, and this run does not claim the account is empty.",
-			recovery_hint: { action: "terminal", retryable: false },
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 		});
 	}
 }
@@ -1283,7 +1283,10 @@ export async function collectAnthropic({
 					message:
 						"The Claude export has no recognized conversations entry, so " +
 						`${stream} was not imported and was not checkpointed.`,
-					recovery_hint: { action: "terminal", retryable: false },
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
 				});
 			}
 		}
@@ -1317,6 +1320,10 @@ export async function collectAnthropic({
 					type: "SKIP_RESULT",
 					stream,
 					reason: "export_items_unparseable",
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
 					message: `${count} ${parent} item(s) in the export ${why}, so ${stream} is incomplete and was not checkpointed.`,
 					diagnostics: { dropped_count: count },
 				});

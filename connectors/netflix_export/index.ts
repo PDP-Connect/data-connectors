@@ -285,6 +285,7 @@ async function collectViewingActivity(
 			type: "SKIP_RESULT",
 			stream,
 			reason: "archive_security_violation",
+			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `Failed to resolve import directory: ${err instanceof Error ? err.message : String(err)}`,
 		});
 		return;
@@ -300,6 +301,12 @@ async function collectViewingActivity(
 			type: "SKIP_RESULT",
 			stream,
 			reason: loaded.reason,
+			// A changed Netflix CSV layout needs a connector upgrade; every other
+			// load failure is a file the owner must upload again.
+			recovery_hint:
+				loaded.reason === "unrecognized_csv_schema"
+					? { action: "retry_on_connector_upgrade", retryable: false }
+					: { action: "manual_action_required", retryable: false },
 			message: loaded.message,
 		});
 		return;
@@ -321,6 +328,7 @@ async function collectViewingActivity(
 			type: "SKIP_RESULT",
 			stream,
 			reason: dateOrderResult.reason,
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message: dateOrderResult.message,
 		});
 		return;

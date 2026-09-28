@@ -339,14 +339,26 @@ test("collectAllStreams: never emits a STATE message (full refresh only, no incr
 	assert.equal(stateMessages.length, 0);
 });
 
-test("collectAllStreams: order missing orderUuid is reported via SKIP_RESULT, not emitted as a RECORD", async () => {
+test("collectAllStreams: order missing orderUuid is a record-level diagnostic, not a RECORD and not a stream SKIP_RESULT", async () => {
 	const harness = await runCollectAllStreamsWithNodes(
 		[makeOrderNode("order-1", { orderUuid: null })],
 		["orders"],
 	);
 	assert.equal(harness.emitted.length, 0);
-	const skipReasons = harness.protocolMessages
-		.filter((m) => m.type === "SKIP_RESULT")
-		.map((m) => (m as { reason: string }).reason);
-	assert.ok(skipReasons.includes("shape_check_failed"));
+	// One bad node must not skip the whole orders stream: Desktop drops every
+	// order of the run for a stream-level skip.
+	assert.equal(
+		harness.protocolMessages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "shape_check_failed",
+		).length,
+		0,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				m.stream === "orders" &&
+				m.message.startsWith("shape_check_failed: "),
+		),
+	);
 });

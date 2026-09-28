@@ -472,6 +472,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "trips",
 				reason: "trips_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `Uber activity feed stopped at the ${MAX_ACTIVITY_PAGES}-page limit with more trip history possibly available`,
 				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
 			});
@@ -481,6 +485,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "trips",
 				reason: "trips_deferred_detail_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
 				diagnostics: {
 					detail_fetch_limit: MAX_DETAIL_FETCHES,

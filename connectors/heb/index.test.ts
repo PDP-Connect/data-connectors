@@ -378,9 +378,17 @@ test("processListOrder: a malformed order date records a 'gap' coverage outcome 
 	);
 	assert.ok(
 		protocolMessages.some(
-			(m) => m.type === "SKIP_RESULT" && m.reason === "unparseable_order_date",
+			(m) =>
+				m.type === "PROGRESS" &&
+				m.stream === "orders" &&
+				m.message.startsWith("unparseable_order_date: "),
 		),
-		"the SKIP_RESULT diagnostic at the order level fires",
+		"the record-level diagnostic at the order level fires",
+	);
+	assert.equal(
+		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"one bad order date must not skip the whole orders stream",
 	);
 	const gaps = protocolMessages.filter((m) => m.type === "DETAIL_GAP");
 	assert.equal(gaps.length, 1, "a DETAIL_GAP backs the coverage gap");
@@ -408,9 +416,17 @@ test("processListOrder: a malformed order date emits no DETAIL_GAP when order_it
 	assert.deepEqual(coverage.hydrated, []);
 	assert.ok(
 		protocolMessages.some(
-			(m) => m.type === "SKIP_RESULT" && m.reason === "unparseable_order_date",
+			(m) =>
+				m.type === "PROGRESS" &&
+				m.stream === "orders" &&
+				m.message.startsWith("unparseable_order_date: "),
 		),
-		"the SKIP_RESULT diagnostic at the order level still fires",
+		"the record-level diagnostic at the order level still fires",
+	);
+	assert.equal(
+		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+		"one bad order date must not skip the whole orders stream",
 	);
 	const gaps = protocolMessages.filter((m) => m.type === "DETAIL_GAP");
 	assert.equal(

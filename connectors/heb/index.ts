@@ -879,6 +879,10 @@ async function extractAndShapeCheckOrders(
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason: "list_page_shape_check_failed",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `list card ${r.orderId}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
 				diagnostics: { card: r, issues: parsed.error.issues, source: r.source },
 			});
@@ -888,6 +892,29 @@ async function extractAndShapeCheckOrders(
 }
 
 type EmptyListPageAction = "abort" | "terminal";
+
+/** An empty page behind a sign-in or bot wall needs the owner; a page whose
+ *  markup no longer matches the parser needs a connector upgrade; anything
+ *  else is a page that did not load as expected and may load on a later run. */
+function emptyListPageRecoveryHint(reason: string): {
+	action:
+		| "refresh_credentials"
+		| "retry_on_connector_upgrade"
+		| "retry_by_runtime";
+	retryable: boolean;
+} {
+	if (reason === "source_auth_or_challenge") {
+		return { action: "refresh_credentials", retryable: false };
+	}
+	if (
+		reason === "selector_drift" ||
+		reason === "pagination_metadata_absent" ||
+		reason === "pagination_metadata_contradictory"
+	) {
+		return { action: "retry_on_connector_upgrade", retryable: false };
+	}
+	return { action: "retry_by_runtime", retryable: true };
+}
 interface EmptyListPageClassification {
 	action: EmptyListPageAction;
 	reason: string;
@@ -1097,6 +1124,7 @@ async function reportEmptyPageDiagnostics(
 		type: "SKIP_RESULT",
 		stream: "orders",
 		reason: classification.reason,
+		recovery_hint: emptyListPageRecoveryHint(classification.reason),
 		message:
 			classification.reason === "heb_empty_history_after_prior_orders"
 				? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
@@ -1704,12 +1732,13 @@ export async function processListOrder(
 ): Promise<void> {
 	const orderDate = parseOrderDate(listOrder.orderDateRaw);
 	if (!orderDate) {
+		// Record-level: the order joins the `orders` coverage denominator below
+		// (considered, not covered), so a stream SKIP_RESULT would only make the
+		// host drop every other order of the run.
 		await deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "orders",
-			reason: "unparseable_order_date",
-			message: `Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
-			diagnostics: { order_id: listOrder.orderId },
+			message: `unparseable_order_date: Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
 		});
 		// Unparseable order dates cannot reach the detail hydration lane. When
 		// order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
@@ -1930,6 +1959,7 @@ async function reportListPageCeiling(
 		type: "SKIP_RESULT",
 		stream: "orders",
 		reason: "older_pages_deferred_page_budget",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message:
 			"Stopped after the most recent orders; older orders were not read in this run",
 		diagnostics: {
@@ -1979,6 +2009,7 @@ async function loadListPage(
 			type: "SKIP_RESULT",
 			stream: "orders",
 			reason: "list_page_navigation_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
 			diagnostics: {
 				error_class: navigation.error instanceof Error ? "Error" : "unknown",
@@ -2009,6 +2040,10 @@ async function loadListPage(
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `H-E-B list page ${pageNum}: ${orders.length} orders parsed but maxPage could not be resolved (${reason}); refusing to silently assume a single-page result.`,
 				diagnostics: { max_page_resolution: maxPageResolution },
 			});
@@ -2196,6 +2231,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "profile_navigation_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `H-E-B profile page navigation failed: ${message.slice(0, 160)}`,
 		});
 		return;
@@ -2209,6 +2245,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "session_repair_required",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
 			message: "H-E-B profile page redirected to sign-in.",
 		});
 		return;
@@ -2218,6 +2255,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "session_repair_required",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
 			message: "H-E-B profile page was blocked by Incapsula.",
 		});
 		return;
@@ -2229,6 +2267,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "profile_shape_check_failed",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message: "H-E-B profile page yielded no name or email.",
 		});
 		return;
@@ -2290,6 +2329,14 @@ async function emitNutritionCoverageIncomplete(
 		type: "SKIP_RESULT",
 		stream: "nutrition",
 		reason: HEB_NUTRITION_COVERAGE_INCOMPLETE_REASON,
+		// Without orders and order_items in scope there is nothing to look up, and
+		// a later run with the same scope cannot change that. Every other cause is
+		// an order-history scan that a later run can finish.
+		recovery_hint:
+			diagnostics.orders_requested === false ||
+			diagnostics.order_items_requested === false
+				? { action: "not_retriable", retryable: false }
+				: { action: "retry_by_runtime", retryable: true },
 		message,
 		diagnostics,
 	});
@@ -2346,6 +2393,7 @@ export async function collectNutrition(
 				type: "SKIP_RESULT",
 				stream: "nutrition",
 				reason: "nutrition_navigation_failed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message: `H-E-B product page navigation failed for ${target.productId}: ${message.slice(0, 160)}`,
 				diagnostics: { product_id: target.productId },
 			});
@@ -2369,6 +2417,7 @@ export async function collectNutrition(
 				type: "SKIP_RESULT",
 				stream: "nutrition",
 				reason: "session_repair_required",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
 				message: `H-E-B product page was blocked by Incapsula for ${target.productId}.`,
 				diagnostics: { product_id: target.productId },
 			});
@@ -2605,6 +2654,10 @@ if (isMainModule(import.meta.url)) {
 						type: "SKIP_RESULT",
 						stream: "order_items",
 						reason: "item_count_short",
+						recovery_hint: {
+							action: "retry_on_connector_upgrade",
+							retryable: false,
+						},
 						message:
 							"Some orders hold fewer items than H-E-B says they contain",
 						diagnostics: {

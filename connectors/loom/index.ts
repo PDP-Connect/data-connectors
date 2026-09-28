@@ -32,6 +32,7 @@ runConnector({
 			type: "SKIP_RESULT",
 			stream: "videos",
 			reason: "loom_apollo_wiring_pending",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message:
 				"Loom session reachable. Apollo cache extraction + transcript endpoint wiring deferred to live session.",
 		});
