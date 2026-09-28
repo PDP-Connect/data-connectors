@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.10)
+ * PDPP Shopify (Shop app) Connector (v0.2.11)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -46,6 +46,8 @@
  * orders no longer returned (full scan each run).
  *
  * CHANGES
+ *   v0.2.11 (2026-09-28) — read Apollo state and empty-page evidence in the
+ *     page's main JavaScript world under Patchright.
  *   v0.2.10 (2026-09-26) — recheck fiber, SSR, and DOM order evidence until
  *     loaded orders or stable verified empty; report evidence deadline expiry.
  *   v0.2.9 (2026-09-26) — bounded cache readiness, legacy DOM-card fallback,
@@ -388,6 +390,24 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 		const phrase = (element.textContent ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 		return allowedPhrases.has(phrase);
 	});
+}
+
+/** Patchright isolates evaluate() by default. Shop's Apollo and React state
+ *  belongs to the page's main world, so these readers must opt into it. */
+export function evaluateShopReaderInMainWorld<T>(
+	page: Page,
+	reader: () => T,
+): Promise<T> {
+	return (
+		page as unknown as {
+			evaluate<R>(
+				reader: () => R,
+				arg: undefined,
+				options: undefined,
+				isolatedContext: false,
+			): Promise<R>;
+		}
+	).evaluate(reader, undefined, undefined, false);
 }
 
 function scrollToBottomInPage(): void {
@@ -773,17 +793,17 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 		state,
 		navigationStartedAt,
 		orderHistoryReady,
-		readCache: () => page.evaluate(readApolloCacheInPage),
+		readCache: () => evaluateShopReaderInMainWorld(page, readApolloCacheInPage),
 		readDomOrders: async () => parseDomOrderCards(await page.content()),
 		readSkipDiagnostics: async () => {
 			try {
-				latestDiagnostics = await page.evaluate(shopSkipDiagnosticsInPage);
+				latestDiagnostics = await evaluateShopReaderInMainWorld(page, shopSkipDiagnosticsInPage);
 			} catch {
 				// Preserve the last captured page-only fields if the page has closed.
 			}
 			return latestDiagnostics;
 		},
-		readVerifiedEmptyState: () => page.evaluate(hasVerifiedEmptyOrderHistoryInPage),
+		readVerifiedEmptyState: () => evaluateShopReaderInMainWorld(page, hasVerifiedEmptyOrderHistoryInPage),
 		scroll: async () => {
 			await page.evaluate(scrollToBottomInPage);
 			await politeDelay(SCROLL_STEP_DELAY_MS);
