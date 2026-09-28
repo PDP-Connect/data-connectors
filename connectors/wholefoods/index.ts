@@ -65,7 +65,12 @@ const USDA_DEMO_KEY = "DEMO_KEY";
 const NAV_TIMEOUT_MS = 30_000;
 const NAV_SETTLE_MS = 2500;
 const POLITE_DELAY_MS = 800;
-const MAX_SEARCH_PAGES = 50;
+// Search pages hold about 10 item rows. A live account (2026-09-28) had 70
+// pages, so 50 failed it. 250 pages (~2,500 item rows) gives 3.5x headroom.
+// That live walk took ~5.3 s per page (load+settle+delay), so 250 pages take
+// ~22 minutes. Desktop kills a run after 15 minutes without a message, so the
+// walk sends one progress message per page.
+const MAX_SEARCH_PAGES = 250;
 const USDA_MIN_TEXT_SCORE = 0.4;
 const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
 
@@ -147,9 +152,13 @@ async function collectProfile(
 
 // ─── Orders: discovery ────────────────────────────────────────────────────
 
-async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
+async function discoverOrderStubs(
+	page: Page,
+	progress: BrowserCollectContext["progress"],
+): Promise<{ stubs: OrderStub[] }> {
 	const stubs: OrderStub[] = [];
 	const seen = new Set<string>();
+	let previousRowSignature: string | null = null;
 	for (let pageNum = 1; pageNum <= MAX_SEARCH_PAGES; pageNum += 1) {
 		await navigateAndSettle(
 			page,
@@ -160,7 +169,12 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
 			throw new Error("Whole Foods order search was blocked or signed out");
 		}
-		const { hasNextPage, stubs: pageStubs } = parseOrderSearchPageDom(html);
+		const {
+			hasNextPage,
+			rowSignature,
+			selectedPage,
+			stubs: pageStubs,
+		} = parseOrderSearchPageDom(html);
 		if (
 			pageStubs.length === 0 &&
 			!/no-orders|\b(?:0|no)\s+(?:orders|results)\b/i.test(html)
@@ -169,7 +183,6 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 				"Whole Foods order search returned no recognizable results or empty-state evidence",
 			);
 		}
-		let sawNewOrder = false;
 		for (const stub of pageStubs) {
 			if (seen.has(stub.orderId)) {
 				const existing = stubs.find((s) => s.orderId === stub.orderId);
@@ -180,12 +193,17 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 			}
 			seen.add(stub.orderId);
 			stubs.push(stub);
-			sawNewOrder = true;
 		}
-		if (hasNextPage && !sawNewOrder) {
-			throw new Error(
-				"Whole Foods order pagination repeated without new orders",
-			);
+		await progress(`Scanned Whole Foods search page ${pageNum}`, {
+			count: stubs.length,
+			stream: "orders",
+		});
+		if (
+			hasNextPage &&
+			((selectedPage !== null && selectedPage !== pageNum) ||
+				rowSignature === previousRowSignature)
+		) {
+			throw new Error("Whole Foods order pagination repeated a page");
 		}
 		if (hasNextPage && pageNum === MAX_SEARCH_PAGES) {
 			throw new Error(
@@ -195,6 +213,7 @@ async function discoverOrderStubs(page: Page): Promise<{ stubs: OrderStub[] }> {
 		if (!hasNextPage) {
 			break;
 		}
+		previousRowSignature = rowSignature;
 		await politeDelay(POLITE_DELAY_MS);
 	}
 	return { stubs };
@@ -564,7 +583,7 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			const ordersCursor = openFingerprintCursor(state.orders);
-			const { stubs } = await discoverOrderStubs(page);
+			const { stubs } = await discoverOrderStubs(page, progress);
 			await progress(`Found ${stubs.length} Whole Foods order(s)`, {
 				count: stubs.length,
 				stream: "orders",

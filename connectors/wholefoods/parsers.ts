@@ -106,11 +106,17 @@ export function parseAmazonProfileDom(html: string): WholeFoodsProfile {
  */
 export function parseOrderSearchPageDom(html: string): {
 	hasNextPage: boolean;
+	rowSignature: string;
+	selectedPage: number | null;
 	stubs: OrderStub[];
 } {
 	const { document } = parseHTML(html);
 	const seen = new Set<string>();
 	const stubs: OrderStub[] = [];
+	// The search page paginates ITEM rows (about 10 per page), not orders: a
+	// large order's rows continue across several pages, so a page with no new
+	// order id is normal. Repetition is detected on the row signature instead.
+	const rowKeys: string[] = [];
 	for (const grid of document.querySelectorAll<HTMLElement>(
 		".a-fixed-left-grid",
 	)) {
@@ -122,6 +128,11 @@ export function parseOrderSearchPageDom(html: string): {
 		if (!orderId) {
 			continue;
 		}
+		rowKeys.push(
+			[...grid.querySelectorAll<HTMLAnchorElement>("a[href]")]
+				.map((a) => a.getAttribute("href") ?? "")
+				.join(" "),
+		);
 		if (seen.has(orderId)) {
 			const existing = stubs.find((stub) => stub.orderId === orderId);
 			if (existing) {
@@ -154,7 +165,11 @@ export function parseOrderSearchPageDom(html: string): {
 	const hasNextPage = Boolean(
 		document.querySelector("ul.a-pagination li.a-last a"),
 	);
-	return { hasNextPage, stubs };
+	const selectedText = textOf(
+		document.querySelector<HTMLElement>("ul.a-pagination li.a-selected"),
+	);
+	const selectedPage = /^\d+$/.test(selectedText) ? Number(selectedText) : null;
+	return { hasNextPage, rowSignature: rowKeys.join("\n"), selectedPage, stubs };
 }
 
 // ─── Order detail page ────────────────────────────────────────────────────
