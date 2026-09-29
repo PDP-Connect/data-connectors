@@ -15,14 +15,14 @@
  * `GET /athlete/training_activities?page=N&per_page=20`, newest first. There
  * is no credential in this code and no credential form: the owner signs in in
  * the browser. Heart rate, calories and gear are not in that list, so those
- * fields are null and the coverage record says so.
+ * fields are null.
  *
  * Bounds: one page at a time, a pause between pages, at most
  * MAX_PAGES_PER_RUN pages per run. A run that stops at the bound saves the
  * next page and the next run continues from it. A resumed walk can re-see an
  * activity when new ones push the list down; the primary key collapses it.
  *
- * Streams: activities, coverage_diagnostics (one per run).
+ * Stream: activities.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -33,7 +33,6 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import type { COVERAGE_REASONS } from "../strava/schemas.ts";
 import {
 	buildActivityRecord,
 	parseTrainingActivitiesPage,
@@ -51,42 +50,13 @@ const LIST_HEADERS = {
 	"X-Requested-With": "XMLHttpRequest",
 };
 const ACTIVITIES_STREAM = "activities";
-const DIAGNOSTICS_STREAM = "coverage_diagnostics";
 const PER_PAGE = 20;
 export const MAX_PAGES_PER_RUN = 100;
 export const PAGE_DELAY_MS = 1000;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_DELAY_MS = 30_000;
-/** Always absent from the list, so always named in `fields_unavailable`. */
-const LIST_LACKS = [
-	"average_heartrate",
-	"max_heartrate",
-	"calories_kcal",
-	"gear",
-] as const;
 
-/** The coverage reasons a browser run can end on; the others are export-only. */
-type CoverageReason = Exclude<
-	(typeof COVERAGE_REASONS)[number],
-	"awaiting_upload" | "window_unavailable"
->;
-
-/** The SKIP_RESULT reason for each coverage reason a run can end on. */
-const SKIP_REASON: Record<CoverageReason, string> = {
-	collection_interrupted: "collection_interrupted",
-	covered_in_full: "covered_in_full",
-	nothing_in_range: "nothing_in_range",
-	records_unreadable: "records_unreadable",
-	sign_in_required: "sign_in_required",
-	source_limit_reached: "source_limit_reached",
-	source_unreadable: "source_unreadable",
-};
-
-/**
- * The part of the collect context this connector uses. Structural, so the
- * desktop runtime and the PageShim runtime (which has no collection mode and
- * no cursor store) both satisfy it.
- */
+/** Structural subset shared by Desktop and PageShim collection runtimes. */
 export interface StravaCollectContext {
 	collectionMode?: BrowserCollectContext["collectionMode"];
 	emit: BrowserCollectContext["emit"];
@@ -255,9 +225,23 @@ async function fetchListPage(
 	);
 }
 
+type CollectionReason =
+	| "collection_interrupted"
+	| "sign_in_required"
+	| "source_limit_reached"
+	| "source_unreadable"
+	| "records_unreadable";
+const COLLECTION_SKIP_REASON: Record<CollectionReason, string> = {
+	collection_interrupted: "collection_interrupted",
+	records_unreadable: "records_unreadable",
+	sign_in_required: "sign_in_required",
+	source_limit_reached: "source_limit_reached",
+	source_unreadable: "source_unreadable",
+};
+
 type PageOutcome =
 	| { ok: true; body: string }
-	| { ok: false; reason: CoverageReason; message: string };
+	| { ok: false; reason: CollectionReason; message: string };
 
 /** Classify one list response. Anything not plainly the JSON list fails. */
 function classify(response: ListResponse): PageOutcome {
@@ -326,9 +310,6 @@ async function fetchPageWithRetry(
 	}
 }
 
-const isoOrNull = (value: string | undefined): string | null =>
-	value ? new Date(value).toISOString() : null;
-
 const earlier = (a: string | null, b: string): string =>
 	a !== null && a < b ? a : b;
 
@@ -336,9 +317,9 @@ const later = (a: string | null, b: string | null): string | null =>
 	!a ? b : !b ? a : a > b ? a : b;
 
 /**
- * The runtime's time-range rule, applied here too so the coverage record
- * describes the records the run keeps: by calendar day, since inclusive and
- * until exclusive, on `start_date`.
+ * The runtime's time-range rule, applied here too so emitted records obey
+ * the requested period: by calendar day, since inclusive and until exclusive,
+ * on `start_date`.
  */
 function isOutsideTimeRange(
 	startDate: string,
@@ -354,16 +335,12 @@ export async function collectStravaBrowser(
 	ctx: StravaCollectContext,
 	options: StravaCollectOptions = {},
 ): Promise<void> {
-	if (
-		!ctx.requested.has(ACTIVITIES_STREAM) &&
-		!ctx.requested.has(DIAGNOSTICS_STREAM)
-	) {
+	if (!ctx.requested.has(ACTIVITIES_STREAM)) {
 		return;
 	}
 	const maxPages = options.maxPages ?? MAX_PAGES_PER_RUN;
 	const pageDelayMs = options.pageDelayMs ?? PAGE_DELAY_MS;
 	const rateLimitDelayMs = options.rateLimitDelayMs ?? RATE_LIMIT_DELAY_MS;
-	const runStartedAt = new Date().toISOString();
 	const fullRefresh = ctx.collectionMode === "full_refresh";
 	const stored =
 		(ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {};
@@ -394,9 +371,8 @@ export async function collectStravaBrowser(
 	let latest: string | null = null;
 	let walkNewest = prior.walk_newest_start_time ?? null;
 	let previousFirstId: string | null = null;
-	let failure: { reason: CoverageReason; message: string } | null = null;
+	let failure: { reason: CollectionReason; message: string } | null = null;
 	let finished = false;
-	const seenFields = new Set<string>();
 
 	while (pagesRead < maxPages) {
 		if (pagesRead > 0) {
@@ -448,16 +424,6 @@ export async function collectStravaBrowser(
 			) {
 				continue;
 			}
-			for (const field of [
-				"distance_m",
-				"moving_time_s",
-				"elapsed_time_s",
-				"total_elevation_gain_m",
-			] as const) {
-				if (record[field] !== null) {
-					seenFields.add(field);
-				}
-			}
 			await ctx.emitRecord(ACTIVITIES_STREAM, { ...record });
 			emitted += 1;
 			earliest = earlier(earliest, instant);
@@ -478,64 +444,24 @@ export async function collectStravaBrowser(
 		pageNumber += 1;
 	}
 
-	let reason: CoverageReason;
-	if (failure) {
-		reason = failure.reason;
-	} else if (!finished) {
-		reason = "source_limit_reached";
-	} else if (unreadable > 0) {
-		reason = "records_unreadable";
-	} else if (emitted === 0) {
-		reason = "nothing_in_range";
-	} else {
-		reason = "covered_in_full";
-	}
-	const status =
-		reason === "covered_in_full"
-			? "complete"
-			: emitted > 0
-				? "partial"
-				: "empty";
-
-	if (reason !== "covered_in_full" && reason !== "nothing_in_range") {
+	const skipReason =
+		failure?.reason ??
+		(!finished
+			? "source_limit_reached"
+			: unreadable > 0
+				? "records_unreadable"
+				: null);
+	if (skipReason) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
-			reason: SKIP_REASON[reason],
+			reason: COLLECTION_SKIP_REASON[skipReason],
 			message:
 				failure?.message ??
-				(reason === "source_limit_reached"
+				(skipReason === "source_limit_reached"
 					? `Stopped after ${pagesRead} pages; page ${pageNumber} is next.`
 					: `${unreadable} activities in the Strava list had no usable id or start time.`),
 			diagnostics: { pages_read: pagesRead, unreadable },
-		});
-	}
-
-	if (ctx.requested.has(DIAGNOSTICS_STREAM)) {
-		const fieldsUnavailable = [
-			...(emitted > 0
-				? [
-						"distance_m",
-						"moving_time_s",
-						"elapsed_time_s",
-						"total_elevation_gain_m",
-					].filter((field) => !seenFields.has(field))
-				: []),
-			...LIST_LACKS,
-		];
-		await ctx.emitRecord(DIAGNOSTICS_STREAM, {
-			id: `${ACTIVITIES_STREAM}:${runStartedAt}`,
-			stream: ACTIVITIES_STREAM,
-			status,
-			reason,
-			record_count: emitted,
-			fields_unavailable: fieldsUnavailable,
-			window_requested_from: isoOrNull(timeRange?.since) ?? since,
-			window_requested_to: isoOrNull(timeRange?.until),
-			window_covered_from: earliest,
-			window_covered_to: latest,
-			freshness: "live",
-			exported_at: null,
 		});
 	}
 

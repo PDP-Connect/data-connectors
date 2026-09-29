@@ -19,9 +19,6 @@ import { test } from "node:test";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import {
 	activitiesSchema,
-	COVERAGE_REASONS,
-	coverageDiagnosticsSchema,
-	validateRecord,
 } from "./schemas.ts";
 
 const MANIFEST_PATH = manifestPath("strava");
@@ -65,20 +62,7 @@ const ACTIVITY = {
 	exported_at: "2026-09-12T09:14:00.000Z",
 };
 
-const DIAGNOSTIC = {
-	id: "activities:2026-09-12T09:14:00.000Z",
-	stream: "activities",
-	status: "complete" as const,
-	reason: "covered_in_full" as const,
-	record_count: 412,
-	fields_unavailable: [],
-	window_requested_from: null,
-	window_requested_to: null,
-	window_covered_from: "2019-03-02T06:00:00Z",
-	window_covered_to: "2026-09-10T18:22:00Z",
-	freshness: "snapshot" as const,
-	exported_at: "2026-09-12T09:14:00.000Z",
-};
+
 
 test("activities schema accepts a representative record", () => {
 	const result = activitiesSchema.safeParse(ACTIVITY);
@@ -134,48 +118,9 @@ test("exported_at is present-and-nullable, never merely optional", () => {
 	assert.equal(activitiesSchema.safeParse(withoutKey).success, false);
 });
 
-test("coverage_diagnostics schema accepts a success record", () => {
-	const result = coverageDiagnosticsSchema.safeParse(DIAGNOSTIC);
-	assert.ok(result.success, JSON.stringify(result.error?.issues));
-});
-
-test("coverage_diagnostics carries a reason on success, so readers never branch on absence", () => {
-	// A nullable reason would invite `if (reason)` as the failure test, which
-	// would classify "no activities last week" as something going wrong.
-	assert.equal(
-		coverageDiagnosticsSchema.safeParse({ ...DIAGNOSTIC, reason: null })
-			.success,
-		false,
-	);
-	assert.ok(COVERAGE_REASONS.includes("covered_in_full"));
-});
-
-test("the empty and interrupted cases are structurally distinct", () => {
-	const empty = {
-		...DIAGNOSTIC,
-		status: "empty" as const,
-		reason: "nothing_in_range" as const,
-		record_count: 0,
-		window_covered_from: null,
-		window_covered_to: null,
-	};
-	const interrupted = { ...empty, reason: "collection_interrupted" as const };
-	assert.ok(coverageDiagnosticsSchema.safeParse(empty).success);
-	assert.ok(coverageDiagnosticsSchema.safeParse(interrupted).success);
-	assert.notEqual(empty.reason, interrupted.reason);
-});
-
-test("validateRecord is wired for both declared streams", () => {
-	assert.doesNotThrow(() => validateRecord("activities", ACTIVITY));
-	assert.doesNotThrow(() => validateRecord("coverage_diagnostics", DIAGNOSTIC));
-});
-
 // ── Manifest parity ──────────────────────────────────────────────────────────
 
-for (const [streamName, zodSchema] of [
-	["activities", activitiesSchema],
-	["coverage_diagnostics", coverageDiagnosticsSchema],
-] as const) {
+for (const [streamName, zodSchema] of [["activities", activitiesSchema]] as const) {
 	test(`${streamName}: Zod and the published JSON Schema declare the same fields`, () => {
 		const manifestFields = Object.keys(
 			stream(streamName).schema.properties,
@@ -209,7 +154,7 @@ test("the published schema carries no location or identity field, by any spellin
 		"email",
 		"filename",
 	];
-	for (const streamName of ["activities", "coverage_diagnostics"]) {
+	for (const streamName of ["activities"]) {
 		const fields = Object.keys(stream(streamName).schema.properties);
 		for (const field of forbidden) {
 			assert.ok(
@@ -220,24 +165,12 @@ test("the published schema carries no location or identity field, by any spellin
 	}
 });
 
-test("every coverage reason has a human sentence in reason_display_messages", () => {
-	const messages = manifest().reason_display_messages;
-	for (const reason of COVERAGE_REASONS) {
-		assert.ok(
-			typeof messages[reason] === "string" && messages[reason].length > 0,
-			`${reason} needs a reason_display_messages entry`,
-		);
-	}
-});
 
-test("the manifest's reason enum and the Zod enum are the same closed set", () => {
-	const manifestReasons =
-		stream("coverage_diagnostics").schema.properties.reason?.enum ?? [];
-	assert.deepEqual([...manifestReasons].sort(), [...COVERAGE_REASONS].sort());
-});
+
+
 
 test("each stream marks exactly one primary-title field", () => {
-	for (const streamName of ["activities", "coverage_diagnostics"]) {
+	for (const streamName of ["activities"]) {
 		const roles = Object.values(stream(streamName).schema.properties)
 			.map((property) => property.x_pdpp_role)
 			.filter((role) => role === "primary-title");

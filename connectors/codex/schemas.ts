@@ -181,15 +181,6 @@ export const skillsSchema = z.object({
 
 const inventoryClassificationSchema = z.enum(["inventory_only", "defer"]);
 const inventoryTypeSchema = z.enum(["directory", "file", "missing", "other"]);
-const coverageStatusSchema = z.enum([
-	"collected",
-	"inventory_only",
-	"excluded",
-	"deferred",
-	"missing",
-	"unsupported",
-]);
-
 export const inventorySchema = z.object({
 	id: pdppSafeText,
 	store: pdppSafeText,
@@ -199,14 +190,6 @@ export const inventorySchema = z.object({
 	size_bytes: z.number().int().min(0).nullable(),
 	mtime_epoch: z.number().int().min(0).nullable(),
 	classification: inventoryClassificationSchema,
-	reason: pdppSafeText.max(512),
-});
-
-export const coverageDiagnosticsSchema = z.object({
-	id: pdppSafeText,
-	store: pdppSafeText,
-	stream: pdppSafeText.nullable(),
-	status: coverageStatusSchema,
 	reason: pdppSafeText.max(512),
 });
 
@@ -224,7 +207,6 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	shell_snapshots: inventorySchema,
 	config_inventory: inventorySchema,
 	cache_inventory: inventorySchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

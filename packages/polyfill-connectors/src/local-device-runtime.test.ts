@@ -220,9 +220,7 @@ test("resolveLocalDeviceConnectorProfile still rejects an unknown connector", ()
 
 // ─── Default streams come from the collector definitions ──────────────────
 // The exporter must request exactly the stream set each connector's own
-// definition declares. A hand-copied second list drifts silently, and an
-// exporter run missing `coverage_diagnostics` leaves the drained collector
-// stuck on `coverage_unknown`.
+// definition declares. A hand-copied second list drifts silently.
 
 /** Exporter profile id → the `connector_id` its definition is filed under. */
 const DEFINITION_BACKED_PROFILES: ReadonlyArray<
@@ -249,13 +247,14 @@ for (const [profileId, definitionConnectorId] of DEFINITION_BACKED_PROFILES) {
 	});
 }
 
-test("codex and claude-code exporter profiles request coverage_diagnostics", () => {
+test("codex and claude-code exporter profiles do not request run diagnostics", () => {
 	for (const profileId of [CODEX_CONNECTOR_ID, CLAUDE_CODE_CONNECTOR_ID]) {
-		assert.ok(
+		assert.equal(
 			resolveLocalDeviceConnectorProfile(profileId).defaultStreams.includes(
 				"coverage_diagnostics",
 			),
-			`${profileId} must request coverage_diagnostics or a drained collector stays on coverage_unknown`,
+			false,
+			`${profileId} must not request run diagnostics`,
 		);
 	}
 });
@@ -271,7 +270,7 @@ test("the amazon profile stays declared locally — it is browser-bound and has 
 });
 
 for (const profileId of [CODEX_CONNECTOR_ID, CLAUDE_CODE_CONNECTOR_ID]) {
-	test(`runLocalDeviceExporter sends ${profileId} a START scope including coverage_diagnostics`, async () => {
+	test(`runLocalDeviceExporter sends ${profileId} a START scope without run diagnostics`, async () => {
 		const dir = await mkdtemp(join(tmpdir(), "pdpp-local-device-runtime-"));
 		const startCapturePath = join(dir, "start.json");
 		const fakeConnectorPath = join(dir, "fake-connector.mjs");
@@ -318,8 +317,9 @@ for (const profileId of [CODEX_CONNECTOR_ID, CLAUDE_CODE_CONNECTOR_ID]) {
 			scope: { streams: { name: string }[] };
 		};
 		const requested = start.scope.streams.map((stream) => stream.name);
-		assert.ok(
+		assert.equal(
 			requested.includes("coverage_diagnostics"),
+			false,
 			`the START the exporter spawned ${profileId} with requested ${requested.join(", ")}`,
 		);
 		assert.deepEqual(requested, [

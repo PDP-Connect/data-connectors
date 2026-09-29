@@ -13,11 +13,6 @@ import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
 
 const RECORD_ID_RE = /^[0-9a-f]{24}$/;
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-
-const isoTimestampSchema = z
-	.string()
-	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 const urlSchema = z.url().max(4096).nullable();
 
 export const profileSchema = z.object({
@@ -113,19 +108,6 @@ export const watchHistorySchema = z.object({
 	description: pdppSafeText.max(5000).nullable(),
 });
 
-export const COVERAGE_REASONS = ["bounded_browser_snapshot"] as const;
-
-export const coverageDiagnosticsSchema = z.object({
-	id: pdppSafeText.max(200),
-	stream: pdppSafeText.max(80).nullable(),
-	status: z.enum(["complete", "partial", "empty"]),
-	reason: z.enum(COVERAGE_REASONS),
-	record_count: z.number().int().min(0).nullable(),
-	fields_unavailable: z.array(pdppSafeText.max(200)),
-	freshness: z.literal("live"),
-	captured_at: isoTimestampSchema,
-});
-
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	profile: profileSchema,
 	subscriptions: subscriptionsSchema,
@@ -134,7 +116,6 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	likes: likesSchema,
 	watch_later: watchLaterSchema,
 	watch_history: watchHistorySchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

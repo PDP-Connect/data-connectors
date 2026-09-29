@@ -80,13 +80,10 @@ only the root changes.
   scan wins, a second sighting in the same scan is treated as the same file
   and skipped — never double-parsed, never double-emitted, and never
   reported as evidence of anything having been deleted.
-- **Archive-root absence is reported honestly, not silently.** A host with
-  nothing archived yet (a fresh install, or one where the archiver hasn't run)
-  reports the `sessions_archive` coverage store as `missing` via
-  `coverage_diagnostics` rather than failing readiness — see the
-  `sessions_archive` entry in `CODEX_KNOWN_LOCAL_STORES` (`index.ts`) and its
-  matching descriptor in `LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR.codex`
-  (`src/local-source-inventory.ts`).
+- **Archive-root absence does not fail readiness.** A host with nothing
+  archived yet (a fresh install, or one where the archiver has not run) treats
+  the archive as an optional source; an absent archive root differs from an
+  unreadable root, which remains an I/O error.
 
 ## Naming note
 

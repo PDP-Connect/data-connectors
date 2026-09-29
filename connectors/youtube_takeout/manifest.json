@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "YouTube Takeout",
 	"brand": {
 		"icon": "icon.svg",
@@ -46,7 +46,7 @@
 			"large_file_fallback": "This connector reads an already-extracted export directory, not the .zip directly. Extract the Takeout archive yourself and point YOUTUBE_TAKEOUT_DIR at the extracted folder.",
 			"validation_expectations": [
 				"Detected a Google Takeout \"YouTube and YouTube Music\" export directory",
-				"Reported per-stream coverage: which expected files were found, which were not",
+				"Reported missing expected files with skip results",
 				"Estimated record counts per stream that was found"
 			]
 		}
@@ -69,7 +69,7 @@
 		{
 			"name": "profile",
 			"required": false,
-			"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns (see coverage_diagnostics).",
+			"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns.",
 			"display": {
 				"label": "Your YouTube channel",
 				"detail": "Channel id and URL from the Takeout channel export. Title, handle, join date, and stats are not present in that file and stay null."
@@ -114,7 +114,7 @@
 		{
 			"name": "subscriptions",
 			"required": false,
-			"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns — see coverage_diagnostics.",
+			"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns.",
 			"display": {
 				"label": "Your subscriptions",
 				"detail": "Channel id, URL, and title. Handle, avatar, subscriber count, verification, and notification state are not present in the export file this connector reads and stay null."
@@ -154,7 +154,7 @@
 		{
 			"name": "playlists",
 			"required": false,
-			"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns — see coverage_diagnostics.",
+			"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns.",
 			"display": {
 				"label": "Your playlists",
 				"detail": "Playlist id and name. URL, owner, visibility, video count, and view count are not present in the index file this connector reads and stay null."
@@ -192,7 +192,7 @@
 		{
 			"name": "playlist_items",
 			"required": false,
-			"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns — see coverage_diagnostics.",
+			"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns.",
 			"display": {
 				"label": "Your playlist items",
 				"detail": "Video id and a derived watch URL per playlist entry. Title, channel, duration, and thumbnail are not present in the per-playlist export file this connector reads and stay null."
@@ -225,7 +225,7 @@
 		{
 			"name": "likes",
 			"required": false,
-			"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+			"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns.",
 			"display": {
 				"label": "Your liked videos",
 				"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
@@ -257,7 +257,7 @@
 		{
 			"name": "watch_later",
 			"required": false,
-			"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+			"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns.",
 			"display": {
 				"label": "Your watch later list",
 				"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
@@ -337,73 +337,11 @@
 			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"required": false,
-			"description": "What this import covered per stream and why it stops where it does. One record per stream per import.",
-			"display": {
-				"label": "What your YouTube import covered",
-				"detail": "Whether each expected Takeout file was found, how many records it produced, and which fields are not available from this export."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": { "type": "string" },
-					"stream": { "type": ["string", "null"] },
-					"status": {
-						"type": "string",
-						"enum": ["complete", "partial", "empty"]
-					},
-					"reason": {
-						"type": "string",
-						"enum": [
-							"covered_in_full",
-							"nothing_in_range",
-							"awaiting_upload",
-							"source_unreadable",
-							"records_unreadable",
-							"file_not_found_in_export"
-						],
-						"x_pdpp_role": "primary-title"
-					},
-					"record_count": { "type": ["integer", "null"] },
-					"fields_unavailable": {
-						"type": "array",
-						"items": { "type": "string" }
-					},
-					"freshness": { "type": "string", "enum": ["live", "snapshot"] },
-					"exported_at": { "type": ["string", "null"], "format": "date-time" }
-				},
-				"required": [
-					"id",
-					"status",
-					"reason",
-					"fields_unavailable",
-					"freshness"
-				]
-			},
-			"primary_key": ["id"],
-			"selection": { "fields": true, "resources": true },
-			"incremental": false,
-			"query": {
-				"range_filters": {
-					"exported_at": ["gte", "gt", "lte", "lt"]
-				},
-				"aggregations": { "count": true }
-			},
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
-		"covered_in_full": "Everything this export carries for this stream was imported.",
-		"nothing_in_range": "Your export didn't contain any records for this stream. That's not a problem — there was simply nothing to read.",
 		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
 		"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
-		"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Coverage for this stream is unverified — Google's Takeout export contents can vary; report this if you expected data here."
+		"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
 	}
 }

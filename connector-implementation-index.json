@@ -1536,7 +1536,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -1675,46 +1675,6 @@
 						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "Safe coverage status for this connector's one known local store (the Photos.app export directory), so a local-collector run always leaves durable, honest coverage evidence even when the export directory is missing or empty — never a silent zero-evidence run.",
-						"display": {
-							"label": "Local collector coverage status",
-							"detail": "Whether the Photos.app export directory was found and collected on this run."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"store": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string"
-								},
-								"reason": {
-									"type": "string",
-									"x_pdpp_role": "primary-title"
-								}
-							},
-							"required": ["id", "store", "status", "reason"]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "device_heartbeat"
 					}
 				],
 				"reason_display_messages": {
@@ -2956,7 +2916,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.6",
+				"version": "0.3.7",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -3826,43 +3786,6 @@
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
-						"name": "coverage_diagnostics",
-						"description": "Safe coverage status for known Claude Code local stores, including excluded auth-adjacent stores without payloads or raw absolute paths.",
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"store": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string"
-								},
-								"reason": {
-									"type": "string",
-									"x_pdpp_role": "primary-title"
-								}
-							},
-							"required": ["id", "store", "status", "reason"]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"required": false,
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "device_heartbeat"
-					},
-					{
 						"name": "backup_inventory",
 						"description": "Metadata-only inventory for Claude Code backup stores; raw backup payloads are not collected.",
 						"compaction_fingerprint": {
@@ -4095,7 +4018,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.5",
+				"version": "0.3.6",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
@@ -4711,41 +4634,6 @@
 						"incremental": false,
 						"required": false,
 						"coverage_policy": "inventory_only",
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "device_heartbeat"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"description": "Safe coverage status for known Codex local stores, including excluded auth-adjacent stores without payloads or raw absolute paths.",
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"store": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string"
-								},
-								"reason": {
-									"type": "string",
-									"x_pdpp_role": "primary-title"
-								}
-							},
-							"required": ["id", "store", "status", "reason"]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -8749,7 +8637,7 @@
 				},
 				"connector_key": "google-messages",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Google Messages (via gmcli)",
 				"brand": {
 					"icon": "icon.svg",
@@ -8859,46 +8747,6 @@
 						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "device_heartbeat"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "Safe coverage status for this connector's one known local store (the gmcli-synced message archive), so a local-collector run always leaves durable, honest coverage evidence even when gmcli is missing, unpaired, or fails to query — never a silent zero-evidence run.",
-						"display": {
-							"label": "Local collector coverage status",
-							"detail": "Whether gmcli was found, paired, and successfully queried on this run."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"store": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string"
-								},
-								"reason": {
-									"type": "string",
-									"x_pdpp_role": "primary-title"
-								}
-							},
-							"required": ["id", "store", "status", "reason"]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "device_heartbeat"
 					}
 				],
 				"reason_display_messages": {
@@ -8952,7 +8800,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Google Takeout",
 				"runtime_requirements": {
 					"bindings": {
@@ -9256,43 +9104,6 @@
 						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"description": "Safe coverage status for known Google Takeout local stores.",
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"store": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string"
-								},
-								"reason": {
-									"type": "string",
-									"x_pdpp_role": "primary-title"
-								}
-							},
-							"required": ["id", "store", "status", "reason"]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"required": false,
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "device_heartbeat"
 					}
 				],
 				"reason_display_messages": {
@@ -16600,7 +16411,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.8",
+				"version": "1.0.9",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -16773,128 +16584,16 @@
 						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "What this import covered and why it stops where it does. One record per stream per import.",
-						"display": {
-							"label": "What your Strava import covered",
-							"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"],
-									"description": "The stream this record accounts for."
-								},
-								"status": {
-									"type": "string",
-									"enum": ["complete", "partial", "empty"],
-									"description": "Whether the covered window matches the requested window. 'empty' is an ordinary outcome, not a failure."
-								},
-								"reason": {
-									"type": "string",
-									"enum": [
-										"covered_in_full",
-										"nothing_in_range",
-										"awaiting_upload",
-										"source_unreadable",
-										"source_limit_reached",
-										"collection_interrupted",
-										"records_unreadable",
-										"sign_in_required",
-										"window_unavailable"
-									],
-									"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner, and each has a reason_display_messages entry.",
-									"x_pdpp_role": "primary-title"
-								},
-								"record_count": {
-									"type": ["integer", "null"],
-									"description": "Records emitted for this stream in this import."
-								},
-								"fields_unavailable": {
-									"type": "array",
-									"items": {
-										"type": "string"
-									},
-									"description": "Fields the schema declares that this particular archive did not carry, so a column of nulls is never mistaken for a column of absent readings. Calories and gear are optional columns in the export and are the two this path exists to deliver."
-								},
-								"window_requested_from": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"window_requested_to": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"window_covered_from": {
-									"type": ["string", "null"],
-									"format": "date-time",
-									"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
-								},
-								"window_covered_to": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"freshness": {
-									"type": "string",
-									"enum": ["live", "snapshot"]
-								},
-								"exported_at": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								}
-							},
-							"required": [
-								"id",
-								"status",
-								"reason",
-								"fields_unavailable",
-								"freshness",
-								"exported_at"
-							]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"query": {
-							"range_filters": {
-								"window_requested_from": ["gte", "gt", "lte", "lt"],
-								"window_requested_to": ["gte", "gt", "lte", "lt"],
-								"window_covered_from": ["gte", "gt", "lte", "lt"],
-								"window_covered_to": ["gte", "gt", "lte", "lt"],
-								"exported_at": ["gte", "gt", "lte", "lt"]
-							},
-							"aggregations": {
-								"count": true
-							}
-						},
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"awaiting_upload": "Nothing to read yet. Ask Strava for a copy of your data, and they'll email you an archive — usually within a day, sometimes longer. Upload it here when it arrives.",
 					"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-					"covered_in_full": "Everything in your export was imported.",
-					"nothing_in_range": "Your export didn't contain any activities in this period. That's not a problem — there was simply nothing to read.",
 					"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
 					"sign_in_required": "Strava needs you to sign in again before this can continue.",
 					"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
 					"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
 					"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-					"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it.",
-					"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+					"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it."
 				}
 			}
 		},
@@ -16913,7 +16612,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -17056,120 +16755,10 @@
 						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "scheduled_window"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "What this collection covered and why it stops where it does. One record per stream per run.",
-						"display": {
-							"label": "What your Strava collection covered",
-							"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"],
-									"description": "The stream this record accounts for."
-								},
-								"status": {
-									"type": "string",
-									"enum": ["complete", "partial", "empty"],
-									"description": "Whether the covered window matches the requested window. 'empty' is an ordinary outcome, not a failure."
-								},
-								"reason": {
-									"type": "string",
-									"enum": [
-										"covered_in_full",
-										"nothing_in_range",
-										"awaiting_upload",
-										"source_unreadable",
-										"source_limit_reached",
-										"collection_interrupted",
-										"records_unreadable",
-										"sign_in_required",
-										"window_unavailable"
-									],
-									"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner, and each has a reason_display_messages entry.",
-									"x_pdpp_role": "primary-title"
-								},
-								"record_count": {
-									"type": ["integer", "null"],
-									"description": "Records emitted for this stream in this import."
-								},
-								"fields_unavailable": {
-									"type": "array",
-									"items": {
-										"type": "string"
-									},
-									"description": "Fields the schema declares that this particular archive did not carry, so a column of nulls is never mistaken for a column of absent readings. Calories and gear are optional columns in the export and are the two this path exists to deliver."
-								},
-								"window_requested_from": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"window_requested_to": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"window_covered_from": {
-									"type": ["string", "null"],
-									"format": "date-time",
-									"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
-								},
-								"window_covered_to": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								},
-								"freshness": {
-									"type": "string",
-									"enum": ["live", "snapshot"]
-								},
-								"exported_at": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								}
-							},
-							"required": [
-								"id",
-								"status",
-								"reason",
-								"fields_unavailable",
-								"freshness",
-								"exported_at"
-							]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"query": {
-							"range_filters": {
-								"window_requested_from": ["gte", "gt", "lte", "lt"],
-								"window_requested_to": ["gte", "gt", "lte", "lt"],
-								"window_covered_from": ["gte", "gt", "lte", "lt"],
-								"window_covered_to": ["gte", "gt", "lte", "lt"],
-								"exported_at": ["gte", "gt", "lte", "lt"]
-							},
-							"aggregations": {
-								"count": true
-							}
-						},
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "full_inventory",
-						"freshness_strategy": "scheduled_window"
 					}
 				],
 				"reason_display_messages": {
 					"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
-					"covered_in_full": "Every activity in your Strava list was collected.",
-					"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
 					"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 					"sign_in_required": "Strava needs you to sign in again before this can continue.",
 					"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
@@ -21168,7 +20757,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.9",
+				"version": "0.2.10",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -21646,75 +21235,6 @@
 						},
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "Browser snapshot bounds and missing field diagnostics for each requested stream.",
-						"display": {
-							"label": "What your YouTube import covered",
-							"detail": "Per-stream bounded browser snapshot counts and unavailable fields."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string",
-									"enum": ["complete", "partial", "empty"]
-								},
-								"reason": {
-									"type": "string",
-									"enum": ["bounded_browser_snapshot"],
-									"x_pdpp_role": "primary-title"
-								},
-								"record_count": {
-									"type": ["integer", "null"]
-								},
-								"fields_unavailable": {
-									"type": "array",
-									"items": {
-										"type": "string"
-									}
-								},
-								"freshness": {
-									"type": "string",
-									"enum": ["live"]
-								},
-								"captured_at": {
-									"type": "string",
-									"format": "date-time"
-								}
-							},
-							"required": [
-								"id",
-								"status",
-								"reason",
-								"fields_unavailable",
-								"freshness",
-								"captured_at"
-							]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"query": {
-							"range_filters": {
-								"captured_at": ["gte", "gt", "lte", "lt"]
-							}
-						},
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "checkpoint_window",
-						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
@@ -21743,7 +21263,7 @@
 				},
 				"connector_key": "youtube-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "YouTube Takeout",
 				"brand": {
 					"icon": "icon.svg",
@@ -21780,7 +21300,7 @@
 						"large_file_fallback": "This connector reads an already-extracted export directory, not the .zip directly. Extract the Takeout archive yourself and point YOUTUBE_TAKEOUT_DIR at the extracted folder.",
 						"validation_expectations": [
 							"Detected a Google Takeout \"YouTube and YouTube Music\" export directory",
-							"Reported per-stream coverage: which expected files were found, which were not",
+							"Reported missing expected files with skip results",
 							"Estimated record counts per stream that was found"
 						]
 					}
@@ -21803,7 +21323,7 @@
 					{
 						"name": "profile",
 						"required": false,
-						"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns (see coverage_diagnostics).",
+						"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns.",
 						"display": {
 							"label": "Your YouTube channel",
 							"detail": "Channel id and URL from the Takeout channel export. Title, handle, join date, and stats are not present in that file and stay null."
@@ -21873,7 +21393,7 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns.",
 						"display": {
 							"label": "Your subscriptions",
 							"detail": "Channel id, URL, and title. Handle, avatar, subscriber count, verification, and notification state are not present in the export file this connector reads and stay null."
@@ -21936,7 +21456,7 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns.",
 						"display": {
 							"label": "Your playlists",
 							"detail": "Playlist id and name. URL, owner, visibility, video count, and view count are not present in the index file this connector reads and stay null."
@@ -21993,7 +21513,7 @@
 					{
 						"name": "playlist_items",
 						"required": false,
-						"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns — see coverage_diagnostics.",
+						"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns.",
 						"display": {
 							"label": "Your playlist items",
 							"detail": "Video id and a derived watch URL per playlist entry. Title, channel, duration, and thumbnail are not present in the per-playlist export file this connector reads and stay null."
@@ -22048,7 +21568,7 @@
 					{
 						"name": "likes",
 						"required": false,
-						"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns.",
 						"display": {
 							"label": "Your liked videos",
 							"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
@@ -22100,7 +21620,7 @@
 					{
 						"name": "watch_later",
 						"required": false,
-						"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns — see coverage_diagnostics.",
+						"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns.",
 						"display": {
 							"label": "Your watch later list",
 							"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
@@ -22219,93 +21739,12 @@
 						},
 						"coverage_strategy": "snapshot_import_receipt",
 						"freshness_strategy": "manual_as_of"
-					},
-					{
-						"name": "coverage_diagnostics",
-						"required": false,
-						"description": "What this import covered per stream and why it stops where it does. One record per stream per import.",
-						"display": {
-							"label": "What your YouTube import covered",
-							"detail": "Whether each expected Takeout file was found, how many records it produced, and which fields are not available from this export."
-						},
-						"semantics": "mutable_state",
-						"schema": {
-							"type": "object",
-							"properties": {
-								"id": {
-									"type": "string"
-								},
-								"stream": {
-									"type": ["string", "null"]
-								},
-								"status": {
-									"type": "string",
-									"enum": ["complete", "partial", "empty"]
-								},
-								"reason": {
-									"type": "string",
-									"enum": [
-										"covered_in_full",
-										"nothing_in_range",
-										"awaiting_upload",
-										"source_unreadable",
-										"records_unreadable",
-										"file_not_found_in_export"
-									],
-									"x_pdpp_role": "primary-title"
-								},
-								"record_count": {
-									"type": ["integer", "null"]
-								},
-								"fields_unavailable": {
-									"type": "array",
-									"items": {
-										"type": "string"
-									}
-								},
-								"freshness": {
-									"type": "string",
-									"enum": ["live", "snapshot"]
-								},
-								"exported_at": {
-									"type": ["string", "null"],
-									"format": "date-time"
-								}
-							},
-							"required": [
-								"id",
-								"status",
-								"reason",
-								"fields_unavailable",
-								"freshness"
-							]
-						},
-						"primary_key": ["id"],
-						"selection": {
-							"fields": true,
-							"resources": true
-						},
-						"incremental": false,
-						"query": {
-							"range_filters": {
-								"exported_at": ["gte", "gt", "lte", "lt"]
-							},
-							"aggregations": {
-								"count": true
-							}
-						},
-						"coverage_policy": "inventory_only",
-						"coverage_strategy": "snapshot_import_receipt",
-						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
-					"covered_in_full": "Everything this export carries for this stream was imported.",
-					"nothing_in_range": "Your export didn't contain any records for this stream. That's not a problem — there was simply nothing to read.",
 					"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
 					"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
-					"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Coverage for this stream is unverified — Google's Takeout export contents can vary; report this if you expected data here."
+					"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
 				}
 			}
 		}

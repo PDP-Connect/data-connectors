@@ -43,8 +43,6 @@
  *
  * Streams:
  *   - activities            one record per workout
- *   - coverage_diagnostics  one record per stream per import, saying what was
- *                           covered and why it stops there
  *
  * Freshness is `snapshot`, stated in the payload and not only in the manifest,
  * because a reader holds records rather than the manifest.
@@ -74,12 +72,15 @@ import {
 	resolveColumns,
 	streamCsvRows,
 } from "./parsers.ts";
-import { type COVERAGE_REASONS, validateRecord } from "./schemas.ts";
+import { validateRecord } from "./schemas.ts";
 
 const ACTIVITIES_STREAM = "activities";
-const DIAGNOSTICS_STREAM = "coverage_diagnostics";
 const UPLOADED_ARTIFACT_RE = /\.(csv|zip)$/i;
-type CoverageReason = (typeof COVERAGE_REASONS)[number];
+type CollectionReason = "collection_interrupted" | "records_unreadable";
+const COLLECTION_SKIP_REASON: Record<CollectionReason, string> = {
+	collection_interrupted: "collection_interrupted",
+	records_unreadable: "records_unreadable",
+};
 
 interface ActivitiesState {
 	last_start_time?: string;
@@ -204,65 +205,6 @@ async function openActivitiesCsv(filePath: string): Promise<CsvSourceResult> {
 	}
 }
 
-interface Coverage {
-	readonly reason: CoverageReason;
-	readonly status: "complete" | "partial" | "empty";
-	readonly recordCount: number;
-	readonly from: string | null;
-	readonly to: string | null;
-	readonly requestedFrom: string | null;
-	readonly requestedTo: string | null;
-	/**
-	 * Optional columns this archive did not carry. Calories and gear are the two
-	 * fields the export path exists to deliver, and neither is a required
-	 * column — an archive without them would otherwise degrade to all-null with
-	 * nothing anywhere saying why.
-	 */
-	readonly fieldsUnavailable: readonly string[];
-}
-
-async function emitDiagnostics(
-	ctx: CollectContext,
-	coverage: Coverage,
-	exportedAt: string | null,
-): Promise<void> {
-	if (!ctx.requested.has(DIAGNOSTICS_STREAM)) {
-		return;
-	}
-	await ctx.emitRecord(DIAGNOSTICS_STREAM, {
-		id: `${ACTIVITIES_STREAM}:${exportedAt ?? "unknown"}`,
-		stream: ACTIVITIES_STREAM,
-		status: coverage.status,
-		reason: coverage.reason,
-		record_count: coverage.recordCount,
-		fields_unavailable: [...coverage.fieldsUnavailable],
-		window_requested_from: coverage.requestedFrom,
-		window_requested_to: coverage.requestedTo,
-		window_covered_from: coverage.from,
-		window_covered_to: coverage.to,
-		freshness: "snapshot",
-		exported_at: exportedAt,
-	});
-}
-
-/** A receipt for a run that collected nothing, so no failure is ever silent. */
-function emptyCoverage(
-	reason: CoverageReason,
-	requestedFrom: string | null,
-	requestedTo: string | null = null,
-): Coverage {
-	return {
-		reason,
-		status: "empty",
-		recordCount: 0,
-		from: null,
-		to: null,
-		requestedFrom,
-		requestedTo,
-		fieldsUnavailable: [],
-	};
-}
-
 /** Match the runtime's inclusive-since/exclusive-until date filtering locally. */
 function isOutsideRequestedTimeRange(
 	dateValue: string,
@@ -286,8 +228,6 @@ async function collectActivities(
 	const fullRefresh = ctx.collectionMode === "full_refresh";
 	const since = fullRefresh ? undefined : state?.last_start_time;
 	const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
-	const requestedFrom = timeRange?.since ?? since ?? null;
-	const requestedTo = timeRange?.until ?? null;
 
 	let canonicalDir: string;
 	try {
@@ -300,11 +240,6 @@ async function collectActivities(
 			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `Failed to resolve import directory: ${error instanceof Error ? error.message : String(error)}`,
 		});
-		await emitDiagnostics(
-			ctx,
-			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
-			null,
-		);
 		return;
 	}
 
@@ -321,11 +256,6 @@ async function collectActivities(
 		// Reporting "some of your activities didn't arrive — import it again" for
 		// a file that does not exist is the exact dishonesty this enum exists to
 		// prevent: every value has to end in the right sentence.
-		await emitDiagnostics(
-			ctx,
-			emptyCoverage("awaiting_upload", requestedFrom, requestedTo),
-			null,
-		);
 		return;
 	}
 
@@ -338,11 +268,6 @@ async function collectActivities(
 			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: opened.message,
 		});
-		await emitDiagnostics(
-			ctx,
-			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
-			null,
-		);
 		return;
 	}
 
@@ -414,8 +339,7 @@ async function collectActivities(
 				return;
 			}
 			// Apply the requested time range before emitRecord. The runtime repeats
-			// this guard, but doing it here makes these diagnostics describe the same
-			// records that the collection actually retains.
+			// this guard so emitted activities obey the requested period.
 			await emitRecord(ACTIVITIES_STREAM, { ...record });
 			emitted += 1;
 			if (!earliest || record.start_time < earliest) {
@@ -445,11 +369,6 @@ async function collectActivities(
 			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `The uploaded file could not be read: ${error instanceof Error ? error.message : String(error)}`,
 		});
-		await emitDiagnostics(
-			ctx,
-			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
-			exportedAt,
-		);
 		return;
 	} finally {
 		source.close();
@@ -478,11 +397,6 @@ async function collectActivities(
 				message: failure?.message ?? `${ACTIVITIES_CSV} has no header row.`,
 			});
 		}
-		await emitDiagnostics(
-			ctx,
-			emptyCoverage("source_unreadable", requestedFrom, requestedTo),
-			exportedAt,
-		);
 		return;
 	}
 
@@ -495,27 +409,18 @@ async function collectActivities(
 	//                 or date. Importing the same file again recovers nothing —
 	//                 those rows will be just as bad next time.
 	//   emitted===0   nothing in range. Ordinary, and not a failure at all.
-	let reason: CoverageReason;
-	let status: Coverage["status"];
+	let reason: CollectionReason | null = null;
 	if (truncated) {
 		reason = "collection_interrupted";
-		status = emitted > 0 ? "partial" : "empty";
 	} else if (unreadable > 0) {
 		reason = "records_unreadable";
-		status = emitted > 0 ? "partial" : "empty";
-	} else if (emitted === 0) {
-		reason = "nothing_in_range";
-		status = "empty";
-	} else {
-		reason = "covered_in_full";
-		status = "complete";
 	}
 
-	if (truncated || unreadable > 0) {
+	if (reason) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
-			reason,
+			reason: COLLECTION_SKIP_REASON[reason],
 			// A file that ended mid-row can be imported again in full. Rows with no
 			// usable id or date stay unreadable in every later import of this file.
 			recovery_hint: truncated
@@ -528,32 +433,6 @@ async function collectActivities(
 		});
 	}
 
-	// Calories and gear are the two fields this path exists to deliver and
-	// neither is a required column, so an archive without them must say so
-	// rather than presenting a column of nulls.
-	const fieldsUnavailable = [
-		resolvedColumns.calories === null ? "calories_kcal" : null,
-		resolvedColumns.gear === null ? "gear" : null,
-		resolvedColumns.movingTimeS === null ? "moving_time_s" : null,
-		resolvedColumns.averageHeartRate === null ? "average_heartrate" : null,
-		resolvedColumns.maxHeartRate === null ? "max_heartrate" : null,
-		resolvedColumns.elevationGainM === null ? "total_elevation_gain_m" : null,
-	].filter((field): field is string => field !== null);
-
-	await emitDiagnostics(
-		ctx,
-		{
-			reason,
-			status,
-			recordCount: emitted,
-			from: earliest,
-			to: coveredLatest,
-			requestedFrom,
-			requestedTo,
-			fieldsUnavailable,
-		},
-		exportedAt,
-	);
 
 	// Hold the cursor ONLY when the file was truncated, because only then does
 	// unread history exist beyond it. Holding it for unreadable rows would stall
@@ -584,10 +463,9 @@ runConnector({
 		const state = ctx.state as StravaState | undefined;
 
 		if (!existsSync(importDir)) {
-			const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
 			// This is the commonest first-run state, and it used to emit a bare
-			// PROGRESS and return — no skip, no receipt. A run that collected
-			// nothing looked exactly like a healthy one.
+			// PROGRESS and return — the requested activity stream would look healthy
+			// despite collecting nothing.
 			if (ctx.requested.has(ACTIVITIES_STREAM)) {
 				await ctx.emit({
 					type: "SKIP_RESULT",
@@ -596,15 +474,6 @@ runConnector({
 					recovery_hint: { action: "manual_action_required", retryable: false },
 					message: `No Strava import directory at ${importDir}. Set STRAVA_EXPORT_DIR, or put the archive in ~/.pdpp/imports/strava/`,
 				});
-				await emitDiagnostics(
-					ctx,
-					emptyCoverage(
-						"awaiting_upload",
-						timeRange?.since ?? state?.activities?.last_start_time ?? null,
-						timeRange?.until ?? null,
-					),
-					null,
-				);
 			}
 			return;
 		}

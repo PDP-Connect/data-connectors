@@ -543,17 +543,13 @@
 		"manifest": {
 			"connector_key": "strava",
 			"reason_display_messages": {
-				"awaiting_upload": "Nothing to read yet. Ask Strava for a copy of your data, and they'll email you an archive — usually within a day, sometimes longer. Upload it here when it arrives.",
 				"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-				"covered_in_full": "Everything in your export was imported.",
-				"nothing_in_range": "Your export didn't contain any activities in this period. That's not a problem — there was simply nothing to read.",
 				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
 				"sign_in_required": "Strava needs you to sign in again before this can continue.",
 				"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
 				"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
 				"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-				"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it.",
-				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+				"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it."
 			}
 		}
 	},
@@ -563,8 +559,6 @@
 			"connector_key": "strava-browser",
 			"reason_display_messages": {
 				"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
-				"covered_in_full": "Every activity in your Strava list was collected.",
-				"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
 				"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 				"sign_in_required": "Strava needs you to sign in again before this can continue.",
 				"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
@@ -674,12 +668,9 @@
 		"manifest": {
 			"connector_key": "youtube-takeout",
 			"reason_display_messages": {
-				"awaiting_upload": "Nothing to read yet. Request a Takeout export of \"YouTube and YouTube Music\", extract it, and provide the folder here.",
-				"covered_in_full": "Everything this export carries for this stream was imported.",
-				"nothing_in_range": "Your export didn't contain any records for this stream. That's not a problem — there was simply nothing to read.",
 				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
 				"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
-				"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Coverage for this stream is unverified — Google's Takeout export contents can vary; report this if you expected data here."
+				"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
 			}
 		}
 	}

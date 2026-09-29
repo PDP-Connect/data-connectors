@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.9",
+	"version": "0.2.10",
 	"display_name": "YouTube",
 	"brand": {
 		"icon": "icon.svg",
@@ -485,75 +485,6 @@
 					"watched_date": ["gte", "gt", "lte", "lt"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
-			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"required": false,
-			"description": "Browser snapshot bounds and missing field diagnostics for each requested stream.",
-			"display": {
-				"label": "What your YouTube import covered",
-				"detail": "Per-stream bounded browser snapshot counts and unavailable fields."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string",
-						"enum": ["complete", "partial", "empty"]
-					},
-					"reason": {
-						"type": "string",
-						"enum": ["bounded_browser_snapshot"],
-						"x_pdpp_role": "primary-title"
-					},
-					"record_count": {
-						"type": ["integer", "null"]
-					},
-					"fields_unavailable": {
-						"type": "array",
-						"items": {
-							"type": "string"
-						}
-					},
-					"freshness": {
-						"type": "string",
-						"enum": ["live"]
-					},
-					"captured_at": {
-						"type": "string",
-						"format": "date-time"
-					}
-				},
-				"required": [
-					"id",
-					"status",
-					"reason",
-					"fields_unavailable",
-					"freshness",
-					"captured_at"
-				]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"query": {
-				"range_filters": {
-					"captured_at": ["gte", "gt", "lte", "lt"]
-				}
-			},
-			"coverage_policy": "inventory_only",
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		}

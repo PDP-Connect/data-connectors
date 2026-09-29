@@ -71,32 +71,6 @@ export const START_TIME_BASES = ["utc", "local", "unknown"] as const;
 export const FRESHNESS_VALUES = ["live", "snapshot"] as const;
 
 /**
- * Why a covered window ends where it does. Closed, and always populated —
- * including on success, via `covered_in_full`. A nullable reason would invite
- * `if (reason)` as the failure test, which would classify "no activities last
- * week" as something going wrong.
- *
- * The values are next-action shaped rather than cause shaped: each one ends in
- * a different sentence to the owner, and each has a `reason_display_messages`
- * entry in the manifest carrying that sentence. `nothing_in_range` and
- * `collection_interrupted` are the pair that matters most — both can produce an
- * empty result, and they have opposite next actions.
- */
-export const COVERAGE_REASONS = [
-	"covered_in_full",
-	"nothing_in_range",
-	"awaiting_upload",
-	"source_unreadable",
-	"source_limit_reached",
-	"collection_interrupted",
-	"records_unreadable",
-	"sign_in_required",
-	"window_unavailable",
-] as const;
-
-export const COVERAGE_STATUSES = ["complete", "partial", "empty"] as const;
-
-/**
  * activities stream: one record per workout in the owner's export.
  * Cursor: start_time. Primary key: id, which is Strava's own activity id and
  * is stable across separate exports — two archives a month apart overlap
@@ -124,36 +98,10 @@ export const activitiesSchema = z.object({
 });
 
 /**
- * coverage_diagnostics stream: one record per stream per import, stating what
- * was covered and why it stops there.
- *
- * This is a separate stream rather than fields on each activity for a reason
- * that decides it on correctness, not taste: when nothing is collected there
- * are no activity records, so there would be nowhere for the diagnostic to
- * live — and "nothing in range" and "collection interrupted" are exactly the
- * two cases that produce an empty result and need telling apart.
- */
-export const coverageDiagnosticsSchema = z.object({
-	id: z.string().min(1).max(200),
-	stream: z.string().min(1).max(64).nullable(),
-	status: z.enum(COVERAGE_STATUSES),
-	reason: z.enum(COVERAGE_REASONS),
-	record_count: z.number().int().min(0).nullable(),
-	fields_unavailable: z.array(z.string().min(1).max(64)).max(32),
-	window_requested_from: isoDateTime.nullable(),
-	window_requested_to: isoDateTime.nullable(),
-	window_covered_from: isoDateTime.nullable(),
-	window_covered_to: isoDateTime.nullable(),
-	freshness: z.enum(FRESHNESS_VALUES),
-	exported_at: isoDateTime.nullable(),
-});
-
-/**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	activities: activitiesSchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

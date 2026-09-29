@@ -98,7 +98,7 @@ test("large synthetic activities.csv emits with bounded RSS", async () => {
 			peakRssPollIntervalMs: 25,
 			start: {
 				scope: {
-					streams: [{ name: "activities" }, { name: "coverage_diagnostics" }],
+					streams: [{ name: "activities" }, ],
 				},
 				type: "START",
 			},

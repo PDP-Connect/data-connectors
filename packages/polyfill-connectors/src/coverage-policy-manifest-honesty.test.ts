@@ -275,7 +275,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["codex.rules", "a056c2cd28198a13"],
 	["codex.prompts", "b46d9879df70b604"],
 	["codex.skills", "bd5a65644fcfe045"],
-	["codex.coverage_diagnostics", "fb67ab5be18229ef"],
 	["github.user", "b6ec1e77b0c49ac1"],
 	["github.user_stats", "257bf53406fa2f35"],
 	["github.repositories", "a281334e68e1a5f6"],

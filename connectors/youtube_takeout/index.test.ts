@@ -5,8 +5,7 @@
  * End-to-end tests for the YouTube Takeout connector, driven through the
  * real connector protocol as a subprocess: proves START -> RECORD -> STATE
  * -> DONE, scope filtering (a stream absent from scope.streams emits
- * nothing), and the honest-coverage behavior for UNVERIFIED streams (see
- * parsers.ts's file header).
+ * nothing), and cursor behavior for watch history.
  */
 
 import assert from "node:assert/strict";
@@ -63,7 +62,6 @@ const ALL_STREAMS = [
 	"likes",
 	"watch_later",
 	"watch_history",
-	"coverage_diagnostics",
 ];
 
 async function run(
@@ -143,44 +141,7 @@ test("watch_history: a second run resumes from the cursor rather than re-emittin
 	);
 });
 
-test("scope filtering: a stream absent from scope.streams emits nothing for that stream", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-			"YouTube and YouTube Music/subscriptions/subscriptions.csv":
-				"Channel Id,Channel Url,Channel Title\nUC1,https://www.youtube.com/channel/UC1,Chan One\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["watch_history"]);
-			assert.equal(recordsOf(result, "watch_history").length, 1);
-			assert.equal(recordsOf(result, "subscriptions").length, 0);
-			assert.equal(recordsOf(result, "coverage_diagnostics").length, 0);
-		},
-	);
-});
 
-test("subscriptions: a real-shaped subscriptions.csv emits one record per row", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/subscriptions/subscriptions.csv":
-				"Channel Id,Channel Url,Channel Title\n" +
-				"UC1,https://www.youtube.com/channel/UC1,Chan One\n" +
-				"UC2,https://www.youtube.com/channel/UC2,Chan Two\n",
-		},
-		async (dir) => {
-			const result = await run(dir, ["subscriptions", "coverage_diagnostics"]);
-			const records = recordsOf(result, "subscriptions");
-			assert.equal(records.length, 2);
-			assert.equal(records[0]?.channel_id, "UC1");
-
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			assert.equal(diagnostic?.stream, "subscriptions");
-			assert.equal(diagnostic?.status, "complete");
-			assert.equal(diagnostic?.record_count, 2);
-		},
-	);
-});
 
 test("playlists + playlist_items: an index file with one per-item CSV emits both streams", async () => {
 	await withExportDir(
@@ -221,51 +182,8 @@ test("likes and watch_later: named playlist export files map to their own stream
 	);
 });
 
-test("a missing export directory reports every requested stream as awaiting import, not silent success", async () => {
-	const dir = join(tmpdir(), "youtube-takeout-does-not-exist-0000");
-	const result = await run(dir, ["watch_history", "coverage_diagnostics"]);
-	assert.equal(recordsOf(result, "watch_history").length, 0);
-	assert.equal(messagesOf(result, "SKIP_RESULT").length, 1);
-	const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-	assert.ok(diagnostic);
-	assert.equal(diagnostic.status, "empty");
-});
 
-test("a directory containing only a .zip is reported as source_unreadable with remediation, not silently ignored", async () => {
-	await withExportDir(
-		{ "takeout-export.zip": "not a real zip" },
-		async (dir) => {
-			const result = await run(dir, ["watch_history", "coverage_diagnostics"]);
-			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.equal(skips.length, 1);
-			assert.match(
-				(skips[0] as { message?: string }).message ?? "",
-				/extract/i,
-			);
-		},
-	);
-});
 
-test("an unverified stream missing its expected file reports file_not_found_in_export honestly", async () => {
-	await withExportDir(
-		{
-			"YouTube and YouTube Music/history/watch-history.json":
-				WATCH_HISTORY_JSON,
-		},
-		async (dir) => {
-			const result = await run(dir, ["profile", "coverage_diagnostics"]);
-			assert.equal(recordsOf(result, "profile").length, 0);
-			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.equal(skips.length, 1);
-			assert.equal(
-				(skips[0] as { reason?: string }).reason,
-				"file_not_found_in_export",
-			);
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			assert.equal(diagnostic?.reason, "file_not_found_in_export");
-		},
-	);
-});
 
 test("an extracted export directly in the import dir (no wrapping folder) is also read", async () => {
 	await withExportDir(

@@ -19,7 +19,7 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 (globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
 	runOnPageShim(page, {
 		platform: "strava",
-		scopes: ["strava.activities", "strava.coverage_diagnostics"],
+		scopes: ["strava.activities"],
 		version: PAGESHIM_CONNECTOR_VERSION,
 		loginUrl: LOGIN_URL,
 		loginMessage: "Sign in to Strava, then return here.",

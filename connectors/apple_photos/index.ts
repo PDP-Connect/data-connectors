@@ -64,31 +64,17 @@
  * different Photos.app exports — or re-exported after this connector
  * already ran once — collapses to one record and one blob rather than
  * being duplicated.
- *
- * COVERAGE_DIAGNOSTICS: this connector reports one durable coverage row
- * (store "export_dir") via src/local-source-inventory.ts's
- * buildLocalSourceInventory, the same primitive claude_code/codex use. This
- * is emitted BEFORE checking whether the export directory exists — a
- * missing/empty export dir must still produce an honest "missing" coverage
- * row rather than a silent zero-evidence run, since the connection-health
- * rollup derives a local collector's coverage axis exclusively from
- * durable coverage_diagnostics records (a local run writes no spine run).
- * See openspec/changes/derive-local-collector-coverage-from-diagnostics.
  */
 
 import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	hydrateMediaBytes,
 	resolveMaxMediaBytes,
 } from "../../packages/polyfill-connectors/src/local-media-blob-hydration.ts";
-import {
-	buildLocalSourceInventory,
-	type KnownLocalStore,
-} from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
 import {
 	advanceCursor,
 	buildPhotoRecord,
@@ -100,17 +86,6 @@ import type { ApplePhotosState, DiscoveredFile } from "./types.ts";
 
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/apple-photos";
 const MAX_PHOTO_BYTES_ENV = "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES";
-
-const APPLE_PHOTOS_KNOWN_STORES: KnownLocalStore[] = [
-	{
-		store: "export_dir",
-		relativePath: ".",
-		stream: "photos",
-		classification: "collect",
-		reason:
-			"Photos.app manual export directory (File → Export → Export Unmodified Originals)",
-	},
-];
 
 // Progress cadence — emit a PROGRESS every N files so operators see motion
 // on large libraries.
@@ -174,21 +149,6 @@ runConnector({
 	name: "apple_photos",
 	validateRecord,
 	async collect({ state, requested, emit, emitRecord, progress }) {
-		if (requested.has("coverage_diagnostics")) {
-			const configuredDir = configuredExportDir();
-			const inventory = await buildLocalSourceInventory(
-				"apple_photos",
-				dirname(configuredDir),
-				APPLE_PHOTOS_KNOWN_STORES.map((store) => ({
-					...store,
-					relativePath: basename(configuredDir),
-				})),
-			);
-			for (const record of inventory.coverage) {
-				await emitRecord("coverage_diagnostics", record);
-			}
-		}
-
 		const dir = resolveExportDir();
 		if (!dir || (await isEmptyDir(dir))) {
 			await emit({

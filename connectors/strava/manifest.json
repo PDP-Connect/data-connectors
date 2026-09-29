@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.8",
+	"version": "1.0.9",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",
@@ -182,127 +182,15 @@
 			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"required": false,
-			"description": "What this import covered and why it stops where it does. One record per stream per import.",
-			"display": {
-				"label": "What your Strava import covered",
-				"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"],
-						"description": "The stream this record accounts for."
-					},
-					"status": {
-						"type": "string",
-						"enum": ["complete", "partial", "empty"],
-						"description": "Whether the covered window matches the requested window. 'empty' is an ordinary outcome, not a failure."
-					},
-					"reason": {
-						"type": "string",
-						"enum": [
-							"covered_in_full",
-							"nothing_in_range",
-							"awaiting_upload",
-							"source_unreadable",
-							"source_limit_reached",
-							"collection_interrupted",
-							"records_unreadable",
-							"sign_in_required",
-							"window_unavailable"
-						],
-						"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner, and each has a reason_display_messages entry.",
-						"x_pdpp_role": "primary-title"
-					},
-					"record_count": {
-						"type": ["integer", "null"],
-						"description": "Records emitted for this stream in this import."
-					},
-					"fields_unavailable": {
-						"type": "array",
-						"items": {
-							"type": "string"
-						},
-						"description": "Fields the schema declares that this particular archive did not carry, so a column of nulls is never mistaken for a column of absent readings. Calories and gear are optional columns in the export and are the two this path exists to deliver."
-					},
-					"window_requested_from": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"window_requested_to": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"window_covered_from": {
-						"type": ["string", "null"],
-						"format": "date-time",
-						"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
-					},
-					"window_covered_to": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"freshness": {
-						"type": "string",
-						"enum": ["live", "snapshot"]
-					},
-					"exported_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					}
-				},
-				"required": [
-					"id",
-					"status",
-					"reason",
-					"fields_unavailable",
-					"freshness",
-					"exported_at"
-				]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"query": {
-				"range_filters": {
-					"window_requested_from": ["gte", "gt", "lte", "lt"],
-					"window_requested_to": ["gte", "gt", "lte", "lt"],
-					"window_covered_from": ["gte", "gt", "lte", "lt"],
-					"window_covered_to": ["gte", "gt", "lte", "lt"],
-					"exported_at": ["gte", "gt", "lte", "lt"]
-				},
-				"aggregations": {
-					"count": true
-				}
-			},
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "manual_as_of"
 		}
 	],
 	"reason_display_messages": {
-		"awaiting_upload": "Nothing to read yet. Ask Strava for a copy of your data, and they'll email you an archive — usually within a day, sometimes longer. Upload it here when it arrives.",
 		"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-		"covered_in_full": "Everything in your export was imported.",
-		"nothing_in_range": "Your export didn't contain any activities in this period. That's not a problem — there was simply nothing to read.",
 		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
 		"sign_in_required": "Strava needs you to sign in again before this can continue.",
 		"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
 		"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
 		"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-		"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it.",
-		"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+		"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it."
 	}
 }

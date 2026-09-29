@@ -79,7 +79,6 @@ import { readBoundedFilePreview } from "../../packages/polyfill-connectors/src/b
 import {
 	dateDirectoryInRange,
 	type EnumerationScope,
-	enumerationScopeFingerprint,
 	isPathWithinSourceRoots,
 	readEnumerationScope,
 	scopeBoundsEnumeration,
@@ -92,10 +91,7 @@ import {
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { LocalJsonlMalformedLineError } from "../../packages/polyfill-connectors/src/local-jsonl-cursor.ts";
 import {
-	buildCoverageDiagnosticsStateSnapshot,
-	buildDerivedCoverageRecord,
 	buildLocalSourceInventory,
-	type CoverageRecord,
 	type KnownLocalStore,
 	listDirectoryInventory,
 	openInventoryFingerprintCursor,
@@ -2685,7 +2681,7 @@ async function assertRequestedCodexSources(
 	requested: Map<string, StreamScope>,
 ): Promise<void> {
 	// Distinguish ENOENT (legitimately absent) from EACCES/EIO (actual I/O failures).
-	// ENOENT allows coverage_diagnostics to emit verified_empty evidence.
+	// ENOENT is an absent optional source, not an I/O failure.
 	// EACCES/EIO is an actual error that should be reported.
 	const unreadable: string[] = [];
 	const needsRollouts =
@@ -2712,12 +2708,10 @@ async function assertRequestedCodexSources(
 		}
 	}
 	// rules/prompts/skills are optional, user-authored directories that Codex
-	// itself never creates until the user writes one — coverage_diagnostics
-	// already reports each as "missing" (not an error) when absent, and
-	// emitRulesStream/emitPromptsStream/emitSkillsStream already no-op safely
-	// on a missing directory. Requiring them here was fatal-on-every-fresh-
-	// install: any host without a manually-created empty rules/prompts dir
-	// failed its very first run. Only actual I/O failures (not ENOENT) are errors.
+	// itself never creates until the user writes one. Their emitters already
+	// no-op safely when a directory is absent. Requiring them here was fatal
+	// on every fresh install without manually-created empty directories. Only
+	// actual I/O failures (not ENOENT) are errors.
 	if (unreadable.length > 0) {
 		throw new Error(
 			`requested Codex local source path(s) are unreadable: ${unreadable.join(", ")}`,
@@ -2783,8 +2777,6 @@ function emitStateCursors({
 	// Inventory streams (history, session_index, shell_snapshots,
 	// config_inventory, cache_inventory) own their STATE inside the fingerprint
 	// gate (emitLocalInventoryStreams) and must NOT get a bare clobbering STATE
-	// here. coverage_diagnostics is emitted after all collection output drains,
-	// immediately before terminal success, so it cannot certify a partial scan.
 }
 
 function readPriorSessionsSourceMtimeMs(startMsg: StartMessage): number | null {
@@ -2864,72 +2856,6 @@ function fileMtimeMs(path: string): number {
 	} catch {
 		return 0;
 	}
-}
-
-/**
- * Emit the per-store `coverage_diagnostics` rows from a pre-built
- * inventory. Kept separate from inventory-record emission so the durable
- * coverage signal can be flushed BEFORE {@link assertRequestedCodexSources}
- * runs: a missing requested content source must still surface honest
- * `missing` coverage rows rather than abort the run with zero coverage
- * evidence. The connection-health rollup derives a local collector's
- * coverage axis from these records, and an omitted coverage stream
- * collapses to `coverage_unknown` forever (the local run path writes no
- * spine run). The inventory walk reads only path metadata, never payload,
- * so it is safe on a partial/empty home. No-op when `coverage_diagnostics`
- * was not requested.
- */
-async function emitCoverageDiagnostics(input: {
-	emitRecord: (stream: string, data: RecordData) => void;
-	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-	requested: Map<string, StreamScope>;
-}): Promise<void> {
-	if (!input.requested.has("coverage_diagnostics")) {
-		return;
-	}
-	for (const record of input.inventory.coverage) {
-		input.emitRecord("coverage_diagnostics", record);
-		await waitForEmitDrain();
-	}
-}
-
-/**
- * Commit the STATE snapshot for the STATIC (inventory-classified) coverage
- * rows only, right after the inventory pass — before rollout scanning ever
- * starts. `bufferedState.coverage_diagnostics` is last-wins per stream, so a
- * later {@link emitDerivedCoverage} call in a run that goes on to finish
- * simply supersedes this snapshot with the richer static+derived one.
- *
- * Exists because a run that ends early — a sample-limit abort, a mid-scan
- * failure — never reaches {@link emitDerivedCoverage}, which used to be the
- * ONLY place `coverage_diagnostics` STATE was written. The inventory pass
- * that classifies `shell_snapshots`/`history`/etc. has nothing to do with
- * rollout scanning and already succeeded by this point, so its proof must
- * not be held hostage by a scan that hasn't even started yet: without this,
- * a store whose classification correctly changed (e.g. `missing` →
- * `inventory_only`) never gets a chance to refresh in the durable checkpoint
- * on any run that doesn't run to full completion, even though a fresh
- * `coverage_diagnostics` RECORD for it was already emitted and durably
- * ingested — a permanent split between the live per-store diagnostic and
- * the committed coverage-axis proof.
- */
-async function emitStaticCoverageState(input: {
-	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-	nowIso: () => string;
-	requested: Map<string, StreamScope>;
-}): Promise<void> {
-	if (!input.requested.has("coverage_diagnostics")) {
-		return;
-	}
-	emit({
-		type: "STATE",
-		stream: "coverage_diagnostics",
-		cursor: {
-			fetched_at: input.nowIso(),
-			stores: buildCoverageDiagnosticsStateSnapshot(input.inventory.coverage),
-		},
-	});
-	await waitForEmitDrain();
 }
 
 /** Emit one inventory stream's records under a fingerprint gate that excludes
@@ -3067,86 +2993,6 @@ function makeCodexEmitRecord(deps: {
 	return { counters, emitRecord };
 }
 
-/**
- * Builds derived (rollout-scanned) coverage_diagnostics records for the
- * requested streams, emits them alongside the static inventory coverage,
- * then flushes the combined snapshot as the stream's STATE cursor.
- */
-async function emitDerivedCoverage(input: {
-	emitRecord: (s: string, d: RecordData) => void;
-	enumerationScope: ReturnType<typeof readEnumerationScope>;
-	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-	nowIso: () => string;
-	requested: Map<string, StreamScope>;
-	rolloutScan: ScanRolloutsResult;
-}): Promise<void> {
-	const {
-		emitRecord,
-		enumerationScope,
-		inventory,
-		nowIso,
-		requested,
-		rolloutScan,
-	} = input;
-	const derivedRecords: CoverageRecord[] = [];
-	const scopeFingerprint = enumerationScopeFingerprint(enumerationScope);
-	const scanComplete = rolloutScan.scanOutcome === "complete";
-	const incompleteReason = scanComplete
-		? undefined
-		: `rollout enumeration failed: ${rolloutScan.scanOutcome}`;
-
-	if (requested.has("messages")) {
-		derivedRecords.push(
-			buildDerivedCoverageRecord({
-				connectorId: "codex",
-				emitted: rolloutScan.messagesEmitted,
-				examined: rolloutScan.messagesExamined,
-				incompleteReason,
-				label: "message",
-				scanComplete,
-				scopeFingerprint,
-				stream: "messages",
-			}),
-		);
-	}
-
-	if (requested.has("function_calls")) {
-		derivedRecords.push(
-			buildDerivedCoverageRecord({
-				connectorId: "codex",
-				emitted: rolloutScan.functionCallsEmitted,
-				examined: rolloutScan.functionCallsExamined,
-				incompleteReason,
-				label: "function_call",
-				scanComplete,
-				scopeFingerprint,
-				stream: "function_calls",
-			}),
-		);
-	}
-
-	// Emit derived records
-	for (const record of derivedRecords) {
-		emitRecord("coverage_diagnostics", record);
-		await waitForEmitDrain();
-	}
-
-	// Emit STATE with snapshot including both static and derived records.
-	const allCoverageRecords: readonly CoverageRecord[] = [
-		...inventory.coverage,
-		...derivedRecords,
-	];
-	emit({
-		type: "STATE",
-		stream: "coverage_diagnostics",
-		cursor: {
-			fetched_at: nowIso(),
-			stores: buildCoverageDiagnosticsStateSnapshot(allCoverageRecords),
-		},
-	});
-	await waitForEmitDrain();
-}
-
 // ─── main ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -3233,33 +3079,17 @@ async function collect({
 	const threadFingerprints = openCarryForwardCursor<ThreadFingerprint>(
 		readPriorThreadFingerprints(startMsg),
 	);
-
-	// Build the source inventory and flush durable coverage diagnostics BEFORE
-	// asserting requested content sources exist. A missing content store should
-	// surface an honest `missing` coverage row, not abort the run with zero
-	// coverage evidence — see emitCoverageDiagnostics. The inventory walk reads
-	// only path metadata, never payload, so it is safe on a partial/empty home.
 	const enumerationScope = readEnumerationScope(requested, [
 		"sessions",
 		"messages",
 		"function_calls",
 	]);
-	// The measured boundary is stamped onto the coverage records themselves,
-	// so it commits atomically with the evidence it qualifies.
 	const inventory = await buildLocalSourceInventory(
 		"codex",
 		dirs.codexHome,
 		CODEX_KNOWN_LOCAL_STORES,
-		enumerationScopeFingerprint(enumerationScope),
 	);
-	await emitCoverageDiagnostics({ emitRecord, inventory, requested });
-	// Commit the static coverage proof now, independent of everything that
-	// follows — see emitStaticCoverageState. assertRequestedCodexSources can
-	// still throw right after this, and a sample-limit abort can still kill
-	// the process during rollout scanning; either way this snapshot already
-	// reached bufferedState and survives as the checkpoint if nothing later
-	// supersedes it.
-	await emitStaticCoverageState({ inventory, nowIso, requested });
+
 	await assertRequestedCodexSources(dirs, requested);
 
 	// The owner-declared boundary rides on the stream scopes the runtime already
@@ -3363,17 +3193,6 @@ async function collect({
 		threadFingerprints,
 	});
 	await waitForEmitDrain();
-
-	if (requested.has("coverage_diagnostics")) {
-		await emitDerivedCoverage({
-			emitRecord,
-			enumerationScope,
-			inventory,
-			nowIso,
-			requested,
-			rolloutScan,
-		});
-	}
 
 	// Both obligations are reported before DONE, and neither is implied by the
 	// other: `outstanding` are bodies this run could not hold (their markers were

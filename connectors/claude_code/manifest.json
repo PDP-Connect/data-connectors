@@ -9,7 +9,7 @@
 	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.6",
+	"version": "0.3.7",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",
@@ -815,43 +815,6 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "mtime_epoch",
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"required": false,
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "device_heartbeat"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"description": "Safe coverage status for known Claude Code local stores, including excluded auth-adjacent stores without payloads or raw absolute paths.",
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"store": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string"
-					},
-					"reason": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
-					}
-				},
-				"required": ["id", "store", "status", "reason"]
-			},
-			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
 				"resources": true

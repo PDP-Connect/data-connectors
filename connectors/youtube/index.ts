@@ -230,16 +230,13 @@ async function waitForChannelIdentity(
 				const hasIdentity = Boolean(
 					document.querySelector(
 						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
-					) ||
-					/@[^/?#]+/.test(location.pathname),
+					) || /@[^/?#]+/.test(location.pathname),
 				);
 				const placeholderTitle =
 					/^(?:loading\b|please wait\b|home$|youtube$|channel$)/i.test(
 						title ?? "",
 					);
-				return title && !placeholderTitle && hasIdentity
-					? true
-					: false;
+				return title && !placeholderTitle && hasIdentity ? true : false;
 			},
 			CHANNEL_TITLE_SELECTOR,
 			{ timeout: 10_000 },
@@ -268,9 +265,11 @@ async function waitForChannelAbout(
 					.map((node) => node.textContent?.trim() ?? "")
 					.filter((value) => value && !/^(loading|please wait)$/i.test(value));
 				const hasJoinedDate = text.some((value) => /^joined\s+/i.test(value));
-				const hasStatsInAbout = Boolean(about) && text.some(
-					(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
-				);
+				const hasStatsInAbout =
+					Boolean(about) &&
+					text.some(
+						(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
+					);
 				const hasDescription = Boolean(
 					aboutRoot
 						.querySelector(
@@ -278,7 +277,9 @@ async function waitForChannelAbout(
 						)
 						?.textContent?.trim(),
 				);
-				return hasJoinedDate || hasStatsInAbout || hasDescription ? "content" : false;
+				return hasJoinedDate || hasStatsInAbout || hasDescription
+					? "content"
+					: false;
 			},
 			undefined,
 			{ timeout: 10_000 },
@@ -362,30 +363,11 @@ type BrowserContext = Pick<
 export async function collectYoutubeBrowser(
 	ctx: BrowserContext,
 ): Promise<void> {
-	const { page, requested } = ctx;
 	const capturedAt = new Date().toISOString();
-	const coverage = async (
-		stream: string,
-		count: number,
-		fieldsUnavailable: string[] = [],
-	) => {
-		if (!requested.has("coverage_diagnostics")) return;
-		await ctx.emitRecord("coverage_diagnostics", {
-			id: id(`${stream}|${capturedAt}`),
-			stream,
-			status: "partial",
-			reason: "bounded_browser_snapshot",
-			record_count: count,
-			fields_unavailable: fieldsUnavailable,
-			freshness: "live",
-			captured_at: capturedAt,
-		});
-	};
+	const { page, requested } = ctx;
 	const emit = async (stream: string, record: Record<string, unknown>) => {
 		await ctx.emitRecord(stream, record);
 	};
-	const missingVideoTitles = (videos: readonly BrowserVideo[]) =>
-		videos.some((video) => !video.video_title) ? ["video_title"] : [];
 	if (requested.has("profile")) {
 		await page.goto(HOME, { waitUntil: "domcontentloaded" });
 		const homeState = await waitForContent(
@@ -395,7 +377,6 @@ export async function collectYoutubeBrowser(
 		if (homeState !== "content") {
 			await skipUnreadable(ctx, "profile", "youtube_profile_home_not_ready");
 		} else {
-			let profileEmitted = false;
 			await page
 				.locator(
 					"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
@@ -433,7 +414,6 @@ export async function collectYoutubeBrowser(
 							view_count: null,
 							video_count: null,
 						});
-						profileEmitted = true;
 					} else {
 						await ctx.emit({
 							type: "SKIP_RESULT",
@@ -499,12 +479,10 @@ export async function collectYoutubeBrowser(
 								view_count: parseCount(about?.view_count_text),
 								video_count: parseCount(about?.video_count_text),
 							});
-							profileEmitted = true;
 						}
 					}
 				}
 			}
-			await coverage("profile", profileEmitted ? 1 : 0);
 		}
 	}
 	if (requested.has("subscriptions")) {
@@ -534,13 +512,6 @@ export async function collectYoutubeBrowser(
 					is_verified: channel.is_verified,
 					notifications: channel.notifications,
 				});
-			await coverage(
-				"subscriptions",
-				subscriptions.length,
-				subscriptions.some((channel) => channel.notifications === null)
-					? ["notifications"]
-					: [],
-			);
 		}
 	}
 	let playlistLinks: Array<{ id: string; url: string }> = [];
@@ -564,9 +535,6 @@ export async function collectYoutubeBrowser(
 		playlistIndexReadable &&
 		(requested.has("playlists") || requested.has("playlist_items"))
 	) {
-		let playlistCount = 0;
-		let itemCount = 0;
-		let itemTitlesMissing = false;
 		for (const playlist of playlistLinks) {
 			await page.goto(playlist.url, { waitUntil: "domcontentloaded" });
 			if (
@@ -596,7 +564,6 @@ export async function collectYoutubeBrowser(
 						? 0
 						: parseCount(header.view_count_text),
 				});
-				playlistCount += 1;
 			}
 			if (requested.has("playlist_items")) {
 				const videos = await readableVideos(
@@ -607,25 +574,16 @@ export async function collectYoutubeBrowser(
 					"playlist_items",
 				);
 				if (videos) {
-					itemTitlesMissing ||= missingVideoTitles(videos).length > 0;
 					for (const video of videos) {
 						await emit("playlist_items", {
 							id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
 							playlist_id: playlist.id,
 							...videoFields(video),
 						});
-						itemCount += 1;
 					}
 				}
 			}
 		}
-		if (requested.has("playlists")) await coverage("playlists", playlistCount);
-		if (requested.has("playlist_items"))
-			await coverage(
-				"playlist_items",
-				itemCount,
-				itemTitlesMissing ? ["video_title"] : [],
-			);
 	}
 	for (const [stream, list] of [
 		["likes", "LL"],
@@ -645,7 +603,6 @@ export async function collectYoutubeBrowser(
 				id: id(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
 			});
-		await coverage(stream, videos.length, missingVideoTitles(videos));
 	}
 	if (requested.has("watch_history")) {
 		const videos = await readableVideos(
@@ -686,10 +643,6 @@ export async function collectYoutubeBrowser(
 					description: video.description,
 				});
 			}
-			await coverage("watch_history", videos.length, [
-				"watch_time_of_day",
-				...missingVideoTitles(videos),
-			]);
 		}
 	}
 }

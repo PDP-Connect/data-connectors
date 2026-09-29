@@ -32,11 +32,6 @@ import {
 	sanitizeHydrationError,
 } from "../../packages/polyfill-connectors/src/local-media-blob-hydration.ts";
 import {
-	buildCoverageDiagnosticsStateSnapshot,
-	buildLocalSourceInventory,
-	type KnownLocalStore,
-} from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
-import {
 	buildLocationRecord,
 	buildPhotoRecord,
 	buildSearchRecord,
@@ -467,52 +462,10 @@ async function collectPhotos(
 	}
 }
 
-/**
- * Known local stores for the coverage_diagnostics stream (§ local-collector
- * bundling). Each store is the exact top-level path this connector reads for
- * one stream, mirroring the claude_code/codex coverage-inventory pattern —
- * `classification: "collect"` since these are the same paths collectRecords
- * reads directly, not a separate metadata-only inventory. `location_history`
- * uses the current Takeout export's folder name; the legacy `Location
- * History/` fallback (see resolveLocationFile) is not separately inventoried
- * since it is the same stream/store, just an older Takeout export layout.
- */
-const GOOGLE_TAKEOUT_KNOWN_LOCAL_STORES: KnownLocalStore[] = [
-	{
-		store: "location_history",
-		relativePath: "Location History (Timeline)/Records.json",
-		stream: "location_history",
-		classification: "collect",
-		reason: "declared location history source",
-	},
-	{
-		store: "youtube_watch_history",
-		relativePath: "YouTube and YouTube Music/history/watch-history.json",
-		stream: "youtube_watch_history",
-		classification: "collect",
-		reason: "declared YouTube watch history source",
-	},
-	{
-		store: "search_history",
-		relativePath: "My Activity/Search/MyActivity.json",
-		stream: "search_history",
-		classification: "collect",
-		reason: "declared search history source",
-	},
-	{
-		store: "photos",
-		relativePath: "Photos",
-		stream: "photos",
-		classification: "collect",
-		reason: "declared photos/videos source",
-	},
-];
-
 runConnector({
 	name: "google_takeout",
 	validateRecord,
 	async collect(ctx) {
-		const { emit, emitRecord, requested } = ctx;
 		const importDir =
 			process.env.GOOGLE_TAKEOUT_DIR ||
 			join(homedir(), ".pdpp/imports/google_takeout");
@@ -532,24 +485,6 @@ runConnector({
 		}
 		if (ctx.requested.has("photos")) {
 			await collectPhotos(ctx, importDir, typedState.photos);
-		}
-		if (requested.has("coverage_diagnostics")) {
-			const inventory = await buildLocalSourceInventory(
-				"google_takeout",
-				importDir,
-				GOOGLE_TAKEOUT_KNOWN_LOCAL_STORES,
-			);
-			for (const record of inventory.coverage) {
-				await emitRecord("coverage_diagnostics", record);
-			}
-			await emit({
-				type: "STATE",
-				stream: "coverage_diagnostics",
-				cursor: {
-					fetched_at: new Date().toISOString(),
-					stores: buildCoverageDiagnosticsStateSnapshot(inventory.coverage),
-				},
-			});
 		}
 	},
 });

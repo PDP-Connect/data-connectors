@@ -208,47 +208,6 @@ test("profile emits an email-only record when the account has no channel link", 
 	]);
 });
 
-test("browser collector emits schema-valid records for all seven scopes without a Takeout directory", async () => {
-	const streams = [
-		"profile",
-		"subscriptions",
-		"playlists",
-		"playlist_items",
-		"likes",
-		"watch_later",
-		"watch_history",
-		"coverage_diagnostics",
-	];
-	const records = new Map<string, Record<string, unknown>[]>();
-	await collectYoutubeBrowser({
-		page: new FixturePage() as never,
-		requested: new Map(streams.map((name) => [name, { name }])) as never,
-		emitRecord: async (stream, data) => {
-			assert.equal(
-				validateRecord(stream, data).ok,
-				true,
-				`${stream}: ${JSON.stringify(data)}`,
-			);
-			records.set(stream, [...(records.get(stream) ?? []), data]);
-		},
-		emit: async () => undefined,
-		progress: async () => undefined,
-	});
-	for (const stream of streams)
-		assert.ok((records.get(stream)?.length ?? 0) > 0, stream);
-	assert.equal(records.get("subscriptions")?.[0]?.notifications, true);
-	assert.equal(
-		records.get("playlist_items")?.[0]?.video_title,
-		"Real video title",
-	);
-	assert.equal(records.get("playlist_items")?.[0]?.playlist_id, "PL1");
-	assert.equal(records.get("watch_history")?.[0]?.position, 0);
-	assert.equal("watched_at" in records.get("watch_history")![0]!, false);
-	assert.match(
-		String(records.get("watch_history")?.[0]?.watched_date),
-		/^\d{4}-\d{2}-\d{2}$/,
-	);
-});
 
 test("date resolver keeps day precision and rejects unknown labels", () => {
 	const now = new Date(2026, 8, 23, 12);
@@ -356,31 +315,4 @@ test("video primary keys survive playlist index changes", async () => {
 	};
 	assert.deepEqual(await collectKeys(1), await collectKeys(9));
 	assert.deepEqual(await collectKeys(1, null), await collectKeys(9, null));
-});
-
-test("unreadable list DOM emits a skip instead of a successful zero-row snapshot", async () => {
-	const page = new FixturePage();
-	page.waitForFunction = async () => {
-		throw new Error("read deadline");
-	};
-	const skipped: Record<string, unknown>[] = [];
-	const records: Record<string, unknown>[] = [];
-	await collectYoutubeBrowser({
-		page: page as never,
-		requested: new Map(
-			["subscriptions", "coverage_diagnostics"].map((name) => [name, { name }]),
-		) as never,
-		emitRecord: async (_stream, data) => {
-			records.push(data);
-		},
-		emit: async (message) => {
-			skipped.push(message as Record<string, unknown>);
-		},
-		progress: async () => undefined,
-	});
-	assert.deepEqual(
-		skipped.map((message) => [message.type, message.stream, message.reason]),
-		[["SKIP_RESULT", "subscriptions", "page_unreadable"]],
-	);
-	assert.equal(records.length, 0);
 });

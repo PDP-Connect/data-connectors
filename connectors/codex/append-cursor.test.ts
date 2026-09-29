@@ -781,7 +781,7 @@ test("malformed early rollout loses only its bad line and preserves later-file o
 		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
 		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
 	);
-	const streams = ["messages", "coverage_diagnostics"];
+	const streams = ["messages"];
 	const first = await runCodex({ codexHome, streams });
 	assert.equal(first.exitCode, 0);
 	const messages = recordsFor(first.messages, "messages");
@@ -801,12 +801,7 @@ test("malformed early rollout loses only its bad line and preserves later-file o
 	assert.deepEqual(state.file_cursors?.[SESSION_ID]?.jsonl_gaps, [
 		gaps[0]?.diagnostics,
 	]);
-	assert.equal(
-		recordsFor(first.messages, "coverage_diagnostics").find(
-			(record) => record.data.store === "derived_messages",
-		)?.data.status,
-		"unaccounted",
-	);
+
 	await appendFile(badPath, "\n");
 	const deferred = await runCodex({
 		codexHome,
@@ -863,7 +858,7 @@ test("unterminated rollout tail is declared, does not block later files, and is 
 		`rollout-2026-04-16T00-00-00-${laterId}.jsonl`,
 		jsonl([sessionMetaLine(laterId), messageLine("later file")]),
 	);
-	const streams = ["messages", "coverage_diagnostics"];
+	const streams = ["messages"];
 	const first = await runCodex({ codexHome, streams });
 	assert.deepEqual(
 		recordsFor(first.messages, "messages").map((record) => record.data.id),
@@ -1159,7 +1154,7 @@ test("directory denial retains Codex line gaps through unchanged recovery until 
 		`rollout-2026-04-15T00-00-00-${SESSION_ID}.jsonl`,
 		`${prefix}{bad}\n${messageLine("after")}\n`,
 	);
-	const streams = ["messages", "coverage_diagnostics"];
+	const streams = ["messages"];
 	const baseline = await runCodex({ codexHome, streams });
 	const baselineState = rolloutStateCursor(baseline.messages);
 	const saved = baselineState.file_cursors?.[SESSION_ID];
@@ -1190,12 +1185,7 @@ test("directory denial retains Codex line gaps through unchanged recovery until 
 		gapsFor(denied.messages, "malformed_jsonl_line")[0]?.diagnostics,
 		saved?.jsonl_gaps?.[0],
 	);
-	assert.equal(
-		recordsFor(denied.messages, "coverage_diagnostics").find(
-			(record) => record.data.store === "derived_messages",
-		)?.data.status,
-		"unaccounted",
-	);
+
 	assert.equal(gapsFor(denied.messages, "rollout_source_read_error").length, 1);
 	assert.deepEqual(
 		recordsFor(denied.messages, "messages").map((record) => record.data.id),
@@ -1222,12 +1212,7 @@ test("directory denial retains Codex line gaps through unchanged recovery until 
 		gapsFor(restored.messages, "malformed_jsonl_line")[0]?.diagnostics,
 		saved?.jsonl_gaps?.[0],
 	);
-	assert.equal(
-		recordsFor(restored.messages, "coverage_diagnostics").find(
-			(record) => record.data.store === "derived_messages",
-		)?.data.status,
-		"unaccounted",
-	);
+
 	assert.equal(
 		gapsFor(restored.messages, "rollout_source_read_error").length,
 		0,
@@ -1238,12 +1223,7 @@ test("directory denial retains Codex line gaps through unchanged recovery until 
 		state: { messages: rolloutStateCursor(restored.messages) },
 	});
 	assert.equal(gapsFor(unchanged.messages, "malformed_jsonl_line").length, 1);
-	assert.equal(
-		recordsFor(unchanged.messages, "coverage_diagnostics").find(
-			(record) => record.data.store === "derived_messages",
-		)?.data.status,
-		"unaccounted",
-	);
+
 	await rename(rootDir, hiddenRoot);
 	const missing = await runCodex({
 		codexHome,
@@ -1325,7 +1305,7 @@ test("Codex skips external and dangling rollout links and retains prior gaps", a
 		file,
 		jsonl([sessionMetaLine(), "{bad}", messageLine("prior")]),
 	);
-	const streams = ["messages", "coverage_diagnostics"];
+	const streams = ["messages"];
 	const baseline = await runCodex({ codexHome, streams });
 	const saved = rolloutStateCursor(baseline.messages).file_cursors?.[
 		SESSION_ID
@@ -1394,12 +1374,7 @@ test("Codex skips external and dangling rollout links and retains prior gaps", a
 			saved,
 		);
 		assert.equal(gapsFor(messages, "malformed_jsonl_line").length, 1);
-		assert.equal(
-			recordsFor(messages, "coverage_diagnostics").find(
-				(record) => record.data.store === "derived_messages",
-			)?.data.status,
-			"unaccounted",
-		);
+
 	};
 	check(first.messages);
 	const repeated = await runCodex({
