@@ -242,6 +242,8 @@ interface FakeOtpPageState {
 	deliveryOptionEnabled?: boolean;
 	/** Whether the delivery-method option is present/visible at all. */
 	deliveryOptionPresent?: boolean;
+	/** Optional dashboard-probe override for pages with shell sign-out text. */
+	dashboardSignOutVisible?: boolean;
 	/** Usable (visible + enabled) OTP inputs. 0 = the page cannot accept a code. */
 	otpInputs: number;
 	/** Whether OTP_PROMPT_TEXT_WITH_SENT matches something visible. */
@@ -462,7 +464,11 @@ function makeOtpPage(
 			const source = text instanceof RegExp ? text.source : String(text);
 			// The dashboard "Sign Out" probe: visible only once signed in.
 			if (/Sign Out/i.test(source)) {
-				return textLocator((): boolean => !state.signedOut);
+				return textLocator((): boolean =>
+					gotoCalls.length > 0
+						? (state.dashboardSignOutVisible ?? !state.signedOut)
+						: !state.signedOut,
+				);
 			}
 			// The identity-challenge method chooser. Off screen unless a test opts
 			// in, so the existing OTP-surface tests are unaffected.
@@ -631,7 +637,9 @@ test("manual entry in the host browser resolves the pending OTP interaction", as
 		});
 		const requests: InteractionRequest[] = [];
 		const completions: Array<{ id: string; status: string }> = [];
-		let resolveInteraction: ((response: InteractionResponse) => void) | undefined;
+		let resolveInteraction:
+			| ((response: InteractionResponse) => void)
+			| undefined;
 
 		const result = await ensureChaseSession({
 			completeAssistance: (id, status) => {
@@ -656,7 +664,109 @@ test("manual entry in the host browser resolves the pending OTP interaction", as
 		assert.equal(typeof resolveInteraction, "function");
 		assert.equal(requests.length, 1);
 		assert.match(requests[0]?.request_id ?? "", /^chase_otp_/);
-		assert.deepEqual(completions, [{ id: requests[0]?.request_id ?? "", status: "resolved" }]);
+		assert.deepEqual(completions, [
+			{ id: requests[0]?.request_id ?? "", status: "resolved" },
+		]);
+	});
+});
+
+test("shell sign-out text on an OTP error page does not resolve assistance", async () => {
+	await withChaseCredentials(async () => {
+		const { page } = makeOtpPage({
+			dashboardSignOutVisible: false,
+			otpInputs: 1,
+			promptTextVisible: true,
+			signedOut: false,
+		});
+		const requests: InteractionRequest[] = [];
+		const completions: Array<{ id: string; status: string }> = [];
+
+		await assert.rejects(
+			ensureChaseSession({
+				completeAssistance: (id, status) => {
+					completions.push({ id, status });
+					return Promise.resolve();
+				},
+				context: makeOtpContext(page),
+				credentials: CHASE_TEST_CREDENTIALS,
+				page,
+				sendInteraction: (req) => {
+					requests.push(req);
+					return new Promise<InteractionResponse>((resolve) => {
+						setTimeout(
+							() =>
+								resolve({
+									request_id: req.request_id ?? "test_interaction",
+									status: "cancelled",
+									type: "INTERACTION_RESPONSE",
+								}),
+							400,
+						);
+					});
+				},
+			}),
+			/chase_otp_not_provided/,
+		);
+
+		assert.equal(requests.length, 1);
+		assert.deepEqual(completions, []);
+	});
+});
+
+test("console OTP reply wins when it arrives during the dashboard probe", async () => {
+	await withChaseCredentials(async () => {
+		const { page, state } = makeOtpPage({
+			otpInputs: 1,
+			promptTextVisible: true,
+			signedOut: true,
+		});
+		const requests: InteractionRequest[] = [];
+		const completions: Array<{ id: string; status: string }> = [];
+		let resolveInteraction:
+			| ((response: InteractionResponse) => void)
+			| undefined;
+		const guardedPage = new Proxy(page, {
+			get(target: Page, prop: string | symbol, receiver: unknown): unknown {
+				if (prop === "goto") {
+					return async (
+						url: string,
+						options?: Parameters<Page["goto"]>[1],
+					): ReturnType<Page["goto"]> => {
+						const result = target.goto(url, options);
+						resolveInteraction?.({
+							data: { code: "123456" },
+							request_id: requests[0]?.request_id ?? "test_interaction",
+							status: "success",
+							type: "INTERACTION_RESPONSE",
+						});
+						await new Promise((resolve) => setTimeout(resolve, 20));
+						return result;
+					};
+				}
+				return Reflect.get(target, prop, receiver) as unknown;
+			},
+		});
+
+		const result = await ensureChaseSession({
+			completeAssistance: (id, status) => {
+				completions.push({ id, status });
+				return Promise.resolve();
+			},
+			context: makeOtpContext(guardedPage),
+			credentials: CHASE_TEST_CREDENTIALS,
+			page: guardedPage,
+			sendInteraction: (req) => {
+				requests.push(req);
+				state.signedOut = false;
+				return new Promise<InteractionResponse>((resolve) => {
+					resolveInteraction = resolve;
+				});
+			},
+		});
+
+		assert.equal(result, true);
+		assert.equal(requests.length, 1);
+		assert.deepEqual(completions, []);
 	});
 });
 

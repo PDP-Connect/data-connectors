@@ -378,26 +378,40 @@ export async function probeChaseSession(
 }
 
 type ChaseOtpOutcome =
-	| { type: "manual" }
+	| { page: Page; type: "manual" }
 	| { type: "response"; response: InteractionResponse }
 	| { type: "timeout" };
 
 async function waitForChaseOtpOutcome(
+	context: BrowserContext,
 	page: Page,
 	interaction: Promise<InteractionResponse>,
 ): Promise<ChaseOtpOutcome> {
 	const deadline = Date.now() + 590_000;
-	const interactionOutcome = interaction.then((response) => ({ type: "response" as const, response }));
+	const interactionOutcome = interaction.then((response) => ({
+		type: "response" as const,
+		response,
+	}));
 	while (Date.now() < deadline) {
 		const outcome = await Promise.race([
 			interactionOutcome,
-			new Promise<{ type: "waiting" }>((resolve) => setTimeout(() => resolve({ type: "waiting" }), 250)),
+			new Promise<{ type: "waiting" }>((resolve) =>
+				setTimeout(() => resolve({ type: "waiting" }), 250),
+			),
 		]);
 		if (outcome.type !== "waiting") {
 			return outcome;
 		}
-		if (await page.getByText(SIGN_OUT_TEXT).first().isVisible().catch(() => false)) {
-			return { type: "manual" };
+		const sessionProbe = await probeChaseSession(context, page);
+		if (sessionProbe.loggedIn) {
+			const responseAfterProbe = await Promise.race([
+				interactionOutcome,
+				Promise.resolve({ type: "waiting" as const }),
+			]);
+			if (responseAfterProbe.type !== "waiting") {
+				return responseAfterProbe;
+			}
+			return { page: sessionProbe.page, type: "manual" };
 		}
 	}
 	return { type: "timeout" };
@@ -431,10 +445,10 @@ async function submitChaseOtp({
 		},
 		timeout_seconds: 600,
 	});
-	const outcome = await waitForChaseOtpOutcome(page, interaction);
+	const outcome = await waitForChaseOtpOutcome(context, page, interaction);
 	if (outcome.type === "manual") {
 		await completeAssistance?.(requestId, "resolved");
-		return { loggedIn: true, page };
+		return { loggedIn: true, page: outcome.page };
 	}
 	const resp = outcome.type === "response" ? outcome.response : null;
 	if (resp?.status !== "success" || !resp.data?.code) {
