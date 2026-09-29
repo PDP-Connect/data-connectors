@@ -189,8 +189,11 @@ function makeContext(overrides: {
 		emitRecord: harness.emitRecord,
 		isRecordSelected: selector.isSelected,
 		emittedAt: "2026-01-01T00:00:00.000Z",
-		progress: (message: string): Promise<void> => {
-			harness.emit({ type: "PROGRESS", message });
+		progress: (
+			message: string,
+			extra: object = {},
+		): Promise<void> => {
+			harness.emit({ type: "PROGRESS", message, ...extra });
 			return Promise.resolve();
 		},
 		requestDetailGapPage: () => Promise.resolve([]),
@@ -425,7 +428,7 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 	);
 });
 
-test("collectAnthropic: excluded oversized source is never spooled; selected oversized source aborts before records", async () => {
+test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is left out with its messages in a PROGRESS note; no stream is skipped", async () => {
 	const hugeConversation = {
 		uuid: "conv-huge",
 		name: "Excluded source",
@@ -479,24 +482,53 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 
 	const beforeSelected = new Set(readdirSync(blobSpoolDir));
 	const selected = await run(
-		["conv-huge"],
-		["account_profile", "conversations", "projects"],
+		["conv-huge", "conv-1"],
+		["account_profile", "conversations", "messages", "projects"],
 	);
-	await assert.rejects(
-		() => collectAnthropic(selected.ctx),
-		/Anthropic conversations source record exceeds the 33554432-byte host blob limit; no export records were emitted/,
+	await collectAnthropic(selected.ctx);
+	// The oversized conversation and its messages are left out; every other
+	// record is still imported.
+	assert.deepEqual(
+		selected.emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => r.data.id),
+		["conv-1"],
 	);
-	assert.equal(selected.emitted.length, 0);
+	assert.ok(
+		selected.emitted
+			.filter((r) => r.stream === "messages")
+			.every((r) => r.data.conversation_id === "conv-1"),
+	);
+	assert.equal(
+		selected.emitted.filter((r) => r.stream === "projects").length,
+		1,
+	);
 	assert.equal(
 		selected.protocolMessages.filter((message) => message.type === "BLOB")
 			.length,
-		0,
+		2,
 	);
 	assert.equal(
 		readdirSync(blobSpoolDir).filter((file) => !beforeSelected.has(file))
 			.length,
-		0,
+		2,
 	);
+	// An oversized item never reaches the host, so no stream is skipped:
+	// a SKIP_RESULT would make Desktop drop all conversations.
+	assert.deepEqual(skipsOf(selected.protocolMessages), []);
+	const notes = selected.protocolMessages.filter(
+		(m) =>
+			m.type === "PROGRESS" &&
+			/export_items_too_large/.test((m as { message: string }).message),
+	) as Array<{ message: string; stream?: string; count?: number }>;
+	assert.equal(notes.length, 1);
+	assert.equal(notes[0]?.stream, "conversations");
+	assert.equal(notes[0]?.count, 1);
+	assert.doesNotMatch(notes[0]?.message ?? "", /conv-huge|Excluded source/);
+	const synced = statesOf(selected.protocolMessages)
+		.filter((m) => "synced_at" in (m.cursor as Record<string, unknown>))
+		.map((m) => m.stream);
+	assert.deepEqual(synced, ["conversations", "messages", "projects"]);
 });
 
 for (const scenario of [
@@ -1909,4 +1941,268 @@ test("collectAnthropic: export_data 500 and network error keep export_request_fa
 	});
 	assert.equal(network.skip.reason, "export_request_failed");
 	assert.deepEqual(network.skip.diagnostics, { http_status: 0 });
+});
+
+// ─── Split export: nonce download is a manifest (2026-09-22 layout) ──────
+//
+// __fixtures__/split-export holds a synthetic copy of the real layout: a
+// manifest JSON plus one ZIP per category. On a real account the nonce
+// download delivered the manifest, not a ZIP.
+
+const SPLIT_EXPORT_DIR = join(import.meta.dirname, "__fixtures__/split-export");
+
+function listFilesRecursive(dir: string, prefix = ""): string[] {
+	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+		entry.isDirectory()
+			? listFilesRecursive(join(dir, entry.name), `${prefix}${entry.name}/`)
+			: [`${prefix}${entry.name}`],
+	);
+}
+
+async function splitExportDownloads(): Promise<{
+	manifestBytes: Buffer;
+	zipsByToken: Map<string, Buffer>;
+}> {
+	const manifestBytes = readFileSync(join(SPLIT_EXPORT_DIR, "manifest.json"));
+	const manifest = JSON.parse(manifestBytes.toString("utf8")) as {
+		data_files: { filename: string; export_url: string }[];
+	};
+	const parts = await Promise.all(
+		manifest.data_files.map(async (part) => {
+			const dir = join(SPLIT_EXPORT_DIR, part.filename.replace(/\.zip$/, ""));
+			const entries = listFilesRecursive(dir).map((name) => ({
+				name,
+				content: JSON.parse(readFileSync(join(dir, name), "utf8")),
+			}));
+			const token = new URL(part.export_url).pathname.split("/").pop() ?? "";
+			return [token, await buildManifestPartZip(entries)] as const;
+		}),
+	);
+	const zipsByToken = new Map<string, Buffer>(parts);
+	return { manifestBytes, zipsByToken };
+}
+
+/** Serve the manifest at the nonce URL and each part at its export_url. */
+function serveSplitExport(
+	page: FakePage,
+	nonce: string,
+	downloads: { manifestBytes: Buffer; zipsByToken: Map<string, Buffer> },
+	failToken?: string,
+): void {
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		const token = new URL(url).pathname.split("/").pop() ?? "";
+		const bytes =
+			token === nonce
+				? downloads.manifestBytes
+				: token === failToken
+					? undefined
+					: downloads.zipsByToken.get(token);
+		if (bytes) {
+			const { download } = makeFakeDownload(bytes);
+			queueMicrotask(() => page.emit("download", download));
+		}
+		return result;
+	};
+}
+
+function recordCounts(
+	emitted: ReturnType<typeof makeRecordingEmit>["emitted"],
+): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const record of emitted)
+		counts[record.stream] = (counts[record.stream] ?? 0) + 1;
+	return counts;
+}
+
+test("collectAnthropic: nonce download that is a split-export manifest imports every category part", async () => {
+	const downloads = await splitExportDownloads();
+	const counter = { exportRequests: 0 };
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["account_profile", ...CONTENT_STREAMS],
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveSplitExport(page, "nonce-layout", downloads);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(counter.exportRequests, 1);
+	assert.deepEqual(recordCounts(emitted), {
+		account_profile: 1,
+		conversations: 2,
+		messages: 3,
+		projects: 2,
+		project_documents: 1,
+	});
+	assert.deepEqual(skipsOf(protocolMessages), []);
+	const final = statesOf(protocolMessages).findLast(
+		(m) => m.stream === "conversations",
+	);
+	const cursor = final?.cursor as Record<string, unknown>;
+	assert.ok("synced_at" in cursor);
+	assert.ok(!("pending_export" in cursor));
+	assert.equal(
+		(cursor.consumed_export as { nonce: string }).nonce,
+		"nonce-layout",
+	);
+	const progressText = protocolMessages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message)
+		.join("\n");
+	assert.match(progressText, /memories \(1 entry\)/);
+	assert.match(progressText, /design_chats \(1 entry\)/);
+});
+
+test("collectAnthropic: split-export manifest returned by POST export_data imports every category part", async () => {
+	const downloads = await splitExportDownloads();
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["account_profile", ...CONTENT_STREAMS],
+		fetchStub: (url) => {
+			if (url.includes("/api/organizations") && !url.includes("export_data"))
+				return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+			if (url.includes("/export_data"))
+				return Promise.resolve(
+					jsonResponse(
+						200,
+						JSON.parse(downloads.manifestBytes.toString("utf8")),
+					),
+				);
+			return Promise.reject(new Error(`unexpected fetch: ${url}`));
+		},
+	});
+	serveSplitExport(page, "no-nonce", downloads);
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(recordCounts(emitted), {
+		account_profile: 1,
+		conversations: 2,
+		messages: 3,
+		projects: 2,
+		project_documents: 1,
+	});
+	assert.deepEqual(skipsOf(protocolMessages), []);
+});
+
+test("collectAnthropic: a failed part of a nonce manifest keeps the pending nonce", async () => {
+	const downloads = await splitExportDownloads();
+	const counter = { exportRequests: 0 };
+	const pending = {
+		organization_id: "org-1",
+		nonce: "kept-nonce",
+		requested_at: "2026-01-01T00:00:00.000Z",
+	};
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "projects"],
+		state: { conversations: { pending_export: pending } },
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveSplitExport(
+		page,
+		"kept-nonce",
+		downloads,
+		"synthetic-part-conversations",
+	);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(counter.exportRequests, 0);
+	assert.equal(emitted.length, 0);
+	assert.equal(statesOf(protocolMessages).length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.equal(skips.length, 2);
+	for (const skip of skips) {
+		assert.equal(skip.reason, "export_part_download_failed");
+		assert.match(skip.message as string, /downloads the same export again/);
+	}
+});
+
+test("collectAnthropic: within 24 h of a consumed export, downloads that export again instead of skipping", async () => {
+	const downloads = await splitExportDownloads();
+	const counter = { exportRequests: 0 };
+	const requestedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+	const consumed = {
+		organization_id: "org-1",
+		nonce: "consumed-nonce",
+		requested_at: requestedAt,
+	};
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "projects"],
+		state: {
+			conversations: {
+				consumed_export: consumed,
+				last_export_requested_at: requestedAt,
+			},
+		},
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveSplitExport(page, "consumed-nonce", downloads);
+
+	await collectAnthropic(ctx);
+
+	assert.equal(counter.exportRequests, 0, "no new export may be requested");
+	assert.equal(recordCounts(emitted).conversations, 2);
+	assert.deepEqual(skipsOf(protocolMessages), []);
+	const final = statesOf(protocolMessages).findLast(
+		(m) => m.stream === "conversations",
+	);
+	assert.ok(final);
+	assert.equal(
+		(final.cursor as Record<string, unknown>).last_export_requested_at,
+		requestedAt,
+		"the request window stays anchored to the original request",
+	);
+});
+
+test("exportRequestMinIntervalMs: dev override applies only outside a host-supervised run", async () => {
+	const { exportRequestMinIntervalMs, DEV_EXPORT_MIN_INTERVAL_ENV } =
+		await import("./index.ts");
+	const day = 24 * 60 * 60 * 1000;
+	assert.equal(exportRequestMinIntervalMs({}), day);
+	assert.equal(
+		exportRequestMinIntervalMs({ [DEV_EXPORT_MIN_INTERVAL_ENV]: "0" }),
+		0,
+	);
+	assert.equal(
+		exportRequestMinIntervalMs({
+			[DEV_EXPORT_MIN_INTERVAL_ENV]: "0",
+			PDPP_RUN_ID: "run-1",
+		}),
+		day,
+	);
+	assert.equal(
+		exportRequestMinIntervalMs({ [DEV_EXPORT_MIN_INTERVAL_ENV]: "soon" }),
+		day,
+	);
+	assert.equal(
+		exportRequestMinIntervalMs({ [DEV_EXPORT_MIN_INTERVAL_ENV]: "-1" }),
+		day,
+	);
+});
+
+test("collectAnthropic: dev override of the request interval lets a hand-run connector POST again", async () => {
+	const counter = { exportRequests: 0 };
+	const lastRequestedAt = new Date(Date.now() - 60 * 1000).toISOString();
+	const priorRunId = process.env.PDPP_RUN_ID;
+	delete process.env.PDPP_RUN_ID;
+	process.env.PDPP_ANTHROPIC_DEV_EXPORT_MIN_INTERVAL_MS = "0";
+	try {
+		const { ctx, page, protocolMessages } = makeContext({
+			streams: ["conversations"],
+			state: {
+				conversations: { last_export_requested_at: lastRequestedAt },
+			},
+			fetchStub: oldFormatFetchStub(counter),
+		});
+		serveDownload(page, await buildZipBytes());
+
+		await collectAnthropic(ctx);
+
+		assert.equal(counter.exportRequests, 1);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+	} finally {
+		delete process.env.PDPP_ANTHROPIC_DEV_EXPORT_MIN_INTERVAL_MS;
+		if (priorRunId !== undefined) process.env.PDPP_RUN_ID = priorRunId;
+	}
 });

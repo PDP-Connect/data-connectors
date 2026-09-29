@@ -127,13 +127,27 @@
  *   - `docs[]` sub-field names and the multi-part category ZIP layout are
  *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
  * Host blob limit: each selected conversation or project envelope must fit
- * within 32 MiB. A larger source object fails the run before any RECORD or
- * BLOB is emitted. The failed run does not advance a data checkpoint; for an
- * old-format export, a newly requested pending nonce may be lost on retry.
+ * within 32 MiB. A larger source object is left out with its child records
+ * (messages or project documents). The run reports the dropped count in a
+ * PROGRESS note (no ids or titles) and does not skip those streams, so they
+ * get their normal `synced_at`. A real account had one 79 MiB conversation.
+ *
+ * The nonce download can itself be a split-export manifest: on 2026-09-22 a
+ * real account's download was a `manifest-<org>-...json` file (the same
+ * `data_files` shape as format 2), not a ZIP. `readManifestDownload`
+ * detects it, and the run then downloads each part as in format 2. The
+ * nonce stays checkpointed until the parts are read, so a failed part
+ * retries the same nonce and does not request a new export.
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, openSync, statSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	openSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -302,6 +316,14 @@ function sourceRecordBytes(source: SourceRecordEnvelope): Buffer {
 	return bytes;
 }
 
+/** True when the source envelope fits one host blob. A larger object (a
+ * real account had one 79 MiB conversation) is left out and counted, so it
+ * cannot block every other record in the export. */
+function fitsHostBlob(source: SourceRecordEnvelope): boolean {
+	const size = Buffer.byteLength(JSON.stringify(source), "utf8");
+	return size > 0 && size <= HOST_BLOB_MAX_BYTES;
+}
+
 function spoolSourceRecord(source: SourceRecordEnvelope): {
 	event: HostBlobMessage;
 	blob_ref: Record<string, unknown>;
@@ -385,6 +407,25 @@ interface AnthropicCursorState {
  * once per 24 h. A pending export is still resumed at any time. */
 const EXPORT_REQUEST_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** Dev-only override of the request interval, in ms, for manual testing.
+ * Off by default. Ignored when `PDPP_RUN_ID` is set: every host-supervised
+ * run (Desktop dev or stable, the reference server) sets it and passes a
+ * cleared environment, so the override can only apply to a hand-run
+ * connector process. */
+export const DEV_EXPORT_MIN_INTERVAL_ENV =
+	"PDPP_ANTHROPIC_DEV_EXPORT_MIN_INTERVAL_MS";
+
+export function exportRequestMinIntervalMs(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	const override = env[DEV_EXPORT_MIN_INTERVAL_ENV];
+	if (override === undefined || override === "" || env.PDPP_RUN_ID?.trim()) {
+		return EXPORT_REQUEST_MIN_INTERVAL_MS;
+	}
+	const ms = Number(override);
+	return Number.isFinite(ms) && ms >= 0 ? ms : EXPORT_REQUEST_MIN_INTERVAL_MS;
+}
+
 function readConversationsCursor(
 	state: Record<string, unknown>,
 ): AnthropicCursorState {
@@ -415,16 +456,21 @@ function readPendingExport(
 	if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
 		return null;
 	}
-	const pending = (cursor as AnthropicCursorState).pending_export;
+	return readExportReference((cursor as AnthropicCursorState).pending_export);
+}
+
+function readExportReference(
+	ref: PendingExportState | undefined,
+): PendingExportState | null {
 	if (
-		!pending ||
-		typeof pending.organization_id !== "string" ||
-		typeof pending.nonce !== "string" ||
-		typeof pending.requested_at !== "string"
+		!ref ||
+		typeof ref.organization_id !== "string" ||
+		typeof ref.nonce !== "string" ||
+		typeof ref.requested_at !== "string"
 	) {
 		return null;
 	}
-	return pending;
+	return ref;
 }
 
 // ─── Claude API calls (in-page, cookie-authenticated) ───────────────────
@@ -835,6 +881,32 @@ export function readManifestPartZip(zipPath: string): ManifestPartFile[] {
 	}
 }
 
+/** A nonce download larger than this is never a manifest. */
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+
+/**
+ * Claude's nonce download can deliver the split-export manifest JSON
+ * (`{ data_files: [...] }`) instead of one ZIP. The owner's 2026-09-22
+ * export arrived this way: a `manifest-<org>-...json` file plus one ZIP per
+ * category. Returns the manifest, or null when the file is a ZIP or any
+ * other content. Exported for tests only.
+ */
+export function readManifestDownload(path: string): ExportManifest | null {
+	const size = statSync(path).size;
+	if (size === 0 || size > MAX_MANIFEST_BYTES) {
+		return null;
+	}
+	const bytes = readFileSync(path);
+	if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+		return null;
+	}
+	const json = safeJsonParse(bytes.toString("utf8"));
+	if (!isPlainObject(json) || !Array.isArray(json.data_files)) {
+		return null;
+	}
+	return json as unknown as ExportManifest;
+}
+
 function safeJsonParse(text: string): unknown {
 	try {
 		return JSON.parse(text);
@@ -959,10 +1031,16 @@ async function emitManifestPartFailureSkip(
 	emit: (msg: EmittedMessage) => Promise<void>,
 	requested: Map<string, unknown>,
 	failedParts: readonly ManifestPartDownloadResult[],
+	resumableByNonce: boolean,
 ): Promise<void> {
 	const failedList = failedParts
 		.map((p) => `${p.category} (${p.filename})`)
 		.join(", ");
+	const next = resumableByNonce
+		? "The export request is checkpointed, so the next run downloads " +
+			"the same export again without requesting a new one."
+		: "A fresh export must be requested on the next run — this " +
+			"manifest's other part URLs cannot be reused.";
 	for (const stream of ALL_STREAMS) {
 		if (!requested.has(stream)) {
 			continue;
@@ -974,9 +1052,7 @@ async function emitManifestPartFailureSkip(
 			message:
 				`${failedParts.length} of this export's parts could not be ` +
 				`downloaded (one-shot URL already used, expired, or never ` +
-				`became ready): ${failedList}. A fresh export must be ` +
-				"requested on the next run — this manifest's other part URLs " +
-				"cannot be reused.",
+				`became ready): ${failedList}. ${next}`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		});
 	}
@@ -1074,10 +1150,23 @@ export async function collectAnthropic({
 					selectedProjects.push({ record, source });
 			}
 		}
-		// Fail before the first RECORD if an in-scope source object cannot fit
-		// the version 1 host blob contract. Excluded objects are never serialized.
-		for (const { source } of [...selectedConversations, ...selectedProjects])
-			sourceRecordBytes(source);
+		// A source object larger than one host blob is left out with its
+		// child records and counted below; excluded objects are never
+		// serialized.
+		const oversizedConversationIds = new Set<string>();
+		const oversizedProjectIds = new Set<string>();
+		for (const [selected, ids] of [
+			[selectedConversations, oversizedConversationIds],
+			[selectedProjects, oversizedProjectIds],
+		] as const) {
+			for (let i = selected.length - 1; i >= 0; i--) {
+				const entry = selected[i];
+				if (entry && !fitsHostBlob(entry.source)) {
+					ids.add(entry.record.id);
+					selected.splice(i, 1);
+				}
+			}
+		}
 		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
 			const profile = resolveExportedProfile(
 				userFiles,
@@ -1130,6 +1219,7 @@ export async function collectAnthropic({
 		}
 		if (wantsMessages) {
 			for (const message of parsed.messages) {
+				if (oversizedConversationIds.has(message.conversation_id)) continue;
 				await emitRecord(MESSAGES_STREAM, message);
 			}
 		}
@@ -1147,20 +1237,36 @@ export async function collectAnthropic({
 		}
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
+				if (oversizedProjectIds.has(doc.project_id)) continue;
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
 		// A dropped parent item also drops its child items (a conversation's
-		// messages, a project's documents), so skip the child stream too.
-		// A skipped stream keeps its prior snapshot and gets no synced_at.
-		const dropGroups: Array<[readonly string[], number]> = [
+		// messages, a project's documents). An unparseable item skips the
+		// parent and child streams: a skipped stream keeps its prior snapshot
+		// and gets no synced_at. An oversized item gets a PROGRESS note only.
+		const dropGroups: Array<
+			[readonly string[], number, "unparseable" | "too_large"]
+		> = [
 			[
 				[CONVERSATIONS_STREAM, MESSAGES_STREAM],
 				parsed.droppedConversations + unclassifiedEntries.conversations,
+				"unparseable",
 			],
 			[
 				[PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM],
 				parsed.droppedProjects + unclassifiedEntries.projects,
+				"unparseable",
+			],
+			[
+				[CONVERSATIONS_STREAM, MESSAGES_STREAM],
+				oversizedConversationIds.size,
+				"too_large",
+			],
+			[
+				[PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM],
+				oversizedProjectIds.size,
+				"too_large",
 			],
 		];
 		const skipped = new Set<string>();
@@ -1181,15 +1287,27 @@ export async function collectAnthropic({
 				});
 			}
 		}
-		for (const [streams, count] of dropGroups) {
+		for (const [streams, count, cause] of dropGroups) {
 			if (count === 0) {
 				continue;
 			}
 			const [parent] = streams;
+			const why =
+				cause === "too_large"
+					? `exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit`
+					: "could not be parsed";
 			await progress(
-				`Warning: ${count} ${parent} item(s) in the export could not be parsed and were not imported.`,
-				{ stream: parent ?? CONVERSATIONS_STREAM },
+				cause === "too_large"
+					? `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported (export_items_too_large).`
+					: `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported.`,
+				{ stream: parent ?? CONVERSATIONS_STREAM, count },
 			);
+			// An oversized item can never reach the host, so leaving it out
+			// loses no stored record. Report it here only: a SKIP_RESULT would
+			// make Desktop drop the whole stream.
+			if (cause === "too_large") {
+				continue;
+			}
 			for (const stream of streams) {
 				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
@@ -1199,7 +1317,7 @@ export async function collectAnthropic({
 					type: "SKIP_RESULT",
 					stream,
 					reason: "export_items_unparseable",
-					message: `${count} ${parent} item(s) in the export could not be parsed, so ${stream} is incomplete and was not checkpointed.`,
+					message: `${count} ${parent} item(s) in the export ${why}, so ${stream} is incomplete and was not checkpointed.`,
 					diagnostics: { dropped_count: count },
 				});
 			}
@@ -1267,9 +1385,18 @@ export async function collectAnthropic({
 	const lastRequestedAt = priorCursor.last_export_requested_at;
 	if (lastRequestedAt) {
 		const elapsedMs = Date.now() - Date.parse(lastRequestedAt);
-		if (elapsedMs >= 0 && elapsedMs < EXPORT_REQUEST_MIN_INTERVAL_MS) {
+		const minIntervalMs = exportRequestMinIntervalMs();
+		if (elapsedMs >= 0 && elapsedMs < minIntervalMs) {
+			// The last export is still inside the request window. Download it
+			// again instead of skipping: this costs no new email, and a run
+			// that skipped a stream last time can finish it.
+			const consumed = readExportReference(priorCursor.consumed_export);
+			if (consumed) {
+				await pollAndEmitOldFormat(consumed, false);
+				return;
+			}
 			const nextAt = new Date(
-				Date.parse(lastRequestedAt) + EXPORT_REQUEST_MIN_INTERVAL_MS,
+				Date.parse(lastRequestedAt) + minIntervalMs,
 			).toISOString();
 			for (const stream of ALL_STREAMS) {
 				if (!requested.has(stream)) {
@@ -1386,7 +1513,13 @@ export async function collectAnthropic({
 			last_export_requested_at: manifestRequestedAt,
 		},
 	});
-	await downloadAndEmitManifest(req.manifest, manifestRequestedAt);
+	await downloadAndEmitManifest(
+		req.manifest,
+		organizationId,
+		{ last_export_requested_at: manifestRequestedAt },
+		true,
+		false,
+	);
 
 	async function pollAndEmitOldFormat(
 		pendingExport: PendingExportState,
@@ -1433,6 +1566,22 @@ export async function collectAnthropic({
 			await progress("Reading downloaded export...", {
 				stream: CONVERSATIONS_STREAM,
 			});
+			const manifest = readManifestDownload(attempt.zipPath);
+			if (manifest) {
+				// No STATE until the parts are read: pending_export stays, so a
+				// failed part download retries this nonce, not a new export.
+				await downloadAndEmitManifest(
+					manifest,
+					pendingExport.organization_id,
+					{
+						consumed_export: pendingExport,
+						last_export_requested_at: pendingExport.requested_at,
+					},
+					pendingExportWasCreatedThisRun,
+					true,
+				);
+				return;
+			}
 			const {
 				conversationsJson,
 				projectFiles,
@@ -1466,7 +1615,15 @@ export async function collectAnthropic({
 
 	async function downloadAndEmitManifest(
 		manifest: ExportManifest,
-		requestedAt: string,
+		exportOrganizationId: string,
+		exportBookkeeping: Pick<
+			AnthropicCursorState,
+			"consumed_export" | "last_export_requested_at"
+		>,
+		browserProfileAppliesToExport: boolean,
+		/** The manifest came from a checkpointed nonce, so the next run can
+		 * download it again. */
+		resumableByNonce: boolean,
 	): Promise<void> {
 		const dataFiles = manifest.data_files.filter(isManifestDataFile);
 		await progress(`Downloading ${dataFiles.length} export part(s)...`, {
@@ -1487,7 +1644,12 @@ export async function collectAnthropic({
 
 		const failed = results.filter((r) => r.outcome === "download_failed");
 		if (failed.length > 0) {
-			await emitManifestPartFailureSkip(emit, requested, failed);
+			await emitManifestPartFailureSkip(
+				emit,
+				requested,
+				failed,
+				resumableByNonce,
+			);
 			return;
 		}
 
@@ -1589,10 +1751,10 @@ export async function collectAnthropic({
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
 		await emitParsed(
 			parsed,
-			organizationId,
+			exportOrganizationId,
 			rawUserProfiles,
-			true,
-			{ last_export_requested_at: requestedAt },
+			browserProfileAppliesToExport,
+			exportBookkeeping,
 			unclassifiedEntries,
 			!conversationsSourceFound,
 		);
