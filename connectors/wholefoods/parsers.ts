@@ -44,6 +44,36 @@ const SERVINGS_PER_CONTAINER_RE =
 const NUTRIENT_PATTERN_SOURCE =
 	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)";
 
+const IN_STORE_ITEM_LIST_SELECTOR = "#f3_food_ItemList";
+// "Qty: 1 @ $7.99 each" | "Qty: 2.17 lb @ $6.99/lb"
+const IN_STORE_QTY_RE =
+	/Qty:\s*(\d+(?:\.\d+)?)(?:\s+([A-Za-z]+))?\s*@\s*\$(\d+(?:\.\d+)?)/i;
+
+/** Elements that show an order-detail page has finished rendering: legacy
+ *  item grid, cancelled order, sign-in form, or the in-store item list. */
+export const ORDER_DETAIL_READY_SELECTOR =
+	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList';
+
+const ORDER_DETAIL_EVIDENCE_RE =
+	/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']|id=["']f3_food_ItemList["']/i;
+
+/** True when the page carries item, cancellation or in-store item-list
+ *  evidence, so an empty parse is a real result and not a blank page. */
+export function hasOrderDetailEvidence(html: string): boolean {
+	return ORDER_DETAIL_EVIDENCE_RE.test(html);
+}
+
+/** Units on an order detail, comparable to the search page's row count: a
+ *  weighed row is one search row however many lb it weighs. */
+export function orderDetailUnitCount(
+	items: readonly OrderDetailItem[],
+): number {
+	return items.reduce(
+		(sum, item) => sum + (item.quantityUnit ? 1 : (item.quantity ?? 1)),
+		0,
+	);
+}
+
 /** Strip Amazon's `ref_=...` attribution query param and resolve a relative
  *  href to an absolute amazon.com URL. */
 function absoluteAmazonUrl(href: string): string {
@@ -196,6 +226,10 @@ export function parseOrderSearchPageDom(html: string): {
  */
 export function parseOrderDetailDom(html: string): OrderDetail {
 	const { document } = parseHTML(html);
+	const inStoreItems = parseInStoreItems(document);
+	if (inStoreItems) {
+		return { items: inStoreItems, orderDateRaw: detailOrderDate(document) };
+	}
 	const items: OrderDetailItem[] = [];
 	const seenHrefs = new Set<string>();
 	for (const itemRow of document.querySelectorAll<HTMLElement>(
@@ -232,12 +266,88 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 			unitPriceDollars: price ? Number(price) : null,
 		});
 	}
+	return { items, orderDateRaw: detailOrderDate(document) };
+}
+
+function detailOrderDate(document: Document): string | null {
 	const pageText = textOf(document.querySelector("body"));
 	const dateMatch =
 		/(?:Order Placed|Ordered|Order placed)[:\s]*([A-Z][a-z]+ \d+, \d{4})/i.exec(
 			pageText,
 		) ?? /([A-Z][a-z]+ \d+, \d{4})/.exec(pageText);
-	return { items, orderDateRaw: dateMatch?.[1] ?? null };
+	return dateMatch?.[1] ?? null;
+}
+
+/**
+ * In-store purchases open on `/fopo/order-details`, which renders none of the
+ * `data-component` markers. Live capture 2026-09-29: the items sit in
+ * `#f3_food_ItemList`, one `.a-row.a-spacing-base` per row (the widget title
+ * row has no `.a-column.a-span2`). A row reads
+ * `<img class="ufpo-itemListWidget-image"> | <a href="/dp/ASIN">name</a> $line-total`
+ * then `Qty: N @ $unit each`, or `Qty: 2.17 lb @ $6.99/lb` for a weighed item.
+ *
+ * Rules: a weighed row keeps the weight as `quantity`, its unit as
+ * `quantityUnit`, and the per-weight price as `unitPriceDollars`. The row's
+ * own price is `lineTotalDollars`, the charged amount after promotions. A row
+ * without a product link keeps its name and prices but gets `productId: null`;
+ * no id is derived from the name.
+ */
+function parseInStoreItems(document: Document): OrderDetailItem[] | null {
+	const container = document.querySelector<HTMLElement>(
+		IN_STORE_ITEM_LIST_SELECTOR,
+	);
+	if (!container) {
+		return null;
+	}
+	const items: OrderDetailItem[] = [];
+	const seenHrefs = new Set<string>();
+	for (const row of container.querySelectorAll<HTMLElement>(
+		".a-row.a-spacing-base",
+	)) {
+		const titleColumn = row.querySelector<HTMLElement>(
+			".a-column.a-span10 .a-column.a-span10",
+		);
+		if (!(row.querySelector(".a-column.a-span2") && titleColumn)) {
+			continue;
+		}
+		const anchor = titleColumn.querySelector<HTMLAnchorElement>(
+			'a[href*="/dp/"], a[href*="/gp/product/"]',
+		);
+		const href = anchor?.getAttribute("href") ?? "";
+		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
+		const name = textOf(anchor ?? titleColumn)
+			.replace(WHITESPACE_RE, " ")
+			.trim();
+		if (name.length < 3) {
+			throw new Error("Whole Foods in-store order row has no item name");
+		}
+		if (productId) {
+			if (seenHrefs.has(href)) {
+				continue;
+			}
+			seenHrefs.add(href);
+		}
+		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
+		const qty = IN_STORE_QTY_RE.exec(rowText);
+		const img = row.querySelector<HTMLImageElement>(
+			'img[src*="images-amazon"], img[src*="m.media-amazon"]',
+		);
+		const lineTotal = PRICE_RE.exec(
+			textOf(row.querySelector(".a-column.a-span2.a-span-last")),
+		)?.[1];
+		const unitPrice = qty?.[3];
+		items.push({
+			imageUrl: img?.getAttribute("src") ?? null,
+			lineTotalDollars: lineTotal ? Number(lineTotal) : null,
+			name,
+			productId,
+			productUrl: productId ? absoluteAmazonUrl(href) : null,
+			quantity: qty?.[1] ? Number(qty[1]) : 1,
+			quantityUnit: qty?.[2] ?? null,
+			unitPriceDollars: unitPrice ? Number(unitPrice) : null,
+		});
+	}
+	return items;
 }
 
 // ─── Shared value parsing (D4: values, no invented precision) ────────────
