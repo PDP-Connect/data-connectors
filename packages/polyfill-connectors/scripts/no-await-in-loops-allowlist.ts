@@ -2680,6 +2680,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "Promise.all(): sequential Playwright action against the shared page/context",
 		},
 		{
+			path: "src/auto-login/chase.ts",
+			line: 457,
+			column: 19,
+			category: "bounded_retry_polling",
+			note: "probeChaseSessionOnSeparatePage(): retry/poll loop gated on Chase leaving the auth flow",
+		},
+		{
 			path: "src/auto-login/chatgpt.ts",
 			line: 361,
 			column: 7,

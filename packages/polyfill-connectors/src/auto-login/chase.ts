@@ -377,7 +377,112 @@ export async function probeChaseSession(
 	};
 }
 
+function hasLeftChaseAuthFlow(page: Page): boolean {
+	try {
+		const { hostname, pathname, protocol } = new URL(page.url());
+		return !(
+			protocol === "https:" &&
+			hostname === "secure.chase.com" &&
+			(pathname === "/web/auth" ||
+				(pathname.startsWith("/web/auth/") &&
+					pathname !== "/web/auth/dashboard"))
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isChaseDashboardPage(page: Page): boolean {
+	try {
+		const { hostname, pathname, protocol } = new URL(page.url());
+		return (
+			protocol === "https:" &&
+			hostname === "secure.chase.com" &&
+			pathname === "/web/auth/dashboard"
+		);
+	} catch {
+		return false;
+	}
+}
+
+async function closeProbePage(
+	page: Page,
+	isContextClosed: () => boolean,
+): Promise<void> {
+	try {
+		await page.close();
+	} catch (error) {
+		if (!page.isClosed() && !isContextClosed()) {
+			throw error;
+		}
+	}
+}
+
+async function probeChaseSessionOnSeparatePage(
+	context: BrowserContext,
+): Promise<boolean> {
+	let contextClosed = false;
+	context.once("close", (): void => {
+		contextClosed = true;
+	});
+	const probePage = await context.newPage();
+	let loggedIn = false;
+	try {
+		if (!probePage.isClosed()) {
+			loggedIn =
+				(await probeSession(probePage)) && isChaseDashboardPage(probePage);
+		}
+	} finally {
+		await closeProbePage(probePage, (): boolean => contextClosed);
+	}
+	return loggedIn;
+}
+
+type ChaseOtpOutcome =
+	| { page: Page; type: "manual" }
+	| { type: "response"; response: InteractionResponse }
+	| { type: "timeout" };
+
+async function waitForChaseOtpOutcome(
+	context: BrowserContext,
+	page: Page,
+	interaction: Promise<InteractionResponse>,
+): Promise<ChaseOtpOutcome> {
+	const deadline = Date.now() + 590_000;
+	const interactionOutcome = interaction.then((response) => ({
+		type: "response" as const,
+		response,
+	}));
+	while (Date.now() < deadline) {
+		const outcome = await Promise.race([
+			interactionOutcome,
+			new Promise<{ type: "waiting" }>((resolve) =>
+				setTimeout(() => resolve({ type: "waiting" }), 250),
+			),
+		]);
+		if (outcome.type !== "waiting") {
+			return outcome;
+		}
+		if (hasLeftChaseAuthFlow(page)) {
+			const loggedIn = await probeChaseSessionOnSeparatePage(context);
+			if (!loggedIn) {
+				continue;
+			}
+			const responseAfterProbe = await Promise.race([
+				interactionOutcome,
+				Promise.resolve({ type: "waiting" as const }),
+			]);
+			if (responseAfterProbe.type !== "waiting") {
+				return responseAfterProbe;
+			}
+			return { page, type: "manual" };
+		}
+	}
+	return { type: "timeout" };
+}
+
 async function submitChaseOtp({
+	completeAssistance,
 	context,
 	page,
 	sendInteraction,
@@ -392,9 +497,11 @@ async function submitChaseOtp({
 		throw new Error("chase_otp_input_missing");
 	}
 
-	const resp = await sendInteraction({
+	const requestId = `chase_otp_${Date.now()}`;
+	const interaction = sendInteraction({
 		kind: "otp",
 		message: "Chase sent a 2FA code. Reply with it.",
+		request_id: requestId,
 		schema: {
 			type: "object",
 			properties: { code: { type: "string", pattern: "^[0-9]{4,10}$" } },
@@ -402,7 +509,13 @@ async function submitChaseOtp({
 		},
 		timeout_seconds: 600,
 	});
-	if (resp.status !== "success" || !resp.data?.code) {
+	const outcome = await waitForChaseOtpOutcome(context, page, interaction);
+	if (outcome.type === "manual") {
+		await completeAssistance?.(requestId, "resolved");
+		return { loggedIn: true, page: outcome.page };
+	}
+	const resp = outcome.type === "response" ? outcome.response : null;
+	if (resp?.status !== "success" || !resp.data?.code) {
 		throw new Error("chase_otp_not_provided");
 	}
 
@@ -625,6 +738,7 @@ export async function ensureChaseSession({
 	const onOtp = await isOnChaseOtpPage(activePage);
 	if (onOtp) {
 		sessionProbe = await submitChaseOtp({
+			...(completeAssistance ? { completeAssistance } : {}),
 			context,
 			page: activePage,
 			sendInteraction,
