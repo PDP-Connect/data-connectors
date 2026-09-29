@@ -2117,7 +2117,7 @@ const MEMORIES_PATH = "/memories?include_memory_entries=true";
  *     `considered > covered` on a run with any rejected entry, so the run
  *     reads `partial` rather than falsely `complete`
  *     (`DetailCoverageParams.covered`'s documented contract) — a bounded
- *     `shape_check_failed` SKIP_RESULT is also emitted per rejected entry so
+ *     `shape_check_failed` PROGRESS diagnostic is also emitted per rejected entry so
  *     the drop is diagnosable, not silent.
  */
 export async function runMemoriesStream(deps: StreamDeps): Promise<void> {
@@ -2198,6 +2198,7 @@ export async function runCustomInstructionsStream(
 			stream: "custom_instructions",
 			reason: "not_available",
 			message: `user_system_messages http ${res.status}`,
+			recovery_hint: { action: "not_retriable", retryable: false },
 		});
 		return;
 	}
@@ -2207,6 +2208,7 @@ export async function runCustomInstructionsStream(
 			stream: "custom_instructions",
 			reason: "http_error",
 			message: `user_system_messages http ${res.status}`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			diagnostics: { http_status: res.status },
 		});
 		return;
@@ -2217,6 +2219,7 @@ export async function runCustomInstructionsStream(
 			stream: "custom_instructions",
 			reason: "parse_error",
 			message: "user_system_messages http 200 with an unreadable body",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			diagnostics: { http_status: res.status },
 		});
 		return;
@@ -2282,15 +2285,16 @@ export async function runCustomInstructionsStream(
  * counting on-branch messages matched the declared count for 5,815 exactly and
  * NEVER exceeded it, so equality is the right contract and a shortfall is real.
  *
- * Emitted as a SKIP_RESULT rather than a DETAIL_GAP for the same reason
- * `empty_detail` is not a DETAIL_GAP: the fetch SUCCEEDED and the conversation is genuinely
+ * Emitted as a record-level PROGRESS diagnostic, the same as `empty_detail`.
+ * It is not a DETAIL_GAP: the fetch SUCCEEDED and the conversation is genuinely
  * hydrated. Re-fetching returns the same truncated graph, so a retryable gap
- * would spin forever. The honest report is "we reached it, and what it gave us
- * is internally inconsistent".
+ * would spin forever. It is not a SKIP_RESULT either: a stream-level skip tells
+ * the host the whole `messages` stream is unavailable, and Desktop then drops
+ * every message of the run because of one conversation. The honest report is
+ * "we reached it, and what it gave us is internally inconsistent".
  */
 async function emitBranchReconciliation(
 	deps: StreamDeps,
-	conversationId: string,
 	mapping: Record<string, ChatGptNode>,
 	currentNode: string | null | undefined,
 	emittedBranchCount: number,
@@ -2302,15 +2306,9 @@ async function emitBranchReconciliation(
 	// the graph contain the tip it claims to be on?
 	if (!mapping[currentNode]) {
 		await deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "messages",
-			reason: "branch_tip_missing",
-			message: `conversation ${conversationId} declares a current_node its mapping does not contain; the branch is truncated`,
-			diagnostics: {
-				conversation_id: conversationId,
-				emitted_on_branch: emittedBranchCount,
-				node_count: Object.keys(mapping).length,
-			},
+			message: `branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		});
 		return;
 	}
@@ -2319,19 +2317,12 @@ async function emitBranchReconciliation(
 	// branch continues in the provider's data but not in ours.
 	const danglingParent = findDanglingBranchParent(mapping, currentNode);
 	if (danglingParent !== null) {
+		// PROGRESS is the owner's status line, so it carries no conversation or
+		// node id (the same form as `empty_detail`).
 		await deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "messages",
-			reason: "branch_truncated",
-			message: `conversation ${conversationId} has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered`,
-			diagnostics: {
-				conversation_id: conversationId,
-				emitted_on_branch: emittedBranchCount,
-				// A ChatGPT node UUID, not user content — safe to disclose, and the
-				// only handle that makes the gap actionable.
-				missing_parent_id: danglingParent,
-				node_count: Object.keys(mapping).length,
-			},
+			message: `branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		});
 	}
 }
@@ -2375,9 +2366,10 @@ function findDanglingBranchParent(
  * of its messages.
  *
  * When `detail.status !== 200` or the mapping is missing, emits a
- * `SKIP_RESULT` on the messages stream and falls back to a list-only
- * conversation record (null detail) so the conversation itself still
- * lands downstream.
+ * record-level PROGRESS diagnostic on the messages stream (not a stream
+ * SKIP_RESULT, which would drop every message of the run) and falls back to a
+ * list-only conversation record (null detail) so the conversation itself
+ * still lands downstream.
  */
 export async function processConversationDetail(
 	deps: StreamDeps,
@@ -2390,11 +2382,9 @@ export async function processConversationDetail(
 ): Promise<void> {
 	if (detail.status !== 200 || !detail.json?.mapping) {
 		deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "messages",
-			reason: detail.status === 200 ? "missing_mapping" : "http_error",
-			message: `conversation ${c.id} http ${detail.status}`,
-			diagnostics: { http_status: detail.status, conversation_id: c.id },
+			message: `${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
 		});
 		// Fall back to list-only conversation record.
 		await emitConversation(c, null);
@@ -2424,7 +2414,6 @@ export async function processConversationDetail(
 	}
 	await emitBranchReconciliation(
 		deps,
-		c.id,
 		mapping,
 		currentNode,
 		emittedBranchCount,
@@ -2554,6 +2543,7 @@ function classifyChatGptListPage<T>(
 				stream,
 				reason: "not_available",
 				message: `${endpointLabel} http ${res.status} (feature may be disabled for this account)`,
+				recovery_hint: { action: "not_retriable", retryable: false },
 			},
 		};
 	}
@@ -2565,6 +2555,7 @@ function classifyChatGptListPage<T>(
 				stream,
 				reason: "http_error",
 				message: `${endpointLabel} http ${res.status}`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				diagnostics: { http_status: res.status },
 			},
 		};
@@ -2578,6 +2569,7 @@ function classifyChatGptListPage<T>(
 				stream,
 				reason: "parse_error",
 				message: `${endpointLabel} http 200 with an unreadable body`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				diagnostics: {
 					http_status: res.status,
 					page,
@@ -2601,6 +2593,9 @@ function classifyChatGptListPage<T>(
 					listKey === undefined
 						? `${endpointLabel} http 200 body is missing every expected list key (${listKeys.join(", ")})`
 						: `${endpointLabel} http 200 body's "${listKey}" key is not an array`,
+				// A 200 body without the expected list shape is response drift; a
+				// rerun gets the same body.
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 				diagnostics: {
 					http_status: res.status,
 					page,
@@ -2637,16 +2632,12 @@ function emitChatGptShapeCheckFailed(
 		raw && typeof raw === "object" && !Array.isArray(raw)
 			? Object.keys(raw as Record<string, unknown>)
 			: null;
+	// Record-level: one rejected item must not mark the whole stream skipped.
+	// The stream's DETAIL_COVERAGE already counts it as considered, not covered.
 	deps.emit({
-		type: "SKIP_RESULT",
+		type: "PROGRESS",
 		stream,
-		reason: "shape_check_failed",
-		message: `${stream} list item rejected: ${reason}`,
-		diagnostics: {
-			reason,
-			raw_keys: rawKeys,
-			raw_type: raw === null ? "null" : typeof raw,
-		},
+		message: `shape_check_failed: ${stream} list item rejected: ${reason} (raw_type=${raw === null ? "null" : typeof raw}, raw_keys=${rawKeys === null ? "null" : rawKeys.join(",")})`,
 	});
 }
 
@@ -2746,6 +2737,10 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 					stream: "custom_gpts",
 					reason: "pagination_cap_truncated",
 					message: `gizmos/mine pagination stopped at the ${GIZMO_MAX_PAGES}-page safety cap with more pages remaining`,
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
 					diagnostics: { pages, considered },
 				});
 				anyError = true;
@@ -2873,6 +2868,10 @@ export async function runSharedConversationsStream(
 				stream: "shared_conversations",
 				reason: "pagination_cap_truncated",
 				message: `shared_conversations pagination stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				diagnostics: { offset, considered },
 			});
 			sawError = true;
@@ -3004,6 +3003,10 @@ async function listConversationsSinceCursor(
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
 				message: `conversations list pagination stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				diagnostics: { offset, collected: convosToSync.length },
 			});
 			return { items: convosToSync, truncated: true };

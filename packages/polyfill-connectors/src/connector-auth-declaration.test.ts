@@ -229,7 +229,7 @@ test("no shipped connector directory is missing from the audit", () => {
 			};
 			if (
 				name === "chatgpt" &&
-				manifest.version === "0.2.8" &&
+				manifest.version === "0.2.9" &&
 				!manifest.setup?.credential_capture &&
 				/\bauthOptional\s*:\s*true\b/u.test(source)
 			) {

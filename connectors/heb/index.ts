@@ -879,6 +879,10 @@ async function extractAndShapeCheckOrders(
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason: "list_page_shape_check_failed",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `list card ${r.orderId}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
 				diagnostics: { card: r, issues: parsed.error.issues, source: r.source },
 			});
@@ -888,6 +892,29 @@ async function extractAndShapeCheckOrders(
 }
 
 type EmptyListPageAction = "abort" | "terminal";
+
+/** An empty page behind a sign-in or bot wall needs the owner; a page whose
+ *  markup no longer matches the parser needs a connector upgrade; anything
+ *  else is a page that did not load as expected and may load on a later run. */
+function emptyListPageRecoveryHint(reason: string): {
+	action:
+		| "refresh_credentials"
+		| "retry_on_connector_upgrade"
+		| "retry_by_runtime";
+	retryable: boolean;
+} {
+	if (reason === "source_auth_or_challenge") {
+		return { action: "refresh_credentials", retryable: false };
+	}
+	if (
+		reason === "selector_drift" ||
+		reason === "pagination_metadata_absent" ||
+		reason === "pagination_metadata_contradictory"
+	) {
+		return { action: "retry_on_connector_upgrade", retryable: false };
+	}
+	return { action: "retry_by_runtime", retryable: true };
+}
 interface EmptyListPageClassification {
 	action: EmptyListPageAction;
 	reason: string;
@@ -1097,6 +1124,7 @@ async function reportEmptyPageDiagnostics(
 		type: "SKIP_RESULT",
 		stream: "orders",
 		reason: classification.reason,
+		recovery_hint: emptyListPageRecoveryHint(classification.reason),
 		message:
 			classification.reason === "heb_empty_history_after_prior_orders"
 				? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
@@ -1555,6 +1583,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 		if (suppressForward && options.wantsNutrition) {
 			await emitNutritionCoverageIncomplete(
 				deps,
+				"order_scan_suppressed",
 				"H-E-B nutrition was not collected because recovery-only mode suppressed the order-history scan.",
 				{ recovery_only: true },
 			);
@@ -1573,6 +1602,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	if (suppressForward && options.wantsNutrition) {
 		await emitNutritionCoverageIncomplete(
 			deps,
+			"order_scan_suppressed",
 			"H-E-B nutrition was not collected because order-item recovery suppressed the order-history scan.",
 			{
 				detail_budget_exhausted: detailBudgetExhausted,
@@ -1704,12 +1734,14 @@ export async function processListOrder(
 ): Promise<void> {
 	const orderDate = parseOrderDate(listOrder.orderDateRaw);
 	if (!orderDate) {
+		// Record-level: the order joins the `orders` coverage denominator below
+		// (considered, not covered), so a stream SKIP_RESULT would only make the
+		// host drop every other order of the run.
 		await deps.emit({
-			type: "SKIP_RESULT",
+			type: "PROGRESS",
 			stream: "orders",
-			reason: "unparseable_order_date",
-			message: `Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
-			diagnostics: { order_id: listOrder.orderId },
+			message:
+				"unparseable_order_date: an order's date did not parse; the order counts as considered, not covered.",
 		});
 		// Unparseable order dates cannot reach the detail hydration lane. When
 		// order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
@@ -1894,7 +1926,7 @@ export async function runForwardScan(
  * the stream short — "I stopped early and cannot say how much is left" must
  * not read as complete either.
  */
-async function reportListPageCeiling(
+export async function reportListPageCeiling(
 	deps: EmitDeps,
 	advertisedMaxPage: number | null,
 ): Promise<void> {
@@ -1930,6 +1962,10 @@ async function reportListPageCeiling(
 		type: "SKIP_RESULT",
 		stream: "orders",
 		reason: "older_pages_deferred_page_budget",
+		// The checkpoint is held on this path (`buildOrdersStateCursor`), so the
+		// next run walks again from page 1 and stops at the same cap. Only a
+		// connector change (a larger cap or a cursor past it) reaches the tail.
+		recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 		message:
 			"Stopped after the most recent orders; older orders were not read in this run",
 		diagnostics: {
@@ -1979,6 +2015,7 @@ async function loadListPage(
 			type: "SKIP_RESULT",
 			stream: "orders",
 			reason: "list_page_navigation_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
 			diagnostics: {
 				error_class: navigation.error instanceof Error ? "Error" : "unknown",
@@ -2009,6 +2046,10 @@ async function loadListPage(
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: `H-E-B list page ${pageNum}: ${orders.length} orders parsed but maxPage could not be resolved (${reason}); refusing to silently assume a single-page result.`,
 				diagnostics: { max_page_resolution: maxPageResolution },
 			});
@@ -2196,6 +2237,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "profile_navigation_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `H-E-B profile page navigation failed: ${message.slice(0, 160)}`,
 		});
 		return;
@@ -2209,6 +2251,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "session_repair_required",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
 			message: "H-E-B profile page redirected to sign-in.",
 		});
 		return;
@@ -2218,6 +2261,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "session_repair_required",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
 			message: "H-E-B profile page was blocked by Incapsula.",
 		});
 		return;
@@ -2229,6 +2273,7 @@ export async function collectProfile(
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "profile_shape_check_failed",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message: "H-E-B profile page yielded no name or email.",
 		});
 		return;
@@ -2257,32 +2302,82 @@ export interface NutritionCoverageGateInput {
 	unrecoveredPriorOrderItemGapCount: number;
 }
 
+type NutritionCoverageGateCause =
+	| "scope_missing"
+	| "orders_truncated"
+	| "resume_boundary"
+	| "prior_detail_gaps"
+	| "detail_gaps"
+	| "item_count_short";
+
+type NutritionCoverageCause =
+	| NutritionCoverageGateCause
+	| "order_scan_suppressed";
+
+const NUTRITION_COVERAGE_BLOCK_REASONS: Record<
+	NutritionCoverageGateCause,
+	string
+> = {
+	scope_missing: "nutrition requires orders and order_items in the same run",
+	orders_truncated:
+		"order history stopped at the page budget before all orders were scanned",
+	resume_boundary:
+		"order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run",
+	prior_detail_gaps: "prior order_items detail gaps are still pending",
+	detail_gaps: "order_items detail coverage has unresolved gaps",
+	item_count_short:
+		"some order_items records are short of the item counts declared by H-E-B",
+};
+
+function nutritionCoverageBlockCause(
+	input: NutritionCoverageGateInput,
+): NutritionCoverageGateCause | null {
+	if (!input.ordersRequested || !input.orderItemsRequested) {
+		return "scope_missing";
+	}
+	if (input.ordersTruncated) return "orders_truncated";
+	if (input.orderHistoryStoppedAtBoundary) return "resume_boundary";
+	if (input.unrecoveredPriorOrderItemGapCount > 0) return "prior_detail_gaps";
+	if (input.orderItemsGapCount > 0) return "detail_gaps";
+	if (input.itemCountShort) return "item_count_short";
+	return null;
+}
+
 export function nutritionCoverageBlockReason(
 	input: NutritionCoverageGateInput,
 ): string | null {
-	if (!input.ordersRequested || !input.orderItemsRequested) {
-		return "nutrition requires orders and order_items in the same run";
+	const cause = nutritionCoverageBlockCause(input);
+	return cause === null ? null : NUTRITION_COVERAGE_BLOCK_REASONS[cause];
+}
+
+/** Whether a later run can clear the block decides the hint. Detail gaps and
+ *  a suppressed order scan are budget or transient outcomes that a rerun can
+ *  finish. The page cap and the item-count shortfall are the same on every
+ *  run. An incremental run always stops at its resume boundary by design, so
+ *  that cause does not clear on a rerun either; only a collection change
+ *  (a full re-walk for nutrition) can fix it. Without orders and order_items
+ *  in scope, the same scope cannot change the result. */
+export function nutritionCoverageRecoveryHint(cause: NutritionCoverageCause):
+	| { action: "not_retriable"; retryable: false }
+	| { action: "retry_on_connector_upgrade"; retryable: false }
+	| { action: "retry_by_runtime"; retryable: true } {
+	switch (cause) {
+		case "scope_missing":
+			return { action: "not_retriable", retryable: false };
+		case "orders_truncated":
+		case "resume_boundary":
+		case "item_count_short":
+			return { action: "retry_on_connector_upgrade", retryable: false };
+		case "prior_detail_gaps":
+		case "detail_gaps":
+		case "order_scan_suppressed":
+			return { action: "retry_by_runtime", retryable: true };
 	}
-	if (input.ordersTruncated) {
-		return "order history stopped at the page budget before all orders were scanned";
-	}
-	if (input.orderHistoryStoppedAtBoundary) {
-		return "order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run";
-	}
-	if (input.unrecoveredPriorOrderItemGapCount > 0) {
-		return "prior order_items detail gaps are still pending";
-	}
-	if (input.orderItemsGapCount > 0) {
-		return "order_items detail coverage has unresolved gaps";
-	}
-	if (input.itemCountShort) {
-		return "some order_items records are short of the item counts declared by H-E-B";
-	}
-	return null;
 }
 
 async function emitNutritionCoverageIncomplete(
 	deps: Pick<EmitDeps, "emit">,
+	cause: NutritionCoverageCause,
 	message: string,
 	diagnostics: Record<string, unknown>,
 ): Promise<void> {
@@ -2290,6 +2385,7 @@ async function emitNutritionCoverageIncomplete(
 		type: "SKIP_RESULT",
 		stream: "nutrition",
 		reason: HEB_NUTRITION_COVERAGE_INCOMPLETE_REASON,
+		recovery_hint: nutritionCoverageRecoveryHint(cause),
 		message,
 		diagnostics,
 	});
@@ -2346,6 +2442,7 @@ export async function collectNutrition(
 				type: "SKIP_RESULT",
 				stream: "nutrition",
 				reason: "nutrition_navigation_failed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message: `H-E-B product page navigation failed for ${target.productId}: ${message.slice(0, 160)}`,
 				diagnostics: { product_id: target.productId },
 			});
@@ -2369,6 +2466,7 @@ export async function collectNutrition(
 				type: "SKIP_RESULT",
 				stream: "nutrition",
 				reason: "session_repair_required",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
 				message: `H-E-B product page was blocked by Incapsula for ${target.productId}.`,
 				diagnostics: { product_id: target.productId },
 			});
@@ -2468,6 +2566,7 @@ if (isMainModule(import.meta.url)) {
 			if (wantsNutrition && !(wantsOrders || wantsItems)) {
 				await emitNutritionCoverageIncomplete(
 					{ emit },
+					"scope_missing",
 					"H-E-B nutrition lookup requires orders and order_items in the same run's scope; it has no independent product catalog to browse and cannot prove full historical coverage without the order-history coverage anchors.",
 					{
 						orders_requested: wantsOrders,
@@ -2605,6 +2704,10 @@ if (isMainModule(import.meta.url)) {
 						type: "SKIP_RESULT",
 						stream: "order_items",
 						reason: "item_count_short",
+						recovery_hint: {
+							action: "retry_on_connector_upgrade",
+							retryable: false,
+						},
 						message:
 							"Some orders hold fewer items than H-E-B says they contain",
 						diagnostics: {
@@ -2626,7 +2729,7 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			if (wantsNutrition) {
-				const coverageBlockReason = nutritionCoverageBlockReason({
+				const coverageGate: NutritionCoverageGateInput = {
 					itemCountShort,
 					orderHistoryStoppedAtBoundary: stoppedAtBoundary,
 					orderItemsGapCount: orderItemsCoverage?.gap.length ?? 0,
@@ -2636,11 +2739,13 @@ if (isMainModule(import.meta.url)) {
 					unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
 						? 1
 						: 0,
-				});
-				if (coverageBlockReason) {
+				};
+				const coverageBlockCause = nutritionCoverageBlockCause(coverageGate);
+				if (coverageBlockCause) {
 					await emitNutritionCoverageIncomplete(
 						{ emit },
-						`H-E-B nutrition was not marked complete because ${coverageBlockReason}.`,
+						coverageBlockCause,
+						`H-E-B nutrition was not marked complete because ${NUTRITION_COVERAGE_BLOCK_REASONS[coverageBlockCause]}.`,
 						{
 							item_count_short: itemCountShort,
 							order_history_stopped_at_boundary: stoppedAtBoundary,

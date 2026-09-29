@@ -1028,6 +1028,24 @@ export async function scrapeTargetingCategories(
 
 // ─── Collect ────────────────────────────────────────────────────────────
 
+/**
+ * Only a failed page load is transient. A missing control or destination
+ * list means the page loaded without that surface (selector drift, or an
+ * account that has no such surface), so a rerun ends the same way. Those
+ * get a final hint so Desktop records the skip and the request can complete
+ * with the reason shown.
+ */
+export function adsSurfacesRecoveryHint(
+	missingSteps: readonly (AdsSurfaceStep | null)[],
+):
+	| { action: "retry_by_runtime"; retryable: true }
+	| { action: "not_retriable"; retryable: false } {
+	return missingSteps.length > 0 &&
+		missingSteps.every((step) => step === "navigation_failed")
+		? { action: "retry_by_runtime", retryable: true }
+		: { action: "not_retriable", retryable: false };
+}
+
 export async function collectAllStreams(
 	ctx: BrowserCollectContext,
 	/** Pacing delay between paginated pages. Defaults to politeDelay(800ms);
@@ -1093,6 +1111,10 @@ export async function collectAllStreams(
 				diagnostics: { page_limit: POSTS_MAX_PAGES, total_seen: edges.length },
 				message: `Instagram posts stopped at the ${POSTS_MAX_PAGES}-page limit with more pages still listed`,
 				reason: "posts_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				stream: wantsPosts ? "posts" : "post_likes",
 				type: "SKIP_RESULT",
 			});
@@ -1135,6 +1157,10 @@ export async function collectAllStreams(
 				},
 				message: `Instagram following stopped at the ${FOLLOWING_MAX_PAGES}-page limit (${users.length} accounts) with more pages still listed`,
 				reason: "following_pages_deferred_page_budget",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				stream: "following",
 				type: "SKIP_RESULT",
 			});
@@ -1176,6 +1202,11 @@ export async function collectAllStreams(
 				},
 				message: `Instagram ads scan could not reach ${missingSurfaces.join(", ")}`,
 				reason: "ads_surfaces_unavailable",
+				recovery_hint: adsSurfacesRecoveryHint(
+					[advertisers, adTopics, categories]
+						.filter((surface) => missingSurfaces.includes(surface.surface))
+						.map((surface) => surface.step),
+				),
 				stream: "ads",
 				type: "SKIP_RESULT",
 			});

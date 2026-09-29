@@ -24,7 +24,11 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, scrapeAdvertisers } from "./index.ts";
+import {
+	adsSurfacesRecoveryHint,
+	collectAllStreams,
+	scrapeAdvertisers,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -902,6 +906,11 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 			{ surface: "targeting_categories", step: "control_not_found" },
 		],
 	});
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "not_retriable", retryable: false },
+		"a loaded page without the control will look the same on a rerun",
+	);
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
 		"an unavailable Manage info tab must reject its Playwright-style wait",
@@ -1063,4 +1072,21 @@ test("collectAllStreams: a profile record missing username lands in SKIP_RESULT,
 	});
 
 	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
+});
+
+test("adsSurfacesRecoveryHint retries only when every missing surface failed to load", () => {
+	assert.deepEqual(adsSurfacesRecoveryHint(["navigation_failed"]), {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	for (const steps of [
+		["control_not_found"],
+		["destination_list_not_found"],
+		["navigation_failed", "control_not_found"],
+	] as const) {
+		assert.deepEqual(adsSurfacesRecoveryHint(steps), {
+			action: "not_retriable",
+			retryable: false,
+		});
+	}
 });

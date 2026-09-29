@@ -562,6 +562,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
 			reason: "shopify_order_history_readiness_timeout",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `Shop order-history or sign-in UI did not become ready within ${String(ORDER_HISTORY_READY_TIMEOUT_MS)}ms.`,
 			diagnostics: {
 				...pageDiagnostics,
@@ -624,6 +625,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
 			reason: cache ? "shopify_order_history_evidence_timeout" : "shopify_apollo_state_unavailable",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: cache
 				? `Shop order history did not expose loaded orders or a stable verified empty marker within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`
 				: `Shop order history did not expose an Apollo cache, DOM orders, or verified empty evidence within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`,
@@ -656,6 +658,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
 			reason: "older_pages_deferred_page_budget",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message: `Shop orders stopped at the ${String(MAX_SCROLL_ROUNDS)}-scroll limit with more orders still listed`,
 			diagnostics: {
 			...(await diagnostics()),

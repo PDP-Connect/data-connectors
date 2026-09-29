@@ -297,6 +297,7 @@ async function collectActivities(
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: "strava_export_not_recognised",
+			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `Failed to resolve import directory: ${error instanceof Error ? error.message : String(error)}`,
 		});
 		await emitDiagnostics(
@@ -313,6 +314,7 @@ async function collectActivities(
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: "strava_export_not_recognised",
+			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `No Strava export found in ${canonicalDir}. Upload the ZIP Strava emailed you, or the ${ACTIVITIES_CSV} from inside it.`,
 		});
 		// An owner who has not uploaded anything yet has not suffered a failure.
@@ -333,6 +335,7 @@ async function collectActivities(
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: "strava_export_not_recognised",
+			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: opened.message,
 		});
 		await emitDiagnostics(
@@ -439,6 +442,7 @@ async function collectActivities(
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: "strava_export_not_recognised",
+			recovery_hint: { action: "manual_action_required", retryable: false },
 			message: `The uploaded file could not be read: ${error instanceof Error ? error.message : String(error)}`,
 		});
 		await emitDiagnostics(
@@ -459,6 +463,10 @@ async function collectActivities(
 				type: "SKIP_RESULT",
 				stream: ACTIVITIES_STREAM,
 				reason: "strava_export_columns_unexpected",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message: failure.message,
 			});
 		} else {
@@ -466,6 +474,7 @@ async function collectActivities(
 				type: "SKIP_RESULT",
 				stream: ACTIVITIES_STREAM,
 				reason: "strava_export_not_recognised",
+				recovery_hint: { action: "manual_action_required", retryable: false },
 				message: failure?.message ?? `${ACTIVITIES_CSV} has no header row.`,
 			});
 		}
@@ -507,6 +516,11 @@ async function collectActivities(
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason,
+			// A file that ended mid-row can be imported again in full. Rows with no
+			// usable id or date stay unreadable in every later import of this file.
+			recovery_hint: truncated
+				? { action: "manual_action_required", retryable: false }
+				: { action: "not_retriable", retryable: false },
 			message: truncated
 				? `${ACTIVITIES_CSV} ended mid-row, so an unknown number of activities were not read.`
 				: `${String(unreadable)} row(s) in ${ACTIVITIES_CSV} had no usable activity id or date and were not read.`,
@@ -579,6 +593,7 @@ runConnector({
 					type: "SKIP_RESULT",
 					stream: ACTIVITIES_STREAM,
 					reason: "strava_export_not_recognised",
+					recovery_hint: { action: "manual_action_required", retryable: false },
 					message: `No Strava import directory at ${importDir}. Set STRAVA_EXPORT_DIR, or put the archive in ~/.pdpp/imports/strava/`,
 				});
 				await emitDiagnostics(

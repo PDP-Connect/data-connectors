@@ -938,6 +938,10 @@ export async function spotifyCollect({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_browser_stage1_deferred",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message:
 					"Spotify browser connector stage 1 preserves profile, playlists, playlist items, and saved tracks; this Web API-only stream is deferred.",
 			});

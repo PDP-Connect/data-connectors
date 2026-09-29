@@ -52,17 +52,30 @@ function makeHarness(
 		progress: (): Promise<void> => Promise.resolve(),
 		requested: new Map(requested.map((name) => [name, { name }])),
 	};
-	// SKIP_RESULT is a protocol message, not a schema rejection, so the gaps this
-	// contract emits live in protocolMessages.
-	const skips = (): Record<string, unknown>[] =>
+	// A branch gap is a fact about one conversation, so it is a record-level
+	// PROGRESS diagnostic ("<reason>: ..."), never a stream-level SKIP_RESULT.
+	// A stream skip would make Desktop drop every message of the run.
+	const streamSkips = (): Record<string, unknown>[] =>
 		harness.protocolMessages.filter(
 			(m) => (m as { type?: string }).type === "SKIP_RESULT",
 		) as unknown as Record<string, unknown>[];
+	const skips = (): { reason: string; message: string }[] =>
+		harness.protocolMessages.flatMap((m) => {
+			const msg = m as { type?: string; message?: string };
+			const match =
+				msg.type === "PROGRESS"
+					? /^(branch_truncated|branch_tip_missing): /.exec(msg.message ?? "")
+					: null;
+			return match?.[1]
+				? [{ reason: match[1], message: msg.message ?? "" }]
+				: [];
+		});
 	return {
 		deps,
 		emitted: harness.emitted,
 		messages: harness.protocolMessages,
 		skips,
+		streamSkips,
 	};
 }
 
@@ -171,14 +184,19 @@ test("chatgpt branch: a whole conversation reconciles clean and reports no gap",
 test("chatgpt branch: a truncated branch is surfaced as a gap, not a silent pass", async () => {
 	// This is the defect the declared-count comparison cannot see: the count and
 	// the data agree with each other, and both are short.
-	const { skips } = await run(truncatedBranch(), "a1");
+	const { skips, streamSkips } = await run(truncatedBranch(), "a1");
 
 	const gap = skips().find((s) => s.reason === "branch_truncated");
 	assert.ok(gap, "a branch whose parent chain dangles must report a gap");
+	assert.ok(
+		!gap.message.includes("aaa2c1fa-missing-user-turn") &&
+			!gap.message.includes("convo-abc"),
+		"PROGRESS is the owner's status line: no node or conversation id",
+	);
 	assert.equal(
-		(gap.diagnostics as { missing_parent_id: string }).missing_parent_id,
-		"aaa2c1fa-missing-user-turn",
-		"the gap names the message that was not delivered, so it is actionable",
+		streamSkips().length,
+		0,
+		"one truncated conversation must not skip the whole messages stream",
 	);
 });
 
@@ -214,13 +232,21 @@ test("chatgpt branch: the tautological count check would have passed this trunca
 test("chatgpt branch: a current_node absent from the mapping is surfaced", async () => {
 	// The conversation says it is on a tip the payload does not contain, so the
 	// branch we walked is not the branch it claims to be on.
-	const { skips } = await run(wholeBranch(), "tip-we-never-received");
+	const { skips, streamSkips } = await run(
+		wholeBranch(),
+		"tip-we-never-received",
+	);
 
 	const gap = skips().find((s) => s.reason === "branch_tip_missing");
 	assert.ok(gap, "an unreachable declared tip must report a gap");
+	assert.ok(
+		!gap.message.includes("convo-abc"),
+		"PROGRESS is the owner's status line: no conversation id",
+	);
 	assert.equal(
-		(gap.diagnostics as { conversation_id: string }).conversation_id,
-		"convo-abc",
+		streamSkips().length,
+		0,
+		"one conversation's missing tip must not skip the whole messages stream",
 	);
 });
 

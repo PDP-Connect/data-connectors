@@ -362,6 +362,7 @@ async function runStream<T extends OuraRow>(
 			type: "SKIP_RESULT",
 			stream: streamName,
 			reason: "older_pages_deferred_page_budget",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			// The ceiling reported here is the one actually enforced, not the module
 			// default — otherwise a lowered cap would disclose a limit the walk
 			// never applied.
@@ -430,6 +431,7 @@ async function collectSleep(
 			type: "SKIP_RESULT",
 			stream: streamName,
 			reason: "older_pages_deferred_page_budget",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
 			diagnostics: {
 				page_limit: maxPages,
