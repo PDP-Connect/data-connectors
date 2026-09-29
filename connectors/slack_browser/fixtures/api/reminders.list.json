@@ -1,0 +1,14 @@
+{
+	"ok": true,
+	"reminders": [
+		{
+			"id": "Rm0123456789",
+			"creator": "U0123456789",
+			"user": "U0123456789",
+			"text": "Rotate the API key",
+			"recurring": false,
+			"time": 1790640000,
+			"complete_ts": 0
+		}
+	]
+}

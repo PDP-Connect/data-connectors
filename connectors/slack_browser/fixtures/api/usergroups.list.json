@@ -1,0 +1,29 @@
+{
+	"ok": true,
+	"usergroups": [
+		{
+			"id": "S0123456789",
+			"team_id": "T0123456789",
+			"is_usergroup": true,
+			"is_subteam": true,
+			"name": "Engineering",
+			"description": "Everyone who ships code",
+			"handle": "engineering",
+			"is_external": false,
+			"date_create": 1700000000,
+			"date_update": 1750000000,
+			"date_delete": 0,
+			"auto_type": null,
+			"created_by": "U0123456789",
+			"updated_by": "U0123456789",
+			"deleted_by": null,
+			"prefs": {
+				"channels": ["C0987654321"],
+				"groups": []
+			},
+			"users": ["U0123456789", "U0555555555"],
+			"user_count": 2,
+			"channel_count": 1
+		}
+	]
+}
