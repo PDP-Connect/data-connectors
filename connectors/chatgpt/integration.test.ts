@@ -1070,6 +1070,7 @@ function makeHarness({
 	};
 	const deps: StreamDeps = {
 		api,
+		sleep: (): Promise<void> => Promise.resolve(),
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		progress: (): Promise<void> => Promise.resolve(),
@@ -1097,29 +1098,48 @@ function makeConvo(
 }
 
 function makeConversationListingHarness(
-	walks: ReadonlyArray<{ items: ConversationListItem[]; total?: number }>,
-): RecordingHarness & { listWalks: () => number } {
+	responsesByCursor: ReadonlyMap<
+		number,
+		ReadonlyArray<{
+			items: unknown[];
+			total?: number;
+			next_cursor?: number | null;
+		}>
+	>,
+): RecordingHarness & {
+	listCursors: () => number[];
+	listPaths: () => string[];
+	delays: () => number[];
+} {
 	const harness = makeRecordingEmit(validateRecord);
-	let walkIndex = -1;
+	const cursors: number[] = [];
+	const paths: string[] = [];
+	const delays: number[] = [];
+	const callsByCursor = new Map<number, number>();
 	const api: ChatGptApi = {
 		auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (!path.startsWith("/conversations?")) {
+			if (!path.startsWith("/conversations/search?query=&cursor=")) {
 				return Promise.resolve({ status: 404, json: null });
 			}
-			const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
-			if (offset === 0) {
-				walkIndex += 1;
-			}
-			const walk = walks[Math.min(walkIndex, walks.length - 1)];
-			if (!walk) {
-				throw new Error("listing fixture must contain at least one walk");
-			}
+			const params = new URLSearchParams(path.split("?")[1]);
+			const cursor = Number(params.get("cursor"));
+			paths.push(path);
+			cursors.push(cursor);
+			const responseIndex = callsByCursor.get(cursor) ?? 0;
+			callsByCursor.set(cursor, responseIndex + 1);
+			const responses = responsesByCursor.get(cursor);
+			const response = responses?.[
+				Math.min(responseIndex, (responses?.length ?? 1) - 1)
+			] ?? { items: [] };
 			return Promise.resolve({
 				status: 200,
 				json: {
-					items: walk.items.slice(offset, offset + 100),
-					...(walk.total === undefined ? {} : { total: walk.total }),
+					items: response.items,
+					...(response.total === undefined ? {} : { total: response.total }),
+					...(response.next_cursor === undefined
+						? {}
+						: { next_cursor: response.next_cursor }),
 				},
 			});
 		},
@@ -1127,6 +1147,10 @@ function makeConversationListingHarness(
 	return {
 		deps: {
 			api,
+			sleep: (milliseconds: number): Promise<void> => {
+				delays.push(milliseconds);
+				return Promise.resolve();
+			},
 			emit: harness.emit,
 			emitRecord: harness.emitRecord,
 			progress: (): Promise<void> => Promise.resolve(),
@@ -1135,7 +1159,9 @@ function makeConversationListingHarness(
 		emitted: harness.emitted,
 		messages: harness.protocolMessages,
 		skipped: harness.skipped,
-		listWalks: () => walkIndex + 1,
+		listCursors: () => cursors,
+		listPaths: () => paths,
+		delays: () => delays,
 	};
 }
 
@@ -1266,148 +1292,479 @@ function makeEmitConversation(
 	};
 }
 
-// Full-list completeness regressions: short/unstable walks must not produce
-// a complete stream result or advance from an unproven boundary.
-test("full conversation listing accepts the stable full ID set after an initial short walk", async () => {
-	const short = [makeConvo({ id: "a" })];
-	const full = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([
-		{ items: short },
-		{ items: full },
-		{ items: full },
-	]);
+// Search discovery uses cursor continuation even when the server returns a
+// short page. The empty terminal is confirmed by one delayed re-probe.
+test("cursor search follows a short page and confirms an empty terminal", async () => {
+	const firstPage = Array.from({ length: 30 }, (_, index) => ({
+		conversation_id: `search-a-${index}`,
+		title: "Reference shape",
+		update_time: 1_700_000_100,
+	}));
+	const finalPage = Array.from({ length: 4 }, (_, index) =>
+		makeConvo({ id: `search-tail-${index}` }),
+	);
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [{ items: firstPage }]],
+			[30, [{ items: finalPage }, { items: finalPage }, { items: finalPage }]],
+			[60, [{ items: [] }, { items: [] }, { items: [] }]],
+		]),
+	);
 
 	await runConversationsAndMessagesStreams(fixture.deps, {});
 
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-		"the connector emits the agreed full ID set after a short first walk",
+	assert.deepEqual(fixture.listCursors(), [0, 30, 30, 30, 60, 60]);
+	assert.equal(
+		fixture
+			.listPaths()
+			.every((path) => path.startsWith("/conversations/search?query=&cursor=")),
+		true,
 	);
-	assert.equal(fixture.listWalks(), 3);
+	assert.deepEqual(
+		fixture.delays(),
+		Array.from({ length: 3 }, () => 400),
+	);
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set([
+			...firstPage.map((item) => item.conversation_id),
+			...finalPage.map((item) => item.id),
+		]),
+	);
 	assert.equal(
 		fixture.messages.some((message) => message.type === "SKIP_RESULT"),
 		false,
 	);
 });
 
-test("full conversation listing stays partial when three cursor-less walks never agree", async () => {
-	const fixture = makeConversationListingHarness([
-		{ items: [makeConvo({ id: "a" })] },
-		{ items: [makeConvo({ id: "b" })] },
-		{ items: [makeConvo({ id: "c" })] },
-	]);
+test("an empty cursor page with a continuation is followed", async () => {
+	const firstPage = Array.from({ length: 30 }, (_, index) =>
+		makeConvo({ id: `before-${index}` }),
+	);
+	const laterPage = [makeConvo({ id: "after-empty" })];
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [{ items: firstPage }]],
+			[30, [{ items: [], next_cursor: 60 }]],
+			[60, [{ items: laterPage }]],
+		]),
+	);
 
 	await runConversationsAndMessagesStreams(fixture.deps, {});
 
-	const skip = fixture.messages.find(
-		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			message.type === "SKIP_RESULT",
-	);
-	assert.equal(skip?.reason, "conversation_list_unstable");
-	assert.deepEqual(skip?.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
-	});
-	assert.deepEqual(skip?.diagnostics, {
-		attempts: 3,
-		walk_counts: [1, 1, 1],
-		last_reported_total: null,
-	});
-	assert.equal(fixture.emitted.length, 0, "unstable IDs are not emitted");
-	assert.equal(
-		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
-		false,
-		"an unstable listing has no complete coverage claim",
-	);
-});
-
-test("stable full conversation listing without total requires exactly two walks", async () => {
-	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([{ items }, { items }]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 2);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-	);
-});
-
-test("short matching walks cannot satisfy a reported total", async () => {
-	const items = [makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items, total: 2 },
-		{ items, total: 2 },
-		{ items, total: 2 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	const skip = fixture.messages.find(
-		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			message.type === "SKIP_RESULT",
-	);
-	assert.equal(skip?.reason, "conversation_list_unstable");
-	assert.deepEqual(skip?.diagnostics, {
-		attempts: 3,
-		walk_counts: [1, 1, 1],
-		last_reported_total: 2,
-	});
-	assert.equal(fixture.listWalks(), 3);
-	assert.equal(fixture.emitted.length, 0);
-});
-
-test("zero total with non-empty IDs is missing and falls back to two-walk agreement", async () => {
-	const items = [makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items, total: 0 },
-		{ items, total: 0 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 2);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a"],
-	);
-});
-
-test("a full walk that reaches a usable total needs exactly one listing walk", async () => {
-	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([{ items, total: 2 }]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 1);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-	);
-});
-
-test("duplicate rows do not count toward a reported total of unique conversation IDs", async () => {
-	const duplicateRows = [makeConvo({ id: "a" }), makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items: duplicateRows, total: 2 },
-		{ items: duplicateRows, total: 2 },
-		{ items: duplicateRows, total: 2 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 3);
+	assert.deepEqual(fixture.listCursors(), [0, 30, 30, 30, 60, 60, 60, 90, 90]);
 	assert.equal(
 		fixture.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.reason === "conversation_list_unstable",
 		),
+		false,
+	);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
 		true,
 	);
-	assert.equal(fixture.emitted.length, 0);
+});
+
+test("a short cursor page followed by more items is complete", async () => {
+	const earlyPage = Array.from({ length: 12 }, (_, index) =>
+		makeConvo({ id: `early-${index}` }),
+	);
+	const laterPage = [makeConvo({ id: "later-cursor-item" })];
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [{ items: earlyPage }, { items: earlyPage }, { items: earlyPage }]],
+			[30, [{ items: laterPage }, { items: laterPage }, { items: laterPage }]],
+		]),
+	);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.equal(
+		fixture.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "conversation_list_unstable",
+		),
+		false,
+	);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		true,
+	);
+});
+
+test("recorded early-end patterns on search cursors stay partial", async () => {
+	const shapes = [
+		{ fullPages: 4, shortCount: 0 },
+		{ fullPages: 3, shortCount: 12 },
+		{ fullPages: 5, shortCount: 0 },
+	];
+	await Promise.all(
+		shapes.map(async (shape) => {
+			const responses = new Map<
+				number,
+				ReadonlyArray<{
+					items: unknown[];
+					total?: number;
+					next_cursor?: number | null;
+				}>
+			>();
+			for (let index = 0; index < shape.fullPages; index += 1) {
+				responses.set(index * 30, [
+					{
+						items: Array.from({ length: 30 }, (_, itemIndex) =>
+							makeConvo({
+								id: `recorded-${shape.fullPages}-${index}-${itemIndex}`,
+							}),
+						),
+					},
+				]);
+			}
+			const earlyCursor = shape.fullPages * 30;
+			responses.set(earlyCursor, [
+				{
+					items: Array.from({ length: shape.shortCount }, (_, index) =>
+						makeConvo({ id: `recorded-short-${shape.fullPages}-${index}` }),
+					),
+					next_cursor: earlyCursor + 30,
+				},
+			]);
+			responses.set(earlyCursor + 30, [
+				{ items: [makeConvo({ id: "recorded-later-page" })] },
+			]);
+			const fixture = makeConversationListingHarness(responses);
+
+			await runConversationsAndMessagesStreams(fixture.deps, {});
+
+			assert.equal(
+				fixture.messages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" &&
+						message.reason === "conversation_list_unstable",
+				),
+				false,
+				`the ${shape.fullPages}-full-page, ${shape.shortCount}-item page must follow its continuation`,
+			);
+			assert.equal(
+				fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+				true,
+			);
+		}),
+	);
+});
+
+test("disagreeing short-page retries union ids and follow the cursor", async () => {
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[
+				0,
+				[
+					{ items: [makeConvo({ id: "probe-a" })] },
+					{ items: [makeConvo({ id: "probe-b" })] },
+					{ items: [makeConvo({ id: "probe-c" })] },
+				],
+			],
+		]),
+	);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	const skip = fixture.messages.find(
+		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			message.type === "SKIP_RESULT",
+	);
+	assert.equal(skip, undefined);
+	assert.equal(
+		new Set(fixture.emitted.map((record) => record.data.id)).size,
+		3,
+	);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		true,
+	);
+});
+
+test("tapped ChatGPT cursor-120 shapes union retry ids and continue at cursor 150", async () => {
+	for (const run of ["A", "B"] as const) {
+		const pages = new Map<
+			number,
+			ReadonlyArray<{ items: unknown[]; next_cursor?: number | null }>
+		>();
+		for (let cursor = 0; cursor < 120; cursor += 30) {
+			pages.set(cursor, [
+				{
+					items: Array.from({ length: 30 }, (_, index) =>
+						makeConvo({ id: `c-${cursor + index}` }),
+					),
+				},
+			]);
+		}
+		const attempts: Array<[number, number]> =
+			run === "A"
+				? [
+						[120, 27],
+						[125, 25],
+						[120, 30],
+					]
+				: [
+						[120, 28],
+						[122, 28],
+						[120, 28],
+					];
+		pages.set(
+			120,
+			attempts.map(([start, count]) => ({
+				items: Array.from({ length: count }, (_, index) =>
+					makeConvo({ id: `c-${start + index}` }),
+				),
+				next_cursor: 150,
+			})),
+		);
+		pages.set(150, [{ items: [] }]);
+		const fixture = makeConversationListingHarness(pages);
+		await runConversationsAndMessagesStreams(fixture.deps, {});
+		assert.equal(
+			new Set(fixture.emitted.map((record) => record.data.id)).size,
+			150,
+			`run ${run}`,
+		);
+		assert.deepEqual(
+			fixture.listCursors().slice(0, 7),
+			[0, 30, 60, 90, 120, 120, 120],
+		);
+		assert.equal(
+			fixture.listCursors().includes(150),
+			true,
+			`run ${run} continued after 120`,
+		);
+		assert.equal(
+			fixture.messages.some((message) => message.type === "SKIP_RESULT"),
+			false,
+		);
+		assert.equal(
+			fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+			true,
+		);
+	}
+});
+
+test("round-2 B1: a stable short page with a next cursor cannot end the full list", async () => {
+	const all = Array.from({ length: 600 }, (_, index) =>
+		makeConvo({ id: `gate-b1-${index}`, update_time: 1_800_000_000 - index }),
+	);
+	const pages = new Map<
+		number,
+		ReadonlyArray<{ items: unknown[]; next_cursor?: number | null }>
+	>();
+	for (let cursor = 0; cursor < 390; cursor += 30) {
+		pages.set(cursor, [
+			{ items: all.slice(cursor, cursor + 30), next_cursor: cursor + 30 },
+		]);
+	}
+	pages.set(390, [{ items: all.slice(390, 400), next_cursor: 420 }]);
+	for (let cursor = 420; cursor <= 600; cursor += 30) {
+		const start = cursor - 20;
+		pages.set(cursor, [
+			{ items: all.slice(start, start + 30), next_cursor: cursor + 30 },
+		]);
+	}
+	pages.set(630, [{ items: [] }]);
+	const fixture = makeConversationListingHarness(pages);
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+	assert.equal(
+		new Set(fixture.emitted.map((record) => record.data.id)).size,
+		600,
+	);
+	assert.equal(fixture.listCursors().includes(420), true);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		true,
+	);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("round-2 B2: a changing watermark page stays partial without coverage", async () => {
+	const all = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({ id: `gate-b2-${index}`, update_time: 1_800_000_000 - index }),
+	);
+	const boundaryConversation = all[45];
+	assert.ok(boundaryConversation);
+	const priorCursor = new Date((1_800_000_000 - 45) * 1000).toISOString();
+	let boundaryCalls = 0;
+	const h = makeRecordingEmit(validateRecord);
+	const paths: string[] = [];
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("auth unused")),
+		fetch: (path) => {
+			paths.push(path);
+			const cursor = Number(
+				new URLSearchParams(path.split("?")[1]).get("cursor"),
+			);
+			const items =
+				cursor === 0
+					? all.slice(0, 30)
+					: ++boundaryCalls === 1
+						? [boundaryConversation]
+						: all.slice(30, 60);
+			return Promise.resolve({
+				status: 200,
+				json: { items, next_cursor: cursor + 30 },
+			});
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		sleep: () => Promise.resolve(),
+		emit: h.emit,
+		emitRecord: h.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map([["conversations", { name: "conversations" }]]),
+	} as StreamDeps;
+	await runConversationsAndMessagesStreams(deps, {
+		conversations: { last_update_time: priorCursor },
+	});
+	assert.deepEqual(
+		paths.map((path) =>
+			Number(new URLSearchParams(path.split("?")[1]).get("cursor")),
+		),
+		[0, 30, 30, 30],
+	);
+	assert.equal(
+		h.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "conversation_list_unstable",
+		),
+		true,
+	);
+	assert.equal(
+		h.protocolMessages.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+	);
+});
+
+test("partial search resumes its backfill after collecting new arrivals", async () => {
+	const firstPage = Array.from({ length: 30 }, (_, index) =>
+		makeConvo({ id: `old-${index}`, update_time: 1_700_001_000 - index }),
+	);
+	const tailPage = Array.from({ length: 30 }, (_, index) =>
+		makeConvo({ id: `tail-${index}`, update_time: 1_700_000_900 - index }),
+	);
+	const resumedTailPage = [firstPage[29], ...tailPage.slice(0, 29)];
+	const newConversation = makeConvo({
+		id: "arrived-between-runs",
+		update_time: 1_700_002_000,
+	});
+	let run = 1;
+	let cursorZeroCalls = 0;
+	const cursors: number[] = [];
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("auth unused")),
+		fetch: (path) => {
+			const cursor = Number(
+				new URLSearchParams(path.split("?")[1]).get("cursor"),
+			);
+			cursors.push(cursor);
+			if (run === 1 && cursor === 0) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: firstPage, next_cursor: 30 },
+				});
+			}
+			if (run === 1) return Promise.resolve({ status: 503, json: null });
+			if (cursor === 0) {
+				cursorZeroCalls += 1;
+				return Promise.resolve({
+					status: 200,
+					json: {
+						items: [newConversation, ...firstPage.slice(0, 29)],
+						next_cursor: 30,
+					},
+				});
+			}
+			if (cursor === 30) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: resumedTailPage, next_cursor: 60 },
+				});
+			}
+			return Promise.resolve({ status: 200, json: { items: [] } });
+		},
+	};
+	const first = makeRecordingEmit(validateRecord);
+	const deps: StreamDeps = {
+		api,
+		sleep: () => Promise.resolve(),
+		emit: first.emit,
+		emitRecord: first.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map([["conversations", { name: "conversations" }]]),
+	} as StreamDeps;
+	await runConversationsAndMessagesStreams(deps, {});
+	const firstState = first.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.equal(
+		firstCursor.last_update_time,
+		new Date(1_700_000_971 * 1000).toISOString(),
+	);
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(1_700_000_971 * 1000).toISOString(),
+		boundary_ids: ["old-29"],
+	});
+
+	run = 2;
+	const second = makeRecordingEmit(validateRecord);
+	const secondDeps: StreamDeps = {
+		...deps,
+		emit: second.emit,
+		emitRecord: second.emitRecord,
+	};
+	await runConversationsAndMessagesStreams(secondDeps, {
+		conversations: firstCursor,
+	});
+	assert.equal(
+		cursorZeroCalls,
+		2,
+		"one incremental page is followed by the overlapped backfill page",
+	);
+	assert.equal(
+		second.emitted.some((record) => record.data.id === "arrived-between-runs"),
+		true,
+	);
+	assert.equal(
+		second.emitted.some((record) => record.data.id === "tail-0"),
+		true,
+	);
+	assert.equal(
+		second.emitted.some((record) => record.data.id === "old-0"),
+		true,
+		"the pinned update-time watermark safely replays already-reached newer rows",
+	);
+	const finalState = second.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(finalState && finalState.type === "STATE");
+	const finalCursor = finalState.cursor as Record<string, unknown>;
+	assert.equal(
+		finalCursor.last_update_time,
+		new Date(1_700_002_000 * 1000).toISOString(),
+	);
+	assert.equal(finalCursor.backfill, undefined);
+	assert.equal(
+		second.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE",
+		),
+		true,
+	);
 });
 
 // ─── Invariant 1: emit order (current ChatGPT contract) ──────────────────
@@ -1960,10 +2317,21 @@ test("processConversationDetail: detail=200 with mapping but zero message-bearin
 		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
 			m.type === "PROGRESS" && m.message.startsWith("empty_detail:"),
 	);
-	assert.ok(diag, "200-with-mapping but zero messages must emit an empty_detail diagnostic");
+	assert.ok(
+		diag,
+		"200-with-mapping but zero messages must emit an empty_detail diagnostic",
+	);
 	assert.equal(diag.stream, "messages");
-	assert.doesNotMatch(diag.message, /convo-/, "PROGRESS is display text and must not leak conversation ids");
-	assert.match(diag.message, /no message-bearing nodes/, "message names the empty-graph cause");
+	assert.doesNotMatch(
+		diag.message,
+		/convo-/,
+		"PROGRESS is display text and must not leak conversation ids",
+	);
+	assert.match(
+		diag.message,
+		/no message-bearing nodes/,
+		"message names the empty-graph cause",
+	);
 	assert.match(
 		diag.message,
 		/node_count=2\)/,
@@ -2050,13 +2418,16 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: [listItem],
+						items: cursor === 0 ? [listItem] : [],
 						has_missing_conversations: false,
-						total: 1,
+						total: cursor === 0 ? 2 : 1,
 					},
 				});
 			}
@@ -2080,7 +2451,11 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 	);
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from(
+			{ length: 2 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/convo-with-binary-text",
 	]);
 	// No SKIP_RESULT: unsafe content is sanitized to null at extraction time.
@@ -2241,6 +2616,43 @@ test("runMessagesAndConversationsWithDetail: fetches detail through adaptive lan
 		false,
 		"lane progress must not expose raw API paths",
 	);
+});
+
+test("runMessagesAndConversationsWithDetail: repeated recovery and forward details emit each message id once per run", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let detailFetches = 0;
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: async (): Promise<ChatGptFetchResult> => {
+			detailFetches += 1;
+			return makeDetailOk();
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedMessageIdsThisRun: new Set<string>(),
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map([["messages", { name: "messages" }]]),
+	};
+	const conversation = makeConvo({ id: "re-probed-conversation" });
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		await runMessagesAndConversationsWithDetail(
+			deps,
+			[conversation],
+			makeEmitConversation(deps),
+			{ random: () => 0, sleep: () => Promise.resolve() },
+		);
+	}
+
+	const messageIds = harness.emitted
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.equal(detailFetches, 2, "both recovery and forward passes fetch detail");
+	assert.deepEqual(messageIds, ["u1", "a1", "a2"]);
 });
 
 test("runMessagesAndConversationsWithDetail: batch detail happy path avoids per-id GET storm", async () => {
@@ -4129,7 +4541,7 @@ test("runConversationsAndMessagesStreams: one run budget bounds the recovery pas
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				// List walk: two new forward conversations, newest first.
 				return {
 					status: 200,
@@ -4246,13 +4658,16 @@ test("runConversationsAndMessagesStreams: capped forward run covers full listed 
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return {
 					status: 200,
 					json: {
-						items: listItems,
+						items: cursor === 0 ? listItems : [],
 						has_missing_conversations: false,
-						total: listItems.length,
+						total: cursor === 0 ? listItems.length + 1 : listItems.length,
 					} as ChatGptJson,
 				};
 			}
@@ -4325,7 +4740,7 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				return {
 					status: 200,
 					json: {
@@ -4412,7 +4827,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				return { status: 200, json: null };
 			}
 			throw new Error(`unexpected fetch ${path}`);
@@ -4444,8 +4859,206 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 	);
 	assert.deepEqual(
 		states.map((state) => state.cursor),
-		[{ last_update_time: "2026-06-15T00:00:00.000Z" }],
-		"the cursor must stay pinned at the last proven boundary, not silently advance past the failure",
+		[
+			{
+				last_update_time: "2026-06-15T00:00:00.000Z",
+				backfill: {
+					position_hint: 0,
+					oldest_update_time: null,
+					boundary_ids: [],
+				},
+			},
+		],
+		"the watermark stays put and the failed first page is saved for backfill",
+	);
+});
+
+test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-time boundary before clearing backfill", async () => {
+	const old = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({
+			id: `old-${index}`,
+			update_time: 1_700_001_000 - index,
+		}),
+	);
+	const newcomer = makeConvo({ id: "new", update_time: 1_700_002_000 });
+	const updated = makeConvo({ id: "old-40", update_time: 1_700_003_000 });
+
+	const run = (second: boolean, omitSavedBoundary = false) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const rows = (second
+			? [
+					newcomer,
+					updated,
+					...old.filter(
+						(_, index) =>
+							index !== 1 &&
+							index !== 2 &&
+							index !== 40 &&
+							!(omitSavedBoundary && index === 29),
+					),
+				]
+			: old).sort(
+				(a, b) => Number(b.update_time) - Number(a.update_time),
+			);
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				if (!second && cursor === 30) {
+					return { status: 503, json: null };
+				}
+				const page = rows.slice(cursor, cursor + 30);
+				return {
+					status: 200,
+					json: {
+						items: page,
+						next_cursor: cursor + 30 < rows.length ? cursor + 30 : null,
+					},
+				};
+			},
+		};
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		} as StreamDeps;
+		return { harness, deps };
+	};
+
+	const first = run(false);
+	await runConversationsAndMessagesStreams(first.deps, {});
+	const firstState = first.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(1_700_000_971 * 1000).toISOString(),
+		boundary_ids: ["old-29"],
+	});
+
+	const second = run(true);
+	await runConversationsAndMessagesStreams(second.deps, {
+		conversations: firstCursor,
+	});
+	const emittedIds = new Set(
+		[...first.harness.emitted, ...second.harness.emitted].map((record) => record.data.id),
+	);
+	assert.ok(emittedIds.has("new"), "the insertion is collected");
+	assert.ok(
+		emittedIds.has("old-30"),
+		"the shifted older conversation is collected",
+	);
+	assert.ok(
+		emittedIds.has("old-40"),
+		"a conversation reordered by update is collected",
+	);
+	const secondState = second.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(secondState && secondState.type === "STATE");
+	assert.equal(
+		(secondState.cursor as Record<string, unknown>).backfill,
+		undefined,
+		"the re-seen boundary clears backfill",
+	);
+	assert.ok(
+		second.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		"clean coverage follows the confirmed boundary",
+	);
+
+	const missingBoundaryRun = run(true, true);
+	await runConversationsAndMessagesStreams(missingBoundaryRun.deps, {
+		conversations: firstCursor,
+	});
+	const partialState = missingBoundaryRun.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(partialState && partialState.type === "STATE");
+	assert.ok(
+		(partialState.cursor as Record<string, unknown>).backfill,
+		"a missing saved boundary remains resumable",
+	);
+	assert.equal(
+		missingBoundaryRun.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		false,
+		"the connector does not claim coverage when the saved boundary was not re-seen",
+	);
+});
+
+test("runConversationsAndMessagesStreams: equal-time rows moved before the resumed boundary are collected", async () => {
+	const boundaryTime = 1_700_000_971;
+	const old = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({
+			id: `tie-${index}`,
+			update_time: index === 30 || index === 29 ? boundaryTime : 1_700_001_000 - index,
+		}),
+	);
+	const run = (second: boolean) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const rows = second
+			? [...old.slice(0, 29), old[30], old[29], ...old.slice(31)]
+			: old;
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				const cursor = Number(new URLSearchParams(path.split("?")[1]).get("cursor"));
+				if (!second && cursor === 30) return { status: 503, json: null };
+				const page = rows.slice(cursor, cursor + 30);
+				return {
+					status: 200,
+					json: {
+						items: page,
+						next_cursor: cursor + 30 < rows.length ? cursor + 30 : null,
+					},
+				};
+			},
+		};
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		} as StreamDeps;
+		return { harness, deps };
+	};
+
+	const first = run(false);
+	await runConversationsAndMessagesStreams(first.deps, {});
+	const firstState = first.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(boundaryTime * 1000).toISOString(),
+		boundary_ids: ["tie-29"],
+	});
+
+	const second = run(true);
+	await runConversationsAndMessagesStreams(second.deps, { conversations: firstCursor });
+	assert.ok(
+		second.harness.emitted.some((record) => record.data.id === "tie-30"),
+		"the unseen equal-time row is collected after moving before the saved boundary ID",
+	);
+	assert.ok(
+		second.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		"coverage follows successful boundary confirmation",
 	);
 });
 
@@ -4464,8 +5077,8 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk leaves the list cursor pinned; a later healthy run reaches the previously-missing tail", async () => {
 	const priorCursorIso = "2026-06-01T00:00:00.000Z";
 	const priorCursorUnix = Math.floor(new Date(priorCursorIso).getTime() / 1000);
-	// Page 1: 100 items, newest-first, all newer than priorCursor.
-	const page1 = Array.from({ length: 100 }, (_, idx) =>
+	// Page 1: 30 items, newest-first, all newer than priorCursor.
+	const page1 = Array.from({ length: 30 }, (_, idx) =>
 		makeConvo({
 			id: `convo-page1-${idx}`,
 			update_time: priorCursorUnix + 1000 - idx,
@@ -4485,15 +5098,16 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 
 	// ── Run 1: page 1 succeeds, page 2 is a 200 with an unreadable body. ──
 	const run1 = makeRecordingEmit(validateRecord);
-	let run1ConversationsCalls = 0;
 	const run1Api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
-				run1ConversationsCalls += 1;
-				if (run1ConversationsCalls === 1) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				if (cursor === 0) {
 					return { status: 200, json: { items: page1 } };
 				}
 				return { status: 200, json: null };
@@ -4518,7 +5132,7 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	);
 	assert.equal(
 		run1ConvoRecords.length,
-		100,
+		30,
 		"the proven page-1 prefix still emits — nothing proven is lost",
 	);
 
@@ -4546,32 +5160,37 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	assert.equal(
 		run1States.length,
 		1,
-		"STATE still fires exactly once so the pinned cursor is persisted",
+		"STATE persists both the newest-seen watermark and the backfill continuation",
 	);
 	assert.equal(
 		(run1States[0]?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		priorCursorIso,
-		"P1 CURSOR SAFETY: a truncated walk must leave the cursor PINNED at the prior value, never advanced to max(proven prefix) — advancing it would let a healthy run 2 skip everything between the prior cursor and that max forever",
+		"a partial walk keeps the watermark pinned before the unread page",
 	);
+	const partialBackfill = (
+		run1States[0]?.cursor as
+			| { backfill?: { position_hint: number; boundary_ids: string[] } }
+			| undefined
+	)?.backfill;
+	assert.equal(partialBackfill?.position_hint, 30);
+	assert.ok(partialBackfill?.boundary_ids.length);
 
-	// ── Run 2: healthy full re-list from the SAME (unchanged) prior cursor. ──
-	// Real pagination order is newest-first: page 1 replays page1 (already
-	// proven), page 2 now succeeds and surfaces missingTail — the items run 1
-	// could never prove existed. A final empty page ends the walk cleanly.
+	// ── Run 2: collect newer changes, then resume the older backfill cursor. ──
 	const run2 = makeRecordingEmit(validateRecord);
-	let run2ConversationsCalls = 0;
 	const run2Api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
-				run2ConversationsCalls += 1;
-				if (run2ConversationsCalls === 1) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				if (cursor === 0) {
 					return { status: 200, json: { items: page1 } };
 				}
-				if (run2ConversationsCalls === 2) {
+				if (cursor === 30) {
 					return { status: 200, json: { items: missingTail } };
 				}
 				return { status: 200, json: { items: [] } };
@@ -4588,7 +5207,7 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	};
 
 	await runConversationsAndMessagesStreams(run2Deps, {
-		conversations: { last_update_time: priorCursorIso },
+		conversations: { ...(run1States[0]?.cursor as Record<string, unknown>) },
 	} as CollectContext["state"]);
 
 	const run2ConvoRecords = run2.emitted.filter(
@@ -4596,8 +5215,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	);
 	assert.equal(
 		run2ConvoRecords.length,
-		120,
-		"run 2 re-observes the safe page-1 prefix (idempotent replay) AND reaches the previously-missing 20-item tail",
+		50,
+		"run 2 replays the reached overlap and emits the previously-missing 20-item tail",
 	);
 	const run2Ids = new Set(run2ConvoRecords.map((r) => r.data.id));
 	for (const tailItem of missingTail) {
@@ -4615,8 +5234,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		run2ListCoverage,
 		"a genuinely clean full walk must certify list coverage",
 	);
-	assert.equal(run2ListCoverage?.considered, 120);
-	assert.equal(run2ListCoverage?.covered, 120);
+	assert.equal(run2ListCoverage?.considered, 50);
+	assert.equal(run2ListCoverage?.covered, 50);
 
 	const run2Skip = run2.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -4635,13 +5254,17 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	assert.equal(
 		run2States.length,
 		1,
-		"the cursor advances exactly once, only after the clean full pass",
+		"the completed backfill clears its continuation",
 	);
 	assert.equal(
 		(run2States[0]?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		trueMaxUpdateIso,
-		"run 2 advances the cursor to the TRUE max update_time now that the full range (including the formerly-missing tail) was genuinely proven — no loss, no double-count",
+		"older backfill items do not move the newest-seen watermark backwards",
+	);
+	assert.equal(
+		(run2States[0]?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		undefined,
 	);
 });
 
@@ -4652,7 +5275,7 @@ test("runConversationsAndMessagesStreams: a backlog-gap re-list that comes back 
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				return { status: 200, json: null };
 			}
 			throw new Error(`unexpected fetch ${path}`);
@@ -4703,7 +5326,7 @@ for (const [label, body] of CHATGPT_WRONG_SHAPE_BODIES) {
 				Promise.reject(new Error("fakeApi.auth() unused in this test")),
 			fetch: async (path: string): Promise<ChatGptFetchResult> => {
 				await Promise.resolve();
-				if (path.startsWith("/conversations?")) {
+				if (path.startsWith("/conversations/search?")) {
 					return { status: 200, json: body };
 				}
 				throw new Error(`unexpected fetch ${path}`);
@@ -4767,7 +5390,7 @@ for (const [label, body] of CHATGPT_WRONG_SHAPE_BODIES) {
 }
 
 test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversations page still withholds coverage and does not advance past the partial prefix", async () => {
-	// First page returns a full 100-item page of real, newer-than-cursor
+	// First page returns a full 30-item page of real, newer-than-cursor
 	// conversations (real progress); second page 500s. The old code would
 	// advance the cursor to the max update_time of the PARTIAL prefix it
 	// collected, silently stranding every conversation older than that partial
@@ -4779,14 +5402,14 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				conversationsCalls += 1;
 				if (conversationsCalls === 1) {
-					// A full page (== limit) so the loop pages again instead of stopping
-					// short. All 100 items are newer than priorCursor, so every one of
+					// A full page (== page size) so the loop pages again instead of stopping
+					// short. All 30 items are newer than priorCursor, so every one of
 					// them is real, un-truncated progress collected before page 2 fails.
 					const page: ConversationListItem[] = Array.from(
-						{ length: 100 },
+						{ length: 30 },
 						(_, i) =>
 							makeConvo({ id: `convo-${i}`, update_time: 1_800_000_000 - i }),
 					);
@@ -4821,8 +5444,8 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 	);
 	assert.equal(
 		harness.emitted.filter((r) => r.stream === "conversations").length,
-		100,
-		"the 100 genuinely-listed conversations from page 1 still emit — only the coverage CLAIM is withheld",
+		30,
+		"the 30 genuinely-listed conversations from page 1 still emit — only the coverage CLAIM is withheld",
 	);
 
 	const coverages = harness.protocolMessages.filter(
@@ -4850,8 +5473,14 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 			(state.cursor as { last_update_time?: unknown }).last_update_time,
 		]),
 		[["conversations", priorCursor]],
-		"cursor must NOT advance to the partial prefix's max update_time — that would strand the un-listed tail",
+		"partial pagination keeps the watermark before the unread page",
 	);
+	const partialBackfill = (
+		states[0]?.cursor as
+			| { backfill?: { position_hint: number } }
+			| undefined
+	)?.backfill;
+	assert.equal(partialBackfill?.position_hint, 30);
 });
 
 test("runConversationsAndMessagesStreams: a genuine empty /conversations page remains a valid completed delta boundary", async () => {
@@ -4864,7 +5493,7 @@ test("runConversationsAndMessagesStreams: a genuine empty /conversations page re
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				return { status: 200, json: { items: [] } };
 			}
 			throw new Error(`unexpected fetch ${path}`);
@@ -4913,7 +5542,7 @@ test("runConversationsAndMessagesStreams: a genuine empty /conversations page re
 });
 
 test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mid-backlog does NOT advance the cursor past the un-listed older tail (data-loss regression)", async () => {
-	// The review's Finding 1 worst case: 51 full (100-item) pages, all newer
+	// The review's Finding 1 worst case: 168 full (30-item) pages, all newer
 	// than priorCursor, so the safety cap fires while there is genuinely more,
 	// OLDER backlog still to list. Before this fix, `listConversationsSinceCursor`
 	// returned `truncated: false` here, so the caller would advance the cursor
@@ -4928,11 +5557,11 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				calls += 1;
 				const base = 1_900_000_000 - calls * 1000;
 				const items: ConversationListItem[] = Array.from(
-					{ length: 100 },
+					{ length: 30 },
 					(_, idx) =>
 						makeConvo({ id: `convo-${calls}-${idx}`, update_time: base - idx }),
 				);
@@ -4978,15 +5607,16 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	const states = harness.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
 	);
-	assert.deepEqual(
-		states.map((state) => [
-			state.stream,
-			(state.cursor as { last_update_time?: unknown }).last_update_time,
-		]),
-		[["conversations", priorCursor]],
-		"cursor must stay pinned to the prior watermark — advancing it to the partial prefix's newest item would " +
-			"permanently strand every un-listed older conversation behind an unreachable `>` cursor",
+	const safetyState = states[0]?.cursor as {
+		last_update_time?: unknown;
+		backfill?: { position_hint: number; boundary_ids: string[] };
+	};
+	assert.equal(
+		safetyState.last_update_time,
+		priorCursor,
 	);
+	assert.equal(safetyState.backfill?.position_hint, 5010);
+	assert.ok(safetyState.backfill?.boundary_ids.length);
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT",
@@ -5256,11 +5886,15 @@ test("a follow-up run expands the backlog gap (older window) before any forward 
 				Promise.reject(new Error("fakeApi.auth() unused in this test")),
 			fetch: async (path: string): Promise<ChatGptFetchResult> => {
 				await Promise.resolve();
-				if (path.startsWith("/conversations?")) {
+				if (path.startsWith("/conversations/search?")) {
 					listCalls.push(path);
-					// Always return the full descending list; listConversationsSinceCursor
-					// applies the cursor filter, just like the live `/conversations` route.
-					return { status: 200, json: { items: allConvos } as ChatGptJson };
+					const cursor = Number(
+						new URLSearchParams(path.split("?")[1]).get("cursor"),
+					);
+					return {
+						status: 200,
+						json: { items: cursor === 0 ? allConvos : [] } as ChatGptJson,
+					};
 				}
 				return makeDetailOk();
 			},
@@ -5392,7 +6026,7 @@ test("runConversationsAndMessagesStreams: detail failure rejects before conversa
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: {
@@ -5462,13 +6096,16 @@ test("runConversationsAndMessagesStreams: isolated recoverable detail exhaustion
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: listItems,
+						items: cursor === 0 ? listItems : [],
 						has_missing_conversations: false,
-						total: listItems.length,
+						total: cursor === 0 ? listItems.length + 1 : listItems.length,
 					},
 				});
 			}
@@ -5517,7 +6154,11 @@ test("runConversationsAndMessagesStreams: isolated recoverable detail exhaustion
 	// latch-and-defer fallback. With sleep injected as a no-op, this is instant.
 	// So convo-gap is attempted 9 times total (1 initial + 8 wait-resume retries).
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from(
+			{ length: 2 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/convo-gap",
 		"/conversation/convo-gap",
 		"/conversation/convo-gap",
@@ -5716,7 +6357,7 @@ test("runConversationsAndMessagesStreams: a single recoverable rate-limit on ONE
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: {
@@ -5888,7 +6529,7 @@ test("runConversationsAndMessagesStreams: retry-exhaustion wait envelope exhaust
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: {
@@ -6047,33 +6688,17 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path === "/conversations?offset=0&limit=100&order=updated") {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				const items = listItems.slice(cursor, cursor + 30);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: listItems.slice(0, 100),
+						items,
 						has_missing_conversations: false,
-						total: 278,
-					},
-				});
-			}
-			if (path === "/conversations?offset=100&limit=100&order=updated") {
-				return Promise.resolve({
-					status: 200,
-					json: {
-						items: listItems.slice(100, 200),
-						has_missing_conversations: false,
-						total: 278,
-					},
-				});
-			}
-			if (path === "/conversations?offset=200&limit=100&order=updated") {
-				return Promise.resolve({
-					status: 200,
-					json: {
-						items: listItems.slice(200),
-						has_missing_conversations: false,
-						total: 278,
+						total: cursor + items.length + 1,
 					},
 				});
 			}
@@ -6119,8 +6744,8 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 	);
 
 	assert.equal(
-		fetches.filter((path) => path.startsWith("/conversations?")).length,
-		3,
+		fetches.filter((path) => path.startsWith("/conversations/search?")).length,
+		14,
 	);
 	// The pressure item (index 29) is retried up to CHATGPT_CIRCUIT_WAIT_OUT_MAX_CYCLES
 	// (8) times before the bounded envelope is spent and the latch fires. So the
@@ -6129,12 +6754,27 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 		fetches.filter((path) => path.startsWith("/conversation/")).length,
 		38,
 	);
-	assert.deepEqual(fetches.slice(0, 33), [
-		"/conversations?offset=0&limit=100&order=updated",
-		"/conversations?offset=100&limit=100&order=updated",
-		"/conversations?offset=200&limit=100&order=updated",
-		...listItems.slice(0, 30).map((item) => `/conversation/${item.id}`),
-	]);
+	assert.deepEqual(
+		fetches.filter((path) => path.startsWith("/conversations/search?")),
+		[
+			...Array.from(
+				{ length: 9 },
+				(_, index) => `/conversations/search?query=&cursor=${index * 30}`,
+			),
+			...Array.from(
+				{ length: 3 },
+				() => "/conversations/search?query=&cursor=270",
+			),
+			...Array.from(
+				{ length: 2 },
+				() => "/conversations/search?query=&cursor=300",
+			),
+		],
+	);
+	assert.deepEqual(
+		fetches.slice(14, 44),
+		listItems.slice(0, 30).map((item) => `/conversation/${item.id}`),
+	);
 
 	assert.equal(
 		harness.emitted.some(
@@ -6381,11 +7021,14 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 			if (path === "/conversation/convo-recover") {
 				return Promise.resolve(makeDetailOk());
 			}
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: [forwardConvo],
+						items: cursor === 0 ? [forwardConvo] : [],
 						has_missing_conversations: false,
 						total: 1,
 					},
@@ -6436,7 +7079,11 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 
 	assert.deepEqual(fetches, [
 		"/conversation/convo-recover",
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from(
+			{ length: 2 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/convo-forward",
 	]);
 	const recoveredIdx = harness.events.findIndex(
@@ -6493,7 +7140,7 @@ test("runConversationsAndMessagesStreams: drains paged pending message gaps beyo
 			if (path.startsWith("/conversation/")) {
 				return Promise.resolve(makeDetailOk());
 			}
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: { items: [], has_missing_conversations: false, total: 0 },
@@ -6545,7 +7192,7 @@ test("runConversationsAndMessagesStreams: drains paged pending message gaps beyo
 	assert.deepEqual(requestedPages, [["messages"], ["messages"], ["messages"]]);
 	assert.ok(
 		fetches.indexOf("/conversation/convo-page-124") <
-			fetches.findIndex((path) => path.startsWith("/conversations")),
+			fetches.findIndex((path) => path.startsWith("/conversations/search?")),
 		"forward list collection starts only after paged recovery drains",
 	);
 });
@@ -6576,7 +7223,7 @@ test("runConversationsAndMessagesStreams: CONTINUOUS DRAIN — a partially-hydra
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return {
 					status: 200,
 					json: { items: [], has_missing_conversations: false, total: 0 },
@@ -6727,7 +7374,7 @@ test("runConversationsAndMessagesStreams: a GENUINELY budget-exhausted recovery 
 		1,
 	);
 	assert.equal(
-		fetches.some((path) => path.startsWith("/conversations")),
+		fetches.some((path) => path.startsWith("/conversations/search?")),
 		false,
 		"a genuinely budget-exhausted run still skips the forward walk (budget-exhaustion defer)",
 	);
@@ -6753,7 +7400,7 @@ test("runConversationsAndMessagesStreams: density during recovery WAITS OUT the 
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				listedCursors.push(path);
 				return {
 					status: 200,
@@ -6861,7 +7508,7 @@ test("runConversationsAndMessagesStreams: a hot account that SUCCEEDS drains to 
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				listedCursors.push(path);
 				return {
 					status: 200,
@@ -6976,7 +7623,7 @@ test("runConversationsAndMessagesStreams: a dead account (every fetch fails, no 
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				listedCursors.push(path);
 				return {
 					status: 200,
@@ -7328,7 +7975,7 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (path.startsWith("/conversations")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: {
@@ -9531,7 +10178,7 @@ test("runConversationsAndMessagesStreams: recoveryOnly=true runs recovery then r
 
 	// List-phase fetch MUST NOT have fired — this is the forward-walk suppression
 	assert.ok(
-		!fetchedPaths.some((p) => p.startsWith("/conversations?")),
+		!fetchedPaths.some((p) => p.startsWith("/conversations/search?")),
 		`list-phase fetch must be suppressed in recoveryOnly mode; got: ${JSON.stringify(fetchedPaths)}`,
 	);
 
@@ -9556,7 +10203,7 @@ test("runConversationsAndMessagesStreams: recoveryOnly=false (default) performs 
 			Promise.reject(new Error("fakeApi.auth() unused")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetchedPaths.push(path);
-			if (path.startsWith("/conversations?")) {
+			if (path.startsWith("/conversations/search?")) {
 				return Promise.resolve({
 					status: 200,
 					json: { items: [], has_missing_conversations: false, total: 0 },
@@ -9585,7 +10232,7 @@ test("runConversationsAndMessagesStreams: recoveryOnly=false (default) performs 
 	);
 
 	assert.ok(
-		fetchedPaths.some((p) => p.startsWith("/conversations?")),
+		fetchedPaths.some((p) => p.startsWith("/conversations/search?")),
 		"list-phase fetch fires on a normal (non-recoveryOnly) run",
 	);
 });

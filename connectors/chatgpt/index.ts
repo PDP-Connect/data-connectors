@@ -2064,9 +2064,13 @@ async function runChatGptSideEffectProbe({
  *  orchestration and the helpers are individually testable. */
 export interface StreamDeps {
 	api: ChatGptApi;
+	/** Optional clock seam for deterministic list retry tests. */
+	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	/** Message IDs already emitted by earlier detail work in this run. */
+	emittedMessageIdsThisRun?: Set<string>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2406,11 +2410,20 @@ export async function processConversationDetail(
 			// synthetic root — skip
 			continue;
 		}
+		const messageId = typeof msg.id === "string" ? msg.id : null;
+		const alreadyEmitted = messageId
+			? (deps.emittedMessageIdsThisRun?.has(messageId) ?? false)
+			: false;
+		if (!alreadyEmitted && messageId) {
+			deps.emittedMessageIdsThisRun?.add(messageId);
+		}
 		emittedMessageCount += 1;
 		if (onBranch) {
 			emittedBranchCount += 1;
 		}
-		await deps.emitRecord("messages", msg);
+		if (!alreadyEmitted) {
+			await deps.emitRecord("messages", msg);
+		}
 	}
 	await emitBranchReconciliation(
 		deps,
@@ -2479,9 +2492,7 @@ type ChatGptListPage<T> =
  * guard those shapes would sail through the same `?? []` fallback a genuinely
  * empty `{ items: [] }` page does.
  */
-function isChatGptJsonObject(
-	value: ChatGptJson,
-): value is Record<string, unknown> {
+function isChatGptJsonObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -2595,7 +2606,10 @@ function classifyChatGptListPage<T>(
 						: `${endpointLabel} http 200 body's "${listKey}" key is not an array`,
 				// A 200 body without the expected list shape is response drift; a
 				// rerun gets the same body.
-				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				diagnostics: {
 					http_status: res.status,
 					page,
@@ -2911,28 +2925,116 @@ export async function runSharedConversationsStream(
 // ─── Conversations + messages ──────────────────────────────────────────
 
 /**
- * The result of one `listConversationsSinceCursor` walk: the items collected,
- * and whether every page that should have contributed to that list actually
- * arrived and parsed. `truncated` is the caller's signal to prove nothing: a
- * page that 404'd, errored, or arrived as an unreadable 200 body stops the
- * walk exactly like a genuine end-of-list would, but the two are NOT the same
- * fact. A genuine end-of-list (a short page, or the first item at/before
- * `priorCursor`) is honest completion — `truncated: false` — even with zero
- * items collected. A page that never arrived intact leaves the walk unable to
- * prove it saw everything newer than `priorCursor`, so the caller MUST NOT
- * advance either cursor built from this list, and MUST NOT emit list/detail
- * coverage claiming this pass covered its boundary.
+ * The result of one `listConversationsSinceCursor` walk: the items collected
+ * and whether every needed page arrived and parsed. `truncated` means a page
+ * failed, watermark probes disagreed, or the safety cap stopped the walk.
+ * `backfill` records the update-time and IDs at the reached boundary; its
+ * numeric position is only a hint that is replayed with overlap and confirmed.
  */
 interface ConversationListResult {
+	backfill: ConversationBackfill | null;
+	backfillItems?: ConversationListItem[];
 	items: ConversationListItem[];
 	truncated: boolean;
-	// Null when pages disagree, the value is malformed, or it falls below the
-	// number of distinct IDs collected in this walk.
-	total: number | null;
+}
+
+/** A position hint is safe only when tied to the time and IDs at its boundary. */
+interface ConversationBackfill {
+	boundary_ids: string[];
+	oldest_update_time: string | null;
+	position_hint: number;
+}
+
+function readConversationBackfill(value: unknown): ConversationBackfill | null {
+	// Migrate legacy offsets by restarting from the beginning. The old state has
+	// no identity boundary that could make its offset safe to resume.
+	if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+		return { position_hint: 0, oldest_update_time: null, boundary_ids: [] };
+	}
+	if (!isChatGptJsonObject(value)) {
+		return null;
+	}
+	const { position_hint, oldest_update_time, boundary_ids } = value;
+	if (
+		position_hint === undefined &&
+		oldest_update_time === undefined &&
+		boundary_ids === undefined &&
+		typeof value.cursor === "number" &&
+		Number.isSafeInteger(value.cursor) &&
+		value.cursor >= 0
+	) {
+		return { position_hint: 0, oldest_update_time: null, boundary_ids: [] };
+	}
+	if (
+		typeof position_hint !== "number" ||
+		!Number.isSafeInteger(position_hint) ||
+		position_hint < 0 ||
+		!(typeof oldest_update_time === "string" || oldest_update_time === null) ||
+		!Array.isArray(boundary_ids) ||
+		(boundary_ids.length === 0 && (position_hint !== 0 || oldest_update_time !== null)) ||
+		!boundary_ids.every((id) => typeof id === "string" && id.length > 0)
+	) {
+		return null;
+	}
+	return { position_hint, oldest_update_time, boundary_ids };
+}
+
+const CONVERSATION_PAGE_SIZE = 30;
+
+function conversationIsAtOrBeforeBackfillBoundary(
+	conversation: ConversationListItem,
+	backfill: ConversationBackfill,
+): boolean {
+	if (backfill.oldest_update_time === null) {
+		return true;
+	}
+	const updateTime = conversation.update_time
+		? tsToIso(conversation.update_time)
+		: null;
+	return updateTime === null || updateTime <= backfill.oldest_update_time;
+}
+
+function conversationBackfillAt(
+	items: Iterable<ConversationListItem>,
+	positionHint: number,
+): ConversationBackfill {
+	const rows = [...items];
+	const timed = rows.flatMap((item) => {
+		const updateTime = item.update_time ? tsToIso(item.update_time) : null;
+		return updateTime ? [{ id: item.id, updateTime }] : [];
+	});
+	const oldestUpdateTime = timed.reduce<string | null>(
+		(oldest, row) =>
+			oldest === null || row.updateTime < oldest ? row.updateTime : oldest,
+		null,
+	);
+	const boundaryIds = oldestUpdateTime
+		? [
+				...timed
+					.filter((row) => row.updateTime === oldestUpdateTime)
+					.map((row) => row.id),
+				...rows
+					.filter((item) => !item.update_time || !tsToIso(item.update_time))
+					.map((row) => row.id),
+			]
+		: rows.slice(-CONVERSATION_PAGE_SIZE).map((row) => row.id);
+	return {
+		position_hint: positionHint,
+		oldest_update_time: oldestUpdateTime,
+		boundary_ids: [...new Set(boundaryIds)],
+	};
+}
+
+function conversationBackfillBoundarySeen(
+	items: Iterable<ConversationListItem>,
+	backfill: ConversationBackfill,
+): boolean {
+	const seen = new Set([...items].map((item) => item.id));
+	return backfill.boundary_ids.every((id) => seen.has(id));
 }
 
 /**
- * Walk /conversations pages newer than priorCursor and collect the list
+ * Walk /conversations/search cursor pages newer than priorCursor and collect the list
  * items we still need to sync. Stops early once any update_time <= priorCursor
  * (conversations are returned ordered by updated desc).
  *
@@ -2941,91 +3043,55 @@ interface ConversationListResult {
  * emits honest retryable/gap evidence instead of fabricating coverage over a
  * partial prefix it never proved complete.
  */
+/** Follow every server cursor; short pages are valid while a continuation exists. */
 async function listConversationsSinceCursor(
 	deps: StreamDeps,
 	priorCursor: string | null,
+	startCursor = 0,
+	resumeBackfill?: ConversationBackfill,
 ): Promise<ConversationListResult> {
-	if (priorCursor !== null) {
-		return listConversationWalk(deps, priorCursor);
-	}
-
-	const walkCounts: number[] = [];
-	let previous: ConversationListResult | null = null;
-	let sawUnreachedTotal = false;
-	for (let attempt = 0; attempt < 3; attempt += 1) {
-		if (attempt > 0) {
-			await new Promise((resolve) => setTimeout(resolve, 500));
-		}
-		const current = await listConversationWalk(deps, null);
-		if (current.truncated) {
-			return current;
-		}
-		const currentUniqueCount = new Set(
-			current.items.map((item) => item.id),
-		).size;
-		walkCounts.push(currentUniqueCount);
-		if (current.total !== null) {
-			if (currentUniqueCount >= current.total) {
-				return current;
-			}
-			sawUnreachedTotal = true;
-			previous = current;
-			continue;
-		}
+	const conversationsById = new Map<string, ConversationListItem>();
+	const backfillTailById = new Map<string, ConversationListItem>();
+	const savedBoundaryIds = new Set(resumeBackfill?.boundary_ids ?? []);
+	let resumeBoundarySeen = resumeBackfill?.boundary_ids.length === 0;
+	// Replay one complete page before the saved hint. The hint alone is not a
+	// continuation: the saved boundary IDs must be encountered again before a
+	// clean terminal can clear this state.
+	let cursor = resumeBackfill
+		? Math.max(0, resumeBackfill.position_hint - CONVERSATION_PAGE_SIZE)
+		: startCursor;
+	const resumeStartCursor = cursor;
+	const pageSize = CONVERSATION_PAGE_SIZE;
+	const complete = (): ConversationListResult => {
 		if (
-			!sawUnreachedTotal &&
-			previous &&
-			previous.total === null &&
-			sameConversationIdSet(previous.items, current.items)
+			resumeBackfill &&
+			!resumeBoundarySeen
 		) {
-			return current;
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT conversation search did not re-observe the saved backfill boundary",
+				{ cursor, boundary_ids: resumeBackfill.boundary_ids },
+			);
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfillItems: [...conversationsById.values()],
+				backfill: {
+					...resumeBackfill,
+					position_hint: Math.max(0, resumeStartCursor - pageSize),
+				},
+			};
 		}
-		previous = current;
-	}
-
-	for (const stream of ["conversations", "messages"] as const) {
-		if (!deps.requested.has(stream)) {
-			continue;
-		}
-		deps.emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: "conversation_list_unstable",
-			message: "ChatGPT conversation listing changed across three full walks; retry this stream",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			diagnostics: {
-				attempts: walkCounts.length,
-				walk_counts: walkCounts,
-				last_reported_total: previous?.total ?? null,
-			},
-		});
-	}
-	return { items: [], truncated: true, total: previous?.total ?? null };
-}
-
-function sameConversationIdSet(
-	left: readonly ConversationListItem[],
-	right: readonly ConversationListItem[],
-): boolean {
-	const leftIds = new Set(left.map((item) => item.id));
-	const rightIds = new Set(right.map((item) => item.id));
-	return (
-		leftIds.size === rightIds.size &&
-		[...leftIds].every((id) => rightIds.has(id))
-	);
-}
-
-/** One offset walk. Cursor-less callers add repeated-walk completeness proof above. */
-async function listConversationWalk(
-	deps: StreamDeps,
-	priorCursor: string | null,
-): Promise<ConversationListResult> {
-	const convosToSync: ConversationListItem[] = [];
-	let reportedTotal: number | null = null;
-	let invalidTotal = false;
-	let offset = 0;
-	const limit = 100;
-	let stopPaging = false;
+		return {
+			items: [...conversationsById.values()],
+			truncated: false,
+			backfill: null,
+			...(resumeBackfill
+				? { backfillItems: [...backfillTailById.values()] }
+				: {}),
+		};
+	};
+	const maxPageAttempts = 3;
 	let page = 0;
 	deps.emit({
 		type: "PROGRESS",
@@ -3034,89 +3100,328 @@ async function listConversationWalk(
 			? `Listing conversations updated after ${priorCursor}`
 			: "Listing conversations (full pass)",
 	});
-	while (!stopPaging) {
-		const classified = classifyChatGptListPage<ConversationListItem>(
-			await deps.api.fetch(
-				`/conversations?offset=${offset}&limit=${limit}&order=updated`,
-			),
-			{
+	while (true) {
+		const attempts: ConversationListItem[][] = [];
+		let nextCursor: number | null = null;
+		let cursorDisagreed = false;
+		let boundaryHit = false;
+		let shouldProbeAgain = false;
+		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
+			if (attempt > 0) {
+				await waitForConversationListRetry(deps, 400);
+			}
+			const response = await deps.api.fetch(
+				`/conversations/search?query=&cursor=${cursor}`,
+			);
+			const classified = classifyChatGptListPage<unknown>(response, {
 				stream: "conversations",
-				endpointLabel: "conversations list",
+				endpointLabel: "conversations search",
 				page,
 				listKeys: ["items"],
-			},
-		);
-		page += 1;
-		if (!classified.ok) {
-			deps.emit(classified.skip);
-			return { items: convosToSync, truncated: true, total: null };
-		}
-		const { items } = classified;
-		const pageTotal = conversationListTotal(classified.json);
-		if (pageTotal === null) {
-			invalidTotal = true;
-		} else if (pageTotal !== undefined) {
-			if (reportedTotal !== null && reportedTotal !== pageTotal) {
-				invalidTotal = true;
-			} else {
-				reportedTotal = pageTotal;
+			});
+			page += 1;
+			if (!classified.ok) {
+				deps.emit(classified.skip);
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				};
 			}
-		}
-		if (!items.length) {
-			break;
-		}
-		for (const c of items) {
-			const updateIso = c.update_time ? tsToIso(c.update_time) : null;
-			if (priorCursor && updateIso && updateIso <= priorCursor) {
-				stopPaging = true;
+			const items: ConversationListItem[] = [];
+			let malformedItem = false;
+			for (const raw of classified.items) {
+				if (!isChatGptJsonObject(raw)) {
+					malformedItem = true;
+					break;
+				}
+				const id = typeof raw.id === "string" ? raw.id : raw.conversation_id;
+				if (typeof id !== "string" || id.length === 0) {
+					malformedItem = true;
+					break;
+				}
+				items.push({ ...raw, id });
+			}
+			if (malformedItem) {
+				for (const stream of ["conversations", "messages"] as const) {
+					if (deps.requested.has(stream)) {
+						deps.emit({
+							type: "SKIP_RESULT",
+							stream,
+							reason: "parse_error",
+							message:
+								"conversations search returned an item without a usable id",
+							recovery_hint: { action: "retry_by_runtime", retryable: true },
+							diagnostics: { page },
+						});
+					}
+				}
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				};
+			}
+			if (items.length > pageSize) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT conversation search returned more than one cursor page",
+					{ cursor, item_count: items.length },
+				);
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				};
+			}
+			attempts.push(items);
+			for (const item of items) {
+				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				if (priorCursor && updateIso && updateIso <= priorCursor) {
+					boundaryHit = true;
+				}
+				conversationsById.set(item.id, item);
+			}
+			if (resumeBackfill) {
+				// The saved time is the stable boundary. IDs at that time were
+				// already collected before interruption; every other equal-time
+				// item remains eligible even if it moved before a saved ID.
+				for (const item of items) {
+					if (
+						conversationIsAtOrBeforeBackfillBoundary(item, resumeBackfill) &&
+						!savedBoundaryIds.has(item.id)
+					) {
+						backfillTailById.set(item.id, item);
+					}
+				}
+				if (
+					!resumeBoundarySeen &&
+					conversationBackfillBoundarySeen(
+						conversationsById.values(),
+						resumeBackfill,
+					)
+				) {
+					resumeBoundarySeen = true;
+				}
+			}
+			const responseNextCursor = conversationSearchNextCursor(
+				response.json,
+				cursor,
+				items.length,
+				pageSize,
+			);
+			if (attempt === 0) {
+				nextCursor = responseNextCursor;
+			} else if (responseNextCursor !== nextCursor) {
+				cursorDisagreed = true;
+			}
+			// Retry a watermark page so a transient short response cannot hide newer
+			// records. Other short pages are retried to union ids, then follow the
+			// server's cursor even when the attempts disagree on their item sets.
+			if (items.length === pageSize && !boundaryHit) {
 				break;
 			}
-			convosToSync.push(c);
+			if (boundaryHit && attempt === maxPageAttempts - 1) {
+				if (cursorDisagreed || !hasConversationPageConsensus(attempts)) {
+					emitConversationListUnstable(
+						deps,
+						"ChatGPT conversation search returned a changing watermark page",
+						{
+							cursor,
+							checks: attempts.length,
+							item_counts: attempts.map((p) => p.length),
+						},
+					);
+					return {
+						items: [...conversationsById.values()],
+						truncated: true,
+						backfill: conversationBackfillAt(conversationsById.values(), cursor),
+					};
+				}
+				return {
+					...complete(),
+				};
+			}
+			if (!boundaryHit && items.length >= pageSize) {
+				break;
+			}
+			if (!boundaryHit && items.length === 0 && responseNextCursor === null) {
+				shouldProbeAgain = true;
+				break;
+			}
+			if (!boundaryHit && responseNextCursor !== null) {
+				if (attempt === maxPageAttempts - 1) break;
+				continue;
+			}
+			if (cursorDisagreed) {
+				break;
+			}
 		}
-		if (items.length < limit) {
-			break;
+		if (
+			cursorDisagreed ||
+			(boundaryHit && !hasConversationPageConsensus(attempts))
+		) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT conversation search returned disagreeing cursor probes",
+				{
+					cursor,
+					checks: attempts.length,
+					item_counts: attempts.map((items) => items.length),
+				},
+			);
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+			};
 		}
-		offset += items.length;
-		if (offset > PAGINATION_SAFETY_LIMIT) {
-			// Reaching this line means the just-fetched page was FULL and no item
-			// on it was old enough to hit `priorCursor` yet (`stopPaging` is still
-			// false, or the `items.length < limit` check above would already have
-			// broken the loop) — there are genuinely more, older conversations the
-			// walk never reached. Returning `truncated: false` here would let the
-			// caller advance the cursor to this partial prefix's max `update_time`
-			// (always the newest value, since pages are `order=updated` desc),
-			// silently and permanently skipping every un-listed conversation older
-			// than that — the walk never gets another chance at them because the
-			// cursor is a `>` "since" watermark. Treated as truncation.
+		if (shouldProbeAgain) {
+			await waitForConversationListRetry(deps, 400);
+			const response = await deps.api.fetch(
+				`/conversations/search?query=&cursor=${cursor}`,
+			);
+			const classified = classifyChatGptListPage<unknown>(response, {
+				stream: "conversations",
+				endpointLabel: "conversations search",
+				page,
+				listKeys: ["items"],
+			});
+			page += 1;
+			if (!classified.ok) {
+				deps.emit(classified.skip);
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				};
+			}
+			if (
+				classified.items.length === 0 &&
+				conversationSearchNextCursor(response.json, cursor, 0, pageSize) ===
+					null
+			) {
+				// An empty response cannot prove a true end: a stable false terminal
+				// page from this endpoint is indistinguishable from a real end without
+				// an independent source boundary. This is an inherent client limit.
+				return {
+					...complete(),
+				};
+			}
+			// A delayed re-probe found more data or a continuation. Revisit this
+			// cursor on the next iteration so no ids from the probe are lost.
+			if (classified.items.length > 0) {
+				for (const raw of classified.items) {
+					if (isChatGptJsonObject(raw)) {
+						const id =
+							typeof raw.id === "string" ? raw.id : raw.conversation_id;
+						if (typeof id === "string" && id.length > 0)
+							conversationsById.set(id, { ...raw, id });
+					}
+				}
+			}
+			nextCursor = conversationSearchNextCursor(
+				response.json,
+				cursor,
+				classified.items.length,
+				pageSize,
+			);
+		}
+		if (boundaryHit) {
+			return {
+				...complete(),
+			};
+		}
+		if (nextCursor === null) {
+			// A non-empty short page with no explicit continuation is still followed
+			// on the endpoint's fixed numeric cursor grid.
+			if (attempts.some((items) => items.length > 0))
+				nextCursor = cursor + pageSize;
+			else
+				return {
+					...complete(),
+				};
+		}
+		cursor = nextCursor;
+		if (cursor > PAGINATION_SAFETY_LIMIT) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations list pagination stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
 					retryable: false,
 				},
-				diagnostics: { offset, collected: convosToSync.length },
+				diagnostics: { cursor, collected: conversationsById.size },
 			});
-			return { items: convosToSync, truncated: true, total: null };
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+			};
 		}
 	}
-	const uniqueIds = new Set(convosToSync.map((item) => item.id)).size;
-	const total = invalidTotal || (reportedTotal !== null && reportedTotal < uniqueIds)
-		? null
-		: reportedTotal;
-	return { items: convosToSync, truncated: false, total };
 }
 
-function conversationListTotal(json: ChatGptJson): number | null | undefined {
-	if (!json || !isChatGptJsonObject(json) || !("total" in json)) {
-		return undefined;
+function conversationSearchNextCursor(
+	json: unknown,
+	cursor: number,
+	itemCount: number,
+	pageSize: number,
+): number | null {
+	if (!isChatGptJsonObject(json))
+		return itemCount > 0 ? cursor + pageSize : null;
+	const raw = json.next_cursor ?? json.nextCursor;
+	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > cursor)
+		return raw;
+	if (typeof raw === "string" && /^\d+$/.test(raw)) {
+		const parsed = Number(raw);
+		if (Number.isSafeInteger(parsed) && parsed > cursor) return parsed;
 	}
-	const { total } = json;
-	return typeof total === "number" && Number.isSafeInteger(total) && total >= 0
-		? total
-		: null;
+	if (raw === null || json.has_more === false) return null;
+	if (typeof json.has_more === "boolean")
+		return json.has_more ? cursor + pageSize : null;
+	return itemCount > 0 ? cursor + pageSize : null;
+}
+
+function emitConversationListUnstable(
+	deps: StreamDeps,
+	message: string,
+	diagnostics: Record<string, unknown>,
+): void {
+	for (const stream of ["conversations", "messages"] as const) {
+		if (!deps.requested.has(stream)) {
+			continue;
+		}
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "conversation_list_unstable",
+			message: `${message}; retry this stream`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics,
+		});
+	}
+}
+
+function hasConversationPageConsensus(
+	pages: readonly ConversationListItem[][],
+): boolean {
+	if (pages.length < 2) {
+		return true;
+	}
+	const signatures = pages.map((items) =>
+		[...new Set(items.map((item) => item.id))].sort().join("\u0000"),
+	);
+	return signatures.every((signature) => signature === signatures[0]);
+}
+
+function waitForConversationListRetry(
+	deps: StreamDeps,
+	milliseconds: number,
+): Promise<void> {
+	return deps.sleep?.(milliseconds) ?? Promise.resolve();
 }
 
 function conversationIsAfterCursor(
@@ -3140,6 +3445,23 @@ function oldestConversationCursor(
 	return a <= b ? a : b;
 }
 
+function oldestAvailableConversationCursor(
+	a: string | null,
+	b: string | null,
+): string | null {
+	if (!a) return b;
+	if (!b) return a;
+	return a <= b ? a : b;
+}
+
+function newestConversationCursor(
+	a: string | null,
+	b: string | null,
+): string | null {
+	if (!(a && b)) return a || b;
+	return a >= b ? a : b;
+}
+
 type ConversationListForCursor = (
 	cursor: string | null,
 ) => Promise<ConversationListResult>;
@@ -3159,6 +3481,7 @@ async function selectConversationListsForRequestedStreams({
 }): Promise<{
 	conversationsToSync: ConversationListItem[];
 	messageDetailConversations: ConversationListItem[];
+	backfill: ConversationBackfill | null;
 	// Whether the list backing THAT stream's selection was truncated by a
 	// failed/unreadable page. When `wantsConversations && wantsMessages` share
 	// one underlying list call, a truncation of that shared call truncates both
@@ -3174,31 +3497,51 @@ async function selectConversationListsForRequestedStreams({
 			priorMessagesCursor,
 		);
 		const sharedList = await listForCursor(sharedCursor);
+		const backfillIds = new Set(
+			(sharedList.backfillItems ?? []).map((c) => c.id),
+		);
 		return {
-			conversationsToSync: sharedList.items.filter((c) =>
-				conversationIsAfterCursor(c, priorConversationsCursor),
+			conversationsToSync: sharedList.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorConversationsCursor),
 			),
-			messageDetailConversations: sharedList.items.filter((c) =>
-				conversationIsAfterCursor(c, priorMessagesCursor),
+			messageDetailConversations: sharedList.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorMessagesCursor),
 			),
+			backfill: sharedList.backfill,
 			conversationsListTruncated: sharedList.truncated,
 			messagesListTruncated: sharedList.truncated,
 		};
 	}
 	if (wantsConversations) {
 		const list = await listForCursor(priorConversationsCursor);
+		const backfillIds = new Set((list.backfillItems ?? []).map((c) => c.id));
 		return {
-			conversationsToSync: list.items,
+			conversationsToSync: list.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorConversationsCursor),
+			),
 			messageDetailConversations: [],
+			backfill: list.backfill,
 			conversationsListTruncated: list.truncated,
 			messagesListTruncated: false,
 		};
 	}
 	if (wantsMessages) {
 		const list = await listForCursor(priorMessagesCursor);
+		const backfillIds = new Set((list.backfillItems ?? []).map((c) => c.id));
 		return {
 			conversationsToSync: [],
-			messageDetailConversations: list.items,
+			messageDetailConversations: list.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorMessagesCursor),
+			),
+			backfill: list.backfill,
 			conversationsListTruncated: false,
 			messagesListTruncated: list.truncated,
 		};
@@ -3206,6 +3549,7 @@ async function selectConversationListsForRequestedStreams({
 	return {
 		conversationsToSync: [],
 		messageDetailConversations: [],
+		backfill: null,
 		conversationsListTruncated: false,
 		messagesListTruncated: false,
 	};
@@ -3923,6 +4267,9 @@ export async function runMessagesAndConversationsWithDetail(
 	) => Promise<void>,
 	pacing: ConversationDetailPacingOptions = {},
 ): Promise<ConversationDetailCoverage> {
+	const detailDeps = deps.emittedMessageIdsThisRun
+		? deps
+		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
 	const random = pacing.random ?? Math.random;
 	const sleep = pacing.sleep ?? sleepMs;
 	const providerBudget = pacing.providerBudget ?? deps.providerBudget ?? null;
@@ -4616,7 +4963,7 @@ export async function runMessagesAndConversationsWithDetail(
 					`required conversation detail ${c.id} failed with http ${detail.status}`,
 				);
 			}
-			await processConversationDetail(deps, c, detail, emitConversation);
+			await processConversationDetail(detailDeps, c, detail, emitConversation);
 			// §10-D: suppress additive-decrease during the cooldown-exempt recovery
 			// lane so the shared pacer interval is not un-learned. Throttles still
 			// fire (recovery may decelerate, never accelerate the pacer).
@@ -4967,6 +5314,7 @@ async function recoverPendingMessageDetailGapsBeforeForwardRun(
 function persistChatGptPacingStateOnly(
 	deps: StreamDeps,
 	priorMessagesCursor: string | null,
+	backfill: ConversationBackfill | null,
 ): void {
 	const pacingFields = buildChatGptPacingStateFields(deps.providerBudget);
 	if (Object.keys(pacingFields).length === 0) {
@@ -4975,7 +5323,11 @@ function persistChatGptPacingStateOnly(
 	deps.emit({
 		type: "STATE",
 		stream: "messages",
-		cursor: { last_update_time: priorMessagesCursor, ...pacingFields },
+		cursor: {
+			last_update_time: priorMessagesCursor,
+			...(backfill === null ? {} : { backfill }),
+			...pacingFields,
+		},
 	});
 }
 
@@ -4999,17 +5351,36 @@ export async function runConversationsAndMessagesStreams(
 	state: CollectContext["state"],
 	options: { detailPacing?: ConversationDetailPacingOptions } = {},
 ): Promise<void> {
+	const runDeps: StreamDeps = {
+		...deps,
+		emittedMessageIdsThisRun: new Set<string>(),
+	};
 	const conversationsCursor = state.conversations as
-		| { last_update_time?: string | null }
+		| {
+				last_update_time?: string | null;
+				backfill?: unknown;
+		  }
 		| undefined;
 	const messagesCursor = state.messages as
-		| { last_update_time?: string | null }
+		| {
+				last_update_time?: string | null;
+				backfill?: unknown;
+		  }
 		| undefined;
 	const priorConversationsCursor =
 		conversationsCursor?.last_update_time || null;
 	const priorMessagesCursor = messagesCursor?.last_update_time || null;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
+	const savedBackfills = [
+		wantsConversations
+			? readConversationBackfill(conversationsCursor?.backfill)
+			: null,
+		wantsMessages ? readConversationBackfill(messagesCursor?.backfill) : null,
+	].filter((backfill): backfill is ConversationBackfill => backfill !== null);
+	const savedBackfill = savedBackfills.sort(
+		(a, b) => a.position_hint - b.position_hint,
+	)[0] ?? null;
 	const listedByCursor = new Map<string, Promise<ConversationListResult>>();
 	const listForCursor = (
 		cursor: string | null,
@@ -5019,7 +5390,31 @@ export async function runConversationsAndMessagesStreams(
 		if (existing) {
 			return existing;
 		}
-		const listed = listConversationsSinceCursor(deps, cursor);
+		const listed = (async (): Promise<ConversationListResult> => {
+			const forward = await listConversationsSinceCursor(deps, cursor);
+			if (savedBackfill === null) return forward;
+			// Collect the incremental frontier first, then resume the incomplete
+			// full-list walk. The update-time watermark and paging continuation are
+			// independent: one finds arrivals; the other drains older unseen pages.
+			const backfill = await listConversationsSinceCursor(
+				deps,
+				null,
+				0,
+				savedBackfill,
+			);
+			const merged = new Map<string, ConversationListItem>();
+			for (const item of backfill.items) merged.set(item.id, item);
+			for (const item of forward.items) merged.set(item.id, item);
+			const nextBackfill = forward.truncated
+				? savedBackfill
+				: backfill.backfill;
+			return {
+				items: [...merged.values()],
+				truncated: forward.truncated || backfill.truncated,
+				backfill: nextBackfill,
+				backfillItems: backfill.backfillItems ?? backfill.items,
+			};
+		})();
 		listedByCursor.set(key, listed);
 		return listed;
 	};
@@ -5034,7 +5429,7 @@ export async function runConversationsAndMessagesStreams(
 	};
 
 	await recoverPendingMessageDetailGapsBeforeForwardRun(
-		deps,
+		runDeps,
 		wantsMessages,
 		emitConversation,
 		options.detailPacing,
@@ -5043,13 +5438,18 @@ export async function runConversationsAndMessagesStreams(
 		// Forward walk suppressed; persist the learned interval so warm-start
 		// survives, then return — deferred work stays durable DETAIL_GAPs for the
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
-		persistChatGptPacingStateOnly(deps, priorMessagesCursor);
+		persistChatGptPacingStateOnly(
+			deps,
+			priorMessagesCursor,
+			savedBackfill,
+		);
 		return;
 	}
 
 	const {
 		conversationsToSync,
 		messageDetailConversations,
+		backfill,
 		conversationsListTruncated,
 		messagesListTruncated,
 	} = await selectConversationListsForRequestedStreams({
@@ -5080,7 +5480,7 @@ export async function runConversationsAndMessagesStreams(
 		} as const;
 		deps.emit(foundMessageDetailProgressMsg);
 		const coverage = await runMessagesAndConversationsWithDetail(
-			deps,
+			runDeps,
 			messageDetailConversations,
 			emitConversation,
 			options.detailPacing,
@@ -5089,6 +5489,7 @@ export async function runConversationsAndMessagesStreams(
 			messageDetailConversations,
 			coverage,
 			messagesListTruncated,
+			backfill,
 			priorMessagesCursor,
 		});
 	}
@@ -5115,6 +5516,7 @@ export async function runConversationsAndMessagesStreams(
 		}
 		emitConversationsState(deps, {
 			conversationsToSync,
+			backfill,
 			conversationsListTruncated,
 			priorConversationsCursor,
 		});
@@ -5122,14 +5524,9 @@ export async function runConversationsAndMessagesStreams(
 }
 
 /**
- * Emit the `messages` DETAIL_COVERAGE + STATE tail of the forward walk. A
- * truncated list proved it did NOT see everything newer than
- * `priorMessagesCursor` — the source-of-truth denominator for "did this run
- * cover its boundary" is broken, so this run must not claim detail coverage
- * over `messageDetailConversations` (only a prefix of the true boundary) and
- * must not advance the cursor past conversations it never listed. What was
- * already hydrated by the caller is still real, lose-nothing detail work;
- * only the completion claim and the cursor watermark are withheld here.
+ * Emit detail coverage only when the list walk completed. On a partial walk,
+ * pin the update-time watermark to the oldest reached row. The backfill token
+ * separately confirms that identity boundary before the list can complete.
  */
 async function emitMessagesCoverageAndState(
 	deps: StreamDeps,
@@ -5137,11 +5534,13 @@ async function emitMessagesCoverageAndState(
 		messageDetailConversations,
 		coverage,
 		messagesListTruncated,
+		backfill,
 		priorMessagesCursor,
 	}: {
 		messageDetailConversations: ConversationListItem[];
 		coverage: ConversationDetailCoverage;
 		messagesListTruncated: boolean;
+		backfill: ConversationBackfill | null;
 		priorMessagesCursor: string | null;
 	},
 ): Promise<void> {
@@ -5161,49 +5560,62 @@ async function emitMessagesCoverageAndState(
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
 	}
 	const maxMessagesUpdate = messagesListTruncated
-		? null
-		: maxUpdateTimeIso(messageDetailConversations);
+		? oldestAvailableConversationCursor(
+			minUpdateTimeIso(messageDetailConversations),
+			priorMessagesCursor,
+		)
+		: newestConversationCursor(
+			maxUpdateTimeIso(messageDetailConversations),
+			priorMessagesCursor,
+		);
 	deps.emit({
 		type: "STATE",
 		stream: "messages",
 		// Persist the controller's learned interval alongside the cursor so the
-		// next run warm-starts from it (warm-start, SLVP ideal §5.2). A
-		// truncated list leaves `maxMessagesUpdate` null so the cursor falls
-		// through to `priorMessagesCursor` unchanged — never advanced on an
-		// unproven boundary.
+		// next run warm-starts from it (warm-start, SLVP ideal §5.2). The backfill
+		// continuation is stored beside the newest-seen watermark on a complete
+		// walk or the oldest reached update-time watermark on a partial walk.
 		cursor: {
-			last_update_time: maxMessagesUpdate || priorMessagesCursor || null,
+			last_update_time: maxMessagesUpdate,
+			...(backfill === null ? {} : { backfill }),
 			...buildChatGptPacingStateFields(deps.providerBudget),
 		},
 	});
 }
 
 /**
- * Emit the `conversations` STATE tail of the forward walk. Mirrors
- * `emitMessagesCoverageAndState`'s truncation posture: never advance (or even
- * re-affirm past a partial max) on an unproven boundary — a truncated list
- * falls straight through to the unchanged prior cursor regardless of how much
- * of the partial prefix it collected.
+ * Emit the safe update-time watermark and the remaining list continuation.
  */
 function emitConversationsState(
 	deps: StreamDeps,
 	{
 		conversationsToSync,
+		backfill,
 		conversationsListTruncated,
 		priorConversationsCursor,
 	}: {
 		conversationsToSync: ConversationListItem[];
+		backfill: ConversationBackfill | null;
 		conversationsListTruncated: boolean;
 		priorConversationsCursor: string | null;
 	},
 ): void {
 	const maxUpdate = conversationsListTruncated
-		? null
-		: maxUpdateTimeIso(conversationsToSync);
+		? oldestAvailableConversationCursor(
+			minUpdateTimeIso(conversationsToSync),
+			priorConversationsCursor,
+		)
+		: newestConversationCursor(
+			maxUpdateTimeIso(conversationsToSync),
+			priorConversationsCursor,
+		);
 	deps.emit({
 		type: "STATE",
 		stream: "conversations",
-		cursor: { last_update_time: maxUpdate || priorConversationsCursor || null },
+		cursor: {
+			last_update_time: maxUpdate,
+			...(backfill === null ? {} : { backfill }),
+		},
 	});
 }
 
@@ -5347,6 +5759,8 @@ if (isMainModule(import.meta.url)) {
 
 			const deps: StreamDeps = {
 				api,
+				sleep: (milliseconds) =>
+					new Promise((resolve) => setTimeout(resolve, milliseconds)),
 				detailGaps: ctx.detailGaps,
 				emit,
 				emitRecord,
