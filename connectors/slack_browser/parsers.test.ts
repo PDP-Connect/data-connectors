@@ -205,6 +205,7 @@ test("channels and users keep every field the archive profile reads", () => {
 		"public",
 		"im",
 		"private",
+		"public",
 	]);
 	const record = buildChannel(general);
 	valid("channels", record);

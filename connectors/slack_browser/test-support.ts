@@ -91,6 +91,13 @@ export function fixtureAnswer(
 			const page = params.cursor === undefined ? "p1" : "p2";
 			return fixture(`conversations.history-${channel}-${page}`);
 		}
+		case "search.messages":
+			return (
+				fixtureIfPresent(`search.messages-p${params.page ?? "1"}`) ?? {
+					ok: true,
+					messages: { total: 0, matches: [], paging: { page: 1, pages: 1 } },
+				}
+			);
 		case "conversations.replies":
 			return (
 				fixtureIfPresent(

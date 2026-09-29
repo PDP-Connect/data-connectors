@@ -7,18 +7,27 @@
  *
  * Directory streams (workspace, channels, users, user_groups, reminders,
  * stars) are full scans gated by a per-record fingerprint, so a steady-state
- * run emits nothing for them. `messages` keeps one cursor per conversation:
- * the newest ts read. A later run reads from a week before that cursor, so a
- * reply or reaction that arrived on a recent message is seen again; a first
- * read of a conversation goes back to the lookback floor and then looks a
- * further month below it for threads that were still active inside the
- * window, so replies to older parents are not lost.
+ * run emits nothing for them.
  *
- * A conversation Slack will not serve this session (`not_in_channel` and
- * the like) is skipped; one Slack stopped answering is reported as a
- * DETAIL_GAP and its cursor stays put, so the next run reads it again. A
- * session rejection or the browser leaving app.slack.com ends the run with a
- * SKIP_RESULT on every requested stream and no cursor moves.
+ * `messages` keeps one cursor per conversation: the newest ts read. Before
+ * walking, the run asks the web client's own `client.counts` for every open
+ * conversation's latest message, and `search.messages` for everything
+ * written since the lookback floor. Conversations with nothing in the window
+ * are not read at all (most of them, on a workspace with hundreds of quiet
+ * direct messages), and the search results name the threads that got a reply
+ * inside the window whatever the age of their parent, so those threads are
+ * read directly instead of scanning a month of history below the floor.
+ * When either signal is unavailable the walk falls back to reading every
+ * conversation and, on a first read, scanning below the floor for active
+ * threads. A later run reads from a week before each conversation's cursor,
+ * so a reply or reaction that arrived on a recent message is seen again.
+ *
+ * Conversations are read a few at a time. A conversation Slack will not
+ * serve this session (`not_in_channel` and the like) is skipped; one Slack
+ * stopped answering is reported as a DETAIL_GAP and its cursor stays put, so
+ * the next run reads it again. A session rejection, the browser leaving
+ * app.slack.com, or the page being closed ends the run with a SKIP_RESULT on
+ * every requested stream and no cursor moves.
  */
 
 import type { ZodType } from "zod";
@@ -48,10 +57,12 @@ import {
 } from "./parsers.ts";
 import {
 	authTestSchema,
+	clientCountsSchema,
 	conversationsListSchema,
 	historySchema,
 	messagesCursorSchema,
 	remindersListSchema,
+	searchMessagesSchema,
 	starsListSchema,
 	teamInfoSchema,
 	userGroupsListSchema,
@@ -67,6 +78,7 @@ import type {
 	TeamInfoAnswer,
 } from "./types.ts";
 import {
+	isHostFault,
 	type SlackApiClient,
 	SlackApiError,
 	SlackSessionLostError,
@@ -74,14 +86,21 @@ import {
 
 /** How far below a conversation's cursor a later run reads again, for late replies and reactions. */
 export const LATE_REPLY_LOOKBACK_SECONDS = 7 * 24 * 3600;
-/** How far below the lookback floor a first read looks for threads still active inside the window. */
+/** How far below the lookback floor a first read looks for active threads when search is unavailable. */
 export const THREAD_LOOKBACK_SECONDS = 30 * 24 * 3600;
 export const MAX_PAGES_PER_CONVERSATION = 2000;
+/** Search pages (100 matches each) a run reads before it stops trusting search for thread discovery. */
+export const MAX_SEARCH_PAGES = 100;
+/** How many conversations are read at once. */
+export const DEFAULT_CONCURRENCY = 3;
 const MAX_PAGES_PER_THREAD = 200;
 const MAX_LIST_PAGES = 500;
-const PAGE_LIMIT = "200";
+/** Slack allows up to 999 per history page; fewer round trips on busy channels. */
+const HISTORY_PAGE_LIMIT = "999";
+const LIST_PAGE_LIMIT = "200";
 const USERS_PAGE_LIMIT = "500";
-const WRONG_ORIGIN_PREFIX = "wrong_origin:";
+const SEARCH_PAGE_COUNT = "100";
+const THREAD_TS_IN_PERMALINK = /[?&]thread_ts=(\d{10}\.\d{1,6})/;
 
 const FINGERPRINTED = [
 	"workspace",
@@ -129,11 +148,14 @@ export interface SlackBrowserCollectContext {
 
 export interface SlackBrowserServices {
 	api: SlackApiClient;
+	/** Conversations read at once; defaults to DEFAULT_CONCURRENCY. */
+	concurrency?: number;
 	now: () => Date;
 }
 
 interface Run {
 	api: SlackApiClient;
+	concurrency: number;
 	ctx: SlackBrowserCollectContext;
 	cursors: Map<FingerprintedStream, FingerprintCursor>;
 	/** Optional streams that ended in a SKIP_RESULT this run. */
@@ -150,6 +172,14 @@ interface MessagesPlan {
 	nextFloorSec: number;
 }
 
+/** What the web client's own signals say about the window, before any history is read. */
+interface Activity {
+	/** Conversations with a message in the window; null when `client.counts` did not answer. */
+	activeIds: Set<string> | null;
+	/** Thread parents, per conversation, that got a reply in the window; null when search did not cover the window. */
+	threadsByChannel: Map<string, Set<string>> | null;
+}
+
 interface HistoryWindow {
 	/** Only parents with a reply at or after this are treated as active threads. */
 	activeSince: number;
@@ -157,6 +187,13 @@ interface HistoryWindow {
 	oldest: number;
 	/** Keep only active thread parents, and do not move the cursor. */
 	threadsOnly: boolean;
+}
+
+interface MessagesOutcome {
+	gaps: string[];
+	hydrated: string[];
+	skippedQuiet: string[];
+	unreadable: string[];
 }
 
 const wants = (run: Run, stream: string): boolean =>
@@ -170,10 +207,6 @@ function parseAnswer<T>(schema: ZodType<T>, method: string, json: unknown): T {
 	return parsed.data;
 }
 
-function isWrongOrigin(error: SlackApiError): boolean {
-	return error.reason.startsWith(WRONG_ORIGIN_PREFIX);
-}
-
 function conversationLabel(conversation: SlackConversationObject): string {
 	if (conversation.is_im) {
 		return `direct message ${conversation.id}`;
@@ -181,6 +214,11 @@ function conversationLabel(conversation: SlackConversationObject): string {
 	return conversation.name === undefined
 		? conversation.id
 		: `#${conversation.name}`;
+}
+
+/** YYYY-MM-DD in UTC, the granularity Slack search's `after:` accepts. */
+function searchDay(seconds: number): string {
+	return new Date(seconds * 1000).toISOString().slice(0, 10);
 }
 
 async function emitFingerprinted(
@@ -228,6 +266,41 @@ async function listAll<
 	return pages;
 }
 
+/**
+ * `items` through `worker`, `size` at a time. The first error stops new
+ * work and is rethrown once the lanes that were mid-item finish.
+ */
+async function runPool<T>(
+	items: readonly T[],
+	size: number,
+	worker: (item: T) => Promise<void>,
+): Promise<void> {
+	const state: { failure: { error: unknown } | null; next: number } = {
+		failure: null,
+		next: 0,
+	};
+	const lane = async (): Promise<void> => {
+		while (state.next < items.length && state.failure === null) {
+			const item = items[state.next];
+			state.next += 1;
+			if (item === undefined) {
+				return;
+			}
+			try {
+				await worker(item);
+			} catch (error) {
+				state.failure ??= { error };
+			}
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.max(1, Math.min(size, items.length)) }, lane),
+	);
+	if (state.failure !== null) {
+		throw state.failure.error;
+	}
+}
+
 // ─── Directory streams ──────────────────────────────────────────────────
 
 async function collectWorkspace(run: Run, team: SignedInTeam): Promise<void> {
@@ -245,7 +318,7 @@ async function collectWorkspace(run: Run, team: SignedInTeam): Promise<void> {
 		);
 	} catch (error) {
 		// team.info only adds the domain and icon; auth.test already names the team.
-		if (!(error instanceof SlackApiError) || isWrongOrigin(error)) {
+		if (!(error instanceof SlackApiError) || isHostFault(error)) {
 			throw error;
 		}
 	}
@@ -287,7 +360,7 @@ async function listConversations(
 		run,
 		team.id,
 		"users.conversations",
-		{ types, limit: PAGE_LIMIT, exclude_archived: "false" },
+		{ types, limit: LIST_PAGE_LIMIT, exclude_archived: "false" },
 		conversationsListSchema,
 	);
 	const allowed = new Set(
@@ -312,7 +385,7 @@ async function collectChannels(
 	}
 }
 
-// ─── Messages ───────────────────────────────────────────────────────────
+// ─── Messages: plan and discovery ───────────────────────────────────────
 
 function readMessagesCursor(raw: unknown): MessagesCursor | null {
 	const parsed = messagesCursorSchema.safeParse(raw);
@@ -348,6 +421,141 @@ function planMessages(run: Run): MessagesPlan {
 	};
 }
 
+/**
+ * The conversations `client.counts` says have a message at or after the
+ * floor. A conversation the client does not count (a closed direct message,
+ * an archived channel) has had nothing new, or it would be open. Null when
+ * the method did not answer, so the caller reads everything.
+ */
+async function activeByCounts(
+	run: Run,
+	team: SignedInTeam,
+	floorSec: number,
+): Promise<Set<string> | null> {
+	let json: unknown;
+	try {
+		json = await run.api.call(team.id, "client.counts", {});
+	} catch (error) {
+		if (!(error instanceof SlackApiError) || isHostFault(error)) {
+			throw error;
+		}
+		return null;
+	}
+	const parsed = clientCountsSchema.safeParse(json);
+	if (!parsed.success) {
+		return null;
+	}
+	const active = new Set<string>();
+	for (const entries of [
+		parsed.data.channels,
+		parsed.data.ims,
+		parsed.data.mpims,
+	]) {
+		for (const entry of entries ?? []) {
+			if (slackTsSeconds(entry.latest) >= floorSec) {
+				active.add(entry.id);
+			}
+		}
+	}
+	return active;
+}
+
+interface SearchFindings {
+	channelIds: Set<string>;
+	/** Whether every page was read, so the thread list is complete. */
+	complete: boolean;
+	threadsByChannel: Map<string, Set<string>>;
+}
+
+/**
+ * Everything written since the floor, from Slack search: which conversations
+ * it landed in, and which thread parents got a reply (search links a reply
+ * to its parent through the permalink's `thread_ts`). Search is paged 100
+ * at a time and rate limited more tightly than history, so a run reads at
+ * most MAX_SEARCH_PAGES pages and reports the list incomplete beyond that.
+ */
+async function searchSinceFloor(
+	run: Run,
+	team: SignedInTeam,
+	floorSec: number,
+): Promise<SearchFindings | null> {
+	const findings: SearchFindings = {
+		channelIds: new Set(),
+		complete: false,
+		threadsByChannel: new Map(),
+	};
+	// `after:` is exclusive of the named day; step one day back to cover the floor itself.
+	const query = `after:${searchDay(floorSec - 86_400)}`;
+	for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
+		let json: unknown;
+		try {
+			json = await run.api.call(team.id, "search.messages", {
+				query,
+				count: SEARCH_PAGE_COUNT,
+				page: String(page),
+				sort: "timestamp",
+			});
+		} catch (error) {
+			if (!(error instanceof SlackApiError) || isHostFault(error)) {
+				throw error;
+			}
+			return page === 1 ? null : findings;
+		}
+		const parsed = searchMessagesSchema.safeParse(json);
+		if (!parsed.success) {
+			return page === 1 ? null : findings;
+		}
+		for (const match of parsed.data.messages?.matches ?? []) {
+			const channelId = match.channel?.id;
+			if (channelId === undefined) {
+				continue;
+			}
+			findings.channelIds.add(channelId);
+			const parent = THREAD_TS_IN_PERMALINK.exec(match.permalink ?? "")?.[1];
+			if (parent !== undefined) {
+				let threads = findings.threadsByChannel.get(channelId);
+				if (threads === undefined) {
+					threads = new Set();
+					findings.threadsByChannel.set(channelId, threads);
+				}
+				threads.add(parent);
+			}
+		}
+		const pages = parsed.data.messages?.paging?.pages ?? 1;
+		if (page >= pages) {
+			findings.complete = true;
+			return findings;
+		}
+	}
+	return findings;
+}
+
+async function discoverActivity(
+	run: Run,
+	team: SignedInTeam,
+	plan: MessagesPlan,
+): Promise<Activity> {
+	if (plan.floorSec <= 0) {
+		// The whole history was asked for; every conversation is read anyway.
+		return { activeIds: null, threadsByChannel: null };
+	}
+	await run.ctx.progress("Asking Slack which conversations changed", {
+		stream: "messages",
+	});
+	const counted = await activeByCounts(run, team, plan.floorSec);
+	const found = await searchSinceFloor(run, team, plan.floorSec);
+	let activeIds: Set<string> | null = counted;
+	if (activeIds !== null && found !== null) {
+		activeIds = new Set([...activeIds, ...found.channelIds]);
+	}
+	return {
+		activeIds,
+		threadsByChannel: found?.complete ? found.threadsByChannel : null,
+	};
+}
+
+// ─── Messages: the walk ─────────────────────────────────────────────────
+
 async function emitMessage(
 	run: Run,
 	channelId: string,
@@ -373,18 +581,20 @@ async function emitMessage(
 	}
 }
 
-async function emitReplies(
+/** A whole thread. The parent comes back as the first reply and is emitted only when asked. */
+async function emitThread(
 	run: Run,
 	team: SignedInTeam,
 	channelId: string,
 	parentTs: string,
+	includeParent: boolean,
 ): Promise<void> {
 	let cursor = "";
 	for (let pageNo = 0; pageNo < MAX_PAGES_PER_THREAD; pageNo += 1) {
 		const params: Record<string, string> = {
 			channel: channelId,
 			ts: parentTs,
-			limit: PAGE_LIMIT,
+			limit: HISTORY_PAGE_LIMIT,
 		};
 		if (cursor !== "") {
 			params.cursor = cursor;
@@ -401,14 +611,14 @@ async function emitReplies(
 			// a reason to give up on the conversation around it.
 			if (
 				error instanceof SlackApiError &&
-				!(error.retryable || isWrongOrigin(error))
+				!(error.retryable || isHostFault(error))
 			) {
 				return;
 			}
 			throw error;
 		}
 		for (const reply of answer.messages ?? []) {
-			if (reply.ts !== parentTs) {
+			if (reply.ts !== parentTs || (includeParent && pageNo === 0)) {
 				await emitMessage(run, channelId, reply);
 			}
 		}
@@ -426,7 +636,7 @@ function historyParams(
 ): Record<string, string> {
 	const params: Record<string, string> = {
 		channel: channelId,
-		limit: PAGE_LIMIT,
+		limit: HISTORY_PAGE_LIMIT,
 	};
 	if (window.oldest > 0) {
 		params.oldest = String(window.oldest);
@@ -446,6 +656,7 @@ async function walkHistory(
 	team: SignedInTeam,
 	conversation: SlackConversationObject,
 	window: HistoryWindow,
+	fetchedThreads: Set<string>,
 ): Promise<string | null> {
 	let cursor = "";
 	let newestTs: string | null = null;
@@ -467,8 +678,9 @@ async function walkHistory(
 				continue;
 			}
 			await emitMessage(run, conversation.id, message);
-			if (active) {
-				await emitReplies(run, team, conversation.id, message.ts);
+			if (active && !fetchedThreads.has(message.ts)) {
+				fetchedThreads.add(message.ts);
+				await emitThread(run, team, conversation.id, message.ts, false);
 			}
 			if (
 				!window.threadsOnly &&
@@ -498,6 +710,7 @@ async function walkConversation(
 	team: SignedInTeam,
 	conversation: SlackConversationObject,
 	plan: MessagesPlan,
+	activity: Activity,
 ): Promise<void> {
 	const last = plan.channelLastTs[conversation.id];
 	const headOldest =
@@ -507,19 +720,42 @@ async function walkConversation(
 					plan.floorSec,
 					Math.floor(slackTsSeconds(last)) - LATE_REPLY_LOOKBACK_SECONDS,
 				);
-	const newest = await walkHistory(run, team, conversation, {
-		activeSince: headOldest,
-		latest: null,
-		oldest: headOldest,
-		threadsOnly: false,
-	});
-	if (last === undefined && plan.floorSec > 0) {
-		await walkHistory(run, team, conversation, {
-			activeSince: plan.floorSec,
-			latest: plan.floorSec,
-			oldest: plan.floorSec - THREAD_LOOKBACK_SECONDS,
-			threadsOnly: true,
-		});
+	const fetchedThreads = new Set<string>();
+	const newest = await walkHistory(
+		run,
+		team,
+		conversation,
+		{
+			activeSince: headOldest,
+			latest: null,
+			oldest: headOldest,
+			threadsOnly: false,
+		},
+		fetchedThreads,
+	);
+	if (activity.threadsByChannel !== null) {
+		// Threads search saw a reply in: their parents may be far below the floor.
+		for (const parentTs of activity.threadsByChannel.get(conversation.id) ??
+			[]) {
+			if (fetchedThreads.has(parentTs)) {
+				continue;
+			}
+			fetchedThreads.add(parentTs);
+			await emitThread(run, team, conversation.id, parentTs, true);
+		}
+	} else if (last === undefined && plan.floorSec > 0) {
+		await walkHistory(
+			run,
+			team,
+			conversation,
+			{
+				activeSince: plan.floorSec,
+				latest: plan.floorSec,
+				oldest: plan.floorSec - THREAD_LOOKBACK_SECONDS,
+				threadsOnly: true,
+			},
+			fetchedThreads,
+		);
 	}
 	if (
 		newest !== null &&
@@ -529,60 +765,94 @@ async function walkConversation(
 	}
 }
 
+/** Read one conversation, filing the outcome; only faults that end the run escape. */
+async function readConversation(
+	run: Run,
+	team: SignedInTeam,
+	conversation: SlackConversationObject,
+	plan: MessagesPlan,
+	activity: Activity,
+	outcome: MessagesOutcome,
+): Promise<void> {
+	await run.ctx.progress(`Reading ${conversationLabel(conversation)}`, {
+		count: run.messagesEmitted,
+		stream: "messages",
+	});
+	try {
+		await walkConversation(run, team, conversation, plan, activity);
+		outcome.hydrated.push(conversation.id);
+	} catch (error) {
+		if (!(error instanceof SlackApiError) || isHostFault(error)) {
+			throw error;
+		}
+		if (!error.retryable) {
+			// Slack will keep answering the same way; a gap would never close.
+			outcome.unreadable.push(conversation.id);
+			return;
+		}
+		outcome.gaps.push(conversation.id);
+		await emitDetailGap(run.ctx, {
+			error: {
+				class: "upstream_pressure",
+				...(error.httpStatus === null ? {} : { httpStatus: error.httpStatus }),
+				message: error.reason,
+			},
+			locator: {
+				kind: "slack_conversation",
+				channel_id: conversation.id,
+				team_id: team.id,
+			},
+			reason:
+				error.reason === "ratelimited" ? "rate_limited" : "retry_exhausted",
+			recordKey: conversation.id,
+			stream: "messages",
+		});
+	}
+}
+
 async function collectMessages(
 	run: Run,
 	team: SignedInTeam,
 	conversations: readonly SlackConversationObject[],
 	plan: MessagesPlan,
 ): Promise<void> {
-	const hydrated: string[] = [];
-	const gaps: string[] = [];
-	const unreadable: string[] = [];
+	const activity = await discoverActivity(run, team, plan);
+	const outcome: MessagesOutcome = {
+		gaps: [],
+		hydrated: [],
+		skippedQuiet: [],
+		unreadable: [],
+	};
+	const toRead: SlackConversationObject[] = [];
 	for (const conversation of conversations) {
-		await run.ctx.progress(`Reading ${conversationLabel(conversation)}`, {
-			count: run.messagesEmitted,
-			stream: "messages",
-		});
-		try {
-			await walkConversation(run, team, conversation, plan);
-			hydrated.push(conversation.id);
-		} catch (error) {
-			if (!(error instanceof SlackApiError) || isWrongOrigin(error)) {
-				throw error;
-			}
-			if (!error.retryable) {
-				// Slack will keep answering the same way; a gap would never close.
-				unreadable.push(conversation.id);
-				continue;
-			}
-			gaps.push(conversation.id);
-			await emitDetailGap(run.ctx, {
-				error: {
-					class: "upstream_pressure",
-					...(error.httpStatus === null
-						? {}
-						: { httpStatus: error.httpStatus }),
-					message: error.reason,
-				},
-				locator: {
-					kind: "slack_conversation",
-					channel_id: conversation.id,
-					team_id: team.id,
-				},
-				reason:
-					error.reason === "ratelimited" ? "rate_limited" : "retry_exhausted",
-				recordKey: conversation.id,
-				stream: "messages",
-			});
+		if (
+			activity.activeIds === null ||
+			activity.activeIds.has(conversation.id)
+		) {
+			toRead.push(conversation);
+		} else {
+			outcome.skippedQuiet.push(conversation.id);
 		}
 	}
+	await run.ctx.progress(
+		`Reading ${toRead.length} of ${conversations.length} conversations; ${outcome.skippedQuiet.length} had nothing new`,
+		{ stream: "messages" },
+	);
+	await runPool(toRead, run.concurrency, (conversation) =>
+		readConversation(run, team, conversation, plan, activity, outcome),
+	);
+	await run.ctx.progress(
+		`Messages: ${run.messagesEmitted} read from ${outcome.hydrated.length} conversations; ${outcome.skippedQuiet.length} quiet, ${outcome.unreadable.length} not readable, ${outcome.gaps.length} to retry next run`,
+		{ count: run.messagesEmitted, stream: "messages" },
+	);
 	await emitDetailCoverage(run.ctx, {
 		considered: conversations.length,
-		covered: hydrated.length,
-		gapKeys: gaps,
-		hydratedKeys: hydrated,
-		optionalSkipKeys: unreadable,
-		requiredKeys: conversations.map((conversation) => conversation.id),
+		// A quiet conversation is accounted for: the client's own counts say nothing landed there.
+		covered: outcome.hydrated.length + outcome.skippedQuiet.length,
+		gapKeys: outcome.gaps,
+		hydratedKeys: outcome.hydrated,
+		optionalSkipKeys: outcome.unreadable,
+		requiredKeys: toRead.map((conversation) => conversation.id),
 		stateStream: "messages",
 		stream: "messages",
 	});
@@ -648,7 +918,7 @@ async function collectOptional(
 	try {
 		records = await read();
 	} catch (error) {
-		if (!(error instanceof SlackApiError) || isWrongOrigin(error)) {
+		if (!(error instanceof SlackApiError) || isHostFault(error)) {
 			throw error;
 		}
 		run.failed.add(stream);
@@ -715,9 +985,9 @@ function classifyAbort(error: unknown): Abort {
 		};
 	}
 	if (error instanceof SlackApiError) {
-		if (isWrongOrigin(error)) {
+		if (isHostFault(error)) {
 			return {
-				message: `The browser left app.slack.com (now on ${error.reason.slice(WRONG_ORIGIN_PREFIX.length)}), so reading stopped.`,
+				message: `The browser page the connector was reading from went away (${error.reason}), so reading stopped. Keep the connector's browser window open until the run finishes.`,
 				reason: "collection_interrupted",
 			};
 		}
@@ -789,6 +1059,7 @@ export async function collectSlackBrowser(
 ): Promise<void> {
 	const run: Run = {
 		api: services.api,
+		concurrency: services.concurrency ?? DEFAULT_CONCURRENCY,
 		ctx,
 		cursors: new Map(),
 		failed: new Set(),

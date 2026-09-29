@@ -182,6 +182,39 @@ export const starsListSchema = envelopeSchema.extend({
 	items: z.array(starObjectSchema).optional(),
 });
 
+/** One entry of the web client's `client.counts`: the sidebar's own view of a conversation. */
+export const countsEntrySchema = z.looseObject({
+	id: z.string(),
+	latest: z.string().optional(),
+});
+
+export const clientCountsSchema = envelopeSchema.extend({
+	channels: z.array(countsEntrySchema).optional(),
+	ims: z.array(countsEntrySchema).optional(),
+	mpims: z.array(countsEntrySchema).optional(),
+});
+
+export const searchMatchSchema = z.looseObject({
+	ts: z.string().optional(),
+	permalink: z.string().optional(),
+	channel: z.looseObject({ id: z.string() }).optional(),
+});
+
+export const searchMessagesSchema = envelopeSchema.extend({
+	messages: z
+		.looseObject({
+			total: z.number().optional(),
+			matches: z.array(searchMatchSchema).optional(),
+			paging: z
+				.looseObject({
+					page: z.number().optional(),
+					pages: z.number().optional(),
+				})
+				.optional(),
+		})
+		.optional(),
+});
+
 /** The `messages` stream's checkpoint, as this profile writes it. */
 export const messagesCursorSchema = z.object({
 	channel_last_ts: z.record(z.string(), z.string()),

@@ -46,13 +46,24 @@ async function run(
 	api = fakeApi(),
 	options: Partial<typeof DEFAULT_OPTIONS> = {},
 	now = FIXTURE_NOW,
+	concurrency = 1,
 ) {
-	await collectSlackBrowser(h.ctx, { api, now: () => now }, [TEAM], {
-		...DEFAULT_OPTIONS,
-		...options,
-	});
+	await collectSlackBrowser(
+		h.ctx,
+		{ api, concurrency, now: () => now },
+		[TEAM],
+		{ ...DEFAULT_OPTIONS, ...options },
+	);
 	return api;
 }
+
+const ALL_CHANNELS = [
+	"C0123456789",
+	"C0987654321",
+	"D0123456789",
+	"C0555555555",
+	"C0777777777",
+];
 
 const historyCalls = (api: ReturnType<typeof fakeApi>, channel: string) =>
 	api.calls.filter(
@@ -114,7 +125,7 @@ test("a first run reads the window, active threads, and the directory, then chec
 	assert.equal(h.of("users").length, 3);
 	assert.deepEqual(
 		h.of("channels").map((c) => c.id),
-		["C0123456789", "C0987654321", "D0123456789", "C0555555555"],
+		ALL_CHANNELS,
 	);
 	assert.equal(h.of("user_groups").length, 1);
 	assert.equal(h.of("reminders").length, 1);
@@ -122,16 +133,24 @@ test("a first run reads the window, active threads, and the directory, then chec
 	assert.deepEqual(h.skips(), []);
 	assert.deepEqual(h.gaps(), []);
 
-	// The window, then one pass below it for threads still active inside it.
+	// The client's own counts and search decide what is read: the quiet
+	// channel is never asked for, and the old thread with a recent reply is
+	// read directly instead of scanning below the floor for it.
+	assert.equal(api.calls.filter((c) => c.method === "client.counts").length, 1);
+	assert.equal(
+		api.calls.find((c) => c.method === "search.messages")?.params.query,
+		"after:2026-09-20",
+	);
 	const general = historyCalls(api, "C0123456789");
 	assert.deepEqual(
 		general.map((c) => [c.params.oldest, c.params.latest, c.params.cursor]),
 		[
 			[String(FLOOR_7D), undefined, undefined],
 			[String(FLOOR_7D), undefined, "bmV4dF90czoxNzkwMzAwMDAw"],
-			[String(FLOOR_7D - 30 * DAY), String(FLOOR_7D), undefined],
 		],
 	);
+	assert.equal(general[0]?.params.limit, "999");
+	assert.deepEqual(historyCalls(api, "C0777777777"), []);
 	assert.deepEqual(
 		api.calls
 			.filter((c) => c.method === "conversations.replies")
@@ -169,10 +188,110 @@ test("a first run reads the window, active threads, and the directory, then chec
 		);
 	}
 	const [coverage] = h.coverage();
-	assert.equal(coverage?.considered, 4);
-	assert.equal(coverage?.covered, 3);
+	assert.equal(coverage?.considered, 5);
+	assert.equal(coverage?.covered, 4);
 	assert.deepEqual(coverage?.optional_skip_keys, ["C0555555555"]);
 	assert.equal(coverage?.gap_keys, undefined);
+	assert.deepEqual(coverage?.required_keys, [
+		"C0123456789",
+		"C0987654321",
+		"D0123456789",
+		"C0555555555",
+	]);
+});
+
+test("reading several conversations at once yields the same records", async () => {
+	const h = harness(ALL_STREAMS);
+	await run(h, fakeApi(), {}, FIXTURE_NOW, 3);
+	const sequential = harness(ALL_STREAMS);
+	await run(sequential);
+	assert.deepEqual(
+		h
+			.of("messages")
+			.map((m) => m.id)
+			.sort(),
+		sequential
+			.of("messages")
+			.map((m) => m.id)
+			.sort(),
+	);
+	assert.deepEqual(h.state("messages"), sequential.state("messages"));
+});
+
+test("without search, a first read scans below the floor for active threads", async () => {
+	const h = harness(["messages"]);
+	const api = await run(
+		h,
+		fakeApi((call) =>
+			call.method === "search.messages"
+				? { ok: false, error: "missing_scope" }
+				: undefined,
+		),
+	);
+	const general = historyCalls(api, "C0123456789");
+	assert.deepEqual(
+		general.map((c) => [c.params.oldest, c.params.latest]),
+		[
+			[String(FLOOR_7D), undefined],
+			[String(FLOOR_7D), undefined],
+			[String(FLOOR_7D - 30 * DAY), String(FLOOR_7D)],
+		],
+	);
+	assert.ok(
+		h.of("messages").some((m) => m.id === "C0123456789:1790000000.000700"),
+	);
+	assert.ok(
+		!h.of("messages").some((m) => m.id === "C0123456789:1788100000.000800"),
+	);
+	assert.deepEqual(historyCalls(api, "C0777777777"), [], "counts still prune");
+});
+
+test("without counts, every conversation is read", async () => {
+	const h = harness(["messages"]);
+	const api = await run(
+		h,
+		fakeApi((call) =>
+			call.method === "client.counts"
+				? { ok: false, error: "missing_scope" }
+				: undefined,
+		),
+	);
+	assert.equal(historyCalls(api, "C0777777777").length, 1);
+	assert.equal(
+		historyCalls(api, "C0123456789").length,
+		2,
+		"search still names the threads",
+	);
+});
+
+test("asking for the whole history reads every conversation without asking counts or search", async () => {
+	const h = harness(["messages"]);
+	const api = await run(h, fakeApi(), { lookbackDays: 0 });
+	assert.ok(!api.calls.some((c) => c.method === "client.counts"));
+	assert.ok(!api.calls.some((c) => c.method === "search.messages"));
+	assert.equal(historyCalls(api, "C0777777777").length, 1);
+	assert.equal(historyCalls(api, "C0123456789")[0]?.params.oldest, undefined);
+});
+
+test("a closed browser page ends the run at once", async () => {
+	const h = harness(["messages", "reactions"]);
+	await run(
+		h,
+		fakeApi((call) =>
+			call.method === "conversations.history" &&
+			call.params.channel === "C0987654321"
+				? new SlackApiError("conversations.history", "page_gone", false, null)
+				: undefined,
+		),
+	);
+	assert.deepEqual(
+		h.skips().map((s) => [s.stream, s.reason]),
+		[
+			["messages", "collection_interrupted"],
+			["reactions", "collection_interrupted"],
+		],
+	);
+	assert.equal(h.messages.filter((m) => m.type === "STATE").length, 0);
 });
 
 test("a later run reads from a week before each conversation's cursor and re-emits nothing unchanged", async () => {
@@ -219,9 +338,12 @@ test("asking for more history than the cursor covers walks every conversation do
 		state: { messages: first.state("messages") },
 	});
 	const api = await run(second, fakeApi(), { lookbackDays: 30 });
-	const [head, , threads] = historyCalls(api, "C0123456789");
+	const [head] = historyCalls(api, "C0123456789");
 	assert.equal(head?.params.oldest, String(FLOOR_30D));
-	assert.equal(threads?.params.latest, String(FLOOR_30D));
+	assert.equal(
+		api.calls.find((c) => c.method === "search.messages")?.params.query,
+		`after:${new Date((FLOOR_30D - DAY) * 1000).toISOString().slice(0, 10)}`,
+	);
 	assert.equal(second.state("messages")?.floor_ts, FLOOR_30D);
 });
 
@@ -250,9 +372,9 @@ test("a full refresh ignores every cursor", async () => {
 		historyCalls(api, "C0123456789")[0]?.params.oldest,
 		String(FLOOR_7D),
 	);
-	assert.equal(historyCalls(api, "C0123456789").length, 3);
+	assert.equal(historyCalls(api, "C0123456789").length, 2);
 	assert.equal(second.of("users").length, 3);
-	assert.equal(second.of("channels").length, 4);
+	assert.equal(second.of("channels").length, 5);
 });
 
 test("a requested start later than the lookback floor wins", async () => {
@@ -330,7 +452,7 @@ test("a conversation Slack stopped answering is a gap; its cursor stays put", as
 	});
 	const [coverage] = h.coverage();
 	assert.deepEqual(coverage?.gap_keys, ["C0987654321"]);
-	assert.equal(coverage?.covered, 2);
+	assert.equal(coverage?.covered, 3);
 	const cursor = h.state("messages")?.channel_last_ts as Record<string, string>;
 	assert.equal(cursor.C0987654321, undefined);
 	assert.equal(cursor.C0123456789, "1790450000.000200");

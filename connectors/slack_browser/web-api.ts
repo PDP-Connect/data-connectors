@@ -26,6 +26,11 @@ import { envelopeSchema, signedInTeamsSchema } from "./schemas.ts";
 import type { SignedInTeam } from "./types.ts";
 
 export const APP_ORIGIN = "https://app.slack.com";
+export const WRONG_ORIGIN_PREFIX = "wrong_origin:";
+/** The page the calls run in was closed or its context torn down; no retry can bring it back. */
+export const PAGE_GONE_REASON = "page_gone";
+const PAGE_GONE_RE =
+	/has been closed|Target closed|Execution context was destroyed|Session closed|browser has disconnected/i;
 /** Slack's own guidance for Tier 3 methods is about one call per second; this stays under it with headroom for retries. */
 export const REQUEST_PAUSE_MS = 350;
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -94,6 +99,14 @@ export class SlackApiError extends Error {
 		this.retryable = retryable;
 		this.httpStatus = httpStatus;
 	}
+}
+
+/** A fault of the browser page itself, not of Slack: the run cannot continue on this page. */
+export function isHostFault(error: SlackApiError): boolean {
+	return (
+		error.reason === PAGE_GONE_REASON ||
+		error.reason.startsWith(WRONG_ORIGIN_PREFIX)
+	);
 }
 
 export interface SlackApiClient {
@@ -241,7 +254,7 @@ function classify(method: string, outcome: SlackCallOutcome): Verdict {
 				kind: "fatal",
 				error: new SlackApiError(
 					method,
-					`wrong_origin:${outcome.origin}`,
+					`${WRONG_ORIGIN_PREFIX}${outcome.origin}`,
 					false,
 					null,
 				),
@@ -249,6 +262,12 @@ function classify(method: string, outcome: SlackCallOutcome): Verdict {
 		case "no_session":
 			return { kind: "fatal", error: new SlackSessionLostError(null) };
 		case "network_error":
+			if (PAGE_GONE_RE.test(outcome.message)) {
+				return {
+					kind: "fatal",
+					error: new SlackApiError(method, PAGE_GONE_REASON, false, null),
+				};
+			}
 			return { kind: "retry", reason: `network_error:${outcome.message}` };
 		default:
 			break;
