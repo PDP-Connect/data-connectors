@@ -558,7 +558,9 @@
 		"manifest": {
 			"connector_key": "strava-browser",
 			"reason_display_messages": {
+				"covered_in_full": "All Strava activities in the selected date range have already been collected.",
 				"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
+				"nothing_in_range": "Strava has no activities in the selected date range.",
 				"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 				"sign_in_required": "Strava needs you to sign in again before this can continue.",
 				"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
