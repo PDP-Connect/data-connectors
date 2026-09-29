@@ -1096,6 +1096,49 @@ function makeConvo(
 	};
 }
 
+function makeConversationListingHarness(
+	walks: ReadonlyArray<{ items: ConversationListItem[]; total?: number }>,
+): RecordingHarness & { listWalks: () => number } {
+	const harness = makeRecordingEmit(validateRecord);
+	let walkIndex = -1;
+	const api: ChatGptApi = {
+		auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (!path.startsWith("/conversations?")) {
+				return Promise.resolve({ status: 404, json: null });
+			}
+			const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+			if (offset === 0) {
+				walkIndex += 1;
+			}
+			const walk = walks[Math.min(walkIndex, walks.length - 1)];
+			if (!walk) {
+				throw new Error("listing fixture must contain at least one walk");
+			}
+			return Promise.resolve({
+				status: 200,
+				json: {
+					items: walk.items.slice(offset, offset + 100),
+					...(walk.total === undefined ? {} : { total: walk.total }),
+				},
+			});
+		},
+	};
+	return {
+		deps: {
+			api,
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: (): Promise<void> => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		emitted: harness.emitted,
+		messages: harness.protocolMessages,
+		skipped: harness.skipped,
+		listWalks: () => walkIndex + 1,
+	};
+}
+
 function makeDetailGapFromConvo(
 	gapId: string,
 	conversation: ConversationListItem,
@@ -1222,6 +1265,150 @@ function makeEmitConversation(
 		await deps.emitRecord("conversations", buildConversationRecord(c, detail));
 	};
 }
+
+// Full-list completeness regressions: short/unstable walks must not produce
+// a complete stream result or advance from an unproven boundary.
+test("full conversation listing accepts the stable full ID set after an initial short walk", async () => {
+	const short = [makeConvo({ id: "a" })];
+	const full = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
+	const fixture = makeConversationListingHarness([
+		{ items: short },
+		{ items: full },
+		{ items: full },
+	]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.deepEqual(
+		fixture.emitted.map((record) => record.data.id),
+		["a", "b"],
+		"the connector emits the agreed full ID set after a short first walk",
+	);
+	assert.equal(fixture.listWalks(), 3);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("full conversation listing stays partial when three cursor-less walks never agree", async () => {
+	const fixture = makeConversationListingHarness([
+		{ items: [makeConvo({ id: "a" })] },
+		{ items: [makeConvo({ id: "b" })] },
+		{ items: [makeConvo({ id: "c" })] },
+	]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	const skip = fixture.messages.find(
+		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			message.type === "SKIP_RESULT",
+	);
+	assert.equal(skip?.reason, "conversation_list_unstable");
+	assert.deepEqual(skip?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	assert.deepEqual(skip?.diagnostics, {
+		attempts: 3,
+		walk_counts: [1, 1, 1],
+		last_reported_total: null,
+	});
+	assert.equal(fixture.emitted.length, 0, "unstable IDs are not emitted");
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+		"an unstable listing has no complete coverage claim",
+	);
+});
+
+test("stable full conversation listing without total requires exactly two walks", async () => {
+	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
+	const fixture = makeConversationListingHarness([{ items }, { items }]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.equal(fixture.listWalks(), 2);
+	assert.deepEqual(
+		fixture.emitted.map((record) => record.data.id),
+		["a", "b"],
+	);
+});
+
+test("short matching walks cannot satisfy a reported total", async () => {
+	const items = [makeConvo({ id: "a" })];
+	const fixture = makeConversationListingHarness([
+		{ items, total: 2 },
+		{ items, total: 2 },
+		{ items, total: 2 },
+	]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	const skip = fixture.messages.find(
+		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			message.type === "SKIP_RESULT",
+	);
+	assert.equal(skip?.reason, "conversation_list_unstable");
+	assert.deepEqual(skip?.diagnostics, {
+		attempts: 3,
+		walk_counts: [1, 1, 1],
+		last_reported_total: 2,
+	});
+	assert.equal(fixture.listWalks(), 3);
+	assert.equal(fixture.emitted.length, 0);
+});
+
+test("zero total with non-empty IDs is missing and falls back to two-walk agreement", async () => {
+	const items = [makeConvo({ id: "a" })];
+	const fixture = makeConversationListingHarness([
+		{ items, total: 0 },
+		{ items, total: 0 },
+	]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.equal(fixture.listWalks(), 2);
+	assert.deepEqual(
+		fixture.emitted.map((record) => record.data.id),
+		["a"],
+	);
+});
+
+test("a full walk that reaches a usable total needs exactly one listing walk", async () => {
+	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
+	const fixture = makeConversationListingHarness([{ items, total: 2 }]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.equal(fixture.listWalks(), 1);
+	assert.deepEqual(
+		fixture.emitted.map((record) => record.data.id),
+		["a", "b"],
+	);
+});
+
+test("duplicate rows do not count toward a reported total of unique conversation IDs", async () => {
+	const duplicateRows = [makeConvo({ id: "a" }), makeConvo({ id: "a" })];
+	const fixture = makeConversationListingHarness([
+		{ items: duplicateRows, total: 2 },
+		{ items: duplicateRows, total: 2 },
+		{ items: duplicateRows, total: 2 },
+	]);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.equal(fixture.listWalks(), 3);
+	assert.equal(
+		fixture.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "conversation_list_unstable",
+		),
+		true,
+	);
+	assert.equal(fixture.emitted.length, 0);
+});
 
 // ─── Invariant 1: emit order (current ChatGPT contract) ──────────────────
 // NOTE: unlike most connectors (accounts-before-transactions,

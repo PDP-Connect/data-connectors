@@ -2466,7 +2466,7 @@ function isUnreadableJsonBody(res: ChatGptFetchResult): boolean {
  * identically: stop, and prove nothing.
  */
 type ChatGptListPage<T> =
-	| { ok: true; items: T[] }
+	| { ok: true; items: T[]; json: Record<string, unknown> }
 	| { ok: false; skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }> };
 
 /**
@@ -2605,7 +2605,7 @@ function classifyChatGptListPage<T>(
 			},
 		};
 	}
-	return { ok: true, items: json[listKey] as T[] };
+	return { ok: true, items: json[listKey] as T[], json };
 }
 
 /**
@@ -2926,6 +2926,9 @@ export async function runSharedConversationsStream(
 interface ConversationListResult {
 	items: ConversationListItem[];
 	truncated: boolean;
+	// Null when pages disagree, the value is malformed, or it falls below the
+	// number of distinct IDs collected in this walk.
+	total: number | null;
 }
 
 /**
@@ -2942,7 +2945,84 @@ async function listConversationsSinceCursor(
 	deps: StreamDeps,
 	priorCursor: string | null,
 ): Promise<ConversationListResult> {
+	if (priorCursor !== null) {
+		return listConversationWalk(deps, priorCursor);
+	}
+
+	const walkCounts: number[] = [];
+	let previous: ConversationListResult | null = null;
+	let sawUnreachedTotal = false;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		if (attempt > 0) {
+			await new Promise((resolve) => setTimeout(resolve, 500));
+		}
+		const current = await listConversationWalk(deps, null);
+		if (current.truncated) {
+			return current;
+		}
+		const currentUniqueCount = new Set(
+			current.items.map((item) => item.id),
+		).size;
+		walkCounts.push(currentUniqueCount);
+		if (current.total !== null) {
+			if (currentUniqueCount >= current.total) {
+				return current;
+			}
+			sawUnreachedTotal = true;
+			previous = current;
+			continue;
+		}
+		if (
+			!sawUnreachedTotal &&
+			previous &&
+			previous.total === null &&
+			sameConversationIdSet(previous.items, current.items)
+		) {
+			return current;
+		}
+		previous = current;
+	}
+
+	for (const stream of ["conversations", "messages"] as const) {
+		if (!deps.requested.has(stream)) {
+			continue;
+		}
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "conversation_list_unstable",
+			message: "ChatGPT conversation listing changed across three full walks; retry this stream",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: {
+				attempts: walkCounts.length,
+				walk_counts: walkCounts,
+				last_reported_total: previous?.total ?? null,
+			},
+		});
+	}
+	return { items: [], truncated: true, total: previous?.total ?? null };
+}
+
+function sameConversationIdSet(
+	left: readonly ConversationListItem[],
+	right: readonly ConversationListItem[],
+): boolean {
+	const leftIds = new Set(left.map((item) => item.id));
+	const rightIds = new Set(right.map((item) => item.id));
+	return (
+		leftIds.size === rightIds.size &&
+		[...leftIds].every((id) => rightIds.has(id))
+	);
+}
+
+/** One offset walk. Cursor-less callers add repeated-walk completeness proof above. */
+async function listConversationWalk(
+	deps: StreamDeps,
+	priorCursor: string | null,
+): Promise<ConversationListResult> {
 	const convosToSync: ConversationListItem[] = [];
+	let reportedTotal: number | null = null;
+	let invalidTotal = false;
 	let offset = 0;
 	const limit = 100;
 	let stopPaging = false;
@@ -2969,9 +3049,19 @@ async function listConversationsSinceCursor(
 		page += 1;
 		if (!classified.ok) {
 			deps.emit(classified.skip);
-			return { items: convosToSync, truncated: true };
+			return { items: convosToSync, truncated: true, total: null };
 		}
 		const { items } = classified;
+		const pageTotal = conversationListTotal(classified.json);
+		if (pageTotal === null) {
+			invalidTotal = true;
+		} else if (pageTotal !== undefined) {
+			if (reportedTotal !== null && reportedTotal !== pageTotal) {
+				invalidTotal = true;
+			} else {
+				reportedTotal = pageTotal;
+			}
+		}
 		if (!items.length) {
 			break;
 		}
@@ -3009,10 +3099,24 @@ async function listConversationsSinceCursor(
 				},
 				diagnostics: { offset, collected: convosToSync.length },
 			});
-			return { items: convosToSync, truncated: true };
+			return { items: convosToSync, truncated: true, total: null };
 		}
 	}
-	return { items: convosToSync, truncated: false };
+	const uniqueIds = new Set(convosToSync.map((item) => item.id)).size;
+	const total = invalidTotal || (reportedTotal !== null && reportedTotal < uniqueIds)
+		? null
+		: reportedTotal;
+	return { items: convosToSync, truncated: false, total };
+}
+
+function conversationListTotal(json: ChatGptJson): number | null | undefined {
+	if (!json || !isChatGptJsonObject(json) || !("total" in json)) {
+		return undefined;
+	}
+	const { total } = json;
+	return typeof total === "number" && Number.isSafeInteger(total) && total >= 0
+		? total
+		: null;
 }
 
 function conversationIsAfterCursor(
