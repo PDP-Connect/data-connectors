@@ -59,8 +59,8 @@ export function parseHeartRateStream(body: string): {
 	};
 }
 
-/** Use the gear identifier already exposed on the activity list model. */
-export function activityGear(model: unknown): string | null {
+/** Read the gear identifier already exposed on the activity list model. */
+export function activityGearId(model: unknown): string | null {
 	if (!isRecord(model)) return null;
 	for (const key of ["athlete_gear_id", "bike_id"] as const) {
 		const value = model[key];
@@ -72,4 +72,30 @@ export function activityGear(model: unknown): string | null {
 		}
 	}
 	return null;
+}
+
+/** Parse the gear list shape exposed by Strava's signed-in bikes/shoes JSON. */
+export function parseGearNames(body: string): Map<string, string> | null {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(payload)) return null;
+	const names = new Map<string, string>();
+	for (const item of payload) {
+		if (!isRecord(item)) continue;
+		const id = item.id;
+		const name = item.display_name;
+		if (
+			((typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
+				(typeof id === "string" && /^\d{1,30}$/.test(id))) &&
+			typeof name === "string" &&
+			name.trim().length > 0
+		) {
+			names.set(String(id), name.trim());
+		}
+	}
+	return names;
 }

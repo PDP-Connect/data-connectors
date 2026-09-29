@@ -29,6 +29,7 @@ const PAGES: Record<string, string> = {
 };
 const ACTIVITY_DETAIL = fixture("activity-detail-synthetic.html");
 const ACTIVITY_HEARTRATE = fixture("activity-heartrate-stream-synthetic.json");
+const GEAR_BIKES = fixture("gear-bikes-synthetic.json");
 const manifest = (dir: string) =>
 	JSON.parse(
 		readFileSync(new URL(`../${dir}/manifest.json`, import.meta.url), "utf8"),
@@ -63,12 +64,32 @@ async function withStrava<T>(
 	fetcher: Fetcher,
 	run: () => Promise<T>,
 	origin = ORIGIN,
+	gearBikes = GEAR_BIKES,
 ): Promise<T> {
 	const savedFetch = globalThis.fetch;
 	const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+	const savedDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+	const savedPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
 	Object.defineProperty(globalThis, "location", {
 		configurable: true,
 		value: { origin },
+	});
+	Object.defineProperty(globalThis, "document", {
+		configurable: true,
+		value: {
+			querySelectorAll: () => [
+				{ getAttribute: () => "/athletes/900001" },
+			],
+		},
+	});
+	Object.defineProperty(globalThis, "performance", {
+		configurable: true,
+		value: {
+			getEntriesByType: () => [
+				{ name: `${ORIGIN}/athletes/900001/gear/bikes` },
+				{ name: `${ORIGIN}/athletes/900001/gear/shoes` },
+			],
+		},
 	});
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = new URL(String(input), origin);
@@ -80,6 +101,12 @@ async function withStrava<T>(
 		if (/^\/activities\/\d+\/streams$/.test(url.pathname)) {
 			return json(ACTIVITY_HEARTRATE);
 		}
+		if (/^\/athletes\/\d+\/gear\/bikes$/.test(url.pathname)) {
+			return json(gearBikes);
+		}
+		if (/^\/athletes\/\d+\/gear\/shoes$/.test(url.pathname)) {
+			return json("[]");
+		}
 		return fetcher(url, init);
 	}) as typeof fetch;
 	try {
@@ -90,6 +117,16 @@ async function withStrava<T>(
 			Object.defineProperty(globalThis, "location", savedLocation);
 		} else {
 			Reflect.deleteProperty(globalThis, "location");
+		}
+		if (savedDocument) {
+			Object.defineProperty(globalThis, "document", savedDocument);
+		} else {
+			Reflect.deleteProperty(globalThis, "document");
+		}
+		if (savedPerformance) {
+			Object.defineProperty(globalThis, "performance", savedPerformance);
+		} else {
+			Reflect.deleteProperty(globalThis, "performance");
 		}
 	}
 }
@@ -228,9 +265,25 @@ test("activity records include heart-rate summary and calories from detail resou
 			average_heartrate: 81.2,
 			max_heartrate: 90,
 			calories_kcal: 42,
-			gear: null,
+			gear: "Synthetic Test Bike",
 		},
 	);
+});
+
+test("unmatched gear ids emit null with a reason in skip diagnostics", async () => {
+	const h = harness(BOTH);
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(h.ctx, FAST),
+		ORIGIN,
+		"[]",
+	);
+	assert.equal(h.of("activities")[0]?.gear, null);
+	assert.equal(
+		JSON.stringify(h.messages).includes('"gear_id_unmatched":1'),
+		true,
+	);
+	assert.equal(h.of("activities")[0]?.gear, null);
 });
 
 test("a detail bound saves the last completed activity and resumes after it", async () => {

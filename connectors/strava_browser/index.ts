@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Strava browser connector (v0.2.0).
+ * PDPP Strava browser connector (v0.1.2).
  *
  * The browser-session profile of the Strava source. `strava` stays the
  * account-export profile; both declare the same source, streams and record
@@ -34,8 +34,9 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
-	activityGear,
+	activityGearId,
 	parseActivityCalories,
+	parseGearNames,
 	parseHeartRateStream,
 } from "./details.ts";
 import {
@@ -62,6 +63,7 @@ export const PAGE_DELAY_MS = 1000;
 export const ACTIVITY_DELAY_MS = 1500;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_DELAY_MS = 30_000;
+const GEAR_LIST_DELAY_MS = 1000;
 
 /** The coverage reasons a browser run can end on; the others are export-only. */
 type CoverageReason =
@@ -364,9 +366,11 @@ async function fetchActivityRecordFields(
 	page: StravaCollectContext["page"],
 	model: unknown,
 	activityId: string,
+	resolveGearName: (gearId: string) => Promise<GearResolution>,
 ): Promise<
 	| {
 			ok: true;
+			gearReason?: string;
 			fields: {
 				average_heartrate: number | null;
 				max_heartrate: number | null;
@@ -406,15 +410,76 @@ async function fetchActivityRecordFields(
 			message: "Strava returned an unknown activity heartrate stream shape.",
 		};
 	}
+	const gearId = activityGearId(model);
+	const gear = gearId ? await resolveGearName(gearId) : { name: null };
 	return {
 		ok: true,
+		...(gear.reason ? { gearReason: gear.reason } : {}),
 		fields: {
 			average_heartrate: heartRate.average,
 			max_heartrate: heartRate.maximum,
 			calories_kcal: parseActivityCalories(detail.body),
-			gear: activityGear(model),
+			gear: gear.name,
 		},
 	};
+}
+
+type GearResolution = { name: string | null; reason?: string };
+
+type GearLookup =
+	| { ok: true; names: Map<string, string> }
+	| { ok: false; reason: string };
+
+/** Observe the gear settings JSON routes and read both owner gear lists. */
+async function fetchGearNames(
+	page: StravaCollectContext["page"],
+): Promise<GearLookup> {
+	await page.goto(`${ORIGIN}/settings/gear`, { waitUntil: "domcontentloaded" });
+	const readPaths = () => page.evaluate(() => {
+		const found = new Set<string>();
+		for (const entry of performance.getEntriesByType("resource")) {
+			try {
+				const path = new URL(entry.name).pathname;
+				if (/^\/athletes\/\d+\/gear\/(?:bikes|shoes)$/.test(path)) {
+					found.add(path);
+				}
+			} catch {
+				// Ignore non-URL performance entries.
+			}
+		}
+		return [...found];
+	});
+	const categories = new Map<string, string>();
+	for (let attempt = 0; attempt < 20; attempt += 1) {
+		const paths = await readPaths();
+		for (const path of paths ?? []) {
+			const match = /^\/athletes\/\d+\/gear\/(bikes|shoes)$/.exec(path);
+			if (match?.[1]) categories.set(match[1], path);
+		}
+		if (categories.has("bikes") && categories.has("shoes")) break;
+		await delay(500);
+	}
+	if (!categories.has("bikes") || !categories.has("shoes")) {
+		return { ok: false, reason: "gear_lists_unavailable" };
+	}
+	const names = new Map<string, string>();
+	for (const category of ["bikes", "shoes"] as const) {
+		if (category === "shoes") await delay(GEAR_LIST_DELAY_MS);
+		const response = classifyActivityResponse(
+			await fetchActivityResource(
+				page,
+				categories.get(category) as string,
+				"application/json, text/javascript",
+			),
+			"json",
+			"gear list",
+		);
+		if (!response.ok) return { ok: false, reason: `gear_${response.reason}` };
+		const parsed = parseGearNames(response.body);
+		if (!parsed) return { ok: false, reason: "gear_list_unreadable" };
+		for (const [id, name] of parsed) names.set(id, name);
+	}
+	return { ok: true, names };
 }
 
 type PageOutcome =
@@ -562,6 +627,17 @@ export async function collectStravaBrowser(
 	let failure: { reason: CoverageReason; message: string } | null = null;
 	let finished = false;
 	let lastDetailAt = 0;
+	let gearLookupPromise: Promise<GearLookup> | null = null;
+	const gearUnresolvedReasons: Record<string, number> = {};
+	const resolveGearName = async (gearId: string): Promise<GearResolution> => {
+		gearLookupPromise ??= fetchGearNames(ctx.page);
+		const lookup = await gearLookupPromise;
+		if (!lookup.ok) return { name: null, reason: lookup.reason };
+		const name = lookup.names.get(gearId);
+		return name
+			? { name }
+			: { name: null, reason: "gear_id_unmatched" };
+	};
 
 	while (pagesRead < maxPages) {
 		if (pagesRead > 0) {
@@ -646,6 +722,7 @@ export async function collectStravaBrowser(
 				ctx.page,
 				model,
 				record.id,
+				resolveGearName,
 			);
 			if (!detail.ok) {
 				failure = detail;
@@ -653,6 +730,10 @@ export async function collectStravaBrowser(
 			}
 			lastDetailAt = Date.now();
 			detailsRead += 1;
+			if (detail.gearReason) {
+				gearUnresolvedReasons[detail.gearReason] =
+					(gearUnresolvedReasons[detail.gearReason] ?? 0) + 1;
+			}
 			const enriched = { ...record, ...detail.fields };
 			await ctx.emitRecord(ACTIVITIES_STREAM, enriched);
 			emitted += 1;
@@ -720,7 +801,37 @@ export async function collectStravaBrowser(
 				(reason === "source_limit_reached"
 					? `Stopped after ${detailsRead} activity details or ${pagesRead} list pages; the saved activity cursor continues on the next run.`
 					: `${unreadable} activities in the Strava list had no usable id or start time.`),
-			diagnostics: { pages_read: pagesRead, unreadable },
+			diagnostics: {
+				pages_read: pagesRead,
+				unreadable,
+				...(Object.keys(gearUnresolvedReasons).length > 0
+					? {
+							gear_name_unresolved: Object.values(
+								gearUnresolvedReasons,
+							).reduce((sum, count) => sum + count, 0),
+							gear_name_reasons: gearUnresolvedReasons,
+						}
+					: {}),
+			},
+		});
+	} else if (Object.keys(gearUnresolvedReasons).length > 0) {
+		const gearReasonSummary = Object.entries(gearUnresolvedReasons)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([name, count]) => `${name}=${count}`)
+			.join(",");
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: ACTIVITIES_STREAM,
+			reason: "records_unreadable",
+			message:
+				`Some activities had a gear id whose name could not be read; gear was emitted as null (${gearReasonSummary}).`,
+			diagnostics: {
+				gear_name_unresolved: Object.values(gearUnresolvedReasons).reduce(
+					(sum, count) => sum + count,
+					0,
+				),
+				gear_name_reasons: gearUnresolvedReasons,
+			},
 		});
 	}
 

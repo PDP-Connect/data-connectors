@@ -1,0 +1,10 @@
+[
+	{
+		"id": 987654,
+		"display_name": "Synthetic Test Bike",
+		"active": true,
+		"default": false,
+		"total_distance": "0",
+		"description": "Synthetic fixture gear"
+	}
+]

@@ -5,8 +5,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-	activityGear,
+	activityGearId,
 	parseActivityCalories,
+	parseGearNames,
 	parseHeartRateStream,
 } from "./details.ts";
 
@@ -33,8 +34,18 @@ test("summarizes the activity page's heartrate stream samples", () => {
 	assert.equal(parseHeartRateStream("not json"), null);
 });
 
-test("uses an activity's exposed gear id, then bike id, and preserves absence", () => {
-	assert.equal(activityGear({ athlete_gear_id: 123 }), "123");
-	assert.equal(activityGear({ bike_id: "456" }), "456");
-	assert.equal(activityGear({ athlete_gear_id: null, bike_id: null }), null);
+test("reads an activity's exposed gear identifier and preserves absence", () => {
+	assert.equal(activityGearId({ athlete_gear_id: 123 }), "123");
+	assert.equal(activityGearId({ bike_id: "456" }), "456");
+	assert.equal(activityGearId({ athlete_gear_id: null, bike_id: null }), null);
+	assert.equal(activityGearId({ athlete_gear_id: "bike-456" }), null);
+});
+
+test("maps only valid ids to displayed owner gear names", () => {
+	assert.deepEqual(
+		parseGearNames(fixture("gear-bikes-synthetic.json")),
+		new Map([["987654", "Synthetic Test Bike"]]),
+	);
+	assert.equal(parseGearNames('{"bikes":[]}'), null);
+	assert.equal(parseGearNames("not json"), null);
 });

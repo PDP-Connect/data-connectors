@@ -17,6 +17,7 @@ const pages = {
 };
 const activityDetail = fx("activity-detail-synthetic.html");
 const activityHeartrate = fx("activity-heartrate-stream-synthetic.json");
+const gearBikes = fx("gear-bikes-synthetic.json");
 const login = fx("login.html");
 
 const html = (body) => ({
@@ -60,8 +61,30 @@ export function resolveFixture(raw) {
 			body: activityHeartrate,
 		};
 	}
-	if (p === "/athlete/training" || p === "/dashboard")
-		return html("<!doctype html><html><body></body></html>");
+	if (/^\/athletes\/\d+\/gear\/bikes$/.test(p)) {
+		return {
+			status: 200,
+			contentType: "application/json; charset=utf-8",
+			body: gearBikes,
+		};
+	}
+	if (/^\/athletes\/\d+\/gear\/shoes$/.test(p)) {
+		return {
+			status: 200,
+			contentType: "application/json; charset=utf-8",
+			body: "[]",
+		};
+	}
+	if (p === "/settings/gear") {
+		return html(`<!doctype html><html><body><script>
+			fetch("/athletes/900001/gear/bikes");
+			fetch("/athletes/900001/gear/shoes");
+		</script></body></html>`);
+	}
+	if (p === "/athlete/training")
+		return html('<!doctype html><html><body><a href="/athletes/900001">Profile</a></body></html>');
+	if (p === "/dashboard")
+		return html('<!doctype html><html><body><a href="/athletes/900001">Profile</a></body></html>');
 	return { status: 404, contentType: "text/html", body: "<html></html>" };
 }
 

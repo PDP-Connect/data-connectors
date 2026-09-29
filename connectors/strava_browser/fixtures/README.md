@@ -16,6 +16,9 @@ Synthetic. No real athlete, activity or gear data.
 - `activity-heartrate-stream-synthetic.json`: the JSON shape from
   `GET /activities/{id}/streams?stream_types[]=heartrate`. The response object
   is keyed by `heartrate`, whose value is a sample array.
+- `gear-bikes-synthetic.json`: an invented item matching the signed-in
+  `GET /athletes/{id}/gear/bikes` response shape. Gear settings also loads
+  `GET /athletes/{id}/gear/shoes`, which returned an empty array when observed.
 - `login.html`: a sign-in form, the page a signed-out browser is sent to.
 
 Signed out, the same list URL answers HTTP 401 with a JSON body; the tests
