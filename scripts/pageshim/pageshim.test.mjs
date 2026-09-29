@@ -89,7 +89,9 @@ for (const name of PAGESHIM_CONNECTORS) {
 			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 			assert.equal(r.data.error, undefined);
 			assertCleanRun(r);
-			assert.deepEqual(r.result.errors, []);
+			assert.deepEqual(r.result.errors, c.partialErrors ?? []);
+			if (c.partialErrors) assert.match(r.data.status, /^Partial:/);
+			else assert.match(r.data.status, /^Complete!/);
 			for (const scope of c.scopes)
 				assert.ok(r.result[scope], `missing ${scope}`);
 			assert.deepEqual(r.result.exportSummary, c.exportSummary);
@@ -143,6 +145,101 @@ for (const name of PAGESHIM_CONNECTORS) {
 		});
 	});
 }
+
+test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	fx.useConversationCount(1);
+	try {
+		const built = await buildPageshim({
+			connector: "chatgpt",
+			outfile: join(out, "chatgpt-complete.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: fx.pageshimCase.scopes,
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.match(r.data.status, /^Complete!/);
+		assert.deepEqual(r.result.exportSummary, {
+			count: 1,
+			label: "conversation",
+			details: { conversations: 1, messages: 1 },
+		});
+	} finally {
+		fx.useConversationCount(2);
+	}
+});
+
+test("chatgpt: capped PageShim walk reports partial with omitted detail evidence", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	fx.useConversationCount(2);
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-partial.js"),
+	});
+	const r = await runHarness({
+		bundle: built.outfile,
+		fixtures: fx.pageshimCase.fixtures,
+		scopes: fx.pageshimCase.scopes,
+		env: {
+			PDPP_CHATGPT_MAX_DETAIL_FETCHES_PER_RUN: "1",
+			PDPP_CHATGPT_MAX_TAIL_DEFERRAL_GAPS_PER_RUN: "1",
+		},
+	});
+	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+	assertCleanRun(r);
+	assert.deepEqual(r.result.exportSummary, {
+		count: 1,
+		label: "conversation",
+		details: { conversations: 1, messages: 1 },
+	});
+	assert.deepEqual(r.result.errors, [
+		{
+			errorClass: "partial",
+			reason:
+				"PageShim collected a bounded ChatGPT prefix with conversation details pending. PageShim does not persist STATE or DETAIL_GAP recovery state, so another PageShim run starts a new bounded walk instead of resuming this omitted tail.",
+			disposition: "degraded",
+			scope: "chatgpt.messages",
+			phase: "collect",
+		},
+	]);
+	assert.match(r.data.status, /^Partial:/);
+});
+
+test("chatgpt: HTTP 200 without a session token still prompts for login", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	fx.setEmptySession(true);
+	try {
+		const built = await buildPageshim({
+			connector: "chatgpt",
+			outfile: join(out, "chatgpt-empty-session.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: fx.pageshimCase.scopes,
+			loginWaitMs: 1000,
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assert.equal(r.calls.showBrowser, 1);
+		assert.deepEqual(r.pageNavigations, [
+			"https://chatgpt.com/",
+			"https://chatgpt.com/auth/login",
+		]);
+		assert.equal(r.result.errors[0].errorClass, "auth_failed");
+	} finally {
+		fx.setEmptySession(false);
+	}
+});
 
 test("github_browser: an incomplete stream is an omitted error", {
 	timeout: 180_000,
