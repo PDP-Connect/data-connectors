@@ -16612,7 +16612,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.1",
+				"version": "0.2.0",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -16649,10 +16649,10 @@
 					{
 						"name": "activities",
 						"required": false,
-						"description": "Workouts recorded on Strava, read from the activity list strava.com shows the signed-in owner. Location data and free text are excluded at the schema.",
+						"description": "Workouts recorded on Strava, read from the owner's account export. Location data and free text are excluded at the schema.",
 						"display": {
 							"label": "Your Strava activities",
-							"detail": "Sport, start time, distance, moving and elapsed time and elevation gain. Heart rate, calories and gear are not in the list strava.com serves and arrive empty from this profile. No route, no GPS coordinates, no activity titles or notes."
+							"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, average and maximum heart rate, calories and gear. No route, no GPS coordinates, no activity titles or notes."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -16753,8 +16753,8 @@
 								"group_by": ["activity_type"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
-						"freshness_strategy": "scheduled_window"
+						"coverage_strategy": "snapshot_import_receipt",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {

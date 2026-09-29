@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Strava browser connector (v0.1.0).
+ * PDPP Strava browser connector (v0.2.0).
  *
  * The browser-session profile of the Strava source. `strava` stays the
  * account-export profile; both declare the same source, streams and record
@@ -11,16 +11,16 @@
  * except by `freshness` ("live" here, "snapshot" there).
  *
  * Collection runs in the owner's own signed-in strava.com session and reads
- * the JSON strava.com's "My Activities" page loads:
+ * the JSON behind "My Activities", each activity's detail HTML, and the
+ * heartrate stream used by its page. The list is
  * `GET /athlete/training_activities?page=N&per_page=20`, newest first. There
  * is no credential in this code and no credential form: the owner signs in in
- * the browser. Heart rate, calories and gear are not in that list, so those
- * fields are null.
+ * the browser.
  *
  * Bounds: one page at a time, a pause between pages, at most
- * MAX_PAGES_PER_RUN pages per run. A run that stops at the bound saves the
- * next page and the next run continues from it. A resumed walk can re-see an
- * activity when new ones push the list down; the primary key collapses it.
+ * MAX_PAGES_PER_RUN pages and MAX_DETAILS_PER_RUN details per run. Detail
+ * reads are paced; a run that stops at a bound saves the last completed
+ * activity and the next run continues from it.
  *
  * Stream: activities.
  */
@@ -33,6 +33,11 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	activityGear,
+	parseActivityCalories,
+	parseHeartRateStream,
+} from "./details.ts";
 import {
 	buildActivityRecord,
 	parseTrainingActivitiesPage,
@@ -52,11 +57,38 @@ const LIST_HEADERS = {
 const ACTIVITIES_STREAM = "activities";
 const PER_PAGE = 20;
 export const MAX_PAGES_PER_RUN = 100;
+export const MAX_DETAILS_PER_RUN = 100;
 export const PAGE_DELAY_MS = 1000;
+export const ACTIVITY_DELAY_MS = 1500;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_DELAY_MS = 30_000;
 
-/** Structural subset shared by Desktop and PageShim collection runtimes. */
+/** The coverage reasons a browser run can end on; the others are export-only. */
+type CoverageReason =
+	| "collection_interrupted"
+	| "covered_in_full"
+	| "nothing_in_range"
+	| "records_unreadable"
+	| "sign_in_required"
+	| "source_limit_reached"
+	| "source_unreadable";
+
+/** The SKIP_RESULT reason for each coverage reason a run can end on. */
+const SKIP_REASON: Record<CoverageReason, string> = {
+	collection_interrupted: "collection_interrupted",
+	covered_in_full: "covered_in_full",
+	nothing_in_range: "nothing_in_range",
+	records_unreadable: "records_unreadable",
+	sign_in_required: "sign_in_required",
+	source_limit_reached: "source_limit_reached",
+	source_unreadable: "source_unreadable",
+};
+
+/**
+ * The part of the collect context this connector uses. Structural, so the
+ * desktop runtime and the PageShim runtime (which has no collection mode and
+ * no cursor store) both satisfy it.
+ */
 export interface StravaCollectContext {
 	collectionMode?: BrowserCollectContext["collectionMode"];
 	emit: BrowserCollectContext["emit"];
@@ -68,7 +100,9 @@ export interface StravaCollectContext {
 
 export interface StravaCollectOptions {
 	maxPages?: number;
+	maxDetails?: number;
 	pageDelayMs?: number;
+	activityDelayMs?: number;
 	rateLimitDelayMs?: number;
 }
 
@@ -77,6 +111,8 @@ interface ActivitiesState {
 	last_start_time?: string | null;
 	/** Set only while a walk is unfinished: the page to continue from. */
 	resume_page?: number | null;
+	/** Last activity whose detail was fully read during an unfinished walk. */
+	resume_after_id?: string | null;
 	/** Newest start collected so far by the unfinished walk, as a UTC instant. */
 	walk_newest_start_time?: string | null;
 	/**
@@ -225,23 +261,165 @@ async function fetchListPage(
 	);
 }
 
-type CollectionReason =
-	| "collection_interrupted"
-	| "sign_in_required"
-	| "source_limit_reached"
-	| "source_unreadable"
-	| "records_unreadable";
-const COLLECTION_SKIP_REASON: Record<CollectionReason, string> = {
-	collection_interrupted: "collection_interrupted",
-	records_unreadable: "records_unreadable",
-	sign_in_required: "sign_in_required",
-	source_limit_reached: "source_limit_reached",
-	source_unreadable: "source_unreadable",
-};
+/** Fetch only the detail document and the heartrate stream the page needs. */
+async function fetchActivityResource(
+	page: StravaCollectContext["page"],
+	pathname: string,
+	accept: string,
+): Promise<ListResponse> {
+	const result = await page.evaluate(
+		async ({ accept, origin, pathname }) => {
+			if (location.origin !== origin) {
+				return { kind: "wrong_origin", origin: location.origin };
+			}
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 30_000);
+			try {
+				const response = await fetch(pathname, {
+					credentials: "include",
+					headers: {
+						Accept: accept,
+						...(accept.includes("json")
+							? { "X-Requested-With": "XMLHttpRequest" }
+							: {}),
+					},
+					signal: controller.signal,
+				});
+				return {
+					kind: "response",
+					status: response.status,
+					url: response.url,
+					contentType: response.headers.get("content-type") ?? "",
+					body: await response.text(),
+				};
+			} catch (error) {
+				return {
+					kind: "network_error",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			} finally {
+				clearTimeout(timeout);
+			}
+		},
+		{ accept, origin: ORIGIN, pathname },
+	);
+	return (
+		(result as ListResponse | null) ?? {
+			kind: "network_error",
+			message: "the page did not return an activity detail result",
+		}
+	);
+}
+
+function classifyActivityResponse(
+	response: ListResponse,
+	expectedContentType: "html" | "json",
+	label: string,
+): PageOutcome {
+	if (response.kind === "wrong_origin" || response.kind === "network_error") {
+		return {
+			ok: false,
+			reason: "collection_interrupted",
+			message:
+				response.kind === "wrong_origin"
+					? `The browser left strava.com while reading ${label}.`
+					: `Strava could not be reached while reading ${label}.`,
+		};
+	}
+	let onLogin = false;
+	try {
+		onLogin = new URL(response.url).pathname.startsWith("/login");
+	} catch {
+		// A missing response URL is not itself a sign-in failure.
+	}
+	if (response.status === 401 || response.status === 403 || onLogin) {
+		return {
+			ok: false,
+			reason: "sign_in_required",
+			message: `Strava asked for sign-in while reading ${label}.`,
+		};
+	}
+	if (response.status === 429 || response.status >= 500) {
+		return {
+			ok: false,
+			reason: "collection_interrupted",
+			message: `Strava answered ${label} with HTTP ${response.status}; the run stopped to respect the rate limit or server error.`,
+		};
+	}
+	const hasExpectedType =
+		expectedContentType === "html"
+			? /html/i.test(response.contentType)
+			: /json/i.test(response.contentType);
+	if (response.status !== 200 || !hasExpectedType) {
+		return {
+			ok: false,
+			reason: "source_unreadable",
+			message: `Strava answered ${label} with HTTP ${response.status} (${response.contentType || "no content type"}), not the expected ${expectedContentType}.`,
+		};
+	}
+	return { ok: true, body: response.body };
+}
+
+async function fetchActivityRecordFields(
+	page: StravaCollectContext["page"],
+	model: unknown,
+	activityId: string,
+): Promise<
+	| {
+			ok: true;
+			fields: {
+				average_heartrate: number | null;
+				max_heartrate: number | null;
+				calories_kcal: number | null;
+				gear: string | null;
+			};
+	  }
+	| { ok: false; reason: CoverageReason; message: string }
+> {
+	const detail = classifyActivityResponse(
+		await fetchActivityResource(
+			page,
+			`/activities/${encodeURIComponent(activityId)}`,
+			"text/html",
+		),
+		"html",
+		"activity detail",
+	);
+	if (!detail.ok) return detail;
+	const query = new URLSearchParams();
+	query.append("stream_types[]", "heartrate");
+	const stream = classifyActivityResponse(
+		await fetchActivityResource(
+			page,
+			`/activities/${encodeURIComponent(activityId)}/streams?${query}`,
+			"application/json, text/javascript",
+		),
+		"json",
+		"activity heartrate stream",
+	);
+	if (!stream.ok) return stream;
+	const heartRate = parseHeartRateStream(stream.body);
+	if (!heartRate) {
+		return {
+			ok: false,
+			reason: "source_unreadable",
+			message: "Strava returned an unknown activity heartrate stream shape.",
+		};
+	}
+	return {
+		ok: true,
+		fields: {
+			average_heartrate: heartRate.average,
+			max_heartrate: heartRate.maximum,
+			calories_kcal: parseActivityCalories(detail.body),
+			gear: activityGear(model),
+		},
+	};
+}
 
 type PageOutcome =
 	| { ok: true; body: string }
-	| { ok: false; reason: CollectionReason; message: string };
+	| { ok: false; reason: CoverageReason; message: string };
 
 /** Classify one list response. Anything not plainly the JSON list fails. */
 function classify(response: ListResponse): PageOutcome {
@@ -317,9 +495,9 @@ const later = (a: string | null, b: string | null): string | null =>
 	!a ? b : !b ? a : a > b ? a : b;
 
 /**
- * The runtime's time-range rule, applied here too so emitted records obey
- * the requested period: by calendar day, since inclusive and until exclusive,
- * on `start_date`.
+ * The runtime's time-range rule, applied here too so the coverage record
+ * describes the records the run keeps: by calendar day, since inclusive and
+ * until exclusive, on `start_date`.
  */
 function isOutsideTimeRange(
 	startDate: string,
@@ -339,7 +517,9 @@ export async function collectStravaBrowser(
 		return;
 	}
 	const maxPages = options.maxPages ?? MAX_PAGES_PER_RUN;
+	const maxDetails = options.maxDetails ?? MAX_DETAILS_PER_RUN;
 	const pageDelayMs = options.pageDelayMs ?? PAGE_DELAY_MS;
+	const activityDelayMs = options.activityDelayMs ?? ACTIVITY_DELAY_MS;
 	const rateLimitDelayMs = options.rateLimitDelayMs ?? RATE_LIMIT_DELAY_MS;
 	const fullRefresh = ctx.collectionMode === "full_refresh";
 	const stored =
@@ -350,15 +530,19 @@ export async function collectStravaBrowser(
 	// asks for an earlier start, or none, the cursor would hide the gap, so the
 	// walk ignores it and goes down to the new start.
 	const storedFloor = stored.requested_since ?? null;
+	const hasPendingWalk =
+		stored.resume_after_id != null || stored.resume_page != null;
 	const cursorCovers =
-		(stored.last_start_time != null || stored.resume_page != null) &&
+		(stored.last_start_time != null || hasPendingWalk) &&
 		(storedFloor === null ||
 			(rangeSinceDay !== null && rangeSinceDay >= storedFloor));
-	// A full refresh ignores the cursor: activities are edited and deleted at
-	// the source, and only a whole walk can see that.
-	const prior: ActivitiesState = !fullRefresh && cursorCovers ? stored : {};
+	// Keep an unfinished walk's cursor even when Desktop requests a full refresh.
+	// The next invocation must continue after a recoverable SKIP_RESULT.
+	const prior: ActivitiesState =
+		cursorCovers && (!fullRefresh || hasPendingWalk) ? stored : {};
 	const floor = !fullRefresh && cursorCovers ? storedFloor : rangeSinceDay;
-	const since = prior.last_start_time ?? null;
+	const since = fullRefresh ? null : prior.last_start_time ?? null;
+	const resumeAfterId = prior.resume_after_id ?? null;
 	const firstPage = prior.resume_page ?? 1;
 
 	await ensureStravaOrigin(ctx.page);
@@ -366,13 +550,18 @@ export async function collectStravaBrowser(
 	let pageNumber = firstPage;
 	let pagesRead = 0;
 	let emitted = 0;
+	let detailsRead = 0;
 	let unreadable = 0;
 	let earliest: string | null = null;
 	let latest: string | null = null;
 	let walkNewest = prior.walk_newest_start_time ?? null;
+	let lastCompletedId = resumeAfterId;
+	let lastCompletedPage = prior.resume_page ?? firstPage;
+	let resumeLocated = resumeAfterId === null;
 	let previousFirstId: string | null = null;
-	let failure: { reason: CollectionReason; message: string } | null = null;
+	let failure: { reason: CoverageReason; message: string } | null = null;
 	let finished = false;
+	let lastDetailAt = 0;
 
 	while (pagesRead < maxPages) {
 		if (pagesRead > 0) {
@@ -393,8 +582,11 @@ export async function collectStravaBrowser(
 			finished = true;
 			break;
 		}
-		const records = parsed.models.map(buildActivityRecord);
-		const firstId = records.find((record) => record !== null)?.id ?? null;
+		const records = parsed.models.map((model) => ({
+			model,
+			record: buildActivityRecord(model),
+		}));
+		const firstId = records.find(({ record }) => record !== null)?.record?.id ?? null;
 		if (firstId !== null && firstId === previousFirstId) {
 			failure = {
 				reason: "source_unreadable",
@@ -404,31 +596,73 @@ export async function collectStravaBrowser(
 		}
 		previousFirstId = firstId;
 		let pageHasNewer = false;
-		for (const record of records) {
+		for (const { model, record } of records) {
 			if (!record) {
 				unreadable += 1;
 				continue;
 			}
 			const instant = startInstant(record);
-			// The list is newest first, so a page with nothing after the cursor
-			// and the requested start ends the walk.
-			if (
-				(!since || instant > since) &&
-				(!rangeSinceDay || record.start_date >= rangeSinceDay)
-			) {
-				pageHasNewer = true;
-			}
-			if (
-				(since && instant <= since) ||
-				isOutsideTimeRange(record.start_date, timeRange)
+			const inRequestedRange = !isOutsideTimeRange(
+				record.start_date,
+				timeRange,
+			);
+			const newerThanCursor = !since || instant > since;
+			if (newerThanCursor && inRequestedRange) pageHasNewer = true;
+
+			const beforeResumeAnchor = !resumeLocated;
+			if (beforeResumeAnchor) {
+				if (record.id === resumeAfterId) {
+					resumeLocated = true;
+					continue;
+				}
+				// Include only new activities above the saved position while finding
+				// the stable anchor; older leading records already completed.
+				const completedThrough =
+					prior.last_start_time ?? prior.walk_newest_start_time;
+				if (
+					!completedThrough ||
+					instant <= completedThrough ||
+					!inRequestedRange
+				) {
+					continue;
+				}
+			} else if (
+				(!resumeAfterId || !prior.last_start_time) &&
+				((since && instant <= since) || !inRequestedRange)
 			) {
 				continue;
+			} else if (resumeAfterId && !inRequestedRange) {
+				continue;
 			}
-			await ctx.emitRecord(ACTIVITIES_STREAM, { ...record });
+			if (detailsRead >= maxDetails) {
+				failure = {
+					reason: "source_limit_reached",
+					message: `Stopped after ${detailsRead} activity details; the activity cursor continues on the next run.`,
+			};
+				break;
+			}
+			if (lastDetailAt > 0) await delay(activityDelayMs);
+			const detail = await fetchActivityRecordFields(
+				ctx.page,
+				model,
+				record.id,
+			);
+			if (!detail.ok) {
+				failure = detail;
+				break;
+			}
+			lastDetailAt = Date.now();
+			detailsRead += 1;
+			const enriched = { ...record, ...detail.fields };
+			await ctx.emitRecord(ACTIVITIES_STREAM, enriched);
 			emitted += 1;
 			earliest = earlier(earliest, instant);
 			latest = later(latest, instant);
 			walkNewest = later(walkNewest, instant);
+			if (!beforeResumeAnchor) {
+				lastCompletedId = record.id;
+				lastCompletedPage = pageNumber;
+			}
 		}
 		await ctx.emit({
 			type: "PROGRESS",
@@ -437,59 +671,81 @@ export async function collectStravaBrowser(
 			count: emitted,
 			...(parsed.total > 0 ? { total: parsed.total } : {}),
 		});
-		if (!pageHasNewer || pageNumber * parsed.perPage >= parsed.total) {
+		if (
+			failure ||
+			(!resumeAfterId && !pageHasNewer) ||
+			pageNumber * parsed.perPage >= parsed.total
+		) {
 			finished = true;
 			break;
 		}
 		pageNumber += 1;
+		lastCompletedPage = pageNumber;
+		if (resumeLocated) lastCompletedId = null;
 	}
+	if (resumeAfterId !== null && !resumeLocated && finished && !failure) {
+		failure = {
+			reason: "collection_interrupted",
+			message:
+				"Strava no longer listed the saved activity cursor; the next run will restart the activity walk.",
+		};
+		lastCompletedId = null;
+		lastCompletedPage = 1;
+	}
+	if (failure) finished = false;
 
-	const skipReason =
-		failure?.reason ??
-		(!finished
-			? "source_limit_reached"
-			: unreadable > 0
-				? "records_unreadable"
-				: null);
-	if (skipReason) {
+	let reason: CoverageReason;
+	if (failure) {
+		reason = failure.reason;
+	} else if (!finished) {
+		reason = "source_limit_reached";
+	} else if (unreadable > 0) {
+		reason = "records_unreadable";
+	} else if (emitted === 0) {
+		reason = "nothing_in_range";
+	} else {
+		reason = "covered_in_full";
+	}
+	if (reason !== "covered_in_full" && reason !== "nothing_in_range") {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
-			reason: COLLECTION_SKIP_REASON[skipReason],
+			reason: SKIP_REASON[reason],
+			...(reason === "source_limit_reached" ||
+			failure?.reason === "collection_interrupted"
+				? { recovery_hint: { action: "retry_by_runtime", retryable: true } }
+				: {}),
 			message:
 				failure?.message ??
-				(skipReason === "source_limit_reached"
-					? `Stopped after ${pagesRead} pages; page ${pageNumber} is next.`
+				(reason === "source_limit_reached"
+					? `Stopped after ${detailsRead} activity details or ${pagesRead} list pages; the saved activity cursor continues on the next run.`
 					: `${unreadable} activities in the Strava list had no usable id or start time.`),
 			diagnostics: { pages_read: pagesRead, unreadable },
 		});
 	}
 
-	// The cursor moves only when a walk finishes. An unfinished walk records
-	// where to continue; a failed page is retried next run.
+	// A partial or interrupted walk resumes after the last activity whose detail
+	// completed. The anchor is stable if new activities shift page boundaries.
 	const floorField = floor ? { requested_since: floor } : {};
 	let cursor: ActivitiesState;
 	if (finished && !failure) {
 		cursor = { last_start_time: later(since, walkNewest), ...floorField };
 	} else {
-		// After a failure this is the failed page; after the page bound it is
-		// the first page not read.
-		const resumePage = pageNumber;
 		cursor =
-			resumePage > 1
-				? {
-						last_start_time: since,
-						resume_page: resumePage,
+			emitted === 0 && failure && !hasPendingWalk
+				? { ...stored }
+				: {
+						last_start_time: prior.last_start_time ?? since,
+						...(lastCompletedId
+							? { resume_after_id: lastCompletedId }
+							: {}),
+						resume_page: lastCompletedPage,
 						walk_newest_start_time: walkNewest,
 						...floorField,
-					}
-				: // Nothing was read: keep the stored cursor, also on a full refresh.
-					{ ...stored };
+					};
 	}
 	const requestedFrom = timeRange?.since ?? floor ?? since ?? "none";
 	const requestedTo = timeRange?.until ?? "none";
-	const coveredFrom = earliest ?? "none";
-	const coveredTo = latest ?? "none";
 	const resumePage =
 		"resume_page" in cursor && typeof cursor.resume_page === "number"
 			? cursor.resume_page
@@ -505,8 +761,8 @@ export async function collectStravaBrowser(
 			`unreadable=${unreadable}`,
 			`window_requested_from=${requestedFrom}`,
 			`window_requested_to=${requestedTo}`,
-			`window_covered_from=${coveredFrom}`,
-			`window_covered_to=${coveredTo}`,
+			`window_covered_from=${earliest ?? "none"}`,
+			`window_covered_to=${latest ?? "none"}`,
 			`resume_page=${resumePage}`,
 		].join(" "),
 	});

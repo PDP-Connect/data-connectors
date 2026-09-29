@@ -15,6 +15,8 @@ const pages = {
 	1: fx("training-activities-page-1.json"),
 	2: fx("training-activities-page-2.json"),
 };
+const activityDetail = fx("activity-detail-synthetic.html");
+const activityHeartrate = fx("activity-heartrate-stream-synthetic.json");
 const login = fx("login.html");
 
 const html = (body) => ({
@@ -48,6 +50,14 @@ export function resolveFixture(raw) {
 			body:
 				pages[url.searchParams.get("page")] ??
 				'{"models":[],"page":3,"perPage":3,"total":5}',
+		};
+	}
+	if (/^\/activities\/\d+$/.test(p)) return html(activityDetail);
+	if (/^\/activities\/\d+\/streams$/.test(p)) {
+		return {
+			status: 200,
+			contentType: "application/json; charset=utf-8",
+			body: activityHeartrate,
 		};
 	}
 	if (p === "/athlete/training" || p === "/dashboard")
