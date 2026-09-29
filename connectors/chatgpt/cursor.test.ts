@@ -128,13 +128,15 @@ function makeFakeApi(
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (path.startsWith("/conversations")) {
-				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: offset === 0 ? list : [],
-						total: offset === 0 ? list.length + 1 : list.length,
+						items: cursor === 0 ? list : [],
+						total: cursor === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -356,14 +358,16 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path.startsWith("/conversations")) {
-				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: offset === 0 ? list : [],
+						items: cursor === 0 ? list : [],
 						has_missing_conversations: false,
-						total: offset === 0 ? list.length + 1 : list.length,
+						total: cursor === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -397,8 +401,11 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 	await run;
 
 	assert.deepEqual(fetches, [
-		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
-		...Array.from({ length: 3 }, () => "/conversations?offset=2&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from(
+			{ length: 3 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/conv-A",
 		"/conversation/conv-B",
 	]);
@@ -427,14 +434,16 @@ test("runConversationsAndMessagesStreams: conversations-only (no messages scope)
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (path.startsWith("/conversations")) {
-				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: offset === 0 ? list : [],
+						items: cursor === 0 ? list : [],
 						has_missing_conversations: false,
-						total: offset === 0 ? list.length + 1 : list.length,
+						total: cursor === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -494,8 +503,11 @@ test("runConversationsAndMessagesStreams: messages backfill is independent from 
 	});
 
 	assert.deepEqual(fetches, [
-		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
-		...Array.from({ length: 3 }, () => "/conversations?offset=2&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from(
+			{ length: 3 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/conv-new",
 		"/conversation/conv-old",
 	]);
@@ -548,7 +560,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	});
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=28&order=updated",
+		"/conversations/search?query=&cursor=0",
 		"/conversation/conv-new",
 		"/conversation/conv-mid",
 	]);

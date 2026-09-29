@@ -2481,9 +2481,7 @@ type ChatGptListPage<T> =
  * guard those shapes would sail through the same `?? []` fallback a genuinely
  * empty `{ items: [] }` page does.
  */
-function isChatGptJsonObject(
-	value: ChatGptJson,
-): value is Record<string, unknown> {
+function isChatGptJsonObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -2597,7 +2595,10 @@ function classifyChatGptListPage<T>(
 						: `${endpointLabel} http 200 body's "${listKey}" key is not an array`,
 				// A 200 body without the expected list shape is response drift; a
 				// rerun gets the same body.
-				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				diagnostics: {
 					http_status: res.status,
 					page,
@@ -2915,7 +2916,8 @@ export async function runSharedConversationsStream(
 /**
  * The result of one `listConversationsSinceCursor` walk: the items collected
  * and whether every needed page arrived and parsed. `truncated` means a page
- * failed or same-offset probes never agreed. In either case the caller must
+ * failed, cursor probes disagreed, or later data followed a short page. In each
+ * case the caller must
  * not advance a cursor or emit coverage for an unproven boundary.
  */
 interface ConversationListResult {
@@ -2924,7 +2926,7 @@ interface ConversationListResult {
 }
 
 /**
- * Walk /conversations pages newer than priorCursor and collect the list
+ * Walk /conversations/search cursor pages newer than priorCursor and collect the list
  * items we still need to sync. Stops early once any update_time <= priorCursor
  * (conversations are returned ordered by updated desc).
  *
@@ -2933,17 +2935,16 @@ interface ConversationListResult {
  * emits honest retryable/gap evidence instead of fabricating coverage over a
  * partial prefix it never proved complete.
  */
-/** One offset walk with bounded same-offset checks for every short page. */
+/** Search pages have a server-fixed size; confirm short pages and their boundary. */
 async function listConversationsSinceCursor(
 	deps: StreamDeps,
 	priorCursor: string | null,
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
-	let offset = 0;
-	const limit = 28;
+	let cursor = 0;
+	const pageSize = 30;
 	const maxPageAttempts = 3;
-	const retryDelaysMs: readonly [number, number] = [1000, 2000];
-	let stopPaging = false;
+	let shortPageSeen = false;
 	let page = 0;
 	deps.emit({
 		type: "PROGRESS",
@@ -2952,26 +2953,17 @@ async function listConversationsSinceCursor(
 			? `Listing conversations updated after ${priorCursor}`
 			: "Listing conversations (full pass)",
 	});
-	while (!stopPaging) {
-		const idsBeforeOffset = conversationsById.size;
+	while (true) {
 		const attempts: ConversationListItem[][] = [];
-		let maxItemsAtOffset = 0;
 		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
-			if (offset > 0 && attempt === 0) {
-				await waitForConversationListRetry(deps, 1000);
-			} else if (attempt > 0) {
-				await waitForConversationListRetry(
-					deps,
-					retryDelaysMs[attempt - 1] ?? retryDelaysMs[1],
-				);
+			if (page > 0) {
+				await waitForConversationListRetry(deps, 400);
 			}
-			const classified = classifyChatGptListPage<ConversationListItem>(
-				await deps.api.fetch(
-					`/conversations?offset=${offset}&limit=${limit}&order=updated`,
-				),
+			const classified = classifyChatGptListPage<unknown>(
+				await deps.api.fetch(`/conversations/search?query=&cursor=${cursor}`),
 				{
 					stream: "conversations",
-					endpointLabel: "conversations list",
+					endpointLabel: "conversations search",
 					page,
 					listKeys: ["items"],
 				},
@@ -2981,79 +2973,122 @@ async function listConversationsSinceCursor(
 				deps.emit(classified.skip);
 				return { items: [...conversationsById.values()], truncated: true };
 			}
-			const items = classified.items;
+			const items: ConversationListItem[] = [];
+			let malformedItem = false;
+			for (const raw of classified.items) {
+				if (!isChatGptJsonObject(raw)) {
+					malformedItem = true;
+					break;
+				}
+				const id = typeof raw.id === "string" ? raw.id : raw.conversation_id;
+				if (typeof id !== "string" || id.length === 0) {
+					malformedItem = true;
+					break;
+				}
+				items.push({ ...raw, id });
+			}
+			if (malformedItem) {
+				for (const stream of ["conversations", "messages"] as const) {
+					if (deps.requested.has(stream)) {
+						deps.emit({
+							type: "SKIP_RESULT",
+							stream,
+							reason: "parse_error",
+							message:
+								"conversations search returned an item without a usable id",
+							recovery_hint: { action: "retry_by_runtime", retryable: true },
+							diagnostics: { page },
+						});
+					}
+				}
+				return { items: [...conversationsById.values()], truncated: true };
+			}
+			if (items.length > pageSize) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT conversation search returned more than one cursor page",
+					{ cursor, item_count: items.length },
+				);
+				return { items: [...conversationsById.values()], truncated: true };
+			}
 			attempts.push(items);
-			maxItemsAtOffset = Math.max(maxItemsAtOffset, items.length);
+			if (shortPageSeen && items.length > 0) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT conversation search returned items after an earlier short cursor page",
+					{
+						cursor,
+						item_count: items.length,
+					},
+				);
+				return { items: [...conversationsById.values()], truncated: true };
+			}
 			for (const item of items) {
 				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
 				if (priorCursor && updateIso && updateIso <= priorCursor) {
-					stopPaging = true;
-					break;
+					return { items: [...conversationsById.values()], truncated: false };
 				}
 				conversationsById.set(item.id, item);
 			}
-			if (stopPaging || (attempt === 0 && items.length >= limit)) {
+			if (items.length === pageSize) {
 				break;
 			}
 		}
-		if (stopPaging) {
-			break;
-		}
-		const pageMadeProgress = conversationsById.size > idsBeforeOffset;
-		if (
-			!hasConversationPageConsensus(attempts) ||
-			(maxItemsAtOffset > 0 && !pageMadeProgress)
-		) {
-			for (const stream of ["conversations", "messages"] as const) {
-				if (!deps.requested.has(stream)) {
-					continue;
-				}
-				deps.emit({
-					type: "SKIP_RESULT",
-					stream,
-					reason: "conversation_list_unstable",
-					message: "ChatGPT conversation listing remained inconsistent after three same-offset checks; retry this stream",
-					recovery_hint: { action: "retry_by_runtime", retryable: true },
-					diagnostics: {
-						offset,
-						checks: attempts.length,
-						item_counts: attempts.map((items) => items.length),
-						page_made_progress: pageMadeProgress,
-					},
-				});
-			}
+		if (!hasConversationPageConsensus(attempts)) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT conversation search returned disagreeing cursor probes",
+				{
+					cursor,
+					checks: attempts.length,
+					item_counts: attempts.map((items) => items.length),
+				},
+			);
 			return { items: [...conversationsById.values()], truncated: true };
 		}
-		if (maxItemsAtOffset === 0) {
-			break;
+		const pageItems = attempts[0] ?? [];
+		if (pageItems.length === 0 && shortPageSeen) {
+			return { items: [...conversationsById.values()], truncated: false };
 		}
-		offset += maxItemsAtOffset;
-		if (offset > PAGINATION_SAFETY_LIMIT) {
-			// Reaching this line means the just-fetched page was FULL and no item
-			// on it was old enough to hit `priorCursor` yet (`stopPaging` is still
-			// false, or the `items.length < limit` check above would already have
-			// broken the loop) — there are genuinely more, older conversations the
-			// walk never reached. Returning `truncated: false` here would let the
-			// caller advance the cursor to this partial prefix's max `update_time`
-			// (always the newest value, since pages are `order=updated` desc),
-			// silently and permanently skipping every un-listed conversation older
-			// than that — the walk never gets another chance at them because the
-			// cursor is a `>` "since" watermark. Treated as truncation.
+		if (pageItems.length < pageSize) {
+			shortPageSeen = true;
+		}
+		cursor += pageSize;
+		if (cursor > PAGINATION_SAFETY_LIMIT) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations list pagination stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
 					retryable: false,
 				},
-				diagnostics: { offset, collected: conversationsById.size },
+				diagnostics: { cursor, collected: conversationsById.size },
 			});
 			return { items: [...conversationsById.values()], truncated: true };
 		}
 	}
-	return { items: [...conversationsById.values()], truncated: false };
+}
+
+function emitConversationListUnstable(
+	deps: StreamDeps,
+	message: string,
+	diagnostics: Record<string, unknown>,
+): void {
+	for (const stream of ["conversations", "messages"] as const) {
+		if (!deps.requested.has(stream)) {
+			continue;
+		}
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "conversation_list_unstable",
+			message: `${message}; retry this stream`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics,
+		});
+	}
 }
 
 function hasConversationPageConsensus(
@@ -3065,9 +3100,7 @@ function hasConversationPageConsensus(
 	const signatures = pages.map((items) =>
 		[...new Set(items.map((item) => item.id))].sort().join("\u0000"),
 	);
-	return signatures.some(
-		(signature) => signatures.filter((candidate) => candidate === signature).length >= 2,
-	);
+	return signatures.every((signature) => signature === signatures[0]);
 }
 
 function waitForConversationListRetry(
