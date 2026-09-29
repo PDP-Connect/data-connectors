@@ -2295,7 +2295,6 @@ export async function runCustomInstructionsStream(
  */
 async function emitBranchReconciliation(
 	deps: StreamDeps,
-	conversationId: string,
 	mapping: Record<string, ChatGptNode>,
 	currentNode: string | null | undefined,
 	emittedBranchCount: number,
@@ -2309,7 +2308,7 @@ async function emitBranchReconciliation(
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `branch_tip_missing: conversation ${conversationId} declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
+			message: `branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		});
 		return;
 	}
@@ -2318,12 +2317,12 @@ async function emitBranchReconciliation(
 	// branch continues in the provider's data but not in ours.
 	const danglingParent = findDanglingBranchParent(mapping, currentNode);
 	if (danglingParent !== null) {
-		// `missing_parent_id` is a ChatGPT node UUID, not user content — safe to
-		// disclose, and the only handle that makes the gap actionable.
+		// PROGRESS is the owner's status line, so it carries no conversation or
+		// node id (the same form as `empty_detail`).
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `branch_truncated: conversation ${conversationId} has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, missing_parent_id=${danglingParent}, node_count=${Object.keys(mapping).length})`,
+			message: `branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		});
 	}
 }
@@ -2385,7 +2384,7 @@ export async function processConversationDetail(
 		deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `${detail.status === 200 ? "missing_mapping" : "http_error"}: conversation ${c.id} http ${detail.status}`,
+			message: `${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
 		});
 		// Fall back to list-only conversation record.
 		await emitConversation(c, null);
@@ -2415,7 +2414,6 @@ export async function processConversationDetail(
 	}
 	await emitBranchReconciliation(
 		deps,
-		c.id,
 		mapping,
 		currentNode,
 		emittedBranchCount,
@@ -2595,7 +2593,9 @@ function classifyChatGptListPage<T>(
 					listKey === undefined
 						? `${endpointLabel} http 200 body is missing every expected list key (${listKeys.join(", ")})`
 						: `${endpointLabel} http 200 body's "${listKey}" key is not an array`,
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				// A 200 body without the expected list shape is response drift; a
+				// rerun gets the same body.
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 				diagnostics: {
 					http_status: res.status,
 					page,

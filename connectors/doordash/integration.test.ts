@@ -326,6 +326,14 @@ test("collectAllStreams: zero observed orders reports SKIP_RESULT doordash_order
 		.filter((m) => m.type === "SKIP_RESULT")
 		.map((m) => (m as { reason: string }).reason);
 	assert.ok(skipReasons.includes("doordash_orders_response_not_observed"));
+	for (const m of harness.protocolMessages) {
+		if (m.type !== "SKIP_RESULT") continue;
+		assert.deepEqual(
+			(m as { recovery_hint?: unknown }).recovery_hint,
+			{ action: "retry_on_connector_upgrade", retryable: false },
+			"drift or an account with no orders looks the same on every run",
+		);
+	}
 });
 
 test("collectAllStreams: never emits a STATE message (full refresh only, no incremental cursor)", async () => {

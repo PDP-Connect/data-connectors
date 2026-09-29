@@ -62,7 +62,9 @@ import {
 	recordDetailOutcome,
 	recoverPendingOrderItemDetailGaps,
 	nutritionCoverageBlockReason,
+	nutritionCoverageRecoveryHint,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
+	reportListPageCeiling,
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
@@ -385,6 +387,14 @@ test("processListOrder: a malformed order date records a 'gap' coverage outcome 
 		),
 		"the record-level diagnostic at the order level fires",
 	);
+	for (const m of protocolMessages) {
+		if (m.type !== "PROGRESS") continue;
+		assert.ok(
+			!m.message.includes(listOrder.orderId) &&
+				!m.message.includes(listOrder.orderDateRaw ?? "\u0000"),
+			"PROGRESS becomes the owner's status line: no order id or raw provider text",
+		);
+	}
 	assert.equal(
 		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
@@ -3830,4 +3840,31 @@ test("collectNutrition emits nothing when given zero targets", async () => {
 		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
 	);
+});
+
+test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, because the held checkpoint makes the next run hit the same cap", async () => {
+	const { deps, protocolMessages } = makeRecordingDeps();
+	await reportListPageCeiling(deps, HEB_MAX_LIST_PAGES + 3);
+	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.equal(skip?.type, "SKIP_RESULT");
+	assert.equal(skip.reason, "older_pages_deferred_page_budget");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_on_connector_upgrade",
+		retryable: false,
+	});
+});
+
+test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", () => {
+	const retry = { action: "retry_by_runtime", retryable: true };
+	const upgrade = { action: "retry_on_connector_upgrade", retryable: false };
+	assert.deepEqual(nutritionCoverageRecoveryHint("scope_missing"), {
+		action: "not_retriable",
+		retryable: false,
+	});
+	assert.deepEqual(nutritionCoverageRecoveryHint("orders_truncated"), upgrade);
+	assert.deepEqual(nutritionCoverageRecoveryHint("resume_boundary"), upgrade);
+	assert.deepEqual(nutritionCoverageRecoveryHint("item_count_short"), upgrade);
+	assert.deepEqual(nutritionCoverageRecoveryHint("prior_detail_gaps"), retry);
+	assert.deepEqual(nutritionCoverageRecoveryHint("detail_gaps"), retry);
+	assert.deepEqual(nutritionCoverageRecoveryHint("order_scan_suppressed"), retry);
 });

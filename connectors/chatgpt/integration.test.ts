@@ -1488,6 +1488,15 @@ for (const [label, body] of CHATGPT_WRONG_SHAPE_BODIES) {
 			"parse_error",
 			`${label}: is a shape error, not genuine empty`,
 		);
+		// An unreadable body can be a transient challenge page; a readable
+		// object without the list shape is response drift that a rerun repeats.
+		assert.deepEqual(
+			skip.recovery_hint,
+			label.startsWith("an object")
+				? { action: "retry_on_connector_upgrade", retryable: false }
+				: { action: "retry_by_runtime", retryable: true },
+			`${label}: hint matches whether a rerun can succeed`,
+		);
 	});
 }
 
@@ -1673,8 +1682,13 @@ test("processConversationDetail: detail.status=404 — still emits conversation 
 	);
 	assert.match(
 		diagnostic.message,
-		/convo-abc http 404/,
-		"message carries the conversation id + http status",
+		/a conversation detail returned http 404/,
+		"message carries the http status",
+	);
+	assert.doesNotMatch(
+		diagnostic.message,
+		/convo-abc/,
+		"PROGRESS is the owner's status line: no conversation id",
 	);
 });
 
@@ -1705,7 +1719,8 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 	);
 	assert.ok(diagnostic, "missing mapping must be diagnosable");
 	assert.equal(diagnostic.stream, "messages");
-	assert.match(diagnostic.message, /convo-abc http 200/);
+	assert.match(diagnostic.message, /http 200/);
+	assert.doesNotMatch(diagnostic.message, /convo-abc/);
 });
 
 test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — records a record-level empty_detail diagnostic, not a stream SKIP", async () => {

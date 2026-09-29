@@ -189,8 +189,9 @@ test("chatgpt branch: a truncated branch is surfaced as a gap, not a silent pass
 	const gap = skips().find((s) => s.reason === "branch_truncated");
 	assert.ok(gap, "a branch whose parent chain dangles must report a gap");
 	assert.ok(
-		gap.message.includes("missing_parent_id=aaa2c1fa-missing-user-turn"),
-		"the gap names the message that was not delivered, so it is actionable",
+		!gap.message.includes("aaa2c1fa-missing-user-turn") &&
+			!gap.message.includes("convo-abc"),
+		"PROGRESS is the owner's status line: no node or conversation id",
 	);
 	assert.equal(
 		streamSkips().length,
@@ -238,7 +239,10 @@ test("chatgpt branch: a current_node absent from the mapping is surfaced", async
 
 	const gap = skips().find((s) => s.reason === "branch_tip_missing");
 	assert.ok(gap, "an unreachable declared tip must report a gap");
-	assert.ok(gap.message.includes("conversation convo-abc "));
+	assert.ok(
+		!gap.message.includes("convo-abc"),
+		"PROGRESS is the owner's status line: no conversation id",
+	);
 	assert.equal(
 		streamSkips().length,
 		0,

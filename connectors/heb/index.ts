@@ -1583,6 +1583,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 		if (suppressForward && options.wantsNutrition) {
 			await emitNutritionCoverageIncomplete(
 				deps,
+				"order_scan_suppressed",
 				"H-E-B nutrition was not collected because recovery-only mode suppressed the order-history scan.",
 				{ recovery_only: true },
 			);
@@ -1601,6 +1602,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	if (suppressForward && options.wantsNutrition) {
 		await emitNutritionCoverageIncomplete(
 			deps,
+			"order_scan_suppressed",
 			"H-E-B nutrition was not collected because order-item recovery suppressed the order-history scan.",
 			{
 				detail_budget_exhausted: detailBudgetExhausted,
@@ -1738,7 +1740,8 @@ export async function processListOrder(
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "orders",
-			message: `unparseable_order_date: Order ${listOrder.orderId}: order date "${listOrder.orderDateRaw ?? ""}" did not parse.`,
+			message:
+				"unparseable_order_date: an order's date did not parse; the order counts as considered, not covered.",
 		});
 		// Unparseable order dates cannot reach the detail hydration lane. When
 		// order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
@@ -1923,7 +1926,7 @@ export async function runForwardScan(
  * the stream short — "I stopped early and cannot say how much is left" must
  * not read as complete either.
  */
-async function reportListPageCeiling(
+export async function reportListPageCeiling(
 	deps: EmitDeps,
 	advertisedMaxPage: number | null,
 ): Promise<void> {
@@ -1959,7 +1962,10 @@ async function reportListPageCeiling(
 		type: "SKIP_RESULT",
 		stream: "orders",
 		reason: "older_pages_deferred_page_budget",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		// The checkpoint is held on this path (`buildOrdersStateCursor`), so the
+		// next run walks again from page 1 and stops at the same cap. Only a
+		// connector change (a larger cap or a cursor past it) reaches the tail.
+		recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 		message:
 			"Stopped after the most recent orders; older orders were not read in this run",
 		diagnostics: {
@@ -2296,32 +2302,82 @@ export interface NutritionCoverageGateInput {
 	unrecoveredPriorOrderItemGapCount: number;
 }
 
+type NutritionCoverageGateCause =
+	| "scope_missing"
+	| "orders_truncated"
+	| "resume_boundary"
+	| "prior_detail_gaps"
+	| "detail_gaps"
+	| "item_count_short";
+
+type NutritionCoverageCause =
+	| NutritionCoverageGateCause
+	| "order_scan_suppressed";
+
+const NUTRITION_COVERAGE_BLOCK_REASONS: Record<
+	NutritionCoverageGateCause,
+	string
+> = {
+	scope_missing: "nutrition requires orders and order_items in the same run",
+	orders_truncated:
+		"order history stopped at the page budget before all orders were scanned",
+	resume_boundary:
+		"order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run",
+	prior_detail_gaps: "prior order_items detail gaps are still pending",
+	detail_gaps: "order_items detail coverage has unresolved gaps",
+	item_count_short:
+		"some order_items records are short of the item counts declared by H-E-B",
+};
+
+function nutritionCoverageBlockCause(
+	input: NutritionCoverageGateInput,
+): NutritionCoverageGateCause | null {
+	if (!input.ordersRequested || !input.orderItemsRequested) {
+		return "scope_missing";
+	}
+	if (input.ordersTruncated) return "orders_truncated";
+	if (input.orderHistoryStoppedAtBoundary) return "resume_boundary";
+	if (input.unrecoveredPriorOrderItemGapCount > 0) return "prior_detail_gaps";
+	if (input.orderItemsGapCount > 0) return "detail_gaps";
+	if (input.itemCountShort) return "item_count_short";
+	return null;
+}
+
 export function nutritionCoverageBlockReason(
 	input: NutritionCoverageGateInput,
 ): string | null {
-	if (!input.ordersRequested || !input.orderItemsRequested) {
-		return "nutrition requires orders and order_items in the same run";
+	const cause = nutritionCoverageBlockCause(input);
+	return cause === null ? null : NUTRITION_COVERAGE_BLOCK_REASONS[cause];
+}
+
+/** Whether a later run can clear the block decides the hint. Detail gaps and
+ *  a suppressed order scan are budget or transient outcomes that a rerun can
+ *  finish. The page cap and the item-count shortfall are the same on every
+ *  run. An incremental run always stops at its resume boundary by design, so
+ *  that cause does not clear on a rerun either; only a collection change
+ *  (a full re-walk for nutrition) can fix it. Without orders and order_items
+ *  in scope, the same scope cannot change the result. */
+export function nutritionCoverageRecoveryHint(cause: NutritionCoverageCause):
+	| { action: "not_retriable"; retryable: false }
+	| { action: "retry_on_connector_upgrade"; retryable: false }
+	| { action: "retry_by_runtime"; retryable: true } {
+	switch (cause) {
+		case "scope_missing":
+			return { action: "not_retriable", retryable: false };
+		case "orders_truncated":
+		case "resume_boundary":
+		case "item_count_short":
+			return { action: "retry_on_connector_upgrade", retryable: false };
+		case "prior_detail_gaps":
+		case "detail_gaps":
+		case "order_scan_suppressed":
+			return { action: "retry_by_runtime", retryable: true };
 	}
-	if (input.ordersTruncated) {
-		return "order history stopped at the page budget before all orders were scanned";
-	}
-	if (input.orderHistoryStoppedAtBoundary) {
-		return "order history stopped at the resume checkpoint boundary before all historical orders were scanned in this run";
-	}
-	if (input.unrecoveredPriorOrderItemGapCount > 0) {
-		return "prior order_items detail gaps are still pending";
-	}
-	if (input.orderItemsGapCount > 0) {
-		return "order_items detail coverage has unresolved gaps";
-	}
-	if (input.itemCountShort) {
-		return "some order_items records are short of the item counts declared by H-E-B";
-	}
-	return null;
 }
 
 async function emitNutritionCoverageIncomplete(
 	deps: Pick<EmitDeps, "emit">,
+	cause: NutritionCoverageCause,
 	message: string,
 	diagnostics: Record<string, unknown>,
 ): Promise<void> {
@@ -2329,14 +2385,7 @@ async function emitNutritionCoverageIncomplete(
 		type: "SKIP_RESULT",
 		stream: "nutrition",
 		reason: HEB_NUTRITION_COVERAGE_INCOMPLETE_REASON,
-		// Without orders and order_items in scope there is nothing to look up, and
-		// a later run with the same scope cannot change that. Every other cause is
-		// an order-history scan that a later run can finish.
-		recovery_hint:
-			diagnostics.orders_requested === false ||
-			diagnostics.order_items_requested === false
-				? { action: "not_retriable", retryable: false }
-				: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: nutritionCoverageRecoveryHint(cause),
 		message,
 		diagnostics,
 	});
@@ -2517,6 +2566,7 @@ if (isMainModule(import.meta.url)) {
 			if (wantsNutrition && !(wantsOrders || wantsItems)) {
 				await emitNutritionCoverageIncomplete(
 					{ emit },
+					"scope_missing",
 					"H-E-B nutrition lookup requires orders and order_items in the same run's scope; it has no independent product catalog to browse and cannot prove full historical coverage without the order-history coverage anchors.",
 					{
 						orders_requested: wantsOrders,
@@ -2679,7 +2729,7 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			if (wantsNutrition) {
-				const coverageBlockReason = nutritionCoverageBlockReason({
+				const coverageGate: NutritionCoverageGateInput = {
 					itemCountShort,
 					orderHistoryStoppedAtBoundary: stoppedAtBoundary,
 					orderItemsGapCount: orderItemsCoverage?.gap.length ?? 0,
@@ -2689,11 +2739,13 @@ if (isMainModule(import.meta.url)) {
 					unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
 						? 1
 						: 0,
-				});
-				if (coverageBlockReason) {
+				};
+				const coverageBlockCause = nutritionCoverageBlockCause(coverageGate);
+				if (coverageBlockCause) {
 					await emitNutritionCoverageIncomplete(
 						{ emit },
-						`H-E-B nutrition was not marked complete because ${coverageBlockReason}.`,
+						coverageBlockCause,
+						`H-E-B nutrition was not marked complete because ${NUTRITION_COVERAGE_BLOCK_REASONS[coverageBlockCause]}.`,
 						{
 							item_count_short: itemCountShort,
 							order_history_stopped_at_boundary: stoppedAtBoundary,

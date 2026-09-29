@@ -364,7 +364,9 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream,
 				reason: "doordash_orders_response_not_observed",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				// Both causes (endpoint drift, or an account with no orders) look
+				// the same on every run, so a rerun cannot clear this.
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 				message:
 					"No getConsumerOrdersWithDetails response was observed on the orders page; the account may have no orders, or DoorDash's endpoint/shape has changed.",
 			});
