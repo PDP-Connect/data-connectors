@@ -2667,7 +2667,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/auto-login/chase.ts",
-			line: 436,
+			line: 457,
 			column: 19,
 			category: "bounded_retry_polling",
 			note: "probeChaseSessionOnSeparatePage(): retry/poll loop gated on Chase leaving the auth flow",

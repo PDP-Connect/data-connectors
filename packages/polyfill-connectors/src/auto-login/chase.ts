@@ -405,16 +405,37 @@ function isChaseDashboardPage(page: Page): boolean {
 	}
 }
 
+async function closeProbePage(
+	page: Page,
+	isContextClosed: () => boolean,
+): Promise<void> {
+	try {
+		await page.close();
+	} catch (error) {
+		if (!page.isClosed() && !isContextClosed()) {
+			throw error;
+		}
+	}
+}
+
 async function probeChaseSessionOnSeparatePage(
 	context: BrowserContext,
 ): Promise<boolean> {
+	let contextClosed = false;
+	context.once("close", (): void => {
+		contextClosed = true;
+	});
 	const probePage = await context.newPage();
+	let loggedIn = false;
 	try {
-		const result = await probeChaseSession(context, probePage);
-		return result.loggedIn && isChaseDashboardPage(result.page);
+		if (!probePage.isClosed()) {
+			loggedIn =
+				(await probeSession(probePage)) && isChaseDashboardPage(probePage);
+		}
 	} finally {
-		await probePage.close().catch((): void => undefined);
+		await closeProbePage(probePage, (): boolean => contextClosed);
 	}
+	return loggedIn;
 }
 
 type ChaseOtpOutcome =

@@ -539,7 +539,11 @@ function makeOtpPage(
 	};
 }
 
-function makeOtpProbePage(state: FakeOtpPageState, onGoto?: () => void): Page {
+function makeOtpProbePage(
+	state: FakeOtpPageState,
+	onGoto?: (url: string) => void,
+	closed = false,
+): Page {
 	let currentUrl = "about:blank";
 	const fake: Pick<Page, "close" | "getByText" | "goto" | "isClosed" | "url"> =
 		{
@@ -550,22 +554,26 @@ function makeOtpProbePage(state: FakeOtpPageState, onGoto?: () => void): Page {
 				),
 			goto: (url: string): ReturnType<Page["goto"]> => {
 				currentUrl = url;
-				onGoto?.();
+				onGoto?.(url);
 				return Promise.resolve(null);
 			},
-			isClosed: (): boolean => false,
+			isClosed: (): boolean => closed,
 			url: (): string => currentUrl,
 		};
 	return fake as Page;
 }
 
-function makeOtpContext(page: Page, probePage: Page = page): BrowserContext {
+function makeOtpContext(
+	page: Page,
+	probePage: Page = page,
+	pages: Page[] = [page],
+): BrowserContext {
 	const fake: Pick<BrowserContext, "browser" | "newPage" | "once" | "pages"> = {
 		browser: () => null,
 		newPage: (): Promise<Page> => Promise.resolve(probePage),
 		once: ((_event: "close", _listener: () => void): BrowserContext =>
 			fake as BrowserContext) as BrowserContext["once"],
-		pages: (): Page[] => [page],
+		pages: (): Page[] => pages,
 	};
 	return fake as BrowserContext;
 }
@@ -787,6 +795,58 @@ test("manual OTP wait never navigates the active OTP page", async () => {
 
 		assert.equal(result, true);
 		assert.deepEqual(gotoCalls, [DASHBOARD_URL, LOGON_URL]);
+	});
+});
+
+test("closed separate session probe never navigates a pre-existing page", async () => {
+	await withChaseCredentials(async () => {
+		const { gotoCalls, page, state } = makeOtpPage(
+			{
+				otpInputs: 1,
+				promptTextVisible: true,
+				signedOut: true,
+			},
+			{
+				onAfterSignInClick: (currentState) => {
+					currentState.url = "https://secure.chase.com/web/auth/otp";
+				},
+			},
+		);
+		const otherPageNavigations: string[] = [];
+		const otherPage = makeOtpProbePage(state, (url) => {
+			otherPageNavigations.push(url);
+		});
+		const closedProbePage = makeOtpProbePage(state, undefined, true);
+
+		await assert.rejects(
+			ensureChaseSession({
+				context: makeOtpContext(page, closedProbePage, [page, otherPage]),
+				credentials: CHASE_TEST_CREDENTIALS,
+				page,
+				sendInteraction: () => {
+					state.url = "https://example.com/return";
+					return new Promise<InteractionResponse>((resolve) => {
+						setTimeout(
+							() =>
+								resolve({
+									request_id: "closed_probe_test",
+									status: "cancelled",
+									type: "INTERACTION_RESPONSE",
+								}),
+							400,
+						);
+					});
+				},
+			}),
+			/chase_otp_not_provided/,
+		);
+
+		assert.deepEqual(
+			gotoCalls.filter((url) => url === DASHBOARD_URL),
+			[DASHBOARD_URL],
+			"only the initial session probe may navigate the active page",
+		);
+		assert.deepEqual(otherPageNavigations, []);
 	});
 });
 
