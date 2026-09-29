@@ -20,6 +20,7 @@
 //   savePlaywrightDownload -> page.extractZipEntries(): the host inflates
 //     the .json entries. The result is kept in memory under the zip path.
 //   readZipEntriesFromFile -> entries from that result.
+//   readManifestDownload -> always "not a manifest" (see readFileSync).
 // A host error that will not clear on retry (spent nonce, auth, bad URL,
 // unreadable archive) is thrown from savePlaywrightDownload, which the
 // connector does not catch, so the run ends with that error.
@@ -190,6 +191,16 @@ export function openSync(path: string): number {
 export function statSync(path: string): { size: number } {
 	if (!archives.has(path)) throw new Error(`ENOENT: ${path}`);
 	return { size: 0 };
+}
+// readManifestDownload (index.ts) reads a small nonce download to see if it
+// is a split-export manifest instead of a ZIP. On this host that cannot
+// happen: captureDownload reports ready only for a body that starts with
+// "PK", and any other body (a manifest JSON too) is "not ready". So a saved
+// path here is always a ZIP, and only its magic bytes are returned. The
+// statSync size of 0 already makes index.ts skip this call.
+export function readFileSync(path: string): Uint8Array {
+	if (!archives.has(path)) throw new Error(`ENOENT: ${path}`);
+	return new Uint8Array([0x50, 0x4b]);
 }
 export function closeSync(fd: number): void {
 	openFiles.delete(fd);
