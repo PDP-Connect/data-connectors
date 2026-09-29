@@ -67,6 +67,7 @@ import {
 	buildLocalSourceInventory,
 	type KnownLocalStore,
 	listDirectoryInventory,
+	localInventoryDiagnosticsSummary,
 	openInventoryFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
 import {
@@ -2698,6 +2699,13 @@ if (isMainModule(import.meta.url)) {
 					claudeHome,
 					CLAUDE_CODE_KNOWN_LOCAL_STORES,
 				);
+				await emit({
+					type: "PROGRESS",
+					message: localInventoryDiagnosticsSummary({
+						inventory,
+						toolLabel: "Claude Code",
+					}),
+				});
 				// The owner-declared boundary rides on the stream scopes the runtime
 				// already threads through. Read once here and applied at ENUMERATION so a
 				// bounded run does not open files it was never asked to collect.

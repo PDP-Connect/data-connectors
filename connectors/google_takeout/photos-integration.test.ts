@@ -51,11 +51,24 @@ function skipResults(
 	);
 }
 
-async function runPhotosImport(
+function progressMessages(
+	messages: readonly EmittedMessage[],
+	stream: string,
+): string[] {
+	return messages
+		.filter(
+			(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+				message.type === "PROGRESS" && message.stream === stream,
+		)
+		.map((message) => message.message);
+}
+
+async function runTakeoutImport(
 	importRoot: string,
+	streams: readonly string[],
 	env: Record<string, string> = {},
-): Promise<{ messages: EmittedMessage[]; photos: Record<string, unknown>[] }> {
-	const result = await runConnectorProtocolSubprocess({
+): Promise<{ messages: EmittedMessage[] }> {
+	return await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: GOOGLE_TAKEOUT_ENTRYPOINT,
 		env: {
@@ -66,10 +79,17 @@ async function runPhotosImport(
 			...env,
 		},
 		start: {
-			scope: { streams: [{ name: "photos" }] },
+			scope: { streams: streams.map((name) => ({ name })) },
 			type: "START",
 		},
 	});
+}
+
+async function runPhotosImport(
+	importRoot: string,
+	env: Record<string, string> = {},
+): Promise<{ messages: EmittedMessage[]; photos: Record<string, unknown>[] }> {
+	const result = await runTakeoutImport(importRoot, ["photos"], env);
 	return {
 		messages: result.messages,
 		photos: records(result.messages, "photos"),
@@ -180,12 +200,44 @@ test("photos stream discovers files, matches sidecars, and skips unsupported fil
 			.join("\n");
 		assert.match(progressText, /unsupported_files=1/);
 		assert.doesNotMatch(progressText, /notes\.txt/);
+		assert.match(
+			progressMessages(messages, "photos").join("\n"),
+			/Google Takeout phase=coverage stream=photos status=collected reason=collected items=3 unsupported_files=1/,
+		);
 
 		const done = messages.at(-1);
 		assert.equal(done?.type, "DONE");
 		if (done?.type === "DONE") {
 			assert.equal(done.status, "succeeded");
 		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("requested missing Takeout stores emit redacted coverage progress", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-missing-"));
+	try {
+		const result = await runTakeoutImport(importRoot, [
+			"location_history",
+			"youtube_watch_history",
+			"search_history",
+			"photos",
+		]);
+		for (const stream of [
+			"location_history",
+			"youtube_watch_history",
+			"search_history",
+			"photos",
+		]) {
+			assert.match(
+				progressMessages(result.messages, stream).join("\n"),
+				new RegExp(
+					`Google Takeout phase=coverage stream=${stream} status=missing reason=records_not_found items=0 unsupported_files=0`,
+				),
+			);
+		}
+		assert.equal(skipResults(result.messages).length, 4);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}

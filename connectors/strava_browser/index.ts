@@ -486,6 +486,30 @@ export async function collectStravaBrowser(
 				: // Nothing was read: keep the stored cursor, also on a full refresh.
 					{ ...stored };
 	}
+	const requestedFrom = timeRange?.since ?? floor ?? since ?? "none";
+	const requestedTo = timeRange?.until ?? "none";
+	const coveredFrom = earliest ?? "none";
+	const coveredTo = latest ?? "none";
+	const resumePage =
+		"resume_page" in cursor && typeof cursor.resume_page === "number"
+			? cursor.resume_page
+			: "none";
+	await ctx.emit({
+		type: "PROGRESS",
+		stream: ACTIVITIES_STREAM,
+		count: emitted,
+		message: [
+			"Strava phase=coverage stream=activities",
+			`status=${failure || !finished || unreadable > 0 ? "partial" : emitted === 0 ? "empty" : "complete"}`,
+			`pages_read=${pagesRead}`,
+			`unreadable=${unreadable}`,
+			`window_requested_from=${requestedFrom}`,
+			`window_requested_to=${requestedTo}`,
+			`window_covered_from=${coveredFrom}`,
+			`window_covered_to=${coveredTo}`,
+			`resume_page=${resumePage}`,
+		].join(" "),
+	});
 	await ctx.emit({ type: "STATE", stream: ACTIVITIES_STREAM, cursor });
 }
 

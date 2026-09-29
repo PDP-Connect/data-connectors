@@ -65,6 +65,53 @@ const LIKES_STREAM = "likes";
 const WATCH_LATER_STREAM = "watch_later";
 const WATCH_HISTORY_STREAM = "watch_history";
 
+type CoverageFact = {
+	stream: string;
+	requested: true;
+	source: "takeout";
+	expected_file_present?: boolean;
+	emitted_count: number;
+	enumerated_count?: number;
+	resumed_from_cursor?: boolean;
+};
+
+function makeCoverageFacts(ctx: CollectContext): Map<string, CoverageFact> {
+	return new Map(
+		[
+			PROFILE_STREAM,
+			SUBSCRIPTIONS_STREAM,
+			PLAYLISTS_STREAM,
+			PLAYLIST_ITEMS_STREAM,
+			LIKES_STREAM,
+			WATCH_LATER_STREAM,
+			WATCH_HISTORY_STREAM,
+		]
+			.filter((stream) => ctx.requested.has(stream))
+			.map((stream) => [
+				stream,
+				{
+					stream,
+					requested: true,
+					source: "takeout",
+					emitted_count: 0,
+				},
+			]),
+	);
+}
+
+async function emitCoverageProgress(
+	ctx: CollectContext,
+	facts: Iterable<CoverageFact>,
+): Promise<void> {
+	await ctx.emit({
+		type: "PROGRESS",
+		message: `youtube_takeout.coverage ${JSON.stringify({
+			connector: "youtube_takeout",
+			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
+		})}`,
+	});
+}
+
 /**
  * A Takeout export can be handed over as the downloaded .zip, or already
  * extracted into a directory (the strava/google_maps convention — see
@@ -136,12 +183,15 @@ async function readTextIf(path: string): Promise<string | null> {
 async function collectProfile(
 	ctx: CollectContext,
 	root: string,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(PROFILE_STREAM)) {
 		return;
 	}
 	const path = join(root, "Channel", "channel.csv");
 	const text = await readTextIf(path);
+	const fact = coverage.get(PROFILE_STREAM);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -165,18 +215,23 @@ async function collectProfile(
 	if (!record) {
 		return;
 	}
+	if (fact) fact.enumerated_count = body.length;
 	await ctx.emitRecord(PROFILE_STREAM, { ...record });
+	if (fact) fact.emitted_count += 1;
 }
 
 async function collectSubscriptions(
 	ctx: CollectContext,
 	root: string,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(SUBSCRIPTIONS_STREAM)) {
 		return;
 	}
 	const path = join(root, "subscriptions", "subscriptions.csv");
 	const text = await readTextIf(path);
+	const fact = coverage.get(SUBSCRIPTIONS_STREAM);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -191,6 +246,10 @@ async function collectSubscriptions(
 	if (!header) {
 		return;
 	}
+	if (fact)
+		fact.enumerated_count = body.filter(
+			(row) => !(row.length === 1 && row[0]?.trim() === ""),
+		).length;
 	const columns = new Map(header.map((name, i) => [name.trim(), i]));
 	for (const row of body) {
 		if (row.length === 1 && row[0]?.trim() === "") {
@@ -201,6 +260,7 @@ async function collectSubscriptions(
 			continue;
 		}
 		await ctx.emitRecord(SUBSCRIPTIONS_STREAM, { ...record });
+		if (fact) fact.emitted_count += 1;
 	}
 }
 
@@ -221,6 +281,7 @@ function listPlaylistItemFiles(playlistsDir: string): PlaylistFileEntry[] {
 async function collectPlaylists(
 	ctx: CollectContext,
 	root: string,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	const wantsPlaylists = ctx.requested.has(PLAYLISTS_STREAM);
 	const wantsItems = ctx.requested.has(PLAYLIST_ITEMS_STREAM);
@@ -230,7 +291,11 @@ async function collectPlaylists(
 	const playlistsDir = join(root, "playlists");
 	const indexPath = join(playlistsDir, "playlists.csv");
 	const text = await readTextIf(indexPath);
+	const playlistsFact = coverage.get(PLAYLISTS_STREAM);
+	const itemsFact = coverage.get(PLAYLIST_ITEMS_STREAM);
+	if (playlistsFact) playlistsFact.expected_file_present = Boolean(text);
 	if (!text) {
+		if (itemsFact) itemsFact.expected_file_present = false;
 		const message = `Playlists export was not found at the expected path (${indexPath}).`;
 		if (wantsPlaylists) {
 			await ctx.emit({
@@ -254,6 +319,10 @@ async function collectPlaylists(
 	const rows = parseCsvRows(text);
 	const [header, ...body] = rows;
 	const columns = new Map((header ?? []).map((name, i) => [name.trim(), i]));
+	if (playlistsFact)
+		playlistsFact.enumerated_count = body.filter(
+			(row) => !(row.length === 1 && row[0]?.trim() === ""),
+		).length;
 	for (const row of body) {
 		if (row.length === 1 && row[0]?.trim() === "") {
 			continue;
@@ -264,6 +333,7 @@ async function collectPlaylists(
 		}
 		if (wantsPlaylists) {
 			await ctx.emitRecord(PLAYLISTS_STREAM, { ...record });
+			if (playlistsFact) playlistsFact.emitted_count += 1;
 		}
 	}
 
@@ -271,6 +341,10 @@ async function collectPlaylists(
 		return;
 	}
 	const itemFiles = listPlaylistItemFiles(playlistsDir);
+	if (itemsFact) {
+		itemsFact.expected_file_present = itemFiles.length > 0;
+		itemsFact.enumerated_count = 0;
+	}
 	for (const file of itemFiles) {
 		const itemText = await readTextIf(join(playlistsDir, file.name));
 		if (!itemText) {
@@ -278,6 +352,11 @@ async function collectPlaylists(
 		}
 		const itemRows = parseCsvRows(itemText);
 		const [itemHeader, ...itemBody] = itemRows;
+		if (itemsFact)
+			itemsFact.enumerated_count =
+				(itemsFact.enumerated_count ?? 0) +
+				itemBody.filter((row) => !(row.length === 1 && row[0]?.trim() === ""))
+					.length;
 		const itemColumns = new Map(
 			(itemHeader ?? []).map((n, i) => [n.trim(), i]),
 		);
@@ -298,6 +377,7 @@ async function collectPlaylists(
 				continue;
 			}
 			await ctx.emitRecord(PLAYLIST_ITEMS_STREAM, { ...record });
+			if (itemsFact) itemsFact.emitted_count += 1;
 		}
 	}
 }
@@ -314,12 +394,15 @@ async function collectNamedPlaylistStream(
 	root: string,
 	stream: typeof LIKES_STREAM | typeof WATCH_LATER_STREAM,
 	fileName: string,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(stream)) {
 		return;
 	}
 	const path = join(root, "playlists", fileName);
 	const text = await readTextIf(path);
+	const fact = coverage.get(stream);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -331,8 +414,10 @@ async function collectNamedPlaylistStream(
 	}
 	const records =
 		stream === LIKES_STREAM ? parseLikesCsv(text) : parseWatchLaterCsv(text);
+	if (fact) fact.enumerated_count = records.length;
 	for (const record of records) {
 		await ctx.emitRecord(stream, { ...record });
+		if (fact) fact.emitted_count += 1;
 	}
 }
 
@@ -340,12 +425,18 @@ async function collectWatchHistory(
 	ctx: CollectContext,
 	root: string,
 	streamState: { last_timestamp?: string } | undefined,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(WATCH_HISTORY_STREAM)) {
 		return;
 	}
 	const path = join(root, "history", "watch-history.json");
 	const json = (await readJsonIf(path)) as WatchHistoryEntry[] | null;
+	const fact = coverage.get(WATCH_HISTORY_STREAM);
+	if (fact) {
+		fact.expected_file_present = Array.isArray(json);
+		fact.resumed_from_cursor = Boolean(streamState?.last_timestamp);
+	}
 	if (!Array.isArray(json)) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -357,6 +448,7 @@ async function collectWatchHistory(
 	}
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
+	if (fact) fact.enumerated_count = json.length;
 	await ctx.emit({
 		type: "PROGRESS",
 		stream: WATCH_HISTORY_STREAM,
@@ -371,6 +463,7 @@ async function collectWatchHistory(
 			continue;
 		}
 		await ctx.emitRecord(WATCH_HISTORY_STREAM, { ...record });
+		if (fact) fact.emitted_count += 1;
 		if (!latest || record.watched_at > latest) {
 			latest = record.watched_at;
 		}
@@ -393,6 +486,7 @@ runConnector({
 
 		const { root, sawZipOnly } = resolveExportRoot(importDir);
 		if (!root) {
+			const coverage = makeCoverageFacts(ctx);
 			const message = sawZipOnly
 				? `Found a .zip in ${importDir} but this connector reads an extracted export directory. Extract the Takeout archive and place its contents (or the "YouTube and YouTube Music" folder) in ${importDir}.`
 				: `No Google Takeout "YouTube and YouTube Music" export found in ${importDir}. Request an export from https://takeout.google.com/, extract it, and place it there. Set YOUTUBE_TAKEOUT_DIR to use a different location.`;
@@ -408,6 +502,8 @@ runConnector({
 				if (!ctx.requested.has(stream)) {
 					continue;
 				}
+				const fact = coverage.get(stream);
+				if (fact) fact.expected_file_present = false;
 				await ctx.emit({
 					type: "SKIP_RESULT",
 					stream,
@@ -415,6 +511,7 @@ runConnector({
 					message,
 				});
 			}
+			await emitCoverageProgress(ctx, coverage.values());
 			return;
 		}
 
@@ -425,22 +522,31 @@ runConnector({
 			canonicalRoot = root;
 		}
 		const typedState = ctx.state as YoutubeState;
+		const coverage = makeCoverageFacts(ctx);
 
-		await collectProfile(ctx, canonicalRoot);
-		await collectSubscriptions(ctx, canonicalRoot);
-		await collectPlaylists(ctx, canonicalRoot);
+		await collectProfile(ctx, canonicalRoot, coverage);
+		await collectSubscriptions(ctx, canonicalRoot, coverage);
+		await collectPlaylists(ctx, canonicalRoot, coverage);
 		await collectNamedPlaylistStream(
 			ctx,
 			canonicalRoot,
 			LIKES_STREAM,
 			"Liked videos-videos.csv",
+			coverage,
 		);
 		await collectNamedPlaylistStream(
 			ctx,
 			canonicalRoot,
 			WATCH_LATER_STREAM,
 			"Watch later-videos.csv",
+			coverage,
 		);
-		await collectWatchHistory(ctx, canonicalRoot, typedState.watch_history);
+		await collectWatchHistory(
+			ctx,
+			canonicalRoot,
+			typedState.watch_history,
+			coverage,
+		);
+		await emitCoverageProgress(ctx, coverage.values());
 	},
 });

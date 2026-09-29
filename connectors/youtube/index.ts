@@ -33,6 +33,17 @@ const SCROLLS = {
 	history: 4,
 } as const;
 
+type CoverageFact = {
+	stream: string;
+	requested: true;
+	source: "browser";
+	emitted_count: number;
+	time_range_requested: boolean;
+	enumerated_count?: number;
+	limit?: number;
+	skipped_unresolved_date_count?: number;
+};
+
 function id(value: string): string {
 	return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
@@ -359,13 +370,40 @@ type BrowserContext = Pick<
 	"page" | "requested" | "emitRecord" | "emit" | "progress"
 >;
 
+async function emitCoverageProgress(
+	ctx: Pick<BrowserContext, "progress">,
+	connector: "youtube",
+	facts: Iterable<CoverageFact>,
+): Promise<void> {
+	await ctx.progress(
+		`${connector}.coverage ${JSON.stringify({
+			connector,
+			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
+		})}`,
+	);
+}
+
 /** Exported so fixture/protocol tests can run without launching a browser. */
 export async function collectYoutubeBrowser(
 	ctx: BrowserContext,
 ): Promise<void> {
 	const capturedAt = new Date().toISOString();
 	const { page, requested } = ctx;
+	const coverage = new Map<string, CoverageFact>(
+		[...requested.keys()].map((stream) => [
+			stream,
+			{
+				stream,
+				requested: true,
+				source: "browser",
+				emitted_count: 0,
+				time_range_requested: Boolean(requested.get(stream)?.time_range),
+			},
+		]),
+	);
 	const emit = async (stream: string, record: Record<string, unknown>) => {
+		const fact = coverage.get(stream);
+		if (fact) fact.emitted_count += 1;
 		await ctx.emitRecord(stream, record);
 	};
 	if (requested.has("profile")) {
@@ -613,6 +651,12 @@ export async function collectYoutubeBrowser(
 			"watch_history",
 		);
 		if (videos) {
+			const fact = coverage.get("watch_history");
+			if (fact) {
+				fact.enumerated_count = videos.length;
+				fact.limit = HISTORY_LIMIT;
+				fact.skipped_unresolved_date_count = 0;
+			}
 			const browserDate = await page.evaluate(() => {
 				const now = new Date();
 				return [now.getFullYear(), now.getMonth(), now.getDate()];
@@ -626,8 +670,13 @@ export async function collectYoutubeBrowser(
 					video.watched_date_label ?? null,
 					dateReference,
 				);
-				if (!watchedDate && requested.get("watch_history")?.time_range)
+				if (!watchedDate && requested.get("watch_history")?.time_range) {
+					const fact = coverage.get("watch_history");
+					if (fact)
+						fact.skipped_unresolved_date_count =
+							(fact.skipped_unresolved_date_count ?? 0) + 1;
 					continue;
+				}
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
 					position,
@@ -645,6 +694,7 @@ export async function collectYoutubeBrowser(
 			}
 		}
 	}
+	await emitCoverageProgress(ctx, "youtube", coverage.values());
 }
 
 export const youtubeConnectorConfig = {

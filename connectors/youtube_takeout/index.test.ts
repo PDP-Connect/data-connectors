@@ -122,6 +122,31 @@ test("watch_history: a real-shaped watch-history.json emits RECORD -> STATE for 
 
 			const done = messagesOf(result, "DONE");
 			assert.equal(done.length, 1);
+
+			const coverage = messagesOf(result, "PROGRESS").find(
+				(m) =>
+					typeof m.message === "string" &&
+					m.message.startsWith("youtube_takeout.coverage "),
+			);
+			assert.ok(coverage);
+			const payload = JSON.parse(
+				String(coverage.message).slice("youtube_takeout.coverage ".length),
+			) as { streams: Array<Record<string, unknown>> };
+			assert.deepEqual(payload.streams, [
+				{
+					stream: "watch_history",
+					requested: true,
+					source: "takeout",
+					expected_file_present: true,
+					emitted_count: 1,
+					enumerated_count: 2,
+					resumed_from_cursor: false,
+				},
+			]);
+			assert.doesNotMatch(
+				String(coverage.message),
+				/How to make sourdough|Baker Channel|youtube\.com|abc123XYZ0/,
+			);
 		},
 	);
 });
@@ -140,8 +165,6 @@ test("watch_history: a second run resumes from the cursor rather than re-emittin
 		},
 	);
 });
-
-
 
 test("playlists + playlist_items: an index file with one per-item CSV emits both streams", async () => {
 	await withExportDir(
@@ -181,9 +204,6 @@ test("likes and watch_later: named playlist export files map to their own stream
 		},
 	);
 });
-
-
-
 
 test("an extracted export directly in the import dir (no wrapping folder) is also read", async () => {
 	await withExportDir(

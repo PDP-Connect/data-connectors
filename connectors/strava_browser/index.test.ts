@@ -202,6 +202,46 @@ test("a full refresh ignores the cursor", async () => {
 	assert.equal(h.of("activities").length, 5);
 });
 
+test("a complete run reports redacted coverage and requested time bounds", async () => {
+	const h = harness(["activities"], {}, {
+		since: "2026-09-01T00:00:00Z",
+		until: "2026-10-01T00:00:00Z",
+	});
+	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
+	const summary = h.messages.find(
+		(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			message.type === "PROGRESS" &&
+			message.message.includes("phase=coverage"),
+	);
+	assert.ok(summary, "successful runs expose coverage after removing its stream");
+	assert.match(summary.message, /status=complete pages_read=2 unreadable=0/);
+	assert.match(
+		summary.message,
+		/window_requested_from=2026-09-01T00:00:00Z window_requested_to=2026-10-01T00:00:00Z/,
+	);
+	assert.match(summary.message, /window_covered_from=2026-09-01T19:00:00Z/);
+	assert.match(summary.message, /window_covered_to=2026-09-20T13:30:00Z/);
+	assert.doesNotMatch(summary.message, /9000000000/);
+});
+
+test("an unreadable row marks the run summary partial", async () => {
+	const page = JSON.parse(PAGES["1"] as string) as { models: unknown[] };
+	page.models.push({});
+	const h = harness(["activities"]);
+	await withStrava(
+		listFetcher({ ...PAGES, "1": JSON.stringify(page) }),
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	const summary = h.messages.find(
+		(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			message.type === "PROGRESS" &&
+			message.message.includes("phase=coverage"),
+	);
+	assert.ok(summary);
+	assert.match(summary.message, /status=partial/);
+	assert.match(summary.message, /unreadable=1/);
+});
+
 
 
 

@@ -207,6 +207,37 @@ test("a normal export emits activities in canonical units", async () => {
 	);
 });
 
+test("a thin export reports unavailable metrics and requested/covered windows", async () => {
+	const header = "Activity ID,Activity Date,Activity Type,Distance,Elapsed Time";
+	const row = "11385479490,2024-05-20T13:05:32Z,Run,8111.2,2890";
+	await withImportDir({ "activities.csv": `${header}\n${row}\n` }, async (dir) => {
+		const result = await run(dir, undefined, {
+			since: "2024-05-01T00:00:00Z",
+			until: "2024-06-01T00:00:00Z",
+		});
+		const activity = recordsOf(result, "activities")[0];
+		assert.ok(activity);
+		assert.equal(activity.calories_kcal, null);
+		assert.equal(activity.gear, null);
+
+		const diagnostics = messagesOf(result, "PROGRESS").find((message) =>
+			String(message.message).includes("phase=coverage"),
+		);
+		assert.ok(diagnostics, "successful imports expose a redacted coverage summary");
+		assert.match(String(diagnostics.message), /status=partial/);
+		assert.match(String(diagnostics.message), /fields_unavailable=calories_kcal,gear,/);
+		assert.match(
+			String(diagnostics.message),
+			/window_requested_from=2024-05-01T00:00:00Z window_requested_to=2024-06-01T00:00:00Z/,
+		);
+		assert.match(
+			String(diagnostics.message),
+			/window_covered_from=2024-05-20T13:05:32Z window_covered_to=2024-05-20T13:05:32Z/,
+		);
+		assert.doesNotMatch(String(diagnostics.message), /Parkrun|11385479490/);
+	});
+});
+
 test("a ZIP export streams activities.csv through the same collection path", async () => {
 	const zip = makeStoredZip([
 		{ name: "activities.csv", data: Buffer.from(`${HEADER}\n${ROW_RUN}\n`) },

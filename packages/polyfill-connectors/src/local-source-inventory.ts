@@ -606,6 +606,25 @@ export interface InventoryPlan {
 	recordsByStream: Map<string, InventoryRecord[]>;
 }
 
+export function localInventoryDiagnosticsSummary(input: {
+	inventory: Pick<InventoryPlan, "coverage">;
+	toolLabel: string;
+}): string {
+	const counts = new Map<string, number>();
+	for (const record of input.inventory.coverage) {
+		const key = `status_${record.status}`;
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const parts = [...counts.entries()]
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([key, count]) => `${key}=${count}`);
+	const stores = input.inventory.coverage
+		.map((record) => `${record.store}:${record.status}`)
+		.sort()
+		.join(",");
+	return `${input.toolLabel} phase=index pass=index local_inventory_stores=${input.inventory.coverage.length} ${parts.join(" ")} stores=${stores}`;
+}
+
 function pathHash(tool: string, relativePath: string): string {
 	return createHash("sha256").update(`${tool}:${relativePath}`).digest("hex");
 }

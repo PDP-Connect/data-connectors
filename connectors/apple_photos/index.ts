@@ -70,6 +70,7 @@ import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	hydrateMediaBytes,
@@ -120,6 +121,26 @@ function hasSupportedExtension(filename: string): boolean {
 	return false;
 }
 
+async function emitCoverageProgress(
+	emit: CollectContext["emit"],
+	input: {
+		filesScanned?: number;
+		reason: "collected" | "export_dir_empty" | "export_dir_missing";
+		status: "collected" | "missing";
+	},
+): Promise<void> {
+	await emit({
+		type: "PROGRESS",
+		stream: "photos",
+		message: [
+			"Apple Photos phase=coverage stream=photos",
+			`status=${input.status}`,
+			`reason=${input.reason}`,
+			`files_scanned=${input.filesScanned ?? 0}`,
+		].join(" "),
+	});
+}
+
 /**
  * Recursively walk `dir`, yielding one DiscoveredFile per supported media
  * file. Uses async iteration over opendir so entries are streamed rather
@@ -150,7 +171,27 @@ runConnector({
 	validateRecord,
 	async collect({ state, requested, emit, emitRecord, progress }) {
 		const dir = resolveExportDir();
-		if (!dir || (await isEmptyDir(dir))) {
+		if (!dir) {
+			await emitCoverageProgress(emit, {
+				reason: "export_dir_missing",
+				status: "missing",
+			});
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "photos",
+				reason: "export_not_found",
+				message:
+					"Export photos from Photos.app (File → Export → Export Unmodified Originals) into " +
+					"~/.pdpp/imports/apple_photos/ (or set APPLE_PHOTOS_EXPORT_DIR).",
+			});
+			return;
+		}
+
+		if (await isEmptyDir(dir)) {
+			await emitCoverageProgress(emit, {
+				reason: "export_dir_empty",
+				status: "missing",
+			});
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "photos",
@@ -201,6 +242,11 @@ runConnector({
 		await progress(
 			`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`,
 		);
+		await emitCoverageProgress(emit, {
+			filesScanned: fileCount,
+			reason: "collected",
+			status: "collected",
+		});
 
 		await emit({
 			type: "STATE",

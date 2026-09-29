@@ -49,6 +49,18 @@ function states(
 	);
 }
 
+function progressMessages(
+	messages: readonly EmittedMessage[],
+	stream: string,
+): string[] {
+	return messages
+		.filter(
+			(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+				m.type === "PROGRESS" && m.stream === stream,
+		)
+		.map((m) => m.message);
+}
+
 function runApplePhotos(
 	exportDir: string,
 	streams: string[],
@@ -81,6 +93,10 @@ test("apple_photos SKIP_RESULTs export_not_found when the export dir does not ex
 	assert.ok(skip, "expected a photos SKIP_RESULT");
 	assert.equal(skip?.reason, "export_not_found");
 	assert.match(skip?.message ?? "", /Export photos from Photos\.app/);
+	assert.match(
+		progressMessages(result.messages, "photos").join("\n"),
+		/Apple Photos phase=coverage stream=photos status=missing reason=export_dir_missing files_scanned=0/,
+	);
 	assert.equal(records(result.messages, "photos").length, 0);
 });
 
@@ -91,6 +107,10 @@ test("apple_photos SKIP_RESULTs export_not_found when the export dir exists but 
 		const skip = skips(result.messages).find((s) => s.stream === "photos");
 		assert.ok(skip, "expected a photos SKIP_RESULT for an empty export dir");
 		assert.equal(skip?.reason, "export_not_found");
+		assert.match(
+			progressMessages(result.messages, "photos").join("\n"),
+			/Apple Photos phase=coverage stream=photos status=missing reason=export_dir_empty files_scanned=0/,
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -114,6 +134,10 @@ test("apple_photos extracts filename/size/hash/mtime/content_type for fixture fi
 		const result = await runApplePhotos(dir, ["photos"]);
 		const photos = records(result.messages, "photos");
 		assert.equal(photos.length, 2);
+		assert.match(
+			progressMessages(result.messages, "photos").join("\n"),
+			/Apple Photos phase=coverage stream=photos status=collected reason=collected files_scanned=2/,
+		);
 
 		const jpg = photos.find((p) => p.filename === "IMG_0001.jpg");
 		assert.ok(jpg, "expected the jpg record");

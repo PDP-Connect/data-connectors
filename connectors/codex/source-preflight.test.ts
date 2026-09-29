@@ -168,6 +168,28 @@ test("codex memories and context_mode are not requestable streams", async () => 
 			JSON.stringify(record).includes("secret-context-payload"),
 		),
 	);
+	const progress = result.messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			msg.type === "PROGRESS",
+	);
+	assert(
+		progress.some(
+			(msg) =>
+				msg.message.startsWith(
+					"Codex phase=index pass=index local_inventory_stores=14 status_inventory_only=2 status_missing=12 stores=",
+				) &&
+				msg.message.includes("context_mode:inventory_only") &&
+				msg.message.includes("memories:inventory_only"),
+		),
+	);
+	assert(
+		!progress.some(
+			(msg) =>
+				msg.message.includes("private memory") ||
+				msg.message.includes("secret-context-payload"),
+		),
+		"diagnostics must not include diagnostics-only payload text",
+	);
 	assert(
 		!result.messages.some(
 			(msg) =>

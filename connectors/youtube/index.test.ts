@@ -21,7 +21,10 @@ const VIDEO = {
 class FixturePage {
 	url = "";
 	private readonly waitStates: Array<"content" | "empty" | "unreadable">;
-	private readonly ownAccount: { channel_url: string | null; email: string | null };
+	private readonly ownAccount: {
+		channel_url: string | null;
+		email: string | null;
+	};
 	constructor(
 		waitStates: Array<"content" | "empty" | "unreadable"> = [],
 		ownAccount: { channel_url: string | null; email: string | null } = {
@@ -138,7 +141,10 @@ test("profile skips report a redacted branch code for each unreadable page", asy
 		assert.equal(skips.length, 1, scenario.name);
 		assert.equal(skips[0]?.type, "SKIP_RESULT", scenario.name);
 		assert.equal(skips[0]?.reason, scenario.reason, scenario.name);
-		assert.doesNotMatch(JSON.stringify(skips[0]), /youtube\.com|owner@example\.com/);
+		assert.doesNotMatch(
+			JSON.stringify(skips[0]),
+			/youtube\.com|owner@example\.com/,
+		);
 	}
 });
 
@@ -208,7 +214,6 @@ test("profile emits an email-only record when the account has no channel link", 
 	]);
 });
 
-
 test("date resolver keeps day precision and rejects unknown labels", () => {
 	const now = new Date(2026, 8, 23, 12);
 	assert.equal(resolveWatchedDate("Today", now), "2026-09-23");
@@ -229,6 +234,7 @@ test("history is the first 50 visible records in page order with no timestamp cu
 				}))
 			: undefined;
 	const history: Record<string, unknown>[] = [];
+	const progress: string[] = [];
 	await collectYoutubeBrowser({
 		page: page as never,
 		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
@@ -236,13 +242,39 @@ test("history is the first 50 visible records in page order with no timestamp cu
 			history.push(data);
 		},
 		emit: async () => undefined,
-		progress: async () => undefined,
+		progress: async (message) => {
+			progress.push(message);
+		},
 	});
 	assert.equal(history.length, 50);
 	assert.equal(history[0]?.video_id, "video0");
 	assert.equal(history[49]?.video_id, "video49");
 	assert.equal(history[49]?.position, 49);
 	assert.equal("watched_at" in history[0]!, false);
+
+	const coverage = progress.find((message) =>
+		message.startsWith("youtube.coverage "),
+	);
+	assert.ok(coverage);
+	const payload = JSON.parse(coverage.slice("youtube.coverage ".length)) as {
+		streams: Array<Record<string, unknown>>;
+	};
+	assert.deepEqual(payload.streams, [
+		{
+			stream: "watch_history",
+			requested: true,
+			source: "browser",
+			emitted_count: 50,
+			time_range_requested: false,
+			enumerated_count: 50,
+			limit: 50,
+			skipped_unresolved_date_count: 0,
+		},
+	]);
+	assert.doesNotMatch(
+		coverage,
+		/Real video title|Creator|youtube\.com|abc123XYZ0/,
+	);
 });
 
 test("repeated history videos keep the first page occurrence and one primary key", async () => {

@@ -206,6 +206,22 @@ test("claude_code context_mode is diagnostics-only, not a requestable stream", a
 	assert(
 		!records.some((record) => JSON.stringify(record).includes("do-not-emit")),
 	);
+	const progress = result.messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			msg.type === "PROGRESS",
+	);
+	assert(
+		progress.some(
+			(msg) =>
+				msg.message.startsWith(
+					"Claude Code phase=index pass=index local_inventory_stores=10 status_inventory_only=1 status_missing=9 stores=",
+				) && msg.message.includes("context_mode:inventory_only"),
+		),
+	);
+	assert(
+		!progress.some((msg) => msg.message.includes("do-not-emit")),
+		"diagnostics must not include context-mode payload text",
+	);
 	assert(
 		!result.messages.some(
 			(msg) =>

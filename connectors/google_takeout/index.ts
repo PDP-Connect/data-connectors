@@ -65,6 +65,30 @@ function maxPhotoBytes(env: NodeJS.ProcessEnv = process.env): number {
 	return resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV, env);
 }
 
+async function emitCoverageProgress(
+	emit: CollectContext["emit"],
+	input: {
+		items?: number;
+		reason: "collected" | "records_not_found";
+		status: "collected" | "missing";
+		stream: string;
+		unsupportedFiles?: number;
+	},
+): Promise<void> {
+	await emit({
+		type: "PROGRESS",
+		stream: input.stream,
+		message: [
+			"Google Takeout phase=coverage",
+			`stream=${input.stream}`,
+			`status=${input.status}`,
+			`reason=${input.reason}`,
+			`items=${input.items ?? 0}`,
+			`unsupported_files=${input.unsupportedFiles ?? 0}`,
+		].join(" "),
+	});
+}
+
 function resolveLocationFile(importDir: string): string | null {
 	const path = join(importDir, "Location History (Timeline)", "Records.json");
 	if (existsSync(path)) {
@@ -87,6 +111,11 @@ async function collectLocationHistory(
 	const file = resolveLocationFile(importDir);
 	const json = (file ? await readJsonIf(file) : null) as LocationFile | null;
 	if (!json?.locations) {
+		await emitCoverageProgress(emit, {
+			reason: "records_not_found",
+			status: "missing",
+			stream,
+		});
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -96,6 +125,12 @@ async function collectLocationHistory(
 		});
 		return;
 	}
+	await emitCoverageProgress(emit, {
+		items: json.locations.length,
+		reason: "collected",
+		status: "collected",
+		stream,
+	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
 	await emit({
@@ -144,6 +179,11 @@ async function collectYoutubeWatchHistory(
 	);
 	const json = (await readJsonIf(path)) as WatchHistoryEntry[] | null;
 	if (!Array.isArray(json)) {
+		await emitCoverageProgress(emit, {
+			reason: "records_not_found",
+			status: "missing",
+			stream,
+		});
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -153,6 +193,12 @@ async function collectYoutubeWatchHistory(
 		});
 		return;
 	}
+	await emitCoverageProgress(emit, {
+		items: json.length,
+		reason: "collected",
+		status: "collected",
+		stream,
+	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
 	await emit({
@@ -195,6 +241,11 @@ async function collectSearchHistory(
 	const path = join(importDir, "My Activity", "Search", "MyActivity.json");
 	const json = (await readJsonIf(path)) as SearchHistoryEntry[] | null;
 	if (!Array.isArray(json)) {
+		await emitCoverageProgress(emit, {
+			reason: "records_not_found",
+			status: "missing",
+			stream,
+		});
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -204,6 +255,12 @@ async function collectSearchHistory(
 		});
 		return;
 	}
+	await emitCoverageProgress(emit, {
+		items: json.length,
+		reason: "collected",
+		status: "collected",
+		stream,
+	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
 	await emit({
@@ -419,6 +476,11 @@ async function collectPhotos(
 	const photosDir = join(importDir, "Photos");
 
 	if (!existsSync(photosDir)) {
+		await emitCoverageProgress(emit, {
+			reason: "records_not_found",
+			status: "missing",
+			stream,
+		});
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -435,6 +497,13 @@ async function collectPhotos(
 	try {
 		const { jsonFilenamesByDir, mediaEntries, unsupportedCount } =
 			await discoverPhotoFiles(photosDir);
+		await emitCoverageProgress(emit, {
+			items: mediaEntries.length,
+			reason: "collected",
+			status: "collected",
+			stream,
+			unsupportedFiles: unsupportedCount,
+		});
 
 		await emit({
 			type: "PROGRESS",

@@ -433,6 +433,32 @@ async function collectActivities(
 		});
 	}
 
+	// Keep the source-coverage facts visible after removing the dedicated
+	// coverage stream. This message contains only schema field names,
+	// counts, and timestamps; it never includes activity content.
+	const fieldsUnavailable = [
+		resolvedColumns.calories === null ? "calories_kcal" : null,
+		resolvedColumns.gear === null ? "gear" : null,
+		resolvedColumns.movingTimeS === null ? "moving_time_s" : null,
+		resolvedColumns.averageHeartRate === null ? "average_heartrate" : null,
+		resolvedColumns.maxHeartRate === null ? "max_heartrate" : null,
+		resolvedColumns.elevationGainM === null ? "total_elevation_gain_m" : null,
+	].filter((field): field is string => field !== null);
+	await emit({
+		type: "PROGRESS",
+		stream: ACTIVITIES_STREAM,
+		count: emitted,
+		message: [
+			"Strava phase=coverage stream=activities",
+			`status=${truncated || unreadable > 0 || fieldsUnavailable.length > 0 ? "partial" : emitted === 0 ? "empty" : "complete"}`,
+			`fields_unavailable=${fieldsUnavailable.join(",") || "none"}`,
+			`window_requested_from=${timeRange?.since ?? since ?? "none"}`,
+			`window_requested_to=${timeRange?.until ?? "none"}`,
+			`window_covered_from=${earliest ?? "none"}`,
+			`window_covered_to=${coveredLatest ?? "none"}`,
+		].join(" "),
+	});
+
 
 	// Hold the cursor ONLY when the file was truncated, because only then does
 	// unread history exist beyond it. Holding it for unreadable rows would stall
