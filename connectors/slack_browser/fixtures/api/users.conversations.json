@@ -1,0 +1,113 @@
+{
+	"ok": true,
+	"channels": [
+		{
+			"id": "C0123456789",
+			"name": "general",
+			"is_channel": true,
+			"is_group": false,
+			"is_im": false,
+			"is_mpim": false,
+			"is_private": false,
+			"created": 1700000000,
+			"is_archived": false,
+			"is_general": true,
+			"unlinked": 0,
+			"name_normalized": "general",
+			"is_shared": false,
+			"is_org_shared": false,
+			"is_pending_ext_shared": false,
+			"context_team_id": "T0123456789",
+			"updated": 1700000000000,
+			"creator": "U0123456789",
+			"is_ext_shared": false,
+			"shared_team_ids": ["T0123456789"],
+			"is_member": true,
+			"topic": {
+				"value": "Company-wide announcements",
+				"creator": "U0123456789",
+				"last_set": 1700000100
+			},
+			"purpose": {
+				"value": "This channel is for everyone",
+				"creator": "U0123456789",
+				"last_set": 1700000000
+			},
+			"properties": {
+				"canvas": {
+					"file_id": "F0123456789",
+					"is_empty": true,
+					"quip_thread_id": "ABC123"
+				}
+			}
+		},
+		{
+			"id": "C0987654321",
+			"name": "eng-alerts",
+			"is_channel": true,
+			"is_group": false,
+			"is_im": false,
+			"is_mpim": false,
+			"is_private": false,
+			"created": 1710000000,
+			"is_archived": false,
+			"is_general": false,
+			"name_normalized": "eng-alerts",
+			"is_shared": false,
+			"is_org_shared": false,
+			"context_team_id": "T0123456789",
+			"creator": "U0555555555",
+			"is_ext_shared": false,
+			"is_member": true,
+			"topic": {
+				"value": "",
+				"creator": "",
+				"last_set": 0
+			},
+			"purpose": {
+				"value": "Deploy and alert notifications",
+				"creator": "U0555555555",
+				"last_set": 1710000000
+			}
+		},
+		{
+			"id": "D0123456789",
+			"created": 1720000000,
+			"is_archived": false,
+			"is_im": true,
+			"is_org_shared": false,
+			"context_team_id": "T0123456789",
+			"updated": 1720000000000,
+			"user": "U0555555555",
+			"is_user_deleted": false,
+			"priority": 0
+		},
+		{
+			"id": "C0555555555",
+			"name": "locked",
+			"is_channel": true,
+			"is_private": true,
+			"is_group": false,
+			"is_im": false,
+			"is_mpim": false,
+			"created": 1730000000,
+			"is_archived": false,
+			"name_normalized": "locked",
+			"creator": "U0555555555",
+			"is_member": false,
+			"topic": {
+				"value": "",
+				"creator": "",
+				"last_set": 0
+			},
+			"purpose": {
+				"value": "",
+				"creator": "",
+				"last_set": 0
+			}
+		}
+	],
+	"response_metadata": {
+		"next_cursor": ""
+	}
+}

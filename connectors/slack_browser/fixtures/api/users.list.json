@@ -1,0 +1,85 @@
+{
+	"ok": true,
+	"members": [
+		{
+			"id": "U0123456789",
+			"team_id": "T0123456789",
+			"name": "owner",
+			"deleted": false,
+			"color": "9f69e7",
+			"real_name": "Owner Example",
+			"tz": "America/Los_Angeles",
+			"tz_label": "Pacific Daylight Time",
+			"tz_offset": -25200,
+			"profile": {
+				"title": "Engineer",
+				"real_name": "Owner Example",
+				"real_name_normalized": "Owner Example",
+				"display_name": "owner",
+				"display_name_normalized": "owner",
+				"first_name": "Owner",
+				"last_name": "Example",
+				"email": "owner@acme.example",
+				"image_192": "https://avatars.slack-edge.com/owner_192.png",
+				"status_text": "",
+				"status_emoji": "",
+				"team": "T0123456789"
+			},
+			"is_admin": true,
+			"is_owner": true,
+			"is_primary_owner": true,
+			"is_restricted": false,
+			"is_ultra_restricted": false,
+			"is_bot": false,
+			"is_app_user": false,
+			"updated": 1758000000,
+			"has_2fa": true,
+			"two_factor_type": "app"
+		},
+		{
+			"id": "U0987654321",
+			"team_id": "T0123456789",
+			"name": "deploybot",
+			"deleted": false,
+			"real_name": "Deploy Bot",
+			"tz": "America/Los_Angeles",
+			"tz_offset": -25200,
+			"profile": {
+				"title": "",
+				"real_name": "Deploy Bot",
+				"display_name": "Deploy Bot",
+				"bot_id": "B0123456789",
+				"image_192": "https://avatars.slack-edge.com/bot_192.png"
+			},
+			"is_admin": false,
+			"is_owner": false,
+			"is_bot": true,
+			"is_app_user": false,
+			"updated": 1757000000
+		},
+		{
+			"id": "U0555555555",
+			"team_id": "T0123456789",
+			"name": "pat",
+			"deleted": false,
+			"real_name": "Pat Example",
+			"tz": "Europe/Lisbon",
+			"tz_offset": 3600,
+			"profile": {
+				"title": "Designer",
+				"real_name": "Pat Example",
+				"display_name": "pat",
+				"email": "pat@acme.example",
+				"image_192": "https://avatars.slack-edge.com/pat_192.png"
+			},
+			"is_admin": false,
+			"is_owner": false,
+			"is_bot": false,
+			"updated": 1756000000
+		}
+	],
+	"cache_ts": 1790553600,
+	"response_metadata": {
+		"next_cursor": ""
+	}
+}

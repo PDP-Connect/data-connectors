@@ -72,6 +72,8 @@ export const QUERY_AFFORDANCE_ALLOWLIST: Readonly<
 		"operational export-job timing, not an owner activity stream",
 	"slack.user_groups.created_at.group_by_time":
 		"workspace admin/membership stream; group-creation counts are not an owner activity chart",
+	"slack-browser.user_groups.created_at.group_by_time":
+		"same user_groups contract as the slack archive profile; group-creation counts are not an owner activity chart",
 
 	// YNAB category goal-snooze is a niche budgeting state timestamp, not an owner
 	// activity axis; range filtering it is rarely meaningful.

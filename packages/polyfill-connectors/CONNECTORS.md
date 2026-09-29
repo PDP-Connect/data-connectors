@@ -54,6 +54,7 @@ First-run-portability notes are platform-specific and worth reading before handi
 | anthropic | Claude.ai login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js` (now on isolated path); selectors TBD. |
 | shopify | Shopify admin login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
 | strava_browser | Owner sign-in to strava.com | 🟡 code ready | ⚠ owner login required | — | Browser-session profile for the Strava source; reads the activity list strava.com serves the signed-in owner. Heart rate, calories and gear are not in that list and arrive null. `strava` remains the account-export profile. Verified live on 2026-09-28 against a test account with 10 synthetic activities. |
+| slack_browser | Owner sign-in to Slack (Google, SSO or password) | 🟡 code ready | ⚠ owner login required | — | Browser-session profile for the Slack source; calls the Web API from the signed-in app.slack.com page with the web client's own session token, so no token is pasted. `slack` remains the slackdump archive profile. |
 | oura_browser | Owner sign-in to Oura cloud | 🟡 code ready | ⚠ owner login required | — | Separate browser-session profile for the Oura streams; `oura` remains the PAT setup profile. |
 | heb | HEB.com login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
 | wholefoods | Piggybacks on Amazon session | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. Inherits Amazon's portability profile. |
