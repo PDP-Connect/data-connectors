@@ -1655,13 +1655,13 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	const tailPage = Array.from({ length: 30 }, (_, index) =>
 		makeConvo({ id: `tail-${index}`, update_time: 1_700_000_900 - index }),
 	);
+	const resumedTailPage = [firstPage[29], ...tailPage.slice(0, 29)];
 	const newConversation = makeConvo({
 		id: "arrived-between-runs",
 		update_time: 1_700_002_000,
 	});
 	let run = 1;
 	let cursorZeroCalls = 0;
-	let tailCalls = 0;
 	const cursors: number[] = [];
 	const api: ChatGptApi = {
 		auth: () => Promise.reject(new Error("auth unused")),
@@ -1687,11 +1687,10 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 					},
 				});
 			}
-			if (cursor === 30 && tailCalls < 3) {
-				tailCalls += 1;
+			if (cursor === 30) {
 				return Promise.resolve({
 					status: 200,
-					json: { items: tailPage, next_cursor: 60 },
+					json: { items: resumedTailPage, next_cursor: 60 },
 				});
 			}
 			return Promise.resolve({ status: 200, json: { items: [] } });
@@ -1714,9 +1713,13 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	const firstCursor = firstState.cursor as Record<string, unknown>;
 	assert.equal(
 		firstCursor.last_update_time,
-		new Date(1_700_001_000 * 1000).toISOString(),
+		new Date(1_700_000_971 * 1000).toISOString(),
 	);
-	assert.deepEqual(firstCursor.backfill, { cursor: 30 });
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(1_700_000_971 * 1000).toISOString(),
+		boundary_ids: ["old-29"],
+	});
 
 	run = 2;
 	const second = makeRecordingEmit(validateRecord);
@@ -1730,8 +1733,8 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	});
 	assert.equal(
 		cursorZeroCalls,
-		3,
-		"the incremental watermark page is re-probed before backfill",
+		2,
+		"one incremental page is followed by the overlapped backfill page",
 	);
 	assert.equal(
 		second.emitted.some((record) => record.data.id === "arrived-between-runs"),
@@ -1743,7 +1746,8 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 	assert.equal(
 		second.emitted.some((record) => record.data.id === "old-0"),
-		false,
+		true,
+		"the pinned update-time watermark safely replays already-reached newer rows",
 	);
 	const finalState = second.protocolMessages.find(
 		(message) => message.type === "STATE" && message.stream === "conversations",
@@ -4818,8 +4822,140 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 	);
 	assert.deepEqual(
 		states.map((state) => state.cursor),
-		[{ last_update_time: "2026-06-15T00:00:00.000Z", backfill: { cursor: 0 } }],
+		[
+			{
+				last_update_time: "2026-06-15T00:00:00.000Z",
+				backfill: {
+					position_hint: 0,
+					oldest_update_time: null,
+					boundary_ids: [],
+				},
+			},
+		],
 		"the watermark stays put and the failed first page is saved for backfill",
+	);
+});
+
+test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-time boundary before clearing backfill", async () => {
+	const old = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({
+			id: `old-${index}`,
+			update_time: 1_700_001_000 - index,
+		}),
+	);
+	const newcomer = makeConvo({ id: "new", update_time: 1_700_002_000 });
+	const updated = makeConvo({ id: "old-40", update_time: 1_700_003_000 });
+
+	const run = (second: boolean, omitSavedBoundary = false) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const rows = (second
+			? [
+					newcomer,
+					updated,
+					...old.filter(
+						(_, index) =>
+							index !== 1 &&
+							index !== 2 &&
+							index !== 40 &&
+							!(omitSavedBoundary && index === 29),
+					),
+				]
+			: old).sort(
+				(a, b) => Number(b.update_time) - Number(a.update_time),
+			);
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				if (!second && cursor === 30) {
+					return { status: 503, json: null };
+				}
+				const page = rows.slice(cursor, cursor + 30);
+				return {
+					status: 200,
+					json: {
+						items: page,
+						next_cursor: cursor + 30 < rows.length ? cursor + 30 : null,
+					},
+				};
+			},
+		};
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		} as StreamDeps;
+		return { harness, deps };
+	};
+
+	const first = run(false);
+	await runConversationsAndMessagesStreams(first.deps, {});
+	const firstState = first.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(1_700_000_971 * 1000).toISOString(),
+		boundary_ids: ["old-29"],
+	});
+
+	const second = run(true);
+	await runConversationsAndMessagesStreams(second.deps, {
+		conversations: firstCursor,
+	});
+	const emittedIds = new Set(
+		[...first.harness.emitted, ...second.harness.emitted].map((record) => record.data.id),
+	);
+	assert.ok(emittedIds.has("new"), "the insertion is collected");
+	assert.ok(
+		emittedIds.has("old-30"),
+		"the shifted older conversation is collected",
+	);
+	assert.ok(
+		emittedIds.has("old-40"),
+		"a conversation reordered by update is collected",
+	);
+	const secondState = second.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(secondState && secondState.type === "STATE");
+	assert.equal(
+		(secondState.cursor as Record<string, unknown>).backfill,
+		undefined,
+		"the re-seen boundary clears backfill",
+	);
+	assert.ok(
+		second.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		"clean coverage follows the confirmed boundary",
+	);
+
+	const missingBoundaryRun = run(true, true);
+	await runConversationsAndMessagesStreams(missingBoundaryRun.deps, {
+		conversations: firstCursor,
+	});
+	const partialState = missingBoundaryRun.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(partialState && partialState.type === "STATE");
+	assert.ok(
+		(partialState.cursor as Record<string, unknown>).backfill,
+		"a missing saved boundary remains resumable",
+	);
+	assert.equal(
+		missingBoundaryRun.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		false,
+		"the connector does not claim coverage when the saved boundary was not re-seen",
 	);
 });
 
@@ -4926,14 +5062,16 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	assert.equal(
 		(run1States[0]?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
-		trueMaxUpdateIso,
-		"a partial walk advances only to the newest item it actually saw",
+		priorCursorIso,
+		"a partial walk keeps the watermark pinned before the unread page",
 	);
-	assert.deepEqual(
-		(run1States[0]?.cursor as { backfill?: { cursor: number } } | undefined)
-			?.backfill,
-		{ cursor: 30 },
-	);
+	const partialBackfill = (
+		run1States[0]?.cursor as
+			| { backfill?: { position_hint: number; boundary_ids: string[] } }
+			| undefined
+	)?.backfill;
+	assert.equal(partialBackfill?.position_hint, 30);
+	assert.ok(partialBackfill?.boundary_ids.length);
 
 	// ── Run 2: collect newer changes, then resume the older backfill cursor. ──
 	const run2 = makeRecordingEmit(validateRecord);
@@ -4974,8 +5112,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	);
 	assert.equal(
 		run2ConvoRecords.length,
-		20,
-		"run 2 resumes and emits the previously-missing 20-item tail",
+		50,
+		"run 2 replays the reached overlap and emits the previously-missing 20-item tail",
 	);
 	const run2Ids = new Set(run2ConvoRecords.map((r) => r.data.id));
 	for (const tailItem of missingTail) {
@@ -4993,8 +5131,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		run2ListCoverage,
 		"a genuinely clean full walk must certify list coverage",
 	);
-	assert.equal(run2ListCoverage?.considered, 20);
-	assert.equal(run2ListCoverage?.covered, 20);
+	assert.equal(run2ListCoverage?.considered, 50);
+	assert.equal(run2ListCoverage?.covered, 50);
 
 	const run2Skip = run2.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -5231,13 +5369,15 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 			state.stream,
 			(state.cursor as { last_update_time?: unknown }).last_update_time,
 		]),
-		[["conversations", "2027-01-15T08:00:00.000Z"]],
-		"watermark advances to newest-seen while backfill protects the unlisted tail",
+		[["conversations", priorCursor]],
+		"partial pagination keeps the watermark before the unread page",
 	);
-	assert.deepEqual(
-		(states[0]?.cursor as { backfill?: unknown } | undefined)?.backfill,
-		{ cursor: 30 },
-	);
+	const partialBackfill = (
+		states[0]?.cursor as
+			| { backfill?: { position_hint: number } }
+			| undefined
+	)?.backfill;
+	assert.equal(partialBackfill?.position_hint, 30);
 });
 
 test("runConversationsAndMessagesStreams: a genuine empty /conversations page remains a valid completed delta boundary", async () => {
@@ -5366,10 +5506,14 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	);
 	const safetyState = states[0]?.cursor as {
 		last_update_time?: unknown;
-		backfill?: { cursor: number };
+		backfill?: { position_hint: number; boundary_ids: string[] };
 	};
-	assert.equal(safetyState.last_update_time, "2030-03-17T17:30:00.000Z");
-	assert.equal(safetyState.backfill?.cursor, 5010);
+	assert.equal(
+		safetyState.last_update_time,
+		priorCursor,
+	);
+	assert.equal(safetyState.backfill?.position_hint, 5010);
+	assert.ok(safetyState.backfill?.boundary_ids.length);
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT",
