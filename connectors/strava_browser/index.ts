@@ -109,6 +109,12 @@ interface ActivitiesState {
 	resume_page?: number | null;
 	/** Newest start collected so far by the unfinished walk, as a UTC instant. */
 	walk_newest_start_time?: string | null;
+	/**
+	 * Earliest local day the cursor covers, from the requested start of the
+	 * walk that set it. Absent when the walk had no start, so the cursor
+	 * covers the whole history.
+	 */
+	requested_since?: string | null;
 }
 
 /** What the in-page fetch returns. It never throws: PageShim turns a throw into null. */
@@ -359,14 +365,23 @@ export async function collectStravaBrowser(
 	const rateLimitDelayMs = options.rateLimitDelayMs ?? RATE_LIMIT_DELAY_MS;
 	const runStartedAt = new Date().toISOString();
 	const fullRefresh = ctx.collectionMode === "full_refresh";
-	const prior: ActivitiesState = fullRefresh
-		? {}
-		: ((ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {});
-	// A full refresh ignores the cursor: activities are edited and deleted at
-	// the source, and only a whole walk can see that.
-	const since = prior.last_start_time ?? null;
+	const stored =
+		(ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {};
 	const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
 	const rangeSinceDay = timeRange?.since?.slice(0, 10) ?? null;
+	// A cursor covers only back to the start its walk requested. When this run
+	// asks for an earlier start, or none, the cursor would hide the gap, so the
+	// walk ignores it and goes down to the new start.
+	const storedFloor = stored.requested_since ?? null;
+	const cursorCovers =
+		(stored.last_start_time != null || stored.resume_page != null) &&
+		(storedFloor === null ||
+			(rangeSinceDay !== null && rangeSinceDay >= storedFloor));
+	// A full refresh ignores the cursor: activities are edited and deleted at
+	// the source, and only a whole walk can see that.
+	const prior: ActivitiesState = !fullRefresh && cursorCovers ? stored : {};
+	const floor = !fullRefresh && cursorCovers ? storedFloor : rangeSinceDay;
+	const since = prior.last_start_time ?? null;
 	const firstPage = prior.resume_page ?? 1;
 
 	await ensureStravaOrigin(ctx.page);
@@ -526,9 +541,10 @@ export async function collectStravaBrowser(
 
 	// The cursor moves only when a walk finishes. An unfinished walk records
 	// where to continue; a failed page is retried next run.
+	const floorField = floor ? { requested_since: floor } : {};
 	let cursor: ActivitiesState;
 	if (finished && !failure) {
-		cursor = { last_start_time: later(since, walkNewest) };
+		cursor = { last_start_time: later(since, walkNewest), ...floorField };
 	} else {
 		// After a failure this is the failed page; after the page bound it is
 		// the first page not read.
@@ -539,8 +555,10 @@ export async function collectStravaBrowser(
 						last_start_time: since,
 						resume_page: resumePage,
 						walk_newest_start_time: walkNewest,
+						...floorField,
 					}
-				: { ...prior };
+				: // Nothing was read: keep the stored cursor, also on a full refresh.
+					{ ...stored };
 	}
 	await ctx.emit({ type: "STATE", stream: ACTIVITIES_STREAM, cursor });
 }

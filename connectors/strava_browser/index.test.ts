@@ -484,3 +484,50 @@ test("the probe accepts any signed-in JSON, so a changed list fails in collectio
 	} as unknown as StravaCollectContext["page"];
 	assert.equal(await probeStravaSession(page), true);
 });
+
+test("a ranged run's cursor does not hide older history from a later unranged run", async () => {
+	const first = harness(BOTH, {}, { since: "2026-09-16T00:00:00Z" });
+	await withStrava(listFetcher(), () => collectStravaBrowser(first.ctx, FAST));
+	assert.deepEqual(
+		first.of("activities").map((a) => a.id),
+		["90000000005", "90000000004", "90000000003"],
+	);
+	assert.deepEqual(first.cursor(), {
+		last_start_time: "2026-09-20T13:30:00Z",
+		requested_since: "2026-09-16",
+	});
+
+	const second = harness(BOTH, {
+		activities: first.cursor() as Record<string, unknown>,
+	});
+	await withStrava(listFetcher(), () => collectStravaBrowser(second.ctx, FAST));
+	assert.deepEqual(
+		second.of("activities").map((a) => a.id).slice(-2),
+		["90000000002", "90000000001"],
+	);
+	assert.equal(second.of("coverage_diagnostics")[0]?.reason, "covered_in_full");
+	assert.deepEqual(second.cursor(), {
+		last_start_time: "2026-09-20T13:30:00Z",
+	});
+
+	// A later start than the cursor's still uses the cursor.
+	const third = harness(
+		BOTH,
+		{ activities: first.cursor() as Record<string, unknown> },
+		{ since: "2026-09-18T00:00:00Z" },
+	);
+	await withStrava(listFetcher(), () => collectStravaBrowser(third.ctx, FAST));
+	assert.deepEqual(third.of("activities"), []);
+	assert.deepEqual(third.cursor(), first.cursor());
+});
+
+test("a full refresh that fails on page 1 keeps the stored cursor", async () => {
+	const stored = { last_start_time: "2026-09-20T13:30:00Z" };
+	const h = harness(BOTH, { activities: stored }, undefined, "full_refresh");
+	await withStrava(
+		() => json('{"activities":[{"id":1}]}'),
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(h.of("coverage_diagnostics")[0]?.reason, "source_unreadable");
+	assert.deepEqual(h.cursor(), stored);
+});
