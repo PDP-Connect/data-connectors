@@ -4996,6 +4996,72 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	);
 });
 
+test("runConversationsAndMessagesStreams: equal-time rows moved before the resumed boundary are collected", async () => {
+	const boundaryTime = 1_700_000_971;
+	const old = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({
+			id: `tie-${index}`,
+			update_time: index === 30 || index === 29 ? boundaryTime : 1_700_001_000 - index,
+		}),
+	);
+	const run = (second: boolean) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const rows = second
+			? [...old.slice(0, 29), old[30], old[29], ...old.slice(31)]
+			: old;
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				const cursor = Number(new URLSearchParams(path.split("?")[1]).get("cursor"));
+				if (!second && cursor === 30) return { status: 503, json: null };
+				const page = rows.slice(cursor, cursor + 30);
+				return {
+					status: 200,
+					json: {
+						items: page,
+						next_cursor: cursor + 30 < rows.length ? cursor + 30 : null,
+					},
+				};
+			},
+		};
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		} as StreamDeps;
+		return { harness, deps };
+	};
+
+	const first = run(false);
+	await runConversationsAndMessagesStreams(first.deps, {});
+	const firstState = first.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.deepEqual(firstCursor.backfill, {
+		position_hint: 30,
+		oldest_update_time: new Date(boundaryTime * 1000).toISOString(),
+		boundary_ids: ["tie-29"],
+	});
+
+	const second = run(true);
+	await runConversationsAndMessagesStreams(second.deps, { conversations: firstCursor });
+	assert.ok(
+		second.harness.emitted.some((record) => record.data.id === "tie-30"),
+		"the unseen equal-time row is collected after moving before the saved boundary ID",
+	);
+	assert.ok(
+		second.harness.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+		),
+		"coverage follows successful boundary confirmation",
+	);
+});
+
 // CURSOR SAFETY (P1): for newest-first pagination, advancing the list cursor
 // to max(proven-prefix) on a truncated walk is unsafe. Items that lived on
 // the failed page or later — anywhere between the prior cursor and that new

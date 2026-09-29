@@ -3052,6 +3052,7 @@ async function listConversationsSinceCursor(
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
 	const backfillTailById = new Map<string, ConversationListItem>();
+	const savedBoundaryIds = new Set(resumeBackfill?.boundary_ids ?? []);
 	let resumeBoundarySeen = resumeBackfill?.boundary_ids.length === 0;
 	// Replay one complete page before the saved hint. The hint alone is not a
 	// continuation: the saved boundary IDs must be encountered again before a
@@ -3182,28 +3183,24 @@ async function listConversationsSinceCursor(
 				conversationsById.set(item.id, item);
 			}
 			if (resumeBackfill) {
-				if (resumeBoundarySeen) {
-					for (const item of items) {
-						if (conversationIsAtOrBeforeBackfillBoundary(item, resumeBackfill)) {
-							backfillTailById.set(item.id, item);
-						}
+				// The saved time is the stable boundary. IDs at that time were
+				// already collected before interruption; every other equal-time
+				// item remains eligible even if it moved before a saved ID.
+				for (const item of items) {
+					if (
+						conversationIsAtOrBeforeBackfillBoundary(item, resumeBackfill) &&
+						!savedBoundaryIds.has(item.id)
+					) {
+						backfillTailById.set(item.id, item);
 					}
-				} else if (
+				}
+				if (
+					!resumeBoundarySeen &&
 					conversationBackfillBoundarySeen(
 						conversationsById.values(),
 						resumeBackfill,
 					)
 				) {
-					const boundaryIds = new Set(resumeBackfill.boundary_ids);
-					let lastBoundaryIndex = -1;
-					for (const [index, item] of items.entries()) {
-						if (boundaryIds.has(item.id)) lastBoundaryIndex = index;
-					}
-					for (const item of items.slice(lastBoundaryIndex + 1)) {
-						if (conversationIsAtOrBeforeBackfillBoundary(item, resumeBackfill)) {
-							backfillTailById.set(item.id, item);
-						}
-					}
 					resumeBoundarySeen = true;
 				}
 			}
