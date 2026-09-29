@@ -1,16 +1,16 @@
 {
 	"protocol_version": "0.1.0",
-	"connector_id": "https://registry.pdpp.dev/connectors/strava",
+	"connector_id": "https://registry.pdpp.dev/connectors/strava-browser",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/strava",
 		"display": {
 			"name": "Strava"
 		}
 	},
-	"connector_key": "strava",
-	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.7",
-	"display_name": "Strava",
+	"connector_key": "strava-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
+	"version": "0.1.0",
+	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#FC4C02"
@@ -18,68 +18,38 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": false
+				"required": true
 			},
-			"filesystem": {
+			"browser": {
 				"required": true
 			}
 		}
 	},
-	"setup": {
-		"modality": "manual_or_upload",
-		"manual_or_upload": {
-			"label": "Strava account export",
-			"description": "Ask Strava for a copy of your account, wait for their email, then upload the ZIP here. Strava usually takes up to a day, and longer for a large history.",
-			"acquisition_methods": [
-				{
-					"label": "Request your account export from Strava",
-					"platform": "web",
-					"posture": "primary",
-					"detail": "On strava.com go to Settings, My Account, 'Download or Delete Your Account', and choose Request Your Archive under Download Request. Strava emails a download link when the archive is ready — usually within a day, sometimes longer for a large history. Upload the ZIP here, or upload just activities.csv from inside it. Don't unzip it first unless the file is too large to upload.",
-					"help_url": "https://support.strava.com/hc/en-us/articles/216918437-Exporting-your-Data-and-Bulk-Export"
-				}
-			],
-			"accepted_file_extensions": [".zip", ".csv"],
-			"import_dir_env_var": "STRAVA_EXPORT_DIR",
-			"help_url": "https://support.strava.com/hc/en-us/articles/216918437-Exporting-your-Data-and-Bulk-Export",
-			"help_text": "Strava's API cannot serve this. Its API Policy limits Strava Data to a short cache, forbids providing it to any third party other than the Strava user of the application that fetched it — expressly including where the user consents — and requires deletion on request from all systems under the developer's control. A Personal Server that other applications read from can satisfy none of those. An account export is different in kind rather than a way around them: the Policy's restrictions attach to data accessed from the API, and an archive Strava gives you was never accessed from the API. Strava states the export right separately and does not condition what you do with your own archive.",
-			"large_file_fallback": "A Strava archive contains one file per activity as well as the index, so it can be large. If the ZIP exceeds the upload limit, unzip it yourself and upload only activities.csv — that file alone carries everything this profile reads.",
-			"validation": {
-				"kind": "strava_account_export",
-				"file_backed": true,
-				"max_file_bytes": 52428800
-			},
-			"validation_expectations": [
-				"Detected a Strava account export: either the archive ZIP containing activities.csv, or activities.csv on its own",
-				"Confirmed the activities.csv header carries the expected columns, including both occurrences of the repeated Distance and Elapsed Time columns",
-				"Estimated activity record count",
-				"Detected activity date range",
-				"Duplicate, empty, unsupported or too-large files stated rather than silently skipped"
-			]
-		}
-	},
 	"capabilities": {
-		"human_interaction": [],
+		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
 			"interaction_posture": "manual_action_likely",
-			"rate_limit_sensitivity": "low",
-			"bot_detection_sensitivity": "low",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
 			"background_safe": false,
-			"rationale": "Collection reads an archive the owner requested from Strava; there is no credential, no session and nothing to poll, so an unattended run has nothing to collect. Refreshing means the owner requesting a new archive and uploading it, which Strava fulfils in hours to days."
+			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Pages are fetched one at a time with a pause between them, and one run reads at most 100 pages."
 		},
 		"public_listing": {
-			"tier": "supported"
+			"tier": "development"
 		}
 	},
 	"streams": [
 		{
 			"name": "activities",
 			"required": false,
-			"description": "Workouts recorded on Strava, read from the owner's account export. Location data and free text are excluded at the schema.",
+			"description": "Workouts recorded on Strava, read from the activity list strava.com shows the signed-in owner. Location data and free text are excluded at the schema.",
 			"display": {
 				"label": "Your Strava activities",
-				"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, average and maximum heart rate, calories and gear. No route, no GPS coordinates, no activity titles or notes."
+				"detail": "Sport, start time, distance, moving and elapsed time and elevation gain. Heart rate, calories and gear are not in the list strava.com serves and arrive empty from this profile. No route, no GPS coordinates, no activity titles or notes."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -180,15 +150,15 @@
 					"group_by": ["activity_type"]
 				}
 			},
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "manual_as_of"
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
 		},
 		{
 			"name": "coverage_diagnostics",
 			"required": false,
-			"description": "What this import covered and why it stops where it does. One record per stream per import.",
+			"description": "What this collection covered and why it stops where it does. One record per stream per run.",
 			"display": {
-				"label": "What your Strava import covered",
+				"label": "What your Strava collection covered",
 				"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
 			},
 			"semantics": "mutable_state",
@@ -288,21 +258,17 @@
 				}
 			},
 			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "manual_as_of"
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
 		}
 	],
 	"reason_display_messages": {
-		"awaiting_upload": "Nothing to read yet. Ask Strava for a copy of your data, and they'll email you an archive — usually within a day, sometimes longer. Upload it here when it arrives.",
-		"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-		"covered_in_full": "Everything in your export was imported.",
-		"nothing_in_range": "Your export didn't contain any activities in this period. That's not a problem — there was simply nothing to read.",
-		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
+		"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
+		"covered_in_full": "Every activity in your Strava list was collected.",
+		"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
+		"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 		"sign_in_required": "Strava needs you to sign in again before this can continue.",
-		"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
-		"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
-		"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-		"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it.",
-		"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+		"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
+		"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
 	}
 }

@@ -71,6 +71,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["spotify", "spotify"],
     ["steam", "steam"],
     ["strava", "strava"],
+    ["strava_browser", "strava-browser"],
     ["twitter_archive", "twitter-archive"],
     ["uber", "uber"],
     ["usaa", "usaa"],
