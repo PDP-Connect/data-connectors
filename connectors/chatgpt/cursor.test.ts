@@ -403,7 +403,7 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 	assert.deepEqual(fetches, [
 		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
 		...Array.from(
-			{ length: 3 },
+			{ length: 2 },
 			() => "/conversations/search?query=&cursor=30",
 		),
 		"/conversation/conv-A",
@@ -505,7 +505,7 @@ test("runConversationsAndMessagesStreams: messages backfill is independent from 
 	assert.deepEqual(fetches, [
 		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
 		...Array.from(
-			{ length: 3 },
+			{ length: 2 },
 			() => "/conversations/search?query=&cursor=30",
 		),
 		"/conversation/conv-new",
@@ -560,7 +560,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	});
 
 	assert.deepEqual(fetches, [
-		"/conversations/search?query=&cursor=0",
+		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
 		"/conversation/conv-new",
 		"/conversation/conv-mid",
 	]);

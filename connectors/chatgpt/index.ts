@@ -2916,13 +2916,14 @@ export async function runSharedConversationsStream(
 /**
  * The result of one `listConversationsSinceCursor` walk: the items collected
  * and whether every needed page arrived and parsed. `truncated` means a page
- * failed, cursor probes disagreed, or later data followed a short page. In each
- * case the caller must
- * not advance a cursor or emit coverage for an unproven boundary.
+ * failed, watermark probes disagreed, or the safety cap stopped the walk.
+ * `backfillCursor` resumes that exact unfinished walk.
  */
 interface ConversationListResult {
 	items: ConversationListItem[];
 	truncated: boolean;
+	backfillCursor: number | null;
+	backfillItems?: ConversationListItem[];
 }
 
 /**
@@ -2935,16 +2936,16 @@ interface ConversationListResult {
  * emits honest retryable/gap evidence instead of fabricating coverage over a
  * partial prefix it never proved complete.
  */
-/** Search pages have a server-fixed size; confirm short pages and their boundary. */
+/** Follow every server cursor; short pages are valid while a continuation exists. */
 async function listConversationsSinceCursor(
 	deps: StreamDeps,
 	priorCursor: string | null,
+	startCursor = 0,
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
-	let cursor = 0;
+	let cursor = startCursor;
 	const pageSize = 30;
 	const maxPageAttempts = 3;
-	let shortPageSeen = false;
 	let page = 0;
 	deps.emit({
 		type: "PROGRESS",
@@ -2955,23 +2956,31 @@ async function listConversationsSinceCursor(
 	});
 	while (true) {
 		const attempts: ConversationListItem[][] = [];
+		let nextCursor: number | null = null;
+		let cursorDisagreed = false;
+		let boundaryHit = false;
+		let shouldProbeAgain = false;
 		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
-			if (page > 0) {
+			if (attempt > 0) {
 				await waitForConversationListRetry(deps, 400);
 			}
-			const classified = classifyChatGptListPage<unknown>(
-				await deps.api.fetch(`/conversations/search?query=&cursor=${cursor}`),
-				{
-					stream: "conversations",
-					endpointLabel: "conversations search",
-					page,
-					listKeys: ["items"],
-				},
+			const response = await deps.api.fetch(
+				`/conversations/search?query=&cursor=${cursor}`,
 			);
+			const classified = classifyChatGptListPage<unknown>(response, {
+				stream: "conversations",
+				endpointLabel: "conversations search",
+				page,
+				listKeys: ["items"],
+			});
 			page += 1;
 			if (!classified.ok) {
 				deps.emit(classified.skip);
-				return { items: [...conversationsById.values()], truncated: true };
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfillCursor: cursor,
+				};
 			}
 			const items: ConversationListItem[] = [];
 			let malformedItem = false;
@@ -3001,7 +3010,11 @@ async function listConversationsSinceCursor(
 						});
 					}
 				}
-				return { items: [...conversationsById.values()], truncated: true };
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfillCursor: cursor,
+				};
 			}
 			if (items.length > pageSize) {
 				emitConversationListUnstable(
@@ -3009,32 +3022,79 @@ async function listConversationsSinceCursor(
 					"ChatGPT conversation search returned more than one cursor page",
 					{ cursor, item_count: items.length },
 				);
-				return { items: [...conversationsById.values()], truncated: true };
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfillCursor: cursor,
+				};
 			}
 			attempts.push(items);
-			if (shortPageSeen && items.length > 0) {
-				emitConversationListUnstable(
-					deps,
-					"ChatGPT conversation search returned items after an earlier short cursor page",
-					{
-						cursor,
-						item_count: items.length,
-					},
-				);
-				return { items: [...conversationsById.values()], truncated: true };
-			}
 			for (const item of items) {
 				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
 				if (priorCursor && updateIso && updateIso <= priorCursor) {
-					return { items: [...conversationsById.values()], truncated: false };
+					boundaryHit = true;
 				}
 				conversationsById.set(item.id, item);
 			}
-			if (items.length === pageSize) {
+			const responseNextCursor = conversationSearchNextCursor(
+				response.json,
+				cursor,
+				items.length,
+				pageSize,
+			);
+			if (attempt === 0) {
+				nextCursor = responseNextCursor;
+			} else if (responseNextCursor !== nextCursor) {
+				cursorDisagreed = true;
+			}
+			// Retry a watermark page so a transient short response cannot hide newer
+			// records. Other short pages are retried to union ids, then follow the
+			// server's cursor even when the attempts disagree on their item sets.
+			if (items.length === pageSize && !boundaryHit) {
+				break;
+			}
+			if (boundaryHit && attempt === maxPageAttempts - 1) {
+				if (cursorDisagreed || !hasConversationPageConsensus(attempts)) {
+					emitConversationListUnstable(
+						deps,
+						"ChatGPT conversation search returned a changing watermark page",
+						{
+							cursor,
+							checks: attempts.length,
+							item_counts: attempts.map((p) => p.length),
+						},
+					);
+					return {
+						items: [...conversationsById.values()],
+						truncated: true,
+						backfillCursor: cursor,
+					};
+				}
+				return {
+					items: [...conversationsById.values()],
+					truncated: false,
+					backfillCursor: null,
+				};
+			}
+			if (!boundaryHit && items.length >= pageSize) {
+				break;
+			}
+			if (!boundaryHit && items.length === 0 && responseNextCursor === null) {
+				shouldProbeAgain = true;
+				break;
+			}
+			if (!boundaryHit && responseNextCursor !== null) {
+				if (attempt === maxPageAttempts - 1) break;
+				continue;
+			}
+			if (cursorDisagreed) {
 				break;
 			}
 		}
-		if (!hasConversationPageConsensus(attempts)) {
+		if (
+			cursorDisagreed ||
+			(boundaryHit && !hasConversationPageConsensus(attempts))
+		) {
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search returned disagreeing cursor probes",
@@ -3044,16 +3104,82 @@ async function listConversationsSinceCursor(
 					item_counts: attempts.map((items) => items.length),
 				},
 			);
-			return { items: [...conversationsById.values()], truncated: true };
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfillCursor: cursor,
+			};
 		}
-		const pageItems = attempts[0] ?? [];
-		if (pageItems.length === 0 && shortPageSeen) {
-			return { items: [...conversationsById.values()], truncated: false };
+		if (shouldProbeAgain) {
+			await waitForConversationListRetry(deps, 400);
+			const response = await deps.api.fetch(
+				`/conversations/search?query=&cursor=${cursor}`,
+			);
+			const classified = classifyChatGptListPage<unknown>(response, {
+				stream: "conversations",
+				endpointLabel: "conversations search",
+				page,
+				listKeys: ["items"],
+			});
+			page += 1;
+			if (!classified.ok) {
+				deps.emit(classified.skip);
+				return {
+					items: [...conversationsById.values()],
+					truncated: true,
+					backfillCursor: cursor,
+				};
+			}
+			if (
+				classified.items.length === 0 &&
+				conversationSearchNextCursor(response.json, cursor, 0, pageSize) ===
+					null
+			) {
+				return {
+					items: [...conversationsById.values()],
+					truncated: false,
+					backfillCursor: null,
+				};
+			}
+			// A delayed re-probe found more data or a continuation. Revisit this
+			// cursor on the next iteration so no ids from the probe are lost.
+			if (classified.items.length > 0) {
+				for (const raw of classified.items) {
+					if (isChatGptJsonObject(raw)) {
+						const id =
+							typeof raw.id === "string" ? raw.id : raw.conversation_id;
+						if (typeof id === "string" && id.length > 0)
+							conversationsById.set(id, { ...raw, id });
+					}
+				}
+			}
+			nextCursor = conversationSearchNextCursor(
+				response.json,
+				cursor,
+				classified.items.length,
+				pageSize,
+			);
 		}
-		if (pageItems.length < pageSize) {
-			shortPageSeen = true;
+		if (boundaryHit) {
+			return {
+				items: [...conversationsById.values()],
+				truncated: false,
+				backfillCursor: null,
+			};
 		}
-		cursor += pageSize;
+		if (nextCursor === null) {
+			// A non-empty short page with no explicit continuation is still followed
+			// on the endpoint's fixed numeric cursor grid.
+			if (attempts.some((items) => items.length > 0))
+				nextCursor = cursor + pageSize;
+			else
+				return {
+					items: [...conversationsById.values()],
+					truncated: false,
+					backfillCursor: null,
+				};
+		}
+		cursor = nextCursor;
 		if (cursor > PAGINATION_SAFETY_LIMIT) {
 			deps.emit({
 				type: "SKIP_RESULT",
@@ -3066,9 +3192,34 @@ async function listConversationsSinceCursor(
 				},
 				diagnostics: { cursor, collected: conversationsById.size },
 			});
-			return { items: [...conversationsById.values()], truncated: true };
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfillCursor: cursor,
+			};
 		}
 	}
+}
+
+function conversationSearchNextCursor(
+	json: unknown,
+	cursor: number,
+	itemCount: number,
+	pageSize: number,
+): number | null {
+	if (!isChatGptJsonObject(json))
+		return itemCount > 0 ? cursor + pageSize : null;
+	const raw = json.next_cursor ?? json.nextCursor;
+	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > cursor)
+		return raw;
+	if (typeof raw === "string" && /^\d+$/.test(raw)) {
+		const parsed = Number(raw);
+		if (Number.isSafeInteger(parsed) && parsed > cursor) return parsed;
+	}
+	if (raw === null || json.has_more === false) return null;
+	if (typeof json.has_more === "boolean")
+		return json.has_more ? cursor + pageSize : null;
+	return itemCount > 0 ? cursor + pageSize : null;
 }
 
 function emitConversationListUnstable(
@@ -3131,6 +3282,14 @@ function oldestConversationCursor(
 	return a <= b ? a : b;
 }
 
+function newestConversationCursor(
+	a: string | null,
+	b: string | null,
+): string | null {
+	if (!(a && b)) return a || b;
+	return a >= b ? a : b;
+}
+
 type ConversationListForCursor = (
 	cursor: string | null,
 ) => Promise<ConversationListResult>;
@@ -3150,6 +3309,7 @@ async function selectConversationListsForRequestedStreams({
 }): Promise<{
 	conversationsToSync: ConversationListItem[];
 	messageDetailConversations: ConversationListItem[];
+	backfillCursor: number | null;
 	// Whether the list backing THAT stream's selection was truncated by a
 	// failed/unreadable page. When `wantsConversations && wantsMessages` share
 	// one underlying list call, a truncation of that shared call truncates both
@@ -3165,31 +3325,51 @@ async function selectConversationListsForRequestedStreams({
 			priorMessagesCursor,
 		);
 		const sharedList = await listForCursor(sharedCursor);
+		const backfillIds = new Set(
+			(sharedList.backfillItems ?? []).map((c) => c.id),
+		);
 		return {
-			conversationsToSync: sharedList.items.filter((c) =>
-				conversationIsAfterCursor(c, priorConversationsCursor),
+			conversationsToSync: sharedList.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorConversationsCursor),
 			),
-			messageDetailConversations: sharedList.items.filter((c) =>
-				conversationIsAfterCursor(c, priorMessagesCursor),
+			messageDetailConversations: sharedList.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorMessagesCursor),
 			),
+			backfillCursor: sharedList.backfillCursor,
 			conversationsListTruncated: sharedList.truncated,
 			messagesListTruncated: sharedList.truncated,
 		};
 	}
 	if (wantsConversations) {
 		const list = await listForCursor(priorConversationsCursor);
+		const backfillIds = new Set((list.backfillItems ?? []).map((c) => c.id));
 		return {
-			conversationsToSync: list.items,
+			conversationsToSync: list.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorConversationsCursor),
+			),
 			messageDetailConversations: [],
+			backfillCursor: list.backfillCursor,
 			conversationsListTruncated: list.truncated,
 			messagesListTruncated: false,
 		};
 	}
 	if (wantsMessages) {
 		const list = await listForCursor(priorMessagesCursor);
+		const backfillIds = new Set((list.backfillItems ?? []).map((c) => c.id));
 		return {
 			conversationsToSync: [],
-			messageDetailConversations: list.items,
+			messageDetailConversations: list.items.filter(
+				(c) =>
+					backfillIds.has(c.id) ||
+					conversationIsAfterCursor(c, priorMessagesCursor),
+			),
+			backfillCursor: list.backfillCursor,
 			conversationsListTruncated: false,
 			messagesListTruncated: list.truncated,
 		};
@@ -3197,6 +3377,7 @@ async function selectConversationListsForRequestedStreams({
 	return {
 		conversationsToSync: [],
 		messageDetailConversations: [],
+		backfillCursor: null,
 		conversationsListTruncated: false,
 		messagesListTruncated: false,
 	};
@@ -4958,6 +5139,7 @@ async function recoverPendingMessageDetailGapsBeforeForwardRun(
 function persistChatGptPacingStateOnly(
 	deps: StreamDeps,
 	priorMessagesCursor: string | null,
+	backfillCursor: number | null,
 ): void {
 	const pacingFields = buildChatGptPacingStateFields(deps.providerBudget);
 	if (Object.keys(pacingFields).length === 0) {
@@ -4966,7 +5148,13 @@ function persistChatGptPacingStateOnly(
 	deps.emit({
 		type: "STATE",
 		stream: "messages",
-		cursor: { last_update_time: priorMessagesCursor, ...pacingFields },
+		cursor: {
+			last_update_time: priorMessagesCursor,
+			...(backfillCursor === null
+				? {}
+				: { backfill: { cursor: backfillCursor } }),
+			...pacingFields,
+		},
 	});
 }
 
@@ -4991,16 +5179,32 @@ export async function runConversationsAndMessagesStreams(
 	options: { detailPacing?: ConversationDetailPacingOptions } = {},
 ): Promise<void> {
 	const conversationsCursor = state.conversations as
-		| { last_update_time?: string | null }
+		| {
+				last_update_time?: string | null;
+				backfill?: { cursor?: number } | null;
+		  }
 		| undefined;
 	const messagesCursor = state.messages as
-		| { last_update_time?: string | null }
+		| {
+				last_update_time?: string | null;
+				backfill?: { cursor?: number } | null;
+		  }
 		| undefined;
 	const priorConversationsCursor =
 		conversationsCursor?.last_update_time || null;
 	const priorMessagesCursor = messagesCursor?.last_update_time || null;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
+	const savedBackfillCursors = [
+		wantsConversations ? conversationsCursor?.backfill?.cursor : undefined,
+		wantsMessages ? messagesCursor?.backfill?.cursor : undefined,
+	].filter(
+		(cursor): cursor is number =>
+			typeof cursor === "number" && Number.isSafeInteger(cursor) && cursor >= 0,
+	);
+	const savedBackfillCursor = savedBackfillCursors.length
+		? Math.min(...savedBackfillCursors)
+		: null;
 	const listedByCursor = new Map<string, Promise<ConversationListResult>>();
 	const listForCursor = (
 		cursor: string | null,
@@ -5010,7 +5214,32 @@ export async function runConversationsAndMessagesStreams(
 		if (existing) {
 			return existing;
 		}
-		const listed = listConversationsSinceCursor(deps, cursor);
+		const listed = (async (): Promise<ConversationListResult> => {
+			const forward = await listConversationsSinceCursor(deps, cursor);
+			if (savedBackfillCursor === null) return forward;
+			// Collect the incremental frontier first, then resume the incomplete
+			// full-list walk. The update-time watermark and paging continuation are
+			// independent: one finds arrivals; the other drains older unseen pages.
+			const backfill = await listConversationsSinceCursor(
+				deps,
+				null,
+				savedBackfillCursor,
+			);
+			const merged = new Map<string, ConversationListItem>();
+			for (const item of backfill.items) merged.set(item.id, item);
+			for (const item of forward.items) merged.set(item.id, item);
+			const nextBackfillCursor = forward.truncated
+				? 0
+				: backfill.truncated
+					? backfill.backfillCursor
+					: null;
+			return {
+				items: [...merged.values()],
+				truncated: forward.truncated || backfill.truncated,
+				backfillCursor: nextBackfillCursor,
+				backfillItems: backfill.items,
+			};
+		})();
 		listedByCursor.set(key, listed);
 		return listed;
 	};
@@ -5034,13 +5263,18 @@ export async function runConversationsAndMessagesStreams(
 		// Forward walk suppressed; persist the learned interval so warm-start
 		// survives, then return — deferred work stays durable DETAIL_GAPs for the
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
-		persistChatGptPacingStateOnly(deps, priorMessagesCursor);
+		persistChatGptPacingStateOnly(
+			deps,
+			priorMessagesCursor,
+			savedBackfillCursor,
+		);
 		return;
 	}
 
 	const {
 		conversationsToSync,
 		messageDetailConversations,
+		backfillCursor,
 		conversationsListTruncated,
 		messagesListTruncated,
 	} = await selectConversationListsForRequestedStreams({
@@ -5080,6 +5314,7 @@ export async function runConversationsAndMessagesStreams(
 			messageDetailConversations,
 			coverage,
 			messagesListTruncated,
+			backfillCursor,
 			priorMessagesCursor,
 		});
 	}
@@ -5106,21 +5341,16 @@ export async function runConversationsAndMessagesStreams(
 		}
 		emitConversationsState(deps, {
 			conversationsToSync,
-			conversationsListTruncated,
+			backfillCursor,
 			priorConversationsCursor,
 		});
 	}
 }
 
 /**
- * Emit the `messages` DETAIL_COVERAGE + STATE tail of the forward walk. A
- * truncated list proved it did NOT see everything newer than
- * `priorMessagesCursor` — the source-of-truth denominator for "did this run
- * cover its boundary" is broken, so this run must not claim detail coverage
- * over `messageDetailConversations` (only a prefix of the true boundary) and
- * must not advance the cursor past conversations it never listed. What was
- * already hydrated by the caller is still real, lose-nothing detail work;
- * only the completion claim and the cursor watermark are withheld here.
+ * Emit detail coverage only when the list walk completed. On a partial walk,
+ * the update-time watermark may advance to the newest item seen because the
+ * separate backfill cursor preserves the older rows the walk did not reach.
  */
 async function emitMessagesCoverageAndState(
 	deps: StreamDeps,
@@ -5128,11 +5358,13 @@ async function emitMessagesCoverageAndState(
 		messageDetailConversations,
 		coverage,
 		messagesListTruncated,
+		backfillCursor,
 		priorMessagesCursor,
 	}: {
 		messageDetailConversations: ConversationListItem[];
 		coverage: ConversationDetailCoverage;
 		messagesListTruncated: boolean;
+		backfillCursor: number | null;
 		priorMessagesCursor: string | null;
 	},
 ): Promise<void> {
@@ -5151,50 +5383,54 @@ async function emitMessagesCoverageAndState(
 			: messageDetailConversations.map((c) => c.id);
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
 	}
-	const maxMessagesUpdate = messagesListTruncated
-		? null
-		: maxUpdateTimeIso(messageDetailConversations);
+	const maxMessagesUpdate = newestConversationCursor(
+		maxUpdateTimeIso(messageDetailConversations),
+		priorMessagesCursor,
+	);
 	deps.emit({
 		type: "STATE",
 		stream: "messages",
 		// Persist the controller's learned interval alongside the cursor so the
-		// next run warm-starts from it (warm-start, SLVP ideal §5.2). A
-		// truncated list leaves `maxMessagesUpdate` null so the cursor falls
-		// through to `priorMessagesCursor` unchanged — never advanced on an
-		// unproven boundary.
+		// next run warm-starts from it (warm-start, SLVP ideal §5.2). The backfill
+		// continuation is stored beside the newest-seen update-time watermark.
 		cursor: {
-			last_update_time: maxMessagesUpdate || priorMessagesCursor || null,
+			last_update_time: maxMessagesUpdate,
+			...(backfillCursor === null
+				? {}
+				: { backfill: { cursor: backfillCursor } }),
 			...buildChatGptPacingStateFields(deps.providerBudget),
 		},
 	});
 }
 
 /**
- * Emit the `conversations` STATE tail of the forward walk. Mirrors
- * `emitMessagesCoverageAndState`'s truncation posture: never advance (or even
- * re-affirm past a partial max) on an unproven boundary — a truncated list
- * falls straight through to the unchanged prior cursor regardless of how much
- * of the partial prefix it collected.
+ * Emit the newest-seen update-time watermark and the remaining list continuation.
  */
 function emitConversationsState(
 	deps: StreamDeps,
 	{
 		conversationsToSync,
-		conversationsListTruncated,
+		backfillCursor,
 		priorConversationsCursor,
 	}: {
 		conversationsToSync: ConversationListItem[];
-		conversationsListTruncated: boolean;
+		backfillCursor: number | null;
 		priorConversationsCursor: string | null;
 	},
 ): void {
-	const maxUpdate = conversationsListTruncated
-		? null
-		: maxUpdateTimeIso(conversationsToSync);
+	const maxUpdate = newestConversationCursor(
+		maxUpdateTimeIso(conversationsToSync),
+		priorConversationsCursor,
+	);
 	deps.emit({
 		type: "STATE",
 		stream: "conversations",
-		cursor: { last_update_time: maxUpdate || priorConversationsCursor || null },
+		cursor: {
+			last_update_time: maxUpdate,
+			...(backfillCursor === null
+				? {}
+				: { backfill: { cursor: backfillCursor } }),
+		},
 	});
 }
 
