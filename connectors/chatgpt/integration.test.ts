@@ -2618,6 +2618,43 @@ test("runMessagesAndConversationsWithDetail: fetches detail through adaptive lan
 	);
 });
 
+test("runMessagesAndConversationsWithDetail: repeated recovery and forward details emit each message id once per run", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let detailFetches = 0;
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: async (): Promise<ChatGptFetchResult> => {
+			detailFetches += 1;
+			return makeDetailOk();
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedMessageIdsThisRun: new Set<string>(),
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map([["messages", { name: "messages" }]]),
+	};
+	const conversation = makeConvo({ id: "re-probed-conversation" });
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		await runMessagesAndConversationsWithDetail(
+			deps,
+			[conversation],
+			makeEmitConversation(deps),
+			{ random: () => 0, sleep: () => Promise.resolve() },
+		);
+	}
+
+	const messageIds = harness.emitted
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data.id);
+	assert.equal(detailFetches, 2, "both recovery and forward passes fetch detail");
+	assert.deepEqual(messageIds, ["u1", "a1", "a2"]);
+});
+
 test("runMessagesAndConversationsWithDetail: batch detail happy path avoids per-id GET storm", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const batchCalls: string[][] = [];

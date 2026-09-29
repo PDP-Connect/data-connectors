@@ -2069,6 +2069,8 @@ export interface StreamDeps {
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	/** Message IDs already emitted by earlier detail work in this run. */
+	emittedMessageIdsThisRun?: Set<string>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2408,11 +2410,20 @@ export async function processConversationDetail(
 			// synthetic root — skip
 			continue;
 		}
+		const messageId = typeof msg.id === "string" ? msg.id : null;
+		const alreadyEmitted = messageId
+			? (deps.emittedMessageIdsThisRun?.has(messageId) ?? false)
+			: false;
+		if (!alreadyEmitted && messageId) {
+			deps.emittedMessageIdsThisRun?.add(messageId);
+		}
 		emittedMessageCount += 1;
 		if (onBranch) {
 			emittedBranchCount += 1;
 		}
-		await deps.emitRecord("messages", msg);
+		if (!alreadyEmitted) {
+			await deps.emitRecord("messages", msg);
+		}
 	}
 	await emitBranchReconciliation(
 		deps,
@@ -4259,6 +4270,9 @@ export async function runMessagesAndConversationsWithDetail(
 	) => Promise<void>,
 	pacing: ConversationDetailPacingOptions = {},
 ): Promise<ConversationDetailCoverage> {
+	const detailDeps = deps.emittedMessageIdsThisRun
+		? deps
+		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
 	const random = pacing.random ?? Math.random;
 	const sleep = pacing.sleep ?? sleepMs;
 	const providerBudget = pacing.providerBudget ?? deps.providerBudget ?? null;
@@ -4952,7 +4966,7 @@ export async function runMessagesAndConversationsWithDetail(
 					`required conversation detail ${c.id} failed with http ${detail.status}`,
 				);
 			}
-			await processConversationDetail(deps, c, detail, emitConversation);
+			await processConversationDetail(detailDeps, c, detail, emitConversation);
 			// §10-D: suppress additive-decrease during the cooldown-exempt recovery
 			// lane so the shared pacer interval is not un-learned. Throttles still
 			// fire (recovery may decelerate, never accelerate the pacer).
@@ -5340,6 +5354,10 @@ export async function runConversationsAndMessagesStreams(
 	state: CollectContext["state"],
 	options: { detailPacing?: ConversationDetailPacingOptions } = {},
 ): Promise<void> {
+	const runDeps: StreamDeps = {
+		...deps,
+		emittedMessageIdsThisRun: new Set<string>(),
+	};
 	const conversationsCursor = state.conversations as
 		| {
 				last_update_time?: string | null;
@@ -5414,7 +5432,7 @@ export async function runConversationsAndMessagesStreams(
 	};
 
 	await recoverPendingMessageDetailGapsBeforeForwardRun(
-		deps,
+		runDeps,
 		wantsMessages,
 		emitConversation,
 		options.detailPacing,
@@ -5465,7 +5483,7 @@ export async function runConversationsAndMessagesStreams(
 		} as const;
 		deps.emit(foundMessageDetailProgressMsg);
 		const coverage = await runMessagesAndConversationsWithDetail(
-			deps,
+			runDeps,
 			messageDetailConversations,
 			emitConversation,
 			options.detailPacing,
