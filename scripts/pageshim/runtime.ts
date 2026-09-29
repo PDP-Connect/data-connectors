@@ -125,6 +125,8 @@ export interface PageshimConnector {
 	loginMessage: string;
 	validateRecord: Parameters<typeof makeEmitRecord>[0]["validateRecord"];
 	probe: (page: ReturnType<typeof playwrightPageFacade>) => Promise<boolean>;
+	/** Optional one-time navigation before the first probe; repeated probes must be observational. */
+	prepareProbe?: (page: ReturnType<typeof playwrightPageFacade>) => Promise<void>;
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
@@ -134,6 +136,8 @@ export interface PageshimConnector {
 		label: string;
 		details: unknown;
 	};
+	/** Streams where pending DETAIL_GAPs mean the PageShim result is partial. */
+	partialStreamsFromDetailGaps?: (streams: string[]) => string[];
 }
 
 type ConnectorError = {
@@ -207,7 +211,8 @@ export async function runOnPageShim(
 	);
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
-	const state: Record<string, unknown> = {};
+	const priorState: Record<string, unknown> = {};
+	const detailGapStreams = new Set<string>();
 	const emit = async (msg: Msg): Promise<void> => {
 		switch (msg.type) {
 			case "RECORD": {
@@ -217,7 +222,6 @@ export async function runOnPageShim(
 				return;
 			}
 			case "STATE":
-				state[String(msg.stream)] = msg.cursor;
 				return;
 			case "SKIP_RESULT": {
 				const stream = String(msg.stream);
@@ -229,6 +233,11 @@ export async function runOnPageShim(
 					scope: `${prefix}${stream}`,
 					phase: "collect",
 				});
+				return;
+			}
+			case "DETAIL_GAP": {
+				const stream = String(msg.stream);
+				detailGapStreams.add(stream);
 				return;
 			}
 			case "PROGRESS":
@@ -266,6 +275,7 @@ export async function runOnPageShim(
 	try {
 		if (initError) throw initError;
 		await shim.setData("status", `Checking ${connector.platform} login...`);
+		if (connector.prepareProbe) await connector.prepareProbe(page);
 		if (!(await connector.probe(page))) {
 			await page.goto(connector.loginUrl);
 			await shim.showBrowser(connector.loginUrl);
@@ -285,8 +295,22 @@ export async function runOnPageShim(
 			progress: (message: string) =>
 				shim.setProgress({ phase: { label: "collect" }, message }),
 			requested,
-			state,
+			state: priorState,
 		});
+		for (const stream of connector.partialStreamsFromDetailGaps?.([
+			...requested.keys(),
+		]) ?? []) {
+			if (detailGapStreams.has(stream)) {
+				errors.push({
+					errorClass: "partial",
+				reason:
+					"PageShim collected a bounded ChatGPT prefix with conversation details pending. PageShim does not persist STATE or DETAIL_GAP recovery state, so another PageShim run starts a new bounded walk instead of resuming this omitted tail.",
+					disposition: records[stream]?.length ? "degraded" : "omitted",
+					scope: `${prefix}${stream}`,
+					phase: "collect",
+				});
+			}
+		}
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
@@ -294,7 +318,9 @@ export async function runOnPageShim(
 		await shim.setData("result", done);
 		await shim.setData(
 			"status",
-			`Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
+			errors.some((error) => error.errorClass === "partial")
+				? `Partial: ${done.exportSummary.count} ${done.exportSummary.label}`
+				: `Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
 		);
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);

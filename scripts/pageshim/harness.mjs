@@ -50,7 +50,8 @@ export const SHIM_METHODS = [
 ];
 
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
-async function hostMain({ source, scopes, methods, loginWaitMs }) {
+async function hostMain({ source, scopes, methods, loginWaitMs, env }) {
+	window.__pageshimEnv = env || {};
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
 		if (r && typeof r === "object" && typeof r.__shimError === "string")
@@ -147,7 +148,7 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 		const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 		await new AsyncFunction("page", "process", code)(
 			page,
-			Object.freeze({ env: Object.freeze({}) }),
+			Object.freeze({ env: Object.freeze({ ...(env || {}) }) }),
 		);
 		return { ok: true };
 	} catch (e) {
@@ -307,10 +308,12 @@ export async function runHarness({
 	loginAfterMs = 0,
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
+	env = {},
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
 	const calls = {};
+	const pageNavigations = [];
 	const data = {};
 	let result = null;
 
@@ -359,6 +362,7 @@ export async function runHarness({
 				case "evaluate":
 					return evaluateInPage(String(a[0] ?? ""));
 				case "goto":
+					pageNavigations.push(String(a[0]));
 					if (a[0]) {
 						await target
 							.goto(a[0], { waitUntil: "commit" })
@@ -466,12 +470,14 @@ export async function runHarness({
 			scopes,
 			methods: SHIM_METHODS,
 			loginWaitMs,
+			env,
 		});
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
 			elapsedMs: Date.now() - started,
 			calls,
+			pageNavigations,
 			data,
 			result,
 			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
