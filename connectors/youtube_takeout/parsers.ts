@@ -203,7 +203,7 @@ function cell(
  * with columns "Channel Id" and "Channel Url". Handle/title/stats are not
  * in that file at all as far as any evidence in this repo shows — those
  * fields are always null from this parser until a real export proves
- * otherwise, and the connector reports the gap via coverage_diagnostics
+ * otherwise, and the connector reports the gap with a skip result
  * rather than presenting them as "collected but empty".
  */
 export function buildProfileRecordFromChannelCsvRow(

@@ -84,36 +84,11 @@ export const photosSchema = z.object({
 	camera_model: z.string().min(1).max(200).nullable(),
 });
 
-const coverageStatusSchema = z.enum([
-	"collected",
-	"inventory_only",
-	"excluded",
-	"deferred",
-	"missing",
-	"unsupported",
-]);
-
-/**
- * coverage_diagnostics stream: one row per known local store (currently just
- * "export_dir") reporting whether it exists and is being collected. Shared
- * shape with claude_code/codex's coverage_diagnostics — see
- * src/local-source-inventory.ts's buildLocalSourceInventory, the emitter
- * both this connector and those use.
- */
-export const coverageDiagnosticsSchema = z.object({
-	id: pdppSafeText,
-	store: pdppSafeText,
-	stream: pdppSafeText.nullable(),
-	status: coverageStatusSchema,
-	reason: pdppSafeText.max(512),
-});
-
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	photos: photosSchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

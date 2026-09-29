@@ -543,7 +543,7 @@ test("an unreadable tool-result is retried on a later run, capture off", async (
 
 test("a setup failure after the stores open still releases them", async () => {
 	// N4 control. The artifact stores are acquired BEFORE several awaited setup
-	// steps (the source inventory, the coverage emissions, the requested-source
+	// steps (the source inventory and the requested-source
 	// preflight) and long before the collection call. When the release guard sat
 	// around the collection call alone, any of those earlier steps rejecting
 	// skipped the finalizer entirely and leaked the outbox handle.

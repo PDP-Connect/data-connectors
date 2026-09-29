@@ -11,14 +11,10 @@
 
 import type { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
-import {
-	activitiesSchema,
-	coverageDiagnosticsSchema,
-} from "../strava/schemas.ts";
+import { activitiesSchema } from "../strava/schemas.ts";
 
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	activities: activitiesSchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

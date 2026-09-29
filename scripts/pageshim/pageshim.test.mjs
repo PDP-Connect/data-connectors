@@ -365,7 +365,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 		});
 
 	await t.test(
-		"activities cross as live records with a coverage receipt",
+		"activities cross as live records",
 		async () => {
 			const r = await run();
 			assertCleanRun(r);
@@ -381,9 +381,6 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 					["90000000001", "Swim", "live"],
 				],
 			);
-			const [receipt] = r.result["strava.coverage_diagnostics"].records;
-			assert.equal(receipt.reason, "covered_in_full");
-			assert.equal(receipt.record_count, 5);
 		},
 	);
 
@@ -405,8 +402,6 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
 			assert.equal(r.result.errors[0].scope, "strava.activities");
 			assert.equal(r.result.errors[0].disposition, "omitted");
-			const [receipt] = r.result["strava.coverage_diagnostics"].records;
-			assert.equal(receipt.reason, "source_unreadable");
 			assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
 		},
 	);

@@ -56,7 +56,6 @@ const ALL_LOCAL_STREAMS = [
 	{ name: "shell_snapshots" },
 	{ name: "cache_inventory" },
 	{ name: "config_inventory" },
-	{ name: "coverage_diagnostics" },
 ];
 
 function records(
@@ -68,63 +67,7 @@ function records(
 	);
 }
 
-function coverageFor(
-	recs: Extract<EmittedMessage, { type: "RECORD" }>[],
-	store: string,
-): Extract<EmittedMessage, { type: "RECORD" }> | undefined {
-	return recs.find(
-		(r) => r.stream === "coverage_diagnostics" && r.data.store === store,
-	);
-}
 
-test("codex fixture home: coverage diagnostics classify every known store", async () => {
-	const result = await runFixtureConnector({
-		home: DEVICE_A_HOME,
-		streams: ALL_LOCAL_STREAMS,
-	});
-	assert.equal(result.exitCode, 0);
-	const recs = records(result.messages);
-
-	// Declared/collected stores.
-	for (const store of ["rules", "prompts", "skills"]) {
-		assert.equal(
-			coverageFor(recs, store)?.data.status,
-			"collected",
-			`${store} should be collected`,
-		);
-	}
-	// Inventory-only stores.
-	for (const store of [
-		"history",
-		"session_index",
-		"shell_snapshots",
-		"cache",
-		"config",
-	]) {
-		assert.equal(
-			coverageFor(recs, store)?.data.status,
-			"inventory_only",
-			`${store} should be inventory_only`,
-		);
-	}
-	// Diagnostics-only private stores and excluded auth-adjacent store.
-	for (const store of ["memories", "context_mode"]) {
-		const cov = coverageFor(recs, store);
-		assert.equal(
-			cov?.data.status,
-			"inventory_only",
-			`${store} should be diagnostics-only inventory_only`,
-		);
-		assert.equal(
-			cov?.data.stream,
-			null,
-			`${store} must not map to a requestable stream`,
-		);
-	}
-	const auth = coverageFor(recs, "auth");
-	assert.equal(auth?.data.status, "excluded");
-	assert.equal(auth?.data.stream, null);
-});
 
 test("codex fixture home: risky-store secret sentinels are never emitted", async () => {
 	const result = await runFixtureConnector({

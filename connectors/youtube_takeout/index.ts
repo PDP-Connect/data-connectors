@@ -28,16 +28,15 @@
  * "UNVERIFIED" means: no fixture or repo evidence confirms this file's
  * existence, path, or column names in a real Takeout export. The parsers
  * are written from Google's documented Takeout conventions and are
- * defensive (null the field rather than guess), but every one of these
- * streams reports itself honestly via coverage_diagnostics — see
- * docs/inbox/report-connector-coverage.md classification.
+ * defensive (null the field rather than guess). Each stream
+ * declares its static verification state in the manifest.
  *
  * Accepts either a .zip archive (as downloaded from Takeout) or an
  * already-extracted directory in YOUTUBE_TAKEOUT_DIR, following the
  * manual_or_upload pattern of connectors/strava and connectors/google_maps.
  */
 
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -55,7 +54,7 @@ import {
 	parseLikesCsv,
 	parseWatchLaterCsv,
 } from "./parsers.ts";
-import { type COVERAGE_REASONS, validateRecord } from "./schemas.ts";
+import { validateRecord } from "./schemas.ts";
 import type { YoutubeState } from "./types.ts";
 
 const PROFILE_STREAM = "profile";
@@ -65,9 +64,53 @@ const PLAYLIST_ITEMS_STREAM = "playlist_items";
 const LIKES_STREAM = "likes";
 const WATCH_LATER_STREAM = "watch_later";
 const WATCH_HISTORY_STREAM = "watch_history";
-const DIAGNOSTICS_STREAM = "coverage_diagnostics";
 
-type CoverageReason = (typeof COVERAGE_REASONS)[number];
+type CoverageFact = {
+	stream: string;
+	requested: true;
+	source: "takeout";
+	expected_file_present?: boolean;
+	emitted_count: number;
+	enumerated_count?: number;
+	resumed_from_cursor?: boolean;
+};
+
+function makeCoverageFacts(ctx: CollectContext): Map<string, CoverageFact> {
+	return new Map(
+		[
+			PROFILE_STREAM,
+			SUBSCRIPTIONS_STREAM,
+			PLAYLISTS_STREAM,
+			PLAYLIST_ITEMS_STREAM,
+			LIKES_STREAM,
+			WATCH_LATER_STREAM,
+			WATCH_HISTORY_STREAM,
+		]
+			.filter((stream) => ctx.requested.has(stream))
+			.map((stream) => [
+				stream,
+				{
+					stream,
+					requested: true,
+					source: "takeout",
+					emitted_count: 0,
+				},
+			]),
+	);
+}
+
+async function emitCoverageProgress(
+	ctx: CollectContext,
+	facts: Iterable<CoverageFact>,
+): Promise<void> {
+	await ctx.emit({
+		type: "PROGRESS",
+		message: `youtube_takeout.coverage ${JSON.stringify({
+			connector: "youtube_takeout",
+			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
+		})}`,
+	});
+}
 
 /**
  * A Takeout export can be handed over as the downloaded .zip, or already
@@ -78,7 +121,7 @@ type CoverageReason = (typeof COVERAGE_REASONS)[number];
  * arbitrary-depth ZIP (rather than one flat CSV as Strava's archive is)
  * is real additional work this lane has not yet proven against a real
  * export. Until then, a .zip in the import dir is reported through
- * coverage_diagnostics as source_unreadable with remediation text telling
+ * source_unreadable with remediation text telling
  * the owner to extract it — never silently ignored.
  */
 function resolveExportRoot(importDir: string): {
@@ -115,14 +158,6 @@ function resolveExportRoot(importDir: string): {
 	return { root: null, sawZipOnly };
 }
 
-function resolveExportedAt(root: string): string | null {
-	try {
-		return statSync(root).mtime.toISOString();
-	} catch {
-		return null;
-	}
-}
-
 async function readJsonIf(path: string): Promise<unknown> {
 	if (!existsSync(path)) {
 		return null;
@@ -145,72 +180,30 @@ async function readTextIf(path: string): Promise<string | null> {
 	}
 }
 
-interface Coverage {
-	readonly fieldsUnavailable: readonly string[];
-	readonly reason: CoverageReason;
-	readonly recordCount: number;
-	readonly status: "complete" | "partial" | "empty";
-}
-
-function emptyCoverage(reason: CoverageReason): Coverage {
-	return { reason, status: "empty", recordCount: 0, fieldsUnavailable: [] };
-}
-
-async function emitDiagnostics(
-	ctx: CollectContext,
-	stream: string,
-	coverage: Coverage,
-	exportedAt: string | null,
-): Promise<void> {
-	if (!ctx.requested.has(DIAGNOSTICS_STREAM)) {
-		return;
-	}
-	await ctx.emitRecord(DIAGNOSTICS_STREAM, {
-		id: hashId(`${stream}|${exportedAt ?? "unknown"}`),
-		stream,
-		status: coverage.status,
-		reason: coverage.reason,
-		record_count: coverage.recordCount,
-		fields_unavailable: [...coverage.fieldsUnavailable],
-		freshness: "snapshot",
-		exported_at: exportedAt,
-	});
-}
-
 async function collectProfile(
 	ctx: CollectContext,
 	root: string,
-	exportedAt: string | null,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(PROFILE_STREAM)) {
 		return;
 	}
 	const path = join(root, "Channel", "channel.csv");
 	const text = await readTextIf(path);
+	const fact = coverage.get(PROFILE_STREAM);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: PROFILE_STREAM,
 			reason: "file_not_found_in_export",
-			message: `Channel export was not found at the expected path (${path}). Profile coverage for this Takeout export is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
+			message: `Channel export was not found at the expected path (${path}).`,
 		});
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
 		return;
 	}
 	const rows = parseCsvRows(text);
 	const [header, ...body] = rows;
 	if (!header || body.length === 0) {
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
 		return;
 	}
 	const columns = new Map(header.map((name, i) => [name.trim(), i]));
@@ -220,77 +213,44 @@ async function collectProfile(
 		null,
 	);
 	if (!record) {
-		await emitDiagnostics(
-			ctx,
-			PROFILE_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
 		return;
 	}
+	if (fact) fact.enumerated_count = body.length;
 	await ctx.emitRecord(PROFILE_STREAM, { ...record });
-	await emitDiagnostics(
-		ctx,
-		PROFILE_STREAM,
-		{
-			reason: "covered_in_full",
-			status: "complete",
-			recordCount: 1,
-			fieldsUnavailable: [
-				"title",
-				"handle",
-				"email",
-				"joined_at",
-				"avatar_url",
-				"description",
-				"country",
-				"subscriber_count",
-				"view_count",
-				"video_count",
-			],
-		},
-		exportedAt,
-	);
+	if (fact) fact.emitted_count += 1;
 }
 
 async function collectSubscriptions(
 	ctx: CollectContext,
 	root: string,
-	exportedAt: string | null,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(SUBSCRIPTIONS_STREAM)) {
 		return;
 	}
 	const path = join(root, "subscriptions", "subscriptions.csv");
 	const text = await readTextIf(path);
+	const fact = coverage.get(SUBSCRIPTIONS_STREAM);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: SUBSCRIPTIONS_STREAM,
 			reason: "file_not_found_in_export",
-			message: `Subscriptions export was not found at the expected path (${path}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
+			message: `Subscriptions export was not found at the expected path (${path}).`,
 		});
-		await emitDiagnostics(
-			ctx,
-			SUBSCRIPTIONS_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
 		return;
 	}
 	const rows = parseCsvRows(text);
 	const [header, ...body] = rows;
 	if (!header) {
-		await emitDiagnostics(
-			ctx,
-			SUBSCRIPTIONS_STREAM,
-			emptyCoverage("source_unreadable"),
-			exportedAt,
-		);
 		return;
 	}
+	if (fact)
+		fact.enumerated_count = body.filter(
+			(row) => !(row.length === 1 && row[0]?.trim() === ""),
+		).length;
 	const columns = new Map(header.map((name, i) => [name.trim(), i]));
-	let emitted = 0;
 	for (const row of body) {
 		if (row.length === 1 && row[0]?.trim() === "") {
 			continue;
@@ -300,26 +260,8 @@ async function collectSubscriptions(
 			continue;
 		}
 		await ctx.emitRecord(SUBSCRIPTIONS_STREAM, { ...record });
-		emitted += 1;
+		if (fact) fact.emitted_count += 1;
 	}
-	await emitDiagnostics(
-		ctx,
-		SUBSCRIPTIONS_STREAM,
-		{
-			reason: emitted > 0 ? "covered_in_full" : "nothing_in_range",
-			status: emitted > 0 ? "complete" : "empty",
-			recordCount: emitted,
-			fieldsUnavailable: [
-				"handle",
-				"avatar_url",
-				"subscriber_count",
-				"description",
-				"is_verified",
-				"notifications",
-			],
-		},
-		exportedAt,
-	);
 }
 
 interface PlaylistFileEntry {
@@ -339,7 +281,7 @@ function listPlaylistItemFiles(playlistsDir: string): PlaylistFileEntry[] {
 async function collectPlaylists(
 	ctx: CollectContext,
 	root: string,
-	exportedAt: string | null,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	const wantsPlaylists = ctx.requested.has(PLAYLISTS_STREAM);
 	const wantsItems = ctx.requested.has(PLAYLIST_ITEMS_STREAM);
@@ -349,8 +291,12 @@ async function collectPlaylists(
 	const playlistsDir = join(root, "playlists");
 	const indexPath = join(playlistsDir, "playlists.csv");
 	const text = await readTextIf(indexPath);
+	const playlistsFact = coverage.get(PLAYLISTS_STREAM);
+	const itemsFact = coverage.get(PLAYLIST_ITEMS_STREAM);
+	if (playlistsFact) playlistsFact.expected_file_present = Boolean(text);
 	if (!text) {
-		const message = `Playlists export was not found at the expected path (${indexPath}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`;
+		if (itemsFact) itemsFact.expected_file_present = false;
+		const message = `Playlists export was not found at the expected path (${indexPath}).`;
 		if (wantsPlaylists) {
 			await ctx.emit({
 				type: "SKIP_RESULT",
@@ -358,12 +304,6 @@ async function collectPlaylists(
 				reason: "file_not_found_in_export",
 				message,
 			});
-			await emitDiagnostics(
-				ctx,
-				PLAYLISTS_STREAM,
-				emptyCoverage("file_not_found_in_export"),
-				exportedAt,
-			);
 		}
 		if (wantsItems) {
 			await ctx.emit({
@@ -372,12 +312,6 @@ async function collectPlaylists(
 				reason: "file_not_found_in_export",
 				message,
 			});
-			await emitDiagnostics(
-				ctx,
-				PLAYLIST_ITEMS_STREAM,
-				emptyCoverage("file_not_found_in_export"),
-				exportedAt,
-			);
 		}
 		return;
 	}
@@ -385,8 +319,10 @@ async function collectPlaylists(
 	const rows = parseCsvRows(text);
 	const [header, ...body] = rows;
 	const columns = new Map((header ?? []).map((name, i) => [name.trim(), i]));
-	let playlistCount = 0;
-	const playlistIds: string[] = [];
+	if (playlistsFact)
+		playlistsFact.enumerated_count = body.filter(
+			(row) => !(row.length === 1 && row[0]?.trim() === ""),
+		).length;
 	for (const row of body) {
 		if (row.length === 1 && row[0]?.trim() === "") {
 			continue;
@@ -395,37 +331,20 @@ async function collectPlaylists(
 		if (!record) {
 			continue;
 		}
-		playlistIds.push(record.id);
 		if (wantsPlaylists) {
 			await ctx.emitRecord(PLAYLISTS_STREAM, { ...record });
+			if (playlistsFact) playlistsFact.emitted_count += 1;
 		}
-		playlistCount += 1;
-	}
-	if (wantsPlaylists) {
-		await emitDiagnostics(
-			ctx,
-			PLAYLISTS_STREAM,
-			{
-				reason: playlistCount > 0 ? "covered_in_full" : "nothing_in_range",
-				status: playlistCount > 0 ? "complete" : "empty",
-				recordCount: playlistCount,
-				fieldsUnavailable: [
-					"url",
-					"owner",
-					"owner_url",
-					"video_count",
-					"view_count",
-				],
-			},
-			exportedAt,
-		);
 	}
 
 	if (!wantsItems) {
 		return;
 	}
 	const itemFiles = listPlaylistItemFiles(playlistsDir);
-	let itemsEmitted = 0;
+	if (itemsFact) {
+		itemsFact.expected_file_present = itemFiles.length > 0;
+		itemsFact.enumerated_count = 0;
+	}
 	for (const file of itemFiles) {
 		const itemText = await readTextIf(join(playlistsDir, file.name));
 		if (!itemText) {
@@ -433,6 +352,11 @@ async function collectPlaylists(
 		}
 		const itemRows = parseCsvRows(itemText);
 		const [itemHeader, ...itemBody] = itemRows;
+		if (itemsFact)
+			itemsFact.enumerated_count =
+				(itemsFact.enumerated_count ?? 0) +
+				itemBody.filter((row) => !(row.length === 1 && row[0]?.trim() === ""))
+					.length;
 		const itemColumns = new Map(
 			(itemHeader ?? []).map((n, i) => [n.trim(), i]),
 		);
@@ -453,31 +377,9 @@ async function collectPlaylists(
 				continue;
 			}
 			await ctx.emitRecord(PLAYLIST_ITEMS_STREAM, { ...record });
-			itemsEmitted += 1;
+			if (itemsFact) itemsFact.emitted_count += 1;
 		}
 	}
-	await emitDiagnostics(
-		ctx,
-		PLAYLIST_ITEMS_STREAM,
-		{
-			reason:
-				itemFiles.length === 0
-					? "file_not_found_in_export"
-					: itemsEmitted > 0
-						? "covered_in_full"
-						: "nothing_in_range",
-			status: itemsEmitted > 0 ? "complete" : "empty",
-			recordCount: itemsEmitted,
-			fieldsUnavailable: [
-				"video_title",
-				"channel_title",
-				"channel_url",
-				"duration_seconds",
-				"thumbnail_url",
-			],
-		},
-		exportedAt,
-	);
 }
 
 /**
@@ -490,65 +392,51 @@ async function collectPlaylists(
 async function collectNamedPlaylistStream(
 	ctx: CollectContext,
 	root: string,
-	exportedAt: string | null,
 	stream: typeof LIKES_STREAM | typeof WATCH_LATER_STREAM,
 	fileName: string,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(stream)) {
 		return;
 	}
 	const path = join(root, "playlists", fileName);
 	const text = await readTextIf(path);
+	const fact = coverage.get(stream);
+	if (fact) fact.expected_file_present = Boolean(text);
 	if (!text) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream,
 			reason: "file_not_found_in_export",
-			message: `${fileName} was not found at the expected path (${path}). Coverage for this stream is UNVERIFIED — see the connector's coverage_diagnostics stream.`,
+			message: `${fileName} was not found at the expected path (${path}).`,
 		});
-		await emitDiagnostics(
-			ctx,
-			stream,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
 		return;
 	}
 	const records =
 		stream === LIKES_STREAM ? parseLikesCsv(text) : parseWatchLaterCsv(text);
+	if (fact) fact.enumerated_count = records.length;
 	for (const record of records) {
 		await ctx.emitRecord(stream, { ...record });
+		if (fact) fact.emitted_count += 1;
 	}
-	await emitDiagnostics(
-		ctx,
-		stream,
-		{
-			reason: records.length > 0 ? "covered_in_full" : "nothing_in_range",
-			status: records.length > 0 ? "complete" : "empty",
-			recordCount: records.length,
-			fieldsUnavailable: [
-				"video_title",
-				"channel_title",
-				"channel_url",
-				"duration_seconds",
-				"thumbnail_url",
-			],
-		},
-		exportedAt,
-	);
 }
 
 async function collectWatchHistory(
 	ctx: CollectContext,
 	root: string,
-	exportedAt: string | null,
 	streamState: { last_timestamp?: string } | undefined,
+	coverage: Map<string, CoverageFact>,
 ): Promise<void> {
 	if (!ctx.requested.has(WATCH_HISTORY_STREAM)) {
 		return;
 	}
 	const path = join(root, "history", "watch-history.json");
 	const json = (await readJsonIf(path)) as WatchHistoryEntry[] | null;
+	const fact = coverage.get(WATCH_HISTORY_STREAM);
+	if (fact) {
+		fact.expected_file_present = Array.isArray(json);
+		fact.resumed_from_cursor = Boolean(streamState?.last_timestamp);
+	}
 	if (!Array.isArray(json)) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -556,17 +444,11 @@ async function collectWatchHistory(
 			reason: "file_not_found_in_export",
 			message: `Watch history was not found at the expected path (${path}).`,
 		});
-		await emitDiagnostics(
-			ctx,
-			WATCH_HISTORY_STREAM,
-			emptyCoverage("file_not_found_in_export"),
-			exportedAt,
-		);
 		return;
 	}
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
-	let emitted = 0;
+	if (fact) fact.enumerated_count = json.length;
 	await ctx.emit({
 		type: "PROGRESS",
 		stream: WATCH_HISTORY_STREAM,
@@ -581,7 +463,7 @@ async function collectWatchHistory(
 			continue;
 		}
 		await ctx.emitRecord(WATCH_HISTORY_STREAM, { ...record });
-		emitted += 1;
+		if (fact) fact.emitted_count += 1;
 		if (!latest || record.watched_at > latest) {
 			latest = record.watched_at;
 		}
@@ -591,17 +473,6 @@ async function collectWatchHistory(
 		stream: WATCH_HISTORY_STREAM,
 		cursor: { last_timestamp: latest },
 	});
-	await emitDiagnostics(
-		ctx,
-		WATCH_HISTORY_STREAM,
-		{
-			reason: emitted > 0 ? "covered_in_full" : "nothing_in_range",
-			status: emitted > 0 ? "complete" : "empty",
-			recordCount: emitted,
-			fieldsUnavailable: ["view_count", "description"],
-		},
-		exportedAt,
-	);
 }
 
 runConnector({
@@ -615,6 +486,7 @@ runConnector({
 
 		const { root, sawZipOnly } = resolveExportRoot(importDir);
 		if (!root) {
+			const coverage = makeCoverageFacts(ctx);
 			const message = sawZipOnly
 				? `Found a .zip in ${importDir} but this connector reads an extracted export directory. Extract the Takeout archive and place its contents (or the "YouTube and YouTube Music" folder) in ${importDir}.`
 				: `No Google Takeout "YouTube and YouTube Music" export found in ${importDir}. Request an export from https://takeout.google.com/, extract it, and place it there. Set YOUTUBE_TAKEOUT_DIR to use a different location.`;
@@ -630,21 +502,16 @@ runConnector({
 				if (!ctx.requested.has(stream)) {
 					continue;
 				}
+				const fact = coverage.get(stream);
+				if (fact) fact.expected_file_present = false;
 				await ctx.emit({
 					type: "SKIP_RESULT",
 					stream,
 					reason: sawZipOnly ? "source_unreadable" : "file_not_found_in_export",
 					message,
 				});
-				await emitDiagnostics(
-					ctx,
-					stream,
-					emptyCoverage(
-						sawZipOnly ? "source_unreadable" : "records_unreadable",
-					),
-					null,
-				);
 			}
+			await emitCoverageProgress(ctx, coverage.values());
 			return;
 		}
 
@@ -654,31 +521,32 @@ runConnector({
 		} catch {
 			canonicalRoot = root;
 		}
-		const exportedAt = resolveExportedAt(canonicalRoot);
 		const typedState = ctx.state as YoutubeState;
+		const coverage = makeCoverageFacts(ctx);
 
-		await collectProfile(ctx, canonicalRoot, exportedAt);
-		await collectSubscriptions(ctx, canonicalRoot, exportedAt);
-		await collectPlaylists(ctx, canonicalRoot, exportedAt);
+		await collectProfile(ctx, canonicalRoot, coverage);
+		await collectSubscriptions(ctx, canonicalRoot, coverage);
+		await collectPlaylists(ctx, canonicalRoot, coverage);
 		await collectNamedPlaylistStream(
 			ctx,
 			canonicalRoot,
-			exportedAt,
 			LIKES_STREAM,
 			"Liked videos-videos.csv",
+			coverage,
 		);
 		await collectNamedPlaylistStream(
 			ctx,
 			canonicalRoot,
-			exportedAt,
 			WATCH_LATER_STREAM,
 			"Watch later-videos.csv",
+			coverage,
 		);
 		await collectWatchHistory(
 			ctx,
 			canonicalRoot,
-			exportedAt,
 			typedState.watch_history,
+			coverage,
 		);
+		await emitCoverageProgress(ctx, coverage.values());
 	},
 });

@@ -24,11 +24,8 @@ import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collecto
 /**
  * Default stream set for an unscoped `codex` local-collector run.
  *
- * Mirrors the full manifest-declared safe surface: `coverage_diagnostics` is
- * what promotes a drained local collector off `coverage_unknown` (the local
- * run path writes no spine run, so the connection-health rollup derives the
- * coverage axis from durable `coverage_diagnostics` records alone), and the
- * inventory streams emit metadata only (path hash, size, mtime).
+ * Mirrors the full manifest-declared safe surface. The inventory streams emit
+ * metadata only (path hash, size, mtime).
  */
 export const CODEX_DEFAULT_STREAMS = [
 	"sessions",
@@ -42,7 +39,6 @@ export const CODEX_DEFAULT_STREAMS = [
 	"shell_snapshots",
 	"config_inventory",
 	"cache_inventory",
-	"coverage_diagnostics",
 ] as const;
 
 /**

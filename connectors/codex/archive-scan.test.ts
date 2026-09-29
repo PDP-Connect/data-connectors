@@ -184,12 +184,6 @@ function rolloutStateCursor(
 	return state.cursor as StateCursor;
 }
 
-function coverageRecords(
-	messages: EmittedMessage[],
-): Extract<EmittedMessage, { type: "RECORD" }>[] {
-	return recordsFor(messages, "coverage_diagnostics");
-}
-
 // ─── Safety case 1: both roots are scanned ──────────────────────────────
 
 test("safety case 1: connector scans BOTH sessions/ and sessions-archive/ and merges their records", async () => {
@@ -265,36 +259,6 @@ test("safety case 1: CODEX_SESSIONS_ARCHIVE_DIR overrides the default archive ro
 	assert.ok(
 		contents.includes("in custom archive"),
 		"CODEX_SESSIONS_ARCHIVE_DIR is honored, not just the default sessions-archive/ path",
-	);
-});
-
-test("safety case 1 (honesty): a fresh host with no archive directory yet is not fatal, and sessions_archive coverage reports missing", async () => {
-	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-archive-fresh-"));
-	await writeRolloutUnder(
-		join(codexHome, "sessions"),
-		DATE_DIR,
-		rolloutFileName(SESSION_ID),
-		jsonl([sessionMetaLine(SESSION_ID), messageLine("only primary root")]),
-	);
-	// No sessions-archive/ directory at all — the common case for a host that
-	// has never had anything archived yet.
-
-	const run = await runCodex({
-		codexHome,
-		streams: ["messages", "coverage_diagnostics"],
-	});
-	assert.equal(run.exitCode, 0, "absent archive root must not fail the run");
-	assert.equal(
-		recordsFor(run.messages, "messages").length,
-		1,
-		"the primary root is still scanned normally",
-	);
-	const coverage = coverageRecords(run.messages);
-	assert.ok(
-		coverage.some(
-			(r) => r.data.store === "sessions_archive" && r.data.status === "missing",
-		),
-		"a missing archive root is reported honestly via coverage_diagnostics, not silently ignored",
 	);
 });
 
@@ -524,84 +488,6 @@ test("safety case 3 (mid-move race): the SAME UUID visible under both roots in o
 });
 
 // ─── examined-count integrity: mid-move race must not double-count ─────
-
-test("mid-move race: a UUID visible under both roots does not double-count messagesExamined in coverage_diagnostics", async () => {
-	const codexHome = await mkdtemp(
-		join(tmpdir(), "pdpp-codex-archive-race-examined-"),
-	);
-	const fileName = rolloutFileName(SESSION_ID);
-	// A real, known message count for this file: exactly 2 `response_item`
-	// message lines (the session_meta line is not a message).
-	const body = jsonl([
-		sessionMetaLine(SESSION_ID),
-		messageLine("racey content"),
-		messageLine("second line", "assistant"),
-	]);
-	await writeRolloutUnder(
-		join(codexHome, "sessions"),
-		DATE_DIR,
-		fileName,
-		body,
-	);
-	await writeRolloutUnder(
-		join(codexHome, "sessions-archive"),
-		DATE_DIR,
-		fileName,
-		body,
-	);
-
-	// Run 1: first sighting under whichever root is walked first parses the
-	// file (2 messages examined); the second sighting under the other root
-	// hits the mid-move-race guard. Confirm the FIRST run's examined count is
-	// already correct (this also passed before the fix, since parsedRollouts
-	// only counts the file once) before checking the steady-state rescan below,
-	// which is where the pre-fix bug actually manifested (examined double-
-	// counted specifically on a "skipped" carry-forward, not on first parse).
-	const run1 = await runCodex({
-		codexHome,
-		streams: ["messages", "coverage_diagnostics"],
-	});
-	assert.equal(run1.exitCode, 0);
-	const cursor1 = rolloutStateCursor(run1.messages);
-	assert.equal(
-		cursor1.file_cursors?.[SESSION_ID]?.message_count,
-		2,
-		"sanity: the cursor records the real message count for this fixture",
-	);
-
-	// Run 2: steady state. Both roots still hold the byte-identical file (the
-	// archiver has not yet completed removing the primary-root copy — the
-	// race window). Nothing changed, so `emitted` for messages is 0 for both
-	// sightings; per `describeDerivedCoverageReason`, a completed scan with
-	// 0 emitted reports its examined count verbatim as
-	// "enumeration complete, N examined (0 emitted)". Pre-fix, the duplicate
-	// sighting's carried-forward cursor was counted a second time, reporting
-	// 4 instead of 2.
-	const run2 = await runCodex({
-		codexHome,
-		streams: ["messages", "coverage_diagnostics"],
-		state: { messages: cursor1 },
-	});
-	assert.equal(run2.exitCode, 0);
-	assert.equal(
-		recordsFor(run2.messages, "messages").length,
-		0,
-		"steady state: no new message records",
-	);
-	const coverage2 = coverageRecords(run2.messages);
-	const messagesCoverage = coverage2.find((r) => r.data.stream === "messages");
-	assert.ok(
-		messagesCoverage,
-		"a derived coverage_diagnostics row for messages is emitted",
-	);
-	assert.equal(
-		messagesCoverage?.data.reason,
-		"enumeration complete, 2 examined (0 emitted)",
-		"the file's 2 messages are examined-counted exactly ONCE per scan, even though " +
-			"its UUID is visible under both sessions/ and sessions-archive/ in this pass — " +
-			"not doubled to 4 by counting the mid-move-race duplicate sighting a second time",
-	);
-});
 
 // ─── Safety case 4: contract doc exists and naming does not collide ─────
 

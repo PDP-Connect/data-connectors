@@ -66,7 +66,7 @@ export const stravaBrowserFixtures = {
 /** What pageshim.test.mjs needs to gate strava_browser. */
 export const pageshimCase = {
 	fixtures: stravaBrowserFixtures,
-	scopes: ["strava.activities", "strava.coverage_diagnostics"],
+	scopes: ["strava.activities"],
 	exportSummary: { count: 5, label: "activities", details: { activities: 5 } },
 	emptyExportSummary: {
 		count: 0,

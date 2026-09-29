@@ -172,7 +172,7 @@ export function startInstant(
  * instant.
  *
  * Heart rate, calories and gear are null because the list does not carry
- * them; the coverage record names them in `fields_unavailable`.
+ * them; the manifest documents those permanent list limitations.
  */
 export function buildActivityRecord(model: unknown): ActivityRecord | null {
 	if (!isRecord(model)) {

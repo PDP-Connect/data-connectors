@@ -110,26 +110,6 @@ export const watchHistorySchema = z.object({
 	description: pdppSafeText.max(5000).nullable(),
 });
 
-export const COVERAGE_REASONS = [
-	"covered_in_full",
-	"nothing_in_range",
-	"awaiting_upload",
-	"source_unreadable",
-	"records_unreadable",
-	"file_not_found_in_export",
-] as const;
-
-export const coverageDiagnosticsSchema = z.object({
-	id: pdppSafeText.max(200),
-	stream: pdppSafeText.max(80).nullable(),
-	status: z.enum(["complete", "partial", "empty"]),
-	reason: z.enum(COVERAGE_REASONS),
-	record_count: z.number().int().min(0).nullable(),
-	fields_unavailable: z.array(pdppSafeText.max(200)),
-	freshness: z.enum(["live", "snapshot"]),
-	exported_at: pdppSafeText.max(40).nullable(),
-});
-
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	profile: profileSchema,
 	subscriptions: subscriptionsSchema,
@@ -138,7 +118,6 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	likes: likesSchema,
 	watch_later: watchLaterSchema,
 	watch_history: watchHistorySchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -152,120 +152,10 @@
 			},
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "scheduled_window"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"required": false,
-			"description": "What this collection covered and why it stops where it does. One record per stream per run.",
-			"display": {
-				"label": "What your Strava collection covered",
-				"detail": "The window asked for, the window actually read, how many activities arrived, and the reason the covered window ends where it does."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"],
-						"description": "The stream this record accounts for."
-					},
-					"status": {
-						"type": "string",
-						"enum": ["complete", "partial", "empty"],
-						"description": "Whether the covered window matches the requested window. 'empty' is an ordinary outcome, not a failure."
-					},
-					"reason": {
-						"type": "string",
-						"enum": [
-							"covered_in_full",
-							"nothing_in_range",
-							"awaiting_upload",
-							"source_unreadable",
-							"source_limit_reached",
-							"collection_interrupted",
-							"records_unreadable",
-							"sign_in_required",
-							"window_unavailable"
-						],
-						"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner, and each has a reason_display_messages entry.",
-						"x_pdpp_role": "primary-title"
-					},
-					"record_count": {
-						"type": ["integer", "null"],
-						"description": "Records emitted for this stream in this import."
-					},
-					"fields_unavailable": {
-						"type": "array",
-						"items": {
-							"type": "string"
-						},
-						"description": "Fields the schema declares that this particular archive did not carry, so a column of nulls is never mistaken for a column of absent readings. Calories and gear are optional columns in the export and are the two this path exists to deliver."
-					},
-					"window_requested_from": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"window_requested_to": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"window_covered_from": {
-						"type": ["string", "null"],
-						"format": "date-time",
-						"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
-					},
-					"window_covered_to": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"freshness": {
-						"type": "string",
-						"enum": ["live", "snapshot"]
-					},
-					"exported_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					}
-				},
-				"required": [
-					"id",
-					"status",
-					"reason",
-					"fields_unavailable",
-					"freshness",
-					"exported_at"
-				]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"query": {
-				"range_filters": {
-					"window_requested_from": ["gte", "gt", "lte", "lt"],
-					"window_requested_to": ["gte", "gt", "lte", "lt"],
-					"window_covered_from": ["gte", "gt", "lte", "lt"],
-					"window_covered_to": ["gte", "gt", "lte", "lt"],
-					"exported_at": ["gte", "gt", "lte", "lt"]
-				},
-				"aggregations": {
-					"count": true
-				}
-			},
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "full_inventory",
-			"freshness_strategy": "scheduled_window"
 		}
 	],
 	"reason_display_messages": {
 		"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
-		"covered_in_full": "Every activity in your Strava list was collected.",
-		"nothing_in_range": "Your Strava list had no activities in this period. That's not a problem — there was simply nothing to read.",
 		"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 		"sign_in_required": "Strava needs you to sign in again before this can continue.",
 		"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",

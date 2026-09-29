@@ -5,11 +5,7 @@
  * End-to-end tests for the Strava export connector, driven through the real
  * connector protocol as a subprocess.
  *
- * The case worth naming: a diagnostic record must be emitted even when NO
- * activities are. "Nothing in range" and "collection interrupted" both present
- * as an empty activity list and have opposite next actions for the owner, so
- * the diagnostic cannot ride on the activity records — there would be nowhere
- * for it to live in exactly the case it is most needed.
+ * The tests cover activity records, import failures, and cursor behavior.
  */
 
 import assert from "node:assert/strict";
@@ -122,7 +118,6 @@ async function run(
 						name: "activities",
 						...(timeRange ? { time_range: timeRange } : {}),
 					},
-					{ name: "coverage_diagnostics" },
 				],
 			},
 			...(state ? { state } : {}),
@@ -145,7 +140,7 @@ async function runFullRefresh(dir: string, state?: Record<string, unknown>) {
 		start: {
 			collection_mode: "full_refresh",
 			scope: {
-				streams: [{ name: "activities" }, { name: "coverage_diagnostics" }],
+				streams: [{ name: "activities" }],
 			},
 			...(state ? { state } : {}),
 			type: "START",
@@ -212,6 +207,37 @@ test("a normal export emits activities in canonical units", async () => {
 	);
 });
 
+test("a thin export reports unavailable metrics and requested/covered windows", async () => {
+	const header = "Activity ID,Activity Date,Activity Type,Distance,Elapsed Time";
+	const row = "11385479490,2024-05-20T13:05:32Z,Run,8111.2,2890";
+	await withImportDir({ "activities.csv": `${header}\n${row}\n` }, async (dir) => {
+		const result = await run(dir, undefined, {
+			since: "2024-05-01T00:00:00Z",
+			until: "2024-06-01T00:00:00Z",
+		});
+		const activity = recordsOf(result, "activities")[0];
+		assert.ok(activity);
+		assert.equal(activity.calories_kcal, null);
+		assert.equal(activity.gear, null);
+
+		const diagnostics = messagesOf(result, "PROGRESS").find((message) =>
+			String(message.message).includes("phase=coverage"),
+		);
+		assert.ok(diagnostics, "successful imports expose a redacted coverage summary");
+		assert.match(String(diagnostics.message), /status=partial/);
+		assert.match(String(diagnostics.message), /fields_unavailable=calories_kcal,gear,/);
+		assert.match(
+			String(diagnostics.message),
+			/window_requested_from=2024-05-01T00:00:00Z window_requested_to=2024-06-01T00:00:00Z/,
+		);
+		assert.match(
+			String(diagnostics.message),
+			/window_covered_from=2024-05-20T13:05:32Z window_covered_to=2024-05-20T13:05:32Z/,
+		);
+		assert.doesNotMatch(String(diagnostics.message), /Parkrun|11385479490/);
+	});
+});
+
 test("a ZIP export streams activities.csv through the same collection path", async () => {
 	const zip = makeStoredZip([
 		{ name: "activities.csv", data: Buffer.from(`${HEADER}\n${ROW_RUN}\n`) },
@@ -224,22 +250,7 @@ test("a ZIP export streams activities.csv through the same collection path", asy
 	});
 });
 
-test("a complete import reports covered_in_full with the window it actually read", async () => {
-	await withImportDir(
-		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n` },
-		async (dir) => {
-			const diagnostics = recordsOf(await run(dir), "coverage_diagnostics");
-			assert.equal(diagnostics.length, 1);
-			const [diagnostic] = diagnostics;
-			assert.equal(diagnostic?.status, "complete");
-			assert.equal(diagnostic?.reason, "covered_in_full");
-			assert.equal(diagnostic?.record_count, 2);
-			assert.equal(diagnostic?.window_covered_from, "2024-05-20T13:05:32");
-			assert.equal(diagnostic?.window_covered_to, "2024-06-01T06:00:00Z");
-			assert.equal(diagnostic?.freshness, "snapshot");
-		},
-	);
-});
+
 
 test("a scoped import reports only the records and window that survived time_range", async () => {
 	await withImportDir(
@@ -252,32 +263,14 @@ test("a scoped import reports only the records and window that survived time_ran
 			assert.equal(recordsOf(result, "activities").length, 1);
 			assert.equal(recordsOf(result, "activities")[0]?.id, "11385479491");
 
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			assert.equal(diagnostic?.record_count, 1);
-			assert.equal(diagnostic?.window_requested_from, "2024-06-01T00:00:00Z");
-			assert.equal(diagnostic?.window_requested_to, "2024-06-02T00:00:00Z");
-			assert.equal(diagnostic?.window_covered_from, "2024-06-01T06:00:00Z");
-			assert.equal(diagnostic?.window_covered_to, "2024-06-01T06:00:00Z");
 		},
 	);
 });
 
-test("an export with no activities still emits a diagnostic, and it is not failure-shaped", async () => {
+test("an export with no activities emits no records or skips", async () => {
 	await withImportDir({ "activities.csv": `${HEADER}\n` }, async (dir) => {
 		const result = await run(dir);
 		assert.equal(recordsOf(result, "activities").length, 0);
-
-		const diagnostics = recordsOf(result, "coverage_diagnostics");
-		assert.equal(
-			diagnostics.length,
-			1,
-			"the diagnostic must survive an empty collection",
-		);
-		assert.equal(diagnostics[0]?.reason, "nothing_in_range");
-		assert.equal(diagnostics[0]?.status, "empty");
-		assert.equal(diagnostics[0]?.record_count, 0);
-
-		// Nothing in range is an ordinary outcome, not an incident.
 		assert.equal(messagesOf(result, "SKIP_RESULT").length, 0);
 	});
 });
@@ -290,12 +283,6 @@ test("unreadable rows are their own outcome, distinct from empty and from trunca
 			const result = await run(dir);
 			assert.equal(recordsOf(result, "activities").length, 1);
 
-			const [diagnostic] = recordsOf(result, "coverage_diagnostics");
-			// NOT collection_interrupted: the file was read to the end, so there is
-			// no remainder to come back for and "import it again" is bad advice.
-			assert.equal(diagnostic?.reason, "records_unreadable");
-			assert.equal(diagnostic?.status, "partial");
-			assert.equal(diagnostic?.record_count, 1);
 
 			const skips = messagesOf(result, "SKIP_RESULT");
 			assert.equal(skips.length, 1);
@@ -324,10 +311,6 @@ test("a second run resumes from the cursor rather than re-reading everything", a
 				recordsOf(second, "activities").length,
 				0,
 				"an overlapping re-import must collapse, not double-count",
-			);
-			assert.equal(
-				recordsOf(second, "coverage_diagnostics")[0]?.reason,
-				"nothing_in_range",
 			);
 		},
 	);
@@ -359,66 +342,17 @@ test("a truncated file DOES hold its cursor, because a remainder exists beyond i
 				| { cursor?: Record<string, unknown> }
 				| undefined;
 			assert.equal(state?.cursor?.last_start_time, null);
-			assert.equal(
-				recordsOf(result, "coverage_diagnostics")[0]?.reason,
-				"collection_interrupted",
-			);
 		},
 	);
 });
 
-test("an archive missing optional columns says which, rather than serving nulls", async () => {
-	const thin = "Activity ID,Activity Date,Activity Type,Elapsed Time,Distance";
-	await withImportDir(
-		{
-			"activities.csv": `${thin}\n11,"May 20, 2024, 1:05:32 PM",Run,2890,8111.2\n`,
-		},
-		async (dir) => {
-			const [diagnostic] = recordsOf(await run(dir), "coverage_diagnostics");
-			const unavailable = diagnostic?.fields_unavailable as string[];
-			// Calories and gear are the two fields this path exists to deliver.
-			assert.ok(unavailable.includes("calories_kcal"));
-			assert.ok(unavailable.includes("gear"));
-		},
-	);
-});
 
-test("nothing uploaded yet is awaiting_upload, not a failure report", async () => {
-	await withImportDir({}, async (dir) => {
-		const diagnostics = recordsOf(await run(dir), "coverage_diagnostics");
-		assert.equal(diagnostics.length, 1);
-		assert.equal(diagnostics[0]?.status, "empty");
-		// Pinning the REASON, not just the status. Asserting only `status` is how
-		// this shipped saying "some of your activities didn't arrive — import the
-		// file again" about a file the owner had never uploaded.
-		assert.equal(diagnostics[0]?.reason, "awaiting_upload");
-	});
-});
 
-test("an import directory that does not exist still emits a receipt", async () => {
-	const dir = join(tmpdir(), "strava-export-does-not-exist-0000");
-	const result = await run(dir);
-	const diagnostics = recordsOf(result, "coverage_diagnostics");
-	assert.equal(
-		diagnostics.length,
-		1,
-		"the branch that used to return silently",
-	);
-	assert.equal(diagnostics[0]?.reason, "awaiting_upload");
-	assert.equal(messagesOf(result, "SKIP_RESULT").length, 1);
-});
 
-test("a file that is not a Strava export is source_unreadable, not interrupted", async () => {
-	await withImportDir(
-		{ "activities.csv": "Title,Date\nSomething,2024-01-01\n" },
-		async (dir) => {
-			// "Import it again" is the wrong next action: the same file will fail
-			// the same way. The owner needs to upload a different file.
-			const [diagnostic] = recordsOf(await run(dir), "coverage_diagnostics");
-			assert.equal(diagnostic?.reason, "source_unreadable");
-		},
-	);
-});
+
+
+
+
 
 test("a full refresh ignores the cursor, so edits at source can propagate", async () => {
 	await withImportDir(

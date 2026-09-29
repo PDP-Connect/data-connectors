@@ -55,7 +55,6 @@ test("routed browser collection emits seven schema-valid streams without a Takeo
 			"likes",
 			"watch_later",
 			"watch_history",
-			"coverage_diagnostics",
 		];
 		const records = new Map<string, Record<string, unknown>[]>();
 		await collectYoutubeBrowser({

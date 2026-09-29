@@ -46,7 +46,6 @@ import {
 import { readBoundedFilePreview } from "../../packages/polyfill-connectors/src/bounded-file-preview.ts";
 import {
 	type EnumerationScope,
-	enumerationScopeFingerprint,
 	projectDirMatchesSourceRoots,
 	readEnumerationScope,
 	scopeBoundsEnumeration,
@@ -65,12 +64,10 @@ import {
 	scanLocalJsonl,
 } from "../../packages/polyfill-connectors/src/local-jsonl-cursor.ts";
 import {
-	buildCoverageDiagnosticsStateSnapshot,
-	buildDerivedCoverageRecord,
 	buildLocalSourceInventory,
-	type CoverageRecord,
 	type KnownLocalStore,
 	listDirectoryInventory,
+	localInventoryDiagnosticsSummary,
 	openInventoryFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
 import {
@@ -1224,9 +1221,9 @@ async function emitProjectMemoryNotes({
 	projectDir,
 	projectPath,
 	requested,
-}: EmitProjectMemoryNotesArgs): Promise<number> {
+}: EmitProjectMemoryNotesArgs): Promise<void> {
 	if (!requested.has("memory_notes")) {
-		return 0;
+		return;
 	}
 	const memoryDir = join(projectPath, "memory");
 	const files = await readFilesRecursively(
@@ -1267,7 +1264,6 @@ async function emitProjectMemoryNotes({
 			}),
 		);
 	}
-	return files.length;
 }
 
 // ─── Projects directory scan ────────────────────────────────────────────
@@ -1292,9 +1288,6 @@ export interface ScanProjectDirsArgs {
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
 	memoryNoteMtimes?: Record<string, number>;
-	/** Mutated in place: total memory-note files examined across all project
-	 *  dirs, for derived coverage_diagnostics reporting (see emitDerivedCoverage). */
-	memoryNotesExamined?: DerivedStreamCounts;
 	newMemoryNoteMtimes?: Record<string, number>;
 	newMtimes: Record<string, number>;
 	requested: Map<string, StreamScope>;
@@ -1453,7 +1446,7 @@ async function scanProjectDir(
 		args.requested.has("memory_notes") &&
 		(args.buildOnly || args.skipJsonl)
 	) {
-		const examined = await emitProjectMemoryNotes({
+		await emitProjectMemoryNotes({
 			projectDir,
 			projectPath,
 			requested: args.requested,
@@ -1461,9 +1454,6 @@ async function scanProjectDir(
 			fileMtimes: args.memoryNoteMtimes ?? {},
 			newMtimes: args.newMemoryNoteMtimes ?? {},
 		});
-		if (args.memoryNotesExamined) {
-			args.memoryNotesExamined.examined += examined;
-		}
 	}
 	if (!args.skipJsonl) {
 		await processTopLevelJsonl(entries, projectPath, projectDir, args);
@@ -1890,21 +1880,6 @@ function makeLocalJsonlTelemetry(): LocalJsonlTelemetry {
 	};
 }
 
-/**
- * Examined/emitted counts for a stream that is parsed out of the same
- * on-disk files as another top-level-scanned stream (`sessions`), so it has
- * no `KnownLocalStore` entry of its own and would otherwise never produce a
- * `coverage_diagnostics` row — see {@link buildDerivedCoverageRecord}.
- */
-interface DerivedStreamCounts {
-	emitted: number;
-	examined: number;
-}
-
-function makeDerivedStreamCounts(): DerivedStreamCounts {
-	return { emitted: 0, examined: 0 };
-}
-
 function observeLocalJsonlScan(
 	telemetry: LocalJsonlTelemetry,
 	result: LocalJsonlScanResult,
@@ -2221,9 +2196,7 @@ async function scanChildSource(input: {
 	source: ClaudeJsonlSource;
 	telemetry: LocalJsonlTelemetry;
 }): Promise<{
-	attachmentsExamined: number;
 	cursor: ClaudeChildFileCursorV1;
-	messagesExamined: number;
 }> {
 	// A subagent source (forcedSessionId set) carries its own stable identity
 	// in its basename, independent of any sessionId value inside its JSONL
@@ -2237,25 +2210,11 @@ async function scanChildSource(input: {
 	);
 	observation.sessionId =
 		input.cursor?.current_session_id ?? observation.sessionId;
-	let messagesExamined = 0;
-	let attachmentsExamined = 0;
 	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
 		onObject: async (obj) => {
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
-			// Classify by the same dispatch rule processJsonlLine applies (a line
-			// without a pinned session id is never dispatched to either stream) so
-			// the per-type examined counts mirror what was actually considered,
-			// not a scan-wide line total shared across both streams -- see
-			// processJsonlLine's own invariants above.
-			if (observation.sessionId) {
-				if (isMessageType(obj.type)) {
-					messagesExamined += 1;
-				} else if (isAttachmentType(obj.type)) {
-					attachmentsExamined += 1;
-				}
-			}
 			await processJsonlLine({
 				buildOnly: !input.emitRecords,
 				deps: {
@@ -2272,11 +2231,7 @@ async function scanChildSource(input: {
 		},
 	});
 	observeLocalJsonlScan(input.telemetry, result);
-	return {
-		attachmentsExamined,
-		cursor: { ...result.cursor, current_session_id: observation.sessionId },
-		messagesExamined,
-	};
+	return { cursor: { ...result.cursor, current_session_id: observation.sessionId } };
 }
 
 async function emitChangedSessions(input: {
@@ -2342,122 +2297,6 @@ async function assertRequestedClaudeSources(input: {
 		throw new Error(
 			`requested Claude Code local source path(s) are missing or unreadable: ${missing.join(", ")}`,
 		);
-	}
-}
-
-/**
- * Emit the per-store `coverage_diagnostics` rows from a pre-built
- * inventory. Kept separate from the inventory-record emission so the
- * durable coverage signal can be flushed BEFORE
- * {@link assertRequestedClaudeSources} runs: a missing requested content
- * source must still produce honest `missing` coverage rows rather than
- * omit the coverage stream entirely. `buildLocalSourceInventory` already
- * classifies every known store (including absent ones) without reading
- * payload, so this is safe to run even when the source home is partial or
- * empty. No-op when `coverage_diagnostics` was not requested.
- */
-async function emitCoverageDiagnostics(input: {
-	emitRecord: (stream: string, data: RecordData) => Promise<void>;
-	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-	requested: Map<string, StreamScope>;
-}): Promise<void> {
-	if (!input.requested.has("coverage_diagnostics")) {
-		return;
-	}
-	for (const record of input.inventory.coverage) {
-		await input.emitRecord("coverage_diagnostics", record);
-	}
-}
-
-async function emitCoverageDiagnosticsState(input: {
-	emit: CollectContext["emit"];
-	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-	requested: Map<string, StreamScope>;
-	derived?: readonly CoverageRecord[];
-}): Promise<void> {
-	if (input.requested.has("coverage_diagnostics")) {
-		await input.emit({
-			type: "STATE",
-			stream: "coverage_diagnostics",
-			cursor: {
-				fetched_at: nowIso(),
-				stores: buildCoverageDiagnosticsStateSnapshot([
-					...input.inventory.coverage,
-					...(input.derived ?? []),
-				]),
-			},
-		});
-	}
-}
-
-/**
- * Build the `coverage_diagnostics` records for the derived streams
- * (messages, attachments, memory_notes) based on the actual project-directory
- * scan outcome. The store id and record id are selected by
- * `buildDerivedCoverageRecord` from `LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR`
- * (the authority shared with the server proof reader), not chosen here — this
- * call site supplies only the stream, connector id, and connector-specific
- * counting/label. The record shape/status/reason policy itself is shared
- * with Codex's identical derived-stream problem — see
- * `buildDerivedCoverageRecord` in local-source-inventory.ts. A thrown error
- * during any scan above fails the whole run before this ever gets called
- * (see `run().catch` in connector-runtime.ts). JSONL parse gaps instead
- * leave the affected transcript streams incomplete while collection continues.
- */
-function buildDerivedCoverageRecords(input: {
-	requested: Map<string, StreamScope>;
-	scanComplete: boolean;
-	attachments: DerivedStreamCounts;
-	memoryNotes: DerivedStreamCounts;
-	memoryNotesComplete: boolean;
-	messages: DerivedStreamCounts;
-}): CoverageRecord[] {
-	const records: CoverageRecord[] = [];
-	if (input.requested.has("messages")) {
-		records.push(
-			buildDerivedCoverageRecord({
-				connectorId: "claude_code",
-				emitted: input.messages.emitted,
-				examined: input.messages.examined,
-				label: "message",
-				scanComplete: input.scanComplete,
-				stream: "messages",
-			}),
-		);
-	}
-	if (input.requested.has("attachments")) {
-		records.push(
-			buildDerivedCoverageRecord({
-				connectorId: "claude_code",
-				emitted: input.attachments.emitted,
-				examined: input.attachments.examined,
-				label: "attachment",
-				scanComplete: input.scanComplete,
-				stream: "attachments",
-			}),
-		);
-	}
-	if (input.requested.has("memory_notes")) {
-		records.push(
-			buildDerivedCoverageRecord({
-				connectorId: "claude_code",
-				emitted: input.memoryNotes.emitted,
-				examined: input.memoryNotes.examined,
-				label: "memory note",
-				scanComplete: input.memoryNotesComplete,
-				stream: "memory_notes",
-			}),
-		);
-	}
-	return records;
-}
-
-async function emitDerivedCoverage(input: {
-	emitRecord: (stream: string, data: RecordData) => Promise<void>;
-	records: readonly CoverageRecord[];
-}): Promise<void> {
-	for (const record of input.records) {
-		await input.emitRecord("coverage_diagnostics", record);
 	}
 }
 
@@ -2835,7 +2674,7 @@ if (isMainModule(import.meta.url)) {
 			// has not opted in) and every body is honestly recorded `unavailable`.
 			const openedCapture = openArtifactCapture({ connectorId: "claude_code" });
 			// N4: the store is live from here, so its release guard starts here too.
-			// Everything below — inventory build, coverage emission, the scan — can
+			// Everything below — inventory build and the scan — can
 			// reject, and a guard that only wrapped the final collection call would
 			// leak the handle for every one of those earlier failures.
 			try {
@@ -2848,37 +2687,25 @@ if (isMainModule(import.meta.url)) {
 					process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 				const baseDir =
 					process.env.CLAUDE_CODE_PROJECTS_DIR || join(claudeHome, "projects");
-				// Build the source inventory and flush durable coverage diagnostics
-				// BEFORE asserting requested content sources exist. A missing content
-				// store should surface an honest `missing` coverage row, not abort the
-				// run with zero coverage evidence — the connection-health rollup
-				// derives a local collector's coverage axis from these records, and an
-				// omitted coverage stream collapses to `coverage_unknown` forever (the
-				// local run path writes no spine run). The inventory walk reads only
-				// path metadata, never payload, so it is safe on a partial/empty home.
+				// Build the source inventory from path metadata. This walk never reads
+				// payload, so it is safe on a partial or empty home.
 				const enumerationScope = readEnumerationScope(requested, [
 					"sessions",
 					"messages",
 					"attachments",
 				]);
-				// The measured boundary is stamped onto the coverage records themselves,
-				// so it commits atomically with the evidence it qualifies.
 				const inventory = await buildLocalSourceInventory(
 					"claude_code",
 					claudeHome,
 					CLAUDE_CODE_KNOWN_LOCAL_STORES,
-					enumerationScopeFingerprint(enumerationScope),
 				);
-				await emitCoverageDiagnostics({ emitRecord, inventory, requested });
-				// Commit the static coverage proof now, independent of everything that
-				// follows. `inventory` classifies every known store (shell content,
-				// config, cache, file-history, etc.) from a path stat, not from the
-				// JSONL scan below — a later failure in that scan has nothing to do
-				// with whether this classification is honest, so it must not hold this
-				// snapshot hostage. `emitCoverageDiagnosticsState`'s later calls still
-				// supersede this one (STATE is last-wins per stream) once the full
-				// collection pass legitimately completes.
-				await emitCoverageDiagnosticsState({ emit, inventory, requested });
+				await emit({
+					type: "PROGRESS",
+					message: localInventoryDiagnosticsSummary({
+						inventory,
+						toolLabel: "Claude Code",
+					}),
+				});
 				// The owner-declared boundary rides on the stream scopes the runtime
 				// already threads through. Read once here and applied at ENUMERATION so a
 				// bounded run does not open files it was never asked to collect.
@@ -2966,7 +2793,7 @@ if (isMainModule(import.meta.url)) {
 
 				// The parent-first state machine intentionally keeps the temporal
 				// ordering visible here: session records/state, non-JSONL attachments,
-				// child records/state, then coverage state. Extracting those transitions
+				// then child records/state. Extracting those transitions
 				// would hide the checkpoint barrier behind a shallow orchestration API.
 				const collectProjectStreams = async (): Promise<void> => {
 					// ---- sessions / messages / attachments ----
@@ -2975,35 +2802,7 @@ if (isMainModule(import.meta.url)) {
 						requested.has("messages") ||
 						requested.has("attachments") ||
 						requested.has("memory_notes");
-					if (!needsProjects) {
-						await emitCoverageDiagnosticsState({ emit, inventory, requested });
-						return;
-					}
-
-					// Derived-stream coverage: messages/attachments/memory_notes are
-					// parsed out of the same on-disk files as `sessions` (no
-					// KnownLocalStore entry of their own), so they must be counted here
-					// and reported as their own coverage_diagnostics rows below —
-					// otherwise a run that emits real records for these streams still
-					// reports them as absent from terminal collection evidence.
-					const derivedCounts = {
-						attachments: makeDerivedStreamCounts(),
-						memoryNotes: makeDerivedStreamCounts(),
-						messages: makeDerivedStreamCounts(),
-					};
-					const countingEmitRecord = async (
-						stream: string,
-						data: RecordData,
-					): Promise<void> => {
-						if (stream === "messages") {
-							derivedCounts.messages.emitted += 1;
-						} else if (stream === "attachments") {
-							derivedCounts.attachments.emitted += 1;
-						} else if (stream === "memory_notes") {
-							derivedCounts.memoryNotes.emitted += 1;
-						}
-						await emitRecord(stream, data);
-					};
+					if (!needsProjects) return;
 
 					const messageRaw = typedState.messages;
 					const sessionsRaw = typedState.sessions;
@@ -3260,13 +3059,12 @@ if (isMainModule(import.meta.url)) {
 							captureContext,
 							captureLedger,
 							emit,
-							emitRecord: countingEmitRecord,
+							emitRecord,
 							fileMtimes: nonJsonlMtimeGate,
 							newMtimes: requested.has("sessions")
 								? newSessionFileMtimes
 								: newMessageFileMtimes,
 							memoryNoteMtimes,
-							memoryNotesExamined: derivedCounts.memoryNotes,
 							newMemoryNoteMtimes,
 							requested,
 							sessionAccumulators: new Map(),
@@ -3318,7 +3116,7 @@ if (isMainModule(import.meta.url)) {
 									scanChildSource({
 										captureContext,
 										cursor: priorChildCursors[source.path],
-										emitRecord: countingEmitRecord,
+										emitRecord,
 										emitRecords: !candidateLegacyBaseline,
 										requested,
 										source,
@@ -3350,7 +3148,7 @@ if (isMainModule(import.meta.url)) {
 										scanChildSource({
 											captureContext,
 											cursor: undefined,
-											emitRecord: countingEmitRecord,
+											emitRecord,
 											emitRecords: true,
 											requested,
 											source,
@@ -3363,13 +3161,6 @@ if (isMainModule(import.meta.url)) {
 									delete newMessageFileMtimes[source.path];
 									continue;
 								}
-							}
-							if (requested.has("messages")) {
-								derivedCounts.messages.examined += scanned.messagesExamined;
-							}
-							if (requested.has("attachments")) {
-								derivedCounts.attachments.examined +=
-									scanned.attachmentsExamined;
 							}
 							await reportGaps(scanned.cursor.jsonl_gaps);
 							nextChildCursors[source.path] = scanned.cursor;
@@ -3397,50 +3188,6 @@ if (isMainModule(import.meta.url)) {
 							},
 						});
 					}
-					// Transcript children and memory notes have no dedicated
-					// KnownLocalStore entry for their derived content streams
-					// and would otherwise never appear in coverage_diagnostics — see
-					// buildDerivedCoverageRecords. Every branch above that could touch
-					// these streams ran (or was gated by !requested.has(...)) before
-					// this point. Declared transcript gaps remain incomplete coverage even
-					// though all readable records have been collected.
-					if (reportedGaps.size > 0) {
-						for (const record of inventory.coverage) {
-							if (record.stream === "sessions") {
-								record.status = "unaccounted";
-								record.reason =
-									"Source gaps were declared in SKIP_RESULT events; affected coverage remains incomplete";
-								if (requested.has("coverage_diagnostics"))
-									await emitRecord("coverage_diagnostics", record);
-							}
-						}
-					}
-					const derivedCoverageRecords = requested.has("coverage_diagnostics")
-						? buildDerivedCoverageRecords({
-								attachments: derivedCounts.attachments,
-								memoryNotes: derivedCounts.memoryNotes,
-								memoryNotesComplete: failedDirectories.size === 0,
-								messages: derivedCounts.messages,
-								requested,
-								scanComplete: reportedGaps.size === 0,
-							})
-						: [];
-					await emitDerivedCoverage({
-						emitRecord,
-						records: derivedCoverageRecords,
-					});
-					// Re-commit coverage STATE now that the full collection pass
-					// completed. This supersedes the early static-only snapshot written
-					// right after the inventory pass (see the top of `collect()`) with
-					// the final gap classifications and derived coverage, and keeps
-					// the STATE cursor's `fetched_at` current for this completed run.
-					await emitCoverageDiagnosticsState({
-						derived: derivedCoverageRecords,
-						emit,
-						inventory,
-						requested,
-					});
-
 					if (requested.has("messages") || requested.has("attachments")) {
 						const cursor = {
 							file_cursors: nextChildCursors,

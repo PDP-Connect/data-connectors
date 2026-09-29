@@ -21,9 +21,7 @@ import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collecto
  * Default stream set for an unscoped `claude_code` local-collector run.
  *
  * Mirrors the full manifest-declared safe surface so an unscoped `run`
- * exercises everything the connector can account for — including
- * `coverage_diagnostics`, which is what promotes a drained local collector off
- * `coverage_unknown`. The inventory streams emit metadata only (path hash,
+ * exercises everything the connector can collect. The inventory streams emit metadata only (path hash,
  * size, mtime); excluded stores never read payload.
  */
 export const CLAUDE_CODE_DEFAULT_STREAMS = [
@@ -36,7 +34,6 @@ export const CLAUDE_CODE_DEFAULT_STREAMS = [
 	"usage",
 	"file_history",
 	"cache_inventory",
-	"coverage_diagnostics",
 	"backup_inventory",
 	"config_inventory",
 ] as const;

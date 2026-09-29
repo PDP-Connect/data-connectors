@@ -68,56 +68,6 @@ test("claude_code names a missing slash-command source", async () => {
 	);
 });
 
-test("claude_code emits coverage diagnostics for a missing source home before failing", async () => {
-	// A host whose requested content sources are absent must still produce the
-	// durable coverage signal: every known store classified `missing`, emitted
-	// BEFORE the source-presence assert throws. Without this the run fails with
-	// zero coverage evidence and the connection-health rollup is stuck at
-	// `coverage_unknown` forever (the local run path writes no spine run).
-	const claudeHome = await mkdtemp(
-		join(tmpdir(), "pdpp-claude-missing-coverage-"),
-	);
-	const result = await runConnectorProcess({
-		env: { CLAUDE_CODE_HOME: claudeHome },
-		start: {
-			scope: {
-				streams: [
-					{ name: "sessions" },
-					{ name: "skills" },
-					{ name: "coverage_diagnostics" },
-				],
-			},
-			type: "START",
-		},
-	});
-
-	// The run still fails honestly on the missing content sources.
-	assert.notEqual(result.exitCode, 0);
-	const done = result.messages.findLast(
-		(msg): msg is Extract<EmittedMessage, { type: "DONE" }> =>
-			msg.type === "DONE",
-	);
-	assert.equal(done?.status, "failed");
-
-	// …but coverage diagnostics were already emitted, classifying the absent
-	// declared stores as `missing` rather than omitting the stream entirely.
-	const coverage = result.messages.filter(
-		(msg): msg is Extract<EmittedMessage, { type: "RECORD" }> =>
-			msg.type === "RECORD" && msg.stream === "coverage_diagnostics",
-	);
-	assert(
-		coverage.length > 0,
-		"expected coverage diagnostics to be emitted before the failure",
-	);
-	assert(
-		coverage.some(
-			(record) =>
-				record.data.store === "projects" && record.data.status === "missing",
-		),
-		"expected the absent projects store to be reported as missing",
-	);
-});
-
 test("claude_code inventory streams emit safe metadata, one STATE per stream, and exclude auth payloads", async () => {
 	const claudeHome = await mkdtemp(join(tmpdir(), "pdpp-claude-inventory-"));
 	await mkdir(join(claudeHome, "file-history"), { recursive: true });
@@ -131,12 +81,11 @@ test("claude_code inventory streams emit safe metadata, one STATE per stream, an
 
 	const start = {
 		scope: {
-			streams: [
-				{ name: "file_history" },
-				{ name: "cache_inventory" },
-				{ name: "coverage_diagnostics" },
-			],
-		},
+				streams: [
+					{ name: "file_history" },
+					{ name: "cache_inventory" },
+				],
+			},
 		type: "START" as const,
 	};
 	const result = await runConnectorProcess({
@@ -175,63 +124,19 @@ test("claude_code inventory streams emit safe metadata, one STATE per stream, an
 	);
 	assert(
 		!records.some(
-			(record) =>
-				record.stream !== "coverage_diagnostics" &&
-				record.data.relative_path === "auth.json",
+			(record) => record.data.relative_path === "auth.json",
 		),
 	);
-	assert(
-		records.some(
-			(record) =>
-				record.stream === "coverage_diagnostics" &&
-				record.data.store === "auth" &&
-				record.data.status === "excluded",
-		),
-	);
-	const coverageState = result.messages.find(
-		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
-			msg.type === "STATE" && msg.stream === "coverage_diagnostics",
-	);
-	assert.equal(
-		typeof (coverageState?.cursor as { fetched_at?: unknown } | undefined)
-			?.fetched_at,
-		"string",
-	);
-	const stores = (coverageState?.cursor as { stores?: unknown } | undefined)
-		?.stores;
-	assert(
-		Array.isArray(stores),
-		"successful collection must emit the committed coverage snapshot",
-	);
-	assert.equal(stores.length, 10);
-	assert(!JSON.stringify(coverageState).includes("secret-token"));
-	assert(!JSON.stringify(coverageState).includes("reason"));
 
 	const states = result.messages.filter(
 		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
 			msg.type === "STATE",
 	);
-	// Every inventory stream writes at most one STATE per collection pass,
-	// EXCEPT coverage_diagnostics: it commits an early static-only snapshot
-	// right after the inventory pass (so a later failure can't discard already-
-	// classified store evidence), then a full successful run supersedes it
-	// with a second, current-`fetched_at` write. See coverage-state-survives-
-	// failure semantics in connectors/codex — claude_code shares the pattern.
-	const nonCoverageStates = states.filter(
-		(entry) => entry.stream !== "coverage_diagnostics",
-	);
+	// Every inventory stream writes at most one STATE per collection pass.
 	assert.equal(
-		new Set(nonCoverageStates.map((entry) => entry.stream)).size,
-		nonCoverageStates.length,
-		"each non-coverage inventory stream writes at most one STATE per collection pass",
-	);
-	const coverageStateCount = states.filter(
-		(entry) => entry.stream === "coverage_diagnostics",
-	).length;
-	assert.equal(
-		coverageStateCount,
-		2,
-		"coverage_diagnostics writes an early static snapshot, then a final one",
+		new Set(states.map((entry) => entry.stream)).size,
+		states.length,
+		"each inventory stream writes at most one STATE per collection pass",
 	);
 	const firstFileHistoryState = states.find(
 		(entry) => entry.stream === "file_history",
@@ -284,12 +189,12 @@ test("claude_code context_mode is diagnostics-only, not a requestable stream", a
 
 	const result = await runConnectorProcess({
 		env: { CLAUDE_CODE_HOME: claudeHome },
-		start: {
-			scope: {
-				streams: [{ name: "context_mode" }, { name: "coverage_diagnostics" }],
+			start: {
+				scope: {
+					streams: [{ name: "context_mode" }],
+				},
+				type: "START",
 			},
-			type: "START",
-		},
 	});
 
 	assert.equal(result.exitCode, 0);
@@ -301,14 +206,21 @@ test("claude_code context_mode is diagnostics-only, not a requestable stream", a
 	assert(
 		!records.some((record) => JSON.stringify(record).includes("do-not-emit")),
 	);
+	const progress = result.messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			msg.type === "PROGRESS",
+	);
 	assert(
-		records.some(
-			(record) =>
-				record.stream === "coverage_diagnostics" &&
-				record.data.store === "context_mode" &&
-				record.data.stream === null &&
-				record.data.status === "inventory_only",
+		progress.some(
+			(msg) =>
+				msg.message.startsWith(
+					"Claude Code phase=index pass=index local_inventory_stores=10 status_inventory_only=1 status_missing=9 stores=",
+				) && msg.message.includes("context_mode:inventory_only"),
 		),
+	);
+	assert(
+		!progress.some((msg) => msg.message.includes("do-not-emit")),
+		"diagnostics must not include context-mode payload text",
 	);
 	assert(
 		!result.messages.some(

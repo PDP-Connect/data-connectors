@@ -37,9 +37,8 @@ test("codex connector succeeds when requested local stores are absent", async ()
 test("codex connector succeeds when only optional rules/prompts/skills sources are missing", async () => {
 	// A fresh Codex install has sessions but has never had the user author a
 	// rule, prompt, or skill — those three directories genuinely do not exist
-	// yet. This must NOT be fatal: coverage_diagnostics already reports each
-	// as "missing", and the corresponding emit*Stream helpers already no-op
-	// safely. Every fresh install previously failed its first run on exactly
+	// yet. This must NOT be fatal: the corresponding emit*Stream helpers
+	// already no-op safely. Every fresh install previously failed its first run on exactly
 	// this condition.
 	const codexHome = await mkdtemp(
 		join(tmpdir(), "pdpp-codex-optional-missing-"),
@@ -69,51 +68,6 @@ test("codex connector succeeds when only optional rules/prompts/skills sources a
 	assert.equal(done?.status, "succeeded");
 });
 
-test("codex emits coverage diagnostics for a missing source home before succeeding", async () => {
-	// A host whose requested content sources are absent must still produce the
-	// durable coverage signal: every known store is classified `missing` before
-	// the successful terminal message. Otherwise an empty local store would be
-	// indistinguishable from an unobserved one.
-	const codexHome = await mkdtemp(
-		join(tmpdir(), "pdpp-codex-missing-coverage-"),
-	);
-	const result = await runConnectorProcess({
-		env: { CODEX_HOME: codexHome },
-		start: {
-			scope: {
-				streams: [
-					{ name: "sessions" },
-					{ name: "rules" },
-					{ name: "coverage_diagnostics" },
-				],
-			},
-			type: "START",
-		},
-	});
-
-	assert.equal(result.exitCode, 0);
-	const done = result.messages.findLast(
-		(msg): msg is Extract<EmittedMessage, { type: "DONE" }> =>
-			msg.type === "DONE",
-	);
-	assert.equal(done?.status, "succeeded");
-
-	// Coverage diagnostics classify absent stores as `missing` rather than
-	// omitting them from the observation.
-	const coverage = result.messages.filter(
-		(msg): msg is Extract<EmittedMessage, { type: "RECORD" }> =>
-			msg.type === "RECORD" && msg.stream === "coverage_diagnostics",
-	);
-	assert(
-		coverage.length > 0,
-		"expected coverage diagnostics before successful completion",
-	);
-	assert(
-		coverage.some((record) => record.data.status === "missing"),
-		"expected at least one absent store to be reported as missing",
-	);
-});
-
 test("codex inventory streams emit safe metadata and exclude auth payloads", async () => {
 	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-inventory-"));
 	await mkdir(join(codexHome, "cache"), { recursive: true });
@@ -130,7 +84,6 @@ test("codex inventory streams emit safe metadata and exclude auth payloads", asy
 					{ name: "history" },
 					{ name: "session_index" },
 					{ name: "cache_inventory" },
-					{ name: "coverage_diagnostics" },
 				],
 			},
 			type: "START",
@@ -167,41 +120,11 @@ test("codex inventory streams emit safe metadata and exclude auth payloads", asy
 		!records.some((record) => JSON.stringify(record).includes("secret-token")),
 	);
 	assert(
-		!records.some(
-			(record) =>
-				record.stream !== "coverage_diagnostics" &&
-				record.data.relative_path === "auth.json",
-		),
+		!records.some((record) => record.data.relative_path === "auth.json"),
 	);
-	assert(
-		records.some(
-			(record) =>
-				record.stream === "coverage_diagnostics" &&
-				record.data.store === "auth" &&
-				record.data.status === "excluded",
-		),
-	);
-	const coverageState = result.messages.find(
-		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
-			msg.type === "STATE" && msg.stream === "coverage_diagnostics",
-	);
-	assert.equal(
-		typeof (coverageState?.cursor as { fetched_at?: unknown } | undefined)
-			?.fetched_at,
-		"string",
-	);
-	const stores = (coverageState?.cursor as { stores?: unknown } | undefined)
-		?.stores;
-	assert(
-		Array.isArray(stores),
-		"successful collection must emit the committed coverage snapshot",
-	);
-	assert.equal(stores.length, 14);
-	assert(!JSON.stringify(coverageState).includes("secret-token"));
-	assert(!JSON.stringify(coverageState).includes("reason"));
 });
 
-test("codex memories and context_mode are diagnostics-only, not requestable streams", async () => {
+test("codex memories and context_mode are not requestable streams", async () => {
 	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-private-"));
 	await mkdir(join(codexHome, "memories"), { recursive: true });
 	await mkdir(join(codexHome, "context-mode"), { recursive: true });
@@ -218,7 +141,6 @@ test("codex memories and context_mode are diagnostics-only, not requestable stre
 				streams: [
 					{ name: "memories" },
 					{ name: "context_mode" },
-					{ name: "coverage_diagnostics" },
 				],
 			},
 			type: "START",
@@ -246,17 +168,28 @@ test("codex memories and context_mode are diagnostics-only, not requestable stre
 			JSON.stringify(record).includes("secret-context-payload"),
 		),
 	);
-	for (const store of ["memories", "context_mode"]) {
-		assert(
-			records.some(
-				(record) =>
-					record.stream === "coverage_diagnostics" &&
-					record.data.store === store &&
-					record.data.stream === null &&
-					record.data.status === "inventory_only",
-			),
-		);
-	}
+	const progress = result.messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+			msg.type === "PROGRESS",
+	);
+	assert(
+		progress.some(
+			(msg) =>
+				msg.message.startsWith(
+					"Codex phase=index pass=index local_inventory_stores=14 status_inventory_only=2 status_missing=12 stores=",
+				) &&
+				msg.message.includes("context_mode:inventory_only") &&
+				msg.message.includes("memories:inventory_only"),
+		),
+	);
+	assert(
+		!progress.some(
+			(msg) =>
+				msg.message.includes("private memory") ||
+				msg.message.includes("secret-context-payload"),
+		),
+		"diagnostics must not include diagnostics-only payload text",
+	);
 	assert(
 		!result.messages.some(
 			(msg) =>

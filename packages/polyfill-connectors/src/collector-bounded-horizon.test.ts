@@ -65,10 +65,9 @@ const CLAUDE_SOURCE_ROOT = "/home/u/code/recent";
 
 interface ConnectorFixture {
 	readonly connector: "claude_code" | "codex";
-	/** The `$collection_scope` this connector's boundary test declares, and the `collection_boundary` string it must produce. */
+	/** The `$collection_scope` this connector's boundary test declares. */
 	readonly declaredScope: { since?: string; source_roots?: readonly string[] };
 	readonly env: Record<string, string>;
-	readonly expectedBoundary: string;
 	readonly streams: readonly string[];
 	readonly timeScopableStreams: readonly string[];
 }
@@ -121,8 +120,7 @@ async function seedClaudeCode(): Promise<ConnectorFixture> {
 			CLAUDE_CODE_HOME: claudeHome,
 			CLAUDE_CODE_PROJECTS_DIR: projectsDir,
 		},
-		expectedBoundary: `roots=${CLAUDE_SOURCE_ROOT}`,
-		streams: ["sessions", "messages", "coverage_diagnostics"],
+		streams: ["sessions", "messages"],
 		timeScopableStreams: [],
 	};
 }
@@ -147,6 +145,14 @@ async function seedCodex(): Promise<ConnectorFixture> {
 				timestamp: "2026-07-01T00:00:00.000Z",
 			},
 			type: "session_meta",
+		})}\n${JSON.stringify({
+			payload: {
+				content: [{ text: "in range", type: "text" }],
+				role: "user",
+				type: "message",
+			},
+			timestamp: "2026-07-01T00:00:01.000Z",
+			type: "response_item",
 		})}\n`,
 		"utf8",
 	);
@@ -154,8 +160,7 @@ async function seedCodex(): Promise<ConnectorFixture> {
 		connector: "codex",
 		declaredScope: { since: SINCE },
 		env: { CODEX_HOME: codexHome },
-		expectedBoundary: `since=${SINCE}`,
-		streams: ["sessions", "messages", "coverage_diagnostics"],
+		streams: ["sessions", "messages"],
 		timeScopableStreams: ["sessions", "messages"],
 	};
 }
@@ -317,7 +322,7 @@ async function runFixture(
 }
 
 for (const connectorId of ["claude_code", "codex"] as const) {
-	test(`${connectorId}: a complete bounded run commits coverage naming the declared boundary`, async () => {
+	test(`${connectorId}: a complete bounded run succeeds without a run-diagnostics stream`, async () => {
 		const fixture = await FIXTURES[connectorId]();
 		const harness = await startRunHarness(scopeState(fixture.declaredScope));
 		try {
@@ -326,20 +331,10 @@ for (const connectorId of ["claude_code", "codex"] as const) {
 			assert.equal(
 				result.done?.status,
 				"succeeded",
-				"the connector must finish cleanly to prove coverage at all",
+				"the connector must finish cleanly within its declared boundary",
 			);
 			assert.equal(result.scanBudgetExceeded, false);
-			assert.equal(
-				harness.terminalPosts.length,
-				1,
-				"an exhaustive pass within the declared boundary must commit exactly one terminal coverage claim",
-			);
-			const post = harness.terminalPosts[0] as { collection_boundary?: string };
-			assert.equal(
-				post.collection_boundary,
-				fixture.expectedBoundary,
-				"committed evidence must name the exact boundary it was measured against, not a generic 'complete'",
-			);
+			assert.equal(harness.terminalPosts.length, 0);
 		} finally {
 			await harness.close();
 		}
@@ -369,26 +364,25 @@ for (const connectorId of ["claude_code", "codex"] as const) {
 		}
 	});
 
-	test(`${connectorId}: out-of-boundary data is excluded from the committed run and never opened`, async () => {
+	test(`${connectorId}: out-of-boundary data is excluded from emitted records`, async () => {
 		const fixture = await FIXTURES[connectorId]();
 		const harness = await startRunHarness(scopeState(fixture.declaredScope));
 		try {
 			const result = await runFixture(fixture, harness);
 			assert.equal(result.done?.status, "succeeded");
-			// The out-of-boundary fixture data is well-formed, so a clean succeeded
-			// DONE alone would not distinguish "pruned before opening" from "opened,
-			// parsed fine, and dropped downstream." `harness.terminalPosts` is
-			// checked here for lifecycle shape; the direct proof that the
-			// out-of-boundary source was never opened lives in
-			// collector-scope-enumeration-bound.test.ts, which inspects discovery
-			// output and connector stdout directly.
-			assert.equal(harness.terminalPosts.length, 1);
+			const records = JSON.stringify(harness.ingestedRecords);
+			if (connectorId === "claude_code") {
+				assert.ok(records.includes("11111111-1111-4111-8111-111111111111"));
+				assert.ok(!records.includes("22222222-2222-4222-8222-222222222222"));
+			} else {
+				assert.ok(!records.includes("PDPP_SENTINEL"));
+			}
 		} finally {
 			await harness.close();
 		}
 	});
 
-	test(`${connectorId}: resume after an interruption is idempotent and eventually commits coverage`, async () => {
+	test(`${connectorId}: resume after interruption succeeds without run diagnostics`, async () => {
 		const fixture = await FIXTURES[connectorId]();
 		const queuePath = await tempQueuePath();
 
@@ -414,11 +408,8 @@ for (const connectorId of ["claude_code", "codex"] as const) {
 		}
 
 		// Resume: a fresh run against the SAME declared boundary and the SAME
-		// durable queue must complete and commit coverage exactly once — proving
-		// the boundary is resumable rather than only usable on a single
-		// uninterrupted attempt. A new harness simulates the state read a real
-		// reconnect performs; the declared scope is unchanged, so proof from this
-		// run is valid.
+		// durable queue must complete. A new harness simulates the state read a
+		// real reconnect performs; the declared scope and queued data stay intact.
 		const secondHarness = await startRunHarness(
 			scopeState(fixture.declaredScope),
 		);
@@ -427,27 +418,20 @@ for (const connectorId of ["claude_code", "codex"] as const) {
 			assert.equal(result.done?.status, "succeeded");
 			assert.equal(
 				secondHarness.terminalPosts.length,
-				1,
-				"resuming after an interruption must reach exactly one committed coverage claim, not a duplicate",
+				0,
+				"connector runs do not emit terminal diagnostic claims",
 			);
-			const post = secondHarness.terminalPosts[0] as {
-				collection_boundary?: string;
-			};
-			assert.equal(post.collection_boundary, fixture.expectedBoundary);
 
-			// Idempotency: running a THIRD time against the already-complete,
-			// already-committed queue must not re-report or duplicate coverage —
-			// the collector's own per-file cursors fast-skip unchanged sources, and
-			// the runner must not re-fire a terminal-collection claim from a lane
-			// that already committed one under the same boundary.
+			// A third run against the same queue still succeeds; source cursors
+			// prevent unchanged inputs from being collected again.
 			const thirdResult = await runFixture(fixture, secondHarness, {
 				queuePath,
 			});
 			assert.equal(thirdResult.done?.status, "succeeded");
 			assert.equal(
 				secondHarness.terminalPosts.length,
-				2,
-				"a third run may re-commit (the state is genuinely re-verified), but must still be exactly one claim per run, never a duplicate burst",
+				0,
+				"no terminal run-diagnostics claims are emitted",
 			);
 		} finally {
 			await secondHarness.close();

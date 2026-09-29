@@ -33,6 +33,17 @@ const SCROLLS = {
 	history: 4,
 } as const;
 
+type CoverageFact = {
+	stream: string;
+	requested: true;
+	source: "browser";
+	emitted_count: number;
+	time_range_requested: boolean;
+	enumerated_count?: number;
+	limit?: number;
+	skipped_unresolved_date_count?: number;
+};
+
 function id(value: string): string {
 	return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
@@ -230,16 +241,13 @@ async function waitForChannelIdentity(
 				const hasIdentity = Boolean(
 					document.querySelector(
 						'link[rel="canonical"][href*="/channel/"], meta[itemprop="channelId"]',
-					) ||
-					/@[^/?#]+/.test(location.pathname),
+					) || /@[^/?#]+/.test(location.pathname),
 				);
 				const placeholderTitle =
 					/^(?:loading\b|please wait\b|home$|youtube$|channel$)/i.test(
 						title ?? "",
 					);
-				return title && !placeholderTitle && hasIdentity
-					? true
-					: false;
+				return title && !placeholderTitle && hasIdentity ? true : false;
 			},
 			CHANNEL_TITLE_SELECTOR,
 			{ timeout: 10_000 },
@@ -268,9 +276,11 @@ async function waitForChannelAbout(
 					.map((node) => node.textContent?.trim() ?? "")
 					.filter((value) => value && !/^(loading|please wait)$/i.test(value));
 				const hasJoinedDate = text.some((value) => /^joined\s+/i.test(value));
-				const hasStatsInAbout = Boolean(about) && text.some(
-					(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
-				);
+				const hasStatsInAbout =
+					Boolean(about) &&
+					text.some(
+						(value) => /subscriber|view|video/i.test(value) && /\d/.test(value),
+					);
 				const hasDescription = Boolean(
 					aboutRoot
 						.querySelector(
@@ -278,7 +288,9 @@ async function waitForChannelAbout(
 						)
 						?.textContent?.trim(),
 				);
-				return hasJoinedDate || hasStatsInAbout || hasDescription ? "content" : false;
+				return hasJoinedDate || hasStatsInAbout || hasDescription
+					? "content"
+					: false;
 			},
 			undefined,
 			{ timeout: 10_000 },
@@ -358,34 +370,42 @@ type BrowserContext = Pick<
 	"page" | "requested" | "emitRecord" | "emit" | "progress"
 >;
 
+async function emitCoverageProgress(
+	ctx: Pick<BrowserContext, "progress">,
+	connector: "youtube",
+	facts: Iterable<CoverageFact>,
+): Promise<void> {
+	await ctx.progress(
+		`${connector}.coverage ${JSON.stringify({
+			connector,
+			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
+		})}`,
+	);
+}
+
 /** Exported so fixture/protocol tests can run without launching a browser. */
 export async function collectYoutubeBrowser(
 	ctx: BrowserContext,
 ): Promise<void> {
-	const { page, requested } = ctx;
 	const capturedAt = new Date().toISOString();
-	const coverage = async (
-		stream: string,
-		count: number,
-		fieldsUnavailable: string[] = [],
-	) => {
-		if (!requested.has("coverage_diagnostics")) return;
-		await ctx.emitRecord("coverage_diagnostics", {
-			id: id(`${stream}|${capturedAt}`),
+	const { page, requested } = ctx;
+	const coverage = new Map<string, CoverageFact>(
+		[...requested.keys()].map((stream) => [
 			stream,
-			status: "partial",
-			reason: "bounded_browser_snapshot",
-			record_count: count,
-			fields_unavailable: fieldsUnavailable,
-			freshness: "live",
-			captured_at: capturedAt,
-		});
-	};
+			{
+				stream,
+				requested: true,
+				source: "browser",
+				emitted_count: 0,
+				time_range_requested: Boolean(requested.get(stream)?.time_range),
+			},
+		]),
+	);
 	const emit = async (stream: string, record: Record<string, unknown>) => {
+		const fact = coverage.get(stream);
+		if (fact) fact.emitted_count += 1;
 		await ctx.emitRecord(stream, record);
 	};
-	const missingVideoTitles = (videos: readonly BrowserVideo[]) =>
-		videos.some((video) => !video.video_title) ? ["video_title"] : [];
 	if (requested.has("profile")) {
 		await page.goto(HOME, { waitUntil: "domcontentloaded" });
 		const homeState = await waitForContent(
@@ -395,7 +415,6 @@ export async function collectYoutubeBrowser(
 		if (homeState !== "content") {
 			await skipUnreadable(ctx, "profile", "youtube_profile_home_not_ready");
 		} else {
-			let profileEmitted = false;
 			await page
 				.locator(
 					"button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn",
@@ -433,7 +452,6 @@ export async function collectYoutubeBrowser(
 							view_count: null,
 							video_count: null,
 						});
-						profileEmitted = true;
 					} else {
 						await ctx.emit({
 							type: "SKIP_RESULT",
@@ -499,12 +517,10 @@ export async function collectYoutubeBrowser(
 								view_count: parseCount(about?.view_count_text),
 								video_count: parseCount(about?.video_count_text),
 							});
-							profileEmitted = true;
 						}
 					}
 				}
 			}
-			await coverage("profile", profileEmitted ? 1 : 0);
 		}
 	}
 	if (requested.has("subscriptions")) {
@@ -534,13 +550,6 @@ export async function collectYoutubeBrowser(
 					is_verified: channel.is_verified,
 					notifications: channel.notifications,
 				});
-			await coverage(
-				"subscriptions",
-				subscriptions.length,
-				subscriptions.some((channel) => channel.notifications === null)
-					? ["notifications"]
-					: [],
-			);
 		}
 	}
 	let playlistLinks: Array<{ id: string; url: string }> = [];
@@ -564,9 +573,6 @@ export async function collectYoutubeBrowser(
 		playlistIndexReadable &&
 		(requested.has("playlists") || requested.has("playlist_items"))
 	) {
-		let playlistCount = 0;
-		let itemCount = 0;
-		let itemTitlesMissing = false;
 		for (const playlist of playlistLinks) {
 			await page.goto(playlist.url, { waitUntil: "domcontentloaded" });
 			if (
@@ -596,7 +602,6 @@ export async function collectYoutubeBrowser(
 						? 0
 						: parseCount(header.view_count_text),
 				});
-				playlistCount += 1;
 			}
 			if (requested.has("playlist_items")) {
 				const videos = await readableVideos(
@@ -607,25 +612,16 @@ export async function collectYoutubeBrowser(
 					"playlist_items",
 				);
 				if (videos) {
-					itemTitlesMissing ||= missingVideoTitles(videos).length > 0;
 					for (const video of videos) {
 						await emit("playlist_items", {
 							id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
 							playlist_id: playlist.id,
 							...videoFields(video),
 						});
-						itemCount += 1;
 					}
 				}
 			}
 		}
-		if (requested.has("playlists")) await coverage("playlists", playlistCount);
-		if (requested.has("playlist_items"))
-			await coverage(
-				"playlist_items",
-				itemCount,
-				itemTitlesMissing ? ["video_title"] : [],
-			);
 	}
 	for (const [stream, list] of [
 		["likes", "LL"],
@@ -645,7 +641,6 @@ export async function collectYoutubeBrowser(
 				id: id(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
 			});
-		await coverage(stream, videos.length, missingVideoTitles(videos));
 	}
 	if (requested.has("watch_history")) {
 		const videos = await readableVideos(
@@ -656,6 +651,12 @@ export async function collectYoutubeBrowser(
 			"watch_history",
 		);
 		if (videos) {
+			const fact = coverage.get("watch_history");
+			if (fact) {
+				fact.enumerated_count = videos.length;
+				fact.limit = HISTORY_LIMIT;
+				fact.skipped_unresolved_date_count = 0;
+			}
 			const browserDate = await page.evaluate(() => {
 				const now = new Date();
 				return [now.getFullYear(), now.getMonth(), now.getDate()];
@@ -669,8 +670,13 @@ export async function collectYoutubeBrowser(
 					video.watched_date_label ?? null,
 					dateReference,
 				);
-				if (!watchedDate && requested.get("watch_history")?.time_range)
+				if (!watchedDate && requested.get("watch_history")?.time_range) {
+					const fact = coverage.get("watch_history");
+					if (fact)
+						fact.skipped_unresolved_date_count =
+							(fact.skipped_unresolved_date_count ?? 0) + 1;
 					continue;
+				}
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
 					position,
@@ -686,12 +692,9 @@ export async function collectYoutubeBrowser(
 					description: video.description,
 				});
 			}
-			await coverage("watch_history", videos.length, [
-				"watch_time_of_day",
-				...missingVideoTitles(videos),
-			]);
 		}
 	}
+	await emitCoverageProgress(ctx, "youtube", coverage.values());
 }
 
 export const youtubeConnectorConfig = {
