@@ -15,6 +15,7 @@ import {
 } from "./chase.ts";
 
 const DASHBOARD_URL = "https://secure.chase.com/web/auth/dashboard";
+const LOGON_URL = "https://secure.chase.com/web/auth/";
 const STREAMING_ENV_KEYS = [
 	"PDPP_RUN_ID",
 	"PDPP_REFERENCE_BASE_URL",
@@ -238,17 +239,21 @@ async function withoutChaseCredentials(
 interface FakeOtpPageState {
 	/** Whether "Confirm Your Identity" is visible — the identity-challenge copy. */
 	challengeTextVisible?: boolean;
+	/** Optional dashboard-probe override for pages with shell sign-out text. */
+	dashboardSignOutVisible?: boolean;
 	/** Whether the delivery-method option ("Get a text") is enabled. */
 	deliveryOptionEnabled?: boolean;
 	/** Whether the delivery-method option is present/visible at all. */
 	deliveryOptionPresent?: boolean;
-	/** Optional dashboard-probe override for pages with shell sign-out text. */
-	dashboardSignOutVisible?: boolean;
+	/** Model the OTP form disappearing if the active OTP page is navigated. */
+	modelOtpLossOnGoto?: boolean;
 	/** Usable (visible + enabled) OTP inputs. 0 = the page cannot accept a code. */
 	otpInputs: number;
 	/** Whether OTP_PROMPT_TEXT_WITH_SENT matches something visible. */
 	promptTextVisible: boolean;
 	signedOut: boolean;
+	/** Current URL, changed by the fake owner when manual sign-in completes. */
+	url?: string;
 }
 
 /**
@@ -355,6 +360,8 @@ interface FakeOtpPage {
 	 */
 	filledValues: { password: string[]; username: string[] };
 	gotoCalls: string[];
+	/** Whether a dashboard probe navigated the live OTP page away. */
+	otpPageLost: boolean;
 	page: Page;
 	state: FakeOtpPageState;
 }
@@ -408,6 +415,7 @@ function makeOtpPage(
 ): FakeOtpPage {
 	const state: FakeOtpPageState = { ...init };
 	const gotoCalls: string[] = [];
+	let otpPageLost = false;
 	let deliveryClicks = 0;
 	const signInButton: Pick<Locator, "click" | "count" | "first"> = {
 		click: (): Promise<void> => {
@@ -448,7 +456,7 @@ function makeOtpPage(
 
 	const fake: Pick<
 		Page,
-		"getByRole" | "getByText" | "goto" | "isClosed" | "locator"
+		"getByRole" | "getByText" | "goto" | "isClosed" | "locator" | "url"
 	> = {
 		getByRole: ((role: string): Locator => {
 			// The delivery-method option is the only role-based control this flow
@@ -464,10 +472,8 @@ function makeOtpPage(
 			const source = text instanceof RegExp ? text.source : String(text);
 			// The dashboard "Sign Out" probe: visible only once signed in.
 			if (/Sign Out/i.test(source)) {
-				return textLocator((): boolean =>
-					gotoCalls.length > 0
-						? (state.dashboardSignOutVisible ?? !state.signedOut)
-						: !state.signedOut,
+				return textLocator(
+					(): boolean => state.dashboardSignOutVisible ?? !state.signedOut,
 				);
 			}
 			// The identity-challenge method chooser. Off screen unless a test opts
@@ -480,9 +486,23 @@ function makeOtpPage(
 		},
 		goto: (url: string): ReturnType<Page["goto"]> => {
 			gotoCalls.push(url);
+			if (
+				state.modelOtpLossOnGoto &&
+				url === DASHBOARD_URL &&
+				gotoCalls.length > 1
+			) {
+				otpPageLost = true;
+				state.otpInputs = 0;
+				state.url = url;
+			}
 			return Promise.resolve(null);
 		},
 		isClosed: (): boolean => false,
+		url: (): string =>
+			state.url ??
+			(state.signedOut
+				? "https://secure.chase.com/web/auth/otp"
+				: DASHBOARD_URL),
 		locator: (selector: string): Locator => {
 			if (isOtpSelector(selector)) {
 				return otpControlLocator(state, 0);
@@ -511,14 +531,38 @@ function makeOtpPage(
 		},
 		filledValues,
 		gotoCalls,
+		get otpPageLost(): boolean {
+			return otpPageLost;
+		},
 		page: fake as Page,
 		state,
 	};
 }
 
-function makeOtpContext(page: Page): BrowserContext {
-	const fake: Pick<BrowserContext, "browser" | "once" | "pages"> = {
+function makeOtpProbePage(state: FakeOtpPageState, onGoto?: () => void): Page {
+	let currentUrl = "about:blank";
+	const fake: Pick<Page, "close" | "getByText" | "goto" | "isClosed" | "url"> =
+		{
+			close: (): Promise<void> => Promise.resolve(),
+			getByText: (): Locator =>
+				textLocator(
+					(): boolean => state.dashboardSignOutVisible ?? !state.signedOut,
+				),
+			goto: (url: string): ReturnType<Page["goto"]> => {
+				currentUrl = url;
+				onGoto?.();
+				return Promise.resolve(null);
+			},
+			isClosed: (): boolean => false,
+			url: (): string => currentUrl,
+		};
+	return fake as Page;
+}
+
+function makeOtpContext(page: Page, probePage: Page = page): BrowserContext {
+	const fake: Pick<BrowserContext, "browser" | "newPage" | "once" | "pages"> = {
 		browser: () => null,
+		newPage: (): Promise<Page> => Promise.resolve(probePage),
 		once: ((_event: "close", _listener: () => void): BrowserContext =>
 			fake as BrowserContext) as BrowserContext["once"],
 		pages: (): Page[] => [page],
@@ -646,13 +690,14 @@ test("manual entry in the host browser resolves the pending OTP interaction", as
 				completions.push({ id, status });
 				return Promise.resolve();
 			},
-			context: makeOtpContext(page),
+			context: makeOtpContext(page, makeOtpProbePage(state)),
 			credentials: CHASE_TEST_CREDENTIALS,
 			page,
 			sendInteraction: (req) => {
 				requests.push(req);
 				setTimeout(() => {
 					state.signedOut = false;
+					state.url = DASHBOARD_URL;
 				}, 10);
 				return new Promise<InteractionResponse>((resolve) => {
 					resolveInteraction = resolve;
@@ -672,11 +717,12 @@ test("manual entry in the host browser resolves the pending OTP interaction", as
 
 test("shell sign-out text on an OTP error page does not resolve assistance", async () => {
 	await withChaseCredentials(async () => {
-		const { page } = makeOtpPage({
+		const fake = makeOtpPage({
 			dashboardSignOutVisible: false,
+			modelOtpLossOnGoto: true,
 			otpInputs: 1,
 			promptTextVisible: true,
-			signedOut: false,
+			signedOut: true,
 		});
 		const requests: InteractionRequest[] = [];
 		const completions: Array<{ id: string; status: string }> = [];
@@ -687,11 +733,12 @@ test("shell sign-out text on an OTP error page does not resolve assistance", asy
 					completions.push({ id, status });
 					return Promise.resolve();
 				},
-				context: makeOtpContext(page),
+				context: makeOtpContext(fake.page),
 				credentials: CHASE_TEST_CREDENTIALS,
-				page,
+				page: fake.page,
 				sendInteraction: (req) => {
 					requests.push(req);
+					fake.state.dashboardSignOutVisible = true;
 					return new Promise<InteractionResponse>((resolve) => {
 						setTimeout(
 							() =>
@@ -709,7 +756,37 @@ test("shell sign-out text on an OTP error page does not resolve assistance", asy
 		);
 
 		assert.equal(requests.length, 1);
+		assert.equal(
+			fake.otpPageLost,
+			false,
+			"the fake must keep the OTP form available unless the implementation navigates it away",
+		);
 		assert.deepEqual(completions, []);
+	});
+});
+
+test("manual OTP wait never navigates the active OTP page", async () => {
+	await withChaseCredentials(async () => {
+		const { gotoCalls, page, state } = makeOtpPage({
+			otpInputs: 1,
+			promptTextVisible: true,
+			signedOut: true,
+		});
+		const result = await ensureChaseSession({
+			context: makeOtpContext(page, makeOtpProbePage(state)),
+			credentials: CHASE_TEST_CREDENTIALS,
+			page,
+			sendInteraction: () => {
+				setTimeout(() => {
+					state.signedOut = false;
+					state.url = DASHBOARD_URL;
+				}, 10);
+				return new Promise<InteractionResponse>(() => undefined);
+			},
+		});
+
+		assert.equal(result, true);
+		assert.deepEqual(gotoCalls, [DASHBOARD_URL, LOGON_URL]);
 	});
 });
 
@@ -752,7 +829,17 @@ test("console OTP reply wins when it arrives during the dashboard probe", async 
 				completions.push({ id, status });
 				return Promise.resolve();
 			},
-			context: makeOtpContext(guardedPage),
+			context: makeOtpContext(
+				guardedPage,
+				makeOtpProbePage(state, () => {
+					resolveInteraction?.({
+						data: { code: "123456" },
+						request_id: requests[0]?.request_id ?? "test_interaction",
+						status: "success",
+						type: "INTERACTION_RESPONSE",
+					});
+				}),
+			),
 			credentials: CHASE_TEST_CREDENTIALS,
 			page: guardedPage,
 			sendInteraction: (req) => {

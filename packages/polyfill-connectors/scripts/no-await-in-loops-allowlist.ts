@@ -2667,10 +2667,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/auto-login/chase.ts",
-			line: 396,
+			line: 436,
 			column: 19,
 			category: "bounded_retry_polling",
-			note: "probeChaseSession(): retry/poll loop gated on the prior dashboard probe outcome",
+			note: "probeChaseSessionOnSeparatePage(): retry/poll loop gated on Chase leaving the auth flow",
 		},
 		{
 			path: "src/auto-login/chatgpt.ts",

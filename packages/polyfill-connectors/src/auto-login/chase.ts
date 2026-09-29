@@ -377,6 +377,46 @@ export async function probeChaseSession(
 	};
 }
 
+function hasLeftChaseAuthFlow(page: Page): boolean {
+	try {
+		const { hostname, pathname, protocol } = new URL(page.url());
+		return !(
+			protocol === "https:" &&
+			hostname === "secure.chase.com" &&
+			(pathname === "/web/auth" ||
+				(pathname.startsWith("/web/auth/") &&
+					pathname !== "/web/auth/dashboard"))
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isChaseDashboardPage(page: Page): boolean {
+	try {
+		const { hostname, pathname, protocol } = new URL(page.url());
+		return (
+			protocol === "https:" &&
+			hostname === "secure.chase.com" &&
+			pathname === "/web/auth/dashboard"
+		);
+	} catch {
+		return false;
+	}
+}
+
+async function probeChaseSessionOnSeparatePage(
+	context: BrowserContext,
+): Promise<boolean> {
+	const probePage = await context.newPage();
+	try {
+		const result = await probeChaseSession(context, probePage);
+		return result.loggedIn && isChaseDashboardPage(result.page);
+	} finally {
+		await probePage.close().catch((): void => undefined);
+	}
+}
+
 type ChaseOtpOutcome =
 	| { page: Page; type: "manual" }
 	| { type: "response"; response: InteractionResponse }
@@ -402,8 +442,11 @@ async function waitForChaseOtpOutcome(
 		if (outcome.type !== "waiting") {
 			return outcome;
 		}
-		const sessionProbe = await probeChaseSession(context, page);
-		if (sessionProbe.loggedIn) {
+		if (hasLeftChaseAuthFlow(page)) {
+			const loggedIn = await probeChaseSessionOnSeparatePage(context);
+			if (!loggedIn) {
+				continue;
+			}
 			const responseAfterProbe = await Promise.race([
 				interactionOutcome,
 				Promise.resolve({ type: "waiting" as const }),
@@ -411,7 +454,7 @@ async function waitForChaseOtpOutcome(
 			if (responseAfterProbe.type !== "waiting") {
 				return responseAfterProbe;
 			}
-			return { page: sessionProbe.page, type: "manual" };
+			return { page, type: "manual" };
 		}
 	}
 	return { type: "timeout" };
