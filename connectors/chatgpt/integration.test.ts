@@ -1070,6 +1070,7 @@ function makeHarness({
 	};
 	const deps: StreamDeps = {
 		api,
+		sleep: (): Promise<void> => Promise.resolve(),
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		progress: (): Promise<void> => Promise.resolve(),
@@ -1097,29 +1098,39 @@ function makeConvo(
 }
 
 function makeConversationListingHarness(
-	walks: ReadonlyArray<{ items: ConversationListItem[]; total?: number }>,
-): RecordingHarness & { listWalks: () => number } {
+	responsesByOffset: ReadonlyMap<
+		number,
+		ReadonlyArray<{ items: ConversationListItem[]; total?: number }>
+	>,
+): RecordingHarness & {
+	listOffsets: () => number[];
+	listLimits: () => string[];
+	delays: () => number[];
+} {
 	const harness = makeRecordingEmit(validateRecord);
-	let walkIndex = -1;
+	const offsets: number[] = [];
+	const limits: string[] = [];
+	const delays: number[] = [];
+	const callsByOffset = new Map<number, number>();
 	const api: ChatGptApi = {
 		auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			if (!path.startsWith("/conversations?")) {
 				return Promise.resolve({ status: 404, json: null });
 			}
-			const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
-			if (offset === 0) {
-				walkIndex += 1;
-			}
-			const walk = walks[Math.min(walkIndex, walks.length - 1)];
-			if (!walk) {
-				throw new Error("listing fixture must contain at least one walk");
-			}
+			const params = new URLSearchParams(path.split("?")[1]);
+			const offset = Number(params.get("offset"));
+			limits.push(params.get("limit") ?? "");
+			offsets.push(offset);
+			const responseIndex = callsByOffset.get(offset) ?? 0;
+			callsByOffset.set(offset, responseIndex + 1);
+			const responses = responsesByOffset.get(offset);
+			const response = responses?.[Math.min(responseIndex, (responses?.length ?? 1) - 1)] ?? { items: [] };
 			return Promise.resolve({
 				status: 200,
 				json: {
-					items: walk.items.slice(offset, offset + 100),
-					...(walk.total === undefined ? {} : { total: walk.total }),
+					items: response.items,
+					...(response.total === undefined ? {} : { total: response.total }),
 				},
 			});
 		},
@@ -1127,6 +1138,10 @@ function makeConversationListingHarness(
 	return {
 		deps: {
 			api,
+			sleep: (milliseconds: number): Promise<void> => {
+				delays.push(milliseconds);
+				return Promise.resolve();
+			},
 			emit: harness.emit,
 			emitRecord: harness.emitRecord,
 			progress: (): Promise<void> => Promise.resolve(),
@@ -1135,8 +1150,38 @@ function makeConversationListingHarness(
 		emitted: harness.emitted,
 		messages: harness.protocolMessages,
 		skipped: harness.skipped,
-		listWalks: () => walkIndex + 1,
+		listOffsets: () => offsets,
+		listLimits: () => limits,
+		delays: () => delays,
 	};
+}
+
+function makeRecordedEarlyEndReplay(
+	transientOffset: number,
+	transientCount: number,
+): RecordingHarness & {
+	listOffsets: () => number[];
+	listLimits: () => string[];
+	delays: () => number[];
+} {
+	const fullList = Array.from({ length: 700 }, (_, index) =>
+		makeConvo({ id: `recorded-shape-${index}` }),
+	);
+	const responses = new Map<number, { items: ConversationListItem[]; total: number }[]>();
+	for (let offset = 0; offset < fullList.length; offset += 28) {
+		const page = fullList.slice(offset, offset + 28);
+		const totalHint = offset + page.length + 1;
+		responses.set(offset, [{ items: page, total: totalHint }]);
+	}
+	responses.set(700, [{ items: [], total: 700 }]);
+	const normalPage = fullList.slice(transientOffset, transientOffset + 28);
+	const transientPage = normalPage.slice(0, transientCount);
+	responses.set(transientOffset, [
+		{ items: transientPage, total: transientOffset + transientPage.length + 1 },
+		{ items: normalPage, total: transientOffset + normalPage.length + 1 },
+		{ items: normalPage, total: transientOffset + normalPage.length + 1 },
+	]);
+	return makeConversationListingHarness(responses);
 }
 
 function makeDetailGapFromConvo(
@@ -1266,37 +1311,125 @@ function makeEmitConversation(
 	};
 }
 
-// Full-list completeness regressions: short/unstable walks must not produce
-// a complete stream result or advance from an unproven boundary.
-test("full conversation listing accepts the stable full ID set after an initial short walk", async () => {
-	const short = [makeConvo({ id: "a" })];
-	const full = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([
-		{ items: short },
-		{ items: full },
-		{ items: full },
-	]);
+// These fixtures reproduce the recorded 100-item full-page / short-page /
+// empty-page pattern at the sidebar's 28-item request size. The recorded `total`
+// values are offset + returned items + 1 on non-final pages, so they cannot
+// prove the account-wide list size.
+test("transient empty page retries the same offset and recovers the full ID union", async () => {
+	const firstPage = Array.from({ length: 28 }, (_, index) =>
+		makeConvo({ id: `page-a-${index}` }),
+	);
+	const secondPage = Array.from({ length: 28 }, (_, index) =>
+		makeConvo({ id: `page-b-${index}` }),
+	);
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [{ items: [], total: 1 }, { items: firstPage, total: 29 }, { items: firstPage, total: 29 }]],
+			[28, [{ items: secondPage, total: 57 }]],
+			[56, [{ items: [], total: 56 }]],
+		]),
+	);
 
 	await runConversationsAndMessagesStreams(fixture.deps, {});
 
+	assert.deepEqual(fixture.listOffsets(), [0, 0, 0, 28, 56, 56, 56]);
+	assert.equal(fixture.listLimits().every((limit) => limit === "28"), true);
 	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-		"the connector emits the agreed full ID set after a short first walk",
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set([...firstPage, ...secondPage].map((item) => item.id)),
 	);
-	assert.equal(fixture.listWalks(), 3);
+	assert.deepEqual(fixture.delays(), [1000, 2000, 1000, 1000, 1000, 2000]);
 	assert.equal(
 		fixture.messages.some((message) => message.type === "SKIP_RESULT"),
 		false,
 	);
 });
 
-test("full conversation listing stays partial when three cursor-less walks never agree", async () => {
-	const fixture = makeConversationListingHarness([
-		{ items: [makeConvo({ id: "a" })] },
-		{ items: [makeConvo({ id: "b" })] },
-		{ items: [makeConvo({ id: "c" })] },
-	]);
+test("recorded 100x4,0 shape recovers after an empty page at the 28-item offset", async () => {
+	const fixture = makeRecordedEarlyEndReplay(392, 0);
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+	assert.equal(fixture.listOffsets().includes(392), true);
+	assert.equal(fixture.listOffsets().filter((offset) => offset === 392).length, 3);
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(Array.from({ length: 700 }, (_, index) => `recorded-shape-${index}`)),
+	);
+});
+
+test("recorded 100x3,12 shape retries its short page and retains the list union", async () => {
+	const fixture = makeRecordedEarlyEndReplay(308, 12);
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+	assert.equal(fixture.listOffsets().filter((offset) => offset === 308).length, 3);
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(Array.from({ length: 700 }, (_, index) => `recorded-shape-${index}`)),
+	);
+});
+
+test("recorded 100x5,0 shape recovers after an empty page at the 28-item offset", async () => {
+	const fixture = makeRecordedEarlyEndReplay(476, 0);
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+	assert.equal(fixture.listOffsets().filter((offset) => offset === 476).length, 3);
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(Array.from({ length: 700 }, (_, index) => `recorded-shape-${index}`)),
+	);
+});
+
+test("confirmed empty next offset completes a short final page", async () => {
+	const finalPage = [makeConvo({ id: "last-a" }), makeConvo({ id: "last-b" })];
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [{ items: finalPage, total: 3 }, { items: finalPage, total: 3 }, { items: finalPage, total: 3 }]],
+			[2, [{ items: [], total: 2 }]],
+		]),
+	);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.deepEqual(fixture.listOffsets(), [0, 0, 0, 2, 2, 2]);
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(["last-a", "last-b"]),
+	);
+	assert.equal(
+		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		true,
+	);
+});
+
+test("same-offset retries union IDs while a two-of-three page consensus holds", async () => {
+	const common = [makeConvo({ id: "common-a" }), makeConvo({ id: "common-b" })];
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [
+				{ items: common, total: 3 },
+				{ items: [...common, makeConvo({ id: "retry-only" })], total: 4 },
+				{ items: common, total: 3 },
+			]],
+			[3, [{ items: [], total: 3 }]],
+		]),
+	);
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(["common-a", "common-b", "retry-only"]),
+	);
+	assert.deepEqual(fixture.listOffsets(), [0, 0, 0, 3, 3, 3]);
+});
+
+test("three disagreeing same-offset probes remain partial without coverage", async () => {
+	const fixture = makeConversationListingHarness(
+		new Map([
+			[0, [
+				{ items: [makeConvo({ id: "probe-a" })] },
+				{ items: [makeConvo({ id: "probe-b" })] },
+				{ items: [makeConvo({ id: "probe-c" })] },
+			]],
+		]),
+	);
 
 	await runConversationsAndMessagesStreams(fixture.deps, {});
 
@@ -1310,104 +1443,20 @@ test("full conversation listing stays partial when three cursor-less walks never
 		retryable: true,
 	});
 	assert.deepEqual(skip?.diagnostics, {
-		attempts: 3,
-		walk_counts: [1, 1, 1],
-		last_reported_total: null,
+		offset: 0,
+		checks: 3,
+		item_counts: [1, 1, 1],
+		page_made_progress: true,
 	});
-	assert.equal(fixture.emitted.length, 0, "unstable IDs are not emitted");
+	assert.deepEqual(
+		new Set(fixture.emitted.map((record) => record.data.id)),
+		new Set(["probe-a", "probe-b", "probe-c"]),
+		"the partial result retains every ID seen in the bounded probes",
+	);
 	assert.equal(
 		fixture.messages.some((message) => message.type === "DETAIL_COVERAGE"),
 		false,
-		"an unstable listing has no complete coverage claim",
 	);
-});
-
-test("stable full conversation listing without total requires exactly two walks", async () => {
-	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([{ items }, { items }]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 2);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-	);
-});
-
-test("short matching walks cannot satisfy a reported total", async () => {
-	const items = [makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items, total: 2 },
-		{ items, total: 2 },
-		{ items, total: 2 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	const skip = fixture.messages.find(
-		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			message.type === "SKIP_RESULT",
-	);
-	assert.equal(skip?.reason, "conversation_list_unstable");
-	assert.deepEqual(skip?.diagnostics, {
-		attempts: 3,
-		walk_counts: [1, 1, 1],
-		last_reported_total: 2,
-	});
-	assert.equal(fixture.listWalks(), 3);
-	assert.equal(fixture.emitted.length, 0);
-});
-
-test("zero total with non-empty IDs is missing and falls back to two-walk agreement", async () => {
-	const items = [makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items, total: 0 },
-		{ items, total: 0 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 2);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a"],
-	);
-});
-
-test("a full walk that reaches a usable total needs exactly one listing walk", async () => {
-	const items = [makeConvo({ id: "a" }), makeConvo({ id: "b" })];
-	const fixture = makeConversationListingHarness([{ items, total: 2 }]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 1);
-	assert.deepEqual(
-		fixture.emitted.map((record) => record.data.id),
-		["a", "b"],
-	);
-});
-
-test("duplicate rows do not count toward a reported total of unique conversation IDs", async () => {
-	const duplicateRows = [makeConvo({ id: "a" }), makeConvo({ id: "a" })];
-	const fixture = makeConversationListingHarness([
-		{ items: duplicateRows, total: 2 },
-		{ items: duplicateRows, total: 2 },
-		{ items: duplicateRows, total: 2 },
-	]);
-
-	await runConversationsAndMessagesStreams(fixture.deps, {});
-
-	assert.equal(fixture.listWalks(), 3);
-	assert.equal(
-		fixture.messages.some(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "conversation_list_unstable",
-		),
-		true,
-	);
-	assert.equal(fixture.emitted.length, 0);
 });
 
 // ─── Invariant 1: emit order (current ChatGPT contract) ──────────────────
@@ -2051,12 +2100,13 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
 			if (path.startsWith("/conversations")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: [listItem],
+						items: offset === 0 ? [listItem] : [],
 						has_missing_conversations: false,
-						total: 1,
+						total: offset === 0 ? 2 : 1,
 					},
 				});
 			}
@@ -2080,7 +2130,8 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 	);
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations?offset=1&limit=28&order=updated"),
 		"/conversation/convo-with-binary-text",
 	]);
 	// No SKIP_RESULT: unsafe content is sanitized to null at extraction time.
@@ -4247,12 +4298,13 @@ test("runConversationsAndMessagesStreams: capped forward run covers full listed 
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			if (path.startsWith("/conversations?")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return {
 					status: 200,
 					json: {
-						items: listItems,
+						items: offset === 0 ? listItems : [],
 						has_missing_conversations: false,
-						total: listItems.length,
+						total: offset === 0 ? listItems.length + 1 : listItems.length,
 					} as ChatGptJson,
 				};
 			}
@@ -5258,9 +5310,11 @@ test("a follow-up run expands the backlog gap (older window) before any forward 
 				await Promise.resolve();
 				if (path.startsWith("/conversations?")) {
 					listCalls.push(path);
-					// Always return the full descending list; listConversationsSinceCursor
-					// applies the cursor filter, just like the live `/conversations` route.
-					return { status: 200, json: { items: allConvos } as ChatGptJson };
+					const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+					return {
+						status: 200,
+						json: { items: offset === 0 ? allConvos : [] } as ChatGptJson,
+					};
 				}
 				return makeDetailOk();
 			},
@@ -5463,12 +5517,13 @@ test("runConversationsAndMessagesStreams: isolated recoverable detail exhaustion
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
 			if (path.startsWith("/conversations")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: listItems,
+						items: offset === 0 ? listItems : [],
 						has_missing_conversations: false,
-						total: listItems.length,
+						total: offset === 0 ? listItems.length + 1 : listItems.length,
 					},
 				});
 			}
@@ -5517,7 +5572,8 @@ test("runConversationsAndMessagesStreams: isolated recoverable detail exhaustion
 	// latch-and-defer fallback. With sleep injected as a no-op, this is instant.
 	// So convo-gap is attempted 9 times total (1 initial + 8 wait-resume retries).
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations?offset=1&limit=28&order=updated"),
 		"/conversation/convo-gap",
 		"/conversation/convo-gap",
 		"/conversation/convo-gap",
@@ -6047,33 +6103,15 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
-			if (path === "/conversations?offset=0&limit=100&order=updated") {
+			if (path.startsWith("/conversations?")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+				const items = listItems.slice(offset, offset + 28);
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: listItems.slice(0, 100),
+						items,
 						has_missing_conversations: false,
-						total: 278,
-					},
-				});
-			}
-			if (path === "/conversations?offset=100&limit=100&order=updated") {
-				return Promise.resolve({
-					status: 200,
-					json: {
-						items: listItems.slice(100, 200),
-						has_missing_conversations: false,
-						total: 278,
-					},
-				});
-			}
-			if (path === "/conversations?offset=200&limit=100&order=updated") {
-				return Promise.resolve({
-					status: 200,
-					json: {
-						items: listItems.slice(200),
-						has_missing_conversations: false,
-						total: 278,
+						total: offset + items.length + 1,
 					},
 				});
 			}
@@ -6120,7 +6158,7 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 
 	assert.equal(
 		fetches.filter((path) => path.startsWith("/conversations?")).length,
-		3,
+		15,
 	);
 	// The pressure item (index 29) is retried up to CHATGPT_CIRCUIT_WAIT_OUT_MAX_CYCLES
 	// (8) times before the bounded envelope is spent and the latch fires. So the
@@ -6129,12 +6167,20 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 		fetches.filter((path) => path.startsWith("/conversation/")).length,
 		38,
 	);
-	assert.deepEqual(fetches.slice(0, 33), [
-		"/conversations?offset=0&limit=100&order=updated",
-		"/conversations?offset=100&limit=100&order=updated",
-		"/conversations?offset=200&limit=100&order=updated",
-		...listItems.slice(0, 30).map((item) => `/conversation/${item.id}`),
-	]);
+	assert.deepEqual(
+		fetches.filter((path) => path.startsWith("/conversations?")),
+		[
+			...Array.from({ length: 9 }, (_, index) =>
+				`/conversations?offset=${index * 28}&limit=28&order=updated`,
+			),
+			...Array.from({ length: 3 }, () => "/conversations?offset=252&limit=28&order=updated"),
+			...Array.from({ length: 3 }, () => "/conversations?offset=278&limit=28&order=updated"),
+		],
+	);
+	assert.deepEqual(
+		fetches.slice(15, 45),
+		listItems.slice(0, 30).map((item) => `/conversation/${item.id}`),
+	);
 
 	assert.equal(
 		harness.emitted.some(
@@ -6436,7 +6482,8 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 
 	assert.deepEqual(fetches, [
 		"/conversation/convo-recover",
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations?offset=1&limit=28&order=updated"),
 		"/conversation/convo-forward",
 	]);
 	const recoveredIdx = harness.events.findIndex(

@@ -118,10 +118,8 @@ function makeListItem(
 	};
 }
 
-/** Build a fake `api` that serves a canned list + per-conversation
- *  details. `listConversationsSinceCursor` issues a GET on
- *  /conversations?offset=... ; we return all items on offset=0 then
- *  signal end via `has_missing_conversations: false`. */
+/** Build a fake `api` that serves a canned first page, then a genuine empty
+ *  page at the next offset, plus per-conversation details. */
 function makeFakeApi(
 	list: ConversationListItem[],
 	details: Map<string, ChatGptFetchResult>,
@@ -131,12 +129,12 @@ function makeFakeApi(
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			if (path.startsWith("/conversations")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: list,
-						has_missing_conversations: false,
-						total: list.length,
+						items: offset === 0 ? list : [],
+						total: offset === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -183,6 +181,7 @@ function makeDeps(
 	const harness = makeRecordingEmit(validateRecord);
 	const deps: StreamDeps = {
 		api,
+		sleep: (): Promise<void> => Promise.resolve(),
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		progress: silentProgress(),
@@ -358,12 +357,13 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
 			if (path.startsWith("/conversations")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: list,
+						items: offset === 0 ? list : [],
 						has_missing_conversations: false,
-						total: list.length,
+						total: offset === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -397,7 +397,8 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 	await run;
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations?offset=2&limit=28&order=updated"),
 		"/conversation/conv-A",
 		"/conversation/conv-B",
 	]);
@@ -427,12 +428,13 @@ test("runConversationsAndMessagesStreams: conversations-only (no messages scope)
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			if (path.startsWith("/conversations")) {
+				const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: list,
+						items: offset === 0 ? list : [],
 						has_missing_conversations: false,
-						total: list.length,
+						total: offset === 0 ? list.length + 1 : list.length,
 					},
 				});
 			}
@@ -492,7 +494,8 @@ test("runConversationsAndMessagesStreams: messages backfill is independent from 
 	});
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		...Array.from({ length: 3 }, () => "/conversations?offset=0&limit=28&order=updated"),
+		...Array.from({ length: 3 }, () => "/conversations?offset=2&limit=28&order=updated"),
 		"/conversation/conv-new",
 		"/conversation/conv-old",
 	]);
@@ -545,7 +548,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	});
 
 	assert.deepEqual(fetches, [
-		"/conversations?offset=0&limit=100&order=updated",
+		"/conversations?offset=0&limit=28&order=updated",
 		"/conversation/conv-new",
 		"/conversation/conv-mid",
 	]);

@@ -2064,6 +2064,8 @@ async function runChatGptSideEffectProbe({
  *  orchestration and the helpers are individually testable. */
 export interface StreamDeps {
 	api: ChatGptApi;
+	/** Optional clock seam for deterministic list retry tests. */
+	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
@@ -2911,24 +2913,14 @@ export async function runSharedConversationsStream(
 // ─── Conversations + messages ──────────────────────────────────────────
 
 /**
- * The result of one `listConversationsSinceCursor` walk: the items collected,
- * and whether every page that should have contributed to that list actually
- * arrived and parsed. `truncated` is the caller's signal to prove nothing: a
- * page that 404'd, errored, or arrived as an unreadable 200 body stops the
- * walk exactly like a genuine end-of-list would, but the two are NOT the same
- * fact. A genuine end-of-list (a short page, or the first item at/before
- * `priorCursor`) is honest completion — `truncated: false` — even with zero
- * items collected. A page that never arrived intact leaves the walk unable to
- * prove it saw everything newer than `priorCursor`, so the caller MUST NOT
- * advance either cursor built from this list, and MUST NOT emit list/detail
- * coverage claiming this pass covered its boundary.
+ * The result of one `listConversationsSinceCursor` walk: the items collected
+ * and whether every needed page arrived and parsed. `truncated` means a page
+ * failed or same-offset probes never agreed. In either case the caller must
+ * not advance a cursor or emit coverage for an unproven boundary.
  */
 interface ConversationListResult {
 	items: ConversationListItem[];
 	truncated: boolean;
-	// Null when pages disagree, the value is malformed, or it falls below the
-	// number of distinct IDs collected in this walk.
-	total: number | null;
 }
 
 /**
@@ -2941,90 +2933,16 @@ interface ConversationListResult {
  * emits honest retryable/gap evidence instead of fabricating coverage over a
  * partial prefix it never proved complete.
  */
+/** One offset walk with bounded same-offset checks for every short page. */
 async function listConversationsSinceCursor(
 	deps: StreamDeps,
 	priorCursor: string | null,
 ): Promise<ConversationListResult> {
-	if (priorCursor !== null) {
-		return listConversationWalk(deps, priorCursor);
-	}
-
-	const walkCounts: number[] = [];
-	let previous: ConversationListResult | null = null;
-	let sawUnreachedTotal = false;
-	for (let attempt = 0; attempt < 3; attempt += 1) {
-		if (attempt > 0) {
-			await new Promise((resolve) => setTimeout(resolve, 500));
-		}
-		const current = await listConversationWalk(deps, null);
-		if (current.truncated) {
-			return current;
-		}
-		const currentUniqueCount = new Set(
-			current.items.map((item) => item.id),
-		).size;
-		walkCounts.push(currentUniqueCount);
-		if (current.total !== null) {
-			if (currentUniqueCount >= current.total) {
-				return current;
-			}
-			sawUnreachedTotal = true;
-			previous = current;
-			continue;
-		}
-		if (
-			!sawUnreachedTotal &&
-			previous &&
-			previous.total === null &&
-			sameConversationIdSet(previous.items, current.items)
-		) {
-			return current;
-		}
-		previous = current;
-	}
-
-	for (const stream of ["conversations", "messages"] as const) {
-		if (!deps.requested.has(stream)) {
-			continue;
-		}
-		deps.emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: "conversation_list_unstable",
-			message: "ChatGPT conversation listing changed across three full walks; retry this stream",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			diagnostics: {
-				attempts: walkCounts.length,
-				walk_counts: walkCounts,
-				last_reported_total: previous?.total ?? null,
-			},
-		});
-	}
-	return { items: [], truncated: true, total: previous?.total ?? null };
-}
-
-function sameConversationIdSet(
-	left: readonly ConversationListItem[],
-	right: readonly ConversationListItem[],
-): boolean {
-	const leftIds = new Set(left.map((item) => item.id));
-	const rightIds = new Set(right.map((item) => item.id));
-	return (
-		leftIds.size === rightIds.size &&
-		[...leftIds].every((id) => rightIds.has(id))
-	);
-}
-
-/** One offset walk. Cursor-less callers add repeated-walk completeness proof above. */
-async function listConversationWalk(
-	deps: StreamDeps,
-	priorCursor: string | null,
-): Promise<ConversationListResult> {
-	const convosToSync: ConversationListItem[] = [];
-	let reportedTotal: number | null = null;
-	let invalidTotal = false;
+	const conversationsById = new Map<string, ConversationListItem>();
 	let offset = 0;
-	const limit = 100;
+	const limit = 28;
+	const maxPageAttempts = 3;
+	const retryDelaysMs: readonly [number, number] = [1000, 2000];
 	let stopPaging = false;
 	let page = 0;
 	deps.emit({
@@ -3035,48 +2953,81 @@ async function listConversationWalk(
 			: "Listing conversations (full pass)",
 	});
 	while (!stopPaging) {
-		const classified = classifyChatGptListPage<ConversationListItem>(
-			await deps.api.fetch(
-				`/conversations?offset=${offset}&limit=${limit}&order=updated`,
-			),
-			{
-				stream: "conversations",
-				endpointLabel: "conversations list",
-				page,
-				listKeys: ["items"],
-			},
-		);
-		page += 1;
-		if (!classified.ok) {
-			deps.emit(classified.skip);
-			return { items: convosToSync, truncated: true, total: null };
-		}
-		const { items } = classified;
-		const pageTotal = conversationListTotal(classified.json);
-		if (pageTotal === null) {
-			invalidTotal = true;
-		} else if (pageTotal !== undefined) {
-			if (reportedTotal !== null && reportedTotal !== pageTotal) {
-				invalidTotal = true;
-			} else {
-				reportedTotal = pageTotal;
+		const idsBeforeOffset = conversationsById.size;
+		const attempts: ConversationListItem[][] = [];
+		let maxItemsAtOffset = 0;
+		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
+			if (offset > 0 && attempt === 0) {
+				await waitForConversationListRetry(deps, 1000);
+			} else if (attempt > 0) {
+				await waitForConversationListRetry(
+					deps,
+					retryDelaysMs[attempt - 1] ?? retryDelaysMs[1],
+				);
 			}
-		}
-		if (!items.length) {
-			break;
-		}
-		for (const c of items) {
-			const updateIso = c.update_time ? tsToIso(c.update_time) : null;
-			if (priorCursor && updateIso && updateIso <= priorCursor) {
-				stopPaging = true;
+			const classified = classifyChatGptListPage<ConversationListItem>(
+				await deps.api.fetch(
+					`/conversations?offset=${offset}&limit=${limit}&order=updated`,
+				),
+				{
+					stream: "conversations",
+					endpointLabel: "conversations list",
+					page,
+					listKeys: ["items"],
+				},
+			);
+			page += 1;
+			if (!classified.ok) {
+				deps.emit(classified.skip);
+				return { items: [...conversationsById.values()], truncated: true };
+			}
+			const items = classified.items;
+			attempts.push(items);
+			maxItemsAtOffset = Math.max(maxItemsAtOffset, items.length);
+			for (const item of items) {
+				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				if (priorCursor && updateIso && updateIso <= priorCursor) {
+					stopPaging = true;
+					break;
+				}
+				conversationsById.set(item.id, item);
+			}
+			if (stopPaging || (attempt === 0 && items.length >= limit)) {
 				break;
 			}
-			convosToSync.push(c);
 		}
-		if (items.length < limit) {
+		if (stopPaging) {
 			break;
 		}
-		offset += items.length;
+		const pageMadeProgress = conversationsById.size > idsBeforeOffset;
+		if (
+			!hasConversationPageConsensus(attempts) ||
+			(maxItemsAtOffset > 0 && !pageMadeProgress)
+		) {
+			for (const stream of ["conversations", "messages"] as const) {
+				if (!deps.requested.has(stream)) {
+					continue;
+				}
+				deps.emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "conversation_list_unstable",
+					message: "ChatGPT conversation listing remained inconsistent after three same-offset checks; retry this stream",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					diagnostics: {
+						offset,
+						checks: attempts.length,
+						item_counts: attempts.map((items) => items.length),
+						page_made_progress: pageMadeProgress,
+					},
+				});
+			}
+			return { items: [...conversationsById.values()], truncated: true };
+		}
+		if (maxItemsAtOffset === 0) {
+			break;
+		}
+		offset += maxItemsAtOffset;
 		if (offset > PAGINATION_SAFETY_LIMIT) {
 			// Reaching this line means the just-fetched page was FULL and no item
 			// on it was old enough to hit `priorCursor` yet (`stopPaging` is still
@@ -3097,26 +3048,33 @@ async function listConversationWalk(
 					action: "retry_on_connector_upgrade",
 					retryable: false,
 				},
-				diagnostics: { offset, collected: convosToSync.length },
+				diagnostics: { offset, collected: conversationsById.size },
 			});
-			return { items: convosToSync, truncated: true, total: null };
+			return { items: [...conversationsById.values()], truncated: true };
 		}
 	}
-	const uniqueIds = new Set(convosToSync.map((item) => item.id)).size;
-	const total = invalidTotal || (reportedTotal !== null && reportedTotal < uniqueIds)
-		? null
-		: reportedTotal;
-	return { items: convosToSync, truncated: false, total };
+	return { items: [...conversationsById.values()], truncated: false };
 }
 
-function conversationListTotal(json: ChatGptJson): number | null | undefined {
-	if (!json || !isChatGptJsonObject(json) || !("total" in json)) {
-		return undefined;
+function hasConversationPageConsensus(
+	pages: readonly ConversationListItem[][],
+): boolean {
+	if (pages.length < 2) {
+		return true;
 	}
-	const { total } = json;
-	return typeof total === "number" && Number.isSafeInteger(total) && total >= 0
-		? total
-		: null;
+	const signatures = pages.map((items) =>
+		[...new Set(items.map((item) => item.id))].sort().join("\u0000"),
+	);
+	return signatures.some(
+		(signature) => signatures.filter((candidate) => candidate === signature).length >= 2,
+	);
+}
+
+function waitForConversationListRetry(
+	deps: StreamDeps,
+	milliseconds: number,
+): Promise<void> {
+	return deps.sleep?.(milliseconds) ?? Promise.resolve();
 }
 
 function conversationIsAfterCursor(
@@ -5347,6 +5305,8 @@ if (isMainModule(import.meta.url)) {
 
 			const deps: StreamDeps = {
 				api,
+				sleep: (milliseconds) =>
+					new Promise((resolve) => setTimeout(resolve, milliseconds)),
 				detailGaps: ctx.detailGaps,
 				emit,
 				emitRecord,
