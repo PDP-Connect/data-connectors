@@ -128,9 +128,9 @@
  *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
  * Host blob limit: each selected conversation or project envelope must fit
  * within 32 MiB. A larger source object is left out with its child records
- * (messages or project documents). Those streams get an
- * `export_items_too_large` SKIP_RESULT and no `synced_at`; every other
- * record is still imported. A real account had one 79 MiB conversation.
+ * (messages or project documents). The run reports the dropped count in a
+ * PROGRESS note (no ids or titles) and does not skip those streams, so they
+ * get their normal `synced_at`. A real account had one 79 MiB conversation.
  *
  * The nonce download can itself be a split-export manifest: on 2026-09-22 a
  * real account's download was a `manifest-<org>-...json` file (the same
@@ -1242,8 +1242,9 @@ export async function collectAnthropic({
 			}
 		}
 		// A dropped parent item also drops its child items (a conversation's
-		// messages, a project's documents), so skip the child stream too.
-		// A skipped stream keeps its prior snapshot and gets no synced_at.
+		// messages, a project's documents). An unparseable item skips the
+		// parent and child streams: a skipped stream keeps its prior snapshot
+		// and gets no synced_at. An oversized item gets a PROGRESS note only.
 		const dropGroups: Array<
 			[readonly string[], number, "unparseable" | "too_large"]
 		> = [
@@ -1296,9 +1297,17 @@ export async function collectAnthropic({
 					? `exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit`
 					: "could not be parsed";
 			await progress(
-				`Warning: ${count} ${parent} item(s) in the export ${why} and were not imported.`,
-				{ stream: parent ?? CONVERSATIONS_STREAM },
+				cause === "too_large"
+					? `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported (export_items_too_large).`
+					: `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported.`,
+				{ stream: parent ?? CONVERSATIONS_STREAM, count },
 			);
+			// An oversized item can never reach the host, so leaving it out
+			// loses no stored record. Report it here only: a SKIP_RESULT would
+			// make Desktop drop the whole stream.
+			if (cause === "too_large") {
+				continue;
+			}
 			for (const stream of streams) {
 				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
@@ -1307,10 +1316,7 @@ export async function collectAnthropic({
 				await emit({
 					type: "SKIP_RESULT",
 					stream,
-					reason:
-						cause === "too_large"
-							? "export_items_too_large"
-							: "export_items_unparseable",
+					reason: "export_items_unparseable",
 					message: `${count} ${parent} item(s) in the export ${why}, so ${stream} is incomplete and was not checkpointed.`,
 					diagnostics: { dropped_count: count },
 				});

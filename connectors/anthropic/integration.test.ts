@@ -189,8 +189,11 @@ function makeContext(overrides: {
 		emitRecord: harness.emitRecord,
 		isRecordSelected: selector.isSelected,
 		emittedAt: "2026-01-01T00:00:00.000Z",
-		progress: (message: string): Promise<void> => {
-			harness.emit({ type: "PROGRESS", message });
+		progress: (
+			message: string,
+			extra: object = {},
+		): Promise<void> => {
+			harness.emit({ type: "PROGRESS", message, ...extra });
 			return Promise.resolve();
 		},
 		requestDetailGapPage: () => Promise.resolve([]),
@@ -425,7 +428,7 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 	);
 });
 
-test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is skipped with its messages, the rest imports", async () => {
+test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is left out with its messages in a PROGRESS note; no stream is skipped", async () => {
 	const hugeConversation = {
 		uuid: "conv-huge",
 		name: "Excluded source",
@@ -510,19 +513,22 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 			.length,
 		2,
 	);
-	const skips = skipsOf(selected.protocolMessages);
-	assert.deepEqual(skips.map((s) => s.stream).sort(), [
-		"conversations",
-		"messages",
-	]);
-	for (const skip of skips) {
-		assert.equal(skip.reason, "export_items_too_large");
-		assert.deepEqual(skip.diagnostics, { dropped_count: 1 });
-	}
+	// An oversized item never reaches the host, so no stream is skipped:
+	// a SKIP_RESULT would make Desktop drop all conversations.
+	assert.deepEqual(skipsOf(selected.protocolMessages), []);
+	const notes = selected.protocolMessages.filter(
+		(m) =>
+			m.type === "PROGRESS" &&
+			/export_items_too_large/.test((m as { message: string }).message),
+	) as Array<{ message: string; stream?: string; count?: number }>;
+	assert.equal(notes.length, 1);
+	assert.equal(notes[0]?.stream, "conversations");
+	assert.equal(notes[0]?.count, 1);
+	assert.doesNotMatch(notes[0]?.message ?? "", /conv-huge|Excluded source/);
 	const synced = statesOf(selected.protocolMessages)
 		.filter((m) => "synced_at" in (m.cursor as Record<string, unknown>))
 		.map((m) => m.stream);
-	assert.deepEqual(synced, ["projects"]);
+	assert.deepEqual(synced, ["conversations", "messages", "projects"]);
 });
 
 for (const scenario of [
