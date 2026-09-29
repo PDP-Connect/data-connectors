@@ -377,7 +377,34 @@ export async function probeChaseSession(
 	};
 }
 
+type ChaseOtpOutcome =
+	| { type: "manual" }
+	| { type: "response"; response: InteractionResponse }
+	| { type: "timeout" };
+
+async function waitForChaseOtpOutcome(
+	page: Page,
+	interaction: Promise<InteractionResponse>,
+): Promise<ChaseOtpOutcome> {
+	const deadline = Date.now() + 590_000;
+	const interactionOutcome = interaction.then((response) => ({ type: "response" as const, response }));
+	while (Date.now() < deadline) {
+		const outcome = await Promise.race([
+			interactionOutcome,
+			new Promise<{ type: "waiting" }>((resolve) => setTimeout(() => resolve({ type: "waiting" }), 250)),
+		]);
+		if (outcome.type !== "waiting") {
+			return outcome;
+		}
+		if (await page.getByText(SIGN_OUT_TEXT).first().isVisible().catch(() => false)) {
+			return { type: "manual" };
+		}
+	}
+	return { type: "timeout" };
+}
+
 async function submitChaseOtp({
+	completeAssistance,
 	context,
 	page,
 	sendInteraction,
@@ -392,9 +419,11 @@ async function submitChaseOtp({
 		throw new Error("chase_otp_input_missing");
 	}
 
-	const resp = await sendInteraction({
+	const requestId = `chase_otp_${Date.now()}`;
+	const interaction = sendInteraction({
 		kind: "otp",
 		message: "Chase sent a 2FA code. Reply with it.",
+		request_id: requestId,
 		schema: {
 			type: "object",
 			properties: { code: { type: "string", pattern: "^[0-9]{4,10}$" } },
@@ -402,7 +431,13 @@ async function submitChaseOtp({
 		},
 		timeout_seconds: 600,
 	});
-	if (resp.status !== "success" || !resp.data?.code) {
+	const outcome = await waitForChaseOtpOutcome(page, interaction);
+	if (outcome.type === "manual") {
+		await completeAssistance?.(requestId, "resolved");
+		return { loggedIn: true, page };
+	}
+	const resp = outcome.type === "response" ? outcome.response : null;
+	if (resp?.status !== "success" || !resp.data?.code) {
 		throw new Error("chase_otp_not_provided");
 	}
 
@@ -625,6 +660,7 @@ export async function ensureChaseSession({
 	const onOtp = await isOnChaseOtpPage(activePage);
 	if (onOtp) {
 		sessionProbe = await submitChaseOtp({
+			...(completeAssistance ? { completeAssistance } : {}),
 			context,
 			page: activePage,
 			sendInteraction,

@@ -622,6 +622,44 @@ test("a genuine code-entry page still prompts the owner for a code", async () =>
 	});
 });
 
+test("manual entry in the host browser resolves the pending OTP interaction", async () => {
+	await withChaseCredentials(async () => {
+		const { page, state } = makeOtpPage({
+			otpInputs: 1,
+			promptTextVisible: true,
+			signedOut: true,
+		});
+		const requests: InteractionRequest[] = [];
+		const completions: Array<{ id: string; status: string }> = [];
+		let resolveInteraction: ((response: InteractionResponse) => void) | undefined;
+
+		const result = await ensureChaseSession({
+			completeAssistance: (id, status) => {
+				completions.push({ id, status });
+				return Promise.resolve();
+			},
+			context: makeOtpContext(page),
+			credentials: CHASE_TEST_CREDENTIALS,
+			page,
+			sendInteraction: (req) => {
+				requests.push(req);
+				setTimeout(() => {
+					state.signedOut = false;
+				}, 10);
+				return new Promise<InteractionResponse>((resolve) => {
+					resolveInteraction = resolve;
+				});
+			},
+		});
+
+		assert.equal(result, true);
+		assert.equal(typeof resolveInteraction, "function");
+		assert.equal(requests.length, 1);
+		assert.match(requests[0]?.request_id ?? "", /^chase_otp_/);
+		assert.deepEqual(completions, [{ id: requests[0]?.request_id ?? "", status: "resolved" }]);
+	});
+});
+
 test("a split per-digit code layout still counts as a real code-entry page", async () => {
 	await withChaseCredentials(async () => {
 		const { page, state } = makeOtpPage({
