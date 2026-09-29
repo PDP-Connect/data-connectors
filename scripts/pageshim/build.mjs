@@ -38,6 +38,7 @@ export const PAGESHIM_CONNECTORS = [
 	"github_browser",
 	"anthropic",
 	"strava_browser",
+	"oura_browser",
 ];
 
 /**

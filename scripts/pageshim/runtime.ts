@@ -21,6 +21,7 @@ export interface ShimPage {
 	requestedScopes: () => string[];
 	evaluate: (code: string) => Promise<unknown>;
 	goto: (url: string) => Promise<null>;
+	url: () => Promise<string>;
 	sleep: (ms: number) => Promise<void>;
 	setData: (key: string, value: unknown) => Promise<void>;
 	setProgress: (p: unknown) => Promise<void>;
@@ -59,6 +60,7 @@ export function playwrightPageFacade(shim: ShimPage) {
 			await shim.goto(url);
 			return null; // Playwright returns a Response; the shim returns nothing.
 		},
+		url: () => shim.url(),
 		content: async () =>
 			(await shim.evaluate("document.documentElement.outerHTML")) as string,
 		evaluate,
@@ -286,6 +288,15 @@ export async function runOnPageShim(
 				shim.setProgress({ phase: { label: "collect" }, message }),
 			requested,
 			state,
+			reportStreamFailure: async (stream: string, message: string) => {
+				errors.push({
+					errorClass: "partial",
+					reason: message,
+					disposition: "degraded",
+					scope: `${prefix}${stream}`,
+					phase: "collect",
+				});
+			},
 		});
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
@@ -294,7 +305,9 @@ export async function runOnPageShim(
 		await shim.setData("result", done);
 		await shim.setData(
 			"status",
-			`Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
+			errors.some((error) => error.errorClass === "partial")
+				? `Partial: ${done.exportSummary.count} ${done.exportSummary.label}`
+				: `Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
 		);
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
