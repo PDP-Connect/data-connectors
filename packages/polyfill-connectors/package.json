@@ -78,6 +78,10 @@
 			"types": "./src/session-establish.d.ts",
 			"default": "./src/session-establish.js"
 		},
+		"./surface-proof": {
+			"types": "./src/surface-proof.d.ts",
+			"default": "./src/surface-proof.js"
+		},
 		"./shutdown-hook": {
 			"types": "./src/shutdown-hook.d.ts",
 			"default": "./src/shutdown-hook.js"
