@@ -86,6 +86,14 @@ export default {
         "properties": {
           "required": {
             "type": "boolean"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
           }
         }
       }

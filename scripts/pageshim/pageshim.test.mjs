@@ -9,15 +9,17 @@
 // run: node --test scripts/pageshim/pageshim.test.mjs  (needs Playwright Chromium)
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
 
-const out = mkdtempSync(join(tmpdir(), "pageshim-"));
+const scratchRoot = fileURLToPath(new URL("../../.tmp/pageshim/", import.meta.url));
+mkdirSync(scratchRoot, { recursive: true });
+const out = mkdtempSync(join(scratchRoot, "run-"));
 const NODE_ONLY = new Set([
 	"crypto",
 	"fs",
@@ -73,10 +75,16 @@ for (const name of PAGESHIM_CONNECTORS) {
 			assert.fail(`${name} has no fixtures/${name}.mjs: ${error.message}`);
 		}
 		assert.ok(c, `fixtures/${name}.mjs must export pageshimCase`);
-		const built = await buildPageshim({
-			connector: name,
-			outfile: join(out, `${name}.js`),
-		});
+		const suppliedBundle =
+			process.env.PAGESHIM_CONNECTOR === name
+				? process.env.PAGESHIM_BUNDLE
+				: undefined;
+		const built = suppliedBundle
+			? { outfile: suppliedBundle, stubbed: [] }
+			: await buildPageshim({
+					connector: name,
+					outfile: join(out, `${name}.js`),
+				});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 

@@ -860,6 +860,14 @@
 					"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+				},
+				"mobile": {
+					"pageshim": {
+						"entry": "anthropic.ts",
+						"exception": "Uses host blob and archive ports for the export download.",
+						"scope_prefix": "claude",
+						"login_url": "https://claude.ai/login"
+					}
 				}
 			}
 		},
@@ -6265,10 +6273,18 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["httpFetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"evaluate",
+								"goto",
+								"content",
+								"waitForFunction",
+								"request.get"
+							]
 						}
 					}
 				},
@@ -6899,6 +6915,14 @@
 				],
 				"reason_display_messages": {
 					"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+				},
+				"mobile": {
+					"pageshim": {
+						"entry": "github_browser.ts",
+						"exception": "Preserves the app's existing GitHub envelope and summary shape.",
+						"scope_prefix": "github",
+						"login_url": "https://github.com/login"
+					}
 				}
 			}
 		},
@@ -12618,15 +12642,17 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["in_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["evaluate", "goto"]
 						}
 					}
 				},
@@ -12903,6 +12929,19 @@
 				],
 				"reason_display_messages": {
 					"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "oura",
+						"login_url": "https://cloud.ouraring.com/user/sign-in",
+						"login_message": "Sign in to Oura, then return here.",
+						"collect_export": "collectOuraBrowser",
+						"probe_export": "probeOuraBrowserSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
 				}
 			}
 		},
@@ -16621,10 +16660,12 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["in_page_fetch", "httpFetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["evaluate", "goto", "request.get"]
 						}
 					}
 				},
@@ -16765,6 +16806,21 @@
 					"sign_in_required": "Strava needs you to sign in again before this can continue.",
 					"source_limit_reached": "This run reached a source limit. The next run will retry the remaining activity work.",
 					"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "strava",
+						"login_url": "https://www.strava.com/login",
+						"login_message": "Sign in to Strava, then return here.",
+						"collect_export": "collectStravaBrowser",
+						"probe_export": "probeStravaSession",
+						"summary": {
+							"stream": "activities",
+							"singular": "activity",
+							"plural": "activities",
+							"details": ["activities"]
+						}
+					}
 				}
 			}
 		},
