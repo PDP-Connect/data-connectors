@@ -82,6 +82,7 @@ import {
 	classifyChatGptSourcePressure,
 	consumeChatGptProviderRetryBudget,
 	createChatGptApi,
+	estimateChatGptDetailMinutesRemaining,
 	normalizeChatGptTerminalError,
 	processConversationDetail,
 	readChatGptPersistedPacing,
@@ -7912,8 +7913,16 @@ test("buildChatGptCollectionRateProgress: legible rate state carries no account 
 	);
 });
 
-test("runMessagesAndConversationsWithDetail: emits a collection_rate progress event as the controller speeds up", async () => {
+test("detail ETA is smoothed from observed rate, handles zero rate and the last item", () => {
+	assert.equal(estimateChatGptDetailMinutesRemaining(0, 10, 0), null);
+	assert.equal(estimateChatGptDetailMinutesRemaining(0, 10, 1_000), null);
+	assert.equal(estimateChatGptDetailMinutesRemaining(2, 10, 60_000), 4);
+	assert.equal(estimateChatGptDetailMinutesRemaining(10, 10, 60_000), 0);
+});
+
+test("runMessagesAndConversationsWithDetail: emits user-facing ETA and keeps rate diagnostics out of progress", async () => {
 	const harness = makeRecordingEmit(validateRecord);
+	const progressMessages: string[] = [];
 	const providerBudget = resolveChatGptProviderBudget({});
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
@@ -7928,7 +7937,10 @@ test("runMessagesAndConversationsWithDetail: emits a collection_rate progress ev
 		api,
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
-		progress: (): Promise<void> => Promise.resolve(),
+		progress: (message): Promise<void> => {
+			progressMessages.push(message);
+			return Promise.resolve();
+		},
 		providerBudget,
 		requested: new Map(
 			["conversations", "messages"].map((name) => [name, { name }]),
@@ -7942,29 +7954,26 @@ test("runMessagesAndConversationsWithDetail: emits a collection_rate progress ev
 		{ random: () => 0, sleep: () => undefined },
 	);
 
-	const rateEvents = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.collection_rate?.object === "collection_rate",
-	);
 	assert.ok(
-		rateEvents.length >= 1,
-		"the controller's rate state is emitted as run-trace progress",
-	);
-	const intervals = rateEvents.map(
-		(m) => m.collection_rate?.current_interval_ms ?? 0,
-	);
-	const firstInterval = intervals[0] as number;
-	const lastInterval = intervals.at(-1) as number;
-	assert.ok(
-		lastInterval < firstInterval,
-		"the emitted interval decreases as the controller speeds up",
+		progressMessages.some((m) =>
+			/^Fetching conversation details: 1 of 3 \(about \d+ min left\)$/.test(m),
+		),
 	);
 	assert.equal(
-		rateEvents.some((m) =>
-			/r1|r2|r3|conversation\//.test(JSON.stringify(m.collection_rate)),
+		progressMessages.includes(
+			"Fetching conversation details: 3 of 3 (about 0 min left)",
+		),
+		true,
+	);
+	assert.equal(
+		progressMessages.some((m) => /interval|ceiling|rate/.test(m)),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "PROGRESS" && m.collection_rate,
 		),
 		false,
-		"rate events carry no conversation ids",
 	);
 });
 

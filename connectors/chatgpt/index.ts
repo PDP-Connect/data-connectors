@@ -1365,6 +1365,18 @@ export function buildChatGptCollectionRateProgress(
 	};
 }
 
+/** Estimate whole minutes remaining from the observed average detail rate. */
+export function estimateChatGptDetailMinutesRemaining(
+	completed: number,
+	total: number,
+	elapsedMs: number,
+): number | null {
+	const remaining = Math.max(0, total - completed);
+	if (remaining === 0) return 0;
+	if (completed <= 0) return null;
+	return Math.ceil((remaining * Math.max(1, elapsedMs)) / (completed * 60_000));
+}
+
 /**
  * Emit a `collection_rate` progress event when the controller's interval has
  * changed since the last emission (a speed-up or back-off TRANSITION), so the
@@ -1372,26 +1384,30 @@ export function buildChatGptCollectionRateProgress(
  * interval just emitted so the caller can track the last-seen value.
  */
 async function emitChatGptCollectionRateOnChange(
-	emit: CollectContext["emit"] | undefined,
 	providerBudget: ProviderBudgetController | null | undefined,
 	lastEmittedIntervalMs: number | null,
+	progress: CollectContext["progress"] | undefined,
+	completed: number,
+	total: number,
+	elapsedMs: number,
 ): Promise<number | null> {
-	if (!(emit && providerBudget)) {
+	if (!progress) {
 		return lastEmittedIntervalMs;
 	}
 	const rate = buildChatGptCollectionRateProgress(providerBudget);
+	const minutes = estimateChatGptDetailMinutesRemaining(
+		completed,
+		total,
+		elapsedMs,
+	);
+	await progress(
+		`Fetching conversation details: ${completed} of ${total}${minutes === null ? " (estimating…)" : ` (about ${minutes} min left)`}`,
+		{ stream: "messages", count: completed, total },
+	);
 	if (!rate || rate.current_interval_ms === lastEmittedIntervalMs) {
 		return lastEmittedIntervalMs;
 	}
-	const backoffSuffix = rate.last_backoff
-		? `; last backed off to ${rate.last_backoff.at_interval_ms}ms (${rate.last_backoff.reason})`
-		: "";
-	await emit({
-		type: "PROGRESS",
-		stream: "messages",
-		message: `Collection rate ${rate.effective_rate_per_min}/min (interval ${rate.current_interval_ms}ms; ceiling ${rate.ceiling_rate_per_min}/min)${backoffSuffix}`,
-		collection_rate: rate,
-	});
+	console.debug("[chatgpt-debug] collection rate", rate);
 	return rate.current_interval_ms;
 }
 
@@ -4365,6 +4381,8 @@ export async function runMessagesAndConversationsWithDetail(
 	) => Promise<void>,
 	pacing: ConversationDetailPacingOptions = {},
 ): Promise<ConversationDetailCoverage> {
+	const detailStartedAt = Date.now();
+	let completedDetails = 0;
 	const detailDeps = deps.emittedMessageIdsThisRun
 		? deps
 		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
@@ -4504,6 +4522,7 @@ export async function runMessagesAndConversationsWithDetail(
 	const tailStopController = new AbortController();
 
 	async function recordConversationDetailProviderSuccess(): Promise<void> {
+		completedDetails += 1;
 		providerBudget?.recordSuccess(
 			deps.recoveryOnly === true
 				? { suppressAdditiveIncrease: true }
@@ -4514,9 +4533,12 @@ export async function runMessagesAndConversationsWithDetail(
 			providerBudget,
 		});
 		lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
-			deps.emit,
 			providerBudget,
 			lastEmittedRateIntervalMs,
+			deps.progress,
+			completedDetails,
+			convosToSync.length,
+			Date.now() - detailStartedAt,
 		);
 	}
 
@@ -4833,9 +4855,12 @@ export async function runMessagesAndConversationsWithDetail(
 				providerBudget,
 			});
 			lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
-				deps.emit,
 				providerBudget,
 				lastEmittedRateIntervalMs,
+				deps.progress,
+				completedDetails,
+				convosToSync.length,
+				Date.now() - detailStartedAt,
 			);
 
 			// SLVP-ideal: wait out the cooldown in-run and re-fetch the SAME
