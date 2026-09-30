@@ -9,15 +9,23 @@
 // run: node --test scripts/pageshim/pageshim.test.mjs  (needs Playwright Chromium)
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
 
-const out = mkdtempSync(join(tmpdir(), "pageshim-"));
+const scratchRoot = join(process.cwd(), ".scratch");
+mkdirSync(scratchRoot, { recursive: true });
+const out = mkdtempSync(join(scratchRoot, "pageshim-"));
+after(() => rmSync(out, { recursive: true, force: true }));
 const NODE_ONLY = new Set([
 	"crypto",
 	"fs",
@@ -364,25 +372,22 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			scopes: c.scopes,
 		});
 
-	await t.test(
-		"activities cross as live records",
-		async () => {
-			const r = await run();
-			assertCleanRun(r);
-			assert.deepEqual(r.result.errors, []);
-			const activities = r.result["strava.activities"].records;
-			assert.deepEqual(
-				activities.map((a) => [a.id, a.activity_type, a.freshness]),
-				[
-					["90000000005", "Ride", "live"],
-					["90000000004", "Run", "live"],
-					["90000000003", "Yoga", "live"],
-					["90000000002", "EBikeRide", "live"],
-					["90000000001", "Swim", "live"],
-				],
-			);
-		},
-	);
+	await t.test("activities cross as live records", async () => {
+		const r = await run();
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		const activities = r.result["strava.activities"].records;
+		assert.deepEqual(
+			activities.map((a) => [a.id, a.activity_type, a.freshness]),
+			[
+				["90000000005", "Ride", "live"],
+				["90000000004", "Run", "live"],
+				["90000000003", "Yoga", "live"],
+				["90000000002", "EBikeRide", "live"],
+				["90000000001", "Swim", "live"],
+			],
+		);
+	});
 
 	await t.test(
 		"an unrecognised list fails closed: no activities, one omitted error",

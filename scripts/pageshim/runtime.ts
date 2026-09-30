@@ -46,6 +46,17 @@ export interface ShimPage {
 type Msg = { type: string; [k: string]: unknown };
 type Rec = Record<string, unknown>;
 
+const RESULT_CHUNK_MAX_UNITS = 256 * 1024;
+
+declare const PAGESHIM_RESULT_STREAMING: boolean;
+
+function resultStreamingEnabled(): boolean {
+	return (
+		typeof PAGESHIM_RESULT_STREAMING !== "undefined" &&
+		PAGESHIM_RESULT_STREAMING
+	);
+}
+
 /** The Playwright `Page` members that connectors on this target call, over the shim. */
 export function playwrightPageFacade(shim: ShimPage) {
 	const evaluate = (fn: unknown, arg?: unknown): Promise<unknown> =>
@@ -128,6 +139,18 @@ export interface PageshimConnector {
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
+	/** Optional incremental form for connectors whose scope value is `{records}`. */
+	streamScopeRecords?: {
+		/** Large streams first; later streams remain buffered until the active scope closes. */
+		order: string[];
+		/** Per-record cleanup matching `toScope`, when required. */
+		toRecord?: (stream: string, record: Rec) => unknown;
+		summarizeCounts: (counts: Record<string, number>) => {
+			count: number;
+			label: string;
+			details: unknown;
+		};
+	};
 	/** The host's `exportSummary`, computed from the finished scopes. */
 	summarize: (scopes: Record<string, unknown>) => {
 		count: number;
@@ -208,12 +231,108 @@ export async function runOnPageShim(
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
 	const state: Record<string, unknown> = {};
+	const streamConfig =
+		resultStreamingEnabled() && connector.streamScopeRecords
+			? connector.streamScopeRecords
+			: null;
+	const pendingRecords: Record<string, Rec[]> = {};
+	const streamCounts: Record<string, number> = {};
+	let streamProtocolUsed = false;
+	let activeStream: string | null = null;
+	let activeSequence = 0;
+	let activeRecordCount = 0;
+	let streamedScopeCount = 0;
+	let streamFailure: Error | null = null;
+	const sendStreamMessage = async (
+		key: string,
+		value: unknown,
+	): Promise<void> => {
+		try {
+			await shim.setData(key, value);
+		} catch (error) {
+			streamFailure = error instanceof Error ? error : new Error(String(error));
+			throw streamFailure;
+		}
+	};
+	const sendStreamText = async (scope: string, text: string): Promise<void> => {
+		for (let offset = 0; offset < text.length; ) {
+			let end = Math.min(offset + RESULT_CHUNK_MAX_UNITS, text.length);
+			if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1))) end--;
+			const piece = text.slice(offset, end);
+			await sendStreamMessage("result:chunk", {
+				scope,
+				sequence: activeSequence,
+				text: piece,
+			});
+			activeSequence++;
+			offset = end;
+		}
+	};
+	const beginStreamScope = async (stream: string): Promise<void> => {
+		const scope = `${prefix}${stream}`;
+		streamProtocolUsed = true;
+		await sendStreamMessage("result:begin", { scope });
+		activeStream = stream;
+		activeSequence = 0;
+		activeRecordCount = 0;
+		await sendStreamText(scope, '{"records":[');
+	};
+	const appendStreamRecord = async (
+		stream: string,
+		record: Rec,
+	): Promise<void> => {
+		if (activeStream !== stream)
+			throw new Error("PageShim stream scope order changed");
+		try {
+			const value = streamConfig?.toRecord
+				? streamConfig.toRecord(stream, record)
+				: record;
+			const serialized = JSON.stringify(value);
+			if (serialized === undefined)
+				throw new Error("PageShim stream record could not be serialized");
+			if (activeRecordCount > 0)
+				await sendStreamText(`${prefix}${stream}`, ",");
+			await sendStreamText(`${prefix}${stream}`, serialized);
+			activeRecordCount++;
+		} catch (error) {
+			streamFailure = error instanceof Error ? error : new Error(String(error));
+			throw streamFailure;
+		}
+	};
+	const finishStreamScope = async (): Promise<void> => {
+		if (activeStream === null) return;
+		const scope = `${prefix}${activeStream}`;
+		await sendStreamText(scope, "]}");
+		await sendStreamMessage("result:scope-done", {
+			scope,
+			chunkCount: activeSequence,
+		});
+		streamedScopeCount++;
+		activeStream = null;
+	};
+	const isHighSurrogate = (unit: number): boolean =>
+		unit >= 0xd800 && unit <= 0xdbff;
 	const emit = async (msg: Msg): Promise<void> => {
+		if (streamFailure) throw streamFailure;
 		switch (msg.type) {
 			case "RECORD": {
 				const stream = String(msg.stream);
-				records[stream] ??= [];
-				records[stream].push(msg.data as Rec);
+				streamCounts[stream] = (streamCounts[stream] ?? 0) + 1;
+				if (streamConfig) {
+					const target = streamConfig.order[0];
+					if (!streamConfig.order.includes(stream))
+						throw new Error(`PageShim stream serializer missing ${stream}`);
+					if (stream === target) {
+						if (activeStream === null) await beginStreamScope(stream);
+						await appendStreamRecord(stream, msg.data as Rec);
+					} else {
+						pendingRecords[stream] ??= [];
+						pendingRecords[stream].push(msg.data as Rec);
+					}
+				} else {
+					records[stream] ??= [];
+					records[stream].push(msg.data as Rec);
+				}
 				return;
 			}
 			case "STATE":
@@ -225,7 +344,7 @@ export async function runOnPageShim(
 				errors.push({
 					errorClass: inferErrorClass(reason),
 					reason,
-					disposition: records[stream]?.length ? "degraded" : "omitted",
+					disposition: (streamCounts[stream] ?? 0) ? "degraded" : "omitted",
 					scope: `${prefix}${stream}`,
 					phase: "collect",
 				});
@@ -287,6 +406,29 @@ export async function runOnPageShim(
 			requested,
 			state,
 		});
+		if (streamFailure) throw streamFailure;
+		if (streamConfig) {
+			await finishStreamScope();
+			for (const stream of streamConfig.order) {
+				const buffered = pendingRecords[stream];
+				if (!buffered?.length) continue;
+				await beginStreamScope(stream);
+				for (const record of buffered) await appendStreamRecord(stream, record);
+				await finishStreamScope();
+			}
+			if (streamedScopeCount > 0) {
+				await sendStreamMessage("result:done", {
+					scopeCount: streamedScopeCount,
+				});
+				const summary = streamConfig.summarizeCounts(streamCounts);
+				const completion =
+					errors.length > 0
+						? `Partial: ${summary.count} ${summary.label}`
+						: `Complete! ${summary.count} ${summary.label}`;
+				await shim.setData("status", completion);
+				return;
+			}
+		}
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
@@ -307,7 +449,7 @@ export async function runOnPageShim(
 						disposition: "fatal",
 						phase: "collect",
 					};
-		await shim.setData("result", result({}, [fatal]));
+		if (!streamProtocolUsed) await shim.setData("result", result({}, [fatal]));
 		await shim.setData("error", fatal.reason);
 	} finally {
 		const hits = [

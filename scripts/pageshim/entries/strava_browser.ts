@@ -28,6 +28,17 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 		collect: (ctx) =>
 			collectStravaBrowser(ctx as unknown as StravaCollectContext),
 		toScope: (_stream, records) => ({ records }),
+		streamScopeRecords: {
+			order: ["activities"],
+			summarizeCounts: (counts) => {
+				const activities = counts.activities ?? 0;
+				return {
+					count: activities,
+					label: activities === 1 ? "activity" : "activities",
+					details: { activities },
+				};
+			},
+		},
 		summarize: (scopes) => {
 			const activities =
 				(scopes["strava.activities"] as { records?: unknown[] } | undefined)
