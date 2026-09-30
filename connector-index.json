@@ -1458,6 +1458,43 @@
           "iconKey": "oura",
           "defaultScope": "oura.readiness"
         }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "3.0.0",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account.",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-09-30T00:00:00Z",
+        "sourceTag": "maciej/oura-playwright-3.0.0",
+        "sourceCommit": "302c758fa84a889ff5f6ac4503be0a3430823589",
+        "releaseId": "connectors-302c758fa84a",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:06b5b31a9451def112782c648c2120ef13b7eb52a11c81afe2680a1055a2a291",
+        "scriptSha256": "sha256:31bc7c90b05a1c4d7879ea0a2c4873f13d0aac535e32a3e0f037c2349e6d7e6c",
+        "artifactSha256": "sha256:78257b0ac7f25b5acfe338b039be1e5e1fcf522ff4701d29d1d7684a0d4f5762",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-3.0.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/302c758fa84a889ff5f6ac4503be0a3430823589/artifacts/oura-playwright/oura-playwright-3.0.0.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
       }
     ],
     "shop-playwright": [
