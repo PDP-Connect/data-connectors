@@ -646,7 +646,8 @@
 		"manifest": {
 			"connector_key": "wholefoods",
 			"reason_display_messages": {
-				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet"
+				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
+				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
 			}
 		}
 	},

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.3.12",
+	"version": "0.3.13",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
@@ -287,6 +287,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet"
+		"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
+		"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
 	}
 }

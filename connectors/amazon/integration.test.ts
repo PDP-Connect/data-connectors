@@ -3376,8 +3376,8 @@ function findItemCountShortfalls(
 ): Record<string, unknown>[] {
 	return protocolMessages.filter(
 		(m) =>
-			(m as { type?: string; reason?: string }).type === "SKIP_RESULT" &&
-			(m as { reason?: string }).reason === "item_count_shortfall",
+			(m as { type?: string; message?: string }).type === "PROGRESS" &&
+			(m as { message?: string }).message?.startsWith("item_count_shortfall:"),
 	) as Record<string, unknown>[];
 }
 
@@ -3404,7 +3404,7 @@ test("emitOrderAndItems: every detail-page item becoming a record reports no sho
 	);
 });
 
-test("emitOrderAndItems: a detail item that never becomes a record is reported as a shortfall", async () => {
+test("emitOrderAndItems: a detail item that never becomes a record reports a diagnostic without skipping order_items", async () => {
 	// Two detail items collapse to one record because they carry the same
 	// identity, so one of the items the page showed us is not in the database.
 	// Before this check that loss was silent.
@@ -3426,11 +3426,18 @@ test("emitOrderAndItems: a detail item that never becomes a record is reported a
 	const shortfalls = findItemCountShortfalls(protocolMessages);
 	assert.equal(emittedItems, 1, "the two detail rows collapsed to one record");
 	assert.equal(shortfalls.length, 1, "the lost item must be surfaced");
-	assert.deepEqual(shortfalls[0]?.diagnostics, {
-		order_id: makeListOrder().orderId,
-		declared_item_count: 2,
-		emitted_item_count: 1,
-	});
+	assert.equal(shortfalls[0]?.stream, "order_items");
+	assert.equal(
+		shortfalls[0]?.message,
+		"item_count_shortfall: an order detail listed 2 items but only 1 became records",
+	);
+	assert.equal(
+		protocolMessages.filter(
+			(m) => (m as { type?: string }).type === "SKIP_RESULT",
+		).length,
+		0,
+		"a per-order issue must not mark the whole order_items stream skipped",
+	);
 });
 
 test("emitOrderAndItems: no detail page means no denominator and no fabricated shortfall", async () => {
