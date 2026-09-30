@@ -2324,7 +2324,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.11",
+				"version": "0.2.12",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -2436,10 +2436,10 @@
 					},
 					{
 						"name": "messages",
-						"description": "Messages within conversations, flattened from ChatGPT's tree structure to the current-branch path. Parent_id is preserved for tree reconstruction.",
+						"description": "Messages within conversations, flattened from ChatGPT's tree structure to the current-branch path. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor. The filtered message count is reported through PROGRESS.",
 						"display": {
 							"label": "Your messages",
-							"detail": "Each message on the current branch of every conversation: role, content, model, create time, tool calls, citations, attachment IDs. Alt branches are not exported (parent_id preserved for rebuild)."
+							"detail": "Each message on the current branch of every conversation: role, content, model, create time, tool calls, citations, attachment IDs. Alt branches are not exported. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor; the filtered count is reported through PROGRESS."
 						},
 						"semantics": "append_only",
 						"schema": {

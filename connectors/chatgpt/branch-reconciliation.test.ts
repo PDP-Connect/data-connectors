@@ -166,6 +166,205 @@ async function run(mapping: Record<string, ChatGptNode>, currentNode: string) {
 	return harness;
 }
 
+function filteredShape(ids: string[], excluded: string[], currentNode: string) {
+	const mapping: Record<string, ChatGptNode> = {
+		root: { parent: null, children: [] },
+	};
+	for (let index = 0; index < ids.length; index += 1) {
+		const id = ids[index];
+		if (id === undefined) continue;
+		const parent = index === 0 ? "root" : (ids[index - 1] ?? "root");
+		const next = ids[index + 1];
+		mapping[id] = {
+			parent,
+			children: next ? [next] : [],
+			message: {
+				author: {
+					role:
+						ids.length <= 3
+							? "system"
+							: index < 2
+								? "system"
+								: index % 2
+									? "user"
+									: "assistant",
+				},
+				content: { content_type: "text", parts: [] },
+			},
+		};
+	}
+	return { mapping, excluded: new Set(excluded), currentNode };
+}
+
+async function runWithFilteredRecords(
+	mapping: Record<string, ChatGptNode>,
+	currentNode: string,
+	excluded: ReadonlySet<string>,
+) {
+	const harness = makeRecordingEmit(validateRecord);
+	const deps: StreamDeps = {
+		api: {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: (): Promise<ChatGptFetchResult> =>
+				Promise.resolve({ status: 200, json: null }),
+		},
+		emit: harness.emit,
+		emitRecord: async (stream, data) => {
+			if (excluded.has(String(data.id))) return;
+			await harness.emitRecord(stream, data);
+		},
+		isRecordSelected: (_stream, data) => !excluded.has(String(data.id)),
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map([
+			["conversations", { name: "conversations" }],
+			["messages", { name: "messages" }],
+		]),
+	};
+	await processConversationDetail(
+		deps,
+		makeConvo(currentNode),
+		{ status: 200, json: { mapping, current_node: currentNode } },
+		emitConversation(deps),
+	);
+	return {
+		emitted: harness.emitted,
+		protocolMessages: harness.protocolMessages,
+	};
+}
+
+test("filtered current branch fixtures reconcile count, tip, and parent chain", async () => {
+	const cases = [
+		// Replay row 1: 6 declared, 5 emitted, current tip present, only 3 of 5 reachable.
+		filteredShape(["m0", "m1", "m2", "m3", "m4", "m5"], ["m2"], "m5"),
+		// Replay rows 2 and 3: 3 declared, 2 emitted, current leaf omitted.
+		filteredShape(["m0", "m1", "m2"], ["m2"], "m2"),
+		filteredShape(["m0", "m1", "m2"], ["m2"], "m2"),
+		// Replay row 4: 2 declared, 1 emitted, current leaf omitted.
+		filteredShape(["m0", "m1"], ["m1"], "m1"),
+	];
+
+	const runs = await Promise.all(
+		cases.map((fixture) =>
+			runWithFilteredRecords(
+				fixture.mapping,
+				fixture.currentNode,
+				fixture.excluded,
+			),
+		),
+	);
+	for (let index = 0; index < cases.length; index += 1) {
+		const fixture = cases[index];
+		const run = runs[index];
+		if (!fixture || !run) continue;
+		const { emitted, protocolMessages } = run;
+		const conversation = emitted.find(
+			(record) => record.stream === "conversations",
+		);
+		const messages = emitted.filter((record) => record.stream === "messages");
+		const branch = messages.filter(
+			(record) => record.data.on_current_branch === true,
+		);
+		assert.equal(
+			conversation?.data.message_count_on_current_branch,
+			branch.length,
+		);
+		assert.equal(
+			branch.some(
+				(record) => record.data.id === conversation?.data.current_node,
+			),
+			true,
+		);
+
+		const byId = new Map(
+			branch.map((record) => [String(record.data.id), record]),
+		);
+		let node = String(conversation?.data.current_node);
+		const visited = new Set<string>();
+		while (byId.has(node) && !visited.has(node)) {
+			visited.add(node);
+			const parent = byId.get(node)?.data.parent_id;
+			node = typeof parent === "string" ? parent : "";
+		}
+		assert.equal(
+			visited.size,
+			branch.length,
+			"every emitted branch message must be reachable from current_node",
+		);
+		const filterNote = protocolMessages.find(
+			(record) =>
+				(record as { type?: string; message?: string }).type === "PROGRESS" &&
+				(record as { message?: string }).message?.startsWith(
+					"branch_message_filtered: ",
+				),
+		) as { message?: string } | undefined;
+		assert.ok(filterNote, "filtered branch nodes must produce a bounded reason note");
+		assert.match(
+			filterNote.message ?? "",
+			fixture.excluded.has(fixture.currentNode)
+				? /current_node_filtered=selection/u
+				: /current_node_filtered=no/u,
+		);
+	}
+});
+
+test("an all-filtered current branch has no current node and reports zero messages", async () => {
+	const fixture = filteredShape(["m0", "m1"], ["m0", "m1"], "m1");
+	const { emitted, protocolMessages } = await runWithFilteredRecords(
+		fixture.mapping,
+		fixture.currentNode,
+		fixture.excluded,
+	);
+	const conversation = emitted.find((record) => record.stream === "conversations");
+
+	assert.equal(conversation?.data.current_node, null);
+	assert.equal(conversation?.data.message_count_on_current_branch, 0);
+	assert.equal(
+		emitted.filter((record) => record.stream === "messages").length,
+		0,
+	);
+	assert.ok(
+		protocolMessages.some(
+			(record) =>
+				(record as { type?: string; message?: string }).type === "PROGRESS" &&
+				(record as { message?: string }).message?.startsWith(
+					"branch_message_filtered: ",
+				),
+		),
+	);
+});
+
+test("a roleless current tip is reported as a filtered non-message node", async () => {
+	const mapping: Record<string, ChatGptNode> = {
+		root: { parent: null, children: ["m1"] },
+		m1: {
+			parent: "root",
+			children: ["leaf"],
+			message: {
+				author: { role: "user" },
+				content: { content_type: "text", parts: ["kept"] },
+			},
+		},
+		leaf: { parent: "m1", children: [], message: {} },
+	};
+	const { emitted, protocolMessages } = await runWithFilteredRecords(
+		mapping,
+		"leaf",
+		new Set(),
+	);
+	const conversation = emitted.find((record) => record.stream === "conversations");
+	assert.equal(conversation?.data.current_node, "m1");
+	assert.equal(conversation?.data.message_count_on_current_branch, 1);
+	assert.ok(
+		protocolMessages.some(
+			(record) =>
+				(record as { type?: string; message?: string }).type === "PROGRESS" &&
+				(record as { message?: string }).message?.includes(
+					"current_node_filtered=non_message",
+				),
+		),
+	);
+});
+
 test("chatgpt branch: a whole conversation reconciles clean and reports no gap", async () => {
 	const { skips, emitted } = await run(wholeBranch(), "a1");
 
