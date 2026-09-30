@@ -35,7 +35,19 @@ function page(initial = "about:blank", visits: string[] = [], sibling?: () => Pr
   return {
     url: () => url,
     goto: async (target: string) => { url = target; visits.push(target); return null; },
-    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => fn(arg),
+    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
+      const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+      Object.defineProperty(globalThis, "location", {
+        configurable: true,
+        value: { origin: new URL(url).origin },
+      });
+      try {
+        return await fn(arg);
+      } finally {
+        if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+        else Reflect.deleteProperty(globalThis, "location");
+      }
+    },
     close: async () => {},
     context: () => ({ newPage: sibling ?? (async () => page()) }),
   } as Page;
