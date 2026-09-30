@@ -144,7 +144,13 @@ function runEntrypointContract({ entrypoint, installRoot, kind, expected }) {
 
 	const child = spawnSync(
 		process.execPath,
-		["--input-type=module", "--eval", probe],
+		[
+			"--import",
+			new URL("./test-utils/deny-external-artifact-imports.mjs", import.meta.url).pathname,
+			"--input-type=module",
+			"--eval",
+			probe,
+		],
 		{
 			cwd: installRoot,
 			encoding: "utf8",

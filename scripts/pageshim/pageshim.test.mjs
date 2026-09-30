@@ -1,23 +1,26 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Gate for the pageshim build target: build each enabled connector and run
-// it in the PageShim harness against recorded fixtures. Every name in
-// PAGESHIM_CONNECTORS needs scripts/pageshim/fixtures/<name>.mjs exporting
+// Gate for the pageshim build target: build each manifest-compatible connector
+// and run it in the PageShim harness against recorded fixtures. Each derived
+// capability needs scripts/pageshim/fixtures/<name>.mjs exporting
 // `pageshimCase`; a connector without one fails here.
 //
 // run: node --test scripts/pageshim/pageshim.test.mjs  (needs Playwright Chromium)
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
+import { buildPageshim } from "./build.mjs";
+import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
 
-const out = mkdtempSync(join(tmpdir(), "pageshim-"));
+const scratchRoot = fileURLToPath(new URL("../../.tmp/pageshim/", import.meta.url));
+mkdirSync(scratchRoot, { recursive: true });
+const out = mkdtempSync(join(scratchRoot, "run-"));
 const NODE_ONLY = new Set([
 	"crypto",
 	"fs",
@@ -64,7 +67,7 @@ function assertFatal(run, c, name, { errorClass, phase, requestedScopes }) {
 	for (const scope of c.scopes) assert.equal(run.result[scope], undefined);
 }
 
-for (const name of PAGESHIM_CONNECTORS) {
+for (const name of pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url)))) {
 	test(`${name}: pageshim gate`, { timeout: 600_000 }, async (t) => {
 		let c;
 		try {
@@ -73,10 +76,16 @@ for (const name of PAGESHIM_CONNECTORS) {
 			assert.fail(`${name} has no fixtures/${name}.mjs: ${error.message}`);
 		}
 		assert.ok(c, `fixtures/${name}.mjs must export pageshimCase`);
-		const built = await buildPageshim({
-			connector: name,
-			outfile: join(out, `${name}.js`),
-		});
+		const suppliedBundle =
+			process.env.PAGESHIM_CONNECTOR === name
+				? process.env.PAGESHIM_BUNDLE
+				: undefined;
+		const built = suppliedBundle
+			? { outfile: suppliedBundle, stubbed: [] }
+			: await buildPageshim({
+					connector: name,
+					outfile: join(out, `${name}.js`),
+				});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 

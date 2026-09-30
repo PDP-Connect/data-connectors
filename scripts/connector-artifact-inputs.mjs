@@ -39,6 +39,7 @@ const OPTIONAL_SHARED_ARTIFACT_INPUTS = new Set([
 const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/attach-to-artifact.mjs",
 	"scripts/pageshim/build.mjs",
+	"scripts/pageshim/capabilities.mjs",
 	"scripts/pageshim/runtime.ts",
 	"scripts/pageshim/shims/anthropic-export.ts",
 	"scripts/pageshim/shims/buffer.js",
@@ -223,7 +224,7 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
   // edits to its entry/runtime/shims, select only the affected connector.
   const pageShimEntry = `scripts/pageshim/entries/${manifest}.ts`;
   const pageShimEntryBytes = readFileAtCommit(commit, pageShimEntry, options);
-  if (pageShimEntryBytes !== null) {
+  if (pageShimEntryBytes !== null || profile.mobile?.pageshim) {
     for (const path of PAGE_SHIM_SHARED_INPUTS) {
       const content = readFileAtCommit(commit, path, options);
       // Older commits can contain PageShim entries without this OCI
@@ -232,7 +233,7 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       if (content === null) files.set(path, Buffer.from("\0absent"));
       else addLocalImportClosure(commit, path, files, options);
     }
-    addLocalImportClosure(commit, pageShimEntry, files, options);
+    if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options);
   }
 
   const hash = createHash("sha256");

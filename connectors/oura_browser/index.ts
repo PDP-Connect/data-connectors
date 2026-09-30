@@ -108,6 +108,19 @@ async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<bool
   return hasOuraSessionOnCurrentPage(page);
 }
 
+export async function probeOuraBrowserSession(
+  page: BrowserCollectContext["page"]
+): Promise<boolean> {
+  return page.evaluate(async () => {
+    try {
+      if (location.origin !== "https://cloud.ouraring.com") return false;
+      return (await fetch("/api/me", { credentials: "include" })).ok;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> {
   const { assist, capture, completeAssistance, page, sendInteraction } = args;
   if (await hasOuraSession(page)) return;
@@ -129,7 +142,6 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
 }
 
 async function fetchDailyData(page: BrowserCollectContext["page"], start: string, end: string): Promise<OuraDailyData> {
-  if (new URL(page.url()).origin !== ORIGIN) throw new Error("oura_auth_failed: wrong browser origin");
   return page.evaluate(
     async ({ start, end }) => {
       if (location.origin !== "https://cloud.ouraring.com") throw new Error("oura_auth_failed: wrong browser origin");

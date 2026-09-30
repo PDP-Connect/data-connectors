@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getPublishShards, PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
-import { PAGESHIM_CONNECTORS } from "./pageshim/build.mjs";
+import { isPageShimCapable } from "./pageshim/capabilities.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const shard = process.env.CONNECTOR_TEST_SHARD;
@@ -43,8 +43,15 @@ test("C-T1 every allowlist entry builds and verifies", async (t) => {
       assert.equal(config.connector_key, connectorKey, "publish repository must match built identity");
       assert.equal(
         config.mobile?.pageshim !== undefined,
-        PAGESHIM_CONNECTORS.includes(manifest),
-        "PageShim metadata must exist exactly for enabled connectors",
+        isPageShimCapable(
+          JSON.parse(
+            readFileSync(
+              join(repoRoot, "connectors", manifest, "manifest.json"),
+              "utf8",
+            ),
+          ),
+        ),
+        "PageShim metadata must match declared binding compatibility",
       );
     });
   }

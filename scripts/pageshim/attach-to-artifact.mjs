@@ -26,7 +26,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
+import { buildPageshim } from "./build.mjs";
+import { isPageShimCapable } from "./capabilities.mjs";
 
 const sha256 = (value) =>
 	`sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -119,11 +120,6 @@ async function main() {
 	if (!/^[a-z0-9][a-z0-9_]*$/.test(connector)) {
 		throw new Error(`Invalid connector directory name ${connector}`);
 	}
-	if (!PAGESHIM_CONNECTORS.includes(connector)) {
-		console.log(`${connector} has no PageShim bundle`);
-		return;
-	}
-
 	const configPath = join(artifactRoot, "config.json");
 	const layersPath = join(artifactRoot, "layers.json");
 	const provenancePath = join(artifactRoot, "provenance.json");
@@ -163,6 +159,10 @@ async function main() {
 		throw new Error(
 			`${config.connector_key} artifact version ${config.version} does not match manifest version ${sourceManifest.version}`,
 		);
+	}
+	if (!isPageShimCapable(sourceManifest)) {
+		console.log(`${connector} has no PageShim bundle`);
+		return;
 	}
 	if (config.mobile?.pageshim) {
 		throw new Error(`${connector} artifact already declares a PageShim bundle`);
