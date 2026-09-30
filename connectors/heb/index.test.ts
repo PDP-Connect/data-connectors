@@ -230,6 +230,7 @@ function makePageStub(opts: {
 									{
 										html: '<li data-qe-id="itemRow" data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a></li>',
 										key: "position:data-index=0",
+										unitCount: 1,
 									},
 								]
 							: [];
@@ -476,11 +477,14 @@ test("emitOrderItemsCoverage: gap marks an actionable degradation (not optional 
 
 test("processListOrder: a normal order counts as considered+covered in ordersCoverage", async () => {
 	const ordersCoverage = newOrdersCoverage();
-	const { deps, emitted } = makeRecordingDeps({ ordersCoverage });
+	const { deps, emitted } = makeRecordingDeps({
+		ordersCoverage,
+		wantsItems: false,
+	});
 	const listOrder = makeListOrder({ orderId: "HEB1000000001" });
 
 	await processListOrder(
-		makePageStub({ content: NO_DETAIL_HTML }),
+		makePageStub({ content: DETAIL_HTML }),
 		deps,
 		makeRunFlags(),
 		listOrder,
@@ -529,7 +533,7 @@ test("processListOrder: nothing recorded in ordersCoverage when orders is out of
 	const listOrder = makeListOrder({ orderId: "HEB1000000001" });
 
 	await processListOrder(
-		makePageStub({ content: NO_DETAIL_HTML }),
+		makePageStub({ content: DETAIL_HTML }),
 		deps,
 		makeRunFlags(),
 		listOrder,
@@ -1189,6 +1193,7 @@ test("runForwardScan: an order id repeated across two list pages is only process
 								{
 									html: '<li data-qe-id="itemRow" data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a></li>',
 									key: "position:data-index=0",
+									unitCount: 1,
 								},
 							],
 							scrollHeight: 100,
@@ -1283,6 +1288,7 @@ test("runForwardScan: item-enriched scan (wantsItems: true) still fetches page 2
 								{
 									html: '<li data-qe-id="itemRow" data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a></li>',
 									key: "position:data-index=0",
+									unitCount: 1,
 								},
 							],
 							scrollHeight: 100,
@@ -2423,7 +2429,7 @@ test("recoverPendingOrderItemDetailGaps: hydrates a pending order_items gap and 
 test("recoverPendingOrderItemDetailGaps: a failed recovery re-emits a pending gap instead of silently dropping it", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const flags = makeRunFlags();
-	const page = makePageStub({ content: NO_DETAIL_HTML });
+	const page = makePageStub({ content: NO_DETAIL_HTML, evaluateError: true });
 
 	const result = await recoverPendingOrderItemDetailGaps(
 		page,
@@ -2876,6 +2882,7 @@ function makeLazyLoadPageStub(totalItems: number): Page {
 								return {
 									html: `<li data-qe-id="itemRow" data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/item-${index}">Item ${index}</a></li>`,
 									key: `position:data-index=${index}`,
+									unitCount: 1,
 								};
 							},
 						);
@@ -3376,6 +3383,21 @@ test("fetchOrderDetail: continuous remounts with matching count fail closed with
 	}
 });
 
+function syntheticStaticQuantityFixture(): string {
+	const rows = Array.from({ length: 58 }, (_, index) => {
+		let quantity: string;
+		if (index < 27) {
+			quantity = "Qty: 1";
+		} else if (index < 53) {
+			quantity = "Qty: 2";
+		} else {
+			quantity = "Qty: 1 of 1.2 lbs";
+		}
+		return `<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`;
+	}).join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
 // ─── Large unattributed virtualized lists (0924 shortfall fix) ─────────────
 // A genuinely large H-E-B order (69-112 declared items, matching the live
 // evidence that produced 42/42 empty order_items) renders far more rows than
@@ -3390,6 +3412,100 @@ test("fetchOrderDetail: continuous remounts with matching count fail closed with
 // weakening the existing fail-closed tests above (which never pass a large
 // expectedItemCount, so they are unaffected — see
 // canAttemptVirtualizedContentIdentity's guard in index.ts).
+
+test("fetchOrderDetail: static 58-row detail reconciles 84 units, including weighed Qty rows", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticStaticQuantityFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/synthetic-static-order",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+
+		// 53 ordinary rows total 79 units; five weighed rows add one each.
+		// Their pounds values do not count as purchased units.
+		const result = await fetchOrderDetail(page, "synthetic-static-order", {
+			detailSurfaceTimeoutMs: 1_500,
+			expectedItemCount: 84,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "hydrated");
+		assert.equal(result.detail?.items.length, 58);
+		assert.equal(
+			result.detail?.items.reduce((sum, item) => sum + (item.quantity ?? 0), 0),
+			84,
+			"the integer Qty prefix of a weighed row counts as one purchased unit",
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("processListOrder keeps fully collected items and reports a remaining count mismatch via PROGRESS", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticStaticQuantityFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000001",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const nutritionTargetSink = {
+			seenProductIds: new Set<string>(),
+			targets: [] as NutritionTarget[],
+		};
+		const { deps, emitted, protocolMessages } = makeRecordingDeps({
+			itemCountTallies: [],
+			nutritionTargetSink,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({
+				orderId: "HEB000000000001",
+				itemCount: 85,
+			}),
+		);
+
+		assert.equal(
+			emitted.filter((record) => record.stream === "order_items").length,
+			58,
+			"the residual one-unit mismatch must not discard the static detail rows",
+		);
+		assert.equal(nutritionTargetSink.targets.length, 58);
+		assert.ok(
+			progressMessages.some((message) =>
+				message.includes(
+					"item_count_reconciliation: card_units=85; product_rows=58; fulfilled_units=84; reason=unit_and_row_counts_differ",
+				),
+			),
+			"the mismatch reason and all three counts are owner-readable progress",
+		);
+		assert.equal(
+			protocolMessages.filter(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.stream === "order_items",
+			).length,
+			0,
+			"a delivered order_items stream must not also emit SKIP_RESULT",
+		);
+	} finally {
+		await browser.close();
+	}
+});
 
 test("fetchOrderDetail: a large unattributed virtualized order accumulates all declared items across scroll snapshots", async () => {
 	const browser = await chromium.launch({ headless: true });
