@@ -224,37 +224,32 @@ async function discoverOrderStubs(
 
 // ─── Orders: detail + record building ─────────────────────────────────────
 
+/** Stable reason code for an order whose detail item count matches neither
+ *  the search-card row count nor the detail-row count. Display copy lives in
+ *  manifest.json `reason_display_messages`. */
+export const ORDER_ITEM_COUNT_UNVERIFIED_REASON =
+	"wholefoods_order_item_count_unverified";
+
 /**
- * `expectedItemCount` (from `parseOrderSearchPageDom`) counts one search-page
- * ROW per matched order-id link; a repeated product's second unit renders as
- * its own row on the search page and increments `expectedItemCount` again
- * (parsers.ts's `parseOrderSearchPageDom`, the `seen.has(orderId)` branch).
- * The order-detail page's `parseOrderDetailDom` instead dedupes items by
- * product href/ASIN (`seenHrefs`) into one row per DISTINCT product, folding
- * repeat units into that row's `quantity`. The two counts are in different
- * units — search-page rows vs. distinct detail products — so comparing raw
- * `items.length` against `expectedItemCount` (the pre-fix behavior) throws
- * for ANY order containing more than one unit of the same product, which is
- * an ordinary grocery-order shape, not an edge case. Reproduced against a
- * synthetic fixture built from both parsers' own documented dedup rules (no
- * live account was available); see the "repeated-product-quantity" test
- * below. This is the most likely root cause of "Whole Foods failed right
- * after the profile record" (0.3.2/0.3.3 did not touch this code path — see
- * PR description for the git-history evidence). Comparing the search row
- * count against the SUM of detail quantities reconciles the units and still
- * fails closed if a distinct product is genuinely missing from the detail
- * page.
+ * True when the order-detail page agrees with the search-page row count.
+ *
+ * `expectedItemCount` counts search-page ROWS that link the order. The detail
+ * side has two honest measures: units (`orderDetailUnitCount`: a repeated
+ * product's `Qty: N` is N, a weighed row is 1) and distinct rows
+ * (`items.length`). Legacy pages render each unit as its own search row, so
+ * units match; an in-store row with `Qty: 3 @ $x each` may be ONE search row,
+ * so rows match. Either agreement is a like-with-like match. A count that
+ * matches neither means a detail row is missing or extra, and the caller must
+ * report the order as unverified.
  */
-function assertCompleteOrderDetail(
+function orderDetailCountsMatch(
 	stub: OrderStub,
 	items: readonly OrderDetailItem[],
-): void {
-	const detailUnitCount = orderDetailUnitCount(items);
-	if (detailUnitCount !== stub.expectedItemCount) {
-		throw new Error(
-			`Whole Foods order ${stub.orderId} detail item count ${detailUnitCount} did not match search result count ${stub.expectedItemCount}`,
-		);
-	}
+): boolean {
+	return (
+		orderDetailUnitCount(items) === stub.expectedItemCount ||
+		items.length === stub.expectedItemCount
+	);
 }
 
 function buildOrderRecord(
@@ -523,6 +518,180 @@ function buildNutritionRecord(
 	};
 }
 
+/** Fetch, verify and emit every discovered order. Auth and readability
+ *  failures still end the run. A detail whose item count cannot be
+ *  reconciled with the search count does not: the order and its items are
+ *  delivered, and progress reports how many orders were unverified. */
+async function collectOrderStubs({
+	credentials,
+	emit,
+	emitRecord,
+	ordersCursor,
+	page,
+	progress,
+	stubs,
+	state,
+	wantsItems,
+	wantsNutrition,
+	wantsOrders,
+}: {
+	credentials: BrowserCollectContext["credentials"];
+	emit: BrowserCollectContext["emit"];
+	emitRecord: BrowserCollectContext["emitRecord"];
+	ordersCursor: ReturnType<typeof openFingerprintCursor>;
+	page: Page;
+	progress: BrowserCollectContext["progress"];
+	state: BrowserCollectContext["state"];
+	stubs: readonly OrderStub[];
+	wantsItems: boolean;
+	wantsNutrition: boolean;
+	wantsOrders: boolean;
+}): Promise<void> {
+	const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
+	let unverifiedCountOrders = 0;
+	// Every source-backed item is considered. A record for each product
+	// makes the legacy coverage counts derivable from outcome rows.
+	const consideredProductIds = new Set<string>();
+	const nutritionCoverage = {
+		blocked: 0,
+		found: 0,
+		foundUSDA: 0,
+		error: 0,
+		notFound: 0,
+	};
+	const nutritionCursor = wantsNutrition
+		? openFingerprintCursor(state.nutrition)
+		: null;
+
+	let processed = 0;
+	for (const stub of stubs) {
+		await navigateAndSettle(
+			page,
+			stub.orderUrl,
+			// Confirmed live (2026-09-22, against a real order-detail page):
+			// [data-component="purchasedItemsRightGrid"] is the real per-item
+			// container; [data-component="cancelled"] covers a cancelled order,
+			// which never renders purchasedItemsRightGrid. In-store orders
+			// (`/fopo/order-details`, live 2026-09-29) render #f3_food_ItemList.
+			ORDER_DETAIL_READY_SELECTOR,
+		);
+		const html = await page.content();
+		if (
+			isBlockedPage(html) ||
+			/<form[^>]*name=["']signIn["']/i.test(html)
+		) {
+			throw new Error(
+				`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
+			);
+		}
+		if (!hasOrderDetailEvidence(html)) {
+			throw new Error(
+				`Whole Foods order ${stub.orderId} detail has no item or cancellation evidence`,
+			);
+		}
+		const detail = parseOrderDetailDom(html);
+		if (!orderDetailCountsMatch(stub, detail.items)) {
+			unverifiedCountOrders += 1;
+			await emit({
+				type: "PROGRESS",
+				stream: "orders",
+				message: `${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled (search_count=${stub.expectedItemCount}, detail_rows=${detail.items.length}, detail_units=${orderDetailUnitCount(detail.items)})`,
+			});
+		}
+
+		if (wantsOrders) {
+			const orderRecord = buildOrderRecord(
+				stub,
+				detail.orderDateRaw,
+				detail.items,
+			);
+			if (ordersCursor.shouldEmit(orderRecord)) {
+				await emitRecord("orders", orderRecord);
+			}
+		}
+
+		if (wantsItems) {
+			for (const itemRecord of buildOrderItemRecords(
+				stub.orderId,
+				detail.items,
+			)) {
+				await emitRecord("order_items", itemRecord);
+			}
+		}
+
+		if (wantsNutrition && nutritionCursor) {
+			for (const item of detail.items) {
+				if (!item.productId || consideredProductIds.has(item.productId)) {
+					continue;
+				}
+				consideredProductIds.add(item.productId);
+				const facts = await lookupNutritionForProduct(
+					page,
+					usdaApiKey,
+					item.name,
+				);
+				if (typeof facts === "string") {
+					if (facts === "blocked") nutritionCoverage.blocked += 1;
+					else if (facts === "error") nutritionCoverage.error += 1;
+					else nutritionCoverage.notFound += 1;
+				} else if (facts.source === "usda_fdc")
+					nutritionCoverage.foundUSDA += 1;
+				else nutritionCoverage.found += 1;
+				const record = buildNutritionRecord(
+					item.productId,
+					item.name,
+					facts,
+				);
+				if (nutritionCursor.shouldEmit(record)) {
+					await emitRecord("nutrition", record);
+				}
+				await politeDelay(POLITE_DELAY_MS);
+			}
+		}
+
+		processed += 1;
+		await progress(`Processed order ${processed}/${stubs.length}`, {
+			count: processed,
+			stream: "orders",
+			total: stubs.length,
+		});
+		await politeDelay(POLITE_DELAY_MS);
+	}
+
+	if (unverifiedCountOrders > 0) {
+		await progress(
+			`${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: ${unverifiedCountOrders} of ${stubs.length} Whole Foods order item counts could not be verified`,
+			{
+				count: unverifiedCountOrders,
+				stream: "orders",
+				total: stubs.length,
+			},
+		);
+	}
+	if (wantsOrders) {
+		await emit({
+			cursor: ordersCursor.toState(),
+			stream: "orders",
+			type: "STATE",
+		});
+	}
+	if (wantsNutrition && nutritionCursor) {
+		await progress(
+			`Nutrition lookup coverage: ${consideredProductIds.size} products; ${nutritionCoverage.found} Whole Foods, ${nutritionCoverage.foundUSDA} USDA, ${nutritionCoverage.blocked} blocked, ${nutritionCoverage.error} error, ${nutritionCoverage.notFound} not found`,
+			{
+				count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
+				stream: "nutrition",
+				total: consideredProductIds.size,
+			},
+		);
+		await emit({
+			cursor: nutritionCursor.toState(),
+			stream: "nutrition",
+			type: "STATE",
+		});
+	}
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime and
@@ -610,131 +779,19 @@ if (isMainModule(import.meta.url)) {
 				stream: "orders",
 			});
 
-			const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
-			// Every source-backed item is considered. A record for each product
-			// makes the legacy coverage counts derivable from outcome rows.
-			const consideredProductIds = new Set<string>();
-			const nutritionCoverage = {
-				blocked: 0,
-				found: 0,
-				foundUSDA: 0,
-				error: 0,
-				notFound: 0,
-			};
-			const nutritionCursor = wantsNutrition
-				? openFingerprintCursor(state.nutrition)
-				: null;
-
-			let processed = 0;
-			for (const stub of stubs) {
-				await navigateAndSettle(
-					page,
-					stub.orderUrl,
-					// Confirmed live (2026-09-22, against a real order-detail page):
-					// [data-component="purchasedItemsRightGrid"] is the real per-item
-					// container; [data-component="cancelled"] covers a cancelled order,
-					// which never renders purchasedItemsRightGrid. In-store orders
-					// (`/fopo/order-details`, live 2026-09-29) render #f3_food_ItemList.
-					ORDER_DETAIL_READY_SELECTOR,
-				);
-				const html = await page.content();
-				if (
-					isBlockedPage(html) ||
-					/<form[^>]*name=["']signIn["']/i.test(html)
-				) {
-					throw new Error(
-						`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
-					);
-				}
-				if (!hasOrderDetailEvidence(html)) {
-					throw new Error(
-						`Whole Foods order ${stub.orderId} detail has no item or cancellation evidence`,
-					);
-				}
-				const detail = parseOrderDetailDom(html);
-				assertCompleteOrderDetail(stub, detail.items);
-
-				if (wantsOrders) {
-					const orderRecord = buildOrderRecord(
-						stub,
-						detail.orderDateRaw,
-						detail.items,
-					);
-					if (ordersCursor.shouldEmit(orderRecord)) {
-						await emitRecord("orders", orderRecord);
-					}
-				}
-
-				if (wantsItems) {
-					for (const itemRecord of buildOrderItemRecords(
-						stub.orderId,
-						detail.items,
-					)) {
-						await emitRecord("order_items", itemRecord);
-					}
-				}
-
-				if (wantsNutrition && nutritionCursor) {
-					for (const item of detail.items) {
-						if (!item.productId || consideredProductIds.has(item.productId)) {
-							continue;
-						}
-						consideredProductIds.add(item.productId);
-						const facts = await lookupNutritionForProduct(
-							page,
-							usdaApiKey,
-							item.name,
-						);
-						if (typeof facts === "string") {
-							if (facts === "blocked") nutritionCoverage.blocked += 1;
-							else if (facts === "error") nutritionCoverage.error += 1;
-							else nutritionCoverage.notFound += 1;
-						} else if (facts.source === "usda_fdc")
-							nutritionCoverage.foundUSDA += 1;
-						else nutritionCoverage.found += 1;
-						const record = buildNutritionRecord(
-							item.productId,
-							item.name,
-							facts,
-						);
-						if (nutritionCursor.shouldEmit(record)) {
-							await emitRecord("nutrition", record);
-						}
-						await politeDelay(POLITE_DELAY_MS);
-					}
-				}
-
-				processed += 1;
-				await progress(`Processed order ${processed}/${stubs.length}`, {
-					count: processed,
-					stream: "orders",
-					total: stubs.length,
-				});
-				await politeDelay(POLITE_DELAY_MS);
-			}
-
-			if (wantsOrders) {
-				await emit({
-					cursor: ordersCursor.toState(),
-					stream: "orders",
-					type: "STATE",
-				});
-			}
-			if (wantsNutrition && nutritionCursor) {
-				await progress(
-					`Nutrition lookup coverage: ${consideredProductIds.size} products; ${nutritionCoverage.found} Whole Foods, ${nutritionCoverage.foundUSDA} USDA, ${nutritionCoverage.blocked} blocked, ${nutritionCoverage.error} error, ${nutritionCoverage.notFound} not found`,
-					{
-						count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
-						stream: "nutrition",
-						total: consideredProductIds.size,
-					},
-				);
-				await emit({
-					cursor: nutritionCursor.toState(),
-					stream: "nutrition",
-					type: "STATE",
-				});
-			}
+			await collectOrderStubs({
+				credentials,
+				emit,
+				emitRecord,
+				ordersCursor,
+				page,
+				progress,
+				state,
+				stubs,
+				wantsItems,
+				wantsNutrition,
+				wantsOrders,
+			});
 		},
 	});
 }
@@ -742,10 +799,11 @@ if (isMainModule(import.meta.url)) {
 // Exported for tests — kept free of the isMainModule guard so integration
 // tests can call them directly without spawning a subprocess/browser.
 export {
-	assertCompleteOrderDetail,
+	orderDetailCountsMatch,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
+	collectOrderStubs,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,

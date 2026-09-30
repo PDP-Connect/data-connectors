@@ -90,14 +90,10 @@ test("a weighed in-store row keeps its weight, per-weight price and line total",
 
 test("a weighed row counts as one search row when reconciling item counts", () => {
 	const { items } = parsers.parseOrderDetailDom(FIXTURE);
-	assert.doesNotThrow(() => connector.assertCompleteOrderDetail(STUB, items));
-	assert.throws(
-		() =>
-			connector.assertCompleteOrderDetail(
-				{ ...STUB, expectedItemCount: 4 },
-				items,
-			),
-		/did not match search result count 4/,
+	assert.equal(connector.orderDetailCountsMatch(STUB, items), true);
+	assert.equal(
+		connector.orderDetailCountsMatch({ ...STUB, expectedItemCount: 4 }, items),
+		false,
 	);
 });
 
@@ -123,9 +119,7 @@ test("an in-store row without an ASIN link is kept for counts but gets no item r
 	assert.equal(bare?.productUrl, null);
 	assert.equal(bare?.imageUrl, null);
 	assert.equal(bare?.name, "Test Deli Item B, 237 ML");
-	assert.doesNotThrow(() =>
-		connector.assertCompleteOrderDetail(STUB, detail.items),
-	);
+	assert.equal(connector.orderDetailCountsMatch(STUB, detail.items), true);
 	const records = connector.buildOrderItemRecords(STUB.orderId, detail.items);
 	assert.deepEqual(
 		records.map((r) => r.product_id),
