@@ -405,6 +405,10 @@ test("processListOrder: a malformed order date records a 'gap' coverage outcome 
 	assert.equal(gaps.length, 1, "a DETAIL_GAP backs the coverage gap");
 	assert.equal(gaps[0]?.stream, "order_items");
 	assert.equal(gaps[0]?.last_error?.class, "transient_no_progress");
+	assert.match(
+		gaps[0]?.last_error?.message ?? "",
+		/^reason_code=parse_missing;elapsed_ms=0;poll_count=0$/,
+	);
 });
 
 test("processListOrder: a malformed order date emits no DETAIL_GAP when order_items is out of scope (wantsItems: false)", async () => {
@@ -692,6 +696,35 @@ test("processListOrder: a password-form detail response latches sessionRepairReq
 	assert.deepEqual(
 		gaps.map((g) => g.last_error?.class),
 		["owner_repair_required", "owner_repair_required"],
+	);
+	assert.ok(
+		gaps.every((gap) =>
+			/^reason_code=session_repair_required;elapsed_ms=\d+;poll_count=0$/.test(
+				gap.last_error?.message ?? "",
+			),
+		),
+		"last_error.message carries the failure code and bounded counters",
+	);
+});
+
+test("processListOrder: DETAIL_GAP retains elapsed time and surface poll count", async () => {
+	const coverage = newOrderItemsCoverage();
+	const { deps, protocolMessages } = makeRecordingDeps({
+		detailSurfaceTimeoutMs: 1,
+		orderItemsCoverage: coverage,
+	});
+	await processListOrder(
+		makePageStub({ content: DETAIL_HTML }),
+		deps,
+		makeRunFlags(),
+		makeListOrder({ itemCount: 100 }),
+	);
+
+	const [gap] = findDetailGaps(protocolMessages);
+	assert.ok(gap);
+	assert.match(
+		gap.last_error?.message ?? "",
+		/^reason_code=detail_surface_timeout;elapsed_ms=\d+;poll_count=[1-9]\d*/,
 	);
 });
 
@@ -3003,6 +3036,55 @@ test("fetchOrderDetail: real inner scrollport fixture proves virtualization and 
 	}
 });
 
+test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", async () => {
+	const browser = await chromium.launch({ headless: true });
+	const previousDebug = process.env.HEB_DETAIL_SURFACE_DEBUG;
+	process.env.HEB_DETAIL_SURFACE_DEBUG = "1";
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = readFileSync(
+			join(FIXTURES_DIR, "order-detail-static-tall.html"),
+			"utf8",
+		).replaceAll("Qty: 1", "Qty: 2.5 of 1,25 lbs each");
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-DEBUG-SURFACE",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const diagnostics: string[] = [];
+		const result = await fetchOrderDetail(page, "HEB-DEBUG-SURFACE", {
+			detailSurfaceTimeoutMs: 5000,
+			expectedItemCount: 20,
+			onDetailProgress: async (message) => {
+				diagnostics.push(message);
+			},
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "hydrated");
+		const pollMessages = diagnostics.filter((message) =>
+			message.startsWith("detail_surface_poll;"),
+		);
+		assert.ok(pollMessages.length > 0, "debug mode emits every surface poll");
+		assert.match(
+			pollMessages[0] ?? "",
+			/^detail_surface_poll;changed=initial;atEnd=(true|false);loading=(true|false);actionableControl=(true|false);observedUnits=unknown;expectedUnits=20;stablePolls=0;qtyFailures=row 1:Qty: #\.# of #,# lbs \[text\]/,
+		);
+		assert.ok(
+			pollMessages.every((message) => !message.includes("Static item")),
+			"debug diagnostics must not expose product names",
+		);
+	} finally {
+		if (previousDebug === undefined) {
+			delete process.env.HEB_DETAIL_SURFACE_DEBUG;
+		} else {
+			process.env.HEB_DETAIL_SURFACE_DEBUG = previousDebug;
+		}
+		await browser.close();
+	}
+});
+
 test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap, not partial hydrated data", async () => {
 	const page = makeLazyLoadPageStub(100); // Deliberately expect more than this fixture exposes.
 
@@ -3019,6 +3101,8 @@ test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap,
 		`unexpected settlement: ${result.failureKind}`,
 	);
 	assert.match(result.diagnostic ?? "", /detail_surface_(timeout|incomplete)/);
+	assert.ok(Number.isFinite(result.elapsedMs), "surface failure records elapsed time");
+	assert.ok((result.pollCount ?? 0) > 0, "surface failure records its poll count");
 });
 
 test("fetchOrderDetail: a surface evaluation error is an observable gap, not swallowed partial hydration", async () => {

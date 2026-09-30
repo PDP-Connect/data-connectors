@@ -112,6 +112,9 @@ export const HEB_REPAIR_RETRY_DELAY_MAX_MS = 2500;
 const DETAIL_SURFACE_TIMEOUT_MS = 30_000;
 const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
+const DETAIL_SURFACE_DEBUG_ENV = "HEB_DETAIL_SURFACE_DEBUG";
+const DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT = 26;
+const DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT = 2;
 
 type DetailSurfaceSettlement = "complete" | "incomplete" | "timeout" | "error";
 type StaticListEvidence = "declared_count" | "fully_mounted" | null;
@@ -119,6 +122,7 @@ type StaticListEvidence = "declared_count" | "fully_mounted" | null;
 interface DetailSurfaceRow {
 	html: string;
 	key: string;
+	qtyShape?: string | null;
 	unitCount: number | null;
 }
 
@@ -167,10 +171,11 @@ async function hydrationWait(): Promise<void> {
  * serialized into the browser by Playwright, so it has no connector state and
  * does not depend on H-E-B-specific React internals. */
 function inspectAndAdvanceDetailSurface(input: {
+	debugDiagnostics: boolean;
 	expectedItemCount: number | null;
 	lastAction: string | null;
 }): DetailSurfaceState {
-	const { expectedItemCount, lastAction } = input;
+	const { debugDiagnostics, expectedItemCount, lastAction } = input;
 	const row =
 		document
 			.querySelector('a[data-qe-id="itemRowDetailsName"]')
@@ -283,7 +288,27 @@ function inspectAndAdvanceDetailSurface(input: {
 		const wrappedHtml = escapedDepartment
 			? `<section><h2 data-qe-id="orderDetailsGroupTitle">${escapedDepartment}</h2>${itemRow.outerHTML}</section>`
 			: itemRow.outerHTML;
-		return { html: wrappedHtml, key, unitCount };
+		return {
+			html: wrappedHtml,
+			key,
+			qtyShape:
+				debugDiagnostics && unitCount === null
+					? /^Qty\s*:/i.test(qtyText.trim())
+						? qtyText
+								.trim()
+								.replace(/\d+\.\d+/g, "#.#")
+								.replace(/\d+/g, "#")
+								.replace(
+									/\b(?!Qty\b|of\b|lb\b|lbs\b)[a-z]+\b/gi,
+									"[text]",
+								)
+								.replace(/\s+/g, " ")
+						: qtyText.trim()
+							? "Qty: [label mismatch]"
+							: "Qty: [empty]"
+					: null,
+			unitCount,
+		};
 	});
 	const atEnd = scrollTop + clientHeight >= scrollHeight - 2;
 	const loading = Boolean(
@@ -411,6 +436,7 @@ async function collectDetailSurface(
 	onProgress?: ((message: string) => Promise<void>) | undefined,
 	timeoutMs = DETAIL_SURFACE_TIMEOUT_MS,
 ): Promise<DetailSurfaceResult> {
+	const debugDiagnostics = process.env[DETAIL_SURFACE_DEBUG_ENV] === "1";
 	const expectedUnits =
 		typeof expectedItemCount === "number" && Number.isInteger(expectedItemCount)
 			? expectedItemCount
@@ -421,6 +447,12 @@ async function collectDetailSurface(
 	const startedAt = Date.now();
 	let lastSignature = "";
 	let lastAction: string | null = null;
+	let previousSignatureComponents: {
+		keys: string;
+		rowsHtml: string;
+		scrollHeight: number;
+		scrollTop: number;
+	} | null = null;
 	let stablePolls = 0;
 	let snapshots = 0;
 	let latest: DetailSurfaceState = {
@@ -455,11 +487,13 @@ async function collectDetailSurface(
 	// only one of its two rows.
 	const contentHrefMountedLastSnapshot = new Set<string>();
 	const contentHrefEverUnmounted = new Set<string>();
+	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
 
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
 			latest = await page.evaluate(inspectAndAdvanceDetailSurface, {
+				debugDiagnostics,
 				expectedItemCount: expectedUnits,
 				lastAction,
 			});
@@ -481,17 +515,28 @@ async function collectDetailSurface(
 			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
 			contentHrefEverUnmounted.clear();
+			failedQuantityRows.clear();
 			ambiguousContentHref = null;
 			collectedScheme = scheme;
 		}
 		const mountedContentHrefs = new Set<string>();
 		const occurrenceByKey = new Map<string, number>();
+		let rowIndex = 0;
 		for (const row of latest.rows) {
+			rowIndex += 1;
 			const occurrence = (occurrenceByKey.get(row.key) ?? 0) + 1;
 			occurrenceByKey.set(row.key, occurrence);
 			const collectedKey = `${row.key}\u001f${occurrence}`;
 			collected.set(collectedKey, row.html);
 			collectedUnits.set(collectedKey, row.unitCount);
+			if (row.unitCount === null && row.qtyShape) {
+				failedQuantityRows.set(collectedKey, {
+					row: rowIndex,
+					shape: row.qtyShape,
+				});
+			} else {
+				failedQuantityRows.delete(collectedKey);
+			}
 			if (row.key.startsWith("content:href=")) {
 				mountedContentHrefs.add(row.key);
 				if (
@@ -513,6 +558,39 @@ async function collectDetailSurface(
 		for (const href of mountedContentHrefs) {
 			contentHrefMountedLastSnapshot.add(href);
 		}
+		const signatureComponents = debugDiagnostics
+			? {
+					scrollTop: latest.scrollTop,
+					scrollHeight: latest.scrollHeight,
+					keys: [...collected.keys()].join("|"),
+					rowsHtml: latest.rows
+						.map((row) => `${row.key}=${row.html}`)
+						.join("|"),
+					}
+			: null;
+		const changedSignatureComponents = signatureComponents
+			? previousSignatureComponents === null
+				? ["initial"]
+				: [
+						...(signatureComponents.scrollTop !==
+						previousSignatureComponents.scrollTop
+							? ["scrollTop"]
+							: []),
+						...(signatureComponents.scrollHeight !==
+						previousSignatureComponents.scrollHeight
+							? ["scrollHeight"]
+							: []),
+						...(signatureComponents.keys !==
+						previousSignatureComponents.keys
+							? ["keys"]
+							: []),
+						...(signatureComponents.rowsHtml !==
+						previousSignatureComponents.rowsHtml
+							? ["rows html"]
+							: []),
+					]
+			: [];
+		previousSignatureComponents = signatureComponents;
 		const signature = `${latest.scrollTop}:${latest.scrollHeight}:${[...collected.keys()].join("|")}:${latest.rows.map((row) => `${row.key}=${row.html}`).join("|")}`;
 		const progressed = signature !== lastSignature;
 		lastSignature = signature;
@@ -530,6 +608,17 @@ async function collectDetailSurface(
 				`H-E-B detail surface: ${collected.size} rows observed; action=${latest.actionableControl ?? "settling"}`,
 			);
 		}
+		const observedUnits = knownUnitTotal(collectedUnits.values());
+		if (debugDiagnostics && onProgress) {
+			const changed = changedSignatureComponents?.join(",") || "none";
+			const qtyFailures = [...failedQuantityRows.values()]
+				.sort((left, right) => left.row - right.row)
+				.map(({ row, shape }) => `row ${row}:${shape}`)
+				.join("|") || "none";
+			await onProgress(
+				`detail_surface_poll;changed=${changed};atEnd=${latest.atEnd};loading=${latest.loading};actionableControl=${Boolean(latest.actionableControl)};observedUnits=${observedUnits ?? "unknown"};expectedUnits=${expectedUnits ?? "unknown"};stablePolls=${stablePolls};qtyFailures=${qtyFailures}`,
+			);
+		}
 		if (ambiguousContentHref) {
 			// A repeated product whose two mounted appearances were never
 			// co-mounted cannot be proven complete under content identity — see
@@ -538,7 +627,6 @@ async function collectDetailSurface(
 			// is reported as an error (not a silent hydrate) below.
 			break;
 		}
-		const observedUnits = knownUnitTotal(collectedUnits.values());
 		const fullyCollectedStaticList =
 			latest.atEnd &&
 			!latest.loading &&
@@ -716,16 +804,26 @@ export function classifyHebDetailFailure(
 }
 
 export type DetailFetchResult =
-	| { detail: OrderDetail; diagnostic?: string; status: "hydrated" }
+	| {
+			detail: OrderDetail;
+			diagnostic?: string;
+			elapsedMs?: number;
+			pollCount?: number;
+			status: "hydrated";
+	  }
 	| {
 			diagnostic?: string;
+			elapsedMs?: number;
 			failureKind: DetailFailureKind;
+			pollCount?: number;
 			reason: HebDetailGapReason;
 			status: "deferred";
 	  }
 	| {
 			diagnostic?: string;
+			elapsedMs?: number;
 			failureKind: DetailFailureKind;
+			pollCount?: number;
 			reason: HebDetailGapReason;
 			status: "failed";
 	  };
@@ -776,6 +874,22 @@ export async function fetchOrderDetail(
 	orderId: string,
 	deps: HydrationDeps = {},
 ): Promise<DetailFetchResult> {
+	const startedAt = Date.now();
+	let pollCount = 0;
+	const metrics = () => ({
+		elapsedMs: Math.max(0, Date.now() - startedAt),
+		pollCount,
+	});
+	const failed = (
+		failureKind: DetailFailureKind,
+		diagnostic?: string,
+	): DetailFetchResult => ({
+		...(diagnostic ? { diagnostic } : {}),
+		...metrics(),
+		failureKind,
+		reason: reasonForDetailFailure(failureKind),
+		status: "failed",
+	});
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
 	try {
 		await navigateToOrderDetail(page, url);
@@ -791,11 +905,7 @@ export async function fetchOrderDetail(
 		const failureKind: DetailFailureKind = RETRYABLE_ERROR_RE.test(message)
 			? "navigation_retry_exhausted"
 			: "navigation_failed_non_retryable";
-		return {
-			failureKind,
-			reason: reasonForDetailFailure(failureKind),
-			status: "failed",
-		};
+		return failed(failureKind);
 	}
 	await (deps.waitForHydration ?? hydrationWait)();
 
@@ -808,29 +918,19 @@ export async function fetchOrderDetail(
 			error instanceof Error
 				? error.message.slice(0, 160)
 				: String(error).slice(0, 160);
-		return {
-			diagnostic: `detail_content_error; error=${diagnostic}`,
-			failureKind: "detail_surface_error",
-			reason: reasonForDetailFailure("detail_surface_error"),
-			status: "failed",
-		};
+		return failed(
+			"detail_surface_error",
+			`detail_content_error; error=${diagnostic}`,
+		);
 	}
 	if (
 		SIGNIN_URL_RE.test(initialLandedUrl) ||
 		looksLoggedOut(initialLandedUrl, initialHtml)
 	) {
-		return {
-			failureKind: "session_repair_required",
-			reason: reasonForDetailFailure("session_repair_required"),
-			status: "failed",
-		};
+		return failed("session_repair_required");
 	}
 	if (isIncapsulaBlocked(initialHtml)) {
-		return {
-			failureKind: "session_repair_required",
-			reason: reasonForDetailFailure("session_repair_required"),
-			status: "failed",
-		};
+		return failed("session_repair_required");
 	}
 
 	const surface = await collectDetailSurface(
@@ -839,6 +939,7 @@ export async function fetchOrderDetail(
 		deps.onDetailProgress,
 		deps.detailSurfaceTimeoutMs,
 	);
+	pollCount = surface.diagnostics.snapshots;
 	if (surface.diagnostics.settlement !== "complete") {
 		let failureKind: Extract<DetailFailureKind, `detail_surface_${string}`> =
 			"detail_surface_incomplete";
@@ -847,12 +948,7 @@ export async function fetchOrderDetail(
 		} else if (surface.diagnostics.settlement === "timeout") {
 			failureKind = "detail_surface_timeout";
 		}
-		return {
-			diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
-			failureKind,
-			reason: reasonForDetailFailure(failureKind),
-			status: "failed",
-		};
+		return failed(failureKind, detailSurfaceErrorMessage(surface.diagnostics));
 	}
 
 	const landedUrl = page.url();
@@ -864,12 +960,10 @@ export async function fetchOrderDetail(
 			error instanceof Error
 				? error.message.slice(0, 160)
 				: String(error).slice(0, 160);
-		return {
-			diagnostic: `detail_content_error; error=${diagnostic}`,
-			failureKind: "detail_surface_error",
-			reason: reasonForDetailFailure("detail_surface_error"),
-			status: "failed",
-		};
+		return failed(
+			"detail_surface_error",
+			`detail_content_error; error=${diagnostic}`,
+		);
 	}
 	// Same looksLoggedOut() helper the deep probe uses (URL AND password-form
 	// check) — not just the URL pattern — so a login form served at the
@@ -879,32 +973,21 @@ export async function fetchOrderDetail(
 		SIGNIN_URL_RE.test(landedUrl) ||
 		(html && looksLoggedOut(landedUrl, html))
 	) {
-		return {
-			failureKind: "session_repair_required",
-			reason: reasonForDetailFailure("session_repair_required"),
-			status: "failed",
-		};
+		return failed("session_repair_required");
 	}
 
 	if (!html || isIncapsulaBlocked(html)) {
-		return {
-			failureKind: "session_repair_required",
-			reason: reasonForDetailFailure("session_repair_required"),
-			status: "failed",
-		};
+		return failed("session_repair_required");
 	}
 
 	const detail = parseOrderDetailDom(surface.html || html);
 	if (!detail) {
-		return {
-			failureKind: "parse_missing",
-			reason: reasonForDetailFailure("parse_missing"),
-			status: "failed",
-		};
+		return failed("parse_missing", detailSurfaceErrorMessage(surface.diagnostics));
 	}
 	return {
 		detail,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
+		...metrics(),
 		status: "hydrated",
 	};
 }
@@ -1273,7 +1356,16 @@ function buildHebDetailGap(
 	failureKind: DetailFailureKind,
 	orderDate?: string | undefined,
 	diagnostic?: string | undefined,
+	metrics: { elapsedMs?: number | undefined; pollCount?: number | undefined } = {},
 ) {
+	const elapsedMs = Math.max(0, Math.round(metrics.elapsedMs ?? 0));
+	const pollCount = Math.max(0, Math.floor(metrics.pollCount ?? 0));
+	const errorMessage = [
+		`reason_code=${failureKind}`,
+		`elapsed_ms=${elapsedMs}`,
+		`poll_count=${pollCount}`,
+		...(diagnostic ? [diagnostic] : []),
+	].join(";");
 	return buildDetailGap({
 		stream: "order_items",
 		parentStream: "orders",
@@ -1286,7 +1378,7 @@ function buildHebDetailGap(
 		},
 		error: {
 			class: classifyHebDetailFailure(failureKind),
-			...(diagnostic ? { message: diagnostic } : {}),
+			message: errorMessage.slice(0, 500),
 		},
 	});
 }
@@ -1531,6 +1623,7 @@ async function recoverPendingOrderItemDetailGapPage(
 		}
 		const result = await resolveOrderDetail(page, flags, locator.orderId, {
 			...(deps.capture ? { capture: deps.capture } : {}),
+			detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
 			sendInteraction: deps.sendInteraction,
 			waitForHydration: deps.waitForHydration,
 		});
@@ -1586,10 +1679,11 @@ async function recoverPendingOrderItemDetailGapPage(
 			buildHebDetailGap(
 				locator.orderId,
 				result.reason,
-				result.failureKind,
-				locator.orderDate,
-				result.diagnostic,
-			),
+						result.failureKind,
+						locator.orderDate,
+						result.diagnostic,
+						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+					),
 		);
 		reDeferred += 1;
 	}
@@ -1772,6 +1866,7 @@ async function fetchDetailAndRecordCoverage(
 ): Promise<OrderDetail | null> {
 	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
 		...(deps.capture ? { capture: deps.capture } : {}),
+		detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
 		expectedItemCount: listOrder.itemCount,
 		onDetailProgress: deps.progress,
 		sendInteraction: deps.sendInteraction,
@@ -1795,6 +1890,7 @@ async function fetchDetailAndRecordCoverage(
 					result.failureKind,
 					orderDate,
 					result.diagnostic,
+					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 				),
 			);
 		}
@@ -1886,6 +1982,8 @@ export async function runForwardScan(
 	boundary: string | null,
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<ForwardScanResult> {
+	const debugSurfaceCapture = process.env[DETAIL_SURFACE_DEBUG_ENV] === "1";
+	let debugLargeOrdersSelected = 0;
 	let newestOrderDate: string | null = null;
 	// Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
 	// a pagination-boundary repeat (the last order on page N reappearing as the
@@ -1943,7 +2041,22 @@ export async function runForwardScan(
 					continue;
 				}
 				seenOrderIds.add(listOrder.orderId);
-				await processListOrder(page, deps, flags, listOrder);
+				const debugLargeOrder =
+					debugSurfaceCapture &&
+					deps.wantsItems &&
+					orderDate !== null &&
+					listOrder.itemCount !== null &&
+					listOrder.itemCount >= DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT &&
+					debugLargeOrdersSelected <
+						DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT;
+				if (debugLargeOrder) {
+					debugLargeOrdersSelected += 1;
+				}
+				const orderDeps =
+					debugSurfaceCapture && deps.wantsItems && !debugLargeOrder
+						? { ...deps, wantsItems: false }
+						: deps;
+				await processListOrder(page, orderDeps, flags, listOrder);
 			}
 
 			if (shouldStopPaginating(pageOrderDates, boundary)) {
