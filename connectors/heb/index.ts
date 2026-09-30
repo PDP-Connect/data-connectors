@@ -114,11 +114,12 @@ const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
 
 type DetailSurfaceSettlement = "complete" | "incomplete" | "timeout" | "error";
-type StaticListEvidence = "declared_count" | null;
+type StaticListEvidence = "declared_count" | "fully_mounted" | null;
 
 interface DetailSurfaceRow {
 	html: string;
 	key: string;
+	unitCount: number | null;
 }
 
 interface DetailSurfaceState {
@@ -138,7 +139,7 @@ interface DetailSurfaceDiagnostics {
 	actionableControl: string | null;
 	clientHeight: number;
 	collectedRows: number;
-	expectedRows: number | null;
+	expectedUnits: number | null;
 	lastAction: string | null;
 	lastError: string | null;
 	loading: boolean;
@@ -147,6 +148,7 @@ interface DetailSurfaceDiagnostics {
 	settlement: DetailSurfaceSettlement;
 	snapshots: number;
 	staticListEvidence: StaticListEvidence;
+	observedUnits: number | null;
 }
 
 interface DetailSurfaceResult {
@@ -245,6 +247,14 @@ function inspectAndAdvanceDetailSurface(input: {
 		rowLinks.length < expectedItemCount;
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
+		const qtyText =
+			itemRow.querySelector('[data-qe-id="orderItemQty"]')?.textContent ?? "";
+		// H-E-B writes weighed quantities as "Qty: N of M lbs". N is the
+		// number of purchased units; M is the measured weight and is not a
+		// second item count. Only whole-unit counts can satisfy the card's
+		// integer item total.
+		const unitMatch = /^\s*Qty:\s*(\d+)(?:\s+of\s+\d+(?:\.\d+)?\s*(?:lb|lbs))?\s*$/i.exec(qtyText);
+		const unitCount = unitMatch?.[1] ? Number(unitMatch[1]) : null;
 		const positionalIdentity = ["data-index", "aria-posinset"]
 			.map((attribute) => {
 				const value = itemRow.getAttribute(attribute)?.trim();
@@ -273,7 +283,7 @@ function inspectAndAdvanceDetailSurface(input: {
 		const wrappedHtml = escapedDepartment
 			? `<section><h2 data-qe-id="orderDetailsGroupTitle">${escapedDepartment}</h2>${itemRow.outerHTML}</section>`
 			: itemRow.outerHTML;
-		return { html: wrappedHtml, key };
+		return { html: wrappedHtml, key, unitCount };
 	});
 	const atEnd = scrollTop + clientHeight >= scrollHeight - 2;
 	const loading = Boolean(
@@ -363,13 +373,25 @@ function identitySchemeOf(rows: readonly DetailSurfaceRow[]): string | null {
 	return separator === -1 ? first.key : first.key.slice(0, separator);
 }
 
+function knownUnitTotal(units: Iterable<number | null>): number | null {
+	let total = 0;
+	for (const unitsForRow of units) {
+		if (unitsForRow === null) {
+			return null;
+		}
+		total += unitsForRow;
+	}
+	return total;
+}
+
 function detailSurfaceErrorMessage(
 	diagnostics: DetailSurfaceDiagnostics,
 ): string {
 	return [
 		`detail_surface_${diagnostics.settlement}`,
 		`collected=${diagnostics.collectedRows}`,
-		`expected=${diagnostics.expectedRows ?? "unknown"}`,
+		`expected_units=${diagnostics.expectedUnits ?? "unknown"}`,
+		`observed_units=${diagnostics.observedUnits ?? "unknown"}`,
 		`snapshots=${diagnostics.snapshots}`,
 		`scroll_top=${Math.round(diagnostics.scrollTop)}`,
 		`scroll_height=${Math.round(diagnostics.scrollHeight)}`,
@@ -389,11 +411,12 @@ async function collectDetailSurface(
 	onProgress?: ((message: string) => Promise<void>) | undefined,
 	timeoutMs = DETAIL_SURFACE_TIMEOUT_MS,
 ): Promise<DetailSurfaceResult> {
-	const expectedRows =
+	const expectedUnits =
 		typeof expectedItemCount === "number" && Number.isInteger(expectedItemCount)
 			? expectedItemCount
 			: null;
 	const collected = new Map<string, string>();
+	const collectedUnits = new Map<string, number | null>();
 	let collectedScheme: string | null = null;
 	const startedAt = Date.now();
 	let lastSignature = "";
@@ -422,9 +445,9 @@ async function collectDetailSurface(
 	// present identically as "href seen at rank 1 again" once the row has
 	// unmounted in between: e.g. a same-href pair ~60 rows apart in an 80-row
 	// virtualized order would silently collapse to one `collected` entry if
-	// this were left unchecked, and `collected.size >= expectedRows` is not a
-	// reliable backstop against that collapse (a coincidental deficit
-	// elsewhere in the same run could still make the count line up). Rather
+	// this were left unchecked, and a quantity sum is not a reliable backstop
+	// against that collapse (a coincidental extra quantity elsewhere could
+	// still make the total line up). Rather
 	// than trust the count match, track this explicitly: once a
 	// `content:href=` base key has been observed, then goes a full snapshot
 	// without being mounted, then reappears, that specific href is ambiguous
@@ -437,7 +460,7 @@ async function collectDetailSurface(
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
 			latest = await page.evaluate(inspectAndAdvanceDetailSurface, {
-				expectedItemCount: expectedRows,
+				expectedItemCount: expectedUnits,
 				lastAction,
 			});
 		} catch (error) {
@@ -449,12 +472,13 @@ async function collectDetailSurface(
 		// "position:document-order=N"), so a surface that remounts under a
 		// different identity scheme would add a second entry for every row
 		// instead of overwriting the first. Because completion tests
-		// `collected.size >= expectedRows`, that inflation satisfies the gate
-		// more easily than the truth. Only rows sharing the latest snapshot's
+		// a matching quantity sum, that inflation satisfies the gate more easily
+		// than the truth. Only rows sharing the latest snapshot's
 		// scheme are comparable, so a scheme change restarts collection.
 		const scheme = identitySchemeOf(latest.rows);
 		if (scheme !== null && scheme !== collectedScheme) {
 			collected.clear();
+			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
 			contentHrefEverUnmounted.clear();
 			ambiguousContentHref = null;
@@ -465,7 +489,9 @@ async function collectDetailSurface(
 		for (const row of latest.rows) {
 			const occurrence = (occurrenceByKey.get(row.key) ?? 0) + 1;
 			occurrenceByKey.set(row.key, occurrence);
-			collected.set(`${row.key}\u001f${occurrence}`, row.html);
+			const collectedKey = `${row.key}\u001f${occurrence}`;
+			collected.set(collectedKey, row.html);
+			collectedUnits.set(collectedKey, row.unitCount);
 			if (row.key.startsWith("content:href=")) {
 				mountedContentHrefs.add(row.key);
 				if (
@@ -512,12 +538,28 @@ async function collectDetailSurface(
 			// is reported as an error (not a silent hydrate) below.
 			break;
 		}
+		const observedUnits = knownUnitTotal(collectedUnits.values());
+		const fullyCollectedStaticList =
+			latest.atEnd &&
+			!latest.loading &&
+			!latest.actionableControl &&
+			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
+			collectedScheme === "content:href" &&
+			contentHrefEverUnmounted.size === 0 &&
+			collected.size === latest.rowCount;
+		const declaredCountRowsCollected =
+			expectedUnits !== null &&
+			latest.staticListEvidence === "declared_count" &&
+			collected.size >= expectedUnits;
 		if (
 			latest.atEnd &&
 			!latest.loading &&
 			!latest.actionableControl &&
 			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			(expectedRows === null || collected.size >= expectedRows)
+			(expectedUnits === null ||
+				(observedUnits !== null && observedUnits >= expectedUnits) ||
+				declaredCountRowsCollected ||
+				fullyCollectedStaticList)
 		) {
 			break;
 		}
@@ -525,13 +567,29 @@ async function collectDetailSurface(
 	}
 
 	const timedOut = Date.now() - startedAt >= timeoutMs;
+	const observedUnits = knownUnitTotal(collectedUnits.values());
+	const fullyCollectedStaticList =
+		latest.atEnd &&
+		!latest.loading &&
+		!latest.actionableControl &&
+		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
+		collectedScheme === "content:href" &&
+		contentHrefEverUnmounted.size === 0 &&
+		collected.size === latest.rowCount;
+	const declaredCountRowsCollected =
+		expectedUnits !== null &&
+		latest.staticListEvidence === "declared_count" &&
+		collected.size >= expectedUnits;
 	const complete =
 		!lastError &&
 		latest.atEnd &&
 		!latest.loading &&
 		!latest.actionableControl &&
 		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		(expectedRows === null || collected.size >= expectedRows);
+		(expectedUnits === null ||
+			(observedUnits !== null && observedUnits >= expectedUnits) ||
+			declaredCountRowsCollected ||
+			fullyCollectedStaticList);
 	let settlement: DetailSurfaceSettlement = "incomplete";
 	if (lastError) {
 		settlement = "error";
@@ -544,15 +602,18 @@ async function collectDetailSurface(
 		actionableControl: latest.actionableControl,
 		clientHeight: latest.clientHeight,
 		collectedRows: collected.size,
-		expectedRows,
+		expectedUnits,
 		lastAction,
 		lastError,
 		loading: latest.loading,
 		scrollHeight: latest.scrollHeight,
 		scrollTop: latest.scrollTop,
-		staticListEvidence: latest.staticListEvidence,
+		staticListEvidence: fullyCollectedStaticList
+			? "fully_mounted"
+			: latest.staticListEvidence,
 		settlement,
 		snapshots,
+		observedUnits,
 	};
 	const html =
 		collected.size > 0
@@ -1673,10 +1734,25 @@ async function emitOrderAndItems(
 		// detail actually hydrated are tallied; a gapped order is already
 		// reported as a DETAIL_GAP and must not also be counted as an item
 		// shortfall.
+		const fulfilledUnits = detail.items.every(
+			(item) => item.quantity !== null && Number.isSafeInteger(item.quantity),
+		)
+			? detail.items.reduce((sum, item) => sum + (item.quantity ?? 0), 0)
+			: null;
+		if (
+			listOrder.itemCount !== null &&
+			(listOrder.itemCount !== detail.items.length ||
+				fulfilledUnits === null ||
+				fulfilledUnits !== listOrder.itemCount)
+		) {
+			await deps.progress(
+				`item_count_reconciliation: card_units=${listOrder.itemCount}; product_rows=${detail.items.length}; fulfilled_units=${fulfilledUnits ?? "unknown"}; reason=unit_and_row_counts_differ`,
+			);
+		}
 		deps.itemCountTallies?.push({
 			orderId: listOrder.orderId,
 			declaredItemCount: listOrder.itemCount,
-			collectedItemCount: detail.items.length,
+			collectedItemCount: fulfilledUnits ?? detail.items.length,
 		});
 	}
 }
@@ -2689,36 +2765,15 @@ if (isMainModule(import.meta.url)) {
 			if (orderItemsCoverage) {
 				await emitOrderItemsCoverage(deps, orderItemsCoverage);
 			}
-			// The `order_items` completeness anchor: every hydrated order's item
-			// count as H-E-B declared it on the list card, against what the detail
-			// page actually yielded. Reported only when the provider's own numbers
-			// say something is missing — a run where every order reconciles needs
-			// no notice, and an order with no declared count is silently
-			// unanchored rather than falsely clean.
-			let itemCountShort = false;
+			// Compare fulfilled unit quantities with the card's count. A mismatch
+			// after the detail collector has proved completeness is diagnostic,
+			// not grounds to drop items or nutrition from the delivered streams.
 			if (itemCountTallies && itemCountTallies.length > 0) {
 				const summary = summarizeItemCounts(itemCountTallies);
-				itemCountShort = summary.short > 0;
-				if (itemCountShort) {
-					await emit({
-						type: "SKIP_RESULT",
-						stream: "order_items",
-						reason: "item_count_short",
-						recovery_hint: {
-							action: "retry_on_connector_upgrade",
-							retryable: false,
-						},
-						message:
-							"Some orders hold fewer items than H-E-B says they contain",
-						diagnostics: {
-							short_orders: summary.short,
-							complete_orders: summary.complete,
-							unanchored_orders: summary.unavailable,
-							declared_items: summary.declaredItems,
-							collected_items: summary.collectedItems,
-							short_order_ids: summary.shortOrderIds,
-						},
-					});
+				if (summary.short > 0) {
+					await progress(
+						`item_count_mismatch: short_orders=${summary.short}; declared_units=${summary.declaredItems}; collected_units=${summary.collectedItems}; reason=detail_surface_complete_but_source_units_unreconciled`,
+					);
 				}
 			}
 			// Same honesty posture as order_items: emit once the forward scan
@@ -2729,6 +2784,10 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			if (wantsNutrition) {
+				// Emitted item rows passed a fulfilled-unit, declared-row, or
+				// complete-static-list proof. Residual count differences are
+				// reported above but cannot cancel nutrition for those items.
+				const itemCountShort = false;
 				const coverageGate: NutritionCoverageGateInput = {
 					itemCountShort,
 					orderHistoryStoppedAtBoundary: stoppedAtBoundary,

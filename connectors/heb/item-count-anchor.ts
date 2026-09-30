@@ -11,13 +11,15 @@
 // `item_count`. That number is computed by H-E-B, not by this connector, and
 // it is read from the LIST page while the items themselves come from a
 // separate DETAIL page. So comparing them compares two independent source
-// surfaces rather than checking the connector's output against itself.
+// surfaces rather than checking the connector's output against itself. The
+// card is a unit count, so the detail side sums each purchased quantity. For
+// weighed rows, `Qty: N of M lbs`, N counts purchased units and M is only the
+// measured weight.
 //
-// Until now `item_count` was recorded and never checked. Live evidence for
-// why that matters: one instance holds two orders declaring 59 and 85 items,
-// but only 35 and 54 `order_items` records — 89 of 144. Both orders are
-// partially hydrated, and nothing anywhere reported a problem, because
-// nothing compared the two numbers.
+// A prior row-count comparison treated distinct product rows as units. That
+// produced false shortfalls on live H-E-B orders whose detail rows included
+// quantities and weighed items. The current anchor compares the list's unit
+// count with the total of each collected row's fulfilled quantity.
 //
 // DELETION-SAFE, ONE-DIRECTIONAL
 // ------------------------------
@@ -36,7 +38,7 @@
 
 /** One order's declared count against what was actually collected. */
 export interface OrderItemTally {
-	/** `order_items` records collected for this order this run. */
+	/** Purchased units represented by collected `order_items` rows. */
 	collectedItemCount: number;
 	/** The count H-E-B printed on the list card, or null when it did not. */
 	declaredItemCount: number | null;
