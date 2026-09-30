@@ -273,6 +273,9 @@ const CHATGPT_RATE_LIMIT_MAX_DELAY_MS = 15 * 60_000;
 const CHATGPT_RATE_LIMIT_MAX_RETRY_AFTER_MS = 15 * 60_000;
 const CHATGPT_LONG_SLEEP_PROGRESS_THRESHOLD_MS = 5000;
 const CHATGPT_CONVERSATION_BATCH_MAX_IDS = 10;
+const CHATGPT_BATCH_INITIAL_PARALLELISM = 2;
+const CHATGPT_BATCH_MAX_PARALLELISM = 4;
+const CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP = 2;
 // Source-pressure fast-open. The live A/B probe (2026-06-02) showed ChatGPT's
 // private detail endpoint returns BARE 429s — no `Retry-After` — and that the
 // throttle is per-account, recovering over minutes, not per-conversation. A
@@ -4677,17 +4680,28 @@ export async function runMessagesAndConversationsWithDetail(
 	function cacheBatchConversationDetails(
 		details: readonly ChatGptFetchResult[],
 		chunkIds: readonly string[],
-	): void {
+	): number {
 		const chunkIdSet = new Set(chunkIds);
+		let cached = 0;
 		for (const detail of details) {
 			const id = cachedBatchDetailId(detail, chunkIdSet);
 			if (id) {
 				batchDetailCache.set(id, detail);
+				cached += 1;
 			}
 		}
+		return cached;
 	}
 
-	async function prefetchConversationDetailBatch(start: number): Promise<void> {
+	let batchParallelism =
+		(deps.preDetailPressure?.rateLimited ?? 0) > 0
+			? 1
+			: CHATGPT_BATCH_INITIAL_PARALLELISM;
+	let cleanBatchWaves = 0;
+	let batchPrefetchStart = 0;
+	let batchPrefetchPromise: Promise<void> | null = null;
+
+	async function prefetchConversationDetailBatchWave(start: number): Promise<void> {
 		const { fetchBatch } = deps.api;
 		if (
 			!fetchBatch ||
@@ -4698,59 +4712,88 @@ export async function runMessagesAndConversationsWithDetail(
 		) {
 			return;
 		}
-		const budgetIds = conversationIdsWithinDetailBudget();
-		const chunkIds = convosToSync
-			.slice(start, start + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
-			.map((conversation) => conversation.id)
-			.filter((id) => budgetIds.includes(id));
-		nextBatchStart = start + CHATGPT_CONVERSATION_BATCH_MAX_IDS;
-		if (chunkIds.length === 0) return;
-		let details: ChatGptFetchResult[];
-		const batchStarted = performance.now();
-		const setTimingConversation = (
-			globalThis as typeof globalThis & {
-				__pdppPageshimSetTimingConversation?: (
-					conversationIds: string[] | null,
-				) => void;
-			}
-		).__pdppPageshimSetTimingConversation;
-		setTimingConversation?.(chunkIds);
-		try {
-			details = await fetchBatch(chunkIds);
-		} catch {
-			// Batch is an optimization. If the endpoint is unavailable, stop trying
-			// it for this pass and let the existing per-id lane preserve correctness.
-			batchEndpointUnavailable = true;
+		const budgetIds = new Set(conversationIdsWithinDetailBudget());
+		const end = Math.min(
+			convosToSync.length,
+			start + batchParallelism * CHATGPT_CONVERSATION_BATCH_MAX_IDS,
+		);
+		const chunks: string[][] = [];
+		for (let offset = start; offset < end; offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS) {
+			const chunkIds = convosToSync
+				.slice(offset, offset + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
+				.map((conversation) => conversation.id)
+				.filter((id) => budgetIds.has(id));
+			if (chunkIds.length > 0) chunks.push(chunkIds);
+		}
+		batchPrefetchStart = start;
+		nextBatchStart = end;
+		if (chunks.length === 0) return;
+
+		const rateLimitedBeforeWave = deps.preDetailPressure?.rateLimited ?? 0;
+		let waveWasClean = true;
+		await Promise.all(
+			chunks.map(async (chunkIds) => {
+				const batchStarted = performance.now();
+				const setTimingConversation = (
+					globalThis as typeof globalThis & {
+						__pdppPageshimSetTimingConversation?: (
+							conversationIds: string[] | null,
+						) => void;
+					}
+				).__pdppPageshimSetTimingConversation;
+				setTimingConversation?.(chunkIds);
+				try {
+					const details = await fetchBatch(chunkIds);
+					const elapsedPerDetail =
+						details.length > 0
+							? (performance.now() - batchStarted) / details.length
+							: 0;
+					const recordDetailTiming = (
+						globalThis as typeof globalThis & {
+							__pdppPageshimDetailFetched?: (
+								conversationId: string,
+								detailMs: number,
+								providerFetchMs: number,
+							) => void;
+						}
+					).__pdppPageshimDetailFetched;
+					const chunkIdSet = new Set(chunkIds);
+					for (const detail of details) {
+						const id = cachedBatchDetailId(detail, chunkIdSet);
+						if (id) {
+							recordDetailTiming?.(
+								id,
+								elapsedPerDetail,
+								detail.providerFetchMs ?? elapsedPerDetail,
+							);
+						}
+					}
+					if (cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length)
+						waveWasClean = false;
+					await recordConversationDetailProviderSuccess();
+				} catch {
+					// Batch results are an optimization; the ordered per-id lane retries gaps.
+					waveWasClean = false;
+				} finally {
+					setTimingConversation?.(null);
+				}
+			}),
+		);
+		const rateLimitedDuringWave =
+			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBeforeWave;
+		if (!waveWasClean || rateLimitedDuringWave) {
+			batchParallelism = 1;
+			cleanBatchWaves = 0;
 			return;
-		} finally {
-			setTimingConversation?.(null);
 		}
-		const elapsedPerDetail =
-			details.length > 0
-				? (performance.now() - batchStarted) / details.length
-				: 0;
-		const recordDetailTiming = (
-			globalThis as typeof globalThis & {
-				__pdppPageshimDetailFetched?: (
-					conversationId: string,
-					detailMs: number,
-					providerFetchMs: number,
-				) => void;
-			}
-		).__pdppPageshimDetailFetched;
-		const chunkIdSet = new Set(chunkIds);
-		for (const detail of details) {
-			const id = cachedBatchDetailId(detail, chunkIdSet);
-			if (id) {
-				recordDetailTiming?.(
-					id,
-					elapsedPerDetail,
-					detail.providerFetchMs ?? elapsedPerDetail,
-				);
-			}
+		cleanBatchWaves += 1;
+		if (
+			cleanBatchWaves >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP &&
+			batchParallelism < CHATGPT_BATCH_MAX_PARALLELISM
+		) {
+			batchParallelism += 1;
+			cleanBatchWaves = 0;
 		}
-		await recordConversationDetailProviderSuccess();
-		cacheBatchConversationDetails(details, chunkIds);
 	}
 
 	async function emitConversationDetailGapOnce(
@@ -5151,11 +5194,18 @@ export async function runMessagesAndConversationsWithDetail(
 		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		const conversationIndex = conversationIndexById.get(c.id);
-		if (
-			conversationIndex !== undefined &&
-			conversationIndex >= nextBatchStart
-		) {
-			await prefetchConversationDetailBatch(conversationIndex);
+		if (conversationIndex !== undefined) {
+			if (conversationIndex >= nextBatchStart) {
+				const wave = prefetchConversationDetailBatchWave(conversationIndex);
+				batchPrefetchPromise = wave;
+				await wave;
+			} else if (
+				batchPrefetchPromise &&
+				conversationIndex >= batchPrefetchStart &&
+				conversationIndex < nextBatchStart
+			) {
+				await batchPrefetchPromise;
+			}
 		}
 		const batchDetail = batchDetailCache.get(c.id);
 		if (batchDetail) {
