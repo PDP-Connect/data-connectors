@@ -4,7 +4,7 @@
 // Runs a pageshim bundle the way the mobile host does, in Playwright Chromium.
 //
 // Model: vana-com/unity-surfaces apps/mobile-shell/lib/connect/page_shim.dart.
-//   - RUNNER page: executes the bundle as `new AsyncFunction('page', 'process', code)`
+//   - RUNNER page: executes the bundle as `new AsyncFunction('page', 'process', 'initialState', code)`
 //     after the host's transform (the last top-level `(async () => {` is returned).
 //   - TARGET page: the provider WebView. Its traffic is served from fixtures.
 //   - `page`: the shim's method set and nothing else. Reading any other member
@@ -50,7 +50,23 @@ export const SHIM_METHODS = [
 ];
 
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
-async function hostMain({ source, scopes, methods, loginWaitMs }) {
+async function hostMain({
+	source,
+	scopes,
+	initialState,
+	methods,
+	loginWaitMs,
+	timerScale,
+}) {
+	if (timerScale !== 1) {
+		const nativeSetTimeout = window.setTimeout.bind(window);
+		window.setTimeout = (callback, delay, ...args) =>
+			nativeSetTimeout(
+				callback,
+				Math.max(0, Number(delay) * timerScale),
+				...args,
+			);
+	}
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
 		if (r && typeof r === "object" && typeof r.__shimError === "string")
@@ -145,9 +161,10 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 	const code = `${source.slice(0, last.index)}${lead}return (async () => {${source.slice(last.index + last[0].length)}`;
 	try {
 		const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-		await new AsyncFunction("page", "process", code)(
+		await new AsyncFunction("page", "process", "initialState", code)(
 			page,
 			Object.freeze({ env: Object.freeze({}) }),
+			initialState,
 		);
 		return { ok: true };
 	} catch (e) {
@@ -297,6 +314,10 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {string} o.bundle path to the built bundle
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
+ * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
+ * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
+ * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
+ * @param {boolean} [o.failResultWrite] fail the first successful result write
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  */
@@ -304,14 +325,25 @@ export async function runHarness({
 	bundle,
 	fixtures,
 	scopes,
+	initialState = {},
 	loginAfterMs = 0,
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
+	timerScale = 1,
+	stateAckDelayMs = 0,
+	failResultWrite = false,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
 	const calls = {};
 	const data = {};
+	const states = { ...initialState };
+	const stagedStates = {};
+	const stateMessages = [];
+	let failedResultWrite = false;
+	let eventOrder = 0;
+	let stateAckOrder = 0;
+	let resultWriteOrder = 0;
 	let result = null;
 
 	const browser = await chromium.launch({ headless: true });
@@ -367,9 +399,29 @@ export async function runHarness({
 					}
 					return null;
 				case "setData":
-					if (a[0] === "result")
-						result = a[1] == null ? null : JSON.parse(a[1]);
-					else data[a[0]] = a[1];
+					if (a[0] === "result") {
+						resultWriteOrder = ++eventOrder;
+						const nextResult = a[1] == null ? null : JSON.parse(a[1]);
+						if (
+							failResultWrite &&
+							!failedResultWrite &&
+							Array.isArray(nextResult?.errors) &&
+							!nextResult.errors.length
+						) {
+							failedResultWrite = true;
+							return { __shimError: "synthetic result write failed" };
+						}
+						result = nextResult;
+					} else if (a[0] === "STATE") {
+						if (stateAckDelayMs > 0)
+							await new Promise((resolve) =>
+								setTimeout(resolve, stateAckDelayMs),
+							);
+						const message = JSON.parse(JSON.stringify(a[1]));
+						stateAckOrder = ++eventOrder;
+						stateMessages.push(message);
+						stagedStates[message.stream] = message.cursor;
+					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
 				case "phase":
@@ -464,15 +516,31 @@ export async function runHarness({
 		const ret = await runner.evaluate(hostMain, {
 			source,
 			scopes,
+			initialState,
 			methods: SHIM_METHODS,
 			loginWaitMs,
+			timerScale,
 		});
+		if (ret?.ok && data.error === undefined && result) {
+			for (const [stream, cursor] of Object.entries(stagedStates)) {
+				const scope = scopes.find((candidate) =>
+					candidate.endsWith(`.${stream}`),
+				);
+				if (!scope || !Object.hasOwn(result, scope)) continue;
+				if (result.errors?.some((error) => error.scope === scope)) continue;
+				states[stream] = cursor;
+			}
+		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
 			elapsedMs: Date.now() - started,
 			calls,
 			data,
+			stateAckOrder,
+			resultWriteOrder,
+			states,
+			stateMessages,
 			result,
 			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
 			log,

@@ -6,10 +6,9 @@
 // PDPP records of that stream.
 //
 // The export download and ZIP read go through the host's captureDownload
-// and extractZipEntries; see ../shims/anthropic-export.ts. The host keeps no
-// STATE between runs, so each run requests a new export (Claude emails the
-// user each time) and an export that is not ready within the run's poll
-// budget is not resumed.
+// and extractZipEntries; see ../shims/anthropic-export.ts. The host can pass
+// committed STATE between runs. The connector emits checkpoints for old-format
+// pending exports, but not one-shot URLs from newer multi-part exports.
 import { collectAnthropic } from "../../../connectors/anthropic/index.ts";
 import { validateRecord } from "../../../connectors/anthropic/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
@@ -57,7 +56,10 @@ const count = (scope: unknown): number => {
 	return Array.isArray(records) ? records.length : 0;
 };
 
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) => {
+(globalThis as Record<string, unknown>).__pageshimMain = (
+	page: ShimPage,
+	initialState: Record<string, unknown>,
+) => {
 	bindExportHost(page as ExportHostPage);
 	return runOnPageShim(page, {
 		platform: "claude",
@@ -88,5 +90,5 @@ const count = (scope: unknown): number => {
 				details,
 			};
 		},
-	});
+	}, initialState);
 };

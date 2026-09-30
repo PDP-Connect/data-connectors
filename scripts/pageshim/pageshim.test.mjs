@@ -406,3 +406,141 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 		},
 	);
 });
+
+test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/strava_browser.mjs"
+	);
+	const built = await buildPageshim({
+		connector: "strava_browser",
+		outfile: join(out, "strava_browser-state.js"),
+	});
+	const sourceModels = JSON.parse(
+		readFileSync(
+			new URL(
+				"../../connectors/strava_browser/fixtures/training-activities-page-1.json",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	).models;
+	const activities = Array.from({ length: 205 }, (_, i) => {
+		const model = structuredClone(sourceModels[i % sourceModels.length]);
+		const id = String(91000000000 + i);
+		return {
+			...model,
+			id: Number(id),
+			id_str: id,
+			name: `Synthetic activity ${i}`,
+			activity_url: `https://www.strava.com/activities/${id}`,
+			activity_url_for_twitter: `https://www.strava.com/activities/${id}`,
+			bike_id: null,
+			athlete_gear_id: null,
+		};
+	});
+	const detailRequests = [];
+	const resolve = (raw) => {
+		const url = new URL(raw);
+		if (url.pathname === "/athlete/training_activities") {
+			const page = Number(url.searchParams.get("page") || 1);
+			const perPage = 20;
+			return {
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					models: activities.slice((page - 1) * perPage, page * perPage),
+					page,
+					perPage,
+					total: activities.length,
+				}),
+			};
+		}
+		const detail = /^\/activities\/(\d+)$/.exec(url.pathname);
+		if (detail) detailRequests.push(detail[1]);
+		return resolveFixture(raw);
+	};
+	const run = (initialState = {}, overrides = {}) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve },
+			scopes: c.scopes,
+			initialState,
+			timerScale: 0.01,
+			stateAckDelayMs: 5,
+			...overrides,
+		});
+	let initialState = {};
+
+	const first = await run(initialState);
+	assert.deepEqual(first.ret, { ok: true }, first.log.slice(-20).join("\n"));
+	assertCleanRun(first);
+	assert.deepEqual(first.result.errors, []);
+	assert.equal(first.result["strava.activities"].records.length, 205);
+	assert.deepEqual(
+		detailRequests,
+		[],
+		"initial inventory must not backfill details",
+	);
+	assert.equal(first.states?.activities?.list_complete, true);
+	assert.equal(first.states?.activities?.pending_detail_ids.length, 205);
+	assert.deepEqual(first.stateMessages, [
+		{
+			type: "STATE",
+			stream: "activities",
+			cursor: first.states.activities,
+		},
+	]);
+	assert.ok(
+		first.stateAckOrder < first.resultWriteOrder,
+		"the runtime must await the shell's STATE acknowledgement before publishing the result",
+	);
+	assert.ok(
+		!first.log.some((line) => line.includes("91000000000")),
+		"cursor contents must not appear in logs",
+	);
+	initialState = first.states;
+
+	detailRequests.length = 0;
+	const second = await run(initialState);
+	assert.deepEqual(second.ret, { ok: true }, second.log.slice(-20).join("\n"));
+	assertCleanRun(second);
+	assert.equal(
+		detailRequests.length,
+		100,
+		"run two must fetch the first detail batch",
+	);
+	const secondBatch = new Set(detailRequests);
+	assert.equal(second.result["strava.activities"].records.length, 100);
+	assert.equal(second.states?.activities?.pending_detail_ids.length, 105);
+	assert.notDeepEqual(second.states, initialState);
+	initialState = second.states;
+
+	detailRequests.length = 0;
+	const third = await run(initialState);
+	assert.deepEqual(third.ret, { ok: true }, third.log.slice(-20).join("\n"));
+	assertCleanRun(third);
+	assert.equal(
+		detailRequests.length,
+		100,
+		"run three must fetch the next detail batch",
+	);
+	assert.ok(
+		detailRequests.every((id) => !secondBatch.has(id)),
+		"run three must continue with activities left by run two",
+	);
+	assert.equal(third.result["strava.activities"].records.length, 100);
+	assert.equal(third.states?.activities?.pending_detail_ids.length, 5);
+
+	detailRequests.length = 0;
+	const failed = await run(third.states, { failResultWrite: true });
+	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
+	assert.equal(failed.data.error, "synthetic result write failed");
+	assert.equal(failed.stateMessages[0].cursor.pending_detail_ids.length, 0);
+	assert.deepEqual(
+		failed.states,
+		third.states,
+		"a failed result write must not commit the staged cursor",
+	);
+});

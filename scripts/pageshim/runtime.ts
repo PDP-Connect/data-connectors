@@ -9,7 +9,7 @@
 // Failure output matches mobile's legacy github-1.5.0.js: bad requestedScopes
 // is a fatal protocol_violation, and a fatal error yields an empty result
 // whose only error is that one, with the class inferred from its message.
-//   STATE    -> dropped (the host has no cursor store between runs)
+//   STATE    -> awaited page.setData("STATE", ...) and retained for this run
 //
 // It does not call runConnector(): that is the stdio + Patchright runtime.
 // It reuses makeEmitRecord, so record validation and scope filtering match
@@ -190,6 +190,7 @@ function resolveRequestedScopes(
 export async function runOnPageShim(
 	shim: ShimPage,
 	connector: PageshimConnector,
+	initialState: Record<string, unknown> = {},
 ): Promise<void> {
 	const page = playwrightPageFacade(shim);
 	let requestedScopes = [...connector.scopes];
@@ -207,7 +208,9 @@ export async function runOnPageShim(
 	);
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
-	const state: Record<string, unknown> = {};
+	const state: Record<string, unknown> = {
+		...initialState,
+	};
 	const emit = async (msg: Msg): Promise<void> => {
 		switch (msg.type) {
 			case "RECORD": {
@@ -216,9 +219,16 @@ export async function runOnPageShim(
 				records[stream].push(msg.data as Rec);
 				return;
 			}
-			case "STATE":
-				state[String(msg.stream)] = msg.cursor;
+			case "STATE": {
+				const stream = String(msg.stream);
+				await shim.setData("STATE", {
+					type: "STATE",
+					stream,
+					cursor: msg.cursor,
+				});
+				state[stream] = msg.cursor;
 				return;
+			}
 			case "SKIP_RESULT": {
 				const stream = String(msg.stream);
 				const reason = String(msg.message ?? msg.reason);

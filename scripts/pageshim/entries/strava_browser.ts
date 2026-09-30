@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // strava_browser on PageShim. Each scope is `{ records }`, the stream's PDPP
-// records unchanged. The host keeps no cursor between runs, so every run
-// walks the list from the newest activity, up to the connector's page bound.
+// records unchanged. Without saved initialState, each run walks the list from
+// the newest activity, up to the connector's page bound.
 import {
 	collectStravaBrowser,
 	LOGIN_URL,
@@ -16,7 +16,10 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 // Defined by build.mjs from connectors/strava_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
 
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
+(globalThis as Record<string, unknown>).__pageshimMain = (
+	page: ShimPage,
+	initialState: Record<string, unknown>,
+) =>
 	runOnPageShim(page, {
 		platform: "strava",
 		scopes: ["strava.activities"],
@@ -38,4 +41,4 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 				details: { activities },
 			};
 		},
-	});
+	}, initialState);

@@ -4,7 +4,7 @@
 
 // The `pageshim` build target: one self-contained browser IIFE per connector,
 // for the Vana mobile app's PageShim host (a WebView that runs a script as
-// `new AsyncFunction('page', 'process', source)`).
+// `new AsyncFunction('page', 'process', 'initialState', source)`).
 //
 // The connector code is bundled unmodified. The seam is three things only:
 //   - an entry in ./entries/ that hands the connector to ./runtime.ts, which
@@ -166,7 +166,7 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
-			js: "\n(async () => {\n  await globalThis.__pageshimMain(page);\n})();\n",
+			js: "\n(async () => {\n  const savedState = typeof initialState === 'undefined' ? {} : initialState;\n  await globalThis.__pageshimMain(page, savedState);\n})();\n",
 		},
 	});
 	const bytes = readFileSync(outfile);
