@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -167,6 +167,8 @@
 	},
 	"mobile": {
 		"pageshim": {
+			"entry": "strava_browser.ts",
+			"exception": "Preserves the app's activities payload and STATE shape.",
 			"scope_prefix": "strava",
 			"login_url": "https://www.strava.com/login",
 			"login_message": "Sign in to Strava, then return here.",

@@ -176,11 +176,17 @@ import { attachDownloadQueue } from "../../packages/polyfill-connectors/src/down
 import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/playwright-download.ts";
 import {
 	classifyManifestPartEntries,
+	parseJsonArrayChunks,
 	type ManifestPartFile,
 	type ParsedExport,
 	parseClassifiedExport,
+	parseConversation,
+	parseConversationHeader,
 	parseExport,
+	parseMessage,
 	resolveExportedProfile,
+	topLevelRawFields,
+	topLevelStringFields,
 	type SourceRecordEnvelope,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -305,6 +311,18 @@ const ACCOUNT_PROFILE_STREAM = "account_profile";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
+const OMITTED_SOURCE_BLOB_REF = {
+	blob_id: `sha256:${"0".repeat(64)}`,
+	mime_type: "application/json",
+	size_bytes: 1,
+	sha256: "0".repeat(64),
+};
+
+export type AnthropicZipEntryChunkReader = (
+	entryName: string,
+	offset: number,
+	length: number,
+) => Promise<string>;
 
 function sourceRecordBytes(source: SourceRecordEnvelope): Buffer {
 	const bytes = Buffer.from(JSON.stringify(source), "utf8");
@@ -827,27 +845,98 @@ export function readExportZip(zipPath: string): {
 	try {
 		const fileSize = statSync(zipPath).size;
 		const entries = readZipEntriesFromFile(fd, fileSize, EXPORT_ZIP_POLICY);
+		const entryJson = (entry: (typeof entries)[number]): unknown => {
+			const data = entry.data() as Buffer & {
+				hasJsonValue?: boolean;
+				jsonValue?: unknown;
+			};
+			return data.hasJsonValue
+				? data.jsonValue
+				: safeJsonParse(data.toString("utf8"));
+		};
 		const conversationsEntry = entries.find(
 			(e) => e.name === "conversations.json",
 		);
 		const conversationsJson = conversationsEntry
-			? safeJsonParse(conversationsEntry.data().toString("utf8"))
+			? entryJson(conversationsEntry)
 			: null;
 		const projectFiles = entries
 			.filter((e) => e.name.startsWith("projects/") && e.name.endsWith(".json"))
 			.map((e) => ({
 				name: e.name,
-				json: safeJsonParse(e.data().toString("utf8")),
+				json: entryJson(e),
 			}));
 		const usersEntry = entries.find((e) => e.name === "users.json");
 		return {
 			conversationsJson,
 			projectFiles,
-			userFiles: usersEntry
-				? [safeJsonParse(usersEntry.data().toString("utf8"))]
-				: [],
+			userFiles: usersEntry ? [entryJson(usersEntry)] : [],
 			recognized: Array.isArray(conversationsJson),
 			entryNames: entries.map((e) => e.name),
+		};
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** PageShim supplies archive metadata and a bounded reader instead of JSON
+ * values. Keep this adapter here so the collector stays independent of the
+ * host bridge; Desktop continues to use readExportZip above. */
+async function readExportZipMetadata(
+	zipPath: string,
+	readChunk: AnthropicZipEntryChunkReader,
+): Promise<{
+	conversationsEntry: { name: string; size: number } | null;
+	projectFiles: ProjectZipFile[];
+	userFiles: unknown[];
+	entryNames: string[];
+}> {
+	const fd = openSync(zipPath, "r");
+	try {
+		const entries = readZipEntriesFromFile(
+			fd,
+			statSync(zipPath).size,
+			EXPORT_ZIP_POLICY,
+		);
+		const jsonEntries = entries as typeof entries & Array<{ size?: number }>;
+		const byName = new Map(jsonEntries.map((entry) => [entry.name, entry]));
+		const sizeOf = (entry: (typeof jsonEntries)[number]) =>
+			typeof entry.size === "number" ? entry.size : entry.uncompressedSize;
+		const readJsonEntry = async (entry: (typeof jsonEntries)[number]) => {
+			let offset = 0;
+			let text = "";
+			const size = sizeOf(entry);
+			while (offset < size) {
+				const requestedLength = Math.min(64 * 1024, size - offset);
+				const chunk = await readChunk(entry.name, offset, requestedLength);
+				if (!chunk || chunk.length > requestedLength)
+					throw new Error(`invalid bounded read for JSON entry ${entry.name}`);
+				text += chunk;
+				offset += chunk.length;
+			}
+			return safeJsonParse(text);
+		};
+		const conversationCandidate = byName.get("conversations.json");
+		const conversationsEntry = conversationCandidate
+			? { ...conversationCandidate, size: sizeOf(conversationCandidate) }
+			: undefined;
+		const projectFiles: ProjectZipFile[] = [];
+		for (const entry of jsonEntries) {
+			if (entry.name.startsWith("projects/") && entry.name.endsWith(".json")) {
+				projectFiles.push({
+					name: entry.name,
+					json: await readJsonEntry(entry),
+				});
+			}
+		}
+		const usersEntry = byName.get("users.json");
+		return {
+			conversationsEntry: conversationsEntry
+				? { name: conversationsEntry.name, size: sizeOf(conversationsEntry) }
+				: null,
+			projectFiles,
+			userFiles: usersEntry ? [await readJsonEntry(usersEntry)] : [],
+			entryNames: entries.map((entry) => entry.name),
 		};
 	} finally {
 		closeSync(fd);
@@ -1074,7 +1163,14 @@ export async function collectAnthropic({
 	emitRecord,
 	isRecordSelected,
 	progress,
-}: BrowserCollectContext): Promise<void> {
+	readZipEntryChunk,
+	entriesValidated,
+	storeSourceRecords = true,
+}: BrowserCollectContext & {
+	readZipEntryChunk?: AnthropicZipEntryChunkReader;
+	entriesValidated?: boolean;
+	storeSourceRecords?: boolean;
+}): Promise<void> {
 	if (requested.size === 0) {
 		return;
 	}
@@ -1207,14 +1303,20 @@ export async function collectAnthropic({
 		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
-				const blob = spoolSourceRecord(source);
-				await emitRecord(
-					CONVERSATIONS_STREAM,
-					{ ...conversation, blob_ref: blob.blob_ref },
-					{
-						beforeEmit: () => emit(blob.event),
-					},
-				);
+				if (storeSourceRecords) {
+					const blob = spoolSourceRecord(source);
+					await emitRecord(
+						CONVERSATIONS_STREAM,
+						{ ...conversation, blob_ref: blob.blob_ref },
+						{
+							beforeEmit: () => emit(blob.event),
+						},
+					);
+				} else
+					await emitRecord(CONVERSATIONS_STREAM, {
+						...conversation,
+						blob_ref: OMITTED_SOURCE_BLOB_REF,
+					});
 			}
 		}
 		if (wantsMessages) {
@@ -1225,14 +1327,20 @@ export async function collectAnthropic({
 		}
 		if (wantsProjects) {
 			for (const { record: project, source } of selectedProjects) {
-				const blob = spoolSourceRecord(source);
-				await emitRecord(
-					PROJECTS_STREAM,
-					{ ...project, blob_ref: blob.blob_ref },
-					{
-						beforeEmit: () => emit(blob.event),
-					},
-				);
+				if (storeSourceRecords) {
+					const blob = spoolSourceRecord(source);
+					await emitRecord(
+						PROJECTS_STREAM,
+						{ ...project, blob_ref: blob.blob_ref },
+						{
+							beforeEmit: () => emit(blob.event),
+						},
+					);
+				} else
+					await emitRecord(PROJECTS_STREAM, {
+						...project,
+						blob_ref: OMITTED_SOURCE_BLOB_REF,
+					});
 			}
 		}
 		if (wantsDocuments) {
@@ -1355,6 +1463,243 @@ export async function collectAnthropic({
 				cursor: { synced_at: syncedAt },
 			});
 		}
+	}
+
+	async function emitStreamingConversations(
+		entry: { name: string; size: number },
+		entryNames: string[],
+		organizationId: string,
+		userFiles: readonly unknown[],
+		browserProfileAppliesToExport: boolean,
+		exportBookkeeping: Pick<
+			AnthropicCursorState,
+			"consumed_export" | "last_export_requested_at"
+		>,
+		parsedProjects: ParsedExport,
+	): Promise<void> {
+		if (!readZipEntryChunk)
+			throw new Error("Anthropic incremental export reader is unavailable");
+		const readValueText = async (start: number, end: number) => {
+			const parts: string[] = [];
+			for (let offset = start; offset < end; ) {
+				const text = await readZipEntryChunk(
+					entry.name,
+					offset,
+					Math.min(64 * 1024, end - offset),
+				);
+				if (!text || text.length > end - offset)
+					throw new Error("invalid bounded conversation reread");
+				parts.push(text);
+				offset += text.length;
+			}
+			return parts.join("");
+		};
+		if (!entriesValidated) {
+			try {
+				await parseJsonArrayChunks(
+					(name, offset, length) => readZipEntryChunk(name, offset, length),
+					entry,
+					() => {},
+				);
+			} catch (error) {
+				if ((error as { code?: string })?.code !== "INVALID_JSON_ARRAY")
+					throw error;
+				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+				return;
+			}
+		}
+		const oversizedConversationIds = new Set<string>();
+		let droppedConversations = 0;
+		let oversizedConversations = 0;
+		const processConversation = async (raw: unknown) => {
+			const parsed = parseConversation(raw);
+			if (!parsed) {
+				droppedConversations += 1;
+				return;
+			}
+			const source: SourceRecordEnvelope = {
+				format: "anthropic-source-record-v1",
+				stream: "conversations",
+				record_key: parsed.conversation.id,
+				payload: raw as Record<string, unknown>,
+			};
+			const selected =
+				wantsConversations &&
+				isRecordSelected?.(CONVERSATIONS_STREAM, parsed.conversation);
+			const sourceTooLarge =
+				selected && storeSourceRecords && !fitsHostBlob(source);
+			if (sourceTooLarge) {
+				oversizedConversationIds.add(parsed.conversation.id);
+				oversizedConversations += 1;
+			}
+			if (wantsMessages && !sourceTooLarge) {
+				for (const message of parsed.messages) {
+					if (!oversizedConversationIds.has(message.conversation_id))
+						await emitRecord(MESSAGES_STREAM, message);
+				}
+			}
+			if (selected && !sourceTooLarge) {
+				if (storeSourceRecords) {
+					const blob = spoolSourceRecord(source);
+					await emitRecord(
+						CONVERSATIONS_STREAM,
+						{ ...parsed.conversation, blob_ref: blob.blob_ref },
+						{
+							beforeEmit: () => emit(blob.event),
+						},
+					);
+				} else
+					await emitRecord(CONVERSATIONS_STREAM, {
+						...parsed.conversation,
+						blob_ref: OMITTED_SOURCE_BLOB_REF,
+					});
+			}
+		};
+		const processConversationJson = async (rawText: string) => {
+			const fields = topLevelRawFields(
+				rawText,
+				new Set([
+					"uuid",
+					"id",
+					"name",
+					"summary",
+					"created_at",
+					"updated_at",
+					"project_uuid",
+					"is_starred",
+					"chat_messages",
+				]),
+			);
+			const header: Record<string, unknown> = {};
+			for (const [key, field] of fields) {
+				if (key === "chat_messages") continue;
+				header[key] = JSON.parse(field);
+			}
+			const conversation = parseConversationHeader(header, 0);
+			if (!conversation) {
+				droppedConversations += 1;
+				return;
+			}
+			const messageText = fields.get("chat_messages") ?? "[]";
+			const messages: Array<{
+				index: number;
+				sortTime: number;
+				record: ReturnType<typeof parseMessage>;
+			}> = [];
+			let messageCount = 0;
+			if (messageText.trimStart().startsWith("[")) {
+				await parseJsonArrayChunks(
+					(_name, offset, length) =>
+						Promise.resolve(messageText.slice(offset, offset + length)),
+					{ name: entry.name, size: messageText.length },
+					(rawMessage) => {
+						const index = messageCount++;
+						if (
+							typeof rawMessage !== "object" ||
+							rawMessage === null ||
+							Array.isArray(rawMessage)
+						)
+							return;
+						const item = rawMessage as Record<string, unknown>;
+						const record = parseMessage(item, conversation.id);
+						if (!record) return;
+						messages.push({
+							index,
+							sortTime:
+								typeof item.created_at === "string"
+									? Date.parse(item.created_at) || 0
+									: 0,
+							record,
+						});
+					},
+					64 * 1024,
+					{ validatedEntry: true },
+				);
+			}
+			conversation.message_count = messageCount;
+			messages.sort((a, b) => a.sortTime - b.sortTime || a.index - b.index);
+			for (const message of messages) {
+				if (wantsMessages && !oversizedConversationIds.has(conversation.id))
+					await emitRecord(MESSAGES_STREAM, message.record!);
+			}
+			if (
+				wantsConversations &&
+				isRecordSelected?.(CONVERSATIONS_STREAM, conversation)
+			)
+				await emitRecord(CONVERSATIONS_STREAM, {
+					...conversation,
+					blob_ref: OMITTED_SOURCE_BLOB_REF,
+				});
+		};
+		try {
+			await parseJsonArrayChunks(
+				(name, offset, length) => readZipEntryChunk(name, offset, length),
+				entry,
+				processConversation,
+					64 * 1024,
+					{
+						validatedEntry: Boolean(entriesValidated),
+						...(entriesValidated && wantsConversations
+							? { maxBufferedObjectUnits: 16 * 1024 * 1024 }
+							: {}),
+					onOversizedObject: async (prefix, value) => {
+					if (
+						value.serializedLowerBoundUnits <=
+						HOST_BLOB_MAX_BYTES + 1024
+					) {
+							const raw = await readValueText(
+								value.startOffset,
+								value.endOffset,
+							);
+							if (storeSourceRecords)
+								await processConversation(JSON.parse(raw));
+							else await processConversationJson(raw);
+							return;
+						}
+						const fields = topLevelStringFields(
+							prefix,
+							new Set(["uuid", "id"]),
+						);
+						const id = fields.get("uuid") || fields.get("id");
+						if (!id) {
+							droppedConversations += 1;
+							return;
+						}
+					if (isRecordSelected?.(CONVERSATIONS_STREAM, { id })) {
+						oversizedConversationIds.add(id);
+						oversizedConversations += 1;
+						return;
+					}
+					const raw = await readValueText(
+						value.startOffset,
+						value.endOffset,
+					);
+					if (storeSourceRecords)
+						await processConversation(JSON.parse(raw));
+					else await processConversationJson(raw);
+					},
+				},
+			);
+		} catch (error) {
+			if ((error as { code?: string })?.code !== "INVALID_JSON_ARRAY")
+				throw error;
+			await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+			return;
+		}
+		parsedProjects.droppedConversations = droppedConversations;
+		if (oversizedConversations > 0) {
+			await progress(
+				`Warning: ${oversizedConversations} conversations item(s) in the export exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit and were not imported (export_items_too_large).`,
+				{ stream: CONVERSATIONS_STREAM, count: oversizedConversations },
+			);
+		}
+		await emitParsed(
+			parsedProjects,
+			organizationId,
+			userFiles,
+			browserProfileAppliesToExport,
+			exportBookkeeping,
+		);
 	}
 
 	// Resume a pending OLD-format export from a prior run — NEVER request a
@@ -1589,16 +1934,46 @@ export async function collectAnthropic({
 				);
 				return;
 			}
+			const streamedArchive = readZipEntryChunk
+				? await readExportZipMetadata(attempt.zipPath, readZipEntryChunk)
+				: null;
 			const {
 				conversationsJson,
 				projectFiles,
 				userFiles,
 				recognized,
 				entryNames,
-			} = readExportZip(attempt.zipPath);
+			} = streamedArchive
+				? {
+						conversationsJson: null,
+						projectFiles: streamedArchive.projectFiles,
+						userFiles: streamedArchive.userFiles,
+						recognized: streamedArchive.conversationsEntry !== null,
+						entryNames: streamedArchive.entryNames,
+					}
+				: readExportZip(attempt.zipPath);
 			if (!recognized) {
 				// No STATE: pending_export stays so the same export is reused.
 				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+				return;
+			}
+			if (streamedArchive?.conversationsEntry) {
+				const parsedProjects = parseExport(
+					[],
+					projectFiles.map((file) => file.json),
+				);
+				await emitStreamingConversations(
+					streamedArchive.conversationsEntry,
+					streamedArchive.entryNames,
+					pendingExport.organization_id,
+					userFiles,
+					pendingExportWasCreatedThisRun,
+					{
+						consumed_export: pendingExport,
+						last_export_requested_at: pendingExport.requested_at,
+					},
+					parsedProjects,
+				);
 				return;
 			}
 			const parsed = parseExport(

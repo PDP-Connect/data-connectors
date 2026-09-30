@@ -126,7 +126,19 @@ const stubPlugin = (stubbed, port) => ({
 });
 
 /** Builds one connector. Returns size and the list of stubbed modules. */
-export async function buildPageshim({ connector, outfile, minify = true }) {
+export async function buildPageshim({
+	connector,
+	outfile,
+	minify = true,
+	sinceDays = 0,
+	streamResults = false,
+	bridgeCallTimeoutMs = 30_000,
+	entryPoint,
+	extraDefines = {},
+}) {
+	if (!Number.isSafeInteger(sinceDays) || sinceDays < 0) {
+		throw new Error("sinceDays must be a non-negative integer");
+	}
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
 	const manifest = JSON.parse(
@@ -144,7 +156,11 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		? undefined
 		: genericPageshimEntry(connector, manifest, pageshim);
 	await esbuild.build({
-		...(entry ? { entryPoints: [entry] } : { stdin: genericEntry }),
+		...(entryPoint
+			? { entryPoints: [entryPoint] }
+			: entry
+				? { entryPoints: [entry] }
+				: { stdin: genericEntry }),
 		bundle: true,
 		platform: "browser",
 		format: "iife",
@@ -158,6 +174,10 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		inject: [join(HERE, "shims", "process.js"), ...(port?.inject ?? [])],
 		define: {
 			"import.meta.url": '"file:///pageshim/bundle.js"',
+			PAGESHIM_RESULT_STREAMING: String(streamResults),
+			PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
+			PAGESHIM_SINCE_DAYS: String(sinceDays),
+			...extraDefines,
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
 				manifest.version,
@@ -167,7 +187,7 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
-			js: "\n(async () => {\n  await globalThis.__pageshimMain(page);\n})();\n",
+			js: "\n(async () => {\n  const supportsState = typeof initialState !== 'undefined';\n  const savedState = supportsState ? initialState : {};\n  await globalThis.__pageshimMain(page, savedState, supportsState);\n})();\n",
 		},
 	});
 	const bytes = readFileSync(outfile);
@@ -249,7 +269,13 @@ const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const { values } = parseArgs({
-		options: { connector: { type: "string" }, out: { type: "string" } },
+		options: {
+			connector: { type: "string" },
+			out: { type: "string" },
+			"since-days": { type: "string" },
+			"stream-results": { type: "boolean", default: false },
+			"bridge-call-timeout-ms": { type: "string" },
+		},
 	});
 	if (!values.connector || !values.out) {
 		console.error("usage: build.mjs --connector <name> --out <file.js>");
@@ -259,6 +285,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const report = await buildPageshim({
 		connector: values.connector,
 		outfile: values.out,
+		sinceDays: values["since-days"] ? Number(values["since-days"]) : 0,
+		streamResults: values["stream-results"],
+		bridgeCallTimeoutMs: values["bridge-call-timeout-ms"]
+			? Number(values["bridge-call-timeout-ms"])
+			: 30_000,
 	});
 	console.log(
 		JSON.stringify({ ...report, outfile: relative(REPO, report.outfile) }),

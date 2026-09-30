@@ -6,15 +6,15 @@
 // PDPP records of that stream.
 //
 // The export download and ZIP read go through the host's captureDownload
-// and extractZipEntries; see ../shims/anthropic-export.ts. The host keeps no
-// STATE between runs, so each run requests a new export (Claude emails the
-// user each time) and an export that is not ready within the run's poll
-// budget is not resumed.
+// and extractZipEntries; see ../shims/anthropic-export.ts. The host can pass
+// committed STATE between runs. The connector emits checkpoints for old-format
+// pending exports, but not one-shot URLs from newer multi-part exports.
 import { collectAnthropic } from "../../../connectors/anthropic/index.ts";
 import { validateRecord } from "../../../connectors/anthropic/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import {
 	bindExportHost,
+	readSavedZipEntryChunk,
 	type ExportHostPage,
 	withExportDownloads,
 } from "../shims/anthropic-export.ts";
@@ -57,7 +57,11 @@ const count = (scope: unknown): number => {
 	return Array.isArray(records) ? records.length : 0;
 };
 
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) => {
+(globalThis as Record<string, unknown>).__pageshimMain = (
+	page: ShimPage,
+	initialState: Record<string, unknown>,
+	supportsState: boolean,
+) => {
 	bindExportHost(page as ExportHostPage);
 	return runOnPageShim(page, {
 		platform: "claude",
@@ -71,12 +75,39 @@ const count = (scope: unknown): number => {
 			collectAnthropic({
 				...ctx,
 				page: withExportDownloads(ctx.page as object),
+				readZipEntryChunk: readSavedZipEntryChunk,
+				entriesValidated: true,
+				storeSourceRecords: false,
 			} as never),
 		// blob_ref names a host blob that this host does not store; drop it
 		// rather than hand the app a reference it cannot resolve.
 		toScope: (_stream, records) => ({
 			records: records.map(({ blob_ref: _blobRef, ...record }) => record),
 		}),
+		streamScopeRecords: {
+			order: [
+				"messages",
+				"conversations",
+				"account_profile",
+				"projects",
+				"project_documents",
+			],
+			toRecord: (_stream, record) => {
+				const { blob_ref: _blobRef, ...output } = record;
+				return output;
+			},
+			summarizeCounts: (counts) => {
+				const details = Object.fromEntries(
+					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),
+				);
+				const conversations = Number(details.conversations ?? 0);
+				return {
+					count: conversations,
+					label: conversations === 1 ? "conversation" : "conversations",
+					details,
+				};
+			},
+		},
 		summarize: (scopes) => {
 			const details = Object.fromEntries(
 				STREAMS.map((s) => [s, count(scopes[`claude.${s}`])]),
@@ -88,5 +119,5 @@ const count = (scope: unknown): number => {
 				details,
 			};
 		},
-	});
+	}, initialState, supportsState);
 };

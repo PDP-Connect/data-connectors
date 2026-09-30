@@ -4,7 +4,7 @@
 // Runs a pageshim bundle the way the mobile host does, in Playwright Chromium.
 //
 // Model: vana-com/unity-surfaces apps/mobile-shell/lib/connect/page_shim.dart.
-//   - RUNNER page: executes the bundle as `new AsyncFunction('page', 'process', code)`
+//   - RUNNER page: executes the bundle as `new AsyncFunction('page', 'process', 'initialState', code)`
 //     after the host's transform (the last top-level `(async () => {` is returned).
 //   - TARGET page: the provider WebView. Its traffic is served from fixtures.
 //   - `page`: the shim's method set and nothing else. Reading any other member
@@ -18,9 +18,48 @@
 // This is a re-implementation from the Dart source, not a vendored copy. It
 // is not a device run.
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { chromium } from "playwright";
+import { ResultStreamHarness } from "./result-stream-harness.mjs";
+
+const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
+
+function jsonPayloadUnits(value) {
+	if (value === null) return 4;
+	if (typeof value === "string") {
+		let units = value.length + 2;
+		for (let index = 0; index < value.length; index++) {
+			const code = value.charCodeAt(index);
+			if (code === 0x22 || code === 0x5c) units++;
+			else if (code < 0x20) units += 5;
+		}
+		return units;
+	}
+	if (typeof value === "number") return String(value).length;
+	if (typeof value === "boolean") return value ? 4 : 5;
+	if (Array.isArray(value))
+		return (
+			2 +
+			value.reduce((sum, item) => sum + jsonPayloadUnits(item), 0) +
+			Math.max(0, value.length - 1)
+		);
+	if (typeof value === "object") {
+		const entries = Object.entries(value);
+		return (
+			2 +
+			entries.reduce(
+				(sum, [key, item]) =>
+					sum + jsonPayloadUnits(key) + 1 + jsonPayloadUnits(item),
+				0,
+			) +
+			Math.max(0, entries.length - 1)
+		);
+	}
+	return 0;
+}
 
 // page_shim.dart harnessJs `page` members. Nothing else is exposed.
 export const SHIM_METHODS = [
@@ -46,11 +85,31 @@ export const SHIM_METHODS = [
 	"hasCapturedResponse",
 	"captureDownload",
 	"extractZipEntries",
+	"readZipEntryChunk",
 	"promptUser",
 ];
 
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
-async function hostMain({ source, scopes, methods, loginWaitMs }) {
+async function hostMain({
+	source,
+	scopes,
+	initialState,
+	supportsStateArgument,
+	methods,
+	loginWaitMs,
+	env,
+	timerScale,
+}) {
+	window.__pageshimEnv = env || {};
+	if (timerScale !== 1) {
+		const nativeSetTimeout = window.setTimeout.bind(window);
+		window.setTimeout = (callback, delay, ...args) =>
+			nativeSetTimeout(
+				callback,
+				Math.max(0, Number(delay) * timerScale),
+				...args,
+			);
+	}
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
 		if (r && typeof r === "object" && typeof r.__shimError === "string")
@@ -104,8 +163,15 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 			]);
 			if (r?.ok !== true)
 				return r || { ok: false, error: "extractZipEntries returned nothing" };
-			return { ok: true, names: r.names, json: JSON.parse(r.jsonText) };
+			return { ok: true, handle: r.handle, names: r.names, entries: r.entries };
 		},
+		readZipEntryChunk: (h, name, offset, length) =>
+			call("readZipEntryChunk", [
+				h == null ? null : String(h),
+				String(name),
+				offset,
+				length,
+			]),
 		promptUser: async (msg, check, interval) => {
 			await call("setData", ["status", msg]);
 			await call("promptUser", []);
@@ -145,11 +211,17 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 	const code = `${source.slice(0, last.index)}${lead}return (async () => {${source.slice(last.index + last[0].length)}`;
 	try {
 		const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-		await new AsyncFunction("page", "process", code)(
+		const runArgs = [
 			page,
-			Object.freeze({ env: Object.freeze({}) }),
-		);
-		return { ok: true };
+			Object.freeze({ env: Object.freeze({ ...(env || {}) }) }),
+		];
+		if (supportsStateArgument) runArgs.push(initialState);
+		const parameters = supportsStateArgument
+			? ["page", "process", "initialState"]
+			: ["page", "process"];
+		await new AsyncFunction(...parameters, code)(...runArgs);
+		const testMetrics = window.__pageshimTestMetrics;
+		return testMetrics ? { ok: true, testMetrics } : { ok: true };
 	} catch (e) {
 		return { ok: false, error: String(e?.message ?? e) };
 	}
@@ -175,11 +247,15 @@ function readZipJsonEntries(bytes, include) {
 	const count = bytes.readUInt16LE(eocd + 10);
 	let off = bytes.readUInt32LE(eocd + 16);
 	const names = [];
-	const json = {};
+	const entries = [];
+	const entryTexts = new Map();
+	let rawBytes = 0;
+	let selectedRawBytes = 0;
 	for (let n = 0; n < count; n++) {
 		if (bytes.readUInt32LE(off) !== 0x02014b50) break;
 		const method = bytes.readUInt16LE(off + 10);
 		const compSize = bytes.readUInt32LE(off + 20);
+		const rawSize = bytes.readUInt32LE(off + 24);
 		const nameLen = bytes.readUInt16LE(off + 28);
 		const extraLen = bytes.readUInt16LE(off + 30);
 		const commentLen = bytes.readUInt16LE(off + 32);
@@ -187,9 +263,11 @@ function readZipJsonEntries(bytes, include) {
 		const name = bytes.toString("utf8", off + 46, off + 46 + nameLen);
 		off += 46 + nameLen + extraLen + commentLen;
 		names.push(name);
+		if (!name.endsWith("/")) rawBytes += rawSize;
 		if (name.endsWith("/") || !name.endsWith(".json")) continue;
 		if (include && !include.some((needle) => name.includes(needle))) continue;
 		if (method !== 0 && method !== 8) continue;
+		selectedRawBytes += rawSize;
 		const start =
 			local +
 			30 +
@@ -204,10 +282,24 @@ function readZipJsonEntries(bytes, include) {
 			return { ok: false, error: "noinflate" };
 		}
 		try {
-			json[name] = JSON.parse(text);
+			JSON.parse(text);
+			entries.push({ name, size: text.length });
+			entryTexts.set(name, text);
 		} catch {}
 	}
-	return { ok: true, names, jsonText: JSON.stringify(json) };
+	return {
+		ok: true,
+		handle: "run",
+		names,
+		entries,
+		entryTexts,
+		stats: {
+			entries: names.length,
+			rawBytes,
+			selected: entries.length,
+			selectedRawBytes,
+		},
+	};
 }
 
 /**
@@ -227,6 +319,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 	let signedUrl = null;
 	let minted = false;
 	let stash = null;
+	let extracted = null;
 	const notReady = (why) => {
 		log.push(`[capture] not ready: ${why}`);
 		return { ok: false, ready: false, error: "export not ready" };
@@ -238,6 +331,9 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 		return { __shimError: message };
 	};
 	return {
+		get stats() {
+			return extracted?.stats ?? null;
+		},
 		async captureDownload(url) {
 			const m = /\/export\/([^/]+)\/download\/([^/?#]+)/.exec(url);
 			if (!m) return terminal("badurl");
@@ -284,10 +380,46 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 				return { ok: false, error: "no captured download in this run" };
 			const bytes = stash;
 			stash = null;
-			return readZipJsonEntries(
+			extracted = readZipJsonEntries(
 				bytes,
 				Array.isArray(options?.include) ? options.include.map(String) : null,
 			);
+			if (extracted.ok) {
+				return {
+					ok: true,
+					handle: extracted.handle,
+					names: extracted.names,
+					entries: extracted.entries,
+				};
+			}
+			return extracted;
+		},
+		readZipEntryChunk(handle, entryName, offset, length) {
+			if (handle !== "run")
+				return { ok: false, error: "zip entry is not available" };
+			if (
+				!Number.isInteger(offset) ||
+				offset < 0 ||
+				!Number.isInteger(length) ||
+				length < 1 ||
+				length > 64 * 1024
+			)
+				return {
+					ok: false,
+					error:
+						"readZipEntryChunk requires a non-negative offset and length <= 65536",
+				};
+			const text = extracted?.entryTexts.get(entryName);
+			if (text == null)
+				return { ok: false, error: "zip entry is not available" };
+			if (offset > text.length)
+				return { ok: false, error: "readZipEntryChunk offset is invalid" };
+			let end = Math.min(offset + length, text.length);
+			if (end < text.length) {
+				const next = text.charCodeAt(end);
+				if (next >= 0xdc00 && next <= 0xdfff) end--;
+			}
+			return { ok: true, text: text.slice(offset, end) };
 		},
 	};
 }
@@ -297,6 +429,11 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {string} o.bundle path to the built bundle
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
+ * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
+ * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
+ * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
+ * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
+ * @param {boolean} [o.failResultWrite] fail the first successful result write
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  */
@@ -304,21 +441,58 @@ export async function runHarness({
 	bundle,
 	fixtures,
 	scopes,
+	initialState = {},
+	supportsStateArgument = true,
 	loginAfterMs = 0,
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
+	env = {},
+	resultStreaming = false,
+	resultSpoolDirectory = join(
+		process.cwd(),
+		".scratch",
+		`pageshim-result-${randomUUID()}`,
+	),
+	resultStreamFailure,
+	timerScale = 1,
+	stateAckDelayMs = 0,
+	failResultWrite = false,
+	resultStreamNeverAck = false,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
 	const calls = {};
+	const pageNavigations = [];
 	const data = {};
+	const states = { ...initialState };
+	const stagedStates = {};
+	const stateMessages = [];
+	let failedResultWrite = false;
+	let eventOrder = 0;
+	let stateAckOrder = 0;
+	let resultWriteOrder = 0;
+	let maxBridgePayloadUnits = 0;
+	let bridgeCallCount = 0;
 	let result = null;
+	const streamHost = new ResultStreamHarness({
+		approvedScopes: scopes,
+		directory: resultSpoolDirectory,
+		failAt: resultStreamFailure,
+		streamingSupported: resultStreaming,
+	});
 
-	const browser = await chromium.launch({ headless: true });
+	const browser = await chromium.launch({
+		headless: true,
+		args: ["--enable-precise-memory-info"],
+	});
 	try {
 		const context = await browser.newContext();
 		await context.route(fixtures.hosts, (route) => {
-			const f = fixtures.resolve(route.request().url());
+			const request = route.request();
+			const f = fixtures.resolve(request.url(), {
+				method: request.method(),
+				postData: request.postData(),
+			});
 			return route.fulfill({
 				...f,
 				headers: { "access-control-allow-origin": "*" },
@@ -359,6 +533,7 @@ export async function runHarness({
 				case "evaluate":
 					return evaluateInPage(String(a[0] ?? ""));
 				case "goto":
+					pageNavigations.push(String(a[0]));
 					if (a[0]) {
 						await target
 							.goto(a[0], { waitUntil: "commit" })
@@ -367,9 +542,38 @@ export async function runHarness({
 					}
 					return null;
 				case "setData":
-					if (a[0] === "result")
-						result = a[1] == null ? null : JSON.parse(a[1]);
-					else data[a[0]] = a[1];
+					if (String(a[0]).startsWith("result:")) {
+						if (resultStreamNeverAck) return new Promise(() => {});
+						const ack = await streamHost.setData(a[0], a[1]);
+						if (a[0] === "result:done") resultWriteOrder = ++eventOrder;
+						return ack;
+					}
+					if (a[0] === "result") {
+						await streamHost.setData("result", a[1]);
+						resultWriteOrder = ++eventOrder;
+						const nextResult = a[1] == null ? null : JSON.parse(a[1]);
+						if (
+							failResultWrite &&
+							!failedResultWrite &&
+							Array.isArray(nextResult?.errors) &&
+							!nextResult.errors.length
+						) {
+							failedResultWrite = true;
+							return { __shimError: "synthetic result write failed" };
+						}
+						result = nextResult;
+					} else if (a[0] === "STATE") {
+						if (!scopes.includes(a[1]?.stream))
+							return { __shimError: "invalid PDPP STATE message" };
+						if (stateAckDelayMs > 0)
+							await new Promise((resolve) =>
+								setTimeout(resolve, stateAckDelayMs),
+							);
+						const message = JSON.parse(JSON.stringify(a[1]));
+						stateAckOrder = ++eventOrder;
+						stateMessages.push(message);
+						stagedStates[message.stream] = message.cursor;
+					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
 				case "phase":
@@ -386,6 +590,8 @@ export async function runHarness({
 					return archive.captureDownload(String(a[0] ?? ""));
 				case "extractZipEntries":
 					return archive.extractZipEntries(a[1]);
+				case "readZipEntryChunk":
+					return archive.readZipEntryChunk(a[0], a[1], a[2], a[3]);
 				case "httpFetch": {
 					const r = await target.evaluate(
 						async ({ url, opts }) => {
@@ -433,6 +639,7 @@ export async function runHarness({
 			}
 		};
 
+
 		const runner = await context.newPage();
 		await runner.route("https://runner.local/", (r) =>
 			r.fulfill({
@@ -440,12 +647,47 @@ export async function runHarness({
 				body: "<!doctype html><body></body>",
 			}),
 		);
-		await runner.exposeBinding("__pageApi", (_src, method, args) =>
-			dispatch(method, args),
-		);
-		runner.on("console", (m) => log.push(`[bundle] ${m.text().slice(0, 300)}`));
+		await runner.exposeBinding("__pageApi", async (_src, method, args) => {
+			const requestUnits = jsonPayloadUnits([method, args]);
+			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, requestUnits);
+			bridgeCallCount++;
+			if (requestUnits > PAGE_BRIDGE_MAX_UNITS)
+				return {
+					__shimError:
+						"Bridge request argument exceeds 256 Ki UTF-16 code units",
+				};
+			const result = await dispatch(method, args);
+			const replyUnits = jsonPayloadUnits(result);
+			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, replyUnits);
+			if (replyUnits > PAGE_BRIDGE_MAX_UNITS)
+				return { __shimError: "Bridge reply exceeds 256 Ki UTF-16 code units" };
+			return result;
+		});
+		runner.on("console", (m) => {
+			const message = m.text();
+			const limit = message.includes("[chatgpt-timing]") ? 4096 : 300;
+			log.push(`[bundle] ${message.slice(0, limit)}`);
+		});
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
+		const performanceSession = await context.newCDPSession(runner);
+		await performanceSession.send("Performance.enable");
+		let sampling = true;
+		let maxHeapBytes = 0;
+		const sampleHeap = async () => {
+			const { metrics } = await performanceSession.send(
+				"Performance.getMetrics",
+			);
+			const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
+			if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
+		};
+		const sampler = (async () => {
+			while (sampling) {
+				await sampleHeap();
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			await sampleHeap();
+		})();
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			fixtures.setLoggedIn(false); // the user never signs in
@@ -464,20 +706,59 @@ export async function runHarness({
 		const ret = await runner.evaluate(hostMain, {
 			source,
 			scopes,
+			initialState,
+			supportsStateArgument,
 			methods: SHIM_METHODS,
 			loginWaitMs,
+			env,
+			timerScale,
 		});
+		sampling = false;
+		await sampler;
+		if (
+			ret?.ok &&
+			data.error === undefined &&
+			(result || streamHost.doneValue)
+		) {
+			for (const [scope, cursor] of Object.entries(stagedStates)) {
+				if (result && !Object.hasOwn(result, scope)) continue;
+				const errors = result?.errors ?? streamHost.doneValue?.errors ?? [];
+				if (errors.some((error) => error.scope === scope)) continue;
+				states[scope] = cursor;
+			}
+		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
 			elapsedMs: Date.now() - started,
+			maxHeapBytes,
 			calls,
+			pageNavigations,
+			bridgeCallCount,
+			maxBridgePayloadUnits,
 			data,
+			stateAckOrder,
+			resultWriteOrder,
+			states,
+			stateMessages,
 			result,
+			streamResult: streamHost.mode === "stream" ? streamHost.summary() : null,
+			streamDone: streamHost.doneValue ?? null,
+			streamScopeFiles:
+				streamHost.mode === "stream"
+					? Object.fromEntries(
+							[...streamHost.files].map(([scope, entry]) => [
+								scope,
+								entry.path,
+							]),
+						)
+					: {},
+			archiveStats: archive.stats,
 			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
 			log,
 		};
 	} finally {
+		for (const entry of streamHost.files.values()) await entry.handle?.close();
 		await browser.close();
 	}
 }
