@@ -19,8 +19,11 @@
 // is not a device run.
 
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { chromium } from "playwright";
+import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
 // page_shim.dart harnessJs `page` members. Nothing else is exposed.
 export const SHIM_METHODS = [
@@ -150,7 +153,8 @@ async function hostMain({ source, scopes, methods, loginWaitMs, env }) {
 			page,
 			Object.freeze({ env: Object.freeze({ ...(env || {}) }) }),
 		);
-		return { ok: true };
+		const testMetrics = window.__pageshimTestMetrics;
+		return testMetrics ? { ok: true, testMetrics } : { ok: true };
 	} catch (e) {
 		return { ok: false, error: String(e?.message ?? e) };
 	}
@@ -309,6 +313,13 @@ export async function runHarness({
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
 	env = {},
+	resultStreaming = false,
+	resultSpoolDirectory = join(
+		process.cwd(),
+		".scratch",
+		`pageshim-result-${randomUUID()}`,
+	),
+	resultStreamFailure,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -316,8 +327,17 @@ export async function runHarness({
 	const pageNavigations = [];
 	const data = {};
 	let result = null;
+	const streamHost = new ResultStreamHarness({
+		approvedScopes: scopes,
+		directory: resultSpoolDirectory,
+		failAt: resultStreamFailure,
+		streamingSupported: resultStreaming,
+	});
 
-	const browser = await chromium.launch({ headless: true });
+	const browser = await chromium.launch({
+		headless: true,
+		args: ["--enable-precise-memory-info"],
+	});
 	try {
 		const context = await browser.newContext();
 		await context.route(fixtures.hosts, (route) => {
@@ -371,9 +391,13 @@ export async function runHarness({
 					}
 					return null;
 				case "setData":
-					if (a[0] === "result")
+					if (String(a[0]).startsWith("result:")) {
+						return await streamHost.setData(a[0], a[1]);
+					}
+					if (a[0] === "result") {
+						await streamHost.setData("result", a[1]);
 						result = a[1] == null ? null : JSON.parse(a[1]);
-					else data[a[0]] = a[1];
+					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
 				case "phase":
@@ -450,6 +474,24 @@ export async function runHarness({
 		runner.on("console", (m) => log.push(`[bundle] ${m.text().slice(0, 300)}`));
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
+		const performanceSession = await context.newCDPSession(runner);
+		await performanceSession.send("Performance.enable");
+		let sampling = true;
+		let maxHeapBytes = 0;
+		const sampleHeap = async () => {
+			const { metrics } = await performanceSession.send(
+				"Performance.getMetrics",
+			);
+			const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
+			if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
+		};
+		const sampler = (async () => {
+			while (sampling) {
+				await sampleHeap();
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			await sampleHeap();
+		})();
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			fixtures.setLoggedIn(false); // the user never signs in
@@ -472,18 +514,33 @@ export async function runHarness({
 			loginWaitMs,
 			env,
 		});
+		sampling = false;
+		await sampler;
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
 			elapsedMs: Date.now() - started,
+			maxHeapBytes,
 			calls,
 			pageNavigations,
 			data,
 			result,
+			streamResult: streamHost.mode === "stream" ? streamHost.summary() : null,
+			streamDone: streamHost.doneValue ?? null,
+			streamScopeFiles:
+				streamHost.mode === "stream"
+					? Object.fromEntries(
+							[...streamHost.files].map(([scope, entry]) => [
+								scope,
+								entry.path,
+							]),
+						)
+					: {},
 			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
 			log,
 		};
 	} finally {
+		for (const entry of streamHost.files.values()) await entry.handle?.close();
 		await browser.close();
 	}
 }

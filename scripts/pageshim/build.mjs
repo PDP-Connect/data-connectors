@@ -19,7 +19,7 @@
 //
 // This target does not touch the OCI build (build-connector-oci-artifact.mjs).
 //
-// usage: node scripts/pageshim/build.mjs --connector <name> --out <file.js>
+// usage: node scripts/pageshim/build.mjs --connector <name> --out <file.js> [--stream-results]
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
@@ -132,7 +132,15 @@ const stubPlugin = (stubbed, port) => ({
 });
 
 /** Builds one connector. Returns size and the list of stubbed modules. */
-export async function buildPageshim({ connector, outfile, minify = true, sinceDays = 0 }) {
+export async function buildPageshim({
+	connector,
+	outfile,
+	minify = true,
+	sinceDays = 0,
+	streamResults = false,
+	entryPoint,
+	extraDefines = {},
+}) {
 	if (!PAGESHIM_CONNECTORS.includes(connector)) {
 		throw new Error(`pageshim target is not enabled for ${connector}`);
 	}
@@ -142,7 +150,7 @@ export async function buildPageshim({ connector, outfile, minify = true, sinceDa
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
 	await esbuild.build({
-		entryPoints: [join(HERE, "entries", `${connector}.ts`)],
+		entryPoints: [entryPoint ?? join(HERE, "entries", `${connector}.ts`)],
 		bundle: true,
 		platform: "browser",
 		format: "iife",
@@ -156,7 +164,9 @@ export async function buildPageshim({ connector, outfile, minify = true, sinceDa
 		inject: [join(HERE, "shims", "process.js"), ...(port?.inject ?? [])],
 		define: {
 			"import.meta.url": '"file:///pageshim/bundle.js"',
+			PAGESHIM_RESULT_STREAMING: String(streamResults),
 			PAGESHIM_SINCE_DAYS: String(sinceDays),
+			...extraDefines,
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
 				JSON.parse(
@@ -190,6 +200,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			connector: { type: "string" },
 			out: { type: "string" },
 			"since-days": { type: "string" },
+			"stream-results": { type: "boolean", default: false },
 		},
 	});
 	if (!values.connector || !values.out) {
@@ -201,6 +212,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		connector: values.connector,
 		outfile: values.out,
 		sinceDays: values["since-days"] ? Number(values["since-days"]) : 0,
+		streamResults: values["stream-results"],
 	});
 	console.log(
 		JSON.stringify({ ...report, outfile: relative(REPO, report.outfile) }),

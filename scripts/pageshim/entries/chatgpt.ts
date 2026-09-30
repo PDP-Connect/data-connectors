@@ -59,6 +59,20 @@ const count = (scope: unknown): number => {
 		probe: (facade) => probe(facade as never),
 		collect: (ctx) => collectChatGpt(ctx as never),
 		toScope: (_stream, records) => ({ records }),
+		streamScopeRecords: {
+			order: ["messages", "conversations"],
+			summarizeCounts: (counts) => {
+				const details = Object.fromEntries(
+					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),
+				);
+				const conversations = details.conversations;
+				return {
+					count: conversations,
+					label: conversations === 1 ? "conversation" : "conversations",
+					details,
+				};
+			},
+		},
 		partialStreamsFromDetailGaps: (streams) =>
 			streams.filter((s) => STREAMS.includes(s)),
 		summarize: (scopes) => {

@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -213,6 +214,7 @@ test("chatgpt: 30-day PageShim window stops before older conversation details", 
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d.js"),
 		sinceDays: 30,
+		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const detailCalls = [];
@@ -242,6 +244,8 @@ test("chatgpt: 30-day PageShim window stops before older conversation details", 
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
 			scopes: fx.pageshimCase.scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, "chatgpt-30d-stream"),
 		});
 	} finally {
 		fx.useConversationCount(2);
@@ -251,17 +255,16 @@ test("chatgpt: 30-day PageShim window stops before older conversation details", 
 		detailCalls,
 		["conv-1", "conv-2"],
 	);
-	assert.deepEqual(
-		r.result["chatgpt.conversations"].records.map((x) => x.id),
-		["conv-1", "conv-2"],
+	assert.equal(r.streamResult.mode, "stream");
+	assert.equal(r.streamResult.completed, true);
+	assert.equal(r.streamDone.exportSummary.window?.sinceDays, 30);
+	assert.equal(r.streamDone.exportSummary.partial, true);
+	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
+	assert.ok(r.streamDone.errors.some((e) => e.reason === "time_window"));
+	const conversations = JSON.parse(
+		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
-	assert.equal(
-		r.result.exportSummary.window?.sinceDays,
-		30,
-	);
-	assert.equal(r.result.exportSummary.partial, true);
-	assert.equal(r.result.exportSummary.partialReason, "time_window");
-	assert.ok(r.result.errors.some((e) => e.reason === "time_window"));
+	assert.deepEqual(conversations.records.map((x) => x.id), ["conv-1", "conv-2"]);
 	assert.match(r.data.status, /^Partial:/);
 });
 
