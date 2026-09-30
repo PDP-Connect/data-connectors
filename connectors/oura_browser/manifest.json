@@ -9,15 +9,17 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {
       "network": {
-        "required": true
+        "required": true,
+        "features": ["in_page_fetch"]
       },
       "browser": {
-        "required": true
+        "required": true,
+        "features": ["evaluate", "goto"]
       }
     }
   },
@@ -294,5 +296,18 @@
   ],
   "reason_display_messages": {
     "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+  },
+  "mobile": {
+    "pageshim": {
+      "scope_prefix": "oura",
+      "login_url": "https://cloud.ouraring.com/user/sign-in",
+      "login_message": "Sign in to Oura, then return here.",
+      "collect_export": "collectOuraBrowser",
+      "probe_export": "probeOuraBrowserSession",
+      "summary": {
+        "singular": "record",
+        "plural": "records"
+      }
+    }
   }
 }

@@ -1,6 +1,6 @@
 name: PageShim target
 
-# Builds every connector enabled for the `pageshim` target (the Vana mobile
+# Builds every connector whose manifest requirements fit the `pageshim` host (the Vana mobile
 # host) and runs it in the PageShim harness against recorded fixtures.
 # See scripts/pageshim/build.mjs. No path filter, so the check never sits
 # pending on a PR.
@@ -42,4 +42,4 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Build and run the harness
-        run: node --test scripts/pageshim/pageshim.test.mjs
+        run: node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs

@@ -8,15 +8,15 @@
 // goto() of the export URL fires a Playwright-style download of the archive.
 
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveFixture } from "./anthropic.mjs";
 
-process.env.PDPP_BLOB_SPOOL_DIR ??= mkdtempSync(
-	join(tmpdir(), "pageshim-blobs-"),
-);
+const scratchRoot = fileURLToPath(new URL("../../../.tmp/pageshim/", import.meta.url));
+mkdirSync(scratchRoot, { recursive: true });
+process.env.PDPP_BLOB_SPOOL_DIR ??= mkdtempSync(join(scratchRoot, "blobs-"));
 
 const { collectAnthropic } = await import(
 	"../../../connectors/anthropic/index.ts"

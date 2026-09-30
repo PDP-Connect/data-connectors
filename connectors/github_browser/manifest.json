@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.8",
+	"version": "0.2.9",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,12 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["httpFetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": ["evaluate", "goto", "content", "waitForFunction", "request.get"]
 			}
 		}
 	},
@@ -638,5 +640,13 @@
 	],
 	"reason_display_messages": {
 		"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "github_browser.ts",
+			"exception": "Preserves the app's existing GitHub envelope and summary shape.",
+			"scope_prefix": "github",
+			"login_url": "https://github.com/login"
+		}
 	}
 }

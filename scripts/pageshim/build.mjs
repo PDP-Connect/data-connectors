@@ -7,8 +7,8 @@
 // `new AsyncFunction('page', 'process', source)`).
 //
 // The connector code is bundled unmodified. The seam is three things only:
-//   - an entry in ./entries/ that hands the connector to ./runtime.ts, which
-//     maps the PDPP protocol onto the shim's `page` API;
+//   - a manifest-generated entry, or an explicit entry in ./entries/ for a
+//     connector with a real output or host exception;
 //   - module resolution: every Node builtin and every browser-automation
 //     package resolves to a stub whose exports throw when called. `path` and
 //     `url` resolve to small pure-JS versions, because connector modules call
@@ -17,7 +17,8 @@
 //     imports resolve to a shim that maps them onto host methods instead of
 //     the throwing stub (anthropic: the export download and ZIP read).
 //
-// This target does not touch the OCI build (build-connector-oci-artifact.mjs).
+// attach-to-artifact.mjs packages an enabled bundle into the existing signed
+// connector artifact after the normal OCI build.
 //
 // usage: node scripts/pageshim/build.mjs --connector <name> --out <file.js>
 
@@ -28,17 +29,11 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 import * as esbuild from "esbuild";
+import { isPageShimCapable } from "./capabilities.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const require = createRequire(import.meta.url);
-
-/** Connectors enabled for the pageshim target. One entry file each. */
-export const PAGESHIM_CONNECTORS = [
-	"github_browser",
-	"anthropic",
-	"strava_browser",
-];
 
 /**
  * Per-connector ports. `modules`: for imports made by `importer` only, these
@@ -132,13 +127,24 @@ const stubPlugin = (stubbed, port) => ({
 
 /** Builds one connector. Returns size and the list of stubbed modules. */
 export async function buildPageshim({ connector, outfile, minify = true }) {
-	if (!PAGESHIM_CONNECTORS.includes(connector)) {
-		throw new Error(`pageshim target is not enabled for ${connector}`);
-	}
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
+	const manifest = JSON.parse(
+		readFileSync(join(REPO, "connectors", connector, "manifest.json"), "utf8"),
+	);
+	const pageshim = manifest.mobile?.pageshim;
+	if (!pageshim) throw new Error(`missing PageShim adapter config for ${connector}`);
+	if (!isPageShimCapable(manifest) && !pageshim.entry) {
+		throw new Error(`PageShim does not provide the declared runtime bindings for ${connector}`);
+	}
+	const entry = pageshim.entry
+		? join(HERE, "entries", pageshim.entry)
+		: undefined;
+	const genericEntry = entry
+		? undefined
+		: genericPageshimEntry(connector, manifest, pageshim);
 	await esbuild.build({
-		entryPoints: [join(HERE, "entries", `${connector}.ts`)],
+		...(entry ? { entryPoints: [entry] } : { stdin: genericEntry }),
 		bundle: true,
 		platform: "browser",
 		format: "iife",
@@ -154,12 +160,7 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 			"import.meta.url": '"file:///pageshim/bundle.js"',
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
-				JSON.parse(
-					readFileSync(
-						join(REPO, "connectors", connector, "manifest.json"),
-						"utf8",
-					),
-				).version,
+				manifest.version,
 			),
 		},
 		plugins: [stubPlugin(stubbed, port)],
@@ -176,6 +177,73 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		bytes: bytes.length,
 		gzipBytes: gzipSync(bytes).length,
 		stubbed: [...stubbed].sort(),
+	};
+}
+
+function genericPageshimEntry(connector, manifest, config) {
+	const connectorModule = join(REPO, "connectors", connector, "index.ts");
+	const schemasModule = join(REPO, "connectors", connector, config.schemas ?? "schemas.ts");
+	const streams = manifest.streams.map((stream) => stream.name);
+	const prefix = config.scope_prefix;
+	if (!prefix || !config.collect_export || !config.probe_export || !config.login_url) {
+		throw new Error(`incomplete mobile.pageshim manifest config for ${connector}`);
+	}
+	const summary = config.summary ?? {};
+	return {
+		contents: `
+import * as implementation from ${JSON.stringify(connectorModule)};
+import * as schemaModule from ${JSON.stringify(schemasModule)};
+import { runOnPageShim, type ShimPage } from ${JSON.stringify(join(HERE, "runtime.ts"))};
+type GenericConfig = {
+	platform: string;
+	scopes: string[];
+	version: string;
+	loginUrl: string;
+	loginMessage: string;
+	streams: string[];
+	summary: { stream?: string; singular?: string; plural?: string; details?: string[] };
+};
+const config: GenericConfig = ${JSON.stringify({
+			platform: prefix,
+			scopes: streams.map((stream) => `${prefix}.${stream}`),
+			version: manifest.version,
+			loginUrl: config.login_url,
+			loginMessage: config.login_message ?? `Sign in to ${manifest.display_name}, then return here.`,
+			streams,
+			summary,
+		})};
+const collect = implementation[${JSON.stringify(config.collect_export)}] as (ctx: never) => Promise<void>;
+const probe = implementation[${JSON.stringify(config.probe_export)}] as (page: never) => Promise<boolean>;
+const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "validateRecord")}] as (stream: string, record: unknown) => boolean;
+(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
+  runOnPageShim(page, {
+    ...config,
+    validateRecord: validateRecord as never,
+    probe: (pw) => probe(pw as never),
+    collect: (ctx) => collect(ctx as never),
+    toScope: (_stream, records) => ({ records }),
+    summarize: (scopes) => {
+      const counts = Object.fromEntries(config.streams.map((stream) => [
+        stream,
+        (scopes[config.platform + "." + stream] as { records?: unknown[] } | undefined)?.records?.length ?? 0,
+      ]));
+      const count = config.summary.stream
+        ? counts[config.summary.stream] ?? 0
+        : Object.values(counts).reduce((sum, value) => sum + value, 0);
+      const details = Object.fromEntries((config.summary.details ?? config.streams).map((stream) => [stream, counts[stream] ?? 0]));
+      const singular = config.summary.singular ?? "record";
+      const plural = config.summary.plural ?? singular + "s";
+      return {
+        count,
+        label: count === 1 ? singular : plural,
+        details,
+      };
+    },
+  });
+`,
+		loader: "ts",
+		resolveDir: REPO,
+		sourcefile: `${connector}-pageshim-entry.ts`,
 	};
 }
 

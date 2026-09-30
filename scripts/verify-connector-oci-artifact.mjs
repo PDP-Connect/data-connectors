@@ -144,7 +144,13 @@ function runEntrypointContract({ entrypoint, installRoot, kind, expected }) {
 
 	const child = spawnSync(
 		process.execPath,
-		["--input-type=module", "--eval", probe],
+		[
+			"--import",
+			new URL("./test-utils/deny-external-artifact-imports.mjs", import.meta.url).pathname,
+			"--input-type=module",
+			"--eval",
+			probe,
+		],
 		{
 			cwd: installRoot,
 			encoding: "utf8",
@@ -349,6 +355,34 @@ function main() {
 		if (!existsSync(path)) throw new Error(`Declared layer missing: ${layer.file}`);
 		for (const member of listTarballMembers(path)) assertSafeMember(member.name);
 	}
+	const pageshim = config.mobile?.pageshim;
+	if (pageshim !== undefined) {
+		if (
+			!pageshim ||
+			pageshim.layer !== "assets" ||
+			pageshim.media_type !== "text/javascript" ||
+			typeof pageshim.path !== "string" ||
+			!pageshim.path.startsWith("pageshim/") ||
+			pageshim.path.startsWith("/") ||
+			pageshim.path.split("/").includes("..") ||
+			pageshim.path.includes("\\") ||
+			pageshim.path.includes("\0") ||
+			!/^sha256:[0-9a-f]{64}$/.test(pageshim.digest ?? "") ||
+			!Number.isSafeInteger(pageshim.size) ||
+			pageshim.size < 0
+		) {
+			throw new Error("config.mobile.pageshim is invalid");
+		}
+		if (
+			!layers.layers.some(
+				(layer) =>
+					layer.file === "assets.tar.gz" &&
+					layer.mediaType === "application/vnd.pdpp.connector.assets.v1.tar+gzip",
+			)
+		) {
+			throw new Error("config.mobile.pageshim names a missing assets layer");
+		}
+	}
 
 	// 3 + 4. Unpack the code layer and import it for real.
 	const scratch = mkdtempSync(join(tmpdir(), "pdpp-artifact-verify-"));
@@ -363,6 +397,23 @@ function main() {
 			throw new Error(
 				`config.entrypoint '${config.entrypoint}' does not exist once code.tar.gz is unpacked`,
 			);
+		}
+		if (pageshim) {
+			const assetsRoot = join(installRoot, "assets");
+			execFileSync("mkdir", ["-p", assetsRoot]);
+			execFileSync("tar", [
+				"-xzf",
+				join(artifactRoot, "assets.tar.gz"),
+				"-C",
+				assetsRoot,
+			]);
+			const bundle = readFileSync(join(assetsRoot, pageshim.path));
+			if (bundle.length !== pageshim.size) {
+				throw new Error("config.mobile.pageshim.size does not match the bundle bytes");
+			}
+			if (sha256(bundle) !== pageshim.digest) {
+				throw new Error("config.mobile.pageshim.digest does not match the bundle bytes");
+			}
 		}
 
 		// The install root gets NO node_modules.

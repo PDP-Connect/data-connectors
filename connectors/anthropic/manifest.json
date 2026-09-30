@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.14",
+	"version": "0.2.15",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -429,5 +429,13 @@
 		"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 		"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 		"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "anthropic.ts",
+			"exception": "Uses host blob and archive ports for the export download.",
+			"scope_prefix": "claude",
+			"login_url": "https://claude.ai/login"
+		}
 	}
 }

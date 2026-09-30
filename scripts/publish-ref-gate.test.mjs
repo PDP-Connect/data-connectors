@@ -356,6 +356,27 @@ test("the workflow installs the root workspace before it builds", () => {
   );
 });
 
+test("the workflow attaches PageShim bytes before verifying and signing the connector artifact", () => {
+  const steps = parsePublishSteps();
+  const buildIndex = steps.findIndex((step) =>
+    step.lines.some((line) => /build-connector-oci-artifact\.mjs/.test(line)),
+  );
+  const attachIndex = steps.findIndex((step) =>
+    step.lines.some((line) => /pageshim\/attach-to-artifact\.mjs/.test(line)),
+  );
+  const verifyIndex = steps.findIndex((step) =>
+    step.lines.some((line) => /verify-connector-oci-artifact\.mjs/.test(line)),
+  );
+  const publishIndex = steps.findIndex((step) => (step.keys.name || "") === "Push and sign");
+
+  assert.notEqual(buildIndex, -1, "expected the normal connector artifact build");
+  assert.notEqual(attachIndex, -1, "expected PageShim bundle attachment");
+  assert.notEqual(verifyIndex, -1, "expected local artifact verification");
+  assert.ok(buildIndex < attachIndex, "the base OCI artifact must exist before PageShim attachment");
+  assert.ok(attachIndex < verifyIndex, "verification must cover the attached PageShim bytes");
+  assert.ok(verifyIndex < publishIndex, "the complete artifact must verify before the signing step");
+});
+
 test("signing is restricted to refs/heads/main, and the advertised identity says so", () => {
   // P1-2. Two halves of one claim, asserted together because a mismatch between
   // them IS the defect: the old expression ended at `@` and constrained nothing

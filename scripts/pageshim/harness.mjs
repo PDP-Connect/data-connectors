@@ -425,7 +425,7 @@ export async function runHarness({
 				}
 				default:
 					// click/fill/press/selectorState/captureNetwork etc. exist
-					// on the host but no enabled connector uses them yet. Fail loudly
+					// on the host but no eligible connector uses them yet. Fail loudly
 					// rather than fake a result.
 					return {
 						__shimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
