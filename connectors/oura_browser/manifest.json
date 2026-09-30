@@ -9,17 +9,17 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {
       "network": {
         "required": true,
-        "features": ["in_page_fetch"]
+        "features": ["same_origin_page_fetch"]
       },
       "browser": {
         "required": true,
-        "features": ["evaluate", "goto"]
+        "features": ["page_script_evaluation", "page_navigation"]
       }
     }
   },

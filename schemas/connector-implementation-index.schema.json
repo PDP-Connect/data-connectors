@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-implementation-index.schema.json",
+  "title": "Connector implementation index",
+  "type": "object",
+  "required": ["connectors"],
+  "properties": {
+    "connectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["manifest"],
+        "properties": {
+          "manifest": {
+            "type": "object",
+            "properties": {
+              "runtime_requirements": {
+                "type": "object",
+                "properties": {
+                  "bindings": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "features": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json#/$defs/bindingFeature"
+                          },
+                          "uniqueItems": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

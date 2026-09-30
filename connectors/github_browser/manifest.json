@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.10",
+	"version": "0.2.11",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -19,11 +19,11 @@
 		"bindings": {
 			"network": {
 				"required": true,
-				"features": ["httpFetch"]
+				"features": ["host_http_request"]
 			},
 			"browser": {
 				"required": true,
-				"features": ["evaluate", "goto", "content", "waitForFunction", "request.get"]
+				"features": ["page_script_evaluation", "page_navigation", "page_content_read", "page_condition_wait", "host_http_request"]
 			}
 		}
 	},

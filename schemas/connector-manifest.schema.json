@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
+  "title": "Connector manifest runtime requirements",
+  "description": "Defines the runtime requirements contract used by connector manifests. Other manifest fields are outside this schema's scope.",
+  "type": "object",
+  "properties": {
+    "runtime_requirements": {
+      "type": "object",
+      "required": ["bindings"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["required"],
+            "properties": {
+              "required": { "type": "boolean" },
+              "features": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/bindingFeature" },
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bindingFeature": {
+      "type": "string",
+      "description": "Host capability definitions:\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.",
+      "enum": [
+        "page_navigation",
+        "page_script_evaluation",
+        "page_content_read",
+        "page_condition_wait",
+        "same_origin_page_fetch",
+        "host_http_request",
+        "host_download_capture",
+        "host_archive_extraction",
+        "host_archive_entry_chunk_read"
+      ]
+    }
+  }
+}

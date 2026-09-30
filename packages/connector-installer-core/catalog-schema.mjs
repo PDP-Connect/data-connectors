@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Ajv2020 from "ajv/dist/2020.js";
-import schema from "./catalog-schema-data.mjs";
+import schema, { connectorManifestSchema } from "./catalog-schema-data.mjs";
 
 export function isCatalogTimestamp(value) {
   if (typeof value !== "string") return false;
@@ -33,6 +33,7 @@ function isUri(value) {
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
+ajv.addSchema(connectorManifestSchema);
 ajv.addFormat("date-time", { type: "string", validate: isCatalogTimestamp });
 ajv.addFormat("uri", { type: "string", validate: isUri });
 const validateCatalog = ajv.compile(schema);

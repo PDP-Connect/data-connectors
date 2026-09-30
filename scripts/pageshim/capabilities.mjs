@@ -4,13 +4,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-const PAGE_SHIM_BINDINGS = {
+const PAGE_SHIM_BINDING_FEATURES = {
 	browser: new Set([
-		"evaluate",
-		"goto",
-		"content",
-		"waitForFunction",
-		"request.get",
 		"page_navigation",
 		"page_script_evaluation",
 		"page_content_read",
@@ -20,12 +15,7 @@ const PAGE_SHIM_BINDINGS = {
 		"host_archive_extraction",
 		"host_archive_entry_chunk_read",
 	]),
-	network: new Set([
-		"in_page_fetch",
-		"httpFetch",
-		"same_origin_page_fetch",
-		"host_http_request",
-	]),
+	network: new Set(["same_origin_page_fetch", "host_http_request"]),
 };
 
 export function pageShimIncompatibilities(manifest) {
@@ -36,7 +26,7 @@ export function pageShimIncompatibilities(manifest) {
 	if (!required.some(([name]) => name === "browser")) failures.push("browser binding is not required");
 	if (!required.some(([name]) => name === "network")) failures.push("network binding is not required");
 	for (const [name, requirement] of required) {
-		const supported = PAGE_SHIM_BINDINGS[name];
+		const supported = PAGE_SHIM_BINDING_FEATURES[name];
 		if (!supported) {
 			failures.push(`required binding ${name} is not provided`);
 			continue;

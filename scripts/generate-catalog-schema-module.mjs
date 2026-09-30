@@ -4,14 +4,17 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 const source = new URL("../schemas/connector-catalog.schema.json", import.meta.url);
+const manifestSchemaSource = new URL("../schemas/connector-manifest.schema.json", import.meta.url);
 const destination = new URL("../packages/connector-installer-core/catalog-schema-data.mjs", import.meta.url);
 const schema = JSON.parse(readFileSync(source, "utf8"));
+const manifestSchema = JSON.parse(readFileSync(manifestSchemaSource, "utf8"));
 const generated = [
   "// Copyright The PDP-Connect Contributors",
   "// SPDX-License-Identifier: Apache-2.0",
   "// Generated from schemas/connector-catalog.schema.json; run npm run catalog-schema:generate.",
   "",
   `export default ${JSON.stringify(schema, null, 2)};`,
+  `export const connectorManifestSchema = ${JSON.stringify(manifestSchema, null, 2)};`,
   "",
 ].join("\n");
 
