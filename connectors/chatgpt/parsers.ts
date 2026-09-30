@@ -625,6 +625,35 @@ export function countBranchMessages(
 }
 
 /**
+ * Derive legacy projection metadata from the records retained for the current
+ * branch. `messages` must be in provider root-to-tip order. Re-linking retained
+ * records across omitted nodes lets downstream consumers walk exactly the
+ * branch we emitted; the first record keeps its provider parent (usually the
+ * synthetic root, which is not itself a message record).
+ */
+export function reconcileEmittedBranchMessages(
+	messages: readonly RecordData[],
+): { currentNode: string | null; count: number; messages: RecordData[] } {
+	const branch = messages.filter(
+		(message) =>
+			message.on_current_branch === true && typeof message.id === "string",
+	);
+	const reconciled = branch.map((message, index) => {
+		const parentId = index > 0 ? branch[index - 1]?.id : undefined;
+		return {
+			...message,
+			...(typeof parentId === "string" ? { parent_id: parentId } : {}),
+		};
+	});
+	const tip = reconciled.at(-1)?.id;
+	return {
+		currentNode: typeof tip === "string" ? tip : null,
+		count: reconciled.length,
+		messages: reconciled,
+	};
+}
+
+/**
  * Merge the list-endpoint and detail-endpoint views into a single conversation
  * record. Fields that only appear on detail (gizmo_id, workspace_id,
  * current_node, message_count_on_current_branch) fall back to list when

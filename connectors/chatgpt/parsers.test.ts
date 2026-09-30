@@ -18,6 +18,7 @@ import {
 	extractToolCalls,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
+	reconcileEmittedBranchMessages,
 	resolveGizmoIsPublic,
 	tsToIso,
 	unwrapGizmo,
@@ -89,6 +90,19 @@ test("countBranchMessages: only counts nodes with a message + role; null for mis
 	assert.equal(countBranchMessages(mapping, currentNode), 2);
 	assert.equal(countBranchMessages(null, currentNode), null);
 	assert.equal(countBranchMessages(mapping, null), null);
+});
+
+test("reconcileEmittedBranchMessages: chooses retained tip and bridges filtered nodes", () => {
+	const result = reconcileEmittedBranchMessages([
+		{ id: "m1", on_current_branch: true, parent_id: "root" },
+		{ id: "m3", on_current_branch: true, parent_id: "m2" },
+	]);
+	assert.equal(result.count, 2);
+	assert.equal(result.currentNode, "m3");
+	assert.deepEqual(
+		result.messages.map((message) => message.parent_id),
+		["root", "m1"],
+	);
 });
 
 // ─── extractContent per-content_type dispatch ─────────────────────────

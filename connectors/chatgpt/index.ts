@@ -80,6 +80,7 @@ import {
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
 	minUpdateTimeIso,
+	reconcileEmittedBranchMessages,
 	tsToIso,
 } from "./parsers.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
@@ -2069,6 +2070,8 @@ export interface StreamDeps {
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
+	isRecordSelected?: CollectContext["isRecordSelected"];
 	/** Message IDs already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
@@ -2264,19 +2267,21 @@ export async function runCustomInstructionsStream(
  * Reconcile the current branch we walked against the branch the conversation
  * actually declares, and surface a shortfall as a gap rather than a silent pass.
  *
- * The subtlety that shapes this whole check: ChatGPT does NOT hand us an
- * independent provider total. `message_count_on_current_branch` is computed by
- * our own `countBranchMessages` from the SAME `mapping` object, in the same
- * call that emits these messages. Comparing emitted-vs-declared there is a
- * tautology — both sides read one in-memory graph — so it would prove nothing.
+ * ChatGPT does NOT hand us an independent provider total. The conversation
+ * count is derived from the detail mapping, while message records pass through
+ * runtime selection and schema validation. `processConversationDetail` now
+ * builds both outputs from the records that pass those same gates. This count
+ * check is therefore a local consistency invariant, not provider completeness
+ * evidence.
  *
  * The real provider assertion is structural: `current_node` plus each node's
  * `parent` pointer declare a chain, and `flattenTreeCurrentBranch` walks it by
  * following parents until one is absent from the mapping. That walk STOPS
  * SILENTLY on a missing parent. A truncated payload therefore yields a short
- * branch AND a correspondingly short `message_count_on_current_branch` — the
- * declared count shrinks to match the loss, so the conversation reads complete.
- * That is the silent-truncation class this check closes.
+ * branch. The connector records a bounded filter note when its own output
+ * omits branch nodes and points `current_node` to the emitted tip. This check
+ * still catches an upstream truncation because it walks the original provider
+ * mapping, before the connector applies its output filters.
  *
  * So the reconciliation is against the graph's own claims:
  *   - `current_node` must be present in the mapping. If the tip is absent, the
@@ -2284,8 +2289,8 @@ export async function runCustomInstructionsStream(
  *   - The chain must terminate at a real root (a node with no parent), not at a
  *     dangling pointer into a node the payload did not include.
  *
- * Both are provider-asserted facts measured at the payload boundary, before any
- * emit decision. Live reconciliation over 5,821 collected conversations:
+ * Both are provider-asserted facts measured at the payload boundary. Live
+ * reconciliation over 5,821 collected conversations:
  * counting on-branch messages matched the declared count for 5,815 exactly and
  * NEVER exceeded it, so equality is the right contract and a shortfall is real.
  *
@@ -2394,36 +2399,129 @@ export async function processConversationDetail(
 		await emitConversation(c, null);
 		return;
 	}
-	// Emit conversation record first (parent-first), then messages.
-	await emitConversation(c, detail.json as ConversationDetail);
 	const { mapping } = detail.json;
 	const currentNode = detail.json.current_node || c.current_node;
-	const currentBranchIds = new Set(
-		flattenTreeCurrentBranch(mapping, currentNode).map((x) => x.nodeId),
+	const currentBranch = flattenTreeCurrentBranch(mapping, currentNode);
+	const currentBranchIds = new Set(currentBranch.map((x) => x.nodeId));
+	const branchOrder = new Map(
+		currentBranch.map((entry, index) => [entry.nodeId, index]),
 	);
-	let emittedMessageCount = 0;
-	let emittedBranchCount = 0;
+	const candidates: { nodeId: string; msg: RecordData; onBranch: boolean }[] = [];
+	const candidateIds = new Set<string>();
+	let filteredBranchCount = 0;
+	let filteredBySelection = 0;
+	let filteredByShape = 0;
+	let filteredAsDuplicate = 0;
+	let filteredAsNonMessage = 0;
+	let currentNodeFilteredReason:
+		| "selection"
+		| "shape"
+		| "duplicate"
+		| "non_message"
+		| null = null;
+	const alreadyEmittedIds = deps.emittedMessageIdsThisRun ?? new Set<string>();
 	for (const [nodeId, node] of Object.entries(mapping)) {
 		const onBranch = currentBranchIds.has(nodeId);
 		const msg = extractMessage(nodeId, node, c.id, onBranch);
 		if (!msg?.role) {
-			// synthetic root — skip
+			if (onBranch) {
+				filteredBranchCount += 1;
+				filteredAsNonMessage += 1;
+				if (nodeId === currentNode) currentNodeFilteredReason = "non_message";
+			}
 			continue;
 		}
+
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		const alreadyEmitted = messageId
-			? (deps.emittedMessageIdsThisRun?.has(messageId) ?? false)
-			: false;
-		if (!alreadyEmitted && messageId) {
-			deps.emittedMessageIdsThisRun?.add(messageId);
+		if (
+			messageId &&
+			(alreadyEmittedIds.has(messageId) || candidateIds.has(messageId))
+		) {
+			if (onBranch) {
+				filteredBranchCount += 1;
+				filteredAsDuplicate += 1;
+				if (nodeId === currentNode) currentNodeFilteredReason = "duplicate";
+			}
+			continue;
 		}
+		if (deps.isRecordSelected && !deps.isRecordSelected("messages", msg)) {
+			if (onBranch) {
+				filteredBranchCount += 1;
+				filteredBySelection += 1;
+				if (nodeId === currentNode) currentNodeFilteredReason = "selection";
+			}
+			continue;
+		}
+		const validation = validateRecord("messages", msg);
+		if (validation && !validation.ok) {
+			if (onBranch) {
+				filteredBranchCount += 1;
+				filteredByShape += 1;
+				if (nodeId === currentNode) currentNodeFilteredReason = "shape";
+			}
+			continue;
+		}
+		candidates.push({ nodeId, msg, onBranch });
+		if (messageId) candidateIds.add(messageId);
+	}
+
+	// The legacy projection walks parent_id from current_node and rejects a
+	// branch if any emitted on-branch record is unreachable. Compact the retained
+	// branch across filtered nodes, preserving the root's original parent when it
+	// is synthetic or otherwise outside the emitted branch.
+	const retainedBranch = candidates
+		.filter((candidate) => candidate.onBranch)
+		.sort(
+			(a, b) =>
+				(branchOrder.get(a.nodeId) ?? -1) - (branchOrder.get(b.nodeId) ?? -1),
+		);
+	const reconciledBranch = reconcileEmittedBranchMessages(
+		retainedBranch.map((candidate) => candidate.msg),
+	);
+	for (let index = 0; index < retainedBranch.length; index += 1) {
+		const retained = retainedBranch[index];
+		const reconciled = reconciledBranch.messages[index];
+		if (retained && reconciled) {
+			retained.msg.parent_id = reconciled.parent_id;
+		}
+	}
+	const emittedCurrentNode = reconciledBranch.currentNode;
+	const emittedBranchCount = reconciledBranch.count;
+	const emittedMapping: Record<string, ChatGptNode> = {};
+	for (const candidate of candidates) {
+		const sourceNode = mapping[candidate.nodeId];
+		if (!sourceNode) continue;
+		emittedMapping[candidate.nodeId] = candidate.onBranch
+			? { ...sourceNode, parent: candidate.msg.parent_id as string | null }
+			: sourceNode;
+	}
+	const conversationDetail: ConversationDetail = {
+		...(detail.json as ConversationDetail),
+		mapping: emittedMapping,
+		current_node: emittedCurrentNode,
+	};
+	// Keep the established parent-first record order. The metadata now comes
+	// from the same selected, schema-valid records that will be emitted below.
+	await emitConversation(c, conversationDetail);
+	if (filteredBranchCount > 0) {
+		deps.emit({
+			type: "PROGRESS",
+			stream: "messages",
+			message:
+				`branch_message_filtered: current_node and branch count reflect emitted messages ` +
+				`(filtered=${filteredBranchCount}, selection=${filteredBySelection}, ` +
+				`shape=${filteredByShape}, duplicate=${filteredAsDuplicate}, ` +
+				`non_message=${filteredAsNonMessage}, ` +
+				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
+		});
+	}
+	let emittedMessageCount = 0;
+	for (const candidate of candidates) {
+		const { msg } = candidate;
+		const messageId = typeof msg.id === "string" ? msg.id : null;
+		if (messageId) alreadyEmittedIds.add(messageId);
 		emittedMessageCount += 1;
-		if (onBranch) {
-			emittedBranchCount += 1;
-		}
-		if (!alreadyEmitted) {
-			await deps.emitRecord("messages", msg);
-		}
+		await deps.emitRecord("messages", msg);
 	}
 	await emitBranchReconciliation(
 		deps,
@@ -5764,6 +5862,7 @@ if (isMainModule(import.meta.url)) {
 				detailGaps: ctx.detailGaps,
 				emit,
 				emitRecord,
+				isRecordSelected: ctx.isRecordSelected,
 				preDetailPressure,
 				progress,
 				providerBudget,
