@@ -307,6 +307,32 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 	}
 });
 
+test("an all-filtered current branch has no current node and reports zero messages", async () => {
+	const fixture = filteredShape(["m0", "m1"], ["m0", "m1"], "m1");
+	const { emitted, protocolMessages } = await runWithFilteredRecords(
+		fixture.mapping,
+		fixture.currentNode,
+		fixture.excluded,
+	);
+	const conversation = emitted.find((record) => record.stream === "conversations");
+
+	assert.equal(conversation?.data.current_node, null);
+	assert.equal(conversation?.data.message_count_on_current_branch, 0);
+	assert.equal(
+		emitted.filter((record) => record.stream === "messages").length,
+		0,
+	);
+	assert.ok(
+		protocolMessages.some(
+			(record) =>
+				(record as { type?: string; message?: string }).type === "PROGRESS" &&
+				(record as { message?: string }).message?.startsWith(
+					"branch_message_filtered: ",
+				),
+		),
+	);
+});
+
 test("a roleless current tip is reported as a filtered non-message node", async () => {
 	const mapping: Record<string, ChatGptNode> = {
 		root: { parent: null, children: ["m1"] },

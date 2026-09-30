@@ -664,7 +664,7 @@ export function buildConversationRecord(
 	detail: ConversationDetail | null,
 ): RecordData {
 	const mapping = detail?.mapping || null;
-	const currentNode = detail?.current_node ?? c.current_node ?? null;
+	const currentNode = detail ? detail.current_node : (c.current_node ?? null);
 	return {
 		id: c.id,
 		title: (detail?.title ?? c.title) || null,
@@ -674,7 +674,11 @@ export function buildConversationRecord(
 		is_starred: detail?.is_starred ?? c.is_starred ?? null,
 		workspace_id: (detail?.workspace_id ?? c.workspace_id) || null,
 		current_node: currentNode || null,
-		message_count_on_current_branch: countBranchMessages(mapping, currentNode),
+		message_count_on_current_branch: mapping
+			? currentNode
+				? countBranchMessages(mapping, currentNode)
+				: 0
+			: null,
 		gizmo_id: (detail?.gizmo_id ?? c.gizmo_id) || null,
 	};
 }
