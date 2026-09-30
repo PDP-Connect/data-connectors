@@ -15,6 +15,7 @@ import { validateRecord } from "../../../connectors/anthropic/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import {
 	bindExportHost,
+	readSavedZipEntryChunk,
 	type ExportHostPage,
 	withExportDownloads,
 } from "../shims/anthropic-export.ts";
@@ -71,12 +72,39 @@ const count = (scope: unknown): number => {
 			collectAnthropic({
 				...ctx,
 				page: withExportDownloads(ctx.page as object),
+				readZipEntryChunk: readSavedZipEntryChunk,
+				entriesValidated: true,
+				storeSourceRecords: false,
 			} as never),
 		// blob_ref names a host blob that this host does not store; drop it
 		// rather than hand the app a reference it cannot resolve.
 		toScope: (_stream, records) => ({
 			records: records.map(({ blob_ref: _blobRef, ...record }) => record),
 		}),
+		streamScopeRecords: {
+			order: [
+				"messages",
+				"conversations",
+				"account_profile",
+				"projects",
+				"project_documents",
+			],
+			toRecord: (_stream, record) => {
+				const { blob_ref: _blobRef, ...output } = record;
+				return output;
+			},
+			summarizeCounts: (counts) => {
+				const details = Object.fromEntries(
+					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),
+				);
+				const conversations = Number(details.conversations ?? 0);
+				return {
+					count: conversations,
+					label: conversations === 1 ? "conversation" : "conversations",
+					details,
+				};
+			},
+		},
 		summarize: (scopes) => {
 			const details = Object.fromEntries(
 				STREAMS.map((s) => [s, count(scopes[`claude.${s}`])]),

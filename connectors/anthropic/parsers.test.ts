@@ -25,12 +25,70 @@ import {
 	flattenMessageText,
 	parseClassifiedExport,
 	parseConversation,
+	parseJsonArrayChunks,
 	parseExport,
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
 	resolveExportedProfile,
 } from "./parsers.ts";
+
+test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a time", async () => {
+	const source =
+		'[{"text":"a \\\"quoted\\\" value","nested":[1,true]},"😀",null]';
+	const calls: Array<[number, number]> = [];
+	const values: unknown[] = [];
+	await parseJsonArrayChunks(
+		async (_name, offset, length) => {
+			calls.push([offset, length]);
+			return source.slice(offset, offset + Math.min(length, 5));
+		},
+		{ name: "conversations.json", size: source.length },
+		(value) => {
+			values.push(value);
+		},
+		8,
+	);
+	assert.deepEqual(values, [
+		{ text: 'a "quoted" value', nested: [1, true] },
+		"😀",
+		null,
+	]);
+	assert.ok(calls.length > 1);
+	assert.ok(calls.every(([, length]) => length <= 8));
+});
+
+test("parseJsonArrayChunks rejects malformed arrays and invalid bounded reads", async () => {
+	await assert.rejects(
+		parseJsonArrayChunks(
+			async () => "[1,]",
+			{ name: "bad.json", size: 4 },
+			() => {},
+		),
+		/invalid JSON array/,
+	);
+	await assert.rejects(
+		parseJsonArrayChunks(
+			async () => "",
+			{ name: "empty.json", size: 1 },
+			() => {},
+		),
+		/invalid bounded read/,
+	);
+	for (const source of ["{}", "null", "[{}\u00a0]", "[]\u000b"]) {
+		await assert.rejects(
+			parseJsonArrayChunks(
+				async (_name, offset, length) => source.slice(offset, offset + length),
+				{ name: "invalid.json", size: source.length },
+				() => {},
+			),
+			(error: unknown) =>
+				error instanceof Error &&
+				/invalid JSON array/.test(error.message) &&
+				(error as Error & { code?: string }).code === "INVALID_JSON_ARRAY",
+		);
+	}
+});
 
 const SYNTHETIC_ZIP_PATH = fileURLToPath(
 	new URL("./__fixtures__/synthetic/synthetic-export.zip", import.meta.url),

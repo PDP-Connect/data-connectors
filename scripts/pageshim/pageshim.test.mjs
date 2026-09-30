@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { deflateRawSync } from "node:zlib";
 import { buildPageshim, PAGESHIM_CONNECTORS } from "./build.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
@@ -265,6 +266,10 @@ test("anthropic: export paths on the PageShim host", {
 		assert.deepEqual(r.result.errors, []);
 		assert.equal(r.calls.captureDownload, 1);
 		assert.equal(r.calls.extractZipEntries, 1);
+		assert.ok(
+			r.calls.readZipEntryChunk > 0,
+			"collector uses bounded entry reads",
+		);
 		assert.deepEqual(fx.counts, { exportRequests: 1, mints: 1 });
 		// No blob store on this host, so no blob_ref.
 		for (const x of r.result["claude.conversations"].records)
@@ -277,6 +282,39 @@ test("anthropic: export paths on the PageShim host", {
 			c.exportSummary.details,
 		);
 		assert.deepEqual(pageshimRecords(r), desktop);
+	});
+
+	await t.test("streamed result records deep-equal Desktop", async () => {
+		const streamBundle = await buildPageshim({
+			connector: "anthropic",
+			outfile: join(out, "anthropic-streamed.js"),
+			streamResults: true,
+		});
+		const spool = mkdtempSync(join(scratchRoot, "anthropic-result-"));
+		try {
+			const r = await runHarness({
+				bundle: streamBundle.outfile,
+				fixtures: c.fixtures,
+				scopes: c.scopes,
+				resultStreaming: true,
+				resultSpoolDirectory: spool,
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assert.equal(r.streamResult?.completed, true);
+			const streamed = Object.fromEntries(
+				Object.entries(r.streamScopeFiles).map(([scope, path]) => [
+					scope,
+					JSON.parse(readFileSync(path, "utf8")).records,
+				]),
+			);
+			const desktop = await desktopRecords(
+				fx.syntheticExport,
+				streams,
+			);
+			assert.deepEqual(streamed, desktop);
+		} finally {
+			rmSync(spool, { recursive: true, force: true });
+		}
 	});
 
 	// Archives the desktop reader refuses. The shim must refuse them too.
@@ -323,6 +361,32 @@ test("anthropic: export paths on the PageShim host", {
 			assert.match(e.reason, /does not claim the account is empty/);
 		assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
 	});
+
+	for (const [label, value] of [
+		["object root", {}],
+		["null root", null],
+		["invalid JSON", deflateRawSync(Buffer.from("{"))],
+	]) {
+		await t.test(
+			`conversation ${label}: same fail-closed result as Desktop`,
+			async () => {
+				const zip = fx.zipOf({ "conversations.json": value });
+				const desktop = await desktopRecords(zip, streams);
+				assert.ok(
+					Object.values(desktop).every((records) => records.length === 0),
+				);
+				const r = await run({ zip });
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.deepEqual(
+					r.result.errors.map((e) => e.disposition),
+					c.scopes.map(() => "omitted"),
+				);
+				for (const scope of c.scopes)
+					assert.equal(r.result[scope], undefined);
+			},
+		);
+	}
 
 	await t.test(
 		"export not ready, then ready: polls the same nonce",
