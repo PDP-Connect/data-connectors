@@ -87,7 +87,7 @@ interface OuraDailyData {
 
 async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]): Promise<boolean> {
   try {
-    if (new URL(page.url()).origin !== ORIGIN) return false;
+    if (new URL(await page.url()).origin !== ORIGIN) return false;
   } catch {
     return false;
   }
@@ -102,7 +102,7 @@ async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]):
 }
 
 async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<boolean> {
-  if (new URL(page.url()).origin !== ORIGIN) {
+  if (new URL(await page.url()).origin !== ORIGIN) {
     await page.goto(HOME, { waitUntil: "domcontentloaded" });
   }
   return hasOuraSessionOnCurrentPage(page);
@@ -129,7 +129,7 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
 }
 
 async function fetchDailyData(page: BrowserCollectContext["page"], start: string, end: string): Promise<OuraDailyData> {
-  if (new URL(page.url()).origin !== ORIGIN) throw new Error("oura_auth_failed: wrong browser origin");
+  if (new URL(await page.url()).origin !== ORIGIN) throw new Error("oura_auth_failed: wrong browser origin");
   return page.evaluate(
     async ({ start, end }) => {
       if (location.origin !== "https://cloud.ouraring.com") throw new Error("oura_auth_failed: wrong browser origin");

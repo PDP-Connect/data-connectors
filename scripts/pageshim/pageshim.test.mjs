@@ -144,6 +144,30 @@ for (const name of PAGESHIM_CONNECTORS) {
 	});
 }
 
+test("oura_browser: PageShim preserves required-window failures", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/oura_browser.mjs");
+	fx.setDailyDataStatus(500);
+	try {
+		const built = await buildPageshim({
+			connector: "oura_browser",
+			outfile: join(out, "oura-browser-failure.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: fx.pageshimCase.scopes,
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assert.equal(r.data.status.startsWith("Partial:"), true);
+		assert.equal(r.result.errors.length, 3);
+		assert.ok(r.result.errors.every((e) => e.errorClass === "partial"));
+	} finally {
+		fx.setDailyDataStatus(200);
+	}
+});
+
 test("github_browser: an incomplete stream is an omitted error", {
 	timeout: 180_000,
 }, async () => {
