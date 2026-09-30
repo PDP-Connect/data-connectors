@@ -176,18 +176,20 @@ import { attachDownloadQueue } from "../../packages/polyfill-connectors/src/down
 import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/playwright-download.ts";
 import {
 	classifyManifestPartEntries,
-	parseJsonArrayChunks,
+	createPipelinedJsonEntryReader,
+	JSON_ENTRY_READ_CHUNK_UNITS,
 	type ManifestPartFile,
 	type ParsedExport,
 	parseClassifiedExport,
 	parseConversation,
 	parseConversationHeader,
 	parseExport,
+	parseJsonArrayChunks,
 	parseMessage,
 	resolveExportedProfile,
+	type SourceRecordEnvelope,
 	topLevelRawFields,
 	topLevelStringFields,
-	type SourceRecordEnvelope,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -903,18 +905,23 @@ async function readExportZipMetadata(
 		const sizeOf = (entry: (typeof jsonEntries)[number]) =>
 			typeof entry.size === "number" ? entry.size : entry.uncompressedSize;
 		const readJsonEntry = async (entry: (typeof jsonEntries)[number]) => {
-			let offset = 0;
-			let text = "";
 			const size = sizeOf(entry);
+			const jsonEntry = { name: entry.name, size };
+			const reader = createPipelinedJsonEntryReader(readChunk, jsonEntry);
+			const parts: string[] = [];
+			let offset = 0;
 			while (offset < size) {
-				const requestedLength = Math.min(64 * 1024, size - offset);
-				const chunk = await readChunk(entry.name, offset, requestedLength);
+				const requestedLength = Math.min(
+					JSON_ENTRY_READ_CHUNK_UNITS,
+					size - offset,
+				);
+				const chunk = await reader(entry.name, offset, requestedLength);
 				if (!chunk || chunk.length > requestedLength)
 					throw new Error(`invalid bounded read for JSON entry ${entry.name}`);
-				text += chunk;
+				parts.push(chunk);
 				offset += chunk.length;
 			}
-			return safeJsonParse(text);
+			return safeJsonParse(parts.join(""));
 		};
 		const conversationCandidate = byName.get("conversations.json");
 		const conversationsEntry = conversationCandidate
@@ -1188,6 +1195,16 @@ export async function collectAnthropic({
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
+	const windowSince =
+		requested.get(CONVERSATIONS_STREAM)?.time_range?.since ??
+		requested.get(MESSAGES_STREAM)?.time_range?.since;
+	const windowSinceMs = windowSince ? Date.parse(windowSince) : Number.NaN;
+	const isWithinTimeWindow = (value: unknown): boolean => {
+		if (!windowSince) return true;
+		if (typeof value !== "string") return false;
+		const updatedAt = Date.parse(value);
+		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
+	};
 	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
 		throw new Error(
 			"Anthropic host blob collection requires the runtime record selector",
@@ -1228,12 +1245,18 @@ export async function collectAnthropic({
 			record: (typeof parsed.projects)[number];
 			source: SourceRecordEnvelope;
 		}> = [];
-		if (wantsConversations) {
-			for (const [index, record] of parsed.conversations.entries()) {
+		const inWindowConversationIds = new Set<string>();
+		for (const [index, record] of parsed.conversations.entries()) {
+			if (isWithinTimeWindow(record.update_time))
+				inWindowConversationIds.add(record.id);
+			if (wantsConversations) {
 				const source = parsed.conversationSources[index];
 				if (!source || source.record_key !== record.id)
 					throw new Error("Anthropic conversation source alignment failed");
-				if (isRecordSelected?.(CONVERSATIONS_STREAM, record))
+				if (
+					isWithinTimeWindow(record.update_time) &&
+					isRecordSelected?.(CONVERSATIONS_STREAM, record)
+				)
 					selectedConversations.push({ record, source });
 			}
 		}
@@ -1242,7 +1265,10 @@ export async function collectAnthropic({
 				const source = parsed.projectSources[index];
 				if (!source || source.record_key !== record.id)
 					throw new Error("Anthropic project source alignment failed");
-				if (isRecordSelected?.(PROJECTS_STREAM, record))
+				if (
+					isWithinTimeWindow(record.update_time) &&
+					isRecordSelected?.(PROJECTS_STREAM, record)
+				)
 					selectedProjects.push({ record, source });
 			}
 		}
@@ -1322,6 +1348,11 @@ export async function collectAnthropic({
 		if (wantsMessages) {
 			for (const message of parsed.messages) {
 				if (oversizedConversationIds.has(message.conversation_id)) continue;
+				if (
+					windowSince &&
+					!inWindowConversationIds.has(message.conversation_id)
+				)
+					continue;
 				await emitRecord(MESSAGES_STREAM, message);
 			}
 		}
@@ -1346,6 +1377,7 @@ export async function collectAnthropic({
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
 				if (oversizedProjectIds.has(doc.project_id)) continue;
+				if (!isWithinTimeWindow(doc.update_time)) continue;
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
@@ -1479,13 +1511,23 @@ export async function collectAnthropic({
 	): Promise<void> {
 		if (!readZipEntryChunk)
 			throw new Error("Anthropic incremental export reader is unavailable");
+		const entryReader = createPipelinedJsonEntryReader(
+			readZipEntryChunk,
+			entry,
+		);
 		const readValueText = async (start: number, end: number) => {
+			const valueReader = createPipelinedJsonEntryReader(
+				readZipEntryChunk,
+				entry,
+				start,
+				end,
+			);
 			const parts: string[] = [];
 			for (let offset = start; offset < end; ) {
-				const text = await readZipEntryChunk(
+				const text = await valueReader(
 					entry.name,
 					offset,
-					Math.min(64 * 1024, end - offset),
+					Math.min(JSON_ENTRY_READ_CHUNK_UNITS, end - offset),
 				);
 				if (!text || text.length > end - offset)
 					throw new Error("invalid bounded conversation reread");
@@ -1496,11 +1538,7 @@ export async function collectAnthropic({
 		};
 		if (!entriesValidated) {
 			try {
-				await parseJsonArrayChunks(
-					(name, offset, length) => readZipEntryChunk(name, offset, length),
-					entry,
-					() => {},
-				);
+				await parseJsonArrayChunks(entryReader, entry, () => {});
 			} catch (error) {
 				if ((error as { code?: string })?.code !== "INVALID_JSON_ARRAY")
 					throw error;
@@ -1512,6 +1550,11 @@ export async function collectAnthropic({
 		let droppedConversations = 0;
 		let oversizedConversations = 0;
 		const processConversation = async (raw: unknown) => {
+			const updatedAt =
+				typeof raw === "object" && raw !== null && !Array.isArray(raw)
+					? (raw as Record<string, unknown>).updated_at
+					: undefined;
+			if (!isWithinTimeWindow(updatedAt)) return;
 			const parsed = parseConversation(raw);
 			if (!parsed) {
 				droppedConversations += 1;
@@ -1575,6 +1618,7 @@ export async function collectAnthropic({
 				if (key === "chat_messages") continue;
 				header[key] = JSON.parse(field);
 			}
+			if (!isWithinTimeWindow(header.updated_at)) return;
 			const conversation = parseConversationHeader(header, 0);
 			if (!conversation) {
 				droppedConversations += 1;
@@ -1612,7 +1656,7 @@ export async function collectAnthropic({
 							record,
 						});
 					},
-					64 * 1024,
+					JSON_ENTRY_READ_CHUNK_UNITS,
 					{ validatedEntry: true },
 				);
 			}
@@ -1633,20 +1677,17 @@ export async function collectAnthropic({
 		};
 		try {
 			await parseJsonArrayChunks(
-				(name, offset, length) => readZipEntryChunk(name, offset, length),
+				entryReader,
 				entry,
 				processConversation,
-					64 * 1024,
-					{
-						validatedEntry: Boolean(entriesValidated),
-						...(entriesValidated && wantsConversations
-							? { maxBufferedObjectUnits: 16 * 1024 * 1024 }
-							: {}),
+				JSON_ENTRY_READ_CHUNK_UNITS,
+				{
+					validatedEntry: Boolean(entriesValidated),
+					...(entriesValidated && wantsConversations
+						? { maxBufferedObjectUnits: 16 * 1024 * 1024 }
+						: {}),
 					onOversizedObject: async (prefix, value) => {
-					if (
-						value.serializedLowerBoundUnits <=
-						HOST_BLOB_MAX_BYTES + 1024
-					) {
+						if (value.serializedLowerBoundUnits <= HOST_BLOB_MAX_BYTES + 1024) {
 							const raw = await readValueText(
 								value.startOffset,
 								value.endOffset,
@@ -1658,25 +1699,22 @@ export async function collectAnthropic({
 						}
 						const fields = topLevelStringFields(
 							prefix,
-							new Set(["uuid", "id"]),
+							new Set(["uuid", "id", "updated_at"]),
 						);
+						if (!isWithinTimeWindow(fields.get("updated_at"))) return;
 						const id = fields.get("uuid") || fields.get("id");
 						if (!id) {
 							droppedConversations += 1;
 							return;
 						}
-					if (isRecordSelected?.(CONVERSATIONS_STREAM, { id })) {
-						oversizedConversationIds.add(id);
-						oversizedConversations += 1;
-						return;
-					}
-					const raw = await readValueText(
-						value.startOffset,
-						value.endOffset,
-					);
-					if (storeSourceRecords)
-						await processConversation(JSON.parse(raw));
-					else await processConversationJson(raw);
+						if (isRecordSelected?.(CONVERSATIONS_STREAM, { id })) {
+							oversizedConversationIds.add(id);
+							oversizedConversations += 1;
+							return;
+						}
+						const raw = await readValueText(value.startOffset, value.endOffset);
+						if (storeSourceRecords) await processConversation(JSON.parse(raw));
+						else await processConversationJson(raw);
 					},
 				},
 			);

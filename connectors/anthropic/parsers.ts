@@ -292,6 +292,9 @@ export type ReadJsonArrayChunk = (
 	length: number,
 ) => Promise<string>;
 
+export const JSON_ENTRY_READ_CHUNK_UNITS = 120 * 1024;
+export const JSON_ENTRY_READ_WINDOW = 4;
+
 export interface ParseJsonArrayChunkOptions {
 	/** The reader guarantees that the complete entry was valid JSON. */
 	validatedEntry?: boolean;
@@ -331,8 +334,7 @@ export function topLevelStringFields(
 		if (first === '"') return stringEnd(start);
 		if (first !== "{" && first !== "[") {
 			let at = start;
-			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? ""))
-				at++;
+			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? "")) at++;
 			return at;
 		}
 		const stack = [first === "{" ? "}" : "]"];
@@ -418,8 +420,7 @@ export function topLevelRawFields(
 		if (first === '"') return stringEnd(start);
 		if (first !== "{" && first !== "[") {
 			let at = start;
-			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? ""))
-				at++;
+			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? "")) at++;
 			return at;
 		}
 		const stack = [first === "{" ? "}" : "]"];
@@ -481,7 +482,7 @@ export async function parseJsonArrayChunks(
 	readChunk: ReadJsonArrayChunk,
 	entry: JsonArrayChunkEntry,
 	onValue: (value: unknown) => Promise<void> | void,
-	chunkUnits = 64 * 1024,
+	chunkUnits = 256 * 1024,
 	options: ParseJsonArrayChunkOptions = {},
 ): Promise<void> {
 	if (!Number.isSafeInteger(entry.size) || entry.size < 0)
@@ -489,9 +490,11 @@ export async function parseJsonArrayChunks(
 	if (
 		!Number.isSafeInteger(chunkUnits) ||
 		chunkUnits < 1 ||
-		chunkUnits > 64 * 1024
+		chunkUnits > 256 * 1024
 	)
-		throw new Error("JSON chunk size must be between 1 and 65536 UTF-16 units");
+		throw new Error(
+			"JSON chunk size must be between 1 and 262144 UTF-16 units",
+		);
 
 	let offset = 0;
 	let rootStarted = false;
@@ -521,23 +524,32 @@ export async function parseJsonArrayChunks(
 			{ code: "INVALID_JSON_ARRAY" },
 		);
 	};
+	const isJsonWhitespace = (code: number) =>
+		code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+	const isNumberCode = (code: number) =>
+		(code >= 0x30 && code <= 0x39) ||
+		code === 0x65 ||
+		code === 0x45 ||
+		code === 0x2b ||
+		code === 0x2e ||
+		code === 0x2d;
 	const captureValueSegment = (end: number) => {
 		const segmentUnits = end - valueSegmentStart;
 		if (segmentUnits > 0) {
 			if (!valueBufferExceeded) {
-			const part = currentChunk.slice(valueSegmentStart, end);
-			if (valuePrefix.length < 64 * 1024)
-				valuePrefix += part.slice(0, 64 * 1024 - valuePrefix.length);
-			if (
-				valueRoot === "object" &&
-				valueLength + segmentUnits >
-					(options.maxBufferedObjectUnits ?? Number.MAX_SAFE_INTEGER)
-			) {
-				valueParts = [];
-				valueBufferExceeded = true;
-			} else {
-				valueParts.push(part);
-			}
+				const part = currentChunk.slice(valueSegmentStart, end);
+				if (valuePrefix.length < 64 * 1024)
+					valuePrefix += part.slice(0, 64 * 1024 - valuePrefix.length);
+				if (
+					valueRoot === "object" &&
+					valueLength + segmentUnits >
+						(options.maxBufferedObjectUnits ?? Number.MAX_SAFE_INTEGER)
+				) {
+					valueParts = [];
+					valueBufferExceeded = true;
+				} else {
+					valueParts.push(part);
+				}
 			}
 			valueLength += segmentUnits;
 		}
@@ -618,55 +630,54 @@ export async function parseJsonArrayChunks(
 		offset += chunk.length;
 		currentChunk = chunk;
 		for (let i = 0; i < chunk.length; i += 1) {
-			const char = chunk[i] ?? "";
+			const code = chunk.charCodeAt(i);
 			if (valueActive) {
 				if (inString) {
 					if (unicodeEscapeDigits > 0) unicodeEscapeDigits--;
 					else if (escaped) {
-						if (char === "u") {
+						if (code === 0x75) {
 							serializedLowerBoundUnits += 1;
 							unicodeEscapeDigits = 4;
-						} else if (char === "/") serializedLowerBoundUnits += 1;
+						} else if (code === 0x2f) serializedLowerBoundUnits += 1;
 						else serializedLowerBoundUnits += 2;
-					} else if (char !== "\\") serializedLowerBoundUnits += 1;
+					} else if (code !== 0x5c) serializedLowerBoundUnits += 1;
 				} else {
-					if (numberToken && !/[0-9eE+.-]/.test(char ?? "")) {
+					if (numberToken && !isNumberCode(code)) {
 						serializedLowerBoundUnits += JSON.stringify(
 							Number(numberToken),
 						).length;
 						numberToken = "";
 					}
-					if (numberToken || /[0-9-]/.test(char ?? ""))
-						numberToken += char;
-					else if (!/[ \t\r\n]/.test(char ?? ""))
-						serializedLowerBoundUnits += 1;
+					if (numberToken || (code >= 0x30 && code <= 0x39) || code === 0x2d)
+						numberToken += String.fromCharCode(code);
+					else if (!isJsonWhitespace(code)) serializedLowerBoundUnits += 1;
 				}
 			}
 			if (!rootStarted) {
-				if (/[ \t\r\n]/.test(char)) continue;
-				if (char !== "[") invalid();
+				if (isJsonWhitespace(code)) continue;
+				if (code !== 0x5b) invalid();
 				rootStarted = true;
 				continue;
 			}
 			if (rootFinished) {
-				if (!/[ \t\r\n]/.test(char)) invalid();
+				if (!isJsonWhitespace(code)) invalid();
 				continue;
 			}
 			if (!valueActive) {
-				if (/[ \t\r\n]/.test(char)) continue;
-				if (expectingValue && char === "]") {
+				if (isJsonWhitespace(code)) continue;
+				if (expectingValue && code === 0x5d) {
 					if (afterComma) invalid();
 					rootFinished = true;
 					expectingValue = false;
 					continue;
 				}
 				if (!expectingValue) {
-					if (char === ",") {
+					if (code === 0x2c) {
 						expectingValue = true;
 						afterComma = true;
 						continue;
 					}
-					if (char === "]") {
+					if (code === 0x5d) {
 						rootFinished = true;
 						continue;
 					}
@@ -676,14 +687,14 @@ export async function parseJsonArrayChunks(
 				valueSegmentStart = i;
 				valueStartOffset = offset - chunk.length + i;
 				valueActive = true;
-				if (char === "{") {
+				if (code === 0x7b) {
 					valueRoot = "object";
 					valueKind = "container";
 					stack.push("}");
-				} else if (char === "[") {
+				} else if (code === 0x5b) {
 					valueKind = "container";
 					stack.push("]");
-				} else if (char === '"') {
+				} else if (code === 0x22) {
 					valueKind = "string";
 					inString = true;
 				} else {
@@ -693,13 +704,13 @@ export async function parseJsonArrayChunks(
 				continue;
 			}
 			if (valueFinished) {
-				if (/[ \t\r\n]/.test(char)) continue;
-				if (char === ",") {
+				if (isJsonWhitespace(code)) continue;
+				if (code === 0x2c) {
 					expectingValue = true;
 					afterComma = true;
 					continue;
 				}
-				if (char === "]") {
+				if (code === 0x5d) {
 					rootFinished = true;
 					continue;
 				}
@@ -708,7 +719,7 @@ export async function parseJsonArrayChunks(
 			if (
 				valueKind === "primitive" &&
 				!inString &&
-				(char === "," || char === "]")
+				(code === 0x2c || code === 0x5d)
 			) {
 				await finishValue(i);
 				i -= 1;
@@ -716,8 +727,8 @@ export async function parseJsonArrayChunks(
 			}
 			if (inString) {
 				if (escaped) escaped = false;
-				else if (char === "\\") escaped = true;
-				else if (char === '"') {
+				else if (code === 0x5c) escaped = true;
+				else if (code === 0x22) {
 					inString = false;
 					if (valueKind === "string") {
 						valueFinished = true;
@@ -726,15 +737,15 @@ export async function parseJsonArrayChunks(
 				}
 				continue;
 			}
-			if (char === '"') {
+			if (code === 0x22) {
 				inString = true;
 				continue;
 			}
 			if (valueKind === "container") {
-				if (char === "{") stack.push("}");
-				else if (char === "[") stack.push("]");
-				else if (char === "}" || char === "]") {
-					if (stack.pop() !== char) invalid();
+				if (code === 0x7b) stack.push("}");
+				else if (code === 0x5b) stack.push("]");
+				else if (code === 0x7d || code === 0x5d) {
+					if (stack.pop() !== String.fromCharCode(code)) invalid();
 					if (stack.length === 0) valueFinished = true;
 				}
 			}
@@ -746,6 +757,77 @@ export async function parseJsonArrayChunks(
 		}
 	}
 	if (!rootStarted || !rootFinished || valueLength !== 0) invalid();
+}
+
+/** Start a bounded window of contiguous reads. Chunks are consumed in offset
+ * order, while later bridge reads overlap the current parse. A host may return
+ * fewer units at a surrogate boundary; stale speculative reads are drained and
+ * the window restarts at the actual next offset. */
+export function createPipelinedJsonEntryReader(
+	readChunk: ReadJsonArrayChunk,
+	entry: JsonArrayChunkEntry,
+	startOffset = 0,
+	endOffset = entry.size,
+	chunkUnits = JSON_ENTRY_READ_CHUNK_UNITS,
+	windowSize = JSON_ENTRY_READ_WINDOW,
+): ReadJsonArrayChunk {
+	if (
+		!Number.isSafeInteger(startOffset) ||
+		!Number.isSafeInteger(endOffset) ||
+		startOffset < 0 ||
+		endOffset < startOffset ||
+		endOffset > entry.size ||
+		!Number.isSafeInteger(chunkUnits) ||
+		chunkUnits < 1 ||
+		chunkUnits > 256 * 1024 ||
+		!Number.isSafeInteger(windowSize) ||
+		windowSize < 1 ||
+		windowSize > 8
+	)
+		throw new Error("invalid pipelined JSON entry reader bounds");
+
+	const pending = new Map<
+		number,
+		{
+			requestedLength: number;
+			result: Promise<{ text?: string; error?: unknown }>;
+		}
+	>();
+	let scheduleOffset = startOffset;
+	const fillWindow = () => {
+		while (pending.size < windowSize && scheduleOffset < endOffset) {
+			const offset = scheduleOffset;
+			const requestedLength = Math.min(chunkUnits, endOffset - offset);
+			scheduleOffset += requestedLength;
+			const result = readChunk(entry.name, offset, requestedLength).then(
+				(text) => ({ text }),
+				(error: unknown) => ({ error }),
+			);
+			pending.set(offset, { requestedLength, result });
+		}
+	};
+
+	return async (name, offset, length) => {
+		if (name !== entry.name || offset < startOffset || offset >= endOffset)
+			throw new Error("pipelined JSON entry read is out of range");
+		fillWindow();
+		const read = pending.get(offset);
+		if (!read || read.requestedLength !== length)
+			throw new Error("pipelined JSON entry reads are not contiguous");
+		const result = await read.result;
+		pending.delete(offset);
+		if (result.error !== undefined) throw result.error;
+		const text = result.text;
+		if (!text || text.length > read.requestedLength)
+			throw new Error("invalid bounded JSON entry read");
+		if (text.length < read.requestedLength) {
+			await Promise.all([...pending.values()].map((item) => item.result));
+			pending.clear();
+			scheduleOffset = offset + text.length;
+		}
+		fillWindow();
+		return text;
+	};
 }
 
 // ─── projects + project_documents (claude.projects split) ──────────────────

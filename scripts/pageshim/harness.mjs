@@ -99,8 +99,10 @@ async function hostMain({
 	loginWaitMs,
 	env,
 	timerScale,
+	clockNowMs,
 }) {
 	window.__pageshimEnv = env || {};
+	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
 	if (timerScale !== 1) {
 		const nativeSetTimeout = window.setTimeout.bind(window);
 		window.setTimeout = (callback, delay, ...args) =>
@@ -402,12 +404,12 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 				offset < 0 ||
 				!Number.isInteger(length) ||
 				length < 1 ||
-				length > 64 * 1024
+				length > 120 * 1024
 			)
 				return {
 					ok: false,
 					error:
-						"readZipEntryChunk requires a non-negative offset and length <= 65536",
+						"readZipEntryChunk requires a non-negative offset and length <= 122880",
 				};
 			const text = extracted?.entryTexts.get(entryName);
 			if (text == null)
@@ -458,6 +460,8 @@ export async function runHarness({
 	stateAckDelayMs = 0,
 	failResultWrite = false,
 	resultStreamNeverAck = false,
+	readBridgeLatencyMs = 0,
+	clockNowMs,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -594,6 +598,10 @@ export async function runHarness({
 				case "extractZipEntries":
 					return archive.extractZipEntries(a[1]);
 				case "readZipEntryChunk":
+					if (readBridgeLatencyMs > 0)
+						await new Promise((resolve) =>
+							setTimeout(resolve, readBridgeLatencyMs),
+						);
 					return archive.readZipEntryChunk(a[0], a[1], a[2], a[3]);
 				case "httpFetch": {
 					const r = await target.evaluate(
@@ -715,6 +723,7 @@ export async function runHarness({
 			loginWaitMs,
 			env,
 			timerScale,
+			clockNowMs,
 		});
 		sampling = false;
 		await sampler;

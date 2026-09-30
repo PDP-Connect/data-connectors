@@ -23,6 +23,7 @@ export class ResultStreamHarness {
 		this.mode = null;
 		this.done = false;
 		this.doneValue = null;
+		this.donePayload = null;
 		this.lastCall = null;
 		this.totalCodeUnits = 0;
 		this.messageCount = 0;
@@ -76,6 +77,7 @@ export class ResultStreamHarness {
 			rejectedMessages: this.rejectedMessages,
 			maxChunkUnits: this.maxChunkUnits,
 			completed: this.done,
+			donePayload: this.donePayload,
 		};
 	}
 
@@ -176,6 +178,7 @@ export class ResultStreamHarness {
 		}
 		this.done = true;
 		this.doneValue = value;
+		this.donePayload = value;
 		return { accepted: true };
 	}
 
