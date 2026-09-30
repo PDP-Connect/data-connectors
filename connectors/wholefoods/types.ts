@@ -32,7 +32,12 @@ export interface OrderDetailItem {
 	productId: string | null;
 	productUrl: string | null;
 	quantity: number | null;
+	/** Unit of a weighed quantity ("lb"); absent or null for counted items. */
+	quantityUnit?: string | null;
+	/** Price per unit (per weight for a weighed item). */
 	unitPriceDollars: number | null;
+	/** Charged price of the whole row, when the page states it (in-store). */
+	lineTotalDollars?: number | null;
 }
 
 /** The order-detail page's parsed contents: items plus whatever the detail

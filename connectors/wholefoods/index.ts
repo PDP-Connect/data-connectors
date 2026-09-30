@@ -40,7 +40,10 @@ import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fi
 import {
 	bestUsdaMatch,
 	cleanProductName,
+	hasOrderDetailEvidence,
 	mapUsdaNutrients,
+	ORDER_DETAIL_READY_SELECTOR,
+	orderDetailUnitCount,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
@@ -246,10 +249,7 @@ function assertCompleteOrderDetail(
 	stub: OrderStub,
 	items: readonly OrderDetailItem[],
 ): void {
-	const detailUnitCount = items.reduce(
-		(sum, item) => sum + (item.quantity ?? 1),
-		0,
-	);
+	const detailUnitCount = orderDetailUnitCount(items);
 	if (detailUnitCount !== stub.expectedItemCount) {
 		throw new Error(
 			`Whole Foods order ${stub.orderId} detail item count ${detailUnitCount} did not match search result count ${stub.expectedItemCount}`,
@@ -262,13 +262,22 @@ function buildOrderRecord(
 	orderDateRaw: string | null,
 	items: readonly OrderDetailItem[],
 ): OrderRecord {
-	const totalCents = items.reduce((sum, item) => {
+	// A stated row total (in-store pages) is the charged amount, so it wins
+	// over unit price x quantity, which ignores promotions and weights.
+	const rowCents = (item: OrderDetailItem): number | null => {
+		const lineCents = parseDollarsToCents(item.lineTotalDollars);
+		if (lineCents !== null) {
+			return lineCents;
+		}
 		const cents = parseDollarsToCents(item.unitPriceDollars);
-		const qty = item.quantity ?? 1;
-		return cents === null ? sum : sum + Math.round(cents * qty);
-	}, 0);
+		return cents === null ? null : Math.round(cents * (item.quantity ?? 1));
+	};
+	const totalCents = items.reduce(
+		(sum, item) => sum + (rowCents(item) ?? 0),
+		0,
+	);
 	const hasCompletePrices =
-		items.length > 0 && items.every((item) => item.unitPriceDollars !== null);
+		items.length > 0 && items.every((item) => rowCents(item) !== null);
 	return {
 		id: stub.orderId,
 		item_count: stub.expectedItemCount,
@@ -302,6 +311,18 @@ function buildOrderItemRecord(
 		quantity: item.quantity,
 		unit_price_cents: parseDollarsToCents(item.unitPriceDollars),
 	};
+}
+
+/** Item records for an order. A row without a source ASIN (possible on
+ *  in-store pages) has no valid `product_id`, so it gets no record; it still
+ *  counts toward the order's item count and total. */
+export function buildOrderItemRecords(
+	orderId: string,
+	items: readonly OrderDetailItem[],
+): OrderItemRecord[] {
+	return items
+		.filter((item) => item.productId)
+		.map((item) => buildOrderItemRecord(orderId, item));
 }
 
 // ─── Nutrition ─────────────────────────────────────────────────────────────
@@ -612,8 +633,9 @@ if (isMainModule(import.meta.url)) {
 					// Confirmed live (2026-09-22, against a real order-detail page):
 					// [data-component="purchasedItemsRightGrid"] is the real per-item
 					// container; [data-component="cancelled"] covers a cancelled order,
-					// which never renders purchasedItemsRightGrid.
-					'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"]',
+					// which never renders purchasedItemsRightGrid. In-store orders
+					// (`/fopo/order-details`, live 2026-09-29) render #f3_food_ItemList.
+					ORDER_DETAIL_READY_SELECTOR,
 				);
 				const html = await page.content();
 				if (
@@ -624,11 +646,7 @@ if (isMainModule(import.meta.url)) {
 						`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
 					);
 				}
-				if (
-					!/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']/i.test(
-						html,
-					)
-				) {
+				if (!hasOrderDetailEvidence(html)) {
 					throw new Error(
 						`Whole Foods order ${stub.orderId} detail has no item or cancellation evidence`,
 					);
@@ -648,11 +666,11 @@ if (isMainModule(import.meta.url)) {
 				}
 
 				if (wantsItems) {
-					for (const item of detail.items) {
-						await emitRecord(
-							"order_items",
-							buildOrderItemRecord(stub.orderId, item),
-						);
+					for (const itemRecord of buildOrderItemRecords(
+						stub.orderId,
+						detail.items,
+					)) {
+						await emitRecord("order_items", itemRecord);
 					}
 				}
 
@@ -724,10 +742,10 @@ if (isMainModule(import.meta.url)) {
 // Exported for tests — kept free of the isMainModule guard so integration
 // tests can call them directly without spawning a subprocess/browser.
 export {
+	assertCompleteOrderDetail,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
-	assertCompleteOrderDetail,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,
