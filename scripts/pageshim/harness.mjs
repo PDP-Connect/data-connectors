@@ -90,7 +90,8 @@ export const SHIM_METHODS = [
 ];
 
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
-async function hostMain({ source, scopes, methods, loginWaitMs }) {
+async function hostMain({ source, scopes, methods, loginWaitMs, clockNowMs }) {
+	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
 		if (r && typeof r === "object" && typeof r.__shimError === "string")
@@ -378,12 +379,12 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 				offset < 0 ||
 				!Number.isInteger(length) ||
 				length < 1 ||
-				length > 64 * 1024
+				length > 120 * 1024
 			)
 				return {
 					ok: false,
 					error:
-						"readZipEntryChunk requires a non-negative offset and length <= 65536",
+						"readZipEntryChunk requires a non-negative offset and length <= 122880",
 				};
 			const text = extracted?.entryTexts.get(entryName);
 			if (text == null)
@@ -422,6 +423,8 @@ export async function runHarness({
 		`pageshim-result-${randomUUID()}`,
 	),
 	resultStreamFailure,
+	readBridgeLatencyMs = 0,
+	clockNowMs,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -517,6 +520,10 @@ export async function runHarness({
 				case "extractZipEntries":
 					return archive.extractZipEntries(a[1]);
 				case "readZipEntryChunk":
+					if (readBridgeLatencyMs > 0)
+						await new Promise((resolve) =>
+							setTimeout(resolve, readBridgeLatencyMs),
+						);
 					return archive.readZipEntryChunk(a[0], a[1], a[2], a[3]);
 				case "httpFetch": {
 					const r = await target.evaluate(
@@ -629,6 +636,7 @@ export async function runHarness({
 			scopes,
 			methods: SHIM_METHODS,
 			loginWaitMs,
+			clockNowMs,
 		});
 		sampling = false;
 		await sampler;

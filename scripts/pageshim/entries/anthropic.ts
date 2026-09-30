@@ -15,13 +15,14 @@ import { validateRecord } from "../../../connectors/anthropic/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import {
 	bindExportHost,
-	readSavedZipEntryChunk,
 	type ExportHostPage,
+	readSavedZipEntryChunk,
 	withExportDownloads,
 } from "../shims/anthropic-export.ts";
 
 // Defined by build.mjs from connectors/anthropic/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_SINCE_DAYS: number;
 
 const CLAUDE_ORIGIN = "https://claude.ai";
 const STREAMS = [
@@ -64,6 +65,7 @@ const count = (scope: unknown): number => {
 		platform: "claude",
 		scopes: STREAMS.map((s) => `claude.${s}`),
 		version: PAGESHIM_CONNECTOR_VERSION,
+		sinceDays: PAGESHIM_SINCE_DAYS || undefined,
 		loginUrl: `${CLAUDE_ORIGIN}/login`,
 		loginMessage: "Sign in to Claude, then return here.",
 		validateRecord,

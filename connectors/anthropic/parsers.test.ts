@@ -22,11 +22,12 @@ import {
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
 import {
 	classifyManifestPartEntries,
+	createPipelinedJsonEntryReader,
 	flattenMessageText,
 	parseClassifiedExport,
 	parseConversation,
-	parseJsonArrayChunks,
 	parseExport,
+	parseJsonArrayChunks,
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
@@ -34,8 +35,7 @@ import {
 } from "./parsers.ts";
 
 test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a time", async () => {
-	const source =
-		'[{"text":"a \\\"quoted\\\" value","nested":[1,true]},"😀",null]';
+	const source = String.raw`[{"text":"a \"quoted\" value","nested":[1,true]},"😀",null]`;
 	const calls: Array<[number, number]> = [];
 	const values: unknown[] = [];
 	await parseJsonArrayChunks(
@@ -56,6 +56,40 @@ test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a 
 	]);
 	assert.ok(calls.length > 1);
 	assert.ok(calls.every(([, length]) => length <= 8));
+});
+
+test("pipelined entry reader overlaps calls, preserves order, and restarts after short reads", async () => {
+	const source = "0123456789abcdefghijklmnopqrst";
+	let active = 0;
+	let maxActive = 0;
+	const reader = createPipelinedJsonEntryReader(
+		async (_name, offset, length) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await new Promise((resolve) => setTimeout(resolve, offset === 0 ? 4 : 1));
+			active--;
+			const end = offset === 0 ? offset + length - 1 : offset + length;
+			return source.slice(offset, end);
+		},
+		{ name: "test.json", size: source.length },
+		0,
+		source.length,
+		8,
+		3,
+	);
+	const chunks: string[] = [];
+	for (let offset = 0; offset < source.length; ) {
+		const text = await reader(
+			"test.json",
+			offset,
+			Math.min(8, source.length - offset),
+		);
+		chunks.push(text);
+		offset += text.length;
+	}
+	assert.equal(chunks.join(""), source);
+	assert.ok(maxActive >= 2, `expected concurrent reads, got ${maxActive}`);
+	assert.ok(maxActive <= 3, `reader exceeded its window: ${maxActive}`);
 });
 
 test("parseJsonArrayChunks rejects malformed arrays and invalid bounded reads", async () => {

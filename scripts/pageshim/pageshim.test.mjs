@@ -307,10 +307,7 @@ test("anthropic: export paths on the PageShim host", {
 					JSON.parse(readFileSync(path, "utf8")).records,
 				]),
 			);
-			const desktop = await desktopRecords(
-				fx.syntheticExport,
-				streams,
-			);
+			const desktop = await desktopRecords(fx.syntheticExport, streams);
 			assert.deepEqual(streamed, desktop);
 		} finally {
 			rmSync(spool, { recursive: true, force: true });
@@ -382,8 +379,7 @@ test("anthropic: export paths on the PageShim host", {
 					r.result.errors.map((e) => e.disposition),
 					c.scopes.map(() => "omitted"),
 				);
-				for (const scope of c.scopes)
-					assert.equal(r.result[scope], undefined);
+				for (const scope of c.scopes) assert.equal(r.result[scope], undefined);
 			},
 		);
 	}
@@ -417,6 +413,126 @@ test("anthropic: export paths on the PageShim host", {
 		);
 		assert.equal(r.calls.goto, 1);
 	});
+});
+
+test("anthropic: 30-day window filters records during streamed collection and marks the result partial", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/anthropic.mjs");
+	const c = fx.pageshimCase;
+	const zip = fx.zipOf({
+		"conversations.json": [
+			{
+				uuid: "conv-recent",
+				name: "recent",
+				updated_at: "2026-01-20T00:00:00.000Z",
+				chat_messages: [
+					{
+						uuid: "msg-recent",
+						sender: "human",
+						created_at: "2026-01-20T00:00:00.000Z",
+						content: [{ type: "text", text: "recent" }],
+					},
+				],
+			},
+			{
+				uuid: "conv-old",
+				name: "old",
+				updated_at: "2025-12-31T00:00:00.000Z",
+				chat_messages: [
+					{
+						uuid: "msg-old",
+						sender: "human",
+						created_at: "2025-12-31T00:00:00.000Z",
+						content: [{ type: "text", text: "old" }],
+					},
+				],
+			},
+		],
+		"projects/project-recent.json": {
+			uuid: "project-recent",
+			name: "recent project",
+			updated_at: "2026-01-20T00:00:00.000Z",
+			docs: [
+				{
+					uuid: "doc-recent",
+					filename: "new.md",
+					content: "new",
+					updated_at: "2026-01-20T00:00:00.000Z",
+				},
+				{
+					uuid: "doc-old",
+					filename: "old.md",
+					content: "old",
+					updated_at: "2025-12-31T00:00:00.000Z",
+				},
+			],
+		},
+		"projects/project-old.json": {
+			uuid: "project-old",
+			name: "old project",
+			updated_at: "2025-12-31T00:00:00.000Z",
+			docs: [],
+		},
+	});
+	const streamBundle = await buildPageshim({
+		connector: "anthropic",
+		outfile: join(out, "anthropic-window.js"),
+		streamResults: true,
+		sinceDays: 30,
+	});
+	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
+	try {
+		fx.reset({ zip });
+		const run = await runHarness({
+			bundle: streamBundle.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: spool,
+			clockNowMs: Date.parse("2026-01-31T00:00:00.000Z"),
+		});
+		assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+		const streamed = Object.fromEntries(
+			Object.entries(run.streamScopeFiles).map(([scope, path]) => [
+				scope,
+				JSON.parse(readFileSync(path, "utf8")).records.map(
+					({ blob_ref: _, ...record }) => record,
+				),
+			]),
+		);
+		assert.deepEqual(
+			streamed["claude.conversations"]?.map((record) => record.id),
+			["conv-recent"],
+		);
+		assert.deepEqual(
+			streamed["claude.messages"]?.map((record) => record.id),
+			["msg-recent"],
+		);
+		assert.deepEqual(
+			streamed["claude.projects"]?.map((record) => record.id),
+			["project-recent"],
+		);
+		assert.deepEqual(
+			streamed["claude.project_documents"]?.map((record) => record.id),
+			["doc-recent"],
+		);
+		assert.equal(
+			run.streamResult?.donePayload?.exportSummary?.window?.sinceDays,
+			30,
+		);
+		assert.equal(
+			run.streamResult?.donePayload?.exportSummary?.partialReason,
+			"time_window",
+		);
+		assert.ok(
+			run.streamResult?.donePayload?.errors?.some(
+				(error) => error.reason === "time_window",
+			),
+		);
+	} finally {
+		rmSync(spool, { recursive: true, force: true });
+	}
 });
 
 test("strava_browser: records and fail-closed paths on the PageShim host", {

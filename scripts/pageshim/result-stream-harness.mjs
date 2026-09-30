@@ -22,6 +22,7 @@ export class ResultStreamHarness {
 		this.openScope = null;
 		this.mode = null;
 		this.done = false;
+		this.donePayload = null;
 		this.lastCall = null;
 		this.totalCodeUnits = 0;
 		this.messageCount = 0;
@@ -75,6 +76,7 @@ export class ResultStreamHarness {
 			rejectedMessages: this.rejectedMessages,
 			maxChunkUnits: this.maxChunkUnits,
 			completed: this.done,
+			donePayload: this.donePayload,
 		};
 	}
 
@@ -174,6 +176,7 @@ export class ResultStreamHarness {
 			throw new Error("result ended before every scope completed");
 		}
 		this.done = true;
+		this.donePayload = value;
 		return { accepted: true };
 	}
 

@@ -136,11 +136,15 @@ export async function buildPageshim({
 	outfile,
 	minify = true,
 	streamResults = false,
+	sinceDays = 0,
 	entryPoint,
 	extraDefines = {},
 }) {
 	if (!PAGESHIM_CONNECTORS.includes(connector)) {
 		throw new Error(`pageshim target is not enabled for ${connector}`);
+	}
+	if (!Number.isSafeInteger(sinceDays) || sinceDays < 0) {
+		throw new Error("sinceDays must be a non-negative integer");
 	}
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
@@ -160,6 +164,7 @@ export async function buildPageshim({
 		define: {
 			"import.meta.url": '"file:///pageshim/bundle.js"',
 			PAGESHIM_RESULT_STREAMING: String(streamResults),
+			PAGESHIM_SINCE_DAYS: String(sinceDays),
 			...extraDefines,
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
@@ -194,6 +199,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			connector: { type: "string" },
 			out: { type: "string" },
 			"stream-results": { type: "boolean", default: false },
+			"since-days": { type: "string" },
 		},
 	});
 	if (!values.connector || !values.out) {
@@ -205,6 +211,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		connector: values.connector,
 		outfile: values.out,
 		streamResults: values["stream-results"],
+		sinceDays: values["since-days"] ? Number(values["since-days"]) : 0,
 	});
 	console.log(
 		JSON.stringify({ ...report, outfile: relative(REPO, report.outfile) }),
