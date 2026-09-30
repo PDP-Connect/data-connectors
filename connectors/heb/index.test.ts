@@ -3085,6 +3085,106 @@ test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", a
 	}
 });
 
+test("fetchOrderDetail: ongoing scroll progress can exceed 30 seconds within the hard cap", async (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: 0 });
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = readFileSync(
+			join(FIXTURES_DIR, "order-detail-static-tall.html"),
+			"utf8",
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-SLOW-SCROLL",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+
+		const pageWithClock = page as unknown as {
+			evaluate: (pageFunction: unknown, arg?: unknown) => Promise<unknown>;
+			waitForTimeout: (ms: number) => Promise<void>;
+		};
+		const evaluate = page.evaluate.bind(page);
+		let polls = 0;
+		pageWithClock.evaluate = async (pageFunction, arg) => {
+			const snapshot = (await Reflect.apply(evaluate, page, [
+				pageFunction,
+				arg,
+			])) as Record<string, unknown>;
+			polls += 1;
+			return {
+				...snapshot,
+				atEnd: polls >= 121,
+				scrollTop: Math.min(polls, 121),
+			};
+		};
+		pageWithClock.waitForTimeout = async (ms) => {
+			t.mock.timers.tick(ms);
+		};
+
+		const result = await fetchOrderDetail(page, "HEB-SLOW-SCROLL", {
+			expectedItemCount: 20,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "hydrated");
+		assert.ok(polls >= 124, "scrolling continued beyond 30 seconds of polls");
+		assert.ok(Date.now() > 30_000, "the synthetic clock passed the idle deadline");
+	} finally {
+		await browser.close();
+		t.mock.timers.reset();
+	}
+});
+
+test("fetchOrderDetail: continuous progress still stops at the hard cap", async (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: 0 });
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = readFileSync(
+			join(FIXTURES_DIR, "order-detail-static-tall.html"),
+			"utf8",
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-HARD-CAP",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+
+		const pageWithClock = page as unknown as {
+			evaluate: (pageFunction: unknown, arg?: unknown) => Promise<unknown>;
+			waitForTimeout: (ms: number) => Promise<void>;
+		};
+		const evaluate = page.evaluate.bind(page);
+		let polls = 0;
+		pageWithClock.evaluate = async (pageFunction, arg) => {
+			const snapshot = (await Reflect.apply(evaluate, page, [
+				pageFunction,
+				arg,
+			])) as Record<string, unknown>;
+			polls += 1;
+			return { ...snapshot, atEnd: false, scrollTop: polls };
+		};
+		pageWithClock.waitForTimeout = async (ms) => {
+			t.mock.timers.tick(ms);
+		};
+
+		const result = await fetchOrderDetail(page, "HEB-HARD-CAP", {
+			expectedItemCount: 20,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "failed");
+		assert.equal(result.failureKind, "detail_surface_timeout");
+		assert.ok(Date.now() <= 60_000, "the hard cap bounds continuous progress");
+	} finally {
+		await browser.close();
+		t.mock.timers.reset();
+	}
+});
+
 test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap, not partial hydrated data", async () => {
 	const page = makeLazyLoadPageStub(100); // Deliberately expect more than this fixture exposes.
 
