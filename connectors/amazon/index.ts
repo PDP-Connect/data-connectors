@@ -1296,7 +1296,7 @@ export async function emitOrderAndItems(
 				buildOrderItemRecord(listOrder.orderId, orderDate, item),
 			);
 		}
-		await emitItemCountReconciliation(deps, listOrder, detail, merged.length);
+		await emitItemCountReconciliation(deps, detail, merged.length);
 	}
 }
 
@@ -1318,7 +1318,6 @@ export async function emitOrderAndItems(
  */
 async function emitItemCountReconciliation(
 	deps: EmitDeps,
-	listOrder: ListPageOrder,
 	detail: OrderDetail | null,
 	emittedItemCount: number,
 ): Promise<void> {
@@ -1327,15 +1326,9 @@ async function emitItemCountReconciliation(
 		return;
 	}
 	await deps.emit({
-		type: "SKIP_RESULT",
+		type: "PROGRESS",
 		stream: "order_items",
-		reason: "item_count_shortfall",
-		message: `order ${listOrder.orderId} listed ${declared} items on its detail page but only ${emittedItemCount} became records`,
-		diagnostics: {
-			order_id: listOrder.orderId,
-			declared_item_count: declared,
-			emitted_item_count: emittedItemCount,
-		},
+		message: `item_count_shortfall: an order detail listed ${declared} items but only ${emittedItemCount} became records`,
 	});
 }
 
