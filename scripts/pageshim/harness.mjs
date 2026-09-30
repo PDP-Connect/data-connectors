@@ -25,6 +25,26 @@ import { inflateRawSync } from "node:zlib";
 import { chromium } from "playwright";
 import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
+export const DEFAULT_BRIDGE_LATENCY_MS = 1500;
+
+function jsonByteLength(value) {
+	if (value === undefined) return 0;
+	try {
+		return Buffer.byteLength(JSON.stringify(value));
+	} catch {
+		return 0;
+	}
+}
+
+export function resolveBridgeLatencyMs(
+	value = process.env.PAGESHIM_BRIDGE_LATENCY_MS,
+) {
+	const parsed = value === undefined ? DEFAULT_BRIDGE_LATENCY_MS : Number(value);
+	return Number.isFinite(parsed) && parsed >= 0
+		? parsed
+		: DEFAULT_BRIDGE_LATENCY_MS;
+}
+
 // page_shim.dart harnessJs `page` members. Nothing else is exposed.
 export const SHIM_METHODS = [
 	"requestedScopes",
@@ -318,10 +338,18 @@ export async function runHarness({
 		`pageshim-result-${randomUUID()}`,
 	),
 	resultStreamFailure,
+	bridgeLatencyMs = resolveBridgeLatencyMs(),
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
 	const calls = {};
+	const bridgeMetrics = {
+		roundTrips: 0,
+		requestBytes: 0,
+		responseBytes: 0,
+		byMethod: {},
+		latencyMsPerCall: resolveBridgeLatencyMs(bridgeLatencyMs),
+	};
 	const data = {};
 	let result = null;
 	const streamHost = new ResultStreamHarness({
@@ -338,7 +366,10 @@ export async function runHarness({
 	try {
 		const context = await browser.newContext();
 		await context.route(fixtures.hosts, (route) => {
-			const f = fixtures.resolve(route.request().url());
+			const request = route.request();
+			const f = fixtures.resolveRequest
+				? fixtures.resolveRequest(request)
+				: fixtures.resolve(request.url());
 			return route.fulfill({
 				...f,
 				headers: { "access-control-allow-origin": "*" },
@@ -464,9 +495,23 @@ export async function runHarness({
 				body: "<!doctype html><body></body>",
 			}),
 		);
-		await runner.exposeBinding("__pageApi", (_src, method, args) =>
-			dispatch(method, args),
-		);
+		await runner.exposeBinding("__pageApi", async (_src, method, args) => {
+			const requestBytes = jsonByteLength([method, args]);
+			const response = await dispatch(method, args);
+			const responseBytes = jsonByteLength(response);
+			bridgeMetrics.roundTrips++;
+			bridgeMetrics.requestBytes += requestBytes;
+			bridgeMetrics.responseBytes += responseBytes;
+			const row = (bridgeMetrics.byMethod[method] ??= {
+				roundTrips: 0,
+				requestBytes: 0,
+				responseBytes: 0,
+			});
+			row.roundTrips++;
+			row.requestBytes += requestBytes;
+			row.responseBytes += responseBytes;
+			return response;
+		});
 		runner.on("console", (m) => log.push(`[bundle] ${m.text().slice(0, 300)}`));
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
@@ -517,6 +562,12 @@ export async function runHarness({
 			elapsedMs: Date.now() - started,
 			maxHeapBytes,
 			calls,
+			bridgeMetrics: {
+				...bridgeMetrics,
+				totalBytes: bridgeMetrics.requestBytes + bridgeMetrics.responseBytes,
+				modeledPhoneTimeMs:
+					bridgeMetrics.roundTrips * bridgeMetrics.latencyMsPerCall,
+			},
 			data,
 			result,
 			streamResult: streamHost.mode === "stream" ? streamHost.summary() : null,
