@@ -50,12 +50,12 @@ const IN_STORE_QTY_RE =
 	/Qty:\s*(\d+(?:\.\d+)?)(?:\s+([A-Za-z]+))?\s*@\s*\$(\d+(?:\.\d+)?)/i;
 
 /** Elements that show an order-detail page has finished rendering: legacy
- *  item grid, cancelled order, sign-in form, or the in-store item list. */
+ *  item grid, cancelled order, sign-in form, in-store list, or delivery items. */
 export const ORDER_DETAIL_READY_SELECTOR =
-	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList';
+	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList, #line-items, [id$="-item-grid-row"]';
 
 const ORDER_DETAIL_EVIDENCE_RE =
-	/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']|id=["']f3_food_ItemList["']/i;
+	/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']|id=["'](?:f3_food_ItemList|line-items)["']|id=["'][^"']+-item-grid-row["']/i;
 
 /** True when the page carries item, cancellation or in-store item-list
  *  evidence, so an empty parse is a real result and not a blank page. */
@@ -226,6 +226,10 @@ export function parseOrderSearchPageDom(html: string): {
  */
 export function parseOrderDetailDom(html: string): OrderDetail {
 	const { document } = parseHTML(html);
+	const deliveryItems = parseDeliveryOrderItems(document);
+	if (deliveryItems) {
+		return { items: deliveryItems, orderDateRaw: detailOrderDate(document) };
+	}
 	const inStoreItems = parseInStoreItems(document);
 	if (inStoreItems) {
 		return { items: inStoreItems, orderDateRaw: detailOrderDate(document) };
@@ -267,6 +271,48 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		});
 	}
 	return { items, orderDateRaw: detailOrderDate(document) };
+}
+
+/**
+ * Delivery orders at `/uff/your-account/order-details` use `#line-items` and
+ * one `*-item-grid-row` element per search row. The captured rows have a
+ * `/dp/ASIN` link and an image. Their row text may include `Qty: N`; the
+ * existing online-order behavior defaults a row without Qty to one. The
+ * capture also exposes a dollar price in row text, which uses PRICE_RE.
+ * Rows without a product link remain in order accounting but cannot produce
+ * an order_items record without a source ASIN.
+ */
+function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
+	const container = document.querySelector<HTMLElement>("#line-items");
+	const rows = container
+		? container.querySelectorAll<HTMLElement>('[id$="-item-grid-row"]')
+		: document.querySelectorAll<HTMLElement>('[id$="-item-grid-row"]');
+	if (!container && rows.length === 0) {
+		return null;
+	}
+
+	return [...rows].map((row) => {
+		const anchor = row.querySelector<HTMLAnchorElement>('a[href*="/dp/"]');
+		const href = anchor?.getAttribute("href") ?? "";
+		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
+		const linkedName = textOf(anchor).replace(WHITESPACE_RE, " ").trim();
+		if (productId && !linkedName) {
+			throw new Error("Whole Foods delivery item has no source product name");
+		}
+		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
+		const quantity = QTY_RE.exec(rowText)?.[1];
+		const price = PRICE_RE.exec(rowText)?.[1];
+		const image = row.querySelector<HTMLImageElement>("img");
+
+		return {
+			imageUrl: image?.getAttribute("src") ?? null,
+			name: linkedName || "Unlinked Whole Foods item",
+			productId,
+			productUrl: productId ? absoluteAmazonUrl(href) : null,
+			quantity: quantity ? Number(quantity) : 1,
+			unitPriceDollars: price ? Number(price) : null,
+		};
+	});
 }
 
 function detailOrderDate(document: Document): string | null {
