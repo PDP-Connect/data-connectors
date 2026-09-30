@@ -36,6 +36,16 @@ const OPTIONAL_SHARED_ARTIFACT_INPUTS = new Set([
 	"scripts/source-declaration-members.mjs",
 	"vendor/pdpp-reference-contract/source.ts",
 ]);
+const PAGE_SHIM_SHARED_INPUTS = [
+	"scripts/pageshim/attach-to-artifact.mjs",
+	"scripts/pageshim/build.mjs",
+	"scripts/pageshim/runtime.ts",
+	"scripts/pageshim/shims/anthropic-export.ts",
+	"scripts/pageshim/shims/buffer.js",
+	"scripts/pageshim/shims/path.js",
+	"scripts/pageshim/shims/process.js",
+	"scripts/pageshim/shims/url.js",
+];
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const SIDE_EFFECT_LOCAL_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const DYNAMIC_LOCAL_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"]*?)\1/g;
@@ -89,14 +99,19 @@ function resolveLocalImport(commit, from, specifier, options) {
 
 function addLocalImportClosure(commit, entryPath, files, options) {
   const pending = [entryPath];
+  const visited = new Set();
   while (pending.length) {
     const path = pending.pop();
-    if (files.has(path)) continue;
-    const source = readFileAtCommit(commit, path, options);
-    if (source === null) {
-      throw new ArtifactInputError(`cannot read local artifact input ${path} at ${commit}`);
+    if (visited.has(path)) continue;
+    visited.add(path);
+    let source = files.get(path);
+    if (source === undefined) {
+      source = readFileAtCommit(commit, path, options);
+      if (source === null) {
+        throw new ArtifactInputError(`cannot read local artifact input ${path} at ${commit}`);
+      }
+      files.set(path, source);
     }
-    files.set(path, source);
     for (const specifier of localImportSpecifiers(source)) {
       pending.push(resolveLocalImport(commit, path, specifier, options));
     }
@@ -202,6 +217,23 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
     files.set(path, bytes);
   }
   addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options);
+
+  // A PageShim bundle is a connector-specific artifact input. Detect it from
+  // the entry file at the commit being compared so enabling a new target, and
+  // edits to its entry/runtime/shims, select only the affected connector.
+  const pageShimEntry = `scripts/pageshim/entries/${manifest}.ts`;
+  const pageShimEntryBytes = readFileAtCommit(commit, pageShimEntry, options);
+  if (pageShimEntryBytes !== null) {
+    for (const path of PAGE_SHIM_SHARED_INPUTS) {
+      const content = readFileAtCommit(commit, path, options);
+      // Older commits can contain PageShim entries without this OCI
+      // packaging step; encode that prior state so it compares as a real
+      // change when the first packaged bundle is introduced.
+      if (content === null) files.set(path, Buffer.from("\0absent"));
+      else addLocalImportClosure(commit, path, files, options);
+    }
+    addLocalImportClosure(commit, pageShimEntry, files, options);
+  }
 
   const hash = createHash("sha256");
   for (const [path, content] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {

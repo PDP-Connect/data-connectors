@@ -255,6 +255,13 @@ jobs:
             --version "${{ steps.target.outputs.version }}" \
             --out "${RUNNER_TEMP}/artifact"
 
+      - name: Attach a PageShim bundle when the connector has one
+        if: steps.target.outputs.selected == 'true'
+        run: |
+          node scripts/pageshim/attach-to-artifact.mjs \
+            --connector "${{ steps.target.outputs.manifest }}" \
+            --artifact "${RUNNER_TEMP}/artifact"
+
       - name: Prove the built bundle imports before publishing it
         # The gate that matters. The bundle is a single file with its in-tree
         # graph already resolved, so the failure this catches is the one the

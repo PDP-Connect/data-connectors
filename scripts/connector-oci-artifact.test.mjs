@@ -50,6 +50,7 @@ const esbuildLib = join(repoRoot, "node_modules", "esbuild", "lib", "main.js");
 
 let workspace;
 let ouraArtifact;
+let githubBrowserArtifact;
 
 const run = (script, args) =>
 	spawnSync(process.execPath, [script, ...args], {
@@ -119,6 +120,33 @@ before(() => {
 		0,
 		`building the real Oura artifact failed:\n${built.stdout}\n${built.stderr}`,
 	);
+	githubBrowserArtifact = join(workspace, "github-browser");
+	const mobileBuilt = build([
+		"--connector",
+		"github_browser",
+		"--out",
+		githubBrowserArtifact,
+	]);
+	assert.equal(
+		mobileBuilt.status,
+		0,
+		`building the PageShim-enabled GitHub artifact failed:\n${mobileBuilt.stdout}\n${mobileBuilt.stderr}`,
+	);
+	const mobileAttached = run(
+		join(repoRoot, "scripts", "pageshim", "attach-to-artifact.mjs"),
+		["--connector", "github_browser", "--artifact", githubBrowserArtifact],
+	);
+	assert.equal(
+		mobileAttached.status,
+		0,
+		`attaching the PageShim bundle failed:\n${mobileAttached.stdout}\n${mobileAttached.stderr}`,
+	);
+	const mobileVerified = verify(githubBrowserArtifact);
+	assert.equal(
+		mobileVerified.status,
+		0,
+		`verifying the attached PageShim bundle failed:\n${mobileVerified.stdout}\n${mobileVerified.stderr}`,
+	);
 });
 
 after(() => {
@@ -126,6 +154,116 @@ after(() => {
 });
 
 describe("W28 — the source declaration is a normative PDPP SourceDeclaration", () => {
+	it("includes the PageShim bundle in the connector's signed assets layer", () => {
+		const config = JSON.parse(
+			readFileSync(join(githubBrowserArtifact, "config.json"), "utf8"),
+		);
+		const pageshim = config.mobile?.pageshim;
+		assert.ok(pageshim, "PageShim-enabled artifacts must advertise their mobile bundle");
+		assert.deepEqual(pageshim, {
+			layer: "assets",
+			path: "pageshim/github_browser.js",
+			media_type: "text/javascript",
+			digest: pageshim.digest,
+			size: pageshim.size,
+		});
+
+		const layerPlan = JSON.parse(
+			readFileSync(join(githubBrowserArtifact, "layers.json"), "utf8"),
+		);
+		assert.equal(
+			layerPlan.layers.filter((layer) => layer.file === "assets.tar.gz").length,
+			1,
+		);
+		assert.ok(
+			layerPlan.layers.every(({ mediaType }) =>
+				[
+					"application/vnd.pdpp.connector.profile.v1+json",
+					"application/vnd.pdpp.connector.code.v1.tar+gzip",
+					"application/vnd.pdpp.connector.assets.v1.tar+gzip",
+					"application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+					"application/vnd.pdpp.connector.provenance.v1+json",
+				].includes(mediaType),
+			),
+			"mobile delivery must keep the existing installer layer contract",
+		);
+
+		const assetsRoot = join(workspace, "github-browser-assets");
+		mkdirSync(assetsRoot, { recursive: true });
+		execFileSync("tar", [
+			"-xzf",
+			join(githubBrowserArtifact, "assets.tar.gz"),
+			"-C",
+			assetsRoot,
+		]);
+		const bundle = readFileSync(join(assetsRoot, pageshim.path));
+		assert.equal(pageshim.digest, sha256(bundle));
+		assert.equal(pageshim.size, bundle.length);
+	});
+
+	it("refuses a PageShim digest that does not match the bundle bytes", () => {
+		const target = join(workspace, "github-browser-wrong-pageshim-digest");
+		cpSync(githubBrowserArtifact, target, { recursive: true });
+		const configPath = join(target, "config.json");
+		const config = JSON.parse(readFileSync(configPath, "utf8"));
+		config.mobile.pageshim.digest = `sha256:${"0".repeat(64)}`;
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+		const verified = verify(target);
+		assert.notEqual(verified.status, 0);
+		assert.match(verified.stderr, /config\.mobile\.pageshim\.digest does not match the bundle bytes/);
+	});
+
+	it("refuses to attach another connector's PageShim to this artifact", () => {
+		const target = join(workspace, "github-browser-wrong-connector");
+		cpSync(githubBrowserArtifact, target, { recursive: true });
+		const configPath = join(target, "config.json");
+		const config = JSON.parse(readFileSync(configPath, "utf8"));
+		delete config.mobile;
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+		const attach = run(
+			join(repoRoot, "scripts", "pageshim", "attach-to-artifact.mjs"),
+			["--connector", "anthropic", "--artifact", target],
+		);
+		assert.notEqual(attach.status, 0);
+		assert.match(attach.stderr, /requested connector anthropic does not match artifact connector github-browser/);
+	});
+
+	it("refuses to attach to a stale connector version", () => {
+		const target = join(workspace, "github-browser-stale-version");
+		cpSync(githubBrowserArtifact, target, { recursive: true });
+		for (const filename of ["config.json", "collection-profile.json"]) {
+			const path = join(target, filename);
+			const document = JSON.parse(readFileSync(path, "utf8"));
+			document.version = "0.0.0";
+			if (filename === "config.json") delete document.mobile;
+			writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`);
+		}
+		const attach = run(
+			join(repoRoot, "scripts", "pageshim", "attach-to-artifact.mjs"),
+			["--connector", "github_browser", "--artifact", target],
+		);
+		assert.notEqual(attach.status, 0);
+		assert.match(attach.stderr, /github-browser artifact version 0\.0\.0 does not match manifest version 0\.2\.9/);
+	});
+
+	it("refuses an artifact whose connector ID disagrees with its source manifest", () => {
+		const target = join(workspace, "github-browser-wrong-id");
+		cpSync(githubBrowserArtifact, target, { recursive: true });
+		for (const filename of ["config.json", "collection-profile.json"]) {
+			const path = join(target, filename);
+			const document = JSON.parse(readFileSync(path, "utf8"));
+			document.connector_id = "https://registry.pdpp.dev/connectors/anthropic";
+			if (filename === "config.json") delete document.mobile;
+			writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`);
+		}
+		const attach = run(
+			join(repoRoot, "scripts", "pageshim", "attach-to-artifact.mjs"),
+			["--connector", "github_browser", "--artifact", target],
+		);
+		assert.notEqual(attach.status, 0);
+		assert.match(attach.stderr, /github-browser artifact connector ID does not match manifest connector ID/);
+	});
+
 	it("keeps the published image layer set compatible with installers before #212", () => {
 		const payload = JSON.parse(readFileSync(join(ouraArtifact, "layers.json"), "utf8"));
 		const supported = new Set([

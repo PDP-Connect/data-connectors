@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getPublishShards, PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
+import { PAGESHIM_CONNECTORS } from "./pageshim/build.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const shard = process.env.CONNECTOR_TEST_SHARD;
@@ -30,6 +31,7 @@ test("C-T1 every allowlist entry builds and verifies", async (t) => {
           "--connector", manifest, "--out", artifact,
           "--esbuild", join(repoRoot, "node_modules/esbuild/lib/main.js"),
         ]],
+        ["pageshim/attach-to-artifact.mjs", ["--connector", manifest, "--artifact", artifact]],
         ["verify-connector-oci-artifact.mjs", ["--artifact", artifact]],
       ]) {
         const result = spawnSync(process.execPath, [join(repoRoot, "scripts", script), ...args], {
@@ -39,6 +41,11 @@ test("C-T1 every allowlist entry builds and verifies", async (t) => {
       }
       const config = JSON.parse(readFileSync(join(artifact, "config.json"), "utf8"));
       assert.equal(config.connector_key, connectorKey, "publish repository must match built identity");
+      assert.equal(
+        config.mobile?.pageshim !== undefined,
+        PAGESHIM_CONNECTORS.includes(manifest),
+        "PageShim metadata must exist exactly for enabled connectors",
+      );
     });
   }
 });

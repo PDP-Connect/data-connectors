@@ -17,7 +17,8 @@
 //     imports resolve to a shim that maps them onto host methods instead of
 //     the throwing stub (anthropic: the export download and ZIP read).
 //
-// This target does not touch the OCI build (build-connector-oci-artifact.mjs).
+// attach-to-artifact.mjs packages an enabled bundle into the existing signed
+// connector artifact after the normal OCI build.
 //
 // usage: node scripts/pageshim/build.mjs --connector <name> --out <file.js>
 

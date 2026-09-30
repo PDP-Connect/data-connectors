@@ -205,6 +205,89 @@ test("an unrelated root file does not select a connector", async () => {
   }
 });
 
+test("a PageShim-only edit changes only connectors with a PageShim entry", async () => {
+  const repo = makeRepo();
+  try {
+    const pageShimFiles = {
+      "scripts/pageshim/attach-to-artifact.mjs": "attach before\n",
+      "scripts/pageshim/build.mjs": "build before\n",
+      "scripts/pageshim/runtime.ts": "runtime before\n",
+      "scripts/pageshim/shims/buffer.js": "buffer shim\n",
+      "scripts/pageshim/shims/path.js": "path shim\n",
+      "scripts/pageshim/shims/process.js": "process shim\n",
+      "scripts/pageshim/shims/url.js": "url shim\n",
+      "scripts/pageshim/shims/anthropic-export.ts": "anthropic shim\n",
+      "scripts/pageshim/entries/helper.ts": "export const helper = 'before';\n",
+      "scripts/pageshim/entries/oura_browser.ts":
+        "import { ouraBrowser } from '../../../connectors/oura_browser/index.ts';\nimport { helper } from './helper.ts';\nexport { ouraBrowser, helper };\n",
+    };
+    for (const [path, content] of Object.entries(pageShimFiles)) repo.write(path, content);
+    const before = repo.commit("add PageShim target");
+    const beforeHashes = await fleetHashes(repo, before);
+    repo.write("scripts/pageshim/runtime.ts", "runtime after\n");
+    const after = repo.commit("change PageShim runtime");
+    const afterHashes = await fleetHashes(repo, after);
+    assert.deepEqual(changedConnectors(beforeHashes, afterHashes), ["oura_browser"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a PageShim entry's local helper is part of its connector artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const pageShimFiles = {
+      "scripts/pageshim/attach-to-artifact.mjs": "attach\n",
+      "scripts/pageshim/build.mjs": "build\n",
+      "scripts/pageshim/runtime.ts": "runtime\n",
+      "scripts/pageshim/shims/buffer.js": "buffer shim\n",
+      "scripts/pageshim/shims/path.js": "path shim\n",
+      "scripts/pageshim/shims/process.js": "process shim\n",
+      "scripts/pageshim/shims/url.js": "url shim\n",
+      "scripts/pageshim/shims/anthropic-export.ts": "anthropic shim\n",
+      "scripts/pageshim/entries/helper.ts": "export const helper = 'before';\n",
+      "scripts/pageshim/entries/oura_browser.ts":
+        "import { helper } from './helper.ts';\nexport { helper };\n",
+    };
+    for (const [path, content] of Object.entries(pageShimFiles)) repo.write(path, content);
+    const before = repo.commit("add PageShim helper");
+    const beforeHashes = await fleetHashes(repo, before);
+    repo.write("scripts/pageshim/entries/helper.ts", "export const helper = 'after';\n");
+    const after = repo.commit("change PageShim helper");
+    const afterHashes = await fleetHashes(repo, after);
+    assert.deepEqual(changedConnectors(beforeHashes, afterHashes), ["oura_browser"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a PageShim injected shim's local helper is part of its connector artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const pageShimFiles = {
+      "scripts/pageshim/attach-to-artifact.mjs": "attach\n",
+      "scripts/pageshim/build.mjs": "build\n",
+      "scripts/pageshim/runtime.ts": "runtime\n",
+      "scripts/pageshim/shims/buffer.js": "buffer shim\n",
+      "scripts/pageshim/shims/path.js": "path shim\n",
+      "scripts/pageshim/shims/process.js": "import { helper } from './helper.js'; export { helper };\n",
+      "scripts/pageshim/shims/url.js": "url shim\n",
+      "scripts/pageshim/shims/anthropic-export.ts": "anthropic shim\n",
+      "scripts/pageshim/shims/helper.js": "export const helper = 'before';\n",
+      "scripts/pageshim/entries/oura_browser.ts": "export {}\n",
+    };
+    for (const [path, content] of Object.entries(pageShimFiles)) repo.write(path, content);
+    const before = repo.commit("add PageShim injected shim helper");
+    const beforeHashes = await fleetHashes(repo, before);
+    repo.write("scripts/pageshim/shims/helper.js", "export const helper = 'after';\n");
+    const after = repo.commit("change injected shim helper");
+    const afterHashes = await fleetHashes(repo, after);
+    assert.deepEqual(changedConnectors(beforeHashes, afterHashes), ["oura_browser"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("an unreachable connector test does not select its connector", async () => {
   const repo = makeRepo();
   try {
