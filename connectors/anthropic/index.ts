@@ -827,25 +827,32 @@ export function readExportZip(zipPath: string): {
 	try {
 		const fileSize = statSync(zipPath).size;
 		const entries = readZipEntriesFromFile(fd, fileSize, EXPORT_ZIP_POLICY);
+		const entryJson = (entry: (typeof entries)[number]): unknown => {
+			const data = entry.data() as Buffer & {
+				hasJsonValue?: boolean;
+				jsonValue?: unknown;
+			};
+			return data.hasJsonValue
+				? data.jsonValue
+				: safeJsonParse(data.toString("utf8"));
+		};
 		const conversationsEntry = entries.find(
 			(e) => e.name === "conversations.json",
 		);
 		const conversationsJson = conversationsEntry
-			? safeJsonParse(conversationsEntry.data().toString("utf8"))
+			? entryJson(conversationsEntry)
 			: null;
 		const projectFiles = entries
 			.filter((e) => e.name.startsWith("projects/") && e.name.endsWith(".json"))
 			.map((e) => ({
 				name: e.name,
-				json: safeJsonParse(e.data().toString("utf8")),
+				json: entryJson(e),
 			}));
 		const usersEntry = entries.find((e) => e.name === "users.json");
 		return {
 			conversationsJson,
 			projectFiles,
-			userFiles: usersEntry
-				? [safeJsonParse(usersEntry.data().toString("utf8"))]
-				: [],
+			userFiles: usersEntry ? [entryJson(usersEntry)] : [],
 			recognized: Array.isArray(conversationsJson),
 			entryNames: entries.map((e) => e.name),
 		};

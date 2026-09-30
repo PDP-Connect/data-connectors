@@ -33,7 +33,12 @@ import type { ShimPage } from "../runtime.ts";
 
 type CaptureResult = { ok: boolean; ready?: boolean; error?: string };
 type ExtractResult =
-	| { ok: true; names: string[]; json: Record<string, unknown> }
+	| {
+			ok: true;
+			handle: string;
+			names: string[];
+			entries: Array<{ name: string; size: number }>;
+	  }
 	| { ok: false; error: string };
 export interface ExportHostPage extends ShimPage {
 	captureDownload: (url: string, opts?: unknown) => Promise<CaptureResult>;
@@ -41,6 +46,12 @@ export interface ExportHostPage extends ShimPage {
 		handle: string | null,
 		opts?: unknown,
 	) => Promise<ExtractResult>;
+	readZipEntryChunk: (
+		handle: string | null,
+		entryName: string,
+		offset: number,
+		length: number,
+	) => Promise<{ ok: boolean; text?: string; error?: string }>;
 }
 
 const CLAUDE_ORIGIN = "https://claude.ai";
@@ -49,9 +60,81 @@ const OLD_FORMAT_DOWNLOAD = /\/export\/[^/]+\/download\/[^/?#]+/;
 let host: ExportHostPage | null = null;
 let armedUrl: string | null = null;
 /** Extracted archives, keyed by the path index.ts thinks it saved to. */
-const archives = new Map<string, Extract<ExtractResult, { ok: true }>>();
+const archives = new Map<
+	string,
+	{ names: string[]; json: Record<string, unknown> }
+>();
 const openFiles = new Map<number, string>();
 let nextFd = 3;
+const ZIP_ENTRY_CHUNK_UNITS = 64 * 1024;
+
+class JsonArrayParser {
+	readonly values: unknown[] = [];
+	#started = false;
+	#closed = false;
+	#depth = 0;
+	#inString = false;
+	#escaped = false;
+	#parts: string[] = [];
+
+	feed(chunk: string): void {
+		let partStart = -1;
+		for (let i = 0; i < chunk.length; i++) {
+			const char = chunk[i];
+			if (!this.#started) {
+				if (/\s/.test(char)) continue;
+				if (char !== "[") throw new Error("expected a JSON array");
+				this.#started = true;
+				continue;
+			}
+			if (this.#closed) {
+				if (!/\s/.test(char)) throw new Error("data after JSON array");
+				continue;
+			}
+			if (this.#depth === 0) {
+				if (/\s|,/.test(char)) continue;
+				if (char === "]") {
+					this.#closed = true;
+					continue;
+				}
+				if (char !== "{") throw new Error("expected a conversation object");
+				this.#depth = 1;
+				this.#inString = false;
+				this.#escaped = false;
+				this.#parts = [];
+				partStart = i;
+				continue;
+			}
+			if (this.#inString) {
+				if (this.#escaped) this.#escaped = false;
+				else if (char === "\\") this.#escaped = true;
+				else if (char === '"') this.#inString = false;
+				continue;
+			}
+			if (char === '"') this.#inString = true;
+			else if (char === "{" || char === "[") this.#depth++;
+			else if (char === "}" || char === "]") this.#depth--;
+			if (this.#depth === 0) {
+				this.#parts.push(chunk.slice(partStart, i + 1));
+				this.values.push(JSON.parse(this.#parts.join("")));
+				this.#parts = [];
+				partStart = -1;
+			}
+		}
+		if (partStart >= 0) this.#parts.push(chunk.slice(partStart));
+	}
+
+	finish(): unknown[] {
+		if (
+			!this.#started ||
+			!this.#closed ||
+			this.#depth !== 0 ||
+			this.#parts.length
+		)
+			throw new Error("incomplete JSON array");
+		return this.values;
+	}
+}
 
 type Download = { terminal?: Error };
 
@@ -130,7 +213,44 @@ export async function savePlaywrightDownload(
 		throw new Error(
 			`The Claude export archive could not be read: ${r?.error ?? "no result"}`,
 		);
-	archives.set(path, r);
+	const json: Record<string, unknown> = {};
+	for (const entry of r.entries) {
+		let offset = 0;
+		let first = "";
+		let text = "";
+		let arrayParser: JsonArrayParser | null = null;
+		while (offset < entry.size) {
+			const chunk = await host.readZipEntryChunk(
+				r.handle,
+				entry.name,
+				offset,
+				ZIP_ENTRY_CHUNK_UNITS,
+			);
+			if (
+				!chunk?.ok ||
+				typeof chunk.text !== "string" ||
+				chunk.text.length === 0
+			)
+				throw new Error(
+					`The Claude export entry could not be read: ${chunk?.error ?? entry.name}`,
+				);
+			if (!arrayParser && !text && !first) {
+				first = chunk.text.trimStart().slice(0, 1);
+				if (first === "[") arrayParser = new JsonArrayParser();
+			}
+			if (arrayParser) arrayParser.feed(chunk.text);
+			else text += chunk.text;
+			offset += chunk.text.length;
+		}
+		try {
+			json[entry.name] = arrayParser ? arrayParser.finish() : JSON.parse(text);
+		} catch {
+			// The shell already selected valid JSON. Treat a mismatch as a bridge
+			// contract failure instead of silently importing a partial archive.
+			throw new Error("The Claude export entry could not be parsed");
+		}
+	}
+	archives.set(path, { names: r.names, json });
 }
 
 // ── bounded-zip-archive.ts ───────────────────────────────────────────────
@@ -174,8 +294,12 @@ export function readZipEntriesFromFile(
 		data: () => {
 			// The host inflates only .json entries that parse.
 			if (!Object.hasOwn(archive.json, name)) return { toString: () => "" };
-			const text = JSON.stringify(archive.json[name]);
-			return { toString: () => text };
+			const jsonValue = archive.json[name];
+			return {
+				hasJsonValue: true,
+				jsonValue,
+				toString: () => JSON.stringify(jsonValue),
+			};
 		},
 	}));
 }

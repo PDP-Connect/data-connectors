@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -46,6 +46,8 @@ async function buildSyntheticBundle(
 	serializeError = false,
 	partialResult = false,
 	negativeHeapControl = false,
+	evaluateResultMiB = 0,
+	recordTextUnits = 100_000,
 ) {
 	await mkdir(root, { recursive: true });
 	const outfile = join(root, `stream-${recordCount}-${streamResults}.js`);
@@ -62,6 +64,8 @@ async function buildSyntheticBundle(
 			PAGESHIM_SERIALIZE_ERROR: String(serializeError),
 			PAGESHIM_PARTIAL_RESULT: String(partialResult),
 			PAGESHIM_NEGATIVE_HEAP_CONTROL: String(negativeHeapControl),
+			PAGESHIM_EVALUATE_RESULT_MIB: String(evaluateResultMiB),
+			PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: String(recordTextUnits),
 		},
 	});
 	return outfile;
@@ -170,10 +174,20 @@ test("result stream rejects malformed order, mixed protocols, and split surrogat
 	}
 });
 
-test("build-time default keeps the legacy result path", {
+test("build-time default keeps the legacy result path for bounded results", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(2, false);
+	const bundle = await buildSyntheticBundle(
+		2,
+		false,
+		false,
+		false,
+		false,
+		false,
+		false,
+		0,
+		1000,
+	);
 	const run = await runHarness({
 		bundle,
 		fixtures,
@@ -320,6 +334,80 @@ test("CDP heap sampling catches a retained allocation above the streaming bound"
 			run.maxHeapBytes > 64 * 1024 * 1024,
 			`sampled heap was ${run.maxHeapBytes} bytes`,
 		);
+	} finally {
+		await rm(spoolDirectory, { recursive: true, force: true });
+	}
+});
+
+test("a 60 MiB single conversation crosses the bridge only in bounded pieces", {
+	timeout: 180_000,
+}, async () => {
+	const bundle = await buildSyntheticBundle(
+		0,
+		true,
+		false,
+		false,
+		false,
+		false,
+		false,
+		60,
+	);
+	const spoolDirectory = join(root, "spool-large-evaluate-result");
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations", "chatgpt.messages"],
+			resultStreaming: true,
+			resultSpoolDirectory: spoolDirectory,
+		});
+		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
+		assert.equal(run.streamResult.completed, true);
+		assert.ok(run.bridgeCallCount > 900);
+		assert.ok(run.maxBridgePayloadUnits <= 256 * 1024);
+		const conversations = JSON.parse(
+			await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"),
+		);
+		assert.deepEqual(conversations.records, [
+			{
+				id: "synthetic-60mb-conversation",
+				messageCharacters: 60 * 1024 * 1024,
+			},
+		]);
+	} finally {
+		await rm(spoolDirectory, { recursive: true, force: true });
+	}
+});
+
+test("an evaluation result above the per-item bound fails with a clear error", {
+	timeout: 180_000,
+}, async () => {
+	const bundle = await buildSyntheticBundle(
+		0,
+		true,
+		false,
+		false,
+		false,
+		false,
+		false,
+		65,
+	);
+	const spoolDirectory = join(root, "spool-oversized-evaluate-result");
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations", "chatgpt.messages"],
+			resultStreaming: true,
+			resultSpoolDirectory: spoolDirectory,
+		});
+		assert.equal(run.ret.ok, true);
+		assert.match(
+			run.data.error,
+			/PageShim evaluation result .* per-item limit/,
+		);
+		assert.ok(run.maxBridgePayloadUnits <= 256 * 1024);
+		assert.equal(run.streamResult, null);
 	} finally {
 		await rm(spoolDirectory, { recursive: true, force: true });
 	}

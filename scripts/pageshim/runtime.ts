@@ -3,7 +3,7 @@
 
 // Runs a PDPP connector's probe() and collect() on the mobile PageShim host
 // and maps PDPP protocol messages onto the shim's page API:
-//   RECORD   -> buffered, then one page.setData("result", ...) at the end
+//   RECORD   -> streamed in bounded chunks when enabled; otherwise buffered
 //   PROGRESS -> page.setProgress
 //   SKIP_RESULT -> an entry in result.errors
 // Failure output matches mobile's legacy github-1.5.0.js: bad requestedScopes
@@ -41,12 +41,26 @@ export interface ShimPage {
 		check: () => Promise<boolean>,
 		interval?: number,
 	) => Promise<boolean>;
+	readZipEntryChunk?: (
+		handle: string | null,
+		entryName: string,
+		offset: number,
+		length: number,
+	) => Promise<{ ok: boolean; text?: string; error?: string }>;
 }
 
 type Msg = { type: string; [k: string]: unknown };
 type Rec = Record<string, unknown>;
 
-const RESULT_CHUNK_MAX_UNITS = 256 * 1024;
+const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
+// JSON text is escaped again when the platform bridge serializes its envelope.
+// Leave room for that second encoding and the message fields.
+const RESULT_CHUNK_MAX_UNITS = 125 * 1024;
+const EVALUATE_INLINE_MAX_UNITS = 64 * 1024;
+const EVALUATE_CHUNK_MAX_UNITS = 64 * 1024;
+const EVALUATE_RESULT_MAX_UNITS = 64 * 1024 * 1024;
+const ERROR_TEXT_MAX_UNITS = 4 * 1024;
+const EVALUATE_RESULT_STORE = "__pdppPageshimEvaluateResults";
 
 declare const PAGESHIM_RESULT_STREAMING: boolean;
 
@@ -57,10 +71,111 @@ function resultStreamingEnabled(): boolean {
 	);
 }
 
+function boundedPageEvaluate(shim: ShimPage) {
+	let nextId = 0;
+	return async (code: string): Promise<unknown> => {
+		if (code.length > PAGE_BRIDGE_MAX_UNITS / 4) {
+			throw new Error(
+				`PageShim evaluation request exceeds ${PAGE_BRIDGE_MAX_UNITS / 4} UTF-16 code units`,
+			);
+		}
+		const id = `pageshim-${nextId++}`;
+		const wrapped = `(async () => {
+			let value;
+			try {
+				value = await (${code});
+				const json = JSON.stringify(value);
+				if (json === undefined) return { type: "undefined" };
+				if (json.length > ${EVALUATE_RESULT_MAX_UNITS}) {
+					return { type: "too-large", length: json.length };
+				}
+				if (json.length <= ${EVALUATE_INLINE_MAX_UNITS}) {
+					return { type: "value", value };
+				}
+				const store = globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}] ||
+					(globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}] = Object.create(null));
+				store[${JSON.stringify(id)}] = json;
+				return { type: "chunked", id: ${JSON.stringify(id)}, length: json.length };
+			} catch (error) {
+				return { type: "error", message: String(error?.message ?? error).slice(0, 1000) };
+			}
+		})()`;
+		const response = (await shim.evaluate(wrapped)) as {
+			type?: string;
+			value?: unknown;
+			id?: string;
+			length?: number;
+			message?: string;
+		};
+		if (response?.type === "undefined") return undefined;
+		if (response?.type === "value") return response.value;
+		if (response?.type === "too-large") {
+			throw new Error(
+				`PageShim evaluation result is ${response.length} UTF-16 code units; the per-item limit is ${EVALUATE_RESULT_MAX_UNITS}`,
+			);
+		}
+		if (response?.type === "error") {
+			throw new Error(
+				`PageShim evaluation failed: ${response.message ?? "unknown error"}`,
+			);
+		}
+		if (
+			response?.type !== "chunked" ||
+			response.id !== id ||
+			!Number.isSafeInteger(response.length) ||
+			(response.length ?? 0) <= EVALUATE_INLINE_MAX_UNITS ||
+			(response.length ?? 0) > EVALUATE_RESULT_MAX_UNITS
+		) {
+			throw new Error(
+				"PageShim evaluation returned an invalid transfer marker",
+			);
+		}
+
+		const chunks: string[] = [];
+		try {
+			for (let offset = 0; offset < response.length; ) {
+				const end = Math.min(
+					offset + EVALUATE_CHUNK_MAX_UNITS,
+					response.length,
+				);
+				const piece = await shim.evaluate(
+					`globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]?.slice(${offset}, ${end}) ?? null`,
+				);
+				if (
+					typeof piece !== "string" ||
+					piece.length === 0 ||
+					piece.length > EVALUATE_CHUNK_MAX_UNITS
+				) {
+					throw new Error(
+						"PageShim evaluation chunk exceeded its transfer bound",
+					);
+				}
+				chunks.push(piece);
+				offset += piece.length;
+			}
+			const json = chunks.join("");
+			if (json.length !== response.length) {
+				throw new Error(
+					"PageShim evaluation chunks did not match their declared size",
+				);
+			}
+			return JSON.parse(json);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(`PageShim evaluation transfer failed: ${reason}`);
+		} finally {
+			await shim.evaluate(
+				`delete globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]`,
+			);
+		}
+	};
+}
+
 /** The Playwright `Page` members that connectors on this target call, over the shim. */
 export function playwrightPageFacade(shim: ShimPage) {
+	const evaluateInPage = boundedPageEvaluate(shim);
 	const evaluate = (fn: unknown, arg?: unknown): Promise<unknown> =>
-		shim.evaluate(
+		evaluateInPage(
 			typeof fn === "function"
 				? `(${fn.toString()})(${arg === undefined ? "" : JSON.stringify(arg)})`
 				: String(fn),
@@ -71,7 +186,7 @@ export function playwrightPageFacade(shim: ShimPage) {
 			return null; // Playwright returns a Response; the shim returns nothing.
 		},
 		content: async () =>
-			(await shim.evaluate("document.documentElement.outerHTML")) as string,
+			(await evaluateInPage("document.documentElement.outerHTML")) as string,
 		evaluate,
 		waitForFunction: async (
 			fn: unknown,
@@ -340,7 +455,10 @@ export async function runOnPageShim(
 				return;
 			case "SKIP_RESULT": {
 				const stream = String(msg.stream);
-				const reason = String(msg.message ?? msg.reason);
+				const reason = String(msg.message ?? msg.reason).slice(
+					0,
+					ERROR_TEXT_MAX_UNITS,
+				);
 				errors.push({
 					errorClass: inferErrorClass(reason),
 					reason,
@@ -353,7 +471,7 @@ export async function runOnPageShim(
 			case "PROGRESS":
 				await shim.setProgress({
 					phase: { label: String(msg.stream ?? "collect") },
-					message: String(msg.message ?? ""),
+					message: String(msg.message ?? "").slice(0, ERROR_TEXT_MAX_UNITS),
 					count: msg.count,
 				});
 				return;
@@ -402,7 +520,10 @@ export async function runOnPageShim(
 			isRecordSelected: emitRecord.isSelected,
 			page,
 			progress: (message: string) =>
-				shim.setProgress({ phase: { label: "collect" }, message }),
+				shim.setProgress({
+					phase: { label: "collect" },
+					message: message.slice(0, ERROR_TEXT_MAX_UNITS),
+				}),
 			requested,
 			state,
 		});
@@ -433,13 +554,21 @@ export async function runOnPageShim(
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
 		const done = result(scopes, errors);
+		const serialized = JSON.stringify(done);
+		if (serialized.length > RESULT_CHUNK_MAX_UNITS) {
+			throw new Error(
+				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; enable streamed results`,
+			);
+		}
 		await shim.setData("result", done);
 		await shim.setData(
 			"status",
 			`Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
 		);
 	} catch (error) {
-		const reason = error instanceof Error ? error.message : String(error);
+		const reason = (
+			error instanceof Error ? error.message : String(error)
+		).slice(0, ERROR_TEXT_MAX_UNITS);
 		const fatal =
 			error instanceof FatalRunError
 				? error.telemetryError
