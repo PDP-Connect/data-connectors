@@ -38,6 +38,7 @@ export const PAGESHIM_CONNECTORS = [
 	"github_browser",
 	"anthropic",
 	"strava_browser",
+	"chatgpt",
 ];
 
 /**
@@ -61,6 +62,11 @@ const CONNECTOR_PORTS = {
 			"../../packages/polyfill-connectors/src/playwright-download.ts",
 		],
 		inject: [join(HERE, "shims", "buffer.js")],
+	},
+	chatgpt: {
+		importer: join(REPO, "packages", "polyfill-connectors", "src", "adaptive-lane.ts"),
+		shim: join(HERE, "shims", "async-hooks.js"),
+		modules: ["async_hooks"],
 	},
 };
 
