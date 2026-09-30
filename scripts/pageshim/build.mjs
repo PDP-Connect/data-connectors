@@ -132,9 +132,12 @@ const stubPlugin = (stubbed, port) => ({
 });
 
 /** Builds one connector. Returns size and the list of stubbed modules. */
-export async function buildPageshim({ connector, outfile, minify = true }) {
+export async function buildPageshim({ connector, outfile, minify = true, sinceDays = 0 }) {
 	if (!PAGESHIM_CONNECTORS.includes(connector)) {
 		throw new Error(`pageshim target is not enabled for ${connector}`);
+	}
+	if (!Number.isSafeInteger(sinceDays) || sinceDays < 0) {
+		throw new Error("sinceDays must be a non-negative integer");
 	}
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
@@ -153,6 +156,7 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		inject: [join(HERE, "shims", "process.js"), ...(port?.inject ?? [])],
 		define: {
 			"import.meta.url": '"file:///pageshim/bundle.js"',
+			PAGESHIM_SINCE_DAYS: String(sinceDays),
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
 				JSON.parse(
@@ -182,7 +186,11 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const { values } = parseArgs({
-		options: { connector: { type: "string" }, out: { type: "string" } },
+		options: {
+			connector: { type: "string" },
+			out: { type: "string" },
+			"since-days": { type: "string" },
+		},
 	});
 	if (!values.connector || !values.out) {
 		console.error("usage: build.mjs --connector <name> --out <file.js>");
@@ -192,6 +200,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const report = await buildPageshim({
 		connector: values.connector,
 		outfile: values.out,
+		sinceDays: values["since-days"] ? Number(values["since-days"]) : 0,
 	});
 	console.log(
 		JSON.stringify({ ...report, outfile: relative(REPO, report.outfile) }),

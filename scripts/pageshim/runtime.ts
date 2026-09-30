@@ -121,6 +121,8 @@ export interface PageshimConnector {
 	scopes: string[];
 	/** The connector manifest's semver. */
 	version: string;
+	/** Fixed, opt-in lookback window embedded in this bundle. */
+	sinceDays?: number;
 	loginUrl: string;
 	loginMessage: string;
 	validateRecord: Parameters<typeof makeEmitRecord>[0]["validateRecord"];
@@ -204,10 +206,20 @@ export async function runOnPageShim(
 		initError = error;
 	}
 	const prefix = `${connector.platform}.`;
+	const windowSince =
+		connector.sinceDays && connector.sinceDays > 0
+			? new Date(Date.now() - connector.sinceDays * 86_400_000).toISOString()
+			: undefined;
 	const requested = new Map(
 		requestedScopes
 			.filter((s) => s.startsWith(prefix))
-			.map((s) => [s.slice(prefix.length), { name: s.slice(prefix.length) }]),
+			.map((s) => [
+				s.slice(prefix.length),
+				{
+					name: s.slice(prefix.length),
+					...(windowSince ? { time_range: { since: windowSince } } : {}),
+				},
+			]),
 	);
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
@@ -311,10 +323,27 @@ export async function runOnPageShim(
 				});
 			}
 		}
+		if (windowSince) {
+			const hasRecords = Object.values(records).some((items) => items.length > 0);
+			errors.push({
+				errorClass: "partial",
+				reason: "time_window",
+				disposition: hasRecords ? "degraded" : "omitted",
+				phase: "collect",
+			});
+		}
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
 		const done = result(scopes, errors);
+		if (windowSince) {
+			done.exportSummary = {
+				...done.exportSummary,
+				window: { since: windowSince, sinceDays: connector.sinceDays },
+				partial: true,
+				partialReason: "time_window",
+			};
+		}
 		await shim.setData("result", done);
 		await shim.setData(
 			"status",

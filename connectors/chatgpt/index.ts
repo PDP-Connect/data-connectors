@@ -3173,6 +3173,9 @@ async function listConversationsSinceCursor(
 		: startCursor;
 	const resumeStartCursor = cursor;
 	const pageSize = CONVERSATION_PAGE_SIZE;
+	const requestedSince =
+		deps.requested.get("conversations")?.time_range?.since ??
+		deps.requested.get("messages")?.time_range?.since;
 	const complete = (): ConversationListResult => {
 		if (
 			resumeBackfill &&
@@ -3216,6 +3219,7 @@ async function listConversationsSinceCursor(
 		let nextCursor: number | null = null;
 		let cursorDisagreed = false;
 		let boundaryHit = false;
+		let windowBoundaryHit = false;
 		let shouldProbeAgain = false;
 		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
 			if (attempt > 0) {
@@ -3251,7 +3255,13 @@ async function listConversationsSinceCursor(
 					malformedItem = true;
 					break;
 				}
-				items.push({ ...raw, id });
+				const item = { ...raw, id } as ConversationListItem;
+				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				if (requestedSince && (!updateIso || updateIso < requestedSince)) {
+					windowBoundaryHit = true;
+					continue;
+				}
+				items.push(item);
 			}
 			if (malformedItem) {
 				for (const stream of ["conversations", "messages"] as const) {
@@ -3367,6 +3377,9 @@ async function listConversationsSinceCursor(
 			if (cursorDisagreed) {
 				break;
 			}
+		}
+		if (windowBoundaryHit) {
+			return { ...complete() };
 		}
 		if (
 			cursorDisagreed ||

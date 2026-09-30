@@ -205,6 +205,66 @@ test("chatgpt: default walk has no 50-detail cap", {
 	}
 });
 
+test("chatgpt: 30-day PageShim window stops before older conversation details", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-30d.js"),
+		sinceDays: 30,
+	});
+	const now = Date.now() / 1000;
+	const detailCalls = [];
+	fx.useConversationCount(4);
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const url = new URL(raw);
+		if (url.pathname === "/backend-api/conversations/search") {
+			const body = JSON.parse(response.body);
+			body.items = body.items.slice(0, 4).map((item, index) => ({
+				...item,
+				create_time: now - (index < 2 ? index + 1 : 30 + index) * 86400,
+				update_time: now - (index < 2 ? index + 1 : 30 + index) * 86400,
+			}));
+			body.total = 4;
+			body.has_more = false;
+			body.next_cursor = null;
+			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
+			detailCalls.push(url.pathname.split("/").pop());
+		}
+		return response;
+	};
+	let r;
+	try {
+		r = await runHarness({
+			bundle: built.outfile,
+			fixtures: { ...fx.pageshimCase.fixtures, resolve },
+			scopes: fx.pageshimCase.scopes,
+		});
+	} finally {
+		fx.useConversationCount(2);
+	}
+	assertCleanRun(r);
+	assert.deepEqual(
+		detailCalls,
+		["conv-1", "conv-2"],
+	);
+	assert.deepEqual(
+		r.result["chatgpt.conversations"].records.map((x) => x.id),
+		["conv-1", "conv-2"],
+	);
+	assert.equal(
+		r.result.exportSummary.window?.sinceDays,
+		30,
+	);
+	assert.equal(r.result.exportSummary.partial, true);
+	assert.equal(r.result.exportSummary.partialReason, "time_window");
+	assert.ok(r.result.errors.some((e) => e.reason === "time_window"));
+	assert.match(r.data.status, /^Partial:/);
+});
+
 test("chatgpt: capped PageShim walk reports partial with omitted detail evidence", {
 	timeout: 180_000,
 }, async () => {

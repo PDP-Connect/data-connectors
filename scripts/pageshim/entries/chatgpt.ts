@@ -6,6 +6,7 @@ import { validateRecord } from "../../../connectors/chatgpt/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_SINCE_DAYS: number;
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const STREAMS = ["conversations", "messages"];
@@ -48,6 +49,7 @@ const count = (scope: unknown): number => {
 		platform: "chatgpt",
 		scopes: STREAMS.map((s) => `chatgpt.${s}`),
 		version: PAGESHIM_CONNECTOR_VERSION,
+		sinceDays: PAGESHIM_SINCE_DAYS || undefined,
 		loginUrl: `${CHATGPT_ORIGIN}/auth/login`,
 		loginMessage: "Sign in to ChatGPT, then return here.",
 		prepareProbe: async (facade) => {
