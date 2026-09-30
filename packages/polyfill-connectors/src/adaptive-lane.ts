@@ -1,7 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import PQueue from "p-queue";
 
 export type AdaptiveLaneOutcomeKind =
@@ -157,14 +156,6 @@ export class AdaptiveLaneAttemptTimeoutError extends Error {
 
 const defaultSleep = (ms: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, ms));
-const runContextStorage = new AsyncLocalStorage<AdaptiveLaneRunContext>();
-
-export function currentAdaptiveLaneRunContext():
-	| AdaptiveLaneRunContext
-	| undefined {
-	return runContextStorage.getStore();
-}
-
 function errorName(error: unknown): string {
 	return error instanceof Error ? error.name : typeof error;
 }
@@ -415,9 +406,7 @@ export function createAdaptiveLane<T>(
 		signal?: AbortSignal,
 	): Promise<T> => {
 		const context = runContext(attempt, signal);
-		const attemptPromise = runContextStorage.run(context, () =>
-			Promise.resolve(task(context)),
-		);
+		const attemptPromise = Promise.resolve(task(context));
 		if (options.attemptTimeoutMs === undefined) {
 			return attemptPromise;
 		}

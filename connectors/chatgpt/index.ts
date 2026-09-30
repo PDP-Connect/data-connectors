@@ -33,8 +33,8 @@ import {
 	type AdaptiveLane,
 	AdaptiveLaneCancelledError,
 	type AdaptiveLaneEvent,
+	type AdaptiveLaneRunContext,
 	createAdaptiveLane,
-	currentAdaptiveLaneRunContext,
 } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
 import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
@@ -1462,6 +1462,7 @@ async function reportChatGptRetryPressure({
 	delayMs,
 	emit,
 	onUnlanedRateLimited,
+	laneContext,
 	providerBudget,
 	recordPacingThrottle,
 	response,
@@ -1470,6 +1471,7 @@ async function reportChatGptRetryPressure({
 	delayMs: number;
 	emit?: CollectContext["emit"] | undefined;
 	onUnlanedRateLimited?: (() => void) | undefined;
+	laneContext?: AdaptiveLaneRunContext | undefined;
 	providerBudget?: ProviderBudgetController | null | undefined;
 	recordPacingThrottle: boolean;
 	response?: { status?: number } | undefined;
@@ -1482,7 +1484,6 @@ async function reportChatGptRetryPressure({
 		});
 		await emitChatGptProviderBudgetTransitions({ emit, providerBudget });
 	}
-	const laneContext = currentAdaptiveLaneRunContext();
 	await laneContext?.reportPressure({
 		absorbedByRequestWait: true,
 		delayMs,
@@ -1595,11 +1596,13 @@ export function createChatGptApi({
 		{
 			body,
 			captureResult,
+			laneContext,
 			method,
 			parseJson,
 		}: {
 			body?: unknown;
 			captureResult: boolean;
+			laneContext?: AdaptiveLaneRunContext | undefined;
 			method: string;
 			parseJson: boolean;
 		},
@@ -1661,6 +1664,7 @@ export function createChatGptApi({
 					delayMs,
 					emit,
 					onUnlanedRateLimited,
+					laneContext,
 					providerBudget,
 					recordPacingThrottle,
 					response,
@@ -1746,11 +1750,20 @@ export function createChatGptApi({
 		auth,
 		fetch(
 			path: string,
-			{ method = "GET", body }: { method?: string; body?: unknown } = {},
+			{
+				method = "GET",
+				body,
+				laneContext,
+			}: {
+				method?: string;
+				body?: unknown;
+				laneContext?: AdaptiveLaneRunContext | undefined;
+			} = {},
 		): Promise<ChatGptFetchResult> {
 			return fetchWithRetry(path, {
 				method,
 				body,
+				laneContext,
 				parseJson: true,
 				captureResult: true,
 			});
@@ -4895,10 +4908,11 @@ export async function runMessagesAndConversationsWithDetail(
 	// returned a durable-defer result, propagate it. Non-recoverable errors re-throw.
 	async function fetchConversationDetailWithRecoverableRetry(
 		c: ConversationListItem,
+		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		for (;;) {
 			try {
-				return await fetchConversationDetailWaitingOutCircuit(c);
+				return await fetchConversationDetailWaitingOutCircuit(c, laneContext);
 			} catch (err) {
 				const fetchErrorDefer = await maybeDeferForFetchError(c, err);
 				if (fetchErrorDefer) {
@@ -4975,6 +4989,7 @@ export async function runMessagesAndConversationsWithDetail(
 
 	async function fetchConversationDetailWaitingOutCircuit(
 		c: ConversationListItem,
+		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		const batchDetail = batchDetailCache.get(c.id);
 		if (batchDetail) {
@@ -4990,6 +5005,7 @@ export async function runMessagesAndConversationsWithDetail(
 			try {
 				return await deps.api.fetch(
 					`/conversation/${encodeURIComponent(c.id)}`,
+					{ laneContext },
 				);
 			} catch (err) {
 				await handleCircuitOpenForWaitOut(err);
@@ -5003,7 +5019,7 @@ export async function runMessagesAndConversationsWithDetail(
 		lane,
 		convosToSync,
 		tailStopController.signal,
-		async (c) => {
+		async (c, laneContext) => {
 			if (!c) {
 				return { status: 404, json: null };
 			}
@@ -5045,7 +5061,10 @@ export async function runMessagesAndConversationsWithDetail(
 			if (runBudgetDefer) {
 				return runBudgetDefer;
 			}
-			const detail = await fetchConversationDetailWithRecoverableRetry(c);
+			const detail = await fetchConversationDetailWithRecoverableRetry(
+				c,
+				laneContext,
+			);
 			if (detail.deferredDueToPressure) {
 				// fetchConversationDetailWithRecoverableRetry surfaced a durable-defer
 				// result from maybeDeferForFetchError — propagate it directly.
@@ -5112,7 +5131,10 @@ async function runLaneUntilTailStopped(
 	lane: AdaptiveLane<ChatGptFetchResult>,
 	items: ConversationListItem[],
 	tailStopSignal: AbortSignal,
-	task: (c: ConversationListItem) => Promise<ChatGptFetchResult>,
+	task: (
+		c: ConversationListItem,
+		context: AdaptiveLaneRunContext,
+	) => Promise<ChatGptFetchResult>,
 ): Promise<void> {
 	try {
 		await lane.runAll(items, task, { signal: tailStopSignal });
@@ -5742,6 +5764,103 @@ function makeEmitRecord(
 	};
 }
 
+export async function collectChatGpt(
+	ctx: CollectContext | BrowserCollectContext,
+): Promise<void> {
+	const {
+		state,
+		requested,
+		emit,
+		emitRecord: baseEmitRecord,
+		progress,
+		capture,
+	} = ctx;
+	const { page } = ctx as BrowserCollectContext;
+
+	// Run-scoped accumulator for served 429s seen outside the detail lane
+	// (list pagination + the non-detail streams). createChatGptApi bumps it
+	// via onUnlanedRateLimited; the detail phase reads it to seed its density
+	// stop so pre-detail source pressure defers the tail earlier.
+	const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
+
+	// Run-scoped bounded-run envelope, created once so the gap-recovery pass
+	// and the forward-walk pass share one budget. By default ChatGPT has no
+	// fixed size/time cap; positive env values opt into explicit envelopes.
+	const runBudget = new ChatGptRunBudget({
+		maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
+		maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+	});
+	// Warm-start: pass the RAW persisted pacing (interval + when it was
+	// learned) so ProviderPacing can apply the §10-E staleness guard itself —
+	// a stale interval (idle > 6h) cold-starts instead of bursting into a
+	// possibly-tightened quota. The descent compounds across fresh runs.
+	const providerBudget = resolveChatGptProviderBudget(
+		process.env,
+		readChatGptPersistedPacing(state),
+	);
+
+	// API client closes over page + capture — no module-level mutable state,
+	// auth cached inside the closure for the run's lifetime.
+	const api = createChatGptApi({
+		page,
+		capture,
+		emit,
+		onUnlanedRateLimited: () => {
+			preDetailPressure.rateLimited += 1;
+		},
+		providerBudget,
+	});
+	const emitRecord = makeEmitRecord(baseEmitRecord);
+
+	// Verify session (extract bearer token for /backend-api calls)
+	const auth = await api.auth();
+	progress(
+		`Authenticated to ChatGPT (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
+	);
+
+	const deps: StreamDeps = {
+		api,
+		sleep: (milliseconds) =>
+			new Promise((resolve) => setTimeout(resolve, milliseconds)),
+		detailGaps: ctx.detailGaps,
+		emit,
+		emitRecord,
+		isRecordSelected: ctx.isRecordSelected,
+		preDetailPressure,
+		progress,
+		providerBudget,
+		// §4.3: thread recoveryOnly from the CollectContext (sourced from the
+		// START message's recovery_only field) into the dep bag so
+		// runConversationsAndMessagesStreams can gate the forward walk. Normalize
+		// to a concrete boolean (CollectContext.recoveryOnly is optional).
+		recoveryOnly: ctx.recoveryOnly === true,
+		requested,
+		requestDetailGapPage: ctx.requestDetailGapPage,
+		runBudget,
+	};
+
+	if (isChatGptSideEffectProbeEnabled()) {
+		await runChatGptSideEffectProbe({ api, emit, page });
+		return;
+	}
+
+	if (requested.has("memories")) {
+		await runMemoriesStream(deps);
+	}
+	if (requested.has("custom_gpts")) {
+		await runCustomGptsStream(deps);
+	}
+	if (requested.has("custom_instructions")) {
+		await runCustomInstructionsStream(deps, state);
+	}
+	if (requested.has("shared_conversations")) {
+		await runSharedConversationsStream(deps, state);
+	}
+	if (requested.has("conversations") || requested.has("messages")) {
+		await runConversationsAndMessagesStreams(deps, state);
+	}
+}
+
 // ─── Entry ─────────────────────────────────────────────────────────────
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime
@@ -5803,100 +5922,7 @@ if (isMainModule(import.meta.url)) {
 				sendInteraction,
 			});
 		},
-		async collect(ctx: CollectContext | BrowserCollectContext): Promise<void> {
-			const {
-				state,
-				requested,
-				emit,
-				emitRecord: baseEmitRecord,
-				progress,
-				capture,
-			} = ctx;
-			const { page } = ctx as BrowserCollectContext;
-
-			// Run-scoped accumulator for served 429s seen outside the detail lane
-			// (list pagination + the non-detail streams). createChatGptApi bumps it
-			// via onUnlanedRateLimited; the detail phase reads it to seed its density
-			// stop so pre-detail source pressure defers the tail earlier.
-			const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
-
-			// Run-scoped bounded-run envelope, created once so the gap-recovery pass
-			// and the forward-walk pass share one budget. By default ChatGPT has no
-			// fixed size/time cap; positive env values opt into explicit envelopes.
-			const runBudget = new ChatGptRunBudget({
-				maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-				maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
-			});
-			// Warm-start: pass the RAW persisted pacing (interval + when it was
-			// learned) so ProviderPacing can apply the §10-E staleness guard itself —
-			// a stale interval (idle > 6h) cold-starts instead of bursting into a
-			// possibly-tightened quota. The descent compounds across fresh runs.
-			const providerBudget = resolveChatGptProviderBudget(
-				process.env,
-				readChatGptPersistedPacing(state),
-			);
-
-			// API client closes over page + capture — no module-level mutable state,
-			// auth cached inside the closure for the run's lifetime.
-			const api = createChatGptApi({
-				page,
-				capture,
-				emit,
-				onUnlanedRateLimited: () => {
-					preDetailPressure.rateLimited += 1;
-				},
-				providerBudget,
-			});
-			const emitRecord = makeEmitRecord(baseEmitRecord);
-
-			// Verify session (extract bearer token for /backend-api calls)
-			const auth = await api.auth();
-			progress(
-				`Authenticated to ChatGPT (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
-			);
-
-			const deps: StreamDeps = {
-				api,
-				sleep: (milliseconds) =>
-					new Promise((resolve) => setTimeout(resolve, milliseconds)),
-				detailGaps: ctx.detailGaps,
-				emit,
-				emitRecord,
-				isRecordSelected: ctx.isRecordSelected,
-				preDetailPressure,
-				progress,
-				providerBudget,
-				// §4.3: thread recoveryOnly from the CollectContext (sourced from the
-				// START message's recovery_only field) into the dep bag so
-				// runConversationsAndMessagesStreams can gate the forward walk. Normalize
-				// to a concrete boolean (CollectContext.recoveryOnly is optional).
-				recoveryOnly: ctx.recoveryOnly === true,
-				requested,
-				requestDetailGapPage: ctx.requestDetailGapPage,
-				runBudget,
-			};
-
-			if (isChatGptSideEffectProbeEnabled()) {
-				await runChatGptSideEffectProbe({ api, emit, page });
-				return;
-			}
-
-			if (requested.has("memories")) {
-				await runMemoriesStream(deps);
-			}
-			if (requested.has("custom_gpts")) {
-				await runCustomGptsStream(deps);
-			}
-			if (requested.has("custom_instructions")) {
-				await runCustomInstructionsStream(deps, state);
-			}
-			if (requested.has("shared_conversations")) {
-				await runSharedConversationsStream(deps, state);
-			}
-			if (requested.has("conversations") || requested.has("messages")) {
-				await runConversationsAndMessagesStreams(deps, state);
-			}
-		},
+		collect: collectChatGpt,
 		retryablePattern: CHATGPT_RETRYABLE_ERROR_PATTERN,
 	});
 }

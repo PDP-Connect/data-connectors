@@ -5,6 +5,8 @@
 // parsers.ts and tests can import them without pulling in the Playwright-
 // flavored runtime entry.
 
+import type { AdaptiveLaneRunContext } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
+
 // ─── API response shapes (loose by design) ─────────────────────────────
 
 // The JSON bodies vary by endpoint; we deliberately keep these loose but typed.
@@ -125,7 +127,11 @@ export interface ChatGptApi {
 	auth: () => Promise<ChatGptAuth>;
 	fetch: (
 		path: string,
-		opts?: { method?: string; body?: unknown },
+		opts?: {
+			method?: string;
+			body?: unknown;
+			laneContext?: AdaptiveLaneRunContext | undefined;
+		},
 	) => Promise<ChatGptFetchResult>;
 	fetchBatch?: (ids: readonly string[]) => Promise<ChatGptFetchResult[]>;
 	fetchStatus?: (

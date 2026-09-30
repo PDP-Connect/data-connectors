@@ -56,7 +56,7 @@ import {
 	retryHttp,
 } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
-import { currentAdaptiveLaneRunContext } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
+import type { AdaptiveLaneRunContext } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
 import { CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
 import type {
 	CollectContext,
@@ -2876,10 +2876,10 @@ test("runMessagesAndConversationsWithDetail: intermediate pressure is bounded an
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = "", opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			activeFetches += 1;
 			maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 45_000,
 				kind: "rate_limited",
@@ -2992,12 +2992,12 @@ test("runMessagesAndConversationsWithDetail: cumulative 429 density WAITS OUT th
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			fetchedIds.push(path);
 			// Model production: a served 429 reports rate_limited pressure (the lane
 			// surfaces this as a cooldown event the density tracker counts), sleeps
 			// its own backoff, then the conversation succeeds.
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 30_000,
 				kind: "rate_limited",
@@ -3110,11 +3110,11 @@ test("runMessagesAndConversationsWithDetail: served 429s below the density thres
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			fetchedIds.push(path);
 			if (firstFetch) {
 				firstFetch = false;
-				await currentAdaptiveLaneRunContext()?.reportPressure({
+				await opts.laneContext?.reportPressure({
 					absorbedByRequestWait: true,
 					delayMs: 30_000,
 					kind: "rate_limited",
@@ -3171,9 +3171,9 @@ test("runMessagesAndConversationsWithDetail: pre-detail 429s seed the density st
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			fetchedIds.push(path);
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 30_000,
 				kind: "rate_limited",
@@ -3275,9 +3275,9 @@ test("runMessagesAndConversationsWithDetail: a zero pre-detail seed preserves th
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			fetchedIds.push(path);
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 30_000,
 				kind: "rate_limited",
@@ -4378,7 +4378,7 @@ test("runMessagesAndConversationsWithDetail: emits structured provider-budget ci
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await admitFakeProviderBudget(providerBudget);
 			return makeDetailOk();
 		},
@@ -5678,7 +5678,7 @@ test("runMessagesAndConversationsWithDetail: a cap trip over a large tail writes
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			return makeDetailOk();
 		},
@@ -5778,7 +5778,7 @@ test("cap-tail backlog deferral is NOT source pressure and arms no cooldown", as
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			return makeDetailOk();
 		},
@@ -7221,7 +7221,7 @@ test("runConversationsAndMessagesStreams: CONTINUOUS DRAIN — a partially-hydra
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			fetches.push(path);
 			if (path.startsWith("/conversations/search?")) {
 				return {
@@ -7232,7 +7232,7 @@ test("runConversationsAndMessagesStreams: CONTINUOUS DRAIN — a partially-hydra
 			if (hot) {
 				// Served-429 pressure keeps the density tracker hot so page 1 trips the
 				// bounded-wait fallback and defers its tail durably.
-				await currentAdaptiveLaneRunContext()?.reportPressure({
+				await opts.laneContext?.reportPressure({
 					absorbedByRequestWait: true,
 					delayMs: 30_000,
 					kind: "rate_limited",
@@ -7506,7 +7506,7 @@ test("runConversationsAndMessagesStreams: a hot account that SUCCEEDS drains to 
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			if (path.startsWith("/conversations/search?")) {
 				listedCursors.push(path);
@@ -7520,7 +7520,7 @@ test("runConversationsAndMessagesStreams: a hot account that SUCCEEDS drains to 
 			// but the request SUCCEEDS (returns 200). With threshold 1, density trips on
 			// every conversation after the first — but each subsequent success resets the
 			// no-progress counter, so the give-up gate is never reached.
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 30_000,
 				kind: "rate_limited",
@@ -7621,7 +7621,7 @@ test("runConversationsAndMessagesStreams: a dead account (every fetch fails, no 
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+		fetch: async (path: string, opts: { method?: string; body?: unknown; laneContext?: AdaptiveLaneRunContext | undefined } = {}): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			if (path.startsWith("/conversations/search?")) {
 				listedCursors.push(path);
@@ -7643,7 +7643,7 @@ test("runConversationsAndMessagesStreams: a dead account (every fetch fails, no 
 			fetchedDetail.push(path);
 			// Dead account: reports a 429 (density accumulates) then always fails with
 			// retry-exhausted. No success → consecutiveWaitOutsWithoutSuccess never resets.
-			await currentAdaptiveLaneRunContext()?.reportPressure({
+			await opts.laneContext?.reportPressure({
 				absorbedByRequestWait: true,
 				delayMs: 30_000,
 				kind: "rate_limited",
@@ -7750,7 +7750,7 @@ test("runConversationsAndMessagesStreams: warm-start round-trip — a run persis
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			return makeDetailOk();
 		},
@@ -7918,7 +7918,7 @@ test("runMessagesAndConversationsWithDetail: emits a collection_rate progress ev
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await admitFakeProviderBudget(providerBudget as ProviderBudgetController);
 			await Promise.resolve();
 			return makeDetailOk();
@@ -8383,7 +8383,7 @@ test("runCustomGptsStream: hitting the GIZMO_MAX_PAGES safety cap with a cursor 
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			calls += 1;
 			return {
@@ -8443,7 +8443,7 @@ test("runCustomGptsStream: hitting the GIZMO_MAX_PAGES cap exactly when the sour
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			calls += 1;
 			const isLastPage = calls === 51;
@@ -9008,7 +9008,7 @@ test("runSharedConversationsStream: hitting the PAGINATION_SAFETY_LIMIT with mor
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
 			calls += 1;
 			const items = Array.from({ length: 100 }, (_, idx) => ({
@@ -9831,7 +9831,7 @@ test("runMessagesAndConversationsWithDetail: hot account at probe-concurrency fa
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetchStatus: (): Promise<Pick<ChatGptFetchResult, "headers" | "status">> =>
 			Promise.resolve({ status: 429 }),
-		fetch: async (): Promise<ChatGptFetchResult> => {
+		fetch: async (_path = ""): Promise<ChatGptFetchResult> => {
 			activeFetches += 1;
 			maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
 			await Promise.resolve();
