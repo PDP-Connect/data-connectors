@@ -268,6 +268,70 @@ test("chatgpt: 30-day PageShim window stops before older conversation details", 
 	assert.match(r.data.status, /^Partial:/);
 });
 
+test("chatgpt: 30-day PageShim walk keeps paging past items without update_time", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-30d-multipage.js"),
+		sinceDays: 30,
+		streamResults: true,
+	});
+	const now = Date.now() / 1000;
+	const detailCalls = [];
+	fx.useConversationCount(51);
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const url = new URL(raw);
+		if (url.pathname === "/backend-api/conversations/search") {
+			const start = Number(url.searchParams.get("cursor") ?? "0");
+			const items = Array.from(
+				{ length: Math.min(30, Math.max(0, 51 - start)) },
+				(_, offset) => {
+					const index = start + offset;
+					return {
+						id: `conv-${index + 1}`,
+						...(index < 30
+							? {}
+							: { update_time: now - (index + 1) * 86400 }),
+					};
+				},
+			);
+			response.body = JSON.stringify({
+				items,
+				total: 51,
+				has_more: start + items.length < 51,
+				next_cursor: start + items.length < 51 ? start + items.length : null,
+			});
+		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
+			detailCalls.push(url.pathname.split("/").pop());
+		}
+		return response;
+	};
+	let r;
+	try {
+		r = await runHarness({
+			bundle: built.outfile,
+			fixtures: { ...fx.pageshimCase.fixtures, resolve },
+			scopes: fx.pageshimCase.scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, "chatgpt-30d-multipage-stream"),
+		});
+	} finally {
+		fx.useConversationCount(2);
+	}
+	assertCleanRun(r);
+	assert.deepEqual(
+		detailCalls,
+		Array.from({ length: 21 }, (_, index) => `conv-${index + 31}`),
+	);
+	assert.equal(r.streamResult?.completed, true);
+	assert.equal(r.streamDone.exportSummary.details.conversations, 21);
+	assert.equal(r.streamDone.exportSummary.details.messages, 21);
+	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
+});
+
 test("chatgpt: capped PageShim walk reports partial with omitted detail evidence", {
 	timeout: 180_000,
 }, async () => {

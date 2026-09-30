@@ -3219,7 +3219,6 @@ async function listConversationsSinceCursor(
 		let nextCursor: number | null = null;
 		let cursorDisagreed = false;
 		let boundaryHit = false;
-		let windowBoundaryHit = false;
 		let shouldProbeAgain = false;
 		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
 			if (attempt > 0) {
@@ -3257,8 +3256,9 @@ async function listConversationsSinceCursor(
 				}
 				const item = { ...raw, id } as ConversationListItem;
 				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				// Filter unknown and out-of-window rows, but keep following cursors:
+				// ChatGPT can return a row without update_time before newer rows.
 				if (requestedSince && (!updateIso || updateIso < requestedSince)) {
-					windowBoundaryHit = true;
 					continue;
 				}
 				items.push(item);
@@ -3377,9 +3377,6 @@ async function listConversationsSinceCursor(
 			if (cursorDisagreed) {
 				break;
 			}
-		}
-		if (windowBoundaryHit) {
-			return { ...complete() };
 		}
 		if (
 			cursorDisagreed ||
