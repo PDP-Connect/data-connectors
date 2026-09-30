@@ -17,10 +17,9 @@
  * is no credential in this code and no credential form: the owner signs in in
  * the browser.
  *
- * Bounds: one page at a time, a pause between pages, at most
- * MAX_PAGES_PER_RUN pages and MAX_DETAILS_PER_RUN details per run. Detail
- * reads are paced; a run that stops at a bound saves the last completed
- * activity and the next run continues from it.
+ * The first run inventories the full activity list and emits each summary.
+ * Later runs discover new activities at the front of the list and backfill
+ * the resumable detail queue at MAX_DETAILS_PER_RUN per run.
  *
  * Stream: activities.
  */
@@ -57,7 +56,6 @@ const LIST_HEADERS = {
 };
 const ACTIVITIES_STREAM = "activities";
 const PER_PAGE = 20;
-export const MAX_PAGES_PER_RUN = 100;
 export const MAX_DETAILS_PER_RUN = 100;
 export const PAGE_DELAY_MS = 1000;
 export const ACTIVITY_DELAY_MS = 1500;
@@ -101,7 +99,6 @@ export interface StravaCollectContext {
 }
 
 export interface StravaCollectOptions {
-	maxPages?: number;
 	maxDetails?: number;
 	pageDelayMs?: number;
 	activityDelayMs?: number;
@@ -109,19 +106,13 @@ export interface StravaCollectOptions {
 }
 
 interface ActivitiesState {
-	/** Newest start collected by a finished walk, as a UTC instant. */
-	last_start_time?: string | null;
-	/** Set only while a walk is unfinished: the page to continue from. */
-	resume_page?: number | null;
-	/** Last activity whose detail was fully read during an unfinished walk. */
-	resume_after_id?: string | null;
-	/** Newest start collected so far by the unfinished walk, as a UTC instant. */
-	walk_newest_start_time?: string | null;
-	/**
-	 * Earliest local day the cursor covers, from the requested start of the
-	 * walk that set it. Absent when the walk had no start, so the cursor
-	 * covers the whole history.
-	 */
+	/** IDs whose summary records are already in the Desktop snapshot. */
+	known_ids?: string[];
+	/** Summary records still waiting for their detail fields, newest first. */
+	pending_detail_ids?: string[];
+	/** Set after a complete initial inventory; detail work starts next run. */
+	list_complete?: boolean;
+	/** Earliest requested day represented by known_ids, when range-limited. */
 	requested_since?: string | null;
 }
 
@@ -581,7 +572,6 @@ export async function collectStravaBrowser(
 	if (!ctx.requested.has(ACTIVITIES_STREAM)) {
 		return;
 	}
-	const maxPages = options.maxPages ?? MAX_PAGES_PER_RUN;
 	const maxDetails = options.maxDetails ?? MAX_DETAILS_PER_RUN;
 	const pageDelayMs = options.pageDelayMs ?? PAGE_DELAY_MS;
 	const activityDelayMs = options.activityDelayMs ?? ACTIVITY_DELAY_MS;
@@ -591,43 +581,44 @@ export async function collectStravaBrowser(
 		(ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {};
 	const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
 	const rangeSinceDay = timeRange?.since?.slice(0, 10) ?? null;
-	// A cursor covers only back to the start its walk requested. When this run
-	// asks for an earlier start, or none, the cursor would hide the gap, so the
-	// walk ignores it and goes down to the new start.
-	const storedFloor = stored.requested_since ?? null;
-	const hasPendingWalk =
-		stored.resume_after_id != null || stored.resume_page != null;
-	const cursorCovers =
-		(stored.last_start_time != null || hasPendingWalk) &&
-		(storedFloor === null ||
-			(rangeSinceDay !== null && rangeSinceDay >= storedFloor));
-	// Keep an unfinished walk's cursor even when Desktop requests a full refresh.
-	// The next invocation must continue after a recoverable SKIP_RESULT.
-	const prior: ActivitiesState =
-		cursorCovers && (!fullRefresh || hasPendingWalk) ? stored : {};
-	const floor = !fullRefresh && cursorCovers ? storedFloor : rangeSinceDay;
-	const since = fullRefresh ? null : prior.last_start_time ?? null;
-	const resumeAfterId = prior.resume_after_id ?? null;
-	const firstPage = prior.resume_page ?? 1;
+	const priorKnownIds = new Set(
+		Array.isArray(stored.known_ids)
+			? stored.known_ids.filter((id): id is string => typeof id === "string")
+			: [],
+	);
+	const priorPendingIds = Array.isArray(stored.pending_detail_ids)
+		? stored.pending_detail_ids.filter(
+				(id): id is string => typeof id === "string",
+			)
+		: [];
+	const rangeExpanded =
+		stored.requested_since != null &&
+		(rangeSinceDay == null || rangeSinceDay < stored.requested_since);
+	const fullListWalk =
+		fullRefresh || stored.list_complete !== true || rangeExpanded;
+	const wasInventoryComplete = stored.list_complete === true;
 
 	await ensureStravaOrigin(ctx.page);
 
-	let pageNumber = firstPage;
+	let pageNumber = 1;
 	let pagesRead = 0;
 	let emitted = 0;
-	let detailsRead = 0;
+	let detailAttempts = 0;
+	let detailsUpdated = 0;
+	let detailsDeferred = 0;
 	let unreadable = 0;
 	let earliest: string | null = null;
 	let latest: string | null = null;
-	let walkNewest = prior.walk_newest_start_time ?? null;
-	let lastCompletedId = resumeAfterId;
-	let lastCompletedPage = prior.resume_page ?? firstPage;
-	let resumeLocated = resumeAfterId === null;
 	let previousFirstId: string | null = null;
 	let failure: { reason: CoverageReason; message: string } | null = null;
-	let finished = false;
-	let lastDetailAt = 0;
+	let listFinished = false;
 	let gearLookupPromise: Promise<GearLookup> | null = null;
+	const modelsById = new Map<string, unknown>();
+	const listed: Array<{
+		model: unknown;
+		record: NonNullable<ReturnType<typeof buildActivityRecord>>;
+	}> = [];
+	const newlyListed: typeof listed = [];
 	const gearUnresolvedReasons: Record<string, number> = {};
 	const resolveGearName = async (gearId: string): Promise<GearResolution> => {
 		gearLookupPromise ??= fetchGearNames(ctx.page);
@@ -639,7 +630,7 @@ export async function collectStravaBrowser(
 			: { name: null, reason: "gear_id_unmatched" };
 	};
 
-	while (pagesRead < maxPages) {
+	while (true) {
 		if (pagesRead > 0) {
 			await delay(pageDelayMs);
 		}
@@ -655,7 +646,7 @@ export async function collectStravaBrowser(
 		}
 		pagesRead += 1;
 		if (parsed.models.length === 0) {
-			finished = true;
+			listFinished = true;
 			break;
 		}
 		const records = parsed.models.map((model) => ({
@@ -671,139 +662,136 @@ export async function collectStravaBrowser(
 			break;
 		}
 		previousFirstId = firstId;
-		let pageHasNewer = false;
+		let pageHasKnown = false;
 		for (const { model, record } of records) {
 			if (!record) {
 				unreadable += 1;
 				continue;
 			}
-			const instant = startInstant(record);
 			const inRequestedRange = !isOutsideTimeRange(
 				record.start_date,
 				timeRange,
 			);
-			const newerThanCursor = !since || instant > since;
-			if (newerThanCursor && inRequestedRange) pageHasNewer = true;
-
-			const beforeResumeAnchor = !resumeLocated;
-			if (beforeResumeAnchor) {
-				if (record.id === resumeAfterId) {
-					resumeLocated = true;
-					continue;
-				}
-				// Include only new activities above the saved position while finding
-				// the stable anchor; older leading records already completed.
-				const completedThrough =
-					prior.last_start_time ?? prior.walk_newest_start_time;
-				if (
-					!completedThrough ||
-					instant <= completedThrough ||
-					!inRequestedRange
-				) {
-					continue;
-				}
-			} else if (
-				(!resumeAfterId || !prior.last_start_time) &&
-				((since && instant <= since) || !inRequestedRange)
-			) {
-				continue;
-			} else if (resumeAfterId && !inRequestedRange) {
+			if (!inRequestedRange) {
 				continue;
 			}
-			if (detailsRead >= maxDetails) {
-				failure = {
-					reason: "source_limit_reached",
-					message: `Stopped after ${detailsRead} activity details; the activity cursor continues on the next run.`,
-			};
-				break;
-			}
-			if (lastDetailAt > 0) await delay(activityDelayMs);
-			const detail = await fetchActivityRecordFields(
-				ctx.page,
-				model,
-				record.id,
-				resolveGearName,
-			);
-			if (!detail.ok) {
-				failure = detail;
-				break;
-			}
-			lastDetailAt = Date.now();
-			detailsRead += 1;
-			if (detail.gearReason) {
-				gearUnresolvedReasons[detail.gearReason] =
-					(gearUnresolvedReasons[detail.gearReason] ?? 0) + 1;
-			}
-			const enriched = { ...record, ...detail.fields };
-			await ctx.emitRecord(ACTIVITIES_STREAM, enriched);
-			emitted += 1;
-			earliest = earlier(earliest, instant);
-			latest = later(latest, instant);
-			walkNewest = later(walkNewest, instant);
-			if (!beforeResumeAnchor) {
-				lastCompletedId = record.id;
-				lastCompletedPage = pageNumber;
+			modelsById.set(record.id, model);
+			listed.push({ model, record });
+			if (priorKnownIds.has(record.id)) {
+				pageHasKnown = true;
+			} else {
+				newlyListed.push({ model, record });
 			}
 		}
 		await ctx.emit({
 			type: "PROGRESS",
 			stream: ACTIVITIES_STREAM,
-			message: `Strava page ${pageNumber}: ${emitted} activities collected`,
-			count: emitted,
+			message: `Strava activity list page ${pageNumber} read`,
+			count: listed.length,
 			...(parsed.total > 0 ? { total: parsed.total } : {}),
 		});
+		if (failure) break;
+		const pendingBeforeDetails = fullRefresh
+			? [...listed.map(({ record }) => record.id), ...priorPendingIds]
+			: [...newlyListed.map(({ record }) => record.id), ...priorPendingIds];
+		const detailTargets = [...new Set(pendingBeforeDetails)].slice(
+			0,
+			maxDetails,
+		);
+		const detailTargetsFound = detailTargets.every((id) => modelsById.has(id));
 		if (
-			failure ||
-			(!resumeAfterId && !pageHasNewer) ||
+			(!fullListWalk && pageHasKnown && detailTargetsFound) ||
 			pageNumber * parsed.perPage >= parsed.total
 		) {
-			finished = true;
+			listFinished = true;
 			break;
 		}
 		pageNumber += 1;
-		lastCompletedPage = pageNumber;
-		if (resumeLocated) lastCompletedId = null;
 	}
-	if (resumeAfterId !== null && !resumeLocated && finished && !failure) {
-		failure = {
-			reason: "collection_interrupted",
-			message:
-				"Strava no longer listed the saved activity cursor; the next run will restart the activity walk.",
-		};
-		lastCompletedId = null;
-		lastCompletedPage = 1;
-	}
-	if (failure) finished = false;
 
-	let reason: CoverageReason;
-	if (failure) {
-		reason = failure.reason;
-	} else if (!finished) {
-		reason = "source_limit_reached";
-	} else if (unreadable > 0) {
-		reason = "records_unreadable";
-	} else if (emitted === 0) {
-		reason = "nothing_in_range";
-	} else {
-		reason = "covered_in_full";
+	const summaryRecords = fullRefresh ? listed : newlyListed;
+	for (const { record } of summaryRecords) {
+		await ctx.emitRecord(ACTIVITIES_STREAM, { ...record });
+		emitted += 1;
+		const instant = startInstant(record);
+		earliest = earlier(earliest, instant);
+		latest = later(latest, instant);
 	}
-	if (reason !== "covered_in_full" && reason !== "nothing_in_range") {
+
+	let pendingIds = fullRefresh
+		? [...listed.map(({ record }) => record.id), ...priorPendingIds]
+		: [...newlyListed.map(({ record }) => record.id), ...priorPendingIds];
+	pendingIds = [...new Set(pendingIds)];
+	const knownIds = new Set(priorKnownIds);
+	for (const { record } of listed) knownIds.add(record.id);
+
+	// The initial inventory run only emits summaries. Start detail work after
+	// Desktop has committed that complete inventory and its queue checkpoint.
+	const canBackfill = wasInventoryComplete && !failure && maxDetails > 0;
+	const detailCandidates = canBackfill
+		? pendingIds.slice(0, maxDetails)
+		: [];
+	const completedDetails = new Set<string>();
+	const deferredDetails: string[] = [];
+	if (canBackfill) {
+		for (const id of detailCandidates) {
+			const model = modelsById.get(id);
+			if (model === undefined) continue;
+			if (detailAttempts > 0) await delay(activityDelayMs);
+			const detail = await fetchActivityRecordFields(
+				ctx.page,
+				model,
+				id,
+				resolveGearName,
+			);
+			detailAttempts += 1;
+			if (!detail.ok) {
+				if (
+					detail.reason === "sign_in_required" ||
+					detail.reason === "collection_interrupted"
+				) {
+					failure = detail;
+					break;
+				}
+				deferredDetails.push(id);
+				detailsDeferred += 1;
+				continue;
+			}
+			if (detail.gearReason) {
+				gearUnresolvedReasons[detail.gearReason] =
+					(gearUnresolvedReasons[detail.gearReason] ?? 0) + 1;
+			}
+			const record = buildActivityRecord(model);
+			if (!record) continue;
+			await ctx.emitRecord(ACTIVITIES_STREAM, { ...record, ...detail.fields });
+			completedDetails.add(id);
+			detailsUpdated += 1;
+			emitted += 1;
+			const instant = startInstant(record);
+			earliest = earlier(earliest, instant);
+			latest = later(latest, instant);
+		}
+	}
+	pendingIds = pendingIds.filter(
+		(id) => !completedDetails.has(id) && !deferredDetails.includes(id),
+	);
+	pendingIds.push(...deferredDetails);
+
+	if (failure || unreadable > 0) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
-			reason: SKIP_REASON[reason],
-			...(reason === "source_limit_reached" ||
-			failure?.reason === "collection_interrupted"
+			reason: SKIP_REASON[failure?.reason ?? "records_unreadable"],
+			...(failure?.reason === "collection_interrupted"
 				? { recovery_hint: { action: "retry_by_runtime", retryable: true } }
 				: {}),
-			message:
-				failure?.message ??
-				(reason === "source_limit_reached"
-					? `Stopped after ${detailsRead} activity details or ${pagesRead} list pages; the saved activity cursor continues on the next run.`
-					: `${unreadable} activities in the Strava list had no usable id or start time.`),
+			message: failure?.message ??
+				`${unreadable} activities in the Strava list had no usable id or start time.`,
 			diagnostics: {
 				pages_read: pagesRead,
 				unreadable,
+				details_updated: detailsUpdated,
+				details_pending: pendingIds.length,
 				...(Object.keys(gearUnresolvedReasons).length > 0
 					? {
 							gear_name_unresolved: Object.values(
@@ -815,16 +803,11 @@ export async function collectStravaBrowser(
 			},
 		});
 	} else if (Object.keys(gearUnresolvedReasons).length > 0) {
-		const gearReasonSummary = Object.entries(gearUnresolvedReasons)
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([name, count]) => `${name}=${count}`)
-			.join(",");
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: "records_unreadable",
-			message:
-				`Some activities had a gear id whose name could not be read; gear was emitted as null (${gearReasonSummary}).`,
+			message: "Some activities had gear ids whose names could not be read; gear was emitted as null.",
 			diagnostics: {
 				gear_name_unresolved: Object.values(gearUnresolvedReasons).reduce(
 					(sum, count) => sum + count,
@@ -835,46 +818,33 @@ export async function collectStravaBrowser(
 		});
 	}
 
-	// A partial or interrupted walk resumes after the last activity whose detail
-	// completed. The anchor is stable if new activities shift page boundaries.
-	const floorField = floor ? { requested_since: floor } : {};
-	let cursor: ActivitiesState;
-	if (finished && !failure) {
-		cursor = { last_start_time: later(since, walkNewest), ...floorField };
-	} else {
-		cursor =
-			emitted === 0 && failure && !hasPendingWalk
-				? { ...stored }
-				: {
-						last_start_time: prior.last_start_time ?? since,
-						...(lastCompletedId
-							? { resume_after_id: lastCompletedId }
-							: {}),
-						resume_page: lastCompletedPage,
-						walk_newest_start_time: walkNewest,
-						...floorField,
-					};
-	}
-	const requestedFrom = timeRange?.since ?? floor ?? since ?? "none";
+	const listComplete = wasInventoryComplete || (listFinished && !failure);
+	const requestedSince = rangeSinceDay;
+	const cursor: ActivitiesState = {
+		known_ids: [...knownIds],
+		pending_detail_ids: pendingIds,
+		list_complete: listComplete,
+		requested_since: requestedSince,
+	};
+	const requestedFrom = timeRange?.since ?? "none";
 	const requestedTo = timeRange?.until ?? "none";
-	const resumePage =
-		"resume_page" in cursor && typeof cursor.resume_page === "number"
-			? cursor.resume_page
-			: "none";
 	await ctx.emit({
 		type: "PROGRESS",
 		stream: ACTIVITIES_STREAM,
 		count: emitted,
 		message: [
 			"Strava phase=coverage stream=activities",
-			`status=${failure || !finished || unreadable > 0 ? "partial" : emitted === 0 ? "empty" : "complete"}`,
+			`status=${failure || unreadable > 0 ? "partial" : listed.length === 0 ? "empty" : "complete"}`,
 			`pages_read=${pagesRead}`,
 			`unreadable=${unreadable}`,
+			`summary_records=${summaryRecords.length}`,
+			`details_updated=${detailsUpdated}`,
+			`details_deferred=${detailsDeferred}`,
+			`details_pending=${pendingIds.length}`,
 			`window_requested_from=${requestedFrom}`,
 			`window_requested_to=${requestedTo}`,
 			`window_covered_from=${earliest ?? "none"}`,
 			`window_covered_to=${latest ?? "none"}`,
-			`resume_page=${resumePage}`,
 		].join(" "),
 	});
 	await ctx.emit({ type: "STATE", stream: ACTIVITIES_STREAM, cursor });

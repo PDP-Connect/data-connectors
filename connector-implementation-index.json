@@ -16612,7 +16612,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -16639,7 +16639,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Pages are fetched one at a time with a pause between them, and one run reads at most 100 pages."
+						"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run inventories all activity summaries. Later runs discover new summaries and read at most 100 activity details from a resumable queue. Pages and details are fetched one at a time with pauses."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -16763,7 +16763,7 @@
 					"nothing_in_range": "Strava has no activities in the selected date range.",
 					"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
 					"sign_in_required": "Strava needs you to sign in again before this can continue.",
-					"source_limit_reached": "This run read as many pages as one run allows, so older activities haven't been collected yet. The next run continues from here.",
+					"source_limit_reached": "This run reached a source limit. The next run will retry the remaining activity work.",
 					"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
 				}
 			}
