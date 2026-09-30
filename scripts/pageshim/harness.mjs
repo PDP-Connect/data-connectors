@@ -54,6 +54,7 @@ async function hostMain({
 	source,
 	scopes,
 	initialState,
+	supportsStateArgument,
 	methods,
 	loginWaitMs,
 	timerScale,
@@ -161,11 +162,12 @@ async function hostMain({
 	const code = `${source.slice(0, last.index)}${lead}return (async () => {${source.slice(last.index + last[0].length)}`;
 	try {
 		const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-		await new AsyncFunction("page", "process", "initialState", code)(
-			page,
-			Object.freeze({ env: Object.freeze({}) }),
-			initialState,
-		);
+		const runArgs = [page, Object.freeze({ env: Object.freeze({}) })];
+		if (supportsStateArgument) runArgs.push(initialState);
+		const parameters = supportsStateArgument
+			? ["page", "process", "initialState"]
+			: ["page", "process"];
+		await new AsyncFunction(...parameters, code)(...runArgs);
 		return { ok: true };
 	} catch (e) {
 		return { ok: false, error: String(e?.message ?? e) };
@@ -315,6 +317,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
  * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
+ * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -326,6 +329,7 @@ export async function runHarness({
 	fixtures,
 	scopes,
 	initialState = {},
+	supportsStateArgument = true,
 	loginAfterMs = 0,
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
@@ -413,6 +417,8 @@ export async function runHarness({
 						}
 						result = nextResult;
 					} else if (a[0] === "STATE") {
+						if (!scopes.includes(a[1]?.stream))
+							return { __shimError: "invalid PDPP STATE message" };
 						if (stateAckDelayMs > 0)
 							await new Promise((resolve) =>
 								setTimeout(resolve, stateAckDelayMs),
@@ -517,18 +523,16 @@ export async function runHarness({
 			source,
 			scopes,
 			initialState,
+			supportsStateArgument,
 			methods: SHIM_METHODS,
 			loginWaitMs,
 			timerScale,
 		});
 		if (ret?.ok && data.error === undefined && result) {
-			for (const [stream, cursor] of Object.entries(stagedStates)) {
-				const scope = scopes.find((candidate) =>
-					candidate.endsWith(`.${stream}`),
-				);
+			for (const [scope, cursor] of Object.entries(stagedStates)) {
 				if (!scope || !Object.hasOwn(result, scope)) continue;
 				if (result.errors?.some((error) => error.scope === scope)) continue;
-				states[stream] = cursor;
+				states[scope] = cursor;
 			}
 		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));

@@ -191,6 +191,7 @@ export async function runOnPageShim(
 	shim: ShimPage,
 	connector: PageshimConnector,
 	initialState: Record<string, unknown> = {},
+	supportsState = false,
 ): Promise<void> {
 	const page = playwrightPageFacade(shim);
 	let requestedScopes = [...connector.scopes];
@@ -201,6 +202,11 @@ export async function runOnPageShim(
 		initError = error;
 	}
 	const prefix = `${connector.platform}.`;
+	const scopeByStream = new Map(
+		connector.scopes
+			.filter((scope) => scope.startsWith(prefix))
+			.map((scope) => [scope.slice(prefix.length), scope]),
+	);
 	const requested = new Map(
 		requestedScopes
 			.filter((s) => s.startsWith(prefix))
@@ -208,9 +214,9 @@ export async function runOnPageShim(
 	);
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
-	const state: Record<string, unknown> = {
-		...initialState,
-	};
+	const state: Record<string, unknown> = {};
+	for (const [stream, scope] of scopeByStream)
+		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
 	const emit = async (msg: Msg): Promise<void> => {
 		switch (msg.type) {
 			case "RECORD": {
@@ -221,11 +227,14 @@ export async function runOnPageShim(
 			}
 			case "STATE": {
 				const stream = String(msg.stream);
-				await shim.setData("STATE", {
-					type: "STATE",
-					stream,
-					cursor: msg.cursor,
-				});
+				const scope = scopeByStream.get(stream);
+				if (!scope) throw new Error(`unsupported STATE stream: ${stream}`);
+				if (supportsState)
+					await shim.setData("STATE", {
+						type: "STATE",
+						stream: scope,
+						cursor: msg.cursor,
+					});
 				state[stream] = msg.cursor;
 				return;
 			}

@@ -19,6 +19,7 @@ const length = (scope: unknown, key: string): number => {
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
 	initialState: Record<string, unknown>,
+	supportsState: boolean,
 ) =>
 	runOnPageShim(page, {
 		platform: "github",
@@ -63,4 +64,4 @@ const length = (scope: unknown, key: string): number => {
 				details: { repositories, starred, events, contributions },
 			};
 		},
-	}, initialState);
+	}, initialState, supportsState);

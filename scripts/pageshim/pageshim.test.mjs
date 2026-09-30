@@ -483,13 +483,13 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		[],
 		"initial inventory must not backfill details",
 	);
-	assert.equal(first.states?.activities?.list_complete, true);
-	assert.equal(first.states?.activities?.pending_detail_ids.length, 205);
+	assert.equal(first.states?.["strava.activities"]?.list_complete, true);
+	assert.equal(first.states?.["strava.activities"]?.pending_detail_ids.length, 205);
 	assert.deepEqual(first.stateMessages, [
 		{
 			type: "STATE",
-			stream: "activities",
-			cursor: first.states.activities,
+			stream: "strava.activities",
+			cursor: first.states["strava.activities"],
 		},
 	]);
 	assert.ok(
@@ -513,7 +513,7 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 	);
 	const secondBatch = new Set(detailRequests);
 	assert.equal(second.result["strava.activities"].records.length, 100);
-	assert.equal(second.states?.activities?.pending_detail_ids.length, 105);
+	assert.equal(second.states?.["strava.activities"]?.pending_detail_ids.length, 105);
 	assert.notDeepEqual(second.states, initialState);
 	initialState = second.states;
 
@@ -531,7 +531,7 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		"run three must continue with activities left by run two",
 	);
 	assert.equal(third.result["strava.activities"].records.length, 100);
-	assert.equal(third.states?.activities?.pending_detail_ids.length, 5);
+	assert.equal(third.states?.["strava.activities"]?.pending_detail_ids.length, 5);
 
 	detailRequests.length = 0;
 	const failed = await run(third.states, { failResultWrite: true });
@@ -543,4 +543,25 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		third.states,
 		"a failed result write must not commit the staged cursor",
 	);
+});
+
+test("strava_browser: old shell without initialState does not receive STATE", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c } = await import("./fixtures/strava_browser.mjs");
+	const built = await buildPageshim({
+		connector: "strava_browser",
+		outfile: join(out, "strava_browser-old-shell.js"),
+	});
+	const run = await runHarness({
+		bundle: built.outfile,
+		fixtures: c.fixtures,
+		scopes: c.scopes,
+		supportsStateArgument: false,
+		timerScale: 0.01,
+	});
+	assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+	assertCleanRun(run);
+	assert.ok(run.result["strava.activities"].records.length > 0);
+	assert.deepEqual(run.stateMessages, []);
 });

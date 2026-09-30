@@ -166,7 +166,7 @@ export async function buildPageshim({ connector, outfile, minify = true }) {
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
-			js: "\n(async () => {\n  const savedState = typeof initialState === 'undefined' ? {} : initialState;\n  await globalThis.__pageshimMain(page, savedState);\n})();\n",
+			js: "\n(async () => {\n  const supportsState = typeof initialState !== 'undefined';\n  const savedState = supportsState ? initialState : {};\n  await globalThis.__pageshimMain(page, savedState, supportsState);\n})();\n",
 		},
 	});
 	const bytes = readFileSync(outfile);

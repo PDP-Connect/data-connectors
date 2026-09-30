@@ -59,6 +59,7 @@ const count = (scope: unknown): number => {
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
 	initialState: Record<string, unknown>,
+	supportsState: boolean,
 ) => {
 	bindExportHost(page as ExportHostPage);
 	return runOnPageShim(page, {
@@ -90,5 +91,5 @@ const count = (scope: unknown): number => {
 				details,
 			};
 		},
-	}, initialState);
+	}, initialState, supportsState);
 };

@@ -19,6 +19,7 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
 	initialState: Record<string, unknown>,
+	supportsState: boolean,
 ) =>
 	runOnPageShim(page, {
 		platform: "strava",
@@ -41,4 +42,4 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 				details: { activities },
 			};
 		},
-	}, initialState);
+	}, initialState, supportsState);
