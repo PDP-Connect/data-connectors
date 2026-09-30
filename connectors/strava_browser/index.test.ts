@@ -56,6 +56,38 @@ const listFetcher =
 		return json(body ?? '{"models":[],"page":9,"perPage":3,"total":5}');
 	};
 
+/** Synthetic fixture account large enough to cross the existing detail budget. */
+function syntheticActivityPages(count: number): Record<string, string> {
+	const perPage = 20;
+	const pages: Record<string, string> = {};
+	const newest = Date.parse("2026-09-29T12:00:00Z");
+	for (let offset = 0; offset < count; offset += perPage) {
+		const models = Array.from(
+			{ length: Math.min(perPage, count - offset) },
+			(_, index) => {
+				const position = offset + index;
+				return {
+					id: 91000000000 + count - position,
+					sport_type: "Run",
+					start_time: new Date(newest - position * 60_000).toISOString(),
+					distance_raw: 5000,
+					moving_time_raw: 1800,
+					elapsed_time_raw: 1900,
+					elevation_gain_raw: 12,
+				};
+			},
+		);
+		const page = offset / perPage + 1;
+		pages[String(page)] = JSON.stringify({
+			models,
+			page,
+			perPage,
+			total: count,
+		});
+	}
+	return pages;
+}
+
 /**
  * Runs page.evaluate callbacks in this process against a fake strava.com:
  * `location` and `fetch` are swapped in for the duration of the test.
@@ -65,6 +97,7 @@ async function withStrava<T>(
 	run: () => Promise<T>,
 	origin = ORIGIN,
 	gearBikes = GEAR_BIKES,
+	detailStatus: (activityId: string) => number = () => 200,
 ): Promise<T> {
 	const savedFetch = globalThis.fetch;
 	const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
@@ -94,6 +127,8 @@ async function withStrava<T>(
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = new URL(String(input), origin);
 		if (/^\/activities\/\d+$/.test(url.pathname)) {
+			const status = detailStatus(url.pathname.split("/").at(-1) ?? "");
+			if (status !== 200) return new Response("", { status });
 			return new Response(ACTIVITY_DETAIL, {
 				headers: { "content-type": "text/html; charset=utf-8" },
 			});
@@ -222,28 +257,42 @@ test("shares the strava source and its stream names", () => {
 });
 
 
-test("an incremental run stops after the first page wholly older than the cursor", async () => {
+test("incremental discovery emits new summaries and stops at a known boundary", async () => {
 	const log: string[] = [];
 	const h = harness(BOTH, {
-		activities: { last_start_time: "2026-09-15T23:45:00Z" },
+		activities: {
+			known_ids: ["90000000003", "90000000002", "90000000001"],
+			pending_detail_ids: [],
+			list_complete: true,
+			requested_since: null,
+		},
 	});
 	await withStrava(listFetcher(PAGES, log), () =>
 		collectStravaBrowser(h.ctx, FAST),
 	);
-	// Page 1 still holds newer activities; page 2 holds none, so the walk ends
-	// there without reading further.
-	assert.equal(log.length, 2);
+	assert.equal(log.length, 1);
 	assert.deepEqual(
-		h.of("activities").map((a) => a.id),
+		[...new Set(h.of("activities").map((a) => a.id))],
 		["90000000005", "90000000004"],
 	);
-	assert.deepEqual(h.cursor(), { last_start_time: "2026-09-20T13:30:00Z" });
+	assert.deepEqual(h.cursor(), {
+		known_ids: ["90000000003", "90000000002", "90000000001", "90000000005", "90000000004"],
+		pending_detail_ids: [],
+		list_complete: true,
+		requested_since: null,
+	});
 });
 
 test("a full refresh ignores the cursor", async () => {
 	const h = harness(
 		["activities"],
-		{ activities: { last_start_time: "2026-09-30T00:00:00Z" } },
+		{
+			activities: {
+				known_ids: ["90000000001"],
+				pending_detail_ids: [],
+				list_complete: false,
+			},
+		},
 		undefined,
 		"full_refresh",
 	);
@@ -252,14 +301,17 @@ test("a full refresh ignores the cursor", async () => {
 });
 
 test("activity records include heart-rate summary and calories from detail resources", async () => {
-	const h = harness(BOTH);
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const h = harness(BOTH, { activities: initial.cursor() });
 	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
+	const newest = h.of("activities").find((record) => record.id === "90000000005");
 	assert.deepEqual(
 		{
-			average_heartrate: h.of("activities")[0]?.average_heartrate,
-			max_heartrate: h.of("activities")[0]?.max_heartrate,
-			calories_kcal: h.of("activities")[0]?.calories_kcal,
-			gear: h.of("activities")[0]?.gear,
+			average_heartrate: newest?.average_heartrate,
+			max_heartrate: newest?.max_heartrate,
+			calories_kcal: newest?.calories_kcal,
+			gear: newest?.gear,
 		},
 		{
 			average_heartrate: 81.2,
@@ -270,24 +322,36 @@ test("activity records include heart-rate summary and calories from detail resou
 	);
 });
 
-test("unmatched gear ids emit null with a reason in skip diagnostics", async () => {
-	const h = harness(BOTH);
+test("unmatched gear ids keep activities and report reason and count through progress", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const h = harness(BOTH, { activities: initial.cursor() });
 	await withStrava(
 		listFetcher(),
 		() => collectStravaBrowser(h.ctx, FAST),
 		ORIGIN,
 		"[]",
 	);
-	assert.equal(h.of("activities")[0]?.gear, null);
-	assert.equal(
-		JSON.stringify(h.messages).includes('"gear_id_unmatched":1'),
-		true,
+	assert.equal(h.of("activities").length, 5);
+	assert.equal(h.of("activities").every((record) => record.gear === null), true);
+	assert.equal(h.skips().length, 0);
+	const progress = h.messages.find(
+		(message) =>
+			message.type === "PROGRESS" &&
+			"message" in message &&
+			message.message.includes("gear_name_unresolved="),
 	);
-	assert.equal(h.of("activities")[0]?.gear, null);
+	const progressMessage =
+		progress && "message" in progress ? progress.message : undefined;
+	assert.ok(progressMessage);
+	assert.match(progressMessage, /gear_name_unresolved=1/);
+	assert.match(progressMessage, /gear_name_reasons=gear_id_unmatched:1/);
 });
 
-test("a detail bound saves the last completed activity and resumes after it", async () => {
-	const first = harness(BOTH, {}, undefined, "full_refresh");
+test("detail work resumes from the pending queue without repeating summaries", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const first = harness(BOTH, { activities: initial.cursor() });
 	await withStrava(listFetcher(), () =>
 		collectStravaBrowser(first.ctx, { ...FAST, maxDetails: 2 }),
 	);
@@ -295,16 +359,11 @@ test("a detail bound saves the last completed activity and resumes after it", as
 		first.of("activities").map((record) => record.id),
 		["90000000005", "90000000004"],
 	);
-	assert.deepEqual(first.cursor(), {
-		last_start_time: null,
-		resume_after_id: "90000000004",
-		resume_page: 1,
-		walk_newest_start_time: "2026-09-20T13:30:00Z",
-	});
-	assert.deepEqual(first.skips()[0]?.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
-	});
+	assert.equal(first.skips().length, 0);
+	assert.deepEqual(
+		(first.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		["90000000003", "90000000002", "90000000001"],
+	);
 
 	const second = harness(BOTH, {
 		activities: first.cursor() as Record<string, unknown>,
@@ -315,6 +374,116 @@ test("a detail bound saves the last completed activity and resumes after it", as
 	assert.deepEqual(
 		second.of("activities").map((record) => record.id),
 		["90000000003", "90000000002", "90000000001"],
+	);
+});
+
+test("a failed activity detail stays queued while later details continue", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const firstPending = (initial.cursor() as { pending_detail_ids: string[] })
+		.pending_detail_ids[0];
+	const h = harness(BOTH, { activities: initial.cursor() });
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(h.ctx, FAST),
+		ORIGIN,
+		GEAR_BIKES,
+		(id) => (id === firstPending ? 404 : 200),
+	);
+	assert.equal(h.of("activities").length, 4);
+	assert.deepEqual(
+		(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		[firstPending],
+	);
+});
+
+test("an interrupted detail run checkpoints pending work for the next run", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const queued = (initial.cursor() as { pending_detail_ids: string[] })
+		.pending_detail_ids;
+	const interrupted = harness(BOTH, { activities: initial.cursor() });
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(interrupted.ctx, FAST),
+		ORIGIN,
+		GEAR_BIKES,
+		() => 500,
+	);
+	assert.equal(interrupted.of("activities").length, 0);
+	assert.deepEqual(interrupted.skips()[0]?.reason, "collection_interrupted");
+	assert.deepEqual(
+		(interrupted.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		queued,
+	);
+
+	const resumed = harness(BOTH, { activities: interrupted.cursor() });
+	await withStrava(listFetcher(), () => collectStravaBrowser(resumed.ctx, FAST));
+	assert.equal(resumed.of("activities").length, 5);
+	assert.deepEqual(
+		(resumed.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		[],
+	);
+});
+
+test("details completed before an interruption are stored while the remainder resumes", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const interrupted = harness(BOTH, { activities: initial.cursor() });
+	let requests = 0;
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(interrupted.ctx, FAST),
+		ORIGIN,
+		GEAR_BIKES,
+		() => (++requests === 3 ? 500 : 200),
+	);
+	assert.equal(interrupted.of("activities").length, 2);
+	const remaining = (interrupted.cursor() as { pending_detail_ids: string[] })
+		.pending_detail_ids;
+	assert.equal(remaining.length, 3);
+
+	const resumed = harness(BOTH, { activities: interrupted.cursor() });
+	await withStrava(listFetcher(), () => collectStravaBrowser(resumed.ctx, FAST));
+	assert.equal(resumed.of("activities").length, 3);
+	assert.deepEqual(
+		(resumed.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		[],
+	);
+});
+
+test("a new activity arriving during backfill emits its summary and joins the queue", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	const pageOne = JSON.parse(PAGES["1"] as string) as {
+		models: Array<Record<string, unknown>>;
+		perPage: number;
+		total: number;
+	};
+	pageOne.models.unshift({
+		...pageOne.models[0],
+		id: 90000000006,
+		id_str: "90000000006",
+		start_time: "2026-09-21T13:30:00+0000",
+	});
+	pageOne.total = 6;
+	const pageTwo = JSON.parse(PAGES["2"] as string) as { total: number };
+	pageTwo.total = 6;
+	const h = harness(BOTH, { activities: initial.cursor() });
+	await withStrava(
+		listFetcher({ "1": JSON.stringify(pageOne), "2": JSON.stringify(pageTwo) }),
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	const newActivity = h
+		.of("activities")
+		.filter((record) => record.id === "90000000006");
+	assert.equal(newActivity.length, 2);
+	assert.equal(newActivity[0]?.average_heartrate, null);
+	assert.equal(newActivity[1]?.average_heartrate, 81.2);
+	assert.ok(
+		!(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids.includes(
+			"90000000006",
+		),
 	);
 });
 
@@ -439,4 +608,37 @@ test("the probe accepts any signed-in JSON, so a changed list fails in collectio
 		}),
 	} as unknown as StravaCollectContext["page"];
 	assert.equal(await probeStravaSession(page), true);
+});
+
+test("a first run emits the full 2,150-activity summary inventory", async () => {
+	const pages = syntheticActivityPages(2150);
+	const h = harness(BOTH);
+	await withStrava(listFetcher(pages), () => collectStravaBrowser(h.ctx, FAST));
+	assert.equal(h.of("activities").length, 2150);
+	assert.equal(new Set(h.of("activities").map((record) => record.id)).size, 2150);
+	assert.ok(h.of("activities").every((record) => record.average_heartrate === null));
+});
+
+test("detail backfill updates the keyed inventory in batches of 100", async () => {
+	let state: unknown = {};
+	const stored = new Map<string, RecordData>();
+	let firstCount = 0;
+	for (let run = 0; run < 23; run += 1) {
+		const h = harness(BOTH, { activities: state });
+		await withStrava(listFetcher(syntheticActivityPages(2150)), () =>
+			collectStravaBrowser(h.ctx, FAST),
+		);
+		const records = h.of("activities");
+		if (run === 0) {
+			firstCount = records.length;
+			assert.equal(firstCount, 2150);
+		} else {
+			assert.equal(records.length, run < 22 ? 100 : 50);
+		}
+		for (const record of records) stored.set(String(record.id), record);
+		state = h.cursor();
+	}
+	assert.equal(stored.size, 2150);
+	assert.equal(firstCount, 2150);
+	assert.ok([...stored.values()].every((record) => record.average_heartrate === 81.2));
 });
