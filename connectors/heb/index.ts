@@ -110,6 +110,7 @@ export const HEB_REPAIR_RETRY_DELAY_MIN_MS = 1500;
 export const HEB_REPAIR_RETRY_DELAY_MAX_MS = 2500;
 
 const DETAIL_SURFACE_TIMEOUT_MS = 30_000;
+const DETAIL_SURFACE_HARD_CAP_MS = 60_000;
 const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
 const DETAIL_SURFACE_DEBUG_ENV = "HEB_DETAIL_SURFACE_DEBUG";
@@ -453,6 +454,10 @@ async function collectDetailSurface(
 		scrollHeight: number;
 		scrollTop: number;
 	} | null = null;
+	const hardDeadlineAt = startedAt + DETAIL_SURFACE_HARD_CAP_MS;
+	let deadlineAt = Math.min(startedAt + timeoutMs, hardDeadlineAt);
+	let previousScrollTop: number | null = null;
+	let previousRowCount: number | null = null;
 	let stablePolls = 0;
 	let snapshots = 0;
 	let latest: DetailSurfaceState = {
@@ -490,7 +495,7 @@ async function collectDetailSurface(
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
 
-	while (Date.now() - startedAt < timeoutMs) {
+	while (Date.now() < deadlineAt) {
 		try {
 			latest = await page.evaluate(inspectAndAdvanceDetailSurface, {
 				debugDiagnostics,
@@ -502,6 +507,15 @@ async function collectDetailSurface(
 			break;
 		}
 		snapshots += 1;
+		const surfaceAdvanced =
+			previousScrollTop === null ||
+			latest.scrollTop > previousScrollTop ||
+			(previousRowCount !== null && latest.rowCount > previousRowCount);
+		if (surfaceAdvanced && snapshots > 1) {
+			deadlineAt = Math.min(hardDeadlineAt, Date.now() + timeoutMs);
+		}
+		previousScrollTop = latest.scrollTop;
+		previousRowCount = latest.rowCount;
 		// Row keys live in disjoint namespaces ("position:data-index=N" vs
 		// "position:document-order=N"), so a surface that remounts under a
 		// different identity scheme would add a second entry for every row
@@ -654,7 +668,7 @@ async function collectDetailSurface(
 		await page.waitForTimeout(DETAIL_SURFACE_POLL_MS);
 	}
 
-	const timedOut = Date.now() - startedAt >= timeoutMs;
+	const timedOut = Date.now() >= deadlineAt;
 	const observedUnits = knownUnitTotal(collectedUnits.values());
 	const fullyCollectedStaticList =
 		latest.atEnd &&
