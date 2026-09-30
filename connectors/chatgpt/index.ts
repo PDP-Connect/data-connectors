@@ -229,10 +229,23 @@ const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
 `;
 
 async function getAuthFromPage(page: Page): Promise<ChatGptAuth> {
-	await page.goto("https://chatgpt.com/", {
-		waitUntil: "domcontentloaded",
-		timeout: 30_000,
-	});
+	const currentUrl = await page
+		.evaluate(() => window.location.href)
+		.catch((): null => null);
+	let alreadyOnChatGpt = false;
+	try {
+		alreadyOnChatGpt =
+			typeof currentUrl === "string" &&
+			new URL(currentUrl).origin === "https://chatgpt.com";
+	} catch {
+		// Unknown or non-HTTP locations must navigate before reading ChatGPT auth.
+	}
+	if (!alreadyOnChatGpt) {
+		await page.goto("https://chatgpt.com/", {
+			waitUntil: "domcontentloaded",
+			timeout: 30_000,
+		});
+	}
 	// Wait for client bootstrap to appear
 	await page
 		.waitForFunction(
