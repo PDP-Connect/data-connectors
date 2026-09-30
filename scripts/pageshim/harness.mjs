@@ -470,6 +470,7 @@ export async function runHarness({
 	let failedResultWrite = false;
 	let eventOrder = 0;
 	let stateAckOrder = 0;
+	let resultDoneAttemptOrder = 0;
 	let resultWriteOrder = 0;
 	let maxBridgePayloadUnits = 0;
 	let bridgeCallCount = 0;
@@ -544,8 +545,10 @@ export async function runHarness({
 				case "setData":
 					if (String(a[0]).startsWith("result:")) {
 						if (resultStreamNeverAck) return new Promise(() => {});
+						if (a[0] === "result:done")
+							resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
-						if (a[0] === "result:done") resultWriteOrder = ++eventOrder;
+						if (a[0] === "result:done") resultWriteOrder = resultDoneAttemptOrder;
 						return ack;
 					}
 					if (a[0] === "result") {
@@ -738,6 +741,7 @@ export async function runHarness({
 			maxBridgePayloadUnits,
 			data,
 			stateAckOrder,
+			resultDoneAttemptOrder,
 			resultWriteOrder,
 			states,
 			stateMessages,

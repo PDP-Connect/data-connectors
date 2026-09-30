@@ -12,8 +12,13 @@ declare const PAGESHIM_PARTIAL_RESULT: boolean;
 declare const PAGESHIM_NEGATIVE_HEAP_CONTROL: boolean;
 declare const PAGESHIM_EVALUATE_RESULT_MIB: number;
 declare const PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: number;
+declare const PAGESHIM_EMIT_STATE: boolean;
 
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
+(globalThis as Record<string, unknown>).__pageshimMain = (
+	page: ShimPage,
+	initialState: Record<string, unknown>,
+	supportsState: boolean,
+) =>
 	runOnPageShim(page, {
 		platform: "chatgpt",
 		scopes: ["chatgpt.conversations", "chatgpt.messages"],
@@ -82,6 +87,12 @@ declare const PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: number;
 					data: messageRecord,
 				});
 			}
+			if (PAGESHIM_EMIT_STATE)
+				void (emit as (value: unknown) => Promise<void>)({
+					type: "STATE",
+					stream: "conversations",
+					cursor: { checkpoint: "synthetic" },
+				});
 			if (PAGESHIM_PARTIAL_RESULT)
 				await send({
 					type: "SKIP_RESULT",
@@ -108,4 +119,4 @@ declare const PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: number;
 			label: "conversations",
 			details: {},
 		}),
-	});
+	}, initialState, supportsState);

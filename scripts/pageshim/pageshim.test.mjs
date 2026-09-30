@@ -222,7 +222,7 @@ test("chatgpt: default walk has no 50-detail cap", {
 	}
 });
 
-test("chatgpt: 30-day PageShim filters older details while continuing the list walk", {
+test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
 	timeout: 180_000,
 }, async () => {
 	const fx = await import("./fixtures/chatgpt.mjs");
@@ -308,7 +308,7 @@ test("chatgpt: 30-day PageShim filters older details while continuing the list w
 	assert.match(r.data.status, /^Partial:/);
 });
 
-test("chatgpt: 30-day bundle walks old history without fetching old details", {
+test("chatgpt: 30-day bundle stops after three old pages without fetching old details", {
 	timeout: 180_000,
 }, async () => {
 	const fx = await import("./fixtures/chatgpt.mjs");
@@ -358,14 +358,7 @@ test("chatgpt: 30-day bundle walks old history without fetching old details", {
 		resultSpoolDirectory: join(out, "chatgpt-30d-full-history-stream"),
 	});
 	assertCleanRun(run);
-	assert.deepEqual(cursors, [
-		...Array.from({ length: 99 }, (_, index) => index * 30),
-		2970,
-		2970,
-		2970,
-		3000,
-		3000,
-	]);
+	assert.deepEqual(cursors, [0, 30, 60]);
 	assert.deepEqual(detailCalls, []);
 	assert.equal(run.result.exportSummary.count, 0);
 	assert.equal(run.result.exportSummary.window?.sinceDays, 30);
@@ -390,9 +383,9 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 			if (cursor === 30) return index === 1 ? 3 : 31 + index;
 			if (cursor === 60) return 40 + index;
 			if (cursor === 90) return index === 1 ? 5 : 41 + index;
-			return null;
+			return 41 + index;
 		};
-		const count = cursor <= 90 ? 30 : 0;
+		const count = cursor <= 180 ? 30 : 0;
 		return Array.from({ length: count }, (_, index) => {
 			const id =
 				cursor === 0 && index === 0
@@ -418,9 +411,9 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 			cursors.push(cursor);
 			response.body = JSON.stringify({
 				items: rowsFor(cursor),
-				total: 120,
-				has_more: cursor < 90,
-				next_cursor: cursor < 90 ? cursor + 30 : null,
+				total: 300,
+				has_more: cursor <= 180,
+				next_cursor: cursor <= 180 ? cursor + 30 : null,
 			});
 		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
 			detailCalls.push(url.pathname.split("/").pop());
@@ -450,6 +443,11 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 		fx.useConversationCount(2);
 	}
 	assertCleanRun(run);
+	assert.deepEqual(
+		cursors,
+		[0, 30, 60, 90, 120, 150, 180],
+		"the walk must scan every mixed page, then stop after three fully older pages",
+	);
 	assert.deepEqual(detailCalls, ["conv-1", "conv-2", "conv-3", "conv-4"]);
 	const listShapeLogs = run.log.filter((line) =>
 		line.includes("[chatgpt-list-shape]"),

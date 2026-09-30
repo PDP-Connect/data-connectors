@@ -3262,8 +3262,10 @@ function conversationBackfillBoundarySeen(
 
 /**
  * Walk /conversations/search cursor pages and collect the list items we still
- * need to sync. Provider pages are not guaranteed to be newest-first, so
- * priorCursor filters details but never stops pagination.
+ * need to sync. Provider pages are not guaranteed to be newest-first, so a
+ * single old row never stops pagination. Incremental/window walks stop only
+ * after several complete pages contain timestamps that all fall before the
+ * requested boundary; missing timestamps reset that evidence.
  *
  * A failed or unreadable page (see classifyChatGptListPage) marks the
  * result `truncated: true` instead of ending the walk silently, so the caller
@@ -3319,6 +3321,8 @@ async function listConversationsSinceCursor(
 		};
 	};
 	const maxPageAttempts = 3;
+	const maxConsecutiveOldPages = 3;
+	let consecutiveOldPages = 0;
 	let page = 0;
 	deps.emit({
 		type: "PROGRESS",
@@ -3329,6 +3333,7 @@ async function listConversationsSinceCursor(
 	});
 	while (true) {
 		const attempts: ConversationListItem[][] = [];
+		let logicalPageEntirelyOld = true;
 		let nextCursor: number | null = null;
 		let cursorDisagreed = false;
 		let shouldProbeAgain = false;
@@ -3358,6 +3363,7 @@ async function listConversationsSinceCursor(
 			const pageItems: ConversationListItem[] = [];
 			const items: ConversationListItem[] = [];
 			let malformedItem = false;
+			let responseEntirelyOld = classified.items.length === pageSize;
 			for (const raw of classified.items) {
 				if (!isChatGptJsonObject(raw)) {
 					malformedItem = true;
@@ -3371,6 +3377,11 @@ async function listConversationsSinceCursor(
 				const item = { ...raw, id } as ConversationListItem;
 				pageItems.push(item);
 				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				const isOld =
+					updateIso !== null &&
+					((priorCursor !== null && updateIso <= priorCursor) ||
+						(requestedSince !== undefined && updateIso < requestedSince));
+				if (!isOld) responseEntirelyOld = false;
 				if (priorCursor && updateIso && updateIso <= priorCursor) {
 					continue;
 				}
@@ -3417,6 +3428,7 @@ async function listConversationsSinceCursor(
 				};
 			}
 			attempts.push(pageItems);
+			logicalPageEntirelyOld &&= responseEntirelyOld;
 			for (const item of items) {
 				conversationsById.set(item.id, item);
 			}
@@ -3453,8 +3465,10 @@ async function listConversationsSinceCursor(
 			} else if (responseNextCursor !== nextCursor) {
 				cursorDisagreed = true;
 			}
-			// Page ordering is not stable. Walk the cursor stream fully and use
-			// priorCursor only to filter detail work for old rows.
+			// Page ordering is not stable. Require several complete old pages before
+			// stopping, so an old row cannot hide a later in-window row on the same
+			// page or one of the next pages. A missing timestamp is never old-page
+			// evidence. Full scans and resumable backfills do not use this shortcut.
 			if (pageItems.length >= pageSize) {
 				break;
 			}
@@ -3536,6 +3550,14 @@ async function listConversationsSinceCursor(
 				classified.items.length,
 				pageSize,
 			);
+		}
+		if (!resumeBackfill && (priorCursor !== null || requestedSince)) {
+			consecutiveOldPages = logicalPageEntirelyOld
+				? consecutiveOldPages + 1
+				: 0;
+			if (consecutiveOldPages >= maxConsecutiveOldPages) {
+				return complete();
+			}
 		}
 		if (nextCursor === null) {
 			// A non-empty short page with no explicit continuation is still followed

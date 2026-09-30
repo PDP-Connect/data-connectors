@@ -48,6 +48,7 @@ async function buildSyntheticBundle(
 	evaluateResultMiB = 0,
 	recordTextUnits = 100_000,
 	bridgeCallTimeoutMs = 30_000,
+	emitState = false,
 ) {
 	await mkdir(root, { recursive: true });
 	const outfile = join(root, `stream-${recordCount}-${streamResults}.js`);
@@ -67,10 +68,60 @@ async function buildSyntheticBundle(
 			PAGESHIM_NEGATIVE_HEAP_CONTROL: String(negativeHeapControl),
 			PAGESHIM_EVALUATE_RESULT_MIB: String(evaluateResultMiB),
 			PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: String(recordTextUnits),
+			PAGESHIM_EMIT_STATE: String(emitState),
 		},
 	});
 	return outfile;
 }
+
+test("a rejected result completion after STATE ack leaves the prior cursor uncommitted", {
+	timeout: 180_000,
+}, async () => {
+	const bundle = await buildSyntheticBundle(
+		3,
+		true,
+		false,
+		false,
+		false,
+		false,
+		false,
+		0,
+		100_000,
+		30_000,
+		true,
+	);
+	const spoolDirectory = join(root, "spool-state-ack-done-failure");
+	const initialState = {
+		"chatgpt.conversations": { checkpoint: "previous" },
+	};
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations", "chatgpt.messages"],
+			initialState,
+			resultStreaming: true,
+			stateAckDelayMs: 20,
+			resultSpoolDirectory: spoolDirectory,
+			resultStreamFailure: { key: "result:done" },
+		});
+		assert.equal(
+			run.stateMessages.length,
+			1,
+			JSON.stringify({ calls: run.calls, data: run.data, log: run.log, result: run.result }),
+		);
+		assert.ok(run.stateAckOrder > 0);
+		assert.ok(run.stateAckOrder < run.resultDoneAttemptOrder);
+		assert.equal(run.streamResult.completed, false);
+		assert.equal(run.streamDone, null);
+		assert.equal(run.result, null);
+		assert.equal(run.data.error, "simulated result protocol rejection");
+		assert.deepEqual(run.states, initialState);
+		assertCleanRun(run);
+	} finally {
+		await rm(spoolDirectory, { recursive: true, force: true });
+	}
+});
 
 function sha256File(path) {
 	return new Promise((resolve, reject) => {

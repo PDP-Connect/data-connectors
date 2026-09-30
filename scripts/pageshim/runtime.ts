@@ -648,7 +648,7 @@ export async function runOnPageShim(
 	};
 	const isHighSurrogate = (unit: number): boolean =>
 		unit >= 0xd800 && unit <= 0xdbff;
-	const emit = async (msg: Msg): Promise<void> => {
+	const emitMessage = async (msg: Msg): Promise<void> => {
 		if (streamFailure) throw streamFailure;
 		switch (msg.type) {
 			case "RECORD": {
@@ -715,6 +715,29 @@ export async function runOnPageShim(
 				console.log(`pageshim: PDPP message ${msg.type} ignored`);
 		}
 	};
+	const pendingStateWrites = new Set<Promise<void>>();
+	let stateWriteFailure: Error | null = null;
+	const emit = (msg: Msg): Promise<void> => {
+		const pending = emitMessage(msg);
+		if (msg.type === "STATE") {
+			const settled = pending.then(
+				() => undefined,
+				(error: unknown) => {
+					stateWriteFailure ??=
+						error instanceof Error ? error : new Error(String(error));
+				},
+			);
+			pendingStateWrites.add(settled);
+			void settled.finally(() => pendingStateWrites.delete(settled));
+		}
+		return pending;
+	};
+	const settleStateWrites = async (): Promise<void> => {
+		while (pendingStateWrites.size > 0) {
+			await Promise.all([...pendingStateWrites]);
+		}
+		if (stateWriteFailure) throw stateWriteFailure;
+	};
 	const emitRecord = makeEmitRecord({
 		requested: requested as never,
 		emit: emit as never,
@@ -764,6 +787,9 @@ export async function runOnPageShim(
 			requested,
 			state,
 		});
+		// Some connectors emit STATE without awaiting the returned promise. Drain
+		// those host acknowledgements before committing the streamed result.
+		await settleStateWrites();
 		for (const stream of connector.partialStreamsFromDetailGaps?.([
 			...requested.keys(),
 		]) ?? []) {
