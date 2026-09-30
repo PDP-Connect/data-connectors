@@ -370,7 +370,9 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			const r = await run();
 			assertCleanRun(r);
 			assert.deepEqual(r.result.errors, []);
-			const activities = r.result["strava.activities"].records;
+			const scopePayload = r.result["strava.activities"];
+			assert.deepEqual(Object.keys(scopePayload), ["activities"]);
+			const activities = scopePayload.activities;
 			assert.deepEqual(
 				activities.map((a) => [a.id, a.activity_type, a.freshness]),
 				[
@@ -380,6 +382,13 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 					["90000000002", "EBikeRide", "live"],
 					["90000000001", "Swim", "live"],
 				],
+			);
+			const { desktopScopePayload } = await import(
+				"./fixtures/strava_browser-desktop.mjs"
+			);
+			assert.deepEqual(
+				scopePayload,
+				await desktopScopePayload(resolveFixture),
 			);
 		},
 	);
