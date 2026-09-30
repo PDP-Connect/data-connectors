@@ -1294,6 +1294,34 @@ function makeEmitConversation(
 
 // Search discovery uses cursor continuation even when the server returns a
 // short page. The empty terminal is confirmed by one delayed re-probe.
+test("30-day time range stops cursor discovery at its first older or undated item", async () => {
+	const since = new Date(1_700_000_000 * 1000).toISOString();
+	const missingTimestamp = makeConvo({ id: "missing-timestamp" });
+	delete missingTimestamp.update_time;
+	const page = [
+		makeConvo({ id: "inside-window", update_time: 1_700_000_100 }),
+		makeConvo({ id: "before-window", update_time: 1_699_999_900 }),
+		missingTimestamp,
+	];
+	const fixture = makeConversationListingHarness(
+		new Map([[0, [{ items: page, next_cursor: 30 }]]]),
+	);
+	fixture.deps.requested.set("conversations", {
+		name: "conversations",
+		time_range: { since },
+	});
+
+	await runConversationsAndMessagesStreams(fixture.deps, {});
+
+	assert.deepEqual(fixture.listCursors(), [0, 0, 0]);
+	assert.deepEqual(
+		fixture.emitted
+			.filter((record) => record.stream === "conversations")
+			.map((record) => record.data.id),
+		["inside-window"],
+	);
+});
+
 test("cursor search follows a short page and confirms an empty terminal", async () => {
 	const firstPage = Array.from({ length: 30 }, (_, index) => ({
 		conversation_id: `search-a-${index}`,
@@ -2812,6 +2840,157 @@ test("runMessagesAndConversationsWithDetail: 100 conversations use 10 capped bat
 		"fully batch-hydrated run must not issue per-id GETs",
 	);
 	assert.equal(coverage.hydratedKeys.length, 100);
+	assert.deepEqual(coverage.gapKeys, []);
+});
+
+test("runMessagesAndConversationsWithDetail: batch waves ramp to four and emit before the next bounded wave", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let activeBatchRequests = 0;
+	let maxActiveBatchRequests = 0;
+	const waveStarts: { firstId: string; emittedConversations: number }[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			const id = path.replace("/conversation/", "");
+			return Promise.resolve(makeDetailOkForConversation(id));
+		},
+		fetchBatch: async (
+			ids: readonly string[],
+		): Promise<ChatGptFetchResult[]> => {
+			activeBatchRequests += 1;
+			maxActiveBatchRequests = Math.max(
+				maxActiveBatchRequests,
+				activeBatchRequests,
+			);
+			waveStarts.push({
+				firstId: ids[0] ?? "",
+				emittedConversations: harness.emitted.filter(
+					(record) => record.stream === "conversations",
+				).length,
+			});
+			await new Promise((resolve) => setImmediate(resolve));
+			activeBatchRequests -= 1;
+			return ids.map((id) => makeDetailOkForConversation(id));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const convos = Array.from({ length: 200 }, (_, index) =>
+		makeConvo({ id: `convo-${index + 1}` }),
+	);
+
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		convos,
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+
+	assert.equal(maxActiveBatchRequests, 4);
+	assert.deepEqual(
+		waveStarts.slice(0, 4).map((start) => start.emittedConversations),
+		[0, 0, 20, 20],
+		"each wave waits for the previous bounded wave to be emitted",
+	);
+	assert.equal(
+		waveStarts.find((start) => start.firstId === "convo-41")
+			?.emittedConversations,
+		40,
+		"the first three-request wave starts after the first 40 records emit",
+	);
+	assert.equal(
+		waveStarts.find((start) => start.firstId === "convo-101")
+			?.emittedConversations,
+		100,
+		"the next 40-detail wave starts after the previous 30 records emit",
+	);
+	const synced = harness.protocolMessages
+		.filter(
+			(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
+				message.type === "PROGRESS" &&
+				message.stream === "messages" &&
+				message.message.startsWith("Synced "),
+		)
+		.map((message) => message.count);
+	assert.deepEqual(synced, [1, 25, 50, 75, 100, 125, 150, 175, 200]);
+	assert.equal(coverage.hydratedKeys.length, 200);
+});
+
+test("runMessagesAndConversationsWithDetail: a short batch or served 429 resets the next wave to one", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const starts: { firstId: string; activeAtStart: number }[] = [];
+	let activeBatchRequests = 0;
+	const preDetailPressure = { rateLimited: 0 };
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			const id = path.replace("/conversation/", "");
+			return Promise.resolve(makeDetailOkForConversation(id));
+		},
+		fetchBatch: async (
+			ids: readonly string[],
+		): Promise<ChatGptFetchResult[]> => {
+			activeBatchRequests += 1;
+			starts.push({ firstId: ids[0] ?? "", activeAtStart: activeBatchRequests });
+			await new Promise((resolve) => setImmediate(resolve));
+			activeBatchRequests -= 1;
+			if (ids[0] === "convo-41") {
+				return ids
+					.slice(1)
+					.map((id) => makeDetailOkForConversation(id));
+			}
+			if (ids[0] === "convo-51") {
+				// Models retryHttp observing a 429, honoring its wait, then succeeding.
+				preDetailPressure.rateLimited += 1;
+			}
+			return ids.map((id) => makeDetailOkForConversation(id));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		preDetailPressure,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const convos = Array.from({ length: 120 }, (_, index) =>
+		makeConvo({ id: `convo-${index + 1}` }),
+	);
+
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		convos,
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+
+	assert.equal(starts.filter((start) => start.activeAtStart > 1).length, 5);
+	const afterPressure = starts.filter(
+		(start) => Number(start.firstId.split("-")[1]) >= 71,
+	);
+	assert.deepEqual(
+		afterPressure.slice(0, 2).map((start) => start.activeAtStart),
+		[1, 1],
+		"the waves after a short response and an absorbed 429 are serial",
+	);
+	assert.equal(
+		afterPressure.some((start) => start.activeAtStart === 2),
+		true,
+		"two later clean waves ramp concurrency back up",
+	);
+	assert.equal(coverage.hydratedKeys.length, 120);
 	assert.deepEqual(coverage.gapKeys, []);
 });
 
