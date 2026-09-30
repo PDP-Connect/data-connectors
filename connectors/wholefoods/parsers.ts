@@ -239,22 +239,30 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 	for (const itemRow of document.querySelectorAll<HTMLElement>(
 		'[data-component="purchasedItemsRightGrid"]',
 	)) {
-		const anchor = itemRow.querySelector<HTMLAnchorElement>(
-			'a[href*="/dp/"], a[href*="/gp/product/"]',
+		const title = itemRow.querySelector<HTMLElement>(
+			'[data-component="itemTitle"]',
 		);
+		const anchor =
+			itemRow.querySelector<HTMLAnchorElement>(
+			'a[href*="/dp/"], a[href*="/gp/product/"]',
+			) ??
+			title?.querySelector<HTMLAnchorElement>("a");
 		const href = anchor?.getAttribute("href") ?? "";
-		const name = textOf(anchor).trim();
+		const sourceName = textOf(anchor ?? title).trim();
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
-		// The legacy orders scope requires productId for every item. A row
-		// without a source ASIN cannot be projected, so never discard it or
-		// replace its identity with a name-derived key.
-		if (!(anchor && name && productId) || name.length < 3) {
-			throw new Error("Whole Foods order item has no source product ASIN");
+		if (productId && sourceName.length < 3) {
+			throw new Error("Whole Foods order item has no source product name");
 		}
-		if (seenHrefs.has(href)) {
-			continue;
+		const name = sourceName || "Unknown Whole Foods item";
+		// Keep an ASIN-less row for its parent order's item count. The legacy
+		// order_items schema requires a source product id, so the collector
+		// reports it and omits only that item record.
+		if (productId) {
+			if (seenHrefs.has(href)) {
+				continue;
+			}
+			seenHrefs.add(href);
 		}
-		seenHrefs.add(href);
 		const rowText = textOf(itemRow);
 		const quantity = QTY_RE.exec(rowText)?.[1];
 		const price = PRICE_RE.exec(rowText)?.[1];
@@ -265,7 +273,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 			imageUrl: img?.getAttribute("src") ?? null,
 			name,
 			productId,
-			productUrl: absoluteAmazonUrl(href),
+			productUrl: productId ? absoluteAmazonUrl(href) : null,
 			quantity: quantity ? Number(quantity) : 1,
 			unitPriceDollars: price ? Number(price) : null,
 		});

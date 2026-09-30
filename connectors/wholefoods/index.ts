@@ -229,6 +229,8 @@ async function discoverOrderStubs(
  *  manifest.json `reason_display_messages`. */
 export const ORDER_ITEM_COUNT_UNVERIFIED_REASON =
 	"wholefoods_order_item_count_unverified";
+export const ORDER_ITEM_ASIN_MISSING_REASON =
+	"wholefoods_order_item_asin_missing";
 
 /**
  * True when the order-detail page agrees with the search-page row count.
@@ -590,6 +592,16 @@ async function collectOrderStubs({
 			);
 		}
 		const detail = parseOrderDetailDom(html);
+		const itemsWithoutAsin = detail.items.filter(
+			(item) => !item.productId,
+		).length;
+		if (itemsWithoutAsin > 0) {
+			await emit({
+				type: "PROGRESS",
+				stream: "orders",
+				message: `${ORDER_ITEM_ASIN_MISSING_REASON}: ${itemsWithoutAsin} order item(s) had no source product ASIN and were omitted from order_items`,
+			});
+		}
 		if (!orderDetailCountsMatch(stub, detail.items)) {
 			unverifiedCountOrders += 1;
 			await emit({

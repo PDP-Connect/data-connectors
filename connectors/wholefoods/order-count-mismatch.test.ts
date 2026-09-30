@@ -134,6 +134,45 @@ test("a count mismatch on order 2 delivers all 3 orders and reports one progress
 	});
 });
 
+test("an online row without an ASIN keeps its order, omits the item record, and reports PROGRESS", async () => {
+	const onlineRow = `<div data-component="purchasedItemsRightGrid">
+		<div data-component="itemTitle"><a href="/product/unknown">Unidentified item</a></div>
+		<div data-component="unitPrice">$4.99</div>
+	</div>`;
+	const onlineStub = {
+		...stub(A, 1),
+		orderUrl: `https://www.amazon.com/your-orders/order-details?orderID=${A}`,
+	};
+	const harness = await runOrders([onlineStub, stub(B, 3)], {
+		[A]: onlineRow,
+		[B]: FIXTURE,
+	});
+	const orders = harness.emitted.filter((record) => record.stream === "orders");
+	const itemRecords = harness.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
+	assert.deepEqual(
+		orders.map((record) => record.data.id),
+		[A, B],
+	);
+	assert.equal(orders[0]?.data.item_count, 1);
+	assert.equal(orders[0]?.data.total_cents, 499);
+	assert.equal(itemRecords.length, 3);
+	assert.ok(itemRecords.every((record) => record.data.order_id === B));
+	const warning = harness.protocolMessages.find((message) => {
+		const progress = message as { type?: string; message?: string };
+		return progress.message?.startsWith(
+			`${connector.ORDER_ITEM_ASIN_MISSING_REASON}:`,
+		);
+	}) as { message?: string; stream?: string; type?: string } | undefined;
+	assert.equal(warning?.type, "PROGRESS");
+	assert.equal(warning?.stream, "orders");
+	assert.equal(
+		warning?.message,
+		`${connector.ORDER_ITEM_ASIN_MISSING_REASON}: 1 order item(s) had no source product ASIN and were omitted from order_items`,
+	);
+});
+
 test("a run with matching counts reports no reason code", async () => {
 	const harness = await runOrders([stub(A, 3), stub(B, 3)], {
 		[A]: FIXTURE,
