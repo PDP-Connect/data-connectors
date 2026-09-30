@@ -200,10 +200,36 @@ test("parseOrderDetailDom defaults quantity to 1 when the row has no Qty text", 
 	assert.equal(detail.items[0]?.quantity, 1);
 });
 
-test("parseOrderDetailDom fails closed when a source item has no ASIN", () => {
+test("parseOrderDetailDom retains an online row without an ASIN for order accounting", () => {
 	const html =
-		'<html><body><div data-component="purchasedItemsRightGrid"><a href="/product/unknown">Unidentified item</a></div></body></html>';
-	assert.throws(() => parseOrderDetailDom(html), /no source product ASIN/);
+		'<html><body><div data-component="purchasedItemsRightGrid"><div data-component="itemTitle"><a href="/product/unknown">Unidentified item</a></div></div><div data-component="purchasedItemsRightGrid"><div data-component="itemTitle">Another unidentified item</div></div></body></html>';
+	const detail = parseOrderDetailDom(html);
+	assert.equal(detail.items.length, 2);
+	assert.equal(detail.items[0]?.name, "Unidentified item");
+	assert.equal(detail.items[0]?.productId, null);
+	assert.equal(detail.items[0]?.productUrl, null);
+	assert.equal(detail.items[1]?.name, "Another unidentified item");
+	assert.equal(detail.items[1]?.productId, null);
+});
+
+test("parseOrderDetailDom prefers a source product link over another title link", () => {
+	const html = `<div data-component="purchasedItemsRightGrid">
+		<div data-component="itemTitle"><a href="/product/unknown">More details</a></div>
+		<a href="/dp/B01ABCDEFG">Source product</a>
+	</div>`;
+	const detail = parseOrderDetailDom(html);
+	assert.equal(detail.items[0]?.productId, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.name, "Source product");
+});
+
+test("parseOrderDetailDom still rejects a source product row with no usable name", () => {
+	const html = `<div data-component="purchasedItemsRightGrid">
+		<div data-component="itemTitle"><a href="/dp/B01ABCDEFG"></a></div>
+	</div>`;
+	assert.throws(
+		() => parseOrderDetailDom(html),
+		/has no source product name/,
+	);
 });
 
 // ─── Shared value parsing ──────────────────────────────────────────────────
