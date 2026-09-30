@@ -322,7 +322,7 @@ test("activity records include heart-rate summary and calories from detail resou
 	);
 });
 
-test("unmatched gear ids emit null with a reason in skip diagnostics", async () => {
+test("unmatched gear ids keep activities and report reason and count through progress", async () => {
 	const initial = harness(BOTH);
 	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
 	const h = harness(BOTH, { activities: initial.cursor() });
@@ -332,12 +332,20 @@ test("unmatched gear ids emit null with a reason in skip diagnostics", async () 
 		ORIGIN,
 		"[]",
 	);
-	assert.equal(h.of("activities").at(-1)?.gear, null);
-	assert.equal(
-		JSON.stringify(h.messages).includes('"gear_id_unmatched":1'),
-		true,
+	assert.equal(h.of("activities").length, 5);
+	assert.equal(h.of("activities").every((record) => record.gear === null), true);
+	assert.equal(h.skips().length, 0);
+	const progress = h.messages.find(
+		(message) =>
+			message.type === "PROGRESS" &&
+			"message" in message &&
+			message.message.includes("gear_name_unresolved="),
 	);
-	assert.equal(h.of("activities").at(-1)?.gear, null);
+	const progressMessage =
+		progress && "message" in progress ? progress.message : undefined;
+	assert.ok(progressMessage);
+	assert.match(progressMessage, /gear_name_unresolved=1/);
+	assert.match(progressMessage, /gear_name_reasons=gear_id_unmatched:1/);
 });
 
 test("detail work resumes from the pending queue without repeating summaries", async () => {

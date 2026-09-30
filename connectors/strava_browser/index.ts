@@ -802,20 +802,6 @@ export async function collectStravaBrowser(
 					: {}),
 			},
 		});
-	} else if (Object.keys(gearUnresolvedReasons).length > 0) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: ACTIVITIES_STREAM,
-			reason: "records_unreadable",
-			message: "Some activities had gear ids whose names could not be read; gear was emitted as null.",
-			diagnostics: {
-				gear_name_unresolved: Object.values(gearUnresolvedReasons).reduce(
-					(sum, count) => sum + count,
-					0,
-				),
-				gear_name_reasons: gearUnresolvedReasons,
-			},
-		});
 	}
 
 	const listComplete = wasInventoryComplete || (listFinished && !failure);
@@ -845,6 +831,12 @@ export async function collectStravaBrowser(
 			`window_requested_to=${requestedTo}`,
 			`window_covered_from=${earliest ?? "none"}`,
 			`window_covered_to=${latest ?? "none"}`,
+			...(Object.keys(gearUnresolvedReasons).length > 0
+				? [
+						`gear_name_unresolved=${Object.values(gearUnresolvedReasons).reduce((sum, count) => sum + count, 0)}`,
+						`gear_name_reasons=${Object.entries(gearUnresolvedReasons).map(([reason, count]) => `${reason}:${count}`).join(",")}`,
+					]
+				: []),
 		].join(" "),
 	});
 	await ctx.emit({ type: "STATE", stream: ACTIVITIES_STREAM, cursor });
