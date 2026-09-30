@@ -93,8 +93,8 @@ export const SHIM_METHODS = [
 async function hostMain({ source, scopes, methods, loginWaitMs }) {
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
-		if (r && typeof r === "object" && typeof r.__shimError === "string")
-			throw new Error(r.__shimError);
+		if (r && typeof r === "object" && typeof r.__vanaShimError === "string")
+			throw new Error(r.__vanaShimError);
 		return r;
 	};
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -164,6 +164,7 @@ async function hostMain({ source, scopes, methods, loginWaitMs }) {
 				} catch {}
 				if (ok) {
 					await call("phase", ["login-detected"]);
+					await call("log", ["login detected"]);
 					return true;
 				}
 				await sleep(interval || 2000);
@@ -406,6 +407,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
  * @param {string[]} o.scopes
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
+ * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  */
 export async function runHarness({
@@ -430,6 +432,7 @@ export async function runHarness({
 	let maxBridgePayloadUnits = 0;
 	let bridgeCallCount = 0;
 	let result = null;
+	let harnessLoggedIn = false;
 	const streamHost = new ResultStreamHarness({
 		approvedScopes: scopes,
 		directory: resultSpoolDirectory,
@@ -486,6 +489,12 @@ export async function runHarness({
 					return evaluateInPage(String(a[0] ?? ""));
 				case "goto":
 					if (a[0]) {
+						const failure = await fixtures.failGoto?.({
+							url: String(a[0]),
+							loggedIn: harnessLoggedIn,
+							call: calls.goto,
+						});
+						if (failure) return { __vanaShimError: String(failure) };
 						await target
 							.goto(a[0], { waitUntil: "commit" })
 							.catch((e) => log.push(`goto error ${e.message}`));
@@ -560,7 +569,7 @@ export async function runHarness({
 					// on the host but no enabled connector uses them yet. Fail loudly
 					// rather than fake a result.
 					return {
-						__shimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
+						__vanaShimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
 					};
 			}
 		};
@@ -578,14 +587,14 @@ export async function runHarness({
 			bridgeCallCount++;
 			if (requestUnits > PAGE_BRIDGE_MAX_UNITS)
 				return {
-					__shimError:
+					__vanaShimError:
 						"Bridge request argument exceeds 256 Ki UTF-16 code units",
 				};
 			const result = await dispatch(method, args);
 			const replyUnits = jsonPayloadUnits(result);
 			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, replyUnits);
 			if (replyUnits > PAGE_BRIDGE_MAX_UNITS)
-				return { __shimError: "Bridge reply exceeds 256 Ki UTF-16 code units" };
+				return { __vanaShimError: "Bridge reply exceeds 256 Ki UTF-16 code units" };
 			return result;
 		});
 		runner.on("console", (m) => log.push(`[bundle] ${m.text().slice(0, 300)}`));
@@ -610,16 +619,20 @@ export async function runHarness({
 			await sampleHeap();
 		})();
 
-		if (loginAfterMs === Number.POSITIVE_INFINITY) {
+			if (loginAfterMs === Number.POSITIVE_INFINITY) {
+			harnessLoggedIn = false;
 			fixtures.setLoggedIn(false); // the user never signs in
 		} else if (loginAfterMs > 0) {
+			harnessLoggedIn = false;
 			fixtures.setLoggedIn(false);
 			setTimeout(() => {
 				log.push("[user] signs in");
+				harnessLoggedIn = true;
 				fixtures.setLoggedIn(true);
 				target.goto(fixtures.homeUrl, { waitUntil: "commit" }).catch(() => {});
 			}, loginAfterMs);
 		} else {
+			harnessLoggedIn = true;
 			fixtures.setLoggedIn(true);
 		}
 

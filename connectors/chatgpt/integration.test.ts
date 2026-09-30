@@ -406,6 +406,9 @@ test("Part A: one HTTP request that retries N times causes ONE pacing backoff, n
 	// every overload without a double-cast.
 	const fakePage: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
 		evaluate: ((_fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof _fn === "function" && arg === undefined) {
+				return Promise.resolve("https://chatgpt.com/");
+			}
 			if (arg === undefined) {
 				return Promise.resolve({
 					accessToken: "fake-token",
@@ -457,8 +460,12 @@ test("createChatGptApi refreshes auth from the current session endpoint after on
 		path?: string;
 	}> = [];
 	let authExtractionCalls = 0;
+	let gotoCalls = 0;
 	const fakePage: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
 		evaluate: ((fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof fn === "function" && arg === undefined) {
+				return Promise.resolve("https://chatgpt.com/");
+			}
 			if (arg === undefined) {
 				authExtractionCalls += 1;
 				assert.equal(
@@ -493,7 +500,10 @@ test("createChatGptApi refreshes auth from the current session endpoint after on
 					: { status: 200, json: { ok: true } },
 			);
 		}) as Page["evaluate"],
-		goto: () => Promise.resolve(null),
+		goto: () => {
+			gotoCalls += 1;
+			return Promise.resolve(null);
+		},
 		waitForFunction: () =>
 			Promise.reject(new Error("fake page: no client-bootstrap")),
 	};
@@ -503,6 +513,7 @@ test("createChatGptApi refreshes auth from the current session endpoint after on
 
 	assert.equal(result.status, 200);
 	assert.equal(authExtractionCalls, 2);
+	assert.equal(gotoCalls, 0, "same-origin auth rechecks do not navigate the live page");
 	assert.deepEqual(
 		backendCalls.map((call) => call.auth?.accessToken),
 		["stale-token", "fresh-token"],
@@ -525,6 +536,9 @@ test("createChatGptApi caps repeated-stale-session reauth at one per run, across
 	}> = [];
 	const fakePage: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
 		evaluate: ((_fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof _fn === "function" && arg === undefined) {
+				return Promise.resolve("https://chatgpt.com/");
+			}
 			if (arg === undefined) {
 				authExtractionCalls += 1;
 				// Every extraction yields a distinct token — the rotation itself is

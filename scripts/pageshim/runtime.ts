@@ -61,6 +61,7 @@ const EVALUATE_CHUNK_MAX_UNITS = 64 * 1024;
 const EVALUATE_RESULT_MAX_UNITS = 64 * 1024 * 1024;
 const ERROR_TEXT_MAX_UNITS = 4 * 1024;
 const EVALUATE_RESULT_STORE = "__pdppPageshimEvaluateResults";
+const PAGE_SHIM_BRIDGE_CALL_TIMEOUT_MS = 30_000;
 
 declare const PAGESHIM_RESULT_STREAMING: boolean;
 
@@ -230,7 +231,32 @@ export function playwrightPageFacade(shim: ShimPage) {
 	// expects, and is recorded so the harness can fail on it.
 	return new Proxy(facade, {
 		get(t, k) {
-			if (k in t) return (t as Record<string | symbol, unknown>)[k];
+			if (k in t) {
+				const member = (t as Record<string | symbol, unknown>)[k];
+				if (k === "requestedScopes" || typeof member !== "function") {
+					return member;
+				}
+				return (...args: unknown[]) => {
+					let timeout: ReturnType<typeof setTimeout> | undefined;
+					const bridgeCall = Promise.resolve().then(() =>
+						(member as (...values: unknown[]) => unknown).apply(t, args),
+					);
+					const deadline = new Promise<never>((_resolve, reject) => {
+						timeout = setTimeout(
+							() =>
+								reject(
+									new Error(
+										`PageShim bridge call ${String(k)} timed out after ${PAGE_SHIM_BRIDGE_CALL_TIMEOUT_MS}ms`,
+									),
+								),
+							PAGE_SHIM_BRIDGE_CALL_TIMEOUT_MS,
+						);
+					});
+					return Promise.race([bridgeCall, deadline]).finally(() => {
+						if (timeout !== undefined) clearTimeout(timeout);
+					});
+				};
+			}
 			if (typeof k === "string")
 				(globalThis as { __pdppStubHits?: string[] }).__pdppStubHits?.push(
 					`Page.${k} (facade)`,
