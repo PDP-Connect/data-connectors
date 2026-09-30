@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.4)
+ * PDPP Meta (Instagram) Connector (v0.4.11)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -40,8 +40,9 @@
  *                cannot be constructed from a bare `fetch()` call (confirmed
  *                live; see `fetchAllPosts`'s header note). Declared
  *                `incremental: false` / `coverage_strategy: full_inventory`
- *                (manifests/meta.json) and emits no STATE: every run walks
- *                the full timeline (no server-provided early-stop cursor is
+ *                (manifests/meta.json). A successful terminal empty
+ *                timeline emits completion STATE; other runs walk the full
+ *                timeline (no server-provided early-stop cursor is
  *                confirmed) — a second run's re-emit of unchanged posts is
  *                an idempotent id-keyed upsert, not incremental savings yet.
  *   post_likes   child stream of posts (D3): (post, liker) pairs from each
@@ -86,9 +87,8 @@
  *     retained sanitized trace identifies which step failed in the latest
  *     partial ads run; a live retest is still needed to confirm whether
  *     layout drift contributes.
- *     A persistent empty ARIA list counts as reached after a 2.5s settle
- *     window to preserve legacy empty-list behavior. Meta exposes no confirmed
- *     empty-state marker, so content arriving after that window remains a risk.
+ *     Empty ARIA lists count as reached only when the matching visible
+ *     source-authored empty message is present in the active dialog.
  *   - Tested surface: single-account, EN locale, personal (non-business)
  *     account (see the connector cutover report's Live evidence section
  *     for exact per-stream counts and the two-run incremental proof).
@@ -99,6 +99,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.11 (2026-09-30) — requires exact empty evidence for ads surfaces and
+ *     a successful terminal empty response for posts completion.
  *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
  *     in the owner's sign-in tab instead of opening a sibling about:blank tab.
  *   v0.4.3 (2026-09-24) — reports bounded failure steps for incomplete ads
@@ -472,10 +474,28 @@ export async function fetchProfileCounts(
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
 
 interface TimelineEnvelope {
+	error?: unknown;
+	errorCode?: unknown;
+	error_code?: unknown;
+	errors?: unknown[] | null;
+	extensions?: {
+		code?: unknown;
+		is_final?: unknown;
+		partial?: unknown;
+	} | null;
+	ok?: boolean;
+	status?: unknown;
 	data?: {
 		xdt_api__v1__feed__user_timeline_graphql_connection?: InstagramTimelineConnection | null;
 	} | null;
 }
+
+type CompleteTimelineConnection = InstagramTimelineConnection & {
+	edges: InstagramTimelineEdge[];
+	page_info: NonNullable<InstagramTimelineConnection["page_info"]> & {
+		has_next_page: boolean;
+	};
+};
 
 /**
  * The owner's own posts are served by a POST to `/graphql/query`
@@ -490,24 +510,128 @@ interface TimelineEnvelope {
  * `page.captureNetwork`/`getCapturedResponse` pattern, using Playwright's own
  * `waitForResponse` instead of that bespoke shim.
  */
-function isPostsTimelineResponse(response: {
-	request: () => { method: () => string };
-	url: () => string;
-}): boolean {
+function isPostsTimelineResponse(
+	response: {
+		request: () => {
+			frame?: () => { page?: () => Page };
+			headers: () => Record<string, string>;
+			method: () => string;
+			postData: () => string | null;
+		};
+		url: () => string;
+	},
+	page: Page,
+): boolean {
+	const request = response.request();
+	let responsePage: Page | undefined;
+	try {
+		responsePage = request.frame?.().page?.();
+	} catch {
+		return false;
+	}
+	const operation =
+		request.headers()["x-fb-friendly-name"] ?? request.postData() ?? "";
 	return (
+		(responsePage === undefined || responsePage === page) &&
 		response.url().includes("/graphql/") &&
-		response.request().method() === "POST"
+		request.method() === "POST" &&
+		/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/.test(
+			operation,
+		)
 	);
+}
+
+function isLoginOrChallengeUrl(rawUrl: string): boolean {
+	try {
+		const url = new URL(rawUrl);
+		return /\/(?:accounts\/login|challenge|challenge_action|accounts\/onetap)\b/.test(
+			url.pathname,
+		);
+	} catch {
+		return false;
+	}
+}
+
+async function hasLoginOrChallengePageState(page: Page): Promise<boolean> {
+	if (isLoginOrChallengeUrl(page.url())) return true;
+	try {
+		await page.waitForFunction(
+			() => {
+				const text = document.body?.innerText.toLowerCase() ?? "";
+				return (
+					(text.includes("verify you are human") &&
+						Boolean(document.querySelector("[data-sitekey]"))) ||
+					(text.includes("welcome back") &&
+						Boolean(
+							document.querySelector(
+								'input[type="email"], input[name="email"]',
+							),
+						)) ||
+					Boolean(
+						document.querySelector(
+							'input[name="verificationCode"], input[name="security_code"]',
+						),
+					) ||
+					text.includes("checkpoint") ||
+					text.includes("challenge") ||
+					text.includes("security code")
+				);
+			},
+			undefined,
+			{ timeout: 500 },
+		);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function readTimelineConnection(response: {
 	json: () => Promise<unknown>;
-}): Promise<InstagramTimelineConnection | null> {
+	status: () => number;
+}): Promise<CompleteTimelineConnection | null> {
+	const status = response.status();
+	if (status < 200 || status >= 300) {
+		return null;
+	}
 	try {
 		const body = (await response.json()) as TimelineEnvelope;
-		return (
-			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection ?? null
-		);
+		if (
+			body?.ok === false ||
+			body?.error !== undefined ||
+			body?.errorCode !== undefined ||
+			body?.error_code !== undefined ||
+			(body?.status !== undefined && body.status !== "ok") ||
+			body?.extensions?.code === "UNAUTHENTICATED" ||
+			body?.extensions?.is_final === false ||
+			body?.extensions?.partial === true ||
+			(body?.errors != null &&
+				(!Array.isArray(body.errors) || body.errors.length > 0))
+		) {
+			return null;
+		}
+		const connection =
+			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+		const edges = connection?.edges;
+		const pageInfo = connection?.page_info;
+		if (
+			!connection ||
+			!Array.isArray(edges) ||
+			edges.some(
+				(edge) => !edge || typeof edge.node !== "object" || edge.node === null,
+			) ||
+			typeof pageInfo?.has_next_page !== "boolean"
+		) {
+			return null;
+		}
+		return {
+			...connection,
+			edges,
+			page_info: {
+				...pageInfo,
+				has_next_page: pageInfo.has_next_page,
+			},
+		};
 	} catch {
 		return null;
 	}
@@ -528,41 +652,71 @@ export async function fetchAllPosts(
 		extra?: Record<string, unknown>,
 	) => Promise<void>,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ edges: InstagramTimelineEdge[]; truncated: boolean }> {
+): Promise<{
+	edges: InstagramTimelineEdge[];
+	sourceEdgeCount: number;
+	truncated: boolean;
+}> {
 	const edges: InstagramTimelineEdge[] = [];
 	const seenIds = new Set<string>();
-	let sawAnyResponse = false;
+	let sawValidResponse = false;
+	let sawTerminalPage = false;
+	let sourceEdgeCount = 0;
 
 	const walk = await walkPagesWithCeiling({
 		fetchPage: async (pageNumber) => {
 			const responsePromise = page
-				.waitForResponse(isPostsTimelineResponse, { timeout: 15_000 })
+				.waitForResponse(
+					(response) => isPostsTimelineResponse(response, page),
+					{ timeout: 15_000 },
+				)
 				.catch(() => null);
 			if (pageNumber === 1) {
-				await page.goto(
-					`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
-					{
-						timeout: 30_000,
-						waitUntil: "domcontentloaded",
-					},
-				);
+				try {
+					await page.goto(
+						`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
+						{
+							timeout: 30_000,
+							waitUntil: "domcontentloaded",
+						},
+					);
+				} catch {
+					throw new Error(
+						"meta_posts_navigation_failed: profile timeline did not load",
+					);
+				}
 			} else {
-				await page.evaluate(() =>
-					window.scrollTo(0, document.body.scrollHeight),
-				);
+				try {
+					await page.evaluate(() =>
+						window.scrollTo(0, document.body.scrollHeight),
+					);
+				} catch {
+					throw new Error(
+						"meta_posts_navigation_failed: timeline page did not advance",
+					);
+				}
 			}
 			const response = await responsePromise;
 			if (!response) {
 				return false;
 			}
-			sawAnyResponse = true;
 			const connection = await readTimelineConnection(response);
+			if (!connection) {
+				throw new Error(
+					"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
+				);
+			}
+			sawValidResponse = true;
+			sourceEdgeCount += connection.edges.length;
 			capture?.captureHttp(
 				`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
 				connection,
 				{ status: response.status() },
 			);
 			const pageEdges = (connection?.edges ?? []).filter((edge) => {
+				if (!edge || !edge.node || typeof edge.node !== "object") {
+					return false;
+				}
 				const id =
 					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
 				if (!id || seenIds.has(id)) {
@@ -578,7 +732,8 @@ export async function fetchAllPosts(
 				total_seen: edges.length,
 			});
 			const pageInfo = connection?.page_info;
-			if (!pageInfo?.has_next_page || pageEdges.length === 0) {
+			if (pageInfo?.has_next_page === false) {
+				sawTerminalPage = true;
 				return false;
 			}
 			await delay(1500);
@@ -587,13 +742,27 @@ export async function fetchAllPosts(
 		maxPages: POSTS_MAX_PAGES,
 	});
 
-	if (!sawAnyResponse) {
+	if (!sawValidResponse) {
 		throw new Error(
 			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
 		);
 	}
+	if (!sawTerminalPage && !walk.truncated) {
+		throw new Error(
+			"meta_posts_terminal_page_not_observed: posts timeline did not include a terminal page",
+		);
+	}
+	if (
+		sawTerminalPage &&
+		sourceEdgeCount === 0 &&
+		(await hasLoginOrChallengePageState(page))
+	) {
+		throw new Error(
+			"meta_posts_login_challenge: empty timeline observed while login or challenge state is active",
+		);
+	}
 
-	return { edges, truncated: walk.truncated };
+	return { edges, sourceEdgeCount, truncated: walk.truncated };
 }
 
 // ─── Following (paginated friendships listing) ─────────────────────────────
@@ -649,6 +818,120 @@ export async function fetchAllFollowing(
 
 // ─── Ads (Accounts Center DOM scrape) ──────────────────────────────────────
 
+const NON_TOPIC_RE = /^(?:special topic|see less)$/i;
+
+type AdsDialogClassification =
+	| { items: string[]; kind: "data" }
+	| { kind: "verified_empty" }
+	| { kind: "unavailable" };
+
+/** Classify a visible Accounts Center list without treating a blank shell as empty. */
+export function classifyAdsDialogInPage(args: {
+	emptyMessage: string;
+	requiredAffordance?: string;
+	uiOnlyPatternSource?: string;
+}): AdsDialogClassification {
+	const normalize = [
+		(text: string): string => text.replace(/\s+/g, " ").trim(),
+	][0]!;
+	const controlSelector = 'a, button, [role="button"], [role="link"]';
+	const visible = [
+		(element: Element): boolean => {
+			if (!element.isConnected) return false;
+			const rect = element.getBoundingClientRect();
+			for (
+				let current: Element | null = element;
+				current;
+				current = current.parentElement
+			) {
+				const style = getComputedStyle(current);
+				if (
+					style.display === "none" ||
+					style.visibility === "hidden" ||
+					style.visibility === "collapse" ||
+					style.opacity === "0"
+				) {
+					return false;
+				}
+			}
+			return rect.width > 0 && rect.height > 0;
+		},
+	][0]!;
+	const visibleText = [
+		(element: Element, excludeControls = false): string => {
+			const text: string[] = [];
+			const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				const parent = node.parentElement;
+				if (!parent || !visible(parent)) continue;
+				if (excludeControls && parent.closest(controlSelector)) continue;
+				const value = normalize(node.textContent ?? "");
+				if (value) text.push(value);
+			}
+			return normalize(text.join(" "));
+		},
+	][0]!;
+	const dialogs = Array.from(
+		document.querySelectorAll('[role="dialog"]'),
+	).filter(visible);
+	const dialog = dialogs.find((candidate) =>
+		candidate.querySelector('[role="list"]') !== null,
+	);
+	if (!dialog) return { kind: "unavailable" };
+	const text = visibleText(dialog);
+	if (
+		dialog.matches('[aria-busy="true"]') ||
+		Array.from(
+			dialog.querySelectorAll('[aria-busy="true"], [role="progressbar"]'),
+		).some(visible) ||
+		/\b(?:loading|please wait)\b/i.test(text) ||
+		Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
+		/\b(?:could not be loaded|try again|temporarily unavailable|something went wrong|error loading)\b/i.test(text)
+	) {
+		return { kind: "unavailable" };
+	}
+	const list = dialog.querySelector('[role="list"]');
+	if (!list) return { kind: "unavailable" };
+	const uiOnlyPattern = args.uiOnlyPatternSource
+		? new RegExp(args.uiOnlyPatternSource, "i")
+		: null;
+	const items: string[] = [];
+	for (const row of Array.from(
+		list.querySelectorAll('[role="listitem"]'),
+	).filter(visible)) {
+		const fullText = visibleText(row);
+		if (!fullText) continue;
+		if (args.requiredAffordance) {
+			const hasAffordance = Array.from(
+				row.querySelectorAll(controlSelector),
+			).some(
+				(control) =>
+					visible(control) &&
+					visibleText(control).includes(args.requiredAffordance!),
+			);
+			if (!hasAffordance) continue;
+		}
+		const hasControl = Array.from(row.querySelectorAll(controlSelector)).some(
+			visible,
+		);
+		const itemText =
+			uiOnlyPattern && hasControl ? visibleText(row, true) : fullText;
+		if (!itemText || (uiOnlyPattern?.test(itemText) ?? false)) continue;
+		items.push(itemText);
+	}
+	if (items.length > 0) return { items, kind: "data" };
+	const expected = normalize(args.emptyMessage).toLowerCase();
+	const hasExactVisibleMessage =
+		visibleText(dialog).toLowerCase() === expected ||
+		Array.from(dialog.querySelectorAll("*")).some(
+			(element) =>
+				visible(element) && visibleText(element).toLowerCase() === expected,
+		);
+	return hasExactVisibleMessage
+		? { kind: "verified_empty" }
+		: { kind: "unavailable" };
+}
+
 /**
  * Scrape all `[role="listitem"]` text within the first open ARIA dialog on
  * the page. Shared by advertisers and ad-topics collection — both legacy
@@ -656,37 +939,26 @@ export async function fetchAllFollowing(
  */
 async function scrapeDialogListItems(
 	page: Page,
+	emptyMessage: string,
+	uiOnlyPattern?: RegExp,
 ): Promise<{ items: string[]; reached: boolean; step: AdsSurfaceStep | null }> {
-	const result = await page.evaluate(() => {
-		const dialog = document.querySelector('[role="dialog"]');
-		if (!dialog) {
-			return { items: [], reached: false };
-		}
-		const list = dialog.querySelector('[role="list"]');
-		if (!list) {
-			return { items: [], reached: false };
-		}
-		const items = list.querySelectorAll('[role="listitem"]');
-		const values = Array.from(items)
-			.map((el) => (el.textContent ?? "").trim())
-			.filter((t) => t.length > 0);
-		return {
-			items: values,
-			reached: true,
-		};
+	const result = await page.evaluate(classifyAdsDialogInPage, {
+		emptyMessage,
+		...(uiOnlyPattern ? { uiOnlyPatternSource: uiOnlyPattern.source } : {}),
 	});
 	return {
-		...result,
-		step: !result.reached
-			? "destination_list_not_found"
-			: result.items.length === 0
-				? "reached_empty"
-				: null,
+		items: result.kind === "data" ? result.items : [],
+		reached: result.kind === "data" || result.kind === "verified_empty",
+		step:
+			result.kind === "unavailable"
+				? "destination_list_not_found"
+				: result.kind === "verified_empty"
+					? "reached_empty"
+					: null,
 	};
 }
 
-/** A mounted list is only a shell. Prefer populated rows, but preserve empty
- * lists after the same bounded settling window used by the legacy collector. */
+/** Wait for rows, then let the classifier require visible source evidence. */
 async function waitForAdsList(page: Page): Promise<boolean> {
 	const shellReady = await waitForAdsCondition(page, () =>
 		Boolean(document.querySelector('[role="dialog"] [role="list"]')),
@@ -805,12 +1077,11 @@ export async function scrapeAdvertisers(
 			surface: "advertisers",
 		};
 	}
-	const result = await scrapeDialogListItems(page);
+	const result = await scrapeDialogListItems(page, "No advertisers");
 	await closeDialog(page);
 	return { ...result, surface: "advertisers" };
 }
 
-const NON_TOPIC_RE = /special topic|see less/i;
 const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
 
 export async function scrapeAdTopics(
@@ -838,16 +1109,15 @@ export async function scrapeAdTopics(
 			surface: "ad_topics",
 		};
 	}
-	const result = await scrapeDialogListItems(page);
-	const items = result.items.filter((t) => !NON_TOPIC_RE.test(t));
+	const result = await scrapeDialogListItems(
+		page,
+		"No ad topics",
+		NON_TOPIC_RE,
+	);
 	return {
-		items,
+		items: result.items,
 		reached: result.reached,
-		step: !result.reached
-			? "destination_list_not_found"
-			: result.items.filter((t) => !NON_TOPIC_RE.test(t)).length === 0
-				? "reached_empty"
-				: null,
+		step: result.step,
 		surface: "ad_topics",
 	};
 }
@@ -954,6 +1224,28 @@ export async function scrapeTargetingCategories(
 			surface: "targeting_categories",
 		};
 	}
+	const initialCategories = await page.evaluate(classifyAdsDialogInPage, {
+		emptyMessage: "No categories",
+		requiredAffordance: "Remove",
+	});
+	if (initialCategories.kind === "verified_empty") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "targeting_categories",
+		};
+	}
+	if (initialCategories.kind !== "data") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "targeting_categories",
+		};
+	}
 
 	const clickedViewAll = await page.evaluate(() => {
 		const btns = document.querySelectorAll('button, [role="button"]');
@@ -973,6 +1265,30 @@ export async function scrapeTargetingCategories(
 				(btn) => (btn.textContent ?? "").trim() === "View all",
 			);
 		}));
+	const finalCategories = clickedViewAll
+		? await page.evaluate(classifyAdsDialogInPage, {
+				emptyMessage: "No categories",
+				requiredAffordance: "Remove",
+			})
+		: initialCategories;
+	if (finalCategories.kind === "verified_empty") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "targeting_categories",
+		};
+	}
+	if (!viewAllExpanded || finalCategories.kind !== "data") {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: false,
+			step: "destination_list_not_found",
+			surface: "targeting_categories",
+		};
+	}
 
 	const categories = await page.evaluate(() => {
 		const dialog = document.querySelector('[role="dialog"]');
@@ -1014,14 +1330,12 @@ export async function scrapeTargetingCategories(
 	await closeDialog(page);
 	return {
 		items: categories.items,
-		reached: categories.reached && viewAllExpanded,
-		step: !categories.reached
-			? "destination_list_not_found"
-			: !viewAllExpanded
-				? "destination_list_not_found"
-				: categories.items.length === 0
-					? "reached_empty"
-					: null,
+		reached:
+			categories.reached && viewAllExpanded && categories.items.length > 0,
+		step:
+			categories.reached && viewAllExpanded && categories.items.length > 0
+				? null
+				: "destination_list_not_found",
 		surface: "targeting_categories",
 	};
 }
@@ -1083,53 +1397,79 @@ export async function collectAllStreams(
 
 	if (wantsPosts || wantsPostLikes) {
 		await progress("Fetching Instagram posts");
-		const { edges, truncated } = await fetchAllPosts(
-			page,
-			profile.username,
-			capture,
-			progress,
-			delay,
-		);
-
-		if (wantsPosts) {
-			for (const edge of edges) {
-				const record = postRecord(edge);
-				if (record) {
-					await emitRecord("posts", record as RecordData);
+		let postsResult: Awaited<ReturnType<typeof fetchAllPosts>> | null = null;
+		try {
+			postsResult = await fetchAllPosts(
+				page,
+				profile.username,
+				capture,
+				progress,
+				delay,
+			);
+		} catch (error) {
+			if (
+				!(error instanceof Error) ||
+				!error.message.startsWith("meta_posts_")
+			) {
+				throw error;
+			}
+			const failedStreams = ["posts", "post_likes"].filter((stream) =>
+				requested.has(stream),
+			);
+			for (const stream of failedStreams) {
+				await emit({
+					diagnostics: { requested_streams: failedStreams },
+					message:
+						"Instagram posts were unavailable because the timeline did not load.",
+					reason: "posts_timeline_unavailable",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					stream,
+					type: "SKIP_RESULT",
+				});
+			}
+		}
+		if (postsResult) {
+			const { edges, sourceEdgeCount, truncated } = postsResult;
+			if (wantsPosts) {
+				for (const edge of edges) {
+					const record = postRecord(edge);
+					if (record) {
+						await emitRecord("posts", record as RecordData);
+					}
+				}
+			}
+			if (wantsPostLikes) {
+				for (const edge of edges) {
+					for (const like of postLikeRecords(edge)) {
+						await emitRecord("post_likes", like as RecordData);
+					}
+				}
+			}
+			if (truncated) {
+				await emit({
+					diagnostics: {
+						page_limit: POSTS_MAX_PAGES,
+						total_seen: edges.length,
+					},
+					message: `Instagram posts stopped at the ${POSTS_MAX_PAGES}-page limit with more pages still listed`,
+					reason: "posts_pages_deferred_page_budget",
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+					stream: wantsPosts ? "posts" : "post_likes",
+					type: "SKIP_RESULT",
+				});
+			}
+			if (sourceEdgeCount === 0 && !truncated) {
+				if (wantsPosts) {
+					await emit({ cursor: {}, stream: "posts", type: "STATE" });
+				}
+				if (wantsPostLikes) {
+					await emit({ cursor: {}, stream: "post_likes", type: "STATE" });
 				}
 			}
 		}
-		if (wantsPostLikes) {
-			for (const edge of edges) {
-				for (const like of postLikeRecords(edge)) {
-					await emitRecord("post_likes", like as RecordData);
-				}
-			}
-		}
-		if (truncated) {
-			await emit({
-				diagnostics: { page_limit: POSTS_MAX_PAGES, total_seen: edges.length },
-				message: `Instagram posts stopped at the ${POSTS_MAX_PAGES}-page limit with more pages still listed`,
-				reason: "posts_pages_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				stream: wantsPosts ? "posts" : "post_likes",
-				type: "SKIP_RESULT",
-			});
-		}
-		// `posts` declares incremental: false / coverage_strategy:
-		// full_inventory (manifests/meta.json) and emits no STATE: every run
-		// walks the full timeline (scroll-triggered pagination has no
-		// server-provided early-stop cursor this connector has confirmed
-		// live — see the header's posts-endpoint note). A `taken_at`
-		// high-water mark could support a stop-at-seen boundary IF Instagram's
-		// timeline connection is confirmed newest-first, but no code or
-		// fixture here confirms that ordering — a live-account run is needed
-		// first. `postRecord`'s id-keyed emit already makes a second run's
-		// re-emit of unchanged posts an idempotent upsert, not a duplicate —
-		// see the connector cutover report's second-run evidence.
 	}
 
 	if (wantsFollowing) {

@@ -1,0 +1,9 @@
+{
+	"errors": null,
+	"data": {
+		"xdt_api__v1__feed__user_timeline_graphql_connection": {
+			"edges": [],
+			"page_info": { "has_next_page": false }
+		}
+	}
+}
