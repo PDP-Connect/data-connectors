@@ -20,13 +20,13 @@ import { test } from "node:test";
 import type { Page } from "playwright";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
-	assertCompleteOrderDetail,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,
+	orderDetailCountsMatch,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
@@ -119,10 +119,10 @@ test("buildOrderRecord reports the source-declared zero item count for an empty 
 	assert.equal(record.total_cents, null);
 });
 
-test("assertCompleteOrderDetail rejects partial detail rows before emitting an order", () => {
-	assert.throws(
-		() => assertCompleteOrderDetail({ ...STUB, expectedItemCount: 2 }, []),
-		/did not match search result count 2/,
+test("orderDetailCountsMatch reports partial detail rows as a mismatch", () => {
+	assert.equal(
+		orderDetailCountsMatch({ ...STUB, expectedItemCount: 2 }, []),
+		false,
 	);
 });
 
@@ -138,8 +138,8 @@ test("assertCompleteOrderDetail rejects partial detail rows before emitting an o
 // been emitted, matching the reported symptom. No live account was
 // available to confirm this against a real run; this fixture is built
 // directly from both parsers' own documented dedup behavior. This must NOT
-// throw.
-test("assertCompleteOrderDetail tolerates a repeated-product order where the detail page folds duplicate units into one row's quantity", () => {
+// report a mismatch.
+test("orderDetailCountsMatch tolerates a repeated-product order where the detail page folds duplicate units into one row's quantity", () => {
 	const repeatedProductStub: OrderStub = { ...STUB, expectedItemCount: 2 };
 	const dedupedDetailItems = [
 		{
@@ -151,14 +151,15 @@ test("assertCompleteOrderDetail tolerates a repeated-product order where the det
 			unitPriceDollars: 1.99,
 		},
 	];
-	assert.doesNotThrow(() =>
-		assertCompleteOrderDetail(repeatedProductStub, dedupedDetailItems),
+	assert.equal(
+		orderDetailCountsMatch(repeatedProductStub, dedupedDetailItems),
+		true,
 	);
 });
 
 // Counterweight: a genuinely incomplete detail page (a distinct product
-// missing its own row, not folded via quantity) must still fail closed.
-test("assertCompleteOrderDetail still rejects a detail page missing a distinct product row", () => {
+// missing its own row, not folded via quantity) must still be reported.
+test("orderDetailCountsMatch still reports a detail page missing a distinct product row", () => {
 	const twoDistinctProductsStub: OrderStub = { ...STUB, expectedItemCount: 2 };
 	const onlyOneProductParsed = [
 		{
@@ -170,10 +171,9 @@ test("assertCompleteOrderDetail still rejects a detail page missing a distinct p
 			unitPriceDollars: 1.99,
 		},
 	];
-	assert.throws(
-		() =>
-			assertCompleteOrderDetail(twoDistinctProductsStub, onlyOneProductParsed),
-		/did not match search result count 2/,
+	assert.equal(
+		orderDetailCountsMatch(twoDistinctProductsStub, onlyOneProductParsed),
+		false,
 	);
 });
 
