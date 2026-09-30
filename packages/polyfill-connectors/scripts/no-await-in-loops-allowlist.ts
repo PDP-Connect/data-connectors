@@ -2366,14 +2366,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/wholefoods/index.ts",
-			line: 613,
+			line: 618,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectOrderStubs(): emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/wholefoods/index.ts",
-			line: 623,
+			line: 628,
 			column: 19,
 			category: "ordered_browser_interaction",
 			note: "collectOrderStubs(): lookupNutritionForProduct(): sequential Playwright navigation (Whole Foods product page, then USDA fetch) against the shared page/context",

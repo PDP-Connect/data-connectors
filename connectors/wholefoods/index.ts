@@ -521,7 +521,7 @@ function buildNutritionRecord(
 /** Fetch, verify and emit every discovered order. Auth and readability
  *  failures still end the run. A detail whose item count cannot be
  *  reconciled with the search count does not: the order and its items are
- *  delivered, and one SKIP_RESULT reports how many orders were unverified. */
+ *  delivered, and progress reports how many orders were unverified. */
 async function collectOrderStubs({
 	credentials,
 	emit,
@@ -592,6 +592,11 @@ async function collectOrderStubs({
 		const detail = parseOrderDetailDom(html);
 		if (!orderDetailCountsMatch(stub, detail.items)) {
 			unverifiedCountOrders += 1;
+			await emit({
+				type: "PROGRESS",
+				stream: "orders",
+				message: `${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled (search_count=${stub.expectedItemCount}, detail_rows=${detail.items.length}, detail_units=${orderDetailUnitCount(detail.items)})`,
+			});
 		}
 
 		if (wantsOrders) {
@@ -654,20 +659,14 @@ async function collectOrderStubs({
 	}
 
 	if (unverifiedCountOrders > 0) {
-		await emit({
-			diagnostics: {
-				unverified_orders: unverifiedCountOrders,
-				total_orders: stubs.length,
+		await progress(
+			`${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: ${unverifiedCountOrders} of ${stubs.length} Whole Foods order item counts could not be verified`,
+			{
+				count: unverifiedCountOrders,
+				stream: "orders",
+				total: stubs.length,
 			},
-			message: `${unverifiedCountOrders} of ${stubs.length} Whole Foods orders were delivered, but their item counts could not be verified against the order search.`,
-			recovery_hint: {
-				action: "retry_on_connector_upgrade",
-				retryable: false,
-			},
-			reason: ORDER_ITEM_COUNT_UNVERIFIED_REASON,
-			stream: "orders",
-			type: "SKIP_RESULT",
-		});
+		);
 	}
 	if (wantsOrders) {
 		await emit({

@@ -55,20 +55,24 @@ function pageServing(htmlByOrder: Record<string, string>): Page {
 
 async function runOrders(stubs: OrderStub[], html: Record<string, string>) {
 	const harness = makeRecordingEmit(validateRecord);
+	const progressUpdates: { message: string; details?: unknown }[] = [];
 	await connector.collectOrderStubs({
 		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),
 		page: pageServing(html),
-		progress: () => Promise.resolve(),
+		progress: (message, details) => {
+			progressUpdates.push({ message, details });
+			return Promise.resolve();
+		},
 		state: {},
 		stubs,
 		wantsItems: true,
 		wantsNutrition: false,
 		wantsOrders: true,
 	});
-	return harness;
+	return { ...harness, progressUpdates };
 }
 
 const A = "111-1111111-1111111";
@@ -84,7 +88,7 @@ test("an integer-quantity in-store row is one search row, not three", () => {
 	assert.equal(connector.orderDetailCountsMatch(stub(A, 4), items), false);
 });
 
-test("a count mismatch on order 2 delivers all 3 orders and reports one reason code", async () => {
+test("a count mismatch on order 2 delivers all 3 orders and reports one progress warning", async () => {
 	const harness = await runOrders([stub(A, 3), stub(B, 9), stub(C, 3)], {
 		[A]: FIXTURE,
 		[B]: FIXTURE,
@@ -96,13 +100,37 @@ test("a count mismatch on order 2 delivers all 3 orders and reports one reason c
 		[A, B, C],
 	);
 	assert.equal(harness.emitted.filter((r) => r.stream === "order_items").length, 9);
-	const skips = harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT");
-	assert.equal(skips.length, 1);
-	assert.equal(skips[0]?.reason, connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON);
-	assert.equal(skips[0]?.stream, "orders");
-	assert.deepEqual(skips[0]?.diagnostics, {
-		total_orders: 3,
-		unverified_orders: 1,
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+	const warnings = harness.protocolMessages.filter((m) => {
+		const progress = m as { type?: string; message?: string };
+		return (
+			progress.type === "PROGRESS" &&
+			progress.message?.startsWith(
+				`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}:`,
+			)
+		);
+	}) as unknown as { stream?: string; message?: string }[];
+	assert.equal(warnings.length, 1);
+	assert.equal(warnings[0]?.stream, "orders");
+	assert.equal(
+		warnings[0]?.message,
+		`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled (search_count=9, detail_rows=3, detail_units=3)`,
+	);
+	const summaries = harness.progressUpdates.filter((update) =>
+		update.message.startsWith(`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}:`),
+	);
+	assert.equal(summaries.length, 1);
+	assert.equal(
+		summaries[0]?.message,
+		`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}: 1 of 3 Whole Foods order item counts could not be verified`,
+	);
+	assert.deepEqual(summaries[0]?.details, {
+		count: 1,
+		stream: "orders",
+		total: 3,
 	});
 });
 
