@@ -104,12 +104,12 @@ function resolveLocalImport(commit, from, specifier, options) {
   );
 }
 
-function addLocalImportClosure(commit, entryPath, files, options) {
+function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set()) {
   const pending = [entryPath];
   const visited = new Set();
   while (pending.length) {
     const path = pending.pop();
-    if (visited.has(path)) continue;
+    if (visited.has(path) || excluded.has(path)) continue;
     visited.add(path);
     let source = files.get(path);
     if (source === undefined) {
@@ -296,7 +296,7 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       // packaging step; encode that prior state so it compares as a real
       // change when the first packaged bundle is introduced.
       if (content === null) files.set(path, Buffer.from("\0absent"));
-      else addLocalImportClosure(commit, path, files, options);
+      else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs"]));
     }
     if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options);
   }
