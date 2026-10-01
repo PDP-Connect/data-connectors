@@ -205,6 +205,36 @@ test("an unrelated root file does not select a connector", async () => {
   }
 });
 
+test("a root developer script does not change non-PageShim artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write("package.json", JSON.stringify({ scripts: { "mobile:bundle": "node scripts/pageshim/mobile-bundle.mjs" } }));
+    const afterCommit = repo.commit("add a local mobile bundle command");
+    const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
+    assert.equal(after, before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("sibling runtime metadata does not change shared SourceDeclaration identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    const siblingPath = join(repo.dir, "connectors/oura_browser/manifest.json");
+    const sibling = JSON.parse(readFileSync(siblingPath, "utf8"));
+    sibling.runtime_requirements = { bindings: { browser: { required: true, features: ["evaluate"] } } };
+    sibling.mobile = { pageshim: { scope_prefix: "oura" } };
+    repo.write("connectors/oura_browser/manifest.json", JSON.stringify(sibling));
+    const afterCommit = repo.commit("add sibling runtime metadata");
+    const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
+    assert.equal(after, before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("a PageShim-only edit changes only connectors with a PageShim entry", async () => {
   const repo = makeRepo();
   try {
