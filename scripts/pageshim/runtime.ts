@@ -446,8 +446,10 @@ export async function runOnPageShim(
 	for (const [stream, scope] of scopeByStream)
 		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
 	const detailGapStreams = new Set<string>();
+	// A thin host accepts streamed results only (mobile-host-v1 amendment A6).
+	const streamingHost = hostAcceptsStreamedResults(pageShim);
 	const streamConfig =
-		connector.streamScopeRecords && hostAcceptsStreamedResults(pageShim)
+		connector.streamScopeRecords && streamingHost
 			? connector.streamScopeRecords
 			: null;
 	const pendingRecords: Record<string, Rec[]> = {};
@@ -837,6 +839,38 @@ export async function runOnPageShim(
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
+		const completionStatus = (summary: { count: number; label: string }) =>
+			errors.some((error) => error.errorClass === "partial")
+				? `Partial: ${summary.count} ${summary.label}`
+				: `Complete! ${summary.count} ${summary.label}`;
+		if (streamingHost) {
+			// The host rejects a stream without scopes, so a run that collected
+			// nothing reports its reason as a run error instead.
+			const scopeEntries = Object.entries(scopes);
+			if (scopeEntries.length === 0)
+				throw new Error(errors[0]?.reason ?? "no records collected");
+			for (const [scope, value] of scopeEntries) {
+				const text = JSON.stringify(value);
+				if (text === undefined)
+					throw new Error(`PageShim scope ${scope} could not be serialized`);
+				streamProtocolUsed = true;
+				await sendStreamMessage("result:begin", { scope });
+				activeSequence = 0;
+				await sendStreamText(scope, text);
+				await sendStreamMessage("result:scope-done", {
+					scope,
+					chunkCount: activeSequence,
+				});
+			}
+			const exportSummary = connector.summarize(scopes);
+			await sendStreamMessage("result:done", {
+				scopeCount: scopeEntries.length,
+				exportSummary,
+				errors,
+			});
+			await shim.setData("status", completionStatus(exportSummary));
+			return;
+		}
 		const done = result(scopes, errors);
 		const serialized = JSON.stringify(done);
 		if (serialized.length > RESULT_CHUNK_MAX_UNITS) {
@@ -845,12 +879,7 @@ export async function runOnPageShim(
 			);
 		}
 		await shim.setData("result", done);
-		await shim.setData(
-			"status",
-			errors.some((error) => error.errorClass === "partial")
-				? `Partial: ${done.exportSummary.count} ${done.exportSummary.label}`
-				: `Complete! ${done.exportSummary.count} ${done.exportSummary.label}`,
-		);
+		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
 		const reason = (
 			error instanceof Error ? error.message : String(error)
@@ -864,7 +893,8 @@ export async function runOnPageShim(
 						disposition: "fatal",
 						phase: "collect",
 					};
-		if (!streamProtocolUsed) await shim.setData("result", result({}, [fatal]));
+		if (!streamProtocolUsed && !streamingHost)
+			await shim.setData("result", result({}, [fatal]));
 		await shim.setData("error", fatal.reason);
 	} finally {
 		const hits = [

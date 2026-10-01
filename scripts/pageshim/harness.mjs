@@ -453,7 +453,8 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {string[]} o.scopes
  * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
- * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept streamed results
+ * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
+ * @param {boolean} [o.acceptLegacyResult] also accept a one-message result (default: only without resultStreaming)
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -485,6 +486,7 @@ export async function runHarness({
 	readBridgeLatencyMs = 0,
 	clockNowMs,
 	legacyScopeBridge = false,
+	acceptLegacyResult,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -510,6 +512,7 @@ export async function runHarness({
 		directory: resultSpoolDirectory,
 		failAt: resultStreamFailure,
 		streamingSupported: resultStreaming,
+		legacyResults: acceptLegacyResult ?? !resultStreaming,
 	});
 
 	const browser = await chromium.launch({

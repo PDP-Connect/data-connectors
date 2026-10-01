@@ -159,6 +159,50 @@ for (const name of pageShimConnectors(
 			assert.equal(r.calls.showBrowser, undefined, "must not ask for login");
 		});
 
+		await t.test("thin host: every scope streams and matches the one-message result", async () => {
+			const legacy = await run({ scopes: c.scopes });
+			assertComplete(legacy);
+			const r = await run({
+				scopes: c.scopes,
+				resultStreaming: true,
+				resultSpoolDirectory: join(out, `${name}-thin-host`),
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assert.equal(r.data.error, undefined);
+			assertCleanRun(r);
+			assert.equal(r.result, null, "a thin host never gets a one-message result");
+			assert.equal(r.streamResult.completed, true);
+			assert.equal(r.streamResult.scopeCount, c.scopes.length);
+			// fetchedAt is wall-clock time, so it differs between the two runs.
+			const withoutFetchedAt = ({ fetchedAt, ...value }) => value;
+			for (const scope of c.scopes)
+				assert.deepEqual(
+					withoutFetchedAt(
+						JSON.parse(await readFile(r.streamScopeFiles[scope], "utf8")),
+					),
+					withoutFetchedAt(legacy.result[scope]),
+					scope,
+				);
+			assert.deepEqual(r.streamDone.exportSummary, legacy.result.exportSummary);
+			assert.deepEqual(r.streamDone.errors, legacy.result.errors);
+			assert.equal(r.data.status, legacy.data.status);
+		});
+
+		await t.test("thin host: a fatal run reports its error without a result", async () => {
+			const r = await run({
+				scopes: c.scopes,
+				loginAfterMs: Number.POSITIVE_INFINITY,
+				loginWaitMs: 3000,
+				resultStreaming: true,
+				resultSpoolDirectory: join(out, `${name}-thin-host-fatal`),
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.result, null);
+			assert.equal(r.streamResult, null);
+			assert.match(r.data.error, /login/i);
+		});
+
 		await t.test("signed out, then sign-in: every scope", async () => {
 			const r = await run({ scopes: c.scopes, loginAfterMs: 5000 });
 			assertComplete(r);
@@ -643,8 +687,11 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	assertCleanRun(run);
 	assert.deepEqual(cursors, [0, 30, 60]);
 	assert.deepEqual(detailCalls, []);
-	assert.equal(run.result.exportSummary.count, 0);
-	assert.equal(run.result.exportSummary.window, undefined);
+	// Nothing in the window means no scope to stream; a thin host fails a
+	// zero-scope run (A7), so the runtime reports why instead of a result.
+	assert.equal(run.result, null);
+	assert.equal(run.streamResult, null);
+	assert.equal(run.data.error, "no records collected");
 });
 
 test("chatgpt: 30-day walk keeps later in-window rows after older rows on unordered pages", {
