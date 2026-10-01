@@ -105,6 +105,22 @@ test("stored session navigates the blank run page before probing", async () => {
   assert.deepEqual(requests, ["/api/me"]);
 });
 
+test("stored session on the Oura app origin probes in place", async () => {
+  const visits: string[] = [];
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    return Response.json({});
+  }, async () => {
+    await ensureOuraSession(Object.assign(Object.create(null) as EnsureSessionArgs, {
+      page: page("https://moi.ouraring.com/", visits),
+      assist: async () => { throw new Error("unexpected assistance"); },
+    }));
+  });
+  assert.deepEqual(visits, []);
+  assert.deepEqual(requests, ["/api/me"]);
+});
+
 test("streamed handoff probes Oura on the login page without opening a sibling tab", async () => {
   let authenticated = false;
   const visits: string[] = [];
@@ -237,6 +253,21 @@ test("wrong-origin page cannot make an authenticated data request", async () => 
     assert.deepEqual(h.failures, []);
   });
   assert.equal(requests, 0);
+});
+
+test("Oura app origin accepts same-origin authenticated collection", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    return Response.json({ daily_activities: [] });
+  }, async () => {
+    const h = harness(["activity"], page("https://moi.ouraring.com/"), {}, { since: today });
+    await collectOuraBrowser(h.ctx);
+    assert.deepEqual(h.failures, []);
+    assert.equal(h.messages.some((m) => m.type === "STATE"), true);
+  });
+  assert.deepEqual(requests, [`/api/account/daily-data?start=${today}&end=${today}`]);
 });
 
 test("lost authentication fails the run without attempting later windows", async () => {
