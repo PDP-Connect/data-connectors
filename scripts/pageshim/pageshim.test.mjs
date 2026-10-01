@@ -320,6 +320,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		const full = await run(fx.pageshimCase.scopes);
 		assert.deepEqual(full.ret, { ok: true }, full.log.slice(-20).join("\n"));
 		assert.deepEqual(full.result.errors, []);
+		assert.equal(full.streamResult, null);
 		assert.equal(full.result["chatgpt.conversations"].records.length, 4);
 		assert.equal(full.result["chatgpt.messages"].records.length, 4);
 		assert.equal(bundleSha256(built.outfile), digest);
@@ -435,7 +436,6 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const detailCalls = [];
@@ -516,6 +516,83 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	assert.match(r.data.status, /^Complete!/);
 });
 
+test("chatgpt: the published bundle streams a large 30-day result only when the host offers page.input", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	// Built exactly as scripts/pageshim/attach-to-artifact.mjs builds it.
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-published.js"),
+	});
+	const now = Date.now();
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const url = new URL(raw);
+		if (url.pathname === "/backend-api/conversations/search") {
+			const body = JSON.parse(response.body);
+			body.items = body.items.map((item) => ({
+				...item,
+				create_time: now / 1000 - 86400,
+				update_time: now / 1000 - 86400,
+			}));
+			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
+			stampChatGptDetail(response, now / 1000 - 86400);
+			const body = JSON.parse(response.body);
+			for (const node of Object.values(body.mapping))
+				if (node.message) node.message.content.parts = ["x".repeat(50_000)];
+			response.body = JSON.stringify(body);
+		}
+		return response;
+	};
+	const run = (name, resultStreaming) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...fx.pageshimCase.fixtures, resolve },
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes, now),
+			env: {
+				PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS: "1",
+				PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "1",
+			},
+			resultStreaming,
+			resultSpoolDirectory: join(out, name),
+		});
+	fx.useConversationCount(4);
+	let thinHost;
+	let olderShell;
+	try {
+		thinHost = await run("chatgpt-published-thin-host", true);
+		olderShell = await run("chatgpt-published-older-shell", false);
+	} finally {
+		fx.useConversationCount(2);
+	}
+
+	assertCleanRun(thinHost);
+	assert.deepEqual(thinHost.ret, { ok: true }, thinHost.log.slice(-20).join("\n"));
+	assert.equal(thinHost.result, null);
+	assert.equal(thinHost.streamResult.mode, "stream");
+	assert.equal(thinHost.streamResult.completed, true);
+	assert.deepEqual(thinHost.streamDone.errors, []);
+	assert.ok(thinHost.maxBridgePayloadUnits <= 256 * 1024);
+	const messages = await readFile(
+		thinHost.streamScopeFiles["chatgpt.messages"],
+		"utf8",
+	);
+	assert.ok(messages.length > 125 * 1024, `${messages.length}`);
+	assert.equal(JSON.parse(messages).records.length, 4);
+	assert.match(thinHost.data.status, /^Complete!/);
+
+	// Without page.input the same bundle sends one result message, which an
+	// older shell cannot carry at this size.
+	assertCleanRun(olderShell);
+	assert.equal(olderShell.streamResult, null);
+	assert.match(
+		olderShell.data.error,
+		/exceeds the 128000-unit legacy bridge limit/,
+	);
+});
+
 test("chatgpt: 30-day bundle stops after three old pages without fetching old details", {
 	timeout: 180_000,
 }, async () => {
@@ -523,7 +600,6 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-full-history.js"),
-		streamResults: true,
 	});
 	const cursors = [];
 	const detailCalls = [];
@@ -578,7 +654,6 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-unordered-pages.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const cursors = [];
@@ -685,7 +760,6 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-multipage.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const detailCalls = [];
@@ -975,7 +1049,6 @@ test("anthropic: export paths on the PageShim host", {
 		const streamBundle = await buildPageshim({
 			connector: "anthropic",
 			outfile: join(out, "anthropic-streamed.js"),
-			streamResults: true,
 		});
 		const spool = mkdtempSync(join(out, "anthropic-result-"));
 		try {
@@ -1318,7 +1391,6 @@ test("anthropic: one range across streams filters streamed collection", {
 	const streamBundle = await buildPageshim({
 		connector: "anthropic",
 		outfile: join(out, "anthropic-window.js"),
-		streamResults: true,
 	});
 	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
 	try {
@@ -1739,6 +1811,118 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		third.states,
 		"a failed result write must not commit the staged cursor",
 	);
+});
+
+test("strava_browser: a large activity list streams only when the host offers page.input", {
+	timeout: 300_000,
+}, async () => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/strava_browser.mjs"
+	);
+	// Built exactly as scripts/pageshim/attach-to-artifact.mjs builds it.
+	const built = await buildPageshim({
+		connector: "strava_browser",
+		outfile: join(out, "strava_browser-published.js"),
+	});
+	const sourceModels = JSON.parse(
+		readFileSync(
+			new URL(
+				"../../connectors/strava_browser/fixtures/training-activities-page-1.json",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	).models;
+	const resolveFor = (count) => {
+		const activities = Array.from({ length: count }, (_, i) => {
+			const model = structuredClone(sourceModels[i % sourceModels.length]);
+			const id = String(92000000000 + i);
+			return {
+				...model,
+				id: Number(id),
+				id_str: id,
+				name: `Synthetic activity ${i}`,
+				activity_url: `https://www.strava.com/activities/${id}`,
+				activity_url_for_twitter: `https://www.strava.com/activities/${id}`,
+				bike_id: null,
+				athlete_gear_id: null,
+			};
+		});
+		return (raw) => {
+			const url = new URL(raw);
+			if (url.pathname !== "/athlete/training_activities")
+				return resolveFixture(raw);
+			const page = Number(url.searchParams.get("page") || 1);
+			const perPage = 20;
+			return {
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					models: activities.slice((page - 1) * perPage, page * perPage),
+					page,
+					perPage,
+					total: activities.length,
+				}),
+			};
+		};
+	};
+	const run = (name, count, resultStreaming) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve: resolveFor(count) },
+			scopes: c.scopes,
+			timerScale: 0.01,
+			resultStreaming,
+			resultSpoolDirectory: join(out, name),
+		});
+
+	// A bounded list: the streamed scope is byte-for-byte what an older shell
+	// receives in its one result message.
+	const smallStream = await run("strava-small-thin-host", 205, true);
+	const smallLegacy = await run("strava-small-older-shell", 205, false);
+	assertCleanRun(smallStream);
+	assertCleanRun(smallLegacy);
+	assert.equal(smallStream.result, null);
+	assert.equal(smallStream.streamResult.completed, true);
+	assert.equal(smallLegacy.streamResult, null);
+	assert.deepEqual(
+		JSON.parse(
+			await readFile(smallStream.streamScopeFiles["strava.activities"], "utf8"),
+		),
+		smallLegacy.result["strava.activities"],
+	);
+	assert.deepEqual(
+		smallStream.streamDone.exportSummary,
+		smallLegacy.result.exportSummary,
+	);
+	assert.deepEqual(smallStream.states, smallLegacy.states);
+
+	const large = await run("strava-large-thin-host", 2000, true);
+	assertCleanRun(large);
+	assert.deepEqual(large.ret, { ok: true }, large.log.slice(-20).join("\n"));
+	assert.equal(large.streamResult.completed, true);
+	assert.deepEqual(large.streamDone.errors, []);
+	assert.ok(large.maxBridgePayloadUnits <= 256 * 1024);
+	const scope = await readFile(
+		large.streamScopeFiles["strava.activities"],
+		"utf8",
+	);
+	assert.ok(scope.length > 125 * 1024, `${scope.length}`);
+	assert.equal(JSON.parse(scope).activities.length, 2000);
+	assert.equal(
+		large.states["strava.activities"].pending_detail_ids.length,
+		2000,
+	);
+	assert.match(large.data.status, /^Complete! 2000 activities/);
+
+	const largeLegacy = await run("strava-large-older-shell", 2000, false);
+	assertCleanRun(largeLegacy);
+	assert.equal(largeLegacy.streamResult, null);
+	assert.match(
+		largeLegacy.data.error,
+		/exceeds the 128000-unit legacy bridge limit/,
+	);
+	assert.deepEqual(largeLegacy.states, {});
 });
 
 test("strava_browser: old shell without initialState does not receive STATE", {

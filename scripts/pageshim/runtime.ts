@@ -3,7 +3,8 @@
 
 // Runs a PDPP connector's probe() and collect() on the mobile PageShim host
 // and maps PDPP protocol messages onto the shim's page API:
-//   RECORD   -> streamed in bounded chunks when enabled; otherwise buffered
+//   RECORD   -> streamed in bounded chunks when the host offers page.input;
+//               otherwise buffered
 //   PROGRESS -> page.setProgress
 //   SKIP_RESULT -> an entry in result.errors
 // Failure output matches mobile's legacy github-1.5.0.js: bad requestedScopes
@@ -122,13 +123,16 @@ function withBridgeCallTimeout(
 	}) as ShimPage;
 }
 
-declare const PAGESHIM_RESULT_STREAMING: boolean;
-
-function resultStreamingEnabled(): boolean {
-	return (
-		typeof PAGESHIM_RESULT_STREAMING !== "undefined" &&
-		PAGESHIM_RESULT_STREAMING
-	);
+// Shells that offer page.input (the thin host) accept the result:begin,
+// result:chunk and result:done messages. Older shells take one whole result
+// message. A host page can be a Proxy that throws on unknown members, so a
+// throw means "absent".
+function hostAcceptsStreamedResults(page: ShimPage): boolean {
+	try {
+		return typeof (page as { input?: unknown }).input === "function";
+	} catch {
+		return false;
+	}
 }
 
 function boundedPageEvaluate(shim: ShimPage) {
@@ -318,10 +322,12 @@ export interface PageshimConnector {
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
-	/** Optional incremental form for connectors whose scope value is `{records}`. */
+	/** Optional incremental form for connectors whose scope value is one record array. */
 	streamScopeRecords?: {
 		/** Large streams first; later streams remain buffered until the active scope closes. */
 		order: string[];
+		/** The scope value's array key, matching `toScope`. Defaults to "records". */
+		arrayKey?: string;
 		/** Per-record cleanup matching `toScope`, when required. */
 		toRecord?: (stream: string, record: Rec) => unknown;
 		summarizeCounts: (counts: Record<string, number>) => {
@@ -441,7 +447,7 @@ export async function runOnPageShim(
 		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
 	const detailGapStreams = new Set<string>();
 	const streamConfig =
-		resultStreamingEnabled() && connector.streamScopeRecords
+		connector.streamScopeRecords && hostAcceptsStreamedResults(pageShim)
 			? connector.streamScopeRecords
 			: null;
 	const pendingRecords: Record<string, Rec[]> = {};
@@ -582,7 +588,10 @@ export async function runOnPageShim(
 		activeSequence = 0;
 		activeRecordCount = 0;
 		activeChunkConversationIds = new Set();
-		await sendStreamText(scope, '{"records":[');
+		await sendStreamText(
+			scope,
+			`{${JSON.stringify(streamConfig?.arrayKey ?? "records")}:[`,
+		);
 	};
 	const appendStreamRecord = async (
 		stream: string,
@@ -832,7 +841,7 @@ export async function runOnPageShim(
 		const serialized = JSON.stringify(done);
 		if (serialized.length > RESULT_CHUNK_MAX_UNITS) {
 			throw new Error(
-				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; enable streamed results`,
+				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; this host does not accept streamed results`,
 			);
 		}
 		await shim.setData("result", done);

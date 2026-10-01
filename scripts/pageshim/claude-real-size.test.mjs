@@ -17,7 +17,6 @@ test("Claude real export ZIPs stay inside the shell bridge bound", {
 	await buildPageshim({
 		connector: "anthropic",
 		outfile: bundle,
-		streamResults: true,
 	});
 	const fixture = await import("./fixtures/anthropic.mjs");
 	const testCase = fixture.pageshimCase;
