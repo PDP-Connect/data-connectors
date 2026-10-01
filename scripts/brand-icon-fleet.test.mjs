@@ -73,6 +73,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "usaa.json",
   "wholefoods.json",
   "whoop.json",
+  "whoop_browser.json",
   "ynab.json",
 ]);
 

@@ -1376,6 +1376,12 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"whoop.sleeps",
 	"whoop.workouts",
 	"whoop.body",
+	// WHOOP browser-session profile (development): auth-walled app.whoop.com
+	// collection with no credential-free coverage driver yet.
+	"whoop_browser.cycles",
+	"whoop_browser.recoveries",
+	"whoop_browser.sleeps",
+	"whoop_browser.workouts",
 	// WhatsApp (REAL_UNLISTED_CONNECTORS is not it — production-ready — but no
 	// driver yet): export-file based, no credential-free fixture built.
 	"whatsapp.chats",

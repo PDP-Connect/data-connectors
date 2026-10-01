@@ -79,6 +79,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["whatsapp", "whatsapp"],
     ["wholefoods", "wholefoods"],
     ["whoop", "whoop"],
+    ["whoop_browser", "whoop-browser"],
     ["ynab", "ynab"],
     ["youtube", "youtube"],
     ["youtube_takeout", "youtube-takeout", "Optional Takeout profile is retained for review and must not be published with the browser-first Vana cutover."],
