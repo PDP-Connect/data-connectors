@@ -66,6 +66,10 @@ const DEFAULT_BRIDGE_CALL_TIMEOUT_MS = 30_000;
 
 declare const PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: number;
 
+// Calls that wait for a person, not for the host. The host bounds them with
+// its own login wait, so the per-call bridge timeout does not apply.
+const USER_WAIT_CALLS = new Set<PropertyKey>(["promptUser"]);
+
 function withBridgeCallTimeout(
 	shim: ShimPage,
 	onBridgeCall: (
@@ -90,6 +94,10 @@ function withBridgeCallTimeout(
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				let result: unknown;
 				try {
+					if (USER_WAIT_CALLS.has(property)) {
+						result = await value.apply(target, args);
+						return result;
+					}
 					result = await Promise.race([
 						value.apply(target, args),
 						new Promise<never>((_, reject) => {

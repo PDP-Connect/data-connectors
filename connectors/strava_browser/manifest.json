@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.9",
+	"version": "0.1.10",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",

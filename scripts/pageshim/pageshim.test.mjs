@@ -244,6 +244,32 @@ for (const name of pageShimConnectors(
 	});
 }
 
+test("oura_browser: a sign-in after 45 s outlives the 30 s bridge-call timeout", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c } = await import("./fixtures/oura_browser.mjs");
+	// Built exactly as scripts/pageshim/attach-to-artifact.mjs builds it, so
+	// the published 30 s bridge-call timeout applies.
+	const built = await buildPageshim({
+		connector: "oura_browser",
+		outfile: join(out, "oura_browser-slow-sign-in.js"),
+	});
+	const r = await runHarness({
+		bundle: built.outfile,
+		fixtures: c.fixtures,
+		scopes: c.scopes,
+		loginAfterMs: 45_000,
+		resultStreaming: true,
+		resultSpoolDirectory: join(out, "oura_browser-slow-sign-in"),
+	});
+	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+	assert.equal(r.data.error, undefined, r.log.slice(-20).join("\n"));
+	assertCleanRun(r);
+	assert.equal(r.calls.promptUser, 1);
+	assert.equal(r.streamResult.completed, true);
+	assert.deepEqual(r.streamDone.exportSummary, c.exportSummary);
+});
+
 test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {
 	timeout: 180_000,
 }, async () => {
