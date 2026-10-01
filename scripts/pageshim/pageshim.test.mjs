@@ -342,7 +342,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 					until: "2026-02-01T00:00:00.000Z",
 				},
 				"chatgpt.messages": {
-					since: "2026-01-15T00:00:00.000Z",
+					since: "2026-01-25T00:00:00.000Z",
 					until: "2026-02-01T00:00:00.000Z",
 				},
 			}),
@@ -355,13 +355,61 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		assert.deepEqual(ranged.result.errors, []);
 		assert.deepEqual(
 			ranged.result["chatgpt.conversations"].records.map((record) => record.id),
-			["conv-3"],
+			["conv-3", "conv-4"],
 		);
 		assert.deepEqual(
 			ranged.result["chatgpt.messages"].records.map((record) => record.id),
-			["msg-2-a", "msg-3-a"],
+			["msg-3-a", "msg-4-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
+
+		for (const scopes of [
+			[
+				{
+					name: "chatgpt.conversations",
+					time_range: { since: "2026-01-25T00:00:00.000Z" },
+				},
+				"chatgpt.messages",
+			],
+			[
+				"chatgpt.conversations",
+				{
+					name: "chatgpt.messages",
+					time_range: { since: "2026-01-25T00:00:00.000Z" },
+				},
+			],
+			[
+				{
+					name: "chatgpt.conversations",
+					time_range: { since: "2026-01-25T00:00:00.000Z" },
+				},
+				{
+					name: "chatgpt.messages",
+					time_range: { until: "2026-02-01T00:00:00.000Z" },
+				},
+			],
+		]) {
+			const unboundedPartner = await run(scopes);
+			assert.deepEqual(
+				unboundedPartner.ret,
+				{ ok: true },
+				unboundedPartner.log.slice(-20).join("\n"),
+			);
+			assert.deepEqual(unboundedPartner.result.errors, []);
+			assert.deepEqual(
+				unboundedPartner.result["chatgpt.conversations"].records.map(
+					(record) => record.id,
+				),
+				["conv-1", "conv-2", "conv-3", "conv-4"],
+			);
+			assert.deepEqual(
+				unboundedPartner.result["chatgpt.messages"].records.map(
+					(record) => record.id,
+				),
+				["msg-1-a", "msg-2-a", "msg-3-a", "msg-4-a"],
+			);
+			assert.equal(bundleSha256(built.outfile), digest);
+		}
 
 		const messagesOnly = await run([
 			{
@@ -382,13 +430,16 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 			messagesOnly.result["chatgpt.messages"].records.map(
 				(record) => record.id,
 			),
-			["msg-3-a"],
+			["msg-3-a", "msg-4-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
 		for (const since of [
 			"2026-02-30T00:00:00.000Z",
 			"2026-04-31T00:00:00.000Z",
+			"2026-13-01T00:00:00.000Z",
+			"2025-02-29T00:00:00.000Z",
+			"2026-01-01T00:00:00+01:00",
 			"bad ISO",
 		]) {
 			const invalid = await run(
@@ -1251,7 +1302,7 @@ test("anthropic: five-part metadata-only shell contract reads part entries throu
 	);
 });
 
-test("anthropic: per-stream time_range filters records during streamed collection", {
+test("anthropic: one range across streams filters streamed collection", {
 	timeout: 300_000,
 }, async () => {
 	const fx = await import("./fixtures/anthropic.mjs");
@@ -1475,24 +1526,11 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 	]);
 	assertDigest();
 
-	const ranges = {
-		"claude.conversations": {
-			since: "2025-12-01T00:00:00.000Z",
-			until: "2026-02-01T00:00:00.000Z",
-		},
-		"claude.messages": {
-			since: "2025-12-01T00:00:00.000Z",
-			until: "2026-01-01T00:00:00.000Z",
-		},
-		"claude.projects": {
-			since: "2026-01-01T00:00:00.000Z",
-			until: "2026-02-01T00:00:00.000Z",
-		},
-		"claude.project_documents": {
-			since: "2025-12-01T00:00:00.000Z",
-			until: "2026-01-01T00:00:00.000Z",
-		},
+	const sameRange = {
+		since: "2026-01-01T00:00:00.000Z",
+		until: "2026-02-01T00:00:00.000Z",
 	};
+	const ranges = Object.fromEntries(c.scopes.map((scope) => [scope, sameRange]));
 	const filtered = await run(scopeEntries(c.scopes, ranges));
 	assert.deepEqual(
 		filtered.ret,
@@ -1500,22 +1538,18 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 		filtered.log.slice(-20).join("\\n"),
 	);
 	assert.deepEqual(filtered.result.errors, []);
-	assert.deepEqual(recordIds(filtered.result, "claude.conversations"), [
-		"conv-recent",
-		"conv-old",
-	]);
-	assert.deepEqual(recordIds(filtered.result, "claude.messages"), ["msg-old"]);
-	assert.deepEqual(recordIds(filtered.result, "claude.projects"), [
-		"project-recent",
-	]);
-	assert.deepEqual(recordIds(filtered.result, "claude.project_documents"), [
-		"doc-old",
-	]);
+	assert.deepEqual(recordIds(filtered.result, "claude.conversations"), ["conv-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.messages"), ["msg-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.projects"), ["project-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.project_documents"), ["doc-recent"]);
 	assertDigest();
 
 	for (const since of [
 		"2026-02-30T00:00:00.000Z",
 		"2026-04-31T00:00:00.000Z",
+		"2026-13-01T00:00:00.000Z",
+		"2025-02-29T00:00:00.000Z",
+		"2026-01-01T00:00:00+01:00",
 		"bad ISO",
 	]) {
 		const invalid = await run(

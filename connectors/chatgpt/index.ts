@@ -3308,12 +3308,14 @@ async function listConversationsSinceCursor(
 		: startCursor;
 	const resumeStartCursor = cursor;
 	const pageSize = CONVERSATION_PAGE_SIZE;
-	const requestedSince = [
-		deps.requested.get("conversations")?.time_range?.since,
-		deps.requested.get("messages")?.time_range?.since,
-	]
-		.filter((value): value is string => value !== undefined)
-		.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+	const conversationRange = deps.requested.get("conversations")?.time_range;
+	const messageRange = deps.requested.get("messages")?.time_range;
+	const hasUnboundedRequestedStream =
+		(deps.requested.has("conversations") && !conversationRange?.since) ||
+		(deps.requested.has("messages") && !messageRange?.since);
+	const requestedSince = hasUnboundedRequestedStream
+		? undefined
+		: (conversationRange?.since ?? messageRange?.since);
 	const complete = (): ConversationListResult => {
 		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
@@ -6026,21 +6028,8 @@ function emitConversationsState(
  */
 function makeEmitRecord(
 	baseEmitRecord: CollectContext["emitRecord"],
-	requested: CollectContext["requested"],
 ): (stream: string, data: RecordData) => Promise<void> {
 	return (stream: string, data: RecordData): Promise<void> => {
-		const range = requested.get(stream)?.time_range;
-		if (range) {
-			const field = stream === "messages" ? "create_time" : "update_time";
-			const value = data[field];
-			const date = typeof value === "string" ? value.slice(0, 10) : null;
-			if (
-				date !== null &&
-				((range.since !== undefined && date < range.since.slice(0, 10)) ||
-					(range.until !== undefined && date >= range.until.slice(0, 10)))
-			)
-				return Promise.resolve();
-		}
 		if (data?.id !== null && data?.id !== undefined) {
 			try {
 				JSON.stringify(data);
@@ -6102,7 +6091,7 @@ export async function collectChatGpt(
 		},
 		providerBudget,
 	});
-	const emitRecord = makeEmitRecord(baseEmitRecord, requested);
+	const emitRecord = makeEmitRecord(baseEmitRecord);
 
 	// Verify session (extract bearer token for /backend-api calls)
 	const auth = await api.auth();

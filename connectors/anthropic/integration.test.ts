@@ -441,27 +441,13 @@ test("collectAnthropic: time window filters conversations with their messages an
 				...CONVERSATIONS_JSON[0],
 				uuid: "conv-recent",
 				updated_at: recent,
-				chat_messages: [
-					{
-						...baseMessage,
-						uuid: "msg-recent",
-						created_at: recent,
-						updated_at: recent,
-					},
-				],
+				chat_messages: [{ ...baseMessage, uuid: "msg-recent" }],
 			},
 			{
 				...CONVERSATIONS_JSON[0],
 				uuid: "conv-old",
 				updated_at: old,
-				chat_messages: [
-					{
-						...baseMessage,
-						uuid: "msg-old",
-						created_at: old,
-						updated_at: old,
-					},
-				],
+				chat_messages: [{ ...baseMessage, uuid: "msg-old" }],
 			},
 		],
 		{
