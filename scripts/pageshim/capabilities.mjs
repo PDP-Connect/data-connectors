@@ -5,8 +5,27 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const PAGE_SHIM_BINDINGS = {
-	browser: new Set(["evaluate", "goto", "content", "waitForFunction", "request.get"]),
-	network: new Set(["in_page_fetch", "httpFetch"]),
+	browser: new Set([
+		"evaluate",
+		"goto",
+		"content",
+		"waitForFunction",
+		"request.get",
+		"page_navigation",
+		"page_script_evaluation",
+		"page_content_read",
+		"page_condition_wait",
+		"host_http_request",
+		"host_download_capture",
+		"host_archive_extraction",
+		"host_archive_entry_chunk_read",
+	]),
+	network: new Set([
+		"in_page_fetch",
+		"httpFetch",
+		"same_origin_page_fetch",
+		"host_http_request",
+	]),
 };
 
 export function pageShimIncompatibilities(manifest) {

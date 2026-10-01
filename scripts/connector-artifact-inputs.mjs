@@ -39,7 +39,6 @@ const OPTIONAL_SHARED_ARTIFACT_INPUTS = new Set([
 const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/attach-to-artifact.mjs",
 	"scripts/pageshim/build.mjs",
-	"scripts/pageshim/capabilities.mjs",
 	"scripts/pageshim/runtime.ts",
 	"scripts/pageshim/shims/anthropic-export.ts",
 	"scripts/pageshim/shims/buffer.js",
@@ -138,6 +137,29 @@ async function publishInventoryAtCommit(commit, options) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+async function pageShimEligibilityAtCommit(commit, profile, options) {
+	const path = "scripts/pageshim/capabilities.mjs";
+	const source = readFileAtCommit(commit, path, options);
+	if (source === null) return Buffer.from("\0absent");
+	const dir = mkdtempSync(join(tmpdir(), "pageshim-capabilities-"));
+	try {
+		const modulePath = join(dir, "capabilities.mjs");
+		writeFileSync(modulePath, source);
+		const { isPageShimCapable } = await import(
+			`${pathToFileURL(modulePath).href}?commit=${encodeURIComponent(commit)}`
+		);
+		if (typeof isPageShimCapable !== "function") {
+			throw new ArtifactInputError(`${path} at ${commit} does not export isPageShimCapable`);
+		}
+		return Buffer.from(isPageShimCapable(profile) ? "eligible" : "ineligible");
+	} catch (error) {
+		if (error instanceof ArtifactInputError) throw error;
+		throw new ArtifactInputError(`cannot determine PageShim eligibility at ${commit}: ${error.message}`);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 }
 
 function readManifestAtCommit(commit, path, options) {
@@ -260,6 +282,14 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
   const pageShimEntry = `scripts/pageshim/entries/${manifest}.ts`;
   const pageShimEntryBytes = readFileAtCommit(commit, pageShimEntry, options);
   if (pageShimEntryBytes !== null || profile.mobile?.pageshim) {
+    // Capability policy is not shipped code. Hash only whether this profile
+    // qualifies: expanding the host set must not look like a bundle change for
+    // connectors that were already eligible, while a newly eligible profile
+    // still changes identity because publish would add its first bundle.
+    files.set(
+      "scripts/pageshim/capabilities.mjs#eligibility",
+      await pageShimEligibilityAtCommit(commit, profile, options),
+    );
     for (const path of PAGE_SHIM_SHARED_INPUTS) {
       const content = readFileAtCommit(commit, path, options);
       // Older commits can contain PageShim entries without this OCI
