@@ -1813,6 +1813,118 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 	);
 });
 
+test("strava_browser: a large activity list streams only when the host offers page.input", {
+	timeout: 300_000,
+}, async () => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/strava_browser.mjs"
+	);
+	// Built exactly as scripts/pageshim/attach-to-artifact.mjs builds it.
+	const built = await buildPageshim({
+		connector: "strava_browser",
+		outfile: join(out, "strava_browser-published.js"),
+	});
+	const sourceModels = JSON.parse(
+		readFileSync(
+			new URL(
+				"../../connectors/strava_browser/fixtures/training-activities-page-1.json",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	).models;
+	const resolveFor = (count) => {
+		const activities = Array.from({ length: count }, (_, i) => {
+			const model = structuredClone(sourceModels[i % sourceModels.length]);
+			const id = String(92000000000 + i);
+			return {
+				...model,
+				id: Number(id),
+				id_str: id,
+				name: `Synthetic activity ${i}`,
+				activity_url: `https://www.strava.com/activities/${id}`,
+				activity_url_for_twitter: `https://www.strava.com/activities/${id}`,
+				bike_id: null,
+				athlete_gear_id: null,
+			};
+		});
+		return (raw) => {
+			const url = new URL(raw);
+			if (url.pathname !== "/athlete/training_activities")
+				return resolveFixture(raw);
+			const page = Number(url.searchParams.get("page") || 1);
+			const perPage = 20;
+			return {
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					models: activities.slice((page - 1) * perPage, page * perPage),
+					page,
+					perPage,
+					total: activities.length,
+				}),
+			};
+		};
+	};
+	const run = (name, count, resultStreaming) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve: resolveFor(count) },
+			scopes: c.scopes,
+			timerScale: 0.01,
+			resultStreaming,
+			resultSpoolDirectory: join(out, name),
+		});
+
+	// A bounded list: the streamed scope is byte-for-byte what an older shell
+	// receives in its one result message.
+	const smallStream = await run("strava-small-thin-host", 205, true);
+	const smallLegacy = await run("strava-small-older-shell", 205, false);
+	assertCleanRun(smallStream);
+	assertCleanRun(smallLegacy);
+	assert.equal(smallStream.result, null);
+	assert.equal(smallStream.streamResult.completed, true);
+	assert.equal(smallLegacy.streamResult, null);
+	assert.deepEqual(
+		JSON.parse(
+			await readFile(smallStream.streamScopeFiles["strava.activities"], "utf8"),
+		),
+		smallLegacy.result["strava.activities"],
+	);
+	assert.deepEqual(
+		smallStream.streamDone.exportSummary,
+		smallLegacy.result.exportSummary,
+	);
+	assert.deepEqual(smallStream.states, smallLegacy.states);
+
+	const large = await run("strava-large-thin-host", 2000, true);
+	assertCleanRun(large);
+	assert.deepEqual(large.ret, { ok: true }, large.log.slice(-20).join("\n"));
+	assert.equal(large.streamResult.completed, true);
+	assert.deepEqual(large.streamDone.errors, []);
+	assert.ok(large.maxBridgePayloadUnits <= 256 * 1024);
+	const scope = await readFile(
+		large.streamScopeFiles["strava.activities"],
+		"utf8",
+	);
+	assert.ok(scope.length > 125 * 1024, `${scope.length}`);
+	assert.equal(JSON.parse(scope).activities.length, 2000);
+	assert.equal(
+		large.states["strava.activities"].pending_detail_ids.length,
+		2000,
+	);
+	assert.match(large.data.status, /^Complete! 2000 activities/);
+
+	const largeLegacy = await run("strava-large-older-shell", 2000, false);
+	assertCleanRun(largeLegacy);
+	assert.equal(largeLegacy.streamResult, null);
+	assert.match(
+		largeLegacy.data.error,
+		/exceeds the 128000-unit legacy bridge limit/,
+	);
+	assert.deepEqual(largeLegacy.states, {});
+});
+
 test("strava_browser: old shell without initialState does not receive STATE", {
 	timeout: 180_000,
 }, async () => {
