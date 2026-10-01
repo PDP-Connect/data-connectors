@@ -307,8 +307,6 @@ export interface PageshimConnector {
 	scopes: string[];
 	/** The connector manifest's semver. */
 	version: string;
-	/** Fixed, opt-in lookback window embedded in this bundle. */
-	sinceDays?: number;
 	loginUrl: string;
 	loginMessage: string;
 	validateRecord: Parameters<typeof makeEmitRecord>[0]["validateRecord"];
@@ -421,10 +419,6 @@ export async function runOnPageShim(
 		initError = error;
 	}
 	const prefix = `${connector.platform}.`;
-	const windowSince =
-		connector.sinceDays && connector.sinceDays > 0
-			? new Date(Date.now() - connector.sinceDays * 86_400_000).toISOString()
-			: undefined;
 	const scopeByStream = new Map(
 		connector.scopes
 			.filter((scope) => scope.startsWith(prefix))
@@ -437,7 +431,6 @@ export async function runOnPageShim(
 				s.slice(prefix.length),
 				{
 					name: s.slice(prefix.length),
-					...(windowSince ? { time_range: { since: windowSince } } : {}),
 				},
 			]),
 	);
@@ -807,15 +800,6 @@ export async function runOnPageShim(
 				});
 			}
 		}
-		if (windowSince) {
-			const hasRecords = Object.values(streamCounts).some((count) => count > 0);
-			errors.push({
-				errorClass: "partial",
-				reason: "time_window",
-				disposition: hasRecords ? "degraded" : "omitted",
-				phase: "collect",
-			});
-		}
 		if (streamFailure) throw streamFailure;
 		if (streamConfig) {
 			await finishStreamScope();
@@ -828,25 +812,15 @@ export async function runOnPageShim(
 			}
 			if (streamedScopeCount > 0) {
 				const exportSummary = streamConfig.summarizeCounts(streamCounts);
-				const metadata = {
-					...exportSummary,
-					...(windowSince
-						? {
-								window: { since: windowSince, sinceDays: connector.sinceDays },
-								partial: true,
-								partialReason: "time_window",
-							}
-						: {}),
-				};
 				await sendStreamMessage("result:done", {
 					scopeCount: streamedScopeCount,
-					exportSummary: metadata,
+					exportSummary,
 					errors,
 				});
 				const completion =
 					errors.length > 0
-						? `Partial: ${metadata.count} ${metadata.label}`
-						: `Complete! ${metadata.count} ${metadata.label}`;
+						? `Partial: ${exportSummary.count} ${exportSummary.label}`
+						: `Complete! ${exportSummary.count} ${exportSummary.label}`;
 				await shim.setData("status", completion);
 				return;
 			}
@@ -855,14 +829,6 @@ export async function runOnPageShim(
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
 		const done = result(scopes, errors);
-		if (windowSince) {
-			done.exportSummary = {
-				...done.exportSummary,
-				window: { since: windowSince, sinceDays: connector.sinceDays },
-				partial: true,
-				partialReason: "time_window",
-			};
-		}
 		const serialized = JSON.stringify(done);
 		if (serialized.length > RESULT_CHUNK_MAX_UNITS) {
 			throw new Error(

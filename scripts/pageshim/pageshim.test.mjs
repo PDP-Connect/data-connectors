@@ -9,6 +9,7 @@
 // run: node --test scripts/pageshim/pageshim.test.mjs  (needs Playwright Chromium)
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -53,6 +54,38 @@ function assertCleanRun(run) {
 		[],
 		"the bundle called a Node-only stub or a missing Page member",
 	);
+}
+
+function thirtyDayScopes(scopes, now = Date.now()) {
+	const time_range = {
+		since: new Date(now - 30 * 86_400_000).toISOString(),
+		until: new Date(now).toISOString(),
+	};
+	return scopes.map((name) => ({ name, time_range }));
+}
+
+function scopeEntries(scopes, timeRanges) {
+	return scopes.map((name) => ({
+		name,
+		...(timeRanges[name] ? { time_range: timeRanges[name] } : {}),
+	}));
+}
+
+function bundleSha256(path) {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function stampChatGptDetail(response, timestamp) {
+	const body = JSON.parse(response.body);
+	body.create_time = timestamp;
+	body.update_time = timestamp;
+	for (const node of Object.values(body.mapping ?? {})) {
+		if (!node.message) continue;
+		node.message.create_time = timestamp;
+		node.message.update_time = timestamp;
+	}
+	response.body = JSON.stringify(body);
+	return response;
 }
 
 function assertFatal(run, c, name, { errorClass, phase, requestedScopes }) {
@@ -196,7 +229,7 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 	}
 });
 
-test("chatgpt: default walk has no 50-detail cap", {
+test("chatgpt: legacy string-only scope bridge runs full history", {
 	timeout: 180_000,
 }, async () => {
 	const fx = await import("./fixtures/chatgpt.mjs");
@@ -214,6 +247,7 @@ test("chatgpt: default walk has no 50-detail cap", {
 				PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS: "1",
 				PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "1",
 			},
+			legacyScopeBridge: true,
 		});
 		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 		assertCleanRun(r);
@@ -226,6 +260,174 @@ test("chatgpt: default walk has no 50-detail cap", {
 	}
 });
 
+test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid requests", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const dates = [
+		"2026-01-10T00:00:00.000Z",
+		"2026-01-20T00:00:00.000Z",
+		"2026-01-30T00:00:00.000Z",
+		"2026-02-02T00:00:00.000Z",
+	];
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const url = new URL(raw);
+		if (url.pathname === "/backend-api/conversations/search") {
+			const body = JSON.parse(response.body);
+			body.items = body.items.map((item) => {
+				const timestamp =
+					Date.parse(dates[Number(item.id.slice(5)) - 1]) / 1000;
+				return { ...item, create_time: timestamp, update_time: timestamp };
+			});
+			response.body = JSON.stringify(body);
+		} else {
+			const match = url.pathname.match(
+				/^\/backend-api\/conversation\/(conv-\d+)$/,
+			);
+			if (match) {
+				const body = JSON.parse(response.body);
+				const timestamp =
+					Date.parse(dates[Number(match[1].slice(5)) - 1]) / 1000;
+				body.create_time = timestamp;
+				body.update_time = timestamp;
+				for (const node of Object.values(body.mapping ?? {}))
+					if (node.message) node.message.create_time = timestamp;
+				response.body = JSON.stringify(body);
+			}
+		}
+		return response;
+	};
+	const fixtures = { ...fx.pageshimCase.fixtures, resolve };
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-publishing-range.js"),
+	});
+	const digest = bundleSha256(built.outfile);
+	fx.useConversationCount(4);
+	const run = (scopes, legacyScopeBridge = false) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures,
+			scopes,
+			env: {
+				PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS: "1",
+				PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "1",
+			},
+			legacyScopeBridge,
+		});
+	try {
+		const full = await run(fx.pageshimCase.scopes);
+		assert.deepEqual(full.ret, { ok: true }, full.log.slice(-20).join("\n"));
+		assert.deepEqual(full.result.errors, []);
+		assert.equal(full.result["chatgpt.conversations"].records.length, 4);
+		assert.equal(full.result["chatgpt.messages"].records.length, 4);
+		assert.equal(bundleSha256(built.outfile), digest);
+
+		const legacy = await run(fx.pageshimCase.scopes, true);
+		assert.deepEqual(
+			legacy.ret,
+			{ ok: true },
+			legacy.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(legacy.result.errors, []);
+		assert.equal(legacy.result["chatgpt.conversations"].records.length, 4);
+		assert.equal(legacy.result["chatgpt.messages"].records.length, 4);
+		assert.equal(bundleSha256(built.outfile), digest);
+
+		// Mobile sends the same range on both streams; the base list walk shares one cutoff.
+		const ranged = await run(
+			scopeEntries(fx.pageshimCase.scopes, {
+				"chatgpt.conversations": {
+					since: "2026-01-25T00:00:00.000Z",
+					until: "2026-02-01T00:00:00.000Z",
+				},
+				"chatgpt.messages": {
+					since: "2026-01-25T00:00:00.000Z",
+					until: "2026-02-01T00:00:00.000Z",
+				},
+			}),
+		);
+		assert.deepEqual(
+			ranged.ret,
+			{ ok: true },
+			ranged.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(ranged.result.errors, []);
+		assert.deepEqual(
+			ranged.result["chatgpt.conversations"].records.map((record) => record.id),
+			["conv-3", "conv-4"],
+		);
+		assert.deepEqual(
+			ranged.result["chatgpt.messages"].records.map((record) => record.id),
+			["msg-3-a", "msg-4-a"],
+		);
+		assert.equal(bundleSha256(built.outfile), digest);
+
+		const messagesOnly = await run([
+			{
+				name: "chatgpt.messages",
+				time_range: {
+					since: "2026-01-25T00:00:00.000Z",
+					until: "2026-02-01T00:00:00.000Z",
+				},
+			},
+		]);
+		assert.deepEqual(
+			messagesOnly.ret,
+			{ ok: true },
+			messagesOnly.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(messagesOnly.result.errors, []);
+		assert.deepEqual(
+			messagesOnly.result["chatgpt.messages"].records.map(
+				(record) => record.id,
+			),
+			["msg-3-a", "msg-4-a"],
+		);
+		assert.equal(bundleSha256(built.outfile), digest);
+
+		for (const since of [
+			"2026-02-30T00:00:00.000Z",
+			"2026-04-31T00:00:00.000Z",
+			"2026-13-01T00:00:00.000Z",
+			"2025-02-29T00:00:00.000Z",
+			"2026-01-01T00:00:00+01:00",
+			"bad ISO",
+		]) {
+			const invalid = await run(
+				scopeEntries(fx.pageshimCase.scopes, {
+					"chatgpt.conversations": { since },
+				}),
+			);
+			assert.equal(
+				invalid.result.errors.length,
+				1,
+				JSON.stringify(invalid.result.errors),
+			);
+			assert.match(
+				invalid.result.errors[0].reason,
+				/valid UTC ISO-8601 bounds/,
+			);
+			assert.equal(invalid.result["chatgpt.conversations"], undefined);
+			assert.equal(bundleSha256(built.outfile), digest);
+		}
+
+		const leapDay = await run(
+			scopeEntries(fx.pageshimCase.scopes, {
+				"chatgpt.conversations": {
+					since: "2024-02-29T00:00:00.000Z",
+					until: "2026-03-01T00:00:00.000Z",
+				},
+			}),
+		);
+		assert.deepEqual(leapDay.result.errors, []);
+		assert.equal(bundleSha256(built.outfile), digest);
+	} finally {
+		fx.useConversationCount(2);
+	}
+});
+
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
 	timeout: 180_000,
 }, async () => {
@@ -233,7 +435,6 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -255,6 +456,7 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 			response.body = JSON.stringify(body);
 		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
 			detailCalls.push(url.pathname.split("/").pop());
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -263,7 +465,7 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 		r = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			resultStreaming: true,
 			resultSpoolDirectory: join(out, "chatgpt-30d-stream"),
 		});
@@ -272,7 +474,11 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	}
 	assertCleanRun(r);
 	const timingLogs = r.log.filter((line) => line.includes("[chatgpt-timing]"));
-	assert.equal(timingLogs.length, 2, timingLogs.join("\n"));
+	assert.equal(
+		timingLogs.length,
+		2,
+		`${timingLogs.join("\n")}\n${r.log.slice(-30).join("\n")}`,
+	);
 	assert.ok(
 		timingLogs.every(
 			(line) =>
@@ -298,10 +504,8 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	assert.deepEqual(detailCalls, ["conv-1", "conv-2"]);
 	assert.equal(r.streamResult.mode, "stream");
 	assert.equal(r.streamResult.completed, true);
-	assert.equal(r.streamDone.exportSummary.window?.sinceDays, 30);
-	assert.equal(r.streamDone.exportSummary.partial, true);
-	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
-	assert.ok(r.streamDone.errors.some((e) => e.reason === "time_window"));
+	assert.equal(r.streamDone.exportSummary.window, undefined);
+	assert.deepEqual(r.streamDone.errors, []);
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
@@ -309,7 +513,7 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 		conversations.records.map((x) => x.id),
 		["conv-1", "conv-2"],
 	);
-	assert.match(r.data.status, /^Partial:/);
+	assert.match(r.data.status, /^Complete!/);
 });
 
 test("chatgpt: 30-day bundle stops after three old pages without fetching old details", {
@@ -319,7 +523,6 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-full-history.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const cursors = [];
@@ -356,7 +559,7 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const run = await runHarness({
 		bundle: built.outfile,
 		fixtures: { ...fx.pageshimCase.fixtures, resolve },
-		scopes: fx.pageshimCase.scopes,
+		scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 		resultStreaming: true,
 		gotoDelayMs: 0,
 		resultSpoolDirectory: join(out, "chatgpt-30d-full-history-stream"),
@@ -365,7 +568,7 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	assert.deepEqual(cursors, [0, 30, 60]);
 	assert.deepEqual(detailCalls, []);
 	assert.equal(run.result.exportSummary.count, 0);
-	assert.equal(run.result.exportSummary.window?.sinceDays, 30);
+	assert.equal(run.result.exportSummary.window, undefined);
 });
 
 test("chatgpt: 30-day walk keeps later in-window rows after older rows on unordered pages", {
@@ -375,7 +578,6 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-unordered-pages.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -421,6 +623,7 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 			});
 		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
 			detailCalls.push(url.pathname.split("/").pop());
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -430,7 +633,7 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 		run = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			initialState: {
 				"chatgpt.conversations": {
 					last_update_time: new Date((now - 10 * 86400) * 1000).toISOString(),
@@ -482,7 +685,6 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-multipage.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -517,6 +719,7 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 			});
 		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
 			detailCalls.push(url.pathname.split("/").pop());
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -525,7 +728,7 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 		r = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			resultStreaming: true,
 			resultSpoolDirectory: join(out, "chatgpt-30d-multipage-stream"),
 		});
@@ -567,7 +770,8 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	assert.equal(r.streamResult?.completed, true);
 	assert.equal(r.streamDone.exportSummary.details.conversations, 21);
 	assert.equal(r.streamDone.exportSummary.details.messages, 21);
-	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
+	assert.equal(r.streamDone.exportSummary.window, undefined);
+	assert.deepEqual(r.streamDone.errors, []);
 });
 
 test("chatgpt: capped PageShim walk reports partial with omitted detail evidence", {
@@ -1051,7 +1255,7 @@ test("anthropic: five-part metadata-only shell contract reads part entries throu
 	);
 });
 
-test("anthropic: 30-day window filters records during streamed collection and marks the result partial", {
+test("anthropic: one range across streams filters streamed collection", {
 	timeout: 300_000,
 }, async () => {
 	const fx = await import("./fixtures/anthropic.mjs");
@@ -1115,7 +1319,6 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 		connector: "anthropic",
 		outfile: join(out, "anthropic-window.js"),
 		streamResults: true,
-		sinceDays: 30,
 	});
 	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
 	try {
@@ -1123,7 +1326,7 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 		const run = await runHarness({
 			bundle: streamBundle.outfile,
 			fixtures: c.fixtures,
-			scopes: c.scopes,
+			scopes: thirtyDayScopes(c.scopes, Date.parse("2026-01-31T00:00:00.000Z")),
 			resultStreaming: true,
 			resultSpoolDirectory: spool,
 			clockNowMs: Date.parse("2026-01-31T00:00:00.000Z"),
@@ -1154,21 +1357,178 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 			["doc-recent"],
 		);
 		assert.equal(
-			run.streamResult?.donePayload?.exportSummary?.window?.sinceDays,
-			30,
+			run.streamResult?.donePayload?.exportSummary?.window,
+			undefined,
 		);
-		assert.equal(
-			run.streamResult?.donePayload?.exportSummary?.partialReason,
-			"time_window",
-		);
-		assert.ok(
-			run.streamResult?.donePayload?.errors?.some(
-				(error) => error.reason === "time_window",
-			),
-		);
+		assert.deepEqual(run.streamResult?.donePayload?.errors, []);
 	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}
+});
+
+test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid requests", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/anthropic.mjs");
+	const c = fx.pageshimCase;
+	const zip = fx.zipOf({
+		"conversations.json": [
+			{
+				uuid: "conv-recent",
+				name: "recent",
+				updated_at: "2026-01-20T00:00:00.000Z",
+				chat_messages: [
+					{
+						uuid: "msg-recent",
+						sender: "human",
+						created_at: "2026-01-20T00:00:00.000Z",
+						content: [{ type: "text", text: "recent" }],
+					},
+				],
+			},
+			{
+				uuid: "conv-old",
+				name: "old",
+				updated_at: "2025-12-31T00:00:00.000Z",
+				chat_messages: [
+					{
+						uuid: "msg-old",
+						sender: "human",
+						created_at: "2025-12-31T00:00:00.000Z",
+						content: [{ type: "text", text: "old" }],
+					},
+				],
+			},
+		],
+		"projects/project-recent.json": {
+			uuid: "project-recent",
+			name: "recent project",
+			updated_at: "2026-01-20T00:00:00.000Z",
+			docs: [
+				{
+					uuid: "doc-recent",
+					filename: "recent.md",
+					content: "recent",
+					updated_at: "2026-01-20T00:00:00.000Z",
+				},
+			],
+		},
+		"projects/project-old.json": {
+			uuid: "project-old",
+			name: "old project",
+			updated_at: "2025-12-31T00:00:00.000Z",
+			docs: [
+				{
+					uuid: "doc-old",
+					filename: "old.md",
+					content: "old",
+					updated_at: "2025-12-31T00:00:00.000Z",
+				},
+			],
+		},
+	});
+	const built = await buildPageshim({
+		connector: "anthropic",
+		outfile: join(out, "anthropic-publishing-range.js"),
+	});
+	const digest = bundleSha256(built.outfile);
+	const run = (scopes, legacyScopeBridge = false) => {
+		fx.reset({ zip });
+		return runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes,
+			legacyScopeBridge,
+		});
+	};
+	const recordIds = (result, scope) =>
+		result[scope]?.records?.map((record) => record.id);
+	const assertDigest = () => assert.equal(bundleSha256(built.outfile), digest);
+
+	const full = await run(c.scopes);
+	assert.deepEqual(full.ret, { ok: true }, full.log.slice(-20).join("\\n"));
+	assert.deepEqual(full.result.errors, []);
+	assert.deepEqual(recordIds(full.result, "claude.conversations"), [
+		"conv-recent",
+		"conv-old",
+	]);
+	assert.deepEqual(recordIds(full.result, "claude.messages"), [
+		"msg-recent",
+		"msg-old",
+	]);
+	assert.deepEqual(recordIds(full.result, "claude.projects"), [
+		"project-recent",
+		"project-old",
+	]);
+	assert.deepEqual(recordIds(full.result, "claude.project_documents"), [
+		"doc-recent",
+		"doc-old",
+	]);
+	assertDigest();
+
+	const legacy = await run(c.scopes, true);
+	assert.deepEqual(legacy.ret, { ok: true }, legacy.log.slice(-20).join("\\n"));
+	assert.deepEqual(legacy.result.errors, []);
+	assert.deepEqual(recordIds(legacy.result, "claude.conversations"), [
+		"conv-recent",
+		"conv-old",
+	]);
+	assert.deepEqual(recordIds(legacy.result, "claude.messages"), [
+		"msg-recent",
+		"msg-old",
+	]);
+	assertDigest();
+
+	const sameRange = {
+		since: "2026-01-01T00:00:00.000Z",
+		until: "2026-02-01T00:00:00.000Z",
+	};
+	const ranges = Object.fromEntries(c.scopes.map((scope) => [scope, sameRange]));
+	const filtered = await run(scopeEntries(c.scopes, ranges));
+	assert.deepEqual(
+		filtered.ret,
+		{ ok: true },
+		filtered.log.slice(-20).join("\\n"),
+	);
+	assert.deepEqual(filtered.result.errors, []);
+	assert.deepEqual(recordIds(filtered.result, "claude.conversations"), ["conv-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.messages"), ["msg-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.projects"), ["project-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.project_documents"), ["doc-recent"]);
+	assertDigest();
+
+	for (const since of [
+		"2026-02-30T00:00:00.000Z",
+		"2026-04-31T00:00:00.000Z",
+		"2026-13-01T00:00:00.000Z",
+		"2025-02-29T00:00:00.000Z",
+		"2026-01-01T00:00:00+01:00",
+		"bad ISO",
+	]) {
+		const invalid = await run(
+			scopeEntries(c.scopes, {
+				"claude.conversations": { since },
+			}),
+		);
+		assert.equal(
+			invalid.result.errors.length,
+			1,
+			JSON.stringify(invalid.result.errors),
+		);
+		assert.match(invalid.result.errors[0].reason, /valid UTC ISO-8601 bounds/);
+		assert.equal(invalid.result["claude.conversations"], undefined);
+		assertDigest();
+	}
+	const leapDay = await run(
+		scopeEntries(c.scopes, {
+			"claude.conversations": {
+				since: "2024-02-29T00:00:00.000Z",
+				until: "2026-03-01T00:00:00.000Z",
+			},
+		}),
+	);
+	assert.deepEqual(leapDay.result.errors, []);
+	assertDigest();
 });
 
 test("strava_browser: records and fail-closed paths on the PageShim host", {
