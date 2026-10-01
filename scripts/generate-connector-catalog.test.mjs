@@ -368,6 +368,29 @@ test("changed registry content advances a tied source timestamp and the next ret
   }
 });
 
+test("a legacy feature in the previous catalog does not block a valid catalog", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const current = await generate(root, registry.registry);
+    const previousCatalog = structuredClone(current);
+    previousCatalog.connectors[0].runtime_requirements.bindings.browser = {
+      required: true,
+      features: ["evaluate"],
+    };
+
+    assertCatalog(current);
+    assert.throws(() => assertCatalog(previousCatalog), /does not match its schema/);
+
+    const next = await generate(root, registry.registry, { previousCatalog });
+    assertCatalog(next);
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the CLI exits nonzero without writing output when any manifest lookup is unknown", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({
