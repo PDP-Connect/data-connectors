@@ -113,7 +113,8 @@ test("parseJsonArrayChunks rejects malformed arrays and invalid bounded reads", 
 		["{}", "null", "[{}\u00a0]", "[]\u000b"].map((source) =>
 			assert.rejects(
 				parseJsonArrayChunks(
-					async (_name, offset, length) => source.slice(offset, offset + length),
+					async (_name, offset, length) =>
+						source.slice(offset, offset + length),
 					{ name: "invalid.json", size: source.length },
 					() => {},
 				),

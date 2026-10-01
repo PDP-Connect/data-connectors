@@ -289,6 +289,7 @@ const CHATGPT_CONVERSATION_BATCH_MAX_IDS = 10;
 const CHATGPT_BATCH_INITIAL_PARALLELISM = 2;
 const CHATGPT_BATCH_MAX_PARALLELISM = 4;
 const CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP = 2;
+const CHATGPT_DETAIL_PROGRESS_EVERY = 25;
 // Source-pressure fast-open. The live A/B probe (2026-06-02) showed ChatGPT's
 // private detail endpoint returns BARE 429s — no `Retry-After` — and that the
 // throttle is per-account, recovering over minutes, not per-conversation. A
@@ -3406,7 +3407,11 @@ async function listConversationsSinceCursor(
 				if (requestedSince && updateIso === null) {
 					continue;
 				}
-				if (requestedSince && updateIso !== null && updateIso < requestedSince) {
+				if (
+					requestedSince &&
+					updateIso !== null &&
+					updateIso < requestedSince
+				) {
 					continue;
 				}
 				items.push(item);
@@ -4714,7 +4719,9 @@ export async function runMessagesAndConversationsWithDetail(
 	let batchPrefetchStart = 0;
 	let batchPrefetchPromise: Promise<void> | null = null;
 
-	async function prefetchConversationDetailBatchWave(start: number): Promise<void> {
+	async function prefetchConversationDetailBatchWave(
+		start: number,
+	): Promise<void> {
 		const { fetchBatch } = deps.api;
 		if (
 			!fetchBatch ||
@@ -4731,7 +4738,11 @@ export async function runMessagesAndConversationsWithDetail(
 			start + batchParallelism * CHATGPT_CONVERSATION_BATCH_MAX_IDS,
 		);
 		const chunks: string[][] = [];
-		for (let offset = start; offset < end; offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS) {
+		for (
+			let offset = start;
+			offset < end;
+			offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS
+		) {
 			const chunkIds = convosToSync
 				.slice(offset, offset + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
 				.map((conversation) => conversation.id)
@@ -4781,11 +4792,14 @@ export async function runMessagesAndConversationsWithDetail(
 							);
 						}
 					}
-					if (cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length)
+					if (
+						cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length
+					)
 						waveWasClean = false;
 					await recordConversationDetailProviderSuccess();
 				} catch {
 					// Batch results are an optimization; the ordered per-id lane retries gaps.
+					batchEndpointUnavailable = true;
 					waveWasClean = false;
 				} finally {
 					setTimingConversation?.(null);
@@ -5357,14 +5371,20 @@ export async function runMessagesAndConversationsWithDetail(
 				// sees the updated count.
 				runBudget.recordDetailFetch();
 				const synced = convosToSync.indexOf(c) + 1;
-				const progressMsg = {
-					type: "PROGRESS",
-					stream: "messages",
-					message: `Synced ${synced} / ${convosToSync.length} conversations`,
-					count: synced,
-					total: convosToSync.length,
-				} as const;
-				deps.emit(progressMsg);
+				if (
+					synced === 1 ||
+					synced % CHATGPT_DETAIL_PROGRESS_EVERY === 0 ||
+					synced === convosToSync.length
+				) {
+					const progressMsg = {
+						type: "PROGRESS",
+						stream: "messages",
+						message: `Synced ${synced} / ${convosToSync.length} conversations`,
+						count: synced,
+						total: convosToSync.length,
+					} as const;
+					deps.emit(progressMsg);
+				}
 				return detail;
 			} finally {
 				setTimingConversation?.(null);

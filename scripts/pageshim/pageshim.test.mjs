@@ -18,15 +18,17 @@ import {
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
 
-const scratchRoot = fileURLToPath(new URL("../../.tmp/pageshim/", import.meta.url));
+const scratchRoot = fileURLToPath(
+	new URL("../../.tmp/pageshim/", import.meta.url),
+);
 mkdirSync(scratchRoot, { recursive: true });
 const out = mkdtempSync(join(scratchRoot, "run-"));
 const NODE_ONLY = new Set([
@@ -75,7 +77,9 @@ function assertFatal(run, c, name, { errorClass, phase, requestedScopes }) {
 	for (const scope of c.scopes) assert.equal(run.result[scope], undefined);
 }
 
-for (const name of pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url)))) {
+for (const name of pageShimConnectors(
+	fileURLToPath(new URL("../..", import.meta.url)),
+)) {
 	test(`${name}: pageshim gate`, { timeout: 600_000 }, async (t) => {
 		let c;
 		try {

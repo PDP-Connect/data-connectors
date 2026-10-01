@@ -114,8 +114,8 @@ async function hostMain({
 	}
 	const call = async (m, a) => {
 		const r = await window.__pageApi(m, a || []);
-		if (r && typeof r === "object" && typeof r.__vanaShimError === "string")
-			throw new Error(r.__vanaShimError);
+		if (r && typeof r === "object" && typeof r.__shimError === "string")
+			throw new Error(r.__shimError);
 		return r;
 	};
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -548,7 +548,7 @@ export async function runHarness({
 							loggedIn: harnessLoggedIn,
 							call: calls.goto,
 						});
-						if (failure) return { __vanaShimError: String(failure) };
+						if (failure) return { __shimError: String(failure) };
 						await target
 							.goto(a[0], { waitUntil: "commit" })
 							.catch((e) => log.push(`goto error ${e.message}`));
@@ -558,10 +558,10 @@ export async function runHarness({
 				case "setData":
 					if (String(a[0]).startsWith("result:")) {
 						if (resultStreamNeverAck) return new Promise(() => {});
-						if (a[0] === "result:done")
-							resultDoneAttemptOrder = ++eventOrder;
+						if (a[0] === "result:done") resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
-						if (a[0] === "result:done") resultWriteOrder = resultDoneAttemptOrder;
+						if (a[0] === "result:done")
+							resultWriteOrder = resultDoneAttemptOrder;
 						return ack;
 					}
 					if (a[0] === "result") {
@@ -654,11 +654,10 @@ export async function runHarness({
 					// on the host but no eligible connector uses them yet. Fail loudly
 					// rather than fake a result.
 					return {
-						__vanaShimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
+						__shimError: `harness: page.${method} is not implemented; add it before enabling a connector that needs it`,
 					};
 			}
 		};
-
 
 		const runner = await context.newPage();
 		await runner.route("https://runner.local/", (r) =>
@@ -673,14 +672,16 @@ export async function runHarness({
 			bridgeCallCount++;
 			if (requestUnits > PAGE_BRIDGE_MAX_UNITS)
 				return {
-					__vanaShimError:
+					__shimError:
 						"Bridge request argument exceeds 256 Ki UTF-16 code units",
 				};
 			const result = await dispatch(method, args);
 			const replyUnits = jsonPayloadUnits(result);
 			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, replyUnits);
 			if (replyUnits > PAGE_BRIDGE_MAX_UNITS)
-				return { __vanaShimError: "Bridge reply exceeds 256 Ki UTF-16 code units" };
+				return {
+					__shimError: "Bridge reply exceeds 256 Ki UTF-16 code units",
+				};
 			return result;
 		});
 		runner.on("console", (m) => {
@@ -709,7 +710,7 @@ export async function runHarness({
 			await sampleHeap();
 		})();
 
-			if (loginAfterMs === Number.POSITIVE_INFINITY) {
+		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			harnessLoggedIn = false;
 			fixtures.setLoggedIn(false); // the user never signs in
 		} else if (loginAfterMs > 0) {

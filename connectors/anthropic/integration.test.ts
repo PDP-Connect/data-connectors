@@ -1607,7 +1607,8 @@ test("collectAnthropic: manifest with an empty conversations part is a verified 
 	const final = statesOf(protocolMessages).findLast(
 		(m) => m.stream === "conversations",
 	);
-	assert.ok("synced_at" in (final?.cursor as Record<string, unknown>));
+	assert.ok(final?.cursor);
+	assert.ok("synced_at" in (final.cursor as Record<string, unknown>));
 });
 
 test("collectAnthropic: manifest projects part with unknown content skips projects and project_documents only", async () => {
@@ -1749,9 +1750,10 @@ for (const scenario of [
 		const conversationsState = statesOf(protocolMessages).findLast(
 			(m) => m.stream === "conversations",
 		);
+		assert.ok(conversationsState?.cursor);
 		assert.ok(
 			"last_export_requested_at" in
-				(conversationsState?.cursor as Record<string, unknown>),
+				(conversationsState.cursor as Record<string, unknown>),
 		);
 	});
 }

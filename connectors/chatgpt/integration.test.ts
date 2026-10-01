@@ -514,7 +514,11 @@ test("createChatGptApi refreshes auth from the current session endpoint after on
 
 	assert.equal(result.status, 200);
 	assert.equal(authExtractionCalls, 2);
-	assert.equal(gotoCalls, 0, "same-origin auth rechecks do not navigate the live page");
+	assert.equal(
+		gotoCalls,
+		0,
+		"same-origin auth rechecks do not navigate the live page",
+	);
 	assert.deepEqual(
 		backendCalls.map((call) => call.auth?.accessToken),
 		["stale-token", "fresh-token"],
@@ -1629,8 +1633,7 @@ test("round-2 B2: a changing continuation page stays partial without coverage", 
 				status: 200,
 				json: {
 					items,
-					next_cursor:
-						cursor === 0 ? 30 : probe === 2 ? 90 : 60,
+					next_cursor: cursor === 0 ? 30 : probe === 2 ? 90 : 60,
 				},
 			});
 		},
@@ -2934,13 +2937,14 @@ test("runMessagesAndConversationsWithDetail: a short batch or served 429 resets 
 			ids: readonly string[],
 		): Promise<ChatGptFetchResult[]> => {
 			activeBatchRequests += 1;
-			starts.push({ firstId: ids[0] ?? "", activeAtStart: activeBatchRequests });
+			starts.push({
+				firstId: ids[0] ?? "",
+				activeAtStart: activeBatchRequests,
+			});
 			await new Promise((resolve) => setImmediate(resolve));
 			activeBatchRequests -= 1;
 			if (ids[0] === "convo-41") {
-				return ids
-					.slice(1)
-					.map((id) => makeDetailOkForConversation(id));
+				return ids.slice(1).map((id) => makeDetailOkForConversation(id));
 			}
 			if (ids[0] === "convo-51") {
 				// Models retryHttp observing a 429, honoring its wait, then succeeding.
