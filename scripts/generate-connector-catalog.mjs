@@ -464,7 +464,15 @@ export async function generateConnectorCatalog({
     connectors: catalogConnectors.map(({ version, ...connector }) => connector),
   };
   if (previousCatalog !== null) {
-    assertCatalog(previousCatalog);
+    if (
+      typeof previousCatalog !== "object" ||
+      typeof previousCatalog.source_commit !== "string" ||
+      !Array.isArray(previousCatalog.connectors) ||
+      typeof previousCatalog.generated_at !== "string" ||
+      !Number.isFinite(Date.parse(previousCatalog.generated_at))
+    ) {
+      throw new Error("previous connector catalog has an invalid comparison shape");
+    }
     const comparable = (value) => JSON.stringify(sortObjectKeys({
       source_commit: value.source_commit,
       connectors: value.connectors,
