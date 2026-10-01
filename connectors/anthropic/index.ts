@@ -977,6 +977,48 @@ export function readManifestPartZip(zipPath: string): ManifestPartFile[] {
 	}
 }
 
+/** PageShim entries have metadata only; read their JSON through the active
+ * shell handle instead of the ZIP compatibility entry's empty `data()` stub. */
+async function readManifestPartZipChunks(
+	zipPath: string,
+	readChunk: AnthropicZipEntryChunkReader,
+): Promise<ManifestPartFile[]> {
+	const fd = openSync(zipPath, "r");
+	try {
+		const entries = readZipEntriesFromFile(
+			fd,
+			statSync(zipPath).size,
+			EXPORT_ZIP_POLICY,
+		);
+		const sizedEntries = entries as Array<
+			(typeof entries)[number] & { size?: number }
+		>;
+		const jsonEntries = sizedEntries.filter((entry) =>
+			entry.name.endsWith(".json"),
+		);
+		const result: ManifestPartFile[] = [];
+		for (const entry of jsonEntries) {
+			const size =
+				typeof entry.size === "number" ? entry.size : entry.uncompressedSize;
+			const descriptor = { name: entry.name, size };
+			const reader = createPipelinedJsonEntryReader(readChunk, descriptor);
+			const chunks: string[] = [];
+			for (let offset = 0; offset < size; ) {
+				const length = Math.min(JSON_ENTRY_READ_CHUNK_UNITS, size - offset);
+				const chunk = await reader(entry.name, offset, length);
+				if (!chunk || chunk.length > length)
+					throw new Error(`invalid bounded read for JSON entry ${entry.name}`);
+				chunks.push(chunk);
+				offset += chunk.length;
+			}
+			result.push({ name: entry.name, json: safeJsonParse(chunks.join("")) });
+		}
+		return result;
+	} finally {
+		closeSync(fd);
+	}
+}
+
 /** A nonce download larger than this is never a manifest. */
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 
@@ -1030,6 +1072,7 @@ interface ManifestPartDownloadResult {
 async function downloadManifestPart(
 	page: BrowserCollectContext["page"],
 	dataFile: ManifestDataFile,
+	readChunk?: AnthropicZipEntryChunkReader,
 ): Promise<ManifestPartDownloadResult> {
 	const attempt = await attemptDownload(page, dataFile.export_url);
 	if (!attempt.ready || !attempt.zipPath) {
@@ -1041,7 +1084,9 @@ async function downloadManifestPart(
 		};
 	}
 	try {
-		const entries = readManifestPartZip(attempt.zipPath);
+		const entries = readChunk
+			? await readManifestPartZipChunks(attempt.zipPath, readChunk)
+			: readManifestPartZip(attempt.zipPath);
 		return {
 			category: dataFile.category,
 			filename: dataFile.filename,
@@ -2057,7 +2102,11 @@ export async function collectAnthropic({
 		// loops allowlisted below, same as the old poll loop's sequential
 		// awaits — see scripts/no-await-in-loops-allowlist.ts).
 		for (const dataFile of dataFiles) {
-			const result = await downloadManifestPart(page, dataFile);
+			const result = await downloadManifestPart(
+				page,
+				dataFile,
+				readZipEntryChunk,
+			);
 			results.push(result);
 			await politeDelay(500);
 		}

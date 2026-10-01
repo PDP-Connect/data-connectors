@@ -293,8 +293,8 @@ function readZipJsonEntries(bytes, include) {
  *     call throw, and the host sets data.error.
  */
 function exportArchive({ fixtures, evaluateInPage, data, log }) {
-	let signedUrl = null;
-	let minted = false;
+	const signedUrls = new Map();
+	const mintedKeys = new Set();
 	let stash = null;
 	let extracted = null;
 	const notReady = (why) => {
@@ -314,8 +314,10 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 		async captureDownload(url) {
 			const m = /\/export\/([^/]+)\/download\/([^/?#]+)/.exec(url);
 			if (!m) return terminal("badurl");
+			const key = `${m[1]}/${m[2]}`;
+			let signedUrl = signedUrls.get(key);
 			if (!signedUrl) {
-				if (minted) return terminal("consumed");
+				if (mintedKeys.has(key)) return terminal("consumed");
 				const mint = await evaluateInPage(`(async () => {
 					const r = await fetch("/api/organizations/" + ${JSON.stringify(encodeURIComponent(m[1]))} +
 						"/export_signed_url/" + ${JSON.stringify(encodeURIComponent(m[2]))},
@@ -332,9 +334,10 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 					return mint.body.toLowerCase().includes("consumed")
 						? terminal("consumed")
 						: notReady(`mint ${mint.status}`);
-				minted = true;
+				mintedKeys.add(key);
 				if (typeof mint.url !== "string" || !mint.url) return notReady("nourl");
 				signedUrl = mint.url;
+				signedUrls.set(key, signedUrl);
 			}
 			const res = fixtures.resolve(signedUrl);
 			if (res.status >= 500) return notReady(`storage ${res.status}`);

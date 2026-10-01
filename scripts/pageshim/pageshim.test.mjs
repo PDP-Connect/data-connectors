@@ -415,6 +415,159 @@ test("anthropic: export paths on the PageShim host", {
 	});
 });
 
+test("anthropic: five-part metadata-only shell contract reads part entries through bounded chunks", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/anthropic.mjs");
+	const c = fx.pageshimCase;
+	const built = await buildPageshim({
+		connector: "anthropic",
+		outfile: join(out, "anthropic-multipart-chunks.js"),
+	});
+	const partData = [
+		{
+			category: "conversations",
+			filename: "conversations-1.zip",
+			entry: [
+				"conversations.json",
+				[
+					{
+						uuid: "conv-multipart",
+						name: "multipart conversation",
+						updated_at: "2026-01-20T00:00:00.000Z",
+						chat_messages: [
+							{
+								uuid: "msg-multipart",
+								sender: "human",
+								created_at: "2026-01-20T00:00:00.000Z",
+								content: [{ type: "text", text: "part bytes" }],
+							},
+						],
+					},
+				],
+			],
+		},
+		{
+			category: "projects",
+			filename: "projects-1.zip",
+			entry: [
+				"projects/project-multipart.json",
+				{
+					uuid: "project-multipart",
+					name: "multipart project",
+					updated_at: "2026-01-20T00:00:00.000Z",
+					docs: [
+						{
+							uuid: "doc-multipart",
+							filename: "part.md",
+							content: "part bytes",
+							updated_at: "2026-01-20T00:00:00.000Z",
+						},
+					],
+				},
+			],
+		},
+		{
+			category: "light_metadata",
+			filename: "light-metadata-1.zip",
+			entry: ["users.json", [{ full_name: "Sample User" }]],
+		},
+		{
+			category: "memories",
+			filename: "memories-1.zip",
+			entry: ["memories.json", [{ uuid: "out-of-scope-memory" }]],
+		},
+		{
+			category: "design_chats",
+			filename: "design-chats-1.zip",
+			entry: ["design_chats.json", [{ uuid: "out-of-scope-chat" }]],
+		},
+	];
+	const archives = new Map(
+		partData.map((part, index) => [
+			`part-${index + 1}`,
+			fx.zipOf([part.entry]),
+		]),
+	);
+	const manifest = {
+		version: "1",
+		total_files: partData.length,
+		data_files: partData.map((part, index) => ({
+			batch_index: 0,
+			category: part.category,
+			part: index + 1,
+			filename: part.filename,
+			export_url: `https://claude.ai/export/org-syn-0000-0000-0000-000000000001/download/part-${index + 1}`,
+		})),
+	};
+	const shellFixtures = {
+		...c.fixtures,
+		resolve(raw) {
+			const url = new URL(raw);
+			if (
+				url.pathname ===
+				"/api/organizations/org-syn-0000-0000-0000-000000000001/export_data"
+			)
+				return {
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify(manifest),
+				};
+			const mint = /\/export_signed_url\/part-(\d+)$/.exec(url.pathname);
+			if (mint)
+				return {
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						signed_url: `https://storage.claude-export.test/part-${mint[1]}.zip`,
+					}),
+				};
+			const archive = /^\/part-(\d+)\.zip$/.exec(url.pathname);
+			if (url.hostname === "storage.claude-export.test" && archive)
+				return {
+					status: 200,
+					contentType: "application/zip",
+					body: archives.get(`part-${archive[1]}`),
+				};
+			return c.fixtures.resolve(raw);
+		},
+	};
+	const run = await runHarness({
+		bundle: built.outfile,
+		fixtures: shellFixtures,
+		scopes: c.scopes,
+	});
+	assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+	assertCleanRun(run);
+	assert.equal(run.calls.captureDownload, 5);
+	assert.equal(run.calls.extractZipEntries, 5);
+	assert.ok(
+		run.calls.readZipEntryChunk > 0,
+		"part JSON must be read through the shell chunk API",
+	);
+	assert.deepEqual(
+		run.result["claude.conversations"]?.records?.map((record) => record.id),
+		["conv-multipart"],
+		JSON.stringify({
+			result: run.result,
+			data: run.data,
+			log: run.log.slice(-20),
+		}),
+	);
+	assert.deepEqual(
+		run.result["claude.messages"]?.records?.map((record) => record.id),
+		["msg-multipart"],
+	);
+	assert.deepEqual(
+		run.result["claude.projects"]?.records?.map((record) => record.id),
+		["project-multipart"],
+	);
+	assert.deepEqual(
+		run.result["claude.project_documents"]?.records?.map((record) => record.id),
+		["doc-multipart"],
+	);
+});
+
 test("anthropic: 30-day window filters records during streamed collection and marks the result partial", {
 	timeout: 300_000,
 }, async () => {
