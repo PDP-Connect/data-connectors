@@ -242,8 +242,15 @@ describe("W28 — the source declaration is a normative PDPP SourceDeclaration",
 			join(repoRoot, "scripts", "pageshim", "attach-to-artifact.mjs"),
 			["--connector", "github_browser", "--artifact", target],
 		);
+		const manifestVersion = JSON.parse(
+			readFileSync(join(repoRoot, "connectors", "github_browser", "manifest.json"), "utf8"),
+		).version;
 		assert.notEqual(attach.status, 0);
-		assert.match(attach.stderr, /github-browser artifact version 0\.0\.0 does not match manifest version 0\.2\.10/);
+		assert.ok(
+			attach.stderr.includes(
+				"github-browser artifact version 0.0.0 does not match manifest version " + manifestVersion,
+			),
+		);
 	});
 
 	it("refuses an artifact whose connector ID disagrees with its source manifest", () => {

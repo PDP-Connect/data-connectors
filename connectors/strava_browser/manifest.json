@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -19,11 +19,11 @@
 		"bindings": {
 			"network": {
 				"required": true,
-				"features": ["in_page_fetch", "httpFetch"]
+				"features": ["same_origin_page_fetch", "host_http_request"]
 			},
 			"browser": {
 				"required": true,
-				"features": ["evaluate", "goto", "request.get"]
+				"features": ["page_script_evaluation", "page_navigation", "host_http_request"]
 			}
 		}
 	},
