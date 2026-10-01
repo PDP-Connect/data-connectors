@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.14",
+	"version": "0.2.15",
 	"display_name": "ChatGPT",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,12 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["same_origin_page_fetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": ["page_navigation", "page_script_evaluation", "page_condition_wait"]
 			}
 		}
 	},

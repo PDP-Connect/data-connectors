@@ -385,7 +385,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.17",
+				"version": "0.2.18",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -395,10 +395,18 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"host_download_capture",
+								"host_archive_extraction",
+								"host_archive_entry_chunk_read"
+							]
 						}
 					}
 				},
@@ -2332,7 +2340,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.14",
+				"version": "0.2.15",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -2341,10 +2349,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},

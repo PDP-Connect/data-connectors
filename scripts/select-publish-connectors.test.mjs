@@ -235,6 +235,70 @@ test("sibling runtime metadata does not change shared SourceDeclaration identity
   }
 });
 
+test("extending PageShim support does not change an already eligible artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const manifestPath = "connectors/oura/manifest.json";
+    const profile = JSON.parse(readFileSync(join(repo.dir, manifestPath), "utf8"));
+    profile.runtime_requirements = {
+      bindings: {
+        browser: { required: true, features: ["page_script_evaluation"] },
+        network: { required: true, features: ["same_origin_page_fetch"] },
+      },
+    };
+    profile.mobile = { pageshim: { scope_prefix: "oura" } };
+    repo.write(manifestPath, JSON.stringify(profile));
+    const writeCapabilityPolicy = (features) => repo.write(
+      "scripts/pageshim/capabilities.mjs",
+      `const supported = new Set(${JSON.stringify(features)});\n` +
+        `export function isPageShimCapable(m) { return Object.values(m.runtime_requirements.bindings).filter((r) => r.required).every((r) => r.features.every((f) => supported.has(f))); }\n`,
+    );
+    writeCapabilityPolicy(["page_script_evaluation", "same_origin_page_fetch"]);
+    const before = repo.commit("set up an eligible PageShim connector");
+    const beforeHash = await artifactInputHash({ commit: before, manifest: "oura", cwd: repo.dir });
+    writeCapabilityPolicy([
+      "page_script_evaluation",
+      "same_origin_page_fetch",
+      "host_download_capture",
+    ]);
+    const after = repo.commit("extend PageShim support for another connector");
+    const afterHash = await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir });
+    assert.equal(afterHash, beforeHash);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a PageShim eligibility transition changes artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const manifestPath = "connectors/oura/manifest.json";
+    const profile = JSON.parse(readFileSync(join(repo.dir, manifestPath), "utf8"));
+    profile.runtime_requirements = {
+      bindings: {
+        browser: { required: true, features: ["page_script_evaluation"] },
+        network: { required: true, features: ["same_origin_page_fetch"] },
+      },
+    };
+    profile.mobile = { pageshim: { scope_prefix: "oura" } };
+    repo.write(manifestPath, JSON.stringify(profile));
+    const writeCapabilityPolicy = (features) => repo.write(
+      "scripts/pageshim/capabilities.mjs",
+      `const supported = new Set(${JSON.stringify(features)});\n` +
+        `export function isPageShimCapable(m) { return Object.values(m.runtime_requirements.bindings).filter((r) => r.required).every((r) => r.features.every((f) => supported.has(f))); }\n`,
+    );
+    writeCapabilityPolicy(["page_script_evaluation"]);
+    const before = repo.commit("set up an ineligible PageShim connector");
+    const beforeHash = await artifactInputHash({ commit: before, manifest: "oura", cwd: repo.dir });
+    writeCapabilityPolicy(["page_script_evaluation", "same_origin_page_fetch"]);
+    const after = repo.commit("enable a PageShim connector");
+    const afterHash = await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir });
+    assert.notEqual(afterHash, beforeHash);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("a PageShim-only edit changes only connectors with a PageShim entry", async () => {
   const repo = makeRepo();
   try {

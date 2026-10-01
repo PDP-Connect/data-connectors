@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -53,6 +53,44 @@ test("C-T1 every allowlist entry builds and verifies", async (t) => {
         ),
         "PageShim metadata must match declared binding compatibility",
       );
+    });
+  }
+});
+
+test("published ChatGPT and Anthropic artifacts contain their PageShim assets", async (t) => {
+  const temporaryRoot = process.env.RUNNER_TEMP || process.env.TMPDIR || join(homedir(), ".tmp");
+  mkdirSync(temporaryRoot, { recursive: true });
+  const workspace = mkdtempSync(join(temporaryRoot, "connector-pageshim-release-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+
+  for (const manifest of ["chatgpt", "anthropic"]) {
+    await t.test(manifest, () => {
+      const artifact = join(workspace, manifest);
+      for (const [script, args] of [
+        ["build-connector-oci-artifact.mjs", [
+          "--connector", manifest, "--out", artifact,
+          "--esbuild", join(repoRoot, "node_modules/esbuild/lib/main.js"),
+        ]],
+        ["pageshim/attach-to-artifact.mjs", ["--connector", manifest, "--artifact", artifact]],
+        ["verify-connector-oci-artifact.mjs", ["--artifact", artifact]],
+      ]) {
+        const result = spawnSync(process.execPath, [join(repoRoot, "scripts", script), ...args], {
+          cwd: repoRoot, encoding: "utf8", timeout: 300_000,
+        });
+        assert.equal(result.status, 0, `${manifest}: ${script}\n${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+      }
+      const config = JSON.parse(readFileSync(join(artifact, "config.json"), "utf8"));
+      const pageshim = config.mobile?.pageshim;
+      assert.ok(pageshim, `${manifest} artifact advertises its PageShim bundle`);
+      assert.deepEqual(pageshim, {
+        layer: "assets",
+        path: `pageshim/${manifest}.js`,
+        media_type: "text/javascript",
+        digest: pageshim.digest,
+        size: pageshim.size,
+      });
+      const assets = execFileSync("tar", ["-tzf", join(artifact, "assets.tar.gz")], { encoding: "utf8" });
+      assert.ok(assets.split("\n").includes(`pageshim/${manifest}.js`), `${manifest} bundle is in assets.tar.gz`);
     });
   }
 });

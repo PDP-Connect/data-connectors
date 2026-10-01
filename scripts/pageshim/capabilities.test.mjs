@@ -17,6 +17,39 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 	}
 });
 
+test("the released ChatGPT and Anthropic connectors declare PageShim-compatible features", () => {
+	const expected = {
+		chatgpt: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		anthropic: {
+			network: ["same_origin_page_fetch"],
+			browser: [
+				"page_navigation",
+				"page_script_evaluation",
+				"host_download_capture",
+				"host_archive_extraction",
+				"host_archive_entry_chunk_read",
+			],
+		},
+	};
+	for (const [name, bindings] of Object.entries(expected)) {
+		const connector = manifest(name);
+		assert.equal(isPageShimCapable(connector), true, name);
+		assert.deepEqual(
+			Object.fromEntries(
+				Object.entries(connector.runtime_requirements.bindings).map(([binding, requirement]) => [
+					binding,
+					requirement.features,
+				]),
+			),
+			bindings,
+			name,
+		);
+	}
+});
+
 test("broad or unsupported requirements fail closed", () => {
 	const incomplete = {
 		runtime_requirements: {
