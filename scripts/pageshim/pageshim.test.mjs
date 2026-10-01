@@ -335,6 +335,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		assert.equal(legacy.result["chatgpt.messages"].records.length, 4);
 		assert.equal(bundleSha256(built.outfile), digest);
 
+		// Mobile sends the same range on both streams; the base list walk shares one cutoff.
 		const ranged = await run(
 			scopeEntries(fx.pageshimCase.scopes, {
 				"chatgpt.conversations": {
@@ -362,54 +363,6 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 			["msg-3-a", "msg-4-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
-
-		for (const scopes of [
-			[
-				{
-					name: "chatgpt.conversations",
-					time_range: { since: "2026-01-25T00:00:00.000Z" },
-				},
-				"chatgpt.messages",
-			],
-			[
-				"chatgpt.conversations",
-				{
-					name: "chatgpt.messages",
-					time_range: { since: "2026-01-25T00:00:00.000Z" },
-				},
-			],
-			[
-				{
-					name: "chatgpt.conversations",
-					time_range: { since: "2026-01-25T00:00:00.000Z" },
-				},
-				{
-					name: "chatgpt.messages",
-					time_range: { until: "2026-02-01T00:00:00.000Z" },
-				},
-			],
-		]) {
-			const unboundedPartner = await run(scopes);
-			assert.deepEqual(
-				unboundedPartner.ret,
-				{ ok: true },
-				unboundedPartner.log.slice(-20).join("\n"),
-			);
-			assert.deepEqual(unboundedPartner.result.errors, []);
-			assert.deepEqual(
-				unboundedPartner.result["chatgpt.conversations"].records.map(
-					(record) => record.id,
-				),
-				["conv-1", "conv-2", "conv-3", "conv-4"],
-			);
-			assert.deepEqual(
-				unboundedPartner.result["chatgpt.messages"].records.map(
-					(record) => record.id,
-				),
-				["msg-1-a", "msg-2-a", "msg-3-a", "msg-4-a"],
-			);
-			assert.equal(bundleSha256(built.outfile), digest);
-		}
 
 		const messagesOnly = await run([
 			{

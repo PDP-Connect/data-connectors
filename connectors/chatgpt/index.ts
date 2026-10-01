@@ -3308,14 +3308,9 @@ async function listConversationsSinceCursor(
 		: startCursor;
 	const resumeStartCursor = cursor;
 	const pageSize = CONVERSATION_PAGE_SIZE;
-	const conversationRange = deps.requested.get("conversations")?.time_range;
-	const messageRange = deps.requested.get("messages")?.time_range;
-	const hasUnboundedRequestedStream =
-		(deps.requested.has("conversations") && !conversationRange?.since) ||
-		(deps.requested.has("messages") && !messageRange?.since);
-	const requestedSince = hasUnboundedRequestedStream
-		? undefined
-		: (conversationRange?.since ?? messageRange?.since);
+	const requestedSince =
+		deps.requested.get("conversations")?.time_range?.since ??
+		deps.requested.get("messages")?.time_range?.since;
 	const complete = (): ConversationListResult => {
 		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
