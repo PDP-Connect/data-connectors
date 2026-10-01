@@ -48,10 +48,18 @@ export function applyRequestedTimeRanges<T extends { time_range?: TimeRange }>(
 					`PageShim time_range for ${entry.name} must be an object.`,
 				);
 			const range = entry.time_range;
-			const validBound = (value: unknown) =>
-				typeof value === "string" &&
-				/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
-				Number.isFinite(Date.parse(value));
+			const validBound = (value: unknown) => {
+				if (
+					typeof value !== "string" ||
+					!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)
+				)
+					return false;
+				const timestamp = Date.parse(value);
+				return (
+					Number.isFinite(timestamp) &&
+					new Date(timestamp).toISOString().slice(0, 19) === value.slice(0, 19)
+				);
+			};
 			if (
 				(range.since !== undefined && !validBound(range.since)) ||
 				(range.until !== undefined && !validBound(range.until)) ||

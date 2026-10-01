@@ -1212,7 +1212,7 @@ export async function collectAnthropic({
 	requested,
 	state,
 	emit,
-	emitRecord,
+	emitRecord: baseEmitRecord,
 	isRecordSelected,
 	progress,
 	readZipEntryChunk,
@@ -1226,6 +1226,21 @@ export async function collectAnthropic({
 	if (requested.size === 0) {
 		return;
 	}
+	const emitRecord: typeof baseEmitRecord = (stream, data, options) => {
+		const range = requested.get(stream)?.time_range;
+		if (range) {
+			const field = stream === MESSAGES_STREAM ? "create_time" : "update_time";
+			const value = data[field];
+			const date = typeof value === "string" ? value.slice(0, 10) : null;
+			if (
+				date !== null &&
+				((range.since !== undefined && date < range.since.slice(0, 10)) ||
+					(range.until !== undefined && date >= range.until.slice(0, 10)))
+			)
+				return Promise.resolve();
+		}
+		return baseEmitRecord(stream, data, options);
+	};
 
 	await page
 		.goto(CLAUDE_HOME_URL, {
@@ -1240,15 +1255,15 @@ export async function collectAnthropic({
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
-	const windowSince =
-		requested.get(CONVERSATIONS_STREAM)?.time_range?.since ??
-		requested.get(MESSAGES_STREAM)?.time_range?.since;
-	const windowSinceMs = windowSince ? Date.parse(windowSince) : Number.NaN;
-	const isWithinTimeWindow = (value: unknown): boolean => {
-		if (!windowSince) return true;
-		if (typeof value !== "string") return false;
-		const updatedAt = Date.parse(value);
-		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
+	const isWithinTimeWindow = (value: unknown, stream: string): boolean => {
+		const range = requested.get(stream)?.time_range;
+		if (!range) return true;
+		if (typeof value !== "string" || !value) return true;
+		const date = value.slice(0, 10);
+		return (
+			(range.since === undefined || date >= range.since.slice(0, 10)) &&
+			(range.until === undefined || date < range.until.slice(0, 10))
+		);
 	};
 	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
 		throw new Error(
@@ -1290,16 +1305,13 @@ export async function collectAnthropic({
 			record: (typeof parsed.projects)[number];
 			source: SourceRecordEnvelope;
 		}> = [];
-		const inWindowConversationIds = new Set<string>();
 		for (const [index, record] of parsed.conversations.entries()) {
-			if (isWithinTimeWindow(record.update_time))
-				inWindowConversationIds.add(record.id);
 			if (wantsConversations) {
 				const source = parsed.conversationSources[index];
 				if (!source || source.record_key !== record.id)
 					throw new Error("Anthropic conversation source alignment failed");
 				if (
-					isWithinTimeWindow(record.update_time) &&
+					isWithinTimeWindow(record.update_time, CONVERSATIONS_STREAM) &&
 					isRecordSelected?.(CONVERSATIONS_STREAM, record)
 				)
 					selectedConversations.push({ record, source });
@@ -1311,7 +1323,7 @@ export async function collectAnthropic({
 				if (!source || source.record_key !== record.id)
 					throw new Error("Anthropic project source alignment failed");
 				if (
-					isWithinTimeWindow(record.update_time) &&
+					isWithinTimeWindow(record.update_time, PROJECTS_STREAM) &&
 					isRecordSelected?.(PROJECTS_STREAM, record)
 				)
 					selectedProjects.push({ record, source });
@@ -1393,11 +1405,7 @@ export async function collectAnthropic({
 		if (wantsMessages) {
 			for (const message of parsed.messages) {
 				if (oversizedConversationIds.has(message.conversation_id)) continue;
-				if (
-					windowSince &&
-					!inWindowConversationIds.has(message.conversation_id)
-				)
-					continue;
+				if (!isWithinTimeWindow(message.create_time, MESSAGES_STREAM)) continue;
 				await emitRecord(MESSAGES_STREAM, message);
 			}
 		}
@@ -1422,7 +1430,8 @@ export async function collectAnthropic({
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
 				if (oversizedProjectIds.has(doc.project_id)) continue;
-				if (!isWithinTimeWindow(doc.update_time)) continue;
+				if (!isWithinTimeWindow(doc.update_time, PROJECT_DOCUMENTS_STREAM))
+					continue;
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
@@ -1595,11 +1604,6 @@ export async function collectAnthropic({
 		let droppedConversations = 0;
 		let oversizedConversations = 0;
 		const processConversation = async (raw: unknown) => {
-			const updatedAt =
-				typeof raw === "object" && raw !== null && !Array.isArray(raw)
-					? (raw as Record<string, unknown>).updated_at
-					: undefined;
-			if (!isWithinTimeWindow(updatedAt)) return;
 			const parsed = parseConversation(raw);
 			if (!parsed) {
 				droppedConversations += 1;
@@ -1611,8 +1615,20 @@ export async function collectAnthropic({
 				record_key: parsed.conversation.id,
 				payload: raw as Record<string, unknown>,
 			};
-			const selected =
+			const conversationInRange =
 				wantsConversations &&
+				isWithinTimeWindow(
+					parsed.conversation.update_time,
+					CONVERSATIONS_STREAM,
+				);
+			const messagesInRange =
+				wantsMessages &&
+				parsed.messages.some((message) =>
+					isWithinTimeWindow(message.create_time, MESSAGES_STREAM),
+				);
+			if (!conversationInRange && !messagesInRange) return;
+			const selected =
+				conversationInRange &&
 				isRecordSelected?.(CONVERSATIONS_STREAM, parsed.conversation);
 			const sourceTooLarge =
 				selected && storeSourceRecords && !fitsHostBlob(source);
@@ -1622,7 +1638,10 @@ export async function collectAnthropic({
 			}
 			if (wantsMessages && !sourceTooLarge) {
 				for (const message of parsed.messages) {
-					if (!oversizedConversationIds.has(message.conversation_id))
+					if (
+						!oversizedConversationIds.has(message.conversation_id) &&
+						isWithinTimeWindow(message.create_time, MESSAGES_STREAM)
+					)
 						await emitRecord(MESSAGES_STREAM, message);
 				}
 			}
@@ -1663,7 +1682,6 @@ export async function collectAnthropic({
 				if (key === "chat_messages") continue;
 				header[key] = JSON.parse(field);
 			}
-			if (!isWithinTimeWindow(header.updated_at)) return;
 			const conversation = parseConversationHeader(header, 0);
 			if (!conversation) {
 				droppedConversations += 1;
@@ -1707,12 +1725,25 @@ export async function collectAnthropic({
 			}
 			conversation.message_count = messageCount;
 			messages.sort((a, b) => a.sortTime - b.sortTime || a.index - b.index);
+			const conversationInRange =
+				wantsConversations &&
+				isWithinTimeWindow(conversation.update_time, CONVERSATIONS_STREAM);
+			const messagesInRange =
+				wantsMessages &&
+				messages.some((message) =>
+					isWithinTimeWindow(message.record?.create_time, MESSAGES_STREAM),
+				);
+			if (!conversationInRange && !messagesInRange) return;
 			for (const message of messages) {
-				if (wantsMessages && !oversizedConversationIds.has(conversation.id))
+				if (
+					wantsMessages &&
+					!oversizedConversationIds.has(conversation.id) &&
+					isWithinTimeWindow(message.record?.create_time, MESSAGES_STREAM)
+				)
 					await emitRecord(MESSAGES_STREAM, message.record!);
 			}
 			if (
-				wantsConversations &&
+				conversationInRange &&
 				isRecordSelected?.(CONVERSATIONS_STREAM, conversation)
 			)
 				await emitRecord(CONVERSATIONS_STREAM, {
@@ -1746,7 +1777,14 @@ export async function collectAnthropic({
 							prefix,
 							new Set(["uuid", "id", "updated_at"]),
 						);
-						if (!isWithinTimeWindow(fields.get("updated_at"))) return;
+						if (
+							!isWithinTimeWindow(
+								fields.get("updated_at"),
+								CONVERSATIONS_STREAM,
+							) &&
+							!wantsMessages
+						)
+							return;
 						const id = fields.get("uuid") || fields.get("id");
 						if (!id) {
 							droppedConversations += 1;
