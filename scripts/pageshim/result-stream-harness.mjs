@@ -13,11 +13,13 @@ export class ResultStreamHarness {
 		directory,
 		failAt,
 		streamingSupported = true,
+		legacyResults = true,
 	}) {
 		this.approvedScopes = new Set(approvedScopes);
 		this.directory = directory;
 		this.failAt = failAt;
 		this.streamingSupported = streamingSupported;
+		this.legacyResults = legacyResults;
 		this.files = new Map();
 		this.openScope = null;
 		this.mode = null;
@@ -35,6 +37,8 @@ export class ResultStreamHarness {
 		this.messageCount++;
 		if (this.done) throw new Error("result protocol is already done");
 		if (key === "result") {
+			// A thin host fails a one-message result (mobile-host-v1 A6).
+			if (!this.legacyResults) throw new Error("host expects streamed results");
 			if (this.mode === "stream")
 				throw new Error("cannot mix result protocols");
 			this.mode = "legacy";

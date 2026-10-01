@@ -556,6 +556,8 @@ test("the browser harness rejects both orders of mixed result protocols", {
 			scopes: ["chatgpt.conversations"],
 			resultStreaming: true,
 			resultSpoolDirectory: join(root, `spool-mixed-${legacyFirst}`),
+			// A host that takes both protocols, so the mix itself is rejected.
+			acceptLegacyResult: true,
 		});
 		assert.deepEqual(run.ret, {
 			ok: false,
