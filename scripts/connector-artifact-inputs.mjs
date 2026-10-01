@@ -67,6 +67,13 @@ function readFileAtCommit(commit, path, { cwd }) {
   }
 }
 
+function artifactInputContent(path, content) {
+  if (path !== "package.json" || content === null) return content;
+  const packageMetadata = JSON.parse(content.toString("utf8"));
+  delete packageMetadata.scripts;
+  return Buffer.from(JSON.stringify(packageMetadata));
+}
+
 function localImportSpecifiers(source) {
   const text = source.toString();
   return [
@@ -143,6 +150,29 @@ function readManifestAtCommit(commit, path, options) {
   }
 }
 
+function sourceDeclarationMember(member) {
+  return {
+    source: {
+      id: member.source?.id,
+      display: { name: member.source?.display?.name },
+    },
+    streams: (member.streams ?? []).map((stream) => ({
+      ...(stream.description !== undefined ? { description: stream.description } : {}),
+      ...(stream.display !== undefined ? { display: stream.display } : {}),
+      ...(stream.cursor_field !== undefined ? { cursor_field: stream.cursor_field } : {}),
+      ...(stream.consent_time_field !== undefined ? { consent_time_field: stream.consent_time_field } : {}),
+      name: stream.name,
+      primary_key: stream.primary_key,
+      ...(stream.query !== undefined ? { query: stream.query } : {}),
+      ...(stream.relationships !== undefined ? { relationships: stream.relationships } : {}),
+      schema: stream.schema,
+      selection: stream.selection,
+      semantics: stream.semantics,
+      ...(stream.views !== undefined ? { views: stream.views } : {}),
+    })),
+  };
+}
+
 /**
  * The allowlist data at `commit` that can affect `profile`'s artifact: the
  * rows of every connector with the same `source.id`, and the manifests of the
@@ -168,8 +198,10 @@ async function sourceSliceInputs(commit, profile, options) {
     if (member.source?.id !== profile.source?.id) continue;
     rows.push({ connectorKey, manifest, exclusionReason });
     if (own || declaresAlone || exclusionReason !== null) continue;
-    const { version: _version, ...declared } = member;
-    inputs.push([`${path}#declaration-member`, Buffer.from(JSON.stringify(declared))]);
+    inputs.push([
+      `${path}#declaration-member`,
+      Buffer.from(JSON.stringify(sourceDeclarationMember(member))),
+    ]);
   }
   rows.sort((a, b) => a.connectorKey.localeCompare(b.connectorKey));
   inputs.push(["scripts/connector-publish-allowlist.mjs#source-slice", Buffer.from(JSON.stringify(rows))]);
@@ -191,7 +223,10 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
     }
     // An absent declaration input is a real prior state (before artifacts
     // carried a declaration); it hashes differently from any present file.
-    files.set(path, content ?? Buffer.from("\0absent"));
+    // Root npm scripts are developer commands. They do not affect the bytes
+    // shipped in a connector artifact, so they must not force every connector
+    // to take a version bump when a convenience command is added.
+    files.set(path, content === null ? Buffer.from("\0absent") : artifactInputContent(path, content));
   }
 
   const manifestPath = `connectors/${manifest}/manifest.json`;
