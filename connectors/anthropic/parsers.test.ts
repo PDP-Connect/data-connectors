@@ -22,15 +22,110 @@ import {
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
 import {
 	classifyManifestPartEntries,
+	createPipelinedJsonEntryReader,
 	flattenMessageText,
 	parseClassifiedExport,
 	parseConversation,
 	parseExport,
+	parseJsonArrayChunks,
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
 	resolveExportedProfile,
 } from "./parsers.ts";
+
+test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a time", async () => {
+	const source = String.raw`[{"text":"a \"quoted\" value","nested":[1,true]},"😀",null]`;
+	const calls: Array<[number, number]> = [];
+	const values: unknown[] = [];
+	await parseJsonArrayChunks(
+		async (_name, offset, length) => {
+			calls.push([offset, length]);
+			return source.slice(offset, offset + Math.min(length, 5));
+		},
+		{ name: "conversations.json", size: source.length },
+		(value) => {
+			values.push(value);
+		},
+		8,
+	);
+	assert.deepEqual(values, [
+		{ text: 'a "quoted" value', nested: [1, true] },
+		"😀",
+		null,
+	]);
+	assert.ok(calls.length > 1);
+	assert.ok(calls.every(([, length]) => length <= 8));
+});
+
+test("pipelined entry reader overlaps calls, preserves order, and restarts after short reads", async () => {
+	const source = "0123456789abcdefghijklmnopqrst";
+	let active = 0;
+	let maxActive = 0;
+	const reader = createPipelinedJsonEntryReader(
+		async (_name, offset, length) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await new Promise((resolve) => setTimeout(resolve, offset === 0 ? 4 : 1));
+			active--;
+			const end = offset === 0 ? offset + length - 1 : offset + length;
+			return source.slice(offset, end);
+		},
+		{ name: "test.json", size: source.length },
+		0,
+		source.length,
+		8,
+		3,
+	);
+	const chunks: string[] = [];
+	for (let offset = 0; offset < source.length; ) {
+		const text = await reader(
+			"test.json",
+			offset,
+			Math.min(8, source.length - offset),
+		);
+		chunks.push(text);
+		offset += text.length;
+	}
+	assert.equal(chunks.join(""), source);
+	assert.ok(maxActive >= 2, `expected concurrent reads, got ${maxActive}`);
+	assert.ok(maxActive <= 3, `reader exceeded its window: ${maxActive}`);
+});
+
+test("parseJsonArrayChunks rejects malformed arrays and invalid bounded reads", async () => {
+	await assert.rejects(
+		parseJsonArrayChunks(
+			async () => "[1,]",
+			{ name: "bad.json", size: 4 },
+			() => {},
+		),
+		/invalid JSON array/,
+	);
+	await assert.rejects(
+		parseJsonArrayChunks(
+			async () => "",
+			{ name: "empty.json", size: 1 },
+			() => {},
+		),
+		/invalid bounded read/,
+	);
+	await Promise.all(
+		["{}", "null", "[{}\u00a0]", "[]\u000b"].map((source) =>
+			assert.rejects(
+				parseJsonArrayChunks(
+					async (_name, offset, length) =>
+						source.slice(offset, offset + length),
+					{ name: "invalid.json", size: source.length },
+					() => {},
+				),
+				(error: unknown) =>
+					error instanceof Error &&
+					/invalid JSON array/.test(error.message) &&
+					(error as Error & { code?: string }).code === "INVALID_JSON_ARRAY",
+			),
+		),
+	);
+});
 
 const SYNTHETIC_ZIP_PATH = fileURLToPath(
 	new URL("./__fixtures__/synthetic/synthetic-export.zip", import.meta.url),

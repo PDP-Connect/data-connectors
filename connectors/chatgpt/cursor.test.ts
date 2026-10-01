@@ -561,6 +561,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 
 	assert.deepEqual(fetches, [
 		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
+		...Array.from({ length: 2 }, () => "/conversations/search?query=&cursor=30"),
 		"/conversation/conv-new",
 		"/conversation/conv-mid",
 	]);

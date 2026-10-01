@@ -385,7 +385,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.15",
+				"version": "0.2.17",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -2332,7 +2332,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.12",
+				"version": "0.2.14",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -2895,6 +2895,14 @@
 						]
 					}
 				],
+				"mobile": {
+					"pageshim": {
+						"entry": "chatgpt.ts",
+						"exception": "Preserves the mobile ChatGPT result envelope while applying list-window filtering.",
+						"scope_prefix": "chatgpt",
+						"login_url": "https://chatgpt.com/auth/login"
+					}
+				},
 				"reason_display_messages": {
 					"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
 					"branch_truncated": "A conversation is missing earlier messages from its current thread",
@@ -5130,7 +5138,7 @@
 				},
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.4",
+				"version": "0.7.5",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
@@ -6264,7 +6272,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.9",
+				"version": "0.2.10",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -12642,7 +12650,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -16651,7 +16659,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -16809,6 +16817,8 @@
 				},
 				"mobile": {
 					"pageshim": {
+						"entry": "strava_browser.ts",
+						"exception": "Preserves the app's activities payload and STATE shape.",
 						"scope_prefix": "strava",
 						"login_url": "https://www.strava.com/login",
 						"login_message": "Sign in to Strava, then return here.",

@@ -33,8 +33,8 @@ import {
 	type AdaptiveLane,
 	AdaptiveLaneCancelledError,
 	type AdaptiveLaneEvent,
+	type AdaptiveLaneRunContext,
 	createAdaptiveLane,
-	currentAdaptiveLaneRunContext,
 } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
 import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
@@ -229,10 +229,23 @@ const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
 `;
 
 async function getAuthFromPage(page: Page): Promise<ChatGptAuth> {
-	await page.goto("https://chatgpt.com/", {
-		waitUntil: "domcontentloaded",
-		timeout: 30_000,
-	});
+	const currentUrl = await page
+		.evaluate(() => window.location.href)
+		.catch((): null => null);
+	let alreadyOnChatGpt = false;
+	try {
+		alreadyOnChatGpt =
+			typeof currentUrl === "string" &&
+			new URL(currentUrl).origin === "https://chatgpt.com";
+	} catch {
+		// Unknown or non-HTTP locations must navigate before reading ChatGPT auth.
+	}
+	if (!alreadyOnChatGpt) {
+		await page.goto("https://chatgpt.com/", {
+			waitUntil: "domcontentloaded",
+			timeout: 30_000,
+		});
+	}
 	// Wait for client bootstrap to appear
 	await page
 		.waitForFunction(
@@ -273,6 +286,10 @@ const CHATGPT_RATE_LIMIT_MAX_DELAY_MS = 15 * 60_000;
 const CHATGPT_RATE_LIMIT_MAX_RETRY_AFTER_MS = 15 * 60_000;
 const CHATGPT_LONG_SLEEP_PROGRESS_THRESHOLD_MS = 5000;
 const CHATGPT_CONVERSATION_BATCH_MAX_IDS = 10;
+const CHATGPT_BATCH_INITIAL_PARALLELISM = 2;
+const CHATGPT_BATCH_MAX_PARALLELISM = 4;
+const CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP = 2;
+const CHATGPT_DETAIL_PROGRESS_EVERY = 25;
 // Source-pressure fast-open. The live A/B probe (2026-06-02) showed ChatGPT's
 // private detail endpoint returns BARE 429s — no `Retry-After` — and that the
 // throttle is per-account, recovering over minutes, not per-conversation. A
@@ -1070,6 +1087,7 @@ interface ChatGptBackendFetchArgs {
 	auth: ChatGptAuth;
 	body?: unknown;
 	method: string;
+	measureProviderFetch?: boolean;
 	parseJson?: boolean;
 	path: string;
 	timeoutMs: number;
@@ -1093,6 +1111,7 @@ export async function chatGptBackendFetchInBrowser({
 	auth,
 	body,
 	method,
+	measureProviderFetch = false,
 	parseJson = true,
 	path,
 	timeoutMs,
@@ -1122,6 +1141,7 @@ export async function chatGptBackendFetchInBrowser({
 		if (body) {
 			init.body = JSON.stringify(body);
 		}
+		const providerFetchStarted = measureProviderFetch ? performance.now() : 0;
 		const res = await fetch(`https://chatgpt.com/backend-api${path}`, init);
 		const { status } = res;
 		const retryAfter = res.headers.get("retry-after") ?? undefined;
@@ -1133,7 +1153,11 @@ export async function chatGptBackendFetchInBrowser({
 				json = null;
 			}
 		}
+		const providerFetchMs = measureProviderFetch
+			? performance.now() - providerFetchStarted
+			: undefined;
 		return {
+			...(providerFetchMs === undefined ? {} : { providerFetchMs }),
 			status,
 			json: json as ChatGptFetchResult["json"],
 			...(retryAfter ? { headers: { "retry-after": retryAfter } } : {}),
@@ -1365,6 +1389,18 @@ export function buildChatGptCollectionRateProgress(
 	};
 }
 
+/** Estimate whole minutes remaining from the observed average detail rate. */
+export function estimateChatGptDetailMinutesRemaining(
+	completed: number,
+	total: number,
+	elapsedMs: number,
+): number | null {
+	const remaining = Math.max(0, total - completed);
+	if (remaining === 0) return 0;
+	if (completed <= 0) return null;
+	return Math.ceil((remaining * Math.max(1, elapsedMs)) / (completed * 60_000));
+}
+
 /**
  * Emit a `collection_rate` progress event when the controller's interval has
  * changed since the last emission (a speed-up or back-off TRANSITION), so the
@@ -1372,26 +1408,30 @@ export function buildChatGptCollectionRateProgress(
  * interval just emitted so the caller can track the last-seen value.
  */
 async function emitChatGptCollectionRateOnChange(
-	emit: CollectContext["emit"] | undefined,
 	providerBudget: ProviderBudgetController | null | undefined,
 	lastEmittedIntervalMs: number | null,
+	progress: CollectContext["progress"] | undefined,
+	completed: number,
+	total: number,
+	elapsedMs: number,
 ): Promise<number | null> {
-	if (!(emit && providerBudget)) {
+	if (!progress) {
 		return lastEmittedIntervalMs;
 	}
 	const rate = buildChatGptCollectionRateProgress(providerBudget);
+	const minutes = estimateChatGptDetailMinutesRemaining(
+		completed,
+		total,
+		elapsedMs,
+	);
+	await progress(
+		`Fetching conversation details: ${completed} of ${total}${minutes === null ? " (estimating…)" : ` (about ${minutes} min left)`}`,
+		{ stream: "messages", count: completed, total },
+	);
 	if (!rate || rate.current_interval_ms === lastEmittedIntervalMs) {
 		return lastEmittedIntervalMs;
 	}
-	const backoffSuffix = rate.last_backoff
-		? `; last backed off to ${rate.last_backoff.at_interval_ms}ms (${rate.last_backoff.reason})`
-		: "";
-	await emit({
-		type: "PROGRESS",
-		stream: "messages",
-		message: `Collection rate ${rate.effective_rate_per_min}/min (interval ${rate.current_interval_ms}ms; ceiling ${rate.ceiling_rate_per_min}/min)${backoffSuffix}`,
-		collection_rate: rate,
-	});
+	console.debug("[chatgpt-debug] collection rate", rate);
 	return rate.current_interval_ms;
 }
 
@@ -1462,6 +1502,7 @@ async function reportChatGptRetryPressure({
 	delayMs,
 	emit,
 	onUnlanedRateLimited,
+	laneContext,
 	providerBudget,
 	recordPacingThrottle,
 	response,
@@ -1470,6 +1511,7 @@ async function reportChatGptRetryPressure({
 	delayMs: number;
 	emit?: CollectContext["emit"] | undefined;
 	onUnlanedRateLimited?: (() => void) | undefined;
+	laneContext?: AdaptiveLaneRunContext | undefined;
 	providerBudget?: ProviderBudgetController | null | undefined;
 	recordPacingThrottle: boolean;
 	response?: { status?: number } | undefined;
@@ -1482,7 +1524,6 @@ async function reportChatGptRetryPressure({
 		});
 		await emitChatGptProviderBudgetTransitions({ emit, providerBudget });
 	}
-	const laneContext = currentAdaptiveLaneRunContext();
 	await laneContext?.reportPressure({
 		absorbedByRequestWait: true,
 		delayMs,
@@ -1554,6 +1595,13 @@ export function createChatGptApi({
 		}: { method: string; body?: unknown; parseJson?: boolean },
 	): Promise<ChatGptFetchResult> {
 		const timeoutMs = resolveChatGptBackendFetchTimeoutMs();
+		const measureProviderFetch =
+			(/^\/conversation\//.test(path) || path === "/conversations/batch") &&
+			typeof (
+				globalThis as typeof globalThis & {
+					__pdppPageshimDetailFetched?: unknown;
+				}
+			).__pdppPageshimDetailFetched === "function";
 		const evaluate = (a: ChatGptAuth): Promise<ChatGptFetchResult> =>
 			withTimeout(
 				page.evaluate(chatGptBackendFetchInBrowser, {
@@ -1561,6 +1609,7 @@ export function createChatGptApi({
 					method,
 					body,
 					parseJson,
+					...(measureProviderFetch ? { measureProviderFetch: true } : {}),
 					auth: a,
 					timeoutMs,
 				}),
@@ -1595,11 +1644,13 @@ export function createChatGptApi({
 		{
 			body,
 			captureResult,
+			laneContext,
 			method,
 			parseJson,
 		}: {
 			body?: unknown;
 			captureResult: boolean;
+			laneContext?: AdaptiveLaneRunContext | undefined;
 			method: string;
 			parseJson: boolean;
 		},
@@ -1661,6 +1712,7 @@ export function createChatGptApi({
 					delayMs,
 					emit,
 					onUnlanedRateLimited,
+					laneContext,
 					providerBudget,
 					recordPacingThrottle,
 					response,
@@ -1746,11 +1798,20 @@ export function createChatGptApi({
 		auth,
 		fetch(
 			path: string,
-			{ method = "GET", body }: { method?: string; body?: unknown } = {},
+			{
+				method = "GET",
+				body,
+				laneContext,
+			}: {
+				method?: string;
+				body?: unknown;
+				laneContext?: AdaptiveLaneRunContext | undefined;
+			} = {},
 		): Promise<ChatGptFetchResult> {
 			return fetchWithRetry(path, {
 				method,
 				body,
+				laneContext,
 				parseJson: true,
 				captureResult: true,
 			});
@@ -1785,6 +1846,9 @@ export function createChatGptApi({
 				.map((item) => ({
 					...(result.headers ? { headers: result.headers } : {}),
 					json: item,
+					...(result.providerFetchMs === undefined
+						? {}
+						: { providerFetchMs: result.providerFetchMs / json.length }),
 					status: result.status,
 				}));
 		},
@@ -2389,6 +2453,20 @@ export async function processConversationDetail(
 		detail: ConversationDetail | null,
 	) => Promise<void>,
 ): Promise<void> {
+	const processingStarted = performance.now();
+	const reportProcessingTime = (): void => {
+		(
+			globalThis as typeof globalThis & {
+				__pdppPageshimDetailProcessed?: (
+					conversationId: string,
+					processingMs: number,
+				) => void;
+			}
+		).__pdppPageshimDetailProcessed?.(
+			c.id,
+			performance.now() - processingStarted,
+		);
+	};
 	if (detail.status !== 200 || !detail.json?.mapping) {
 		deps.emit({
 			type: "PROGRESS",
@@ -2396,6 +2474,7 @@ export async function processConversationDetail(
 			message: `${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
 		});
 		// Fall back to list-only conversation record.
+		reportProcessingTime();
 		await emitConversation(c, null);
 		return;
 	}
@@ -2406,7 +2485,8 @@ export async function processConversationDetail(
 	const branchOrder = new Map(
 		currentBranch.map((entry, index) => [entry.nodeId, index]),
 	);
-	const candidates: { nodeId: string; msg: RecordData; onBranch: boolean }[] = [];
+	const candidates: { nodeId: string; msg: RecordData; onBranch: boolean }[] =
+		[];
 	const candidateIds = new Set<string>();
 	let filteredBranchCount = 0;
 	let filteredBySelection = 0;
@@ -2500,6 +2580,7 @@ export async function processConversationDetail(
 		mapping: emittedMapping,
 		current_node: emittedCurrentNode,
 	};
+	reportProcessingTime();
 	// Keep the established parent-first record order. The metadata now comes
 	// from the same selected, schema-valid records that will be emitted below.
 	await emitConversation(c, conversationDetail);
@@ -3069,7 +3150,8 @@ function readConversationBackfill(value: unknown): ConversationBackfill | null {
 		position_hint < 0 ||
 		!(typeof oldest_update_time === "string" || oldest_update_time === null) ||
 		!Array.isArray(boundary_ids) ||
-		(boundary_ids.length === 0 && (position_hint !== 0 || oldest_update_time !== null)) ||
+		(boundary_ids.length === 0 &&
+			(position_hint !== 0 || oldest_update_time !== null)) ||
 		!boundary_ids.every((id) => typeof id === "string" && id.length > 0)
 	) {
 		return null;
@@ -3078,6 +3160,70 @@ function readConversationBackfill(value: unknown): ConversationBackfill | null {
 }
 
 const CONVERSATION_PAGE_SIZE = 30;
+
+function logConversationListPageShape(
+	items: readonly unknown[],
+	page: number,
+): void {
+	const dateFieldsByItem: string[][] = [];
+	const allDateFields = new Set<string>();
+	for (const raw of items) {
+		if (!isChatGptJsonObject(raw)) {
+			dateFieldsByItem.push([]);
+			continue;
+		}
+		const fields = Object.keys(raw)
+			.filter((key) =>
+				/(?:date|time|created|updated|modified|timestamp)/i.test(key),
+			)
+			.sort();
+		for (const field of fields) allDateFields.add(field);
+		dateFieldsByItem.push(fields);
+	}
+	const shapeCounts = new Map<string, number>();
+	for (const fields of dateFieldsByItem) {
+		const shape = fields.join("+") || "none";
+		shapeCounts.set(shape, (shapeCounts.get(shape) ?? 0) + 1);
+	}
+	const orderField = [
+		"update_time",
+		"updated_at",
+		"last_updated",
+		"modified_at",
+		"update_date",
+		"created_time",
+		"create_time",
+		"created_at",
+		"create_date",
+	].find((field) => allDateFields.has(field));
+	let sawAscendingPair = false;
+	let comparablePairs = 0;
+	let previous: string | null = null;
+	for (const raw of items) {
+		const updateTime =
+			orderField && isChatGptJsonObject(raw) && raw[orderField]
+				? tsToIso(raw[orderField])
+				: null;
+		if (!updateTime) continue;
+		if (previous !== null) {
+			comparablePairs += 1;
+			if (updateTime > previous) sawAscendingPair = true;
+		}
+		previous = updateTime;
+	}
+	const order =
+		comparablePairs === 0
+			? "unknown"
+			: sawAscendingPair
+				? "not-newest-first"
+				: "newest-first";
+	const shapes = [...shapeCounts]
+		.map(([fields, count]) => `${fields}:${count}`)
+		.join(",");
+	console.info(
+		`[chatgpt-list-shape] page=${page} items=${items.length} dateFields=${[...allDateFields].sort().join(",") || "none"} itemShapes=${shapes} order=${order}`,
+	);
+}
 
 function conversationIsAtOrBeforeBackfillBoundary(
 	conversation: ConversationListItem,
@@ -3132,9 +3278,11 @@ function conversationBackfillBoundarySeen(
 }
 
 /**
- * Walk /conversations/search cursor pages newer than priorCursor and collect the list
- * items we still need to sync. Stops early once any update_time <= priorCursor
- * (conversations are returned ordered by updated desc).
+ * Walk /conversations/search cursor pages and collect the list items we still
+ * need to sync. Provider pages are not guaranteed to be newest-first, so a
+ * single old row never stops pagination. Incremental/window walks stop only
+ * after several complete pages contain timestamps that all fall before the
+ * requested boundary; missing timestamps reset that evidence.
  *
  * A failed or unreadable page (see classifyChatGptListPage) marks the
  * result `truncated: true` instead of ending the walk silently, so the caller
@@ -3160,11 +3308,11 @@ async function listConversationsSinceCursor(
 		: startCursor;
 	const resumeStartCursor = cursor;
 	const pageSize = CONVERSATION_PAGE_SIZE;
+	const requestedSince =
+		deps.requested.get("conversations")?.time_range?.since ??
+		deps.requested.get("messages")?.time_range?.since;
 	const complete = (): ConversationListResult => {
-		if (
-			resumeBackfill &&
-			!resumeBoundarySeen
-		) {
+		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search did not re-observe the saved backfill boundary",
@@ -3190,6 +3338,8 @@ async function listConversationsSinceCursor(
 		};
 	};
 	const maxPageAttempts = 3;
+	const maxConsecutiveOldPages = 3;
+	let consecutiveOldPages = 0;
 	let page = 0;
 	deps.emit({
 		type: "PROGRESS",
@@ -3200,9 +3350,9 @@ async function listConversationsSinceCursor(
 	});
 	while (true) {
 		const attempts: ConversationListItem[][] = [];
+		let logicalPageEntirelyOld = true;
 		let nextCursor: number | null = null;
 		let cursorDisagreed = false;
-		let boundaryHit = false;
 		let shouldProbeAgain = false;
 		for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
 			if (attempt > 0) {
@@ -3226,8 +3376,11 @@ async function listConversationsSinceCursor(
 					backfill: conversationBackfillAt(conversationsById.values(), cursor),
 				};
 			}
+			logConversationListPageShape(classified.items, page);
+			const pageItems: ConversationListItem[] = [];
 			const items: ConversationListItem[] = [];
 			let malformedItem = false;
+			let responseEntirelyOld = classified.items.length === pageSize;
 			for (const raw of classified.items) {
 				if (!isChatGptJsonObject(raw)) {
 					malformedItem = true;
@@ -3238,7 +3391,30 @@ async function listConversationsSinceCursor(
 					malformedItem = true;
 					break;
 				}
-				items.push({ ...raw, id });
+				const item = { ...raw, id } as ConversationListItem;
+				pageItems.push(item);
+				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				const isOld =
+					updateIso !== null &&
+					((priorCursor !== null && updateIso <= priorCursor) ||
+						(requestedSince !== undefined && updateIso < requestedSince));
+				if (!isOld) responseEntirelyOld = false;
+				if (priorCursor && updateIso && updateIso <= priorCursor) {
+					continue;
+				}
+				// The provider can return rows out of date order. Filter old rows from
+				// details, but keep walking every cursor so a later row is never lost.
+				if (requestedSince && updateIso === null) {
+					continue;
+				}
+				if (
+					requestedSince &&
+					updateIso !== null &&
+					updateIso < requestedSince
+				) {
+					continue;
+				}
+				items.push(item);
 			}
 			if (malformedItem) {
 				for (const stream of ["conversations", "messages"] as const) {
@@ -3260,7 +3436,7 @@ async function listConversationsSinceCursor(
 					backfill: conversationBackfillAt(conversationsById.values(), cursor),
 				};
 			}
-			if (items.length > pageSize) {
+			if (pageItems.length > pageSize) {
 				emitConversationListUnstable(
 					deps,
 					"ChatGPT conversation search returned more than one cursor page",
@@ -3272,12 +3448,9 @@ async function listConversationsSinceCursor(
 					backfill: conversationBackfillAt(conversationsById.values(), cursor),
 				};
 			}
-			attempts.push(items);
+			attempts.push(pageItems);
+			logicalPageEntirelyOld &&= responseEntirelyOld;
 			for (const item of items) {
-				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
-				if (priorCursor && updateIso && updateIso <= priorCursor) {
-					boundaryHit = true;
-				}
 				conversationsById.set(item.id, item);
 			}
 			if (resumeBackfill) {
@@ -3305,7 +3478,7 @@ async function listConversationsSinceCursor(
 			const responseNextCursor = conversationSearchNextCursor(
 				response.json,
 				cursor,
-				items.length,
+				pageItems.length,
 				pageSize,
 			);
 			if (attempt === 0) {
@@ -3313,41 +3486,18 @@ async function listConversationsSinceCursor(
 			} else if (responseNextCursor !== nextCursor) {
 				cursorDisagreed = true;
 			}
-			// Retry a watermark page so a transient short response cannot hide newer
-			// records. Other short pages are retried to union ids, then follow the
-			// server's cursor even when the attempts disagree on their item sets.
-			if (items.length === pageSize && !boundaryHit) {
+			// Page ordering is not stable. Require several complete old pages before
+			// stopping, so an old row cannot hide a later in-window row on the same
+			// page or one of the next pages. A missing timestamp is never old-page
+			// evidence. Full scans and resumable backfills do not use this shortcut.
+			if (pageItems.length >= pageSize) {
 				break;
 			}
-			if (boundaryHit && attempt === maxPageAttempts - 1) {
-				if (cursorDisagreed || !hasConversationPageConsensus(attempts)) {
-					emitConversationListUnstable(
-						deps,
-						"ChatGPT conversation search returned a changing watermark page",
-						{
-							cursor,
-							checks: attempts.length,
-							item_counts: attempts.map((p) => p.length),
-						},
-					);
-					return {
-						items: [...conversationsById.values()],
-						truncated: true,
-						backfill: conversationBackfillAt(conversationsById.values(), cursor),
-					};
-				}
-				return {
-					...complete(),
-				};
-			}
-			if (!boundaryHit && items.length >= pageSize) {
-				break;
-			}
-			if (!boundaryHit && items.length === 0 && responseNextCursor === null) {
+			if (pageItems.length === 0 && responseNextCursor === null) {
 				shouldProbeAgain = true;
 				break;
 			}
-			if (!boundaryHit && responseNextCursor !== null) {
+			if (responseNextCursor !== null) {
 				if (attempt === maxPageAttempts - 1) break;
 				continue;
 			}
@@ -3355,10 +3505,7 @@ async function listConversationsSinceCursor(
 				break;
 			}
 		}
-		if (
-			cursorDisagreed ||
-			(boundaryHit && !hasConversationPageConsensus(attempts))
-		) {
+		if (cursorDisagreed) {
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search returned disagreeing cursor probes",
@@ -3425,10 +3572,13 @@ async function listConversationsSinceCursor(
 				pageSize,
 			);
 		}
-		if (boundaryHit) {
-			return {
-				...complete(),
-			};
+		if (!resumeBackfill && (priorCursor !== null || requestedSince)) {
+			consecutiveOldPages = logicalPageEntirelyOld
+				? consecutiveOldPages + 1
+				: 0;
+			if (consecutiveOldPages >= maxConsecutiveOldPages) {
+				return complete();
+			}
 		}
 		if (nextCursor === null) {
 			// A non-empty short page with no explicit continuation is still followed
@@ -3501,18 +3651,6 @@ function emitConversationListUnstable(
 			diagnostics,
 		});
 	}
-}
-
-function hasConversationPageConsensus(
-	pages: readonly ConversationListItem[][],
-): boolean {
-	if (pages.length < 2) {
-		return true;
-	}
-	const signatures = pages.map((items) =>
-		[...new Set(items.map((item) => item.id))].sort().join("\u0000"),
-	);
-	return signatures.every((signature) => signature === signatures[0]);
 }
 
 function waitForConversationListRetry(
@@ -4365,6 +4503,8 @@ export async function runMessagesAndConversationsWithDetail(
 	) => Promise<void>,
 	pacing: ConversationDetailPacingOptions = {},
 ): Promise<ConversationDetailCoverage> {
+	const detailStartedAt = Date.now();
+	let completedDetails = 0;
 	const detailDeps = deps.emittedMessageIdsThisRun
 		? deps
 		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
@@ -4444,7 +4584,10 @@ export async function runMessagesAndConversationsWithDetail(
 		// gate. The controller computes the delay without sleeping (signal mode);
 		// the lane takes max(launchDelay, cooldown, hint).
 		...(providerBudget
-			? { launchDelayHint: (): number => providerBudget.pacingDelayHint() }
+			? {
+					launchDelayHint: (): number =>
+						batchDetailCache.size > 0 ? 0 : providerBudget.pacingDelayHint(),
+				}
 			: {}),
 		pressureMaxDelayMs: CHATGPT_RATE_LIMIT_MAX_DELAY_MS,
 		pressureMinDelayMs: CHATGPT_RATE_LIMIT_BASE_DELAY_MS,
@@ -4495,6 +4638,11 @@ export async function runMessagesAndConversationsWithDetail(
 	const hydratedKeys = new Set<string>();
 	const batchDetailCache = new Map<string, ChatGptFetchResult>();
 	const batchDetailCacheHits = new Set<string>();
+	const conversationIndexById = new Map(
+		convosToSync.map((conversation, index) => [conversation.id, index]),
+	);
+	let nextBatchStart = 0;
+	let batchEndpointUnavailable = false;
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
 	// then abort queued lane work. With the launch-jitter floor deleted (now an ε
@@ -4513,10 +4661,17 @@ export async function runMessagesAndConversationsWithDetail(
 			emit: deps.emit,
 			providerBudget,
 		});
+	}
+
+	async function reportConversationDetailHydrated(): Promise<void> {
+		completedDetails += 1;
 		lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
-			deps.emit,
 			providerBudget,
 			lastEmittedRateIntervalMs,
+			deps.progress,
+			completedDetails,
+			convosToSync.length,
+			Date.now() - detailStartedAt,
 		);
 	}
 
@@ -4543,44 +4698,128 @@ export async function runMessagesAndConversationsWithDetail(
 	function cacheBatchConversationDetails(
 		details: readonly ChatGptFetchResult[],
 		chunkIds: readonly string[],
-	): void {
+	): number {
 		const chunkIdSet = new Set(chunkIds);
+		let cached = 0;
 		for (const detail of details) {
 			const id = cachedBatchDetailId(detail, chunkIdSet);
 			if (id) {
 				batchDetailCache.set(id, detail);
+				cached += 1;
 			}
 		}
+		return cached;
 	}
 
-	async function prefetchConversationDetailBatches(): Promise<void> {
+	let batchParallelism =
+		(deps.preDetailPressure?.rateLimited ?? 0) > 0
+			? 1
+			: CHATGPT_BATCH_INITIAL_PARALLELISM;
+	let cleanBatchWaves = 0;
+	let batchPrefetchStart = 0;
+	let batchPrefetchPromise: Promise<void> | null = null;
+
+	async function prefetchConversationDetailBatchWave(
+		start: number,
+	): Promise<void> {
 		const { fetchBatch } = deps.api;
-		if (!fetchBatch || convosToSync.length === 0 || runBudget.shouldStop()) {
+		if (
+			!fetchBatch ||
+			batchEndpointUnavailable ||
+			start < nextBatchStart ||
+			start >= convosToSync.length ||
+			runBudget.shouldStop()
+		) {
 			return;
 		}
-		const prefetchIds = conversationIdsWithinDetailBudget();
+		const budgetIds = new Set(conversationIdsWithinDetailBudget());
+		const end = Math.min(
+			convosToSync.length,
+			start + batchParallelism * CHATGPT_CONVERSATION_BATCH_MAX_IDS,
+		);
+		const chunks: string[][] = [];
 		for (
-			let start = 0;
-			start < prefetchIds.length;
-			start += CHATGPT_CONVERSATION_BATCH_MAX_IDS
+			let offset = start;
+			offset < end;
+			offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS
 		) {
-			if (runBudget.shouldStop()) {
-				return;
-			}
-			const chunkIds = prefetchIds.slice(
-				start,
-				start + CHATGPT_CONVERSATION_BATCH_MAX_IDS,
-			);
-			let details: ChatGptFetchResult[];
-			try {
-				details = await fetchBatch(chunkIds);
-			} catch {
-				// Batch is an optimization. If the endpoint is unavailable, stop trying
-				// it for this pass and let the existing per-id lane preserve correctness.
-				return;
-			}
-			await recordConversationDetailProviderSuccess();
-			cacheBatchConversationDetails(details, chunkIds);
+			const chunkIds = convosToSync
+				.slice(offset, offset + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
+				.map((conversation) => conversation.id)
+				.filter((id) => budgetIds.has(id));
+			if (chunkIds.length > 0) chunks.push(chunkIds);
+		}
+		batchPrefetchStart = start;
+		nextBatchStart = end;
+		if (chunks.length === 0) return;
+
+		const rateLimitedBeforeWave = deps.preDetailPressure?.rateLimited ?? 0;
+		let waveWasClean = true;
+		await Promise.all(
+			chunks.map(async (chunkIds) => {
+				const batchStarted = performance.now();
+				const setTimingConversation = (
+					globalThis as typeof globalThis & {
+						__pdppPageshimSetTimingConversation?: (
+							conversationIds: string[] | null,
+						) => void;
+					}
+				).__pdppPageshimSetTimingConversation;
+				setTimingConversation?.(chunkIds);
+				try {
+					const details = await fetchBatch(chunkIds);
+					const elapsedPerDetail =
+						details.length > 0
+							? (performance.now() - batchStarted) / details.length
+							: 0;
+					const recordDetailTiming = (
+						globalThis as typeof globalThis & {
+							__pdppPageshimDetailFetched?: (
+								conversationId: string,
+								detailMs: number,
+								providerFetchMs: number,
+							) => void;
+						}
+					).__pdppPageshimDetailFetched;
+					const chunkIdSet = new Set(chunkIds);
+					for (const detail of details) {
+						const id = cachedBatchDetailId(detail, chunkIdSet);
+						if (id) {
+							recordDetailTiming?.(
+								id,
+								elapsedPerDetail,
+								detail.providerFetchMs ?? elapsedPerDetail,
+							);
+						}
+					}
+					if (
+						cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length
+					)
+						waveWasClean = false;
+					await recordConversationDetailProviderSuccess();
+				} catch {
+					// Batch results are an optimization; the ordered per-id lane retries gaps.
+					batchEndpointUnavailable = true;
+					waveWasClean = false;
+				} finally {
+					setTimingConversation?.(null);
+				}
+			}),
+		);
+		const rateLimitedDuringWave =
+			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBeforeWave;
+		if (!waveWasClean || rateLimitedDuringWave) {
+			batchParallelism = 1;
+			cleanBatchWaves = 0;
+			return;
+		}
+		cleanBatchWaves += 1;
+		if (
+			cleanBatchWaves >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP &&
+			batchParallelism < CHATGPT_BATCH_MAX_PARALLELISM
+		) {
+			batchParallelism += 1;
+			cleanBatchWaves = 0;
 		}
 	}
 
@@ -4833,9 +5072,12 @@ export async function runMessagesAndConversationsWithDetail(
 				providerBudget,
 			});
 			lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
-				deps.emit,
 				providerBudget,
 				lastEmittedRateIntervalMs,
+				deps.progress,
+				completedDetails,
+				convosToSync.length,
+				Date.now() - detailStartedAt,
 			);
 
 			// SLVP-ideal: wait out the cooldown in-run and re-fetch the SAME
@@ -4895,10 +5137,11 @@ export async function runMessagesAndConversationsWithDetail(
 	// returned a durable-defer result, propagate it. Non-recoverable errors re-throw.
 	async function fetchConversationDetailWithRecoverableRetry(
 		c: ConversationListItem,
+		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		for (;;) {
 			try {
-				return await fetchConversationDetailWaitingOutCircuit(c);
+				return await fetchConversationDetailWaitingOutCircuit(c, laneContext);
 			} catch (err) {
 				const fetchErrorDefer = await maybeDeferForFetchError(c, err);
 				if (fetchErrorDefer) {
@@ -4975,7 +5218,22 @@ export async function runMessagesAndConversationsWithDetail(
 
 	async function fetchConversationDetailWaitingOutCircuit(
 		c: ConversationListItem,
+		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
+		const conversationIndex = conversationIndexById.get(c.id);
+		if (conversationIndex !== undefined) {
+			if (conversationIndex >= nextBatchStart) {
+				const wave = prefetchConversationDetailBatchWave(conversationIndex);
+				batchPrefetchPromise = wave;
+				await wave;
+			} else if (
+				batchPrefetchPromise &&
+				conversationIndex >= batchPrefetchStart &&
+				conversationIndex < nextBatchStart
+			) {
+				await batchPrefetchPromise;
+			}
+		}
 		const batchDetail = batchDetailCache.get(c.id);
 		if (batchDetail) {
 			batchDetailCache.delete(c.id);
@@ -4990,6 +5248,7 @@ export async function runMessagesAndConversationsWithDetail(
 			try {
 				return await deps.api.fetch(
 					`/conversation/${encodeURIComponent(c.id)}`,
+					{ laneContext },
 				);
 			} catch (err) {
 				await handleCircuitOpenForWaitOut(err);
@@ -4997,13 +5256,11 @@ export async function runMessagesAndConversationsWithDetail(
 		}
 	}
 
-	await prefetchConversationDetailBatches();
-
 	await runLaneUntilTailStopped(
 		lane,
 		convosToSync,
 		tailStopController.signal,
-		async (c) => {
+		async (c, laneContext) => {
 			if (!c) {
 				return { status: 404, json: null };
 			}
@@ -5045,50 +5302,93 @@ export async function runMessagesAndConversationsWithDetail(
 			if (runBudgetDefer) {
 				return runBudgetDefer;
 			}
-			const detail = await fetchConversationDetailWithRecoverableRetry(c);
-			if (detail.deferredDueToPressure) {
-				// fetchConversationDetailWithRecoverableRetry surfaced a durable-defer
-				// result from maybeDeferForFetchError — propagate it directly.
-				return detail;
-			}
-			if (detail.status !== 200) {
-				providerBudget?.recordFailure();
-				await emitChatGptProviderBudgetTransitions({
-					emit: deps.emit,
-					providerBudget,
-				});
-				throw new Error(
-					`required conversation detail ${c.id} failed with http ${detail.status}`,
+			const setTimingConversation = (
+				globalThis as typeof globalThis & {
+					__pdppPageshimSetTimingConversation?: (
+						conversationIds: string[] | null,
+					) => void;
+				}
+			).__pdppPageshimSetTimingConversation;
+			setTimingConversation?.([c.id]);
+			try {
+				const detailStarted = performance.now();
+				const detail = await fetchConversationDetailWithRecoverableRetry(
+					c,
+					laneContext,
 				);
+				const detailMs = performance.now() - detailStarted;
+				if (detail.deferredDueToPressure) {
+					// fetchConversationDetailWithRecoverableRetry surfaced a durable-defer
+					// result from maybeDeferForFetchError — propagate it directly.
+					return detail;
+				}
+				if (detail.status !== 200) {
+					providerBudget?.recordFailure();
+					await emitChatGptProviderBudgetTransitions({
+						emit: deps.emit,
+						providerBudget,
+					});
+					throw new Error(
+						`required conversation detail ${c.id} failed with http ${detail.status}`,
+					);
+				}
+				const recordDetailTiming = (
+					globalThis as typeof globalThis & {
+						__pdppPageshimDetailFetched?: (
+							conversationId: string,
+							detailMs: number,
+							providerFetchMs: number,
+						) => void;
+					}
+				).__pdppPageshimDetailFetched;
+				recordDetailTiming?.(
+					c.id,
+					detailMs,
+					detail.providerFetchMs ?? detailMs,
+				);
+				await processConversationDetail(
+					detailDeps,
+					c,
+					detail,
+					emitConversation,
+				);
+				// §10-D: suppress additive-decrease during the cooldown-exempt recovery
+				// lane so the shared pacer interval is not un-learned. Throttles still
+				// fire (recovery may decelerate, never accelerate the pacer).
+				const servedFromBatchCache = batchDetailCacheHits.delete(c.id);
+				if (!servedFromBatchCache) {
+					await recordConversationDetailProviderSuccess();
+				}
+				await reportConversationDetailHydrated();
+				// Reset the progress-based give-up counter: any successful fetch proves the
+				// account is alive, so N consecutive no-progress waits restarts from 0.
+				consecutiveWaitOutsWithoutSuccess = 0;
+				hydratedKeys.add(c.id);
+				coverage.hydratedKeys.push(c.id);
+				// Count this hydration against the bounded-run cap. Done after a successful
+				// fetch so deferred/failed conversations never consume the size budget; the
+				// next `reason()` check (this pass or the forward pass sharing the budget)
+				// sees the updated count.
+				runBudget.recordDetailFetch();
+				const synced = convosToSync.indexOf(c) + 1;
+				if (
+					synced === 1 ||
+					synced % CHATGPT_DETAIL_PROGRESS_EVERY === 0 ||
+					synced === convosToSync.length
+				) {
+					const progressMsg = {
+						type: "PROGRESS",
+						stream: "messages",
+						message: `Synced ${synced} / ${convosToSync.length} conversations`,
+						count: synced,
+						total: convosToSync.length,
+					} as const;
+					deps.emit(progressMsg);
+				}
+				return detail;
+			} finally {
+				setTimingConversation?.(null);
 			}
-			await processConversationDetail(detailDeps, c, detail, emitConversation);
-			// §10-D: suppress additive-decrease during the cooldown-exempt recovery
-			// lane so the shared pacer interval is not un-learned. Throttles still
-			// fire (recovery may decelerate, never accelerate the pacer).
-			const servedFromBatchCache = batchDetailCacheHits.delete(c.id);
-			if (!servedFromBatchCache) {
-				await recordConversationDetailProviderSuccess();
-			}
-			// Reset the progress-based give-up counter: any successful fetch proves the
-			// account is alive, so N consecutive no-progress waits restarts from 0.
-			consecutiveWaitOutsWithoutSuccess = 0;
-			hydratedKeys.add(c.id);
-			coverage.hydratedKeys.push(c.id);
-			// Count this hydration against the bounded-run cap. Done after a successful
-			// fetch so deferred/failed conversations never consume the size budget; the
-			// next `reason()` check (this pass or the forward pass sharing the budget)
-			// sees the updated count.
-			runBudget.recordDetailFetch();
-			const synced = convosToSync.indexOf(c) + 1;
-			const progressMsg = {
-				type: "PROGRESS",
-				stream: "messages",
-				message: `Synced ${synced} / ${convosToSync.length} conversations`,
-				count: synced,
-				total: convosToSync.length,
-			} as const;
-			deps.emit(progressMsg);
-			return detail;
 		},
 	);
 	return coverage;
@@ -5112,7 +5412,10 @@ async function runLaneUntilTailStopped(
 	lane: AdaptiveLane<ChatGptFetchResult>,
 	items: ConversationListItem[],
 	tailStopSignal: AbortSignal,
-	task: (c: ConversationListItem) => Promise<ChatGptFetchResult>,
+	task: (
+		c: ConversationListItem,
+		context: AdaptiveLaneRunContext,
+	) => Promise<ChatGptFetchResult>,
 ): Promise<void> {
 	try {
 		await lane.runAll(items, task, { signal: tailStopSignal });
@@ -5476,9 +5779,8 @@ export async function runConversationsAndMessagesStreams(
 			: null,
 		wantsMessages ? readConversationBackfill(messagesCursor?.backfill) : null,
 	].filter((backfill): backfill is ConversationBackfill => backfill !== null);
-	const savedBackfill = savedBackfills.sort(
-		(a, b) => a.position_hint - b.position_hint,
-	)[0] ?? null;
+	const savedBackfill =
+		savedBackfills.sort((a, b) => a.position_hint - b.position_hint)[0] ?? null;
 	const listedByCursor = new Map<string, Promise<ConversationListResult>>();
 	const listForCursor = (
 		cursor: string | null,
@@ -5536,11 +5838,7 @@ export async function runConversationsAndMessagesStreams(
 		// Forward walk suppressed; persist the learned interval so warm-start
 		// survives, then return — deferred work stays durable DETAIL_GAPs for the
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
-		persistChatGptPacingStateOnly(
-			deps,
-			priorMessagesCursor,
-			savedBackfill,
-		);
+		persistChatGptPacingStateOnly(deps, priorMessagesCursor, savedBackfill);
 		return;
 	}
 
@@ -5659,13 +5957,13 @@ async function emitMessagesCoverageAndState(
 	}
 	const maxMessagesUpdate = messagesListTruncated
 		? oldestAvailableConversationCursor(
-			minUpdateTimeIso(messageDetailConversations),
-			priorMessagesCursor,
-		)
+				minUpdateTimeIso(messageDetailConversations),
+				priorMessagesCursor,
+			)
 		: newestConversationCursor(
-			maxUpdateTimeIso(messageDetailConversations),
-			priorMessagesCursor,
-		);
+				maxUpdateTimeIso(messageDetailConversations),
+				priorMessagesCursor,
+			);
 	deps.emit({
 		type: "STATE",
 		stream: "messages",
@@ -5700,13 +5998,13 @@ function emitConversationsState(
 ): void {
 	const maxUpdate = conversationsListTruncated
 		? oldestAvailableConversationCursor(
-			minUpdateTimeIso(conversationsToSync),
-			priorConversationsCursor,
-		)
+				minUpdateTimeIso(conversationsToSync),
+				priorConversationsCursor,
+			)
 		: newestConversationCursor(
-			maxUpdateTimeIso(conversationsToSync),
-			priorConversationsCursor,
-		);
+				maxUpdateTimeIso(conversationsToSync),
+				priorConversationsCursor,
+			);
 	deps.emit({
 		type: "STATE",
 		stream: "conversations",
@@ -5740,6 +6038,103 @@ function makeEmitRecord(
 		}
 		return baseEmitRecord(stream, data);
 	};
+}
+
+export async function collectChatGpt(
+	ctx: CollectContext | BrowserCollectContext,
+): Promise<void> {
+	const {
+		state,
+		requested,
+		emit,
+		emitRecord: baseEmitRecord,
+		progress,
+		capture,
+	} = ctx;
+	const { page } = ctx as BrowserCollectContext;
+
+	// Run-scoped accumulator for served 429s seen outside the detail lane
+	// (list pagination + the non-detail streams). createChatGptApi bumps it
+	// via onUnlanedRateLimited; the detail phase reads it to seed its density
+	// stop so pre-detail source pressure defers the tail earlier.
+	const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
+
+	// Run-scoped bounded-run envelope, created once so the gap-recovery pass
+	// and the forward-walk pass share one budget. By default ChatGPT has no
+	// fixed size/time cap; positive env values opt into explicit envelopes.
+	const runBudget = new ChatGptRunBudget({
+		maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
+		maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+	});
+	// Warm-start: pass the RAW persisted pacing (interval + when it was
+	// learned) so ProviderPacing can apply the §10-E staleness guard itself —
+	// a stale interval (idle > 6h) cold-starts instead of bursting into a
+	// possibly-tightened quota. The descent compounds across fresh runs.
+	const providerBudget = resolveChatGptProviderBudget(
+		process.env,
+		readChatGptPersistedPacing(state),
+	);
+
+	// API client closes over page + capture — no module-level mutable state,
+	// auth cached inside the closure for the run's lifetime.
+	const api = createChatGptApi({
+		page,
+		capture,
+		emit,
+		onUnlanedRateLimited: () => {
+			preDetailPressure.rateLimited += 1;
+		},
+		providerBudget,
+	});
+	const emitRecord = makeEmitRecord(baseEmitRecord);
+
+	// Verify session (extract bearer token for /backend-api calls)
+	const auth = await api.auth();
+	progress(
+		`Authenticated to ChatGPT (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
+	);
+
+	const deps: StreamDeps = {
+		api,
+		sleep: (milliseconds) =>
+			new Promise((resolve) => setTimeout(resolve, milliseconds)),
+		detailGaps: ctx.detailGaps,
+		emit,
+		emitRecord,
+		isRecordSelected: ctx.isRecordSelected,
+		preDetailPressure,
+		progress,
+		providerBudget,
+		// §4.3: thread recoveryOnly from the CollectContext (sourced from the
+		// START message's recovery_only field) into the dep bag so
+		// runConversationsAndMessagesStreams can gate the forward walk. Normalize
+		// to a concrete boolean (CollectContext.recoveryOnly is optional).
+		recoveryOnly: ctx.recoveryOnly === true,
+		requested,
+		requestDetailGapPage: ctx.requestDetailGapPage,
+		runBudget,
+	};
+
+	if (isChatGptSideEffectProbeEnabled()) {
+		await runChatGptSideEffectProbe({ api, emit, page });
+		return;
+	}
+
+	if (requested.has("memories")) {
+		await runMemoriesStream(deps);
+	}
+	if (requested.has("custom_gpts")) {
+		await runCustomGptsStream(deps);
+	}
+	if (requested.has("custom_instructions")) {
+		await runCustomInstructionsStream(deps, state);
+	}
+	if (requested.has("shared_conversations")) {
+		await runSharedConversationsStream(deps, state);
+	}
+	if (requested.has("conversations") || requested.has("messages")) {
+		await runConversationsAndMessagesStreams(deps, state);
+	}
 }
 
 // ─── Entry ─────────────────────────────────────────────────────────────
@@ -5803,100 +6198,7 @@ if (isMainModule(import.meta.url)) {
 				sendInteraction,
 			});
 		},
-		async collect(ctx: CollectContext | BrowserCollectContext): Promise<void> {
-			const {
-				state,
-				requested,
-				emit,
-				emitRecord: baseEmitRecord,
-				progress,
-				capture,
-			} = ctx;
-			const { page } = ctx as BrowserCollectContext;
-
-			// Run-scoped accumulator for served 429s seen outside the detail lane
-			// (list pagination + the non-detail streams). createChatGptApi bumps it
-			// via onUnlanedRateLimited; the detail phase reads it to seed its density
-			// stop so pre-detail source pressure defers the tail earlier.
-			const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
-
-			// Run-scoped bounded-run envelope, created once so the gap-recovery pass
-			// and the forward-walk pass share one budget. By default ChatGPT has no
-			// fixed size/time cap; positive env values opt into explicit envelopes.
-			const runBudget = new ChatGptRunBudget({
-				maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-				maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
-			});
-			// Warm-start: pass the RAW persisted pacing (interval + when it was
-			// learned) so ProviderPacing can apply the §10-E staleness guard itself —
-			// a stale interval (idle > 6h) cold-starts instead of bursting into a
-			// possibly-tightened quota. The descent compounds across fresh runs.
-			const providerBudget = resolveChatGptProviderBudget(
-				process.env,
-				readChatGptPersistedPacing(state),
-			);
-
-			// API client closes over page + capture — no module-level mutable state,
-			// auth cached inside the closure for the run's lifetime.
-			const api = createChatGptApi({
-				page,
-				capture,
-				emit,
-				onUnlanedRateLimited: () => {
-					preDetailPressure.rateLimited += 1;
-				},
-				providerBudget,
-			});
-			const emitRecord = makeEmitRecord(baseEmitRecord);
-
-			// Verify session (extract bearer token for /backend-api calls)
-			const auth = await api.auth();
-			progress(
-				`Authenticated to ChatGPT (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
-			);
-
-			const deps: StreamDeps = {
-				api,
-				sleep: (milliseconds) =>
-					new Promise((resolve) => setTimeout(resolve, milliseconds)),
-				detailGaps: ctx.detailGaps,
-				emit,
-				emitRecord,
-				isRecordSelected: ctx.isRecordSelected,
-				preDetailPressure,
-				progress,
-				providerBudget,
-				// §4.3: thread recoveryOnly from the CollectContext (sourced from the
-				// START message's recovery_only field) into the dep bag so
-				// runConversationsAndMessagesStreams can gate the forward walk. Normalize
-				// to a concrete boolean (CollectContext.recoveryOnly is optional).
-				recoveryOnly: ctx.recoveryOnly === true,
-				requested,
-				requestDetailGapPage: ctx.requestDetailGapPage,
-				runBudget,
-			};
-
-			if (isChatGptSideEffectProbeEnabled()) {
-				await runChatGptSideEffectProbe({ api, emit, page });
-				return;
-			}
-
-			if (requested.has("memories")) {
-				await runMemoriesStream(deps);
-			}
-			if (requested.has("custom_gpts")) {
-				await runCustomGptsStream(deps);
-			}
-			if (requested.has("custom_instructions")) {
-				await runCustomInstructionsStream(deps, state);
-			}
-			if (requested.has("shared_conversations")) {
-				await runSharedConversationsStream(deps, state);
-			}
-			if (requested.has("conversations") || requested.has("messages")) {
-				await runConversationsAndMessagesStreams(deps, state);
-			}
-		},
+		collect: collectChatGpt,
 		retryablePattern: CHATGPT_RETRYABLE_ERROR_PATTERN,
 	});
 }

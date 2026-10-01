@@ -149,6 +149,7 @@ function makeFakeDownload(bytes: Buffer): {
 function makeContext(overrides: {
 	streams: string[];
 	resources?: Record<string, string[]>;
+	since?: string;
 	state?: Record<string, unknown>;
 	fetchStub: FetchStub;
 }): {
@@ -162,6 +163,7 @@ function makeContext(overrides: {
 	const page = new FakePage(overrides.fetchStub);
 	const scopeStreams = overrides.streams.map((name) => ({
 		name,
+		...(overrides.since ? { time_range: { since: overrides.since } } : {}),
 		...(overrides.resources?.[name]
 			? { resources: overrides.resources[name] }
 			: {}),
@@ -189,10 +191,7 @@ function makeContext(overrides: {
 		emitRecord: harness.emitRecord,
 		isRecordSelected: selector.isSelected,
 		emittedAt: "2026-01-01T00:00:00.000Z",
-		progress: (
-			message: string,
-			extra: object = {},
-		): Promise<void> => {
+		progress: (message: string, extra: object = {}): Promise<void> => {
 			harness.emit({ type: "PROGRESS", message, ...extra });
 			return Promise.resolve();
 		},
@@ -246,6 +245,7 @@ const PROJECT_JSON = {
 async function buildZipBytes(
 	users?: unknown,
 	conversations: unknown = CONVERSATIONS_JSON,
+	project: unknown = PROJECT_JSON,
 ): Promise<Buffer> {
 	const { deflateRawSync } = await import("node:zlib");
 	const files = [
@@ -255,7 +255,7 @@ async function buildZipBytes(
 		},
 		{
 			name: "projects/proj-1.json",
-			content: Buffer.from(JSON.stringify(PROJECT_JSON)),
+			content: Buffer.from(JSON.stringify(project)),
 		},
 	];
 	if (users !== undefined)
@@ -426,6 +426,86 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 		"synced_at" in (finalConvState.cursor as Record<string, unknown>),
 		"final conversations STATE must carry synced_at",
 	);
+});
+
+test("collectAnthropic: time window filters conversations with their messages and filters projects and documents", async () => {
+	const now = Date.now();
+	const since = new Date(now - 30 * 86_400_000).toISOString();
+	const recent = new Date(now - 2 * 86_400_000).toISOString();
+	const old = new Date(now - 31 * 86_400_000).toISOString();
+	const baseMessage = CONVERSATIONS_JSON[0]?.chat_messages[0] ?? {};
+	const zipBytes = await buildZipBytes(
+		undefined,
+		[
+			{
+				...CONVERSATIONS_JSON[0],
+				uuid: "conv-recent",
+				updated_at: recent,
+				chat_messages: [{ ...baseMessage, uuid: "msg-recent" }],
+			},
+			{
+				...CONVERSATIONS_JSON[0],
+				uuid: "conv-old",
+				updated_at: old,
+				chat_messages: [{ ...baseMessage, uuid: "msg-old" }],
+			},
+		],
+		{
+			...PROJECT_JSON,
+			updated_at: recent,
+			docs: [
+				{
+					uuid: "doc-recent",
+					filename: "new.md",
+					content: "new",
+					updated_at: recent,
+				},
+				{
+					uuid: "doc-old",
+					filename: "old.md",
+					content: "old",
+					updated_at: old,
+				},
+			],
+		},
+	);
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		if (url.includes("/export_data"))
+			return Promise.resolve(jsonResponse(200, { nonce: "nonce-window" }));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page } = makeContext({
+		streams: ["conversations", "messages", "projects", "project_documents"],
+		since,
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+	await collectAnthropic(ctx);
+	const idsByStream = Object.fromEntries(
+		["conversations", "messages", "projects", "project_documents"].map(
+			(stream) => [
+				stream,
+				emitted
+					.filter((record) => record.stream === stream)
+					.map((record) => record.data.id),
+			],
+		),
+	);
+	assert.deepEqual(idsByStream, {
+		conversations: ["conv-recent"],
+		messages: ["msg-recent"],
+		projects: ["proj-1"],
+		project_documents: ["doc-recent"],
+	});
 });
 
 test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is left out with its messages in a PROGRESS note; no stream is skipped", async () => {
@@ -1527,7 +1607,8 @@ test("collectAnthropic: manifest with an empty conversations part is a verified 
 	const final = statesOf(protocolMessages).findLast(
 		(m) => m.stream === "conversations",
 	);
-	assert.ok("synced_at" in (final?.cursor as Record<string, unknown>));
+	assert.ok(final?.cursor);
+	assert.ok("synced_at" in (final.cursor as Record<string, unknown>));
 });
 
 test("collectAnthropic: manifest projects part with unknown content skips projects and project_documents only", async () => {
@@ -1669,9 +1750,10 @@ for (const scenario of [
 		const conversationsState = statesOf(protocolMessages).findLast(
 			(m) => m.stream === "conversations",
 		);
+		assert.ok(conversationsState?.cursor);
 		assert.ok(
 			"last_export_requested_at" in
-				(conversationsState?.cursor as Record<string, unknown>),
+				(conversationsState.cursor as Record<string, unknown>),
 		);
 	});
 }

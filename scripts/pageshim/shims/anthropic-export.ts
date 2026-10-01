@@ -33,7 +33,12 @@ import type { ShimPage } from "../runtime.ts";
 
 type CaptureResult = { ok: boolean; ready?: boolean; error?: string };
 type ExtractResult =
-	| { ok: true; names: string[]; json: Record<string, unknown> }
+	| {
+			ok: true;
+			handle: string;
+			names: string[];
+			entries: Array<{ name: string; size: number }>;
+	  }
 	| { ok: false; error: string };
 export interface ExportHostPage extends ShimPage {
 	captureDownload: (url: string, opts?: unknown) => Promise<CaptureResult>;
@@ -41,6 +46,12 @@ export interface ExportHostPage extends ShimPage {
 		handle: string | null,
 		opts?: unknown,
 	) => Promise<ExtractResult>;
+	readZipEntryChunk: (
+		handle: string | null,
+		entryName: string,
+		offset: number,
+		length: number,
+	) => Promise<{ ok: boolean; text?: string; error?: string }>;
 }
 
 const CLAUDE_ORIGIN = "https://claude.ai";
@@ -49,7 +60,10 @@ const OLD_FORMAT_DOWNLOAD = /\/export\/[^/]+\/download\/[^/?#]+/;
 let host: ExportHostPage | null = null;
 let armedUrl: string | null = null;
 /** Extracted archives, keyed by the path index.ts thinks it saved to. */
-const archives = new Map<string, Extract<ExtractResult, { ok: true }>>();
+const archives = new Map<
+	string,
+	{ names: string[]; entries: Array<{ name: string; size: number }> }
+>();
 const openFiles = new Map<number, string>();
 let nextFd = 3;
 
@@ -130,7 +144,29 @@ export async function savePlaywrightDownload(
 		throw new Error(
 			`The Claude export archive could not be read: ${r?.error ?? "no result"}`,
 		);
-	archives.set(path, r);
+	archives.set(path, { names: r.names, entries: r.entries });
+	activeArchiveHandle = r.handle;
+}
+
+export async function readSavedZipEntryChunk(
+	entryName: string,
+	offset: number,
+	length: number,
+): Promise<string> {
+	if (!host) throw new Error("pageshim: export host is not bound");
+	if (!activeArchiveHandle)
+		throw new Error("pageshim: no extracted archive is active");
+	const r = await host.readZipEntryChunk(
+		activeArchiveHandle,
+		entryName,
+		offset,
+		length,
+	);
+	if (!r?.ok || typeof r.text !== "string")
+		throw new Error(
+			`The Claude export entry could not be read: ${r?.error ?? "no result"}`,
+		);
+	return r.text;
 }
 
 // ── bounded-zip-archive.ts ───────────────────────────────────────────────
@@ -169,15 +205,15 @@ export function readZipEntriesFromFile(
 		seen.add(name);
 	}
 	const files = archive.names.filter((name) => !name.endsWith("/"));
-	return files.map((name) => ({
-		name,
-		data: () => {
-			// The host inflates only .json entries that parse.
-			if (!Object.hasOwn(archive.json, name)) return { toString: () => "" };
-			const text = JSON.stringify(archive.json[name]);
-			return { toString: () => text };
-		},
-	}));
+	return files.map((name) => {
+		const metadata = archive.entries.find((entry) => entry.name === name);
+		return {
+			name,
+			uncompressedSize: metadata?.size ?? 0,
+			...(metadata ? { size: metadata.size } : {}),
+			data: () => ({ toString: () => "" }),
+		};
+	});
 }
 
 // ── node:fs, node:fs/promises, node:os ───────────────────────────────────
