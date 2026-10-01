@@ -55,6 +55,14 @@ function assertCleanRun(run) {
 	);
 }
 
+function thirtyDayScopes(scopes, now = Date.now()) {
+	const time_range = {
+		since: new Date(now - 30 * 86_400_000).toISOString(),
+		until: new Date(now).toISOString(),
+	};
+	return scopes.map((name) => ({ name, time_range }));
+}
+
 function assertFatal(run, c, name, { errorClass, phase, requestedScopes }) {
 	assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
 	assertCleanRun(run);
@@ -196,7 +204,7 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 	}
 });
 
-test("chatgpt: default walk has no 50-detail cap", {
+test("chatgpt: legacy string-only scope bridge runs full history", {
 	timeout: 180_000,
 }, async () => {
 	const fx = await import("./fixtures/chatgpt.mjs");
@@ -214,6 +222,7 @@ test("chatgpt: default walk has no 50-detail cap", {
 				PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS: "1",
 				PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "1",
 			},
+			legacyScopeBridge: true,
 		});
 		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 		assertCleanRun(r);
@@ -233,7 +242,6 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -263,7 +271,7 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 		r = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			resultStreaming: true,
 			resultSpoolDirectory: join(out, "chatgpt-30d-stream"),
 		});
@@ -298,10 +306,8 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	assert.deepEqual(detailCalls, ["conv-1", "conv-2"]);
 	assert.equal(r.streamResult.mode, "stream");
 	assert.equal(r.streamResult.completed, true);
-	assert.equal(r.streamDone.exportSummary.window?.sinceDays, 30);
-	assert.equal(r.streamDone.exportSummary.partial, true);
-	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
-	assert.ok(r.streamDone.errors.some((e) => e.reason === "time_window"));
+	assert.equal(r.streamDone.exportSummary.window, undefined);
+	assert.deepEqual(r.streamDone.errors, []);
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
@@ -309,7 +315,7 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 		conversations.records.map((x) => x.id),
 		["conv-1", "conv-2"],
 	);
-	assert.match(r.data.status, /^Partial:/);
+	assert.match(r.data.status, /^Complete!/);
 });
 
 test("chatgpt: 30-day bundle stops after three old pages without fetching old details", {
@@ -319,7 +325,6 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-full-history.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const cursors = [];
@@ -356,7 +361,7 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const run = await runHarness({
 		bundle: built.outfile,
 		fixtures: { ...fx.pageshimCase.fixtures, resolve },
-		scopes: fx.pageshimCase.scopes,
+		scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 		resultStreaming: true,
 		gotoDelayMs: 0,
 		resultSpoolDirectory: join(out, "chatgpt-30d-full-history-stream"),
@@ -365,7 +370,7 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	assert.deepEqual(cursors, [0, 30, 60]);
 	assert.deepEqual(detailCalls, []);
 	assert.equal(run.result.exportSummary.count, 0);
-	assert.equal(run.result.exportSummary.window?.sinceDays, 30);
+	assert.equal(run.result.exportSummary.window, undefined);
 });
 
 test("chatgpt: 30-day walk keeps later in-window rows after older rows on unordered pages", {
@@ -375,7 +380,6 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-unordered-pages.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -430,7 +434,7 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 		run = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			initialState: {
 				"chatgpt.conversations": {
 					last_update_time: new Date((now - 10 * 86400) * 1000).toISOString(),
@@ -482,7 +486,6 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-multipage.js"),
-		sinceDays: 30,
 		streamResults: true,
 	});
 	const now = Date.now() / 1000;
@@ -525,7 +528,7 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 		r = await runHarness({
 			bundle: built.outfile,
 			fixtures: { ...fx.pageshimCase.fixtures, resolve },
-			scopes: fx.pageshimCase.scopes,
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes),
 			resultStreaming: true,
 			resultSpoolDirectory: join(out, "chatgpt-30d-multipage-stream"),
 		});
@@ -567,7 +570,8 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	assert.equal(r.streamResult?.completed, true);
 	assert.equal(r.streamDone.exportSummary.details.conversations, 21);
 	assert.equal(r.streamDone.exportSummary.details.messages, 21);
-	assert.equal(r.streamDone.exportSummary.partialReason, "time_window");
+	assert.equal(r.streamDone.exportSummary.window, undefined);
+	assert.deepEqual(r.streamDone.errors, []);
 });
 
 test("chatgpt: capped PageShim walk reports partial with omitted detail evidence", {
@@ -1051,7 +1055,7 @@ test("anthropic: five-part metadata-only shell contract reads part entries throu
 	);
 });
 
-test("anthropic: 30-day window filters records during streamed collection and marks the result partial", {
+test("anthropic: per-stream time_range filters records during streamed collection", {
 	timeout: 300_000,
 }, async () => {
 	const fx = await import("./fixtures/anthropic.mjs");
@@ -1115,7 +1119,6 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 		connector: "anthropic",
 		outfile: join(out, "anthropic-window.js"),
 		streamResults: true,
-		sinceDays: 30,
 	});
 	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
 	try {
@@ -1123,7 +1126,7 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 		const run = await runHarness({
 			bundle: streamBundle.outfile,
 			fixtures: c.fixtures,
-			scopes: c.scopes,
+			scopes: thirtyDayScopes(c.scopes, Date.parse("2026-01-31T00:00:00.000Z")),
 			resultStreaming: true,
 			resultSpoolDirectory: spool,
 			clockNowMs: Date.parse("2026-01-31T00:00:00.000Z"),
@@ -1154,18 +1157,10 @@ test("anthropic: 30-day window filters records during streamed collection and ma
 			["doc-recent"],
 		);
 		assert.equal(
-			run.streamResult?.donePayload?.exportSummary?.window?.sinceDays,
-			30,
+			run.streamResult?.donePayload?.exportSummary?.window,
+			undefined,
 		);
-		assert.equal(
-			run.streamResult?.donePayload?.exportSummary?.partialReason,
-			"time_window",
-		);
-		assert.ok(
-			run.streamResult?.donePayload?.errors?.some(
-				(error) => error.reason === "time_window",
-			),
-		);
+		assert.deepEqual(run.streamResult?.donePayload?.errors, []);
 	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}

@@ -385,7 +385,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.18",
+				"version": "0.2.19",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -2340,7 +2340,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.15",
+				"version": "0.2.16",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",

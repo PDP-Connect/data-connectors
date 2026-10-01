@@ -130,15 +130,11 @@ export async function buildPageshim({
 	connector,
 	outfile,
 	minify = true,
-	sinceDays = 0,
 	streamResults = false,
 	bridgeCallTimeoutMs = 30_000,
 	entryPoint,
 	extraDefines = {},
 }) {
-	if (!Number.isSafeInteger(sinceDays) || sinceDays < 0) {
-		throw new Error("sinceDays must be a non-negative integer");
-	}
 	const stubbed = new Set();
 	const port = CONNECTOR_PORTS[connector];
 	const manifest = JSON.parse(
@@ -176,7 +172,6 @@ export async function buildPageshim({
 			"import.meta.url": '"file:///pageshim/bundle.js"',
 			PAGESHIM_RESULT_STREAMING: String(streamResults),
 			PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
-			PAGESHIM_SINCE_DAYS: String(sinceDays),
 			...extraDefines,
 			// The export's `version` is the connector manifest's semver.
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
@@ -272,7 +267,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		options: {
 			connector: { type: "string" },
 			out: { type: "string" },
-			"since-days": { type: "string" },
 			"stream-results": { type: "boolean", default: false },
 			"bridge-call-timeout-ms": { type: "string" },
 		},
@@ -285,7 +279,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const report = await buildPageshim({
 		connector: values.connector,
 		outfile: values.out,
-		sinceDays: values["since-days"] ? Number(values["since-days"]) : 0,
 		streamResults: values["stream-results"],
 		bridgeCallTimeoutMs: values["bridge-call-timeout-ms"]
 			? Number(values["bridge-call-timeout-ms"])

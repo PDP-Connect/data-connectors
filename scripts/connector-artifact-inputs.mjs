@@ -73,6 +73,34 @@ function artifactInputContent(path, content) {
   return Buffer.from(JSON.stringify(packageMetadata));
 }
 
+function pageShimBuilderInput(content, connectorKey) {
+  if (connectorKey === "chatgpt" || connectorKey === "anthropic") return content;
+  const source = content
+    .toString("utf8")
+    .replace(/^\tsinceDays = 0,\r?\n/gm, "")
+    .replace(/^\tif \(!Number\.isSafeInteger\(sinceDays\) \|\| sinceDays < 0\) \{\r?\n\t\tthrow new Error\("sinceDays must be a non-negative integer"\);\r?\n\t\}\r?\n/gm, "")
+    .replace(/^\t\t\tPAGESHIM_SINCE_DAYS: String\(sinceDays\),\r?\n/gm, "")
+    .replace(/^\t\t\t"since-days": \{ type: "string" \},\r?\n/gm, "")
+    .replace(/^\t\tsinceDays: values\["since-days"\] \? Number\(values\["since-days"\]\) : 0,\r?\n/gm, "");
+  return Buffer.from(source);
+}
+
+function pageShimRuntimeInput(content, connectorKey) {
+  if (connectorKey === "chatgpt" || connectorKey === "anthropic") return content;
+  const source = content
+    .toString("utf8")
+    .replace("\t/** Fixed, opt-in lookback window embedded in this bundle. */\n\tsinceDays?: number;\n", "")
+    .replace(/\tconst windowSince =\n\t\tconnector\.sinceDays && connector\.sinceDays > 0\n\t\t\t\? new Date\(Date\.now\(\) - connector\.sinceDays \* 86_400_000\)\.toISOString\(\)\n\t\t\t: undefined;\n/, "")
+    .replace("\t\t\t\t\t...(windowSince ? { time_range: { since: windowSince } } : {}),\n", "")
+    .replace(/\t\tif \(windowSince\) \{\n\t\t\tconst hasRecords = Object\.values\(streamCounts\)\.some\(\(count\) => count > 0\);\n\t\t\terrors\.push\(\{\n\t\t\t\terrorClass: "partial",\n\t\t\t\treason: "time_window",\n\t\t\t\tdisposition: hasRecords \? "degraded" : "omitted",\n\t\t\t\tphase: "collect",\n\t\t\t\}\);\n\t\t\}\n/, "")
+    .replace(/\t{4}const metadata = \{\n[\s\S]*?\n\t{4}\};\n/, "")
+    .replaceAll("exportSummary: metadata,", "exportSummary,")
+    .replaceAll("metadata.count", "exportSummary.count")
+    .replaceAll("metadata.label", "exportSummary.label")
+    .replace(/\t{2}if \(windowSince\) \{\n[\s\S]*?\n\t{2}\}\n/, "");
+  return Buffer.from(source);
+}
+
 function localImportSpecifiers(source) {
   const text = source.toString();
   return [
@@ -297,6 +325,10 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       // change when the first packaged bundle is introduced.
       if (content === null) files.set(path, Buffer.from("\0absent"));
       else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs"]));
+      if (path === "scripts/pageshim/build.mjs" && content !== null)
+        files.set(path, pageShimBuilderInput(content, profile.connector_key));
+      if (path === "scripts/pageshim/runtime.ts" && content !== null)
+        files.set(path, pageShimRuntimeInput(content, profile.connector_key));
     }
     if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options);
   }

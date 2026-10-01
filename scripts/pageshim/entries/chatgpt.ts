@@ -4,9 +4,9 @@
 import { collectChatGpt } from "../../../connectors/chatgpt/index.ts";
 import { validateRecord } from "../../../connectors/chatgpt/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
+import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
-declare const PAGESHIM_SINCE_DAYS: number;
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const STREAMS = ["conversations", "messages"];
@@ -34,6 +34,9 @@ type Facade = {
 	goto: (url: string) => Promise<unknown>;
 	evaluate: (code: string) => Promise<unknown>;
 };
+type ScopeEntriesPage = ShimPage & {
+	requestedScopeEntries?: () => unknown;
+};
 
 async function probe(page: Facade): Promise<boolean> {
 	const authenticated = await page.evaluate(
@@ -55,7 +58,6 @@ const count = (scope: unknown): number => {
 		platform: "chatgpt",
 		scopes: STREAMS.map((s) => `chatgpt.${s}`),
 		version: PAGESHIM_CONNECTOR_VERSION,
-		sinceDays: PAGESHIM_SINCE_DAYS || undefined,
 		loginUrl: `${CHATGPT_ORIGIN}/auth/login`,
 		loginMessage: "Sign in to ChatGPT, then return here.",
 		prepareProbe: async (facade) => {
@@ -63,7 +65,17 @@ const count = (scope: unknown): number => {
 		},
 		validateRecord,
 		probe: (facade) => probe(facade as never),
-		collect: (ctx) => collectChatGpt(ctx as never),
+		collect: (ctx) => {
+			const { requested } = ctx as unknown as {
+				requested: Map<string, { time_range?: { since?: string; until?: string } }>;
+			};
+			applyRequestedTimeRanges(
+				requested,
+				(page as ScopeEntriesPage).requestedScopeEntries?.(),
+				"chatgpt",
+			);
+			return collectChatGpt(ctx as never);
+		},
 		toScope: (_stream, records) => ({ records }),
 		streamScopeRecords: {
 			order: ["messages", "conversations"],

@@ -64,6 +64,7 @@ function jsonPayloadUnits(value) {
 // page_shim.dart harnessJs `page` members. Nothing else is exposed.
 export const SHIM_METHODS = [
 	"requestedScopes",
+	"requestedScopeEntries",
 	"evaluate",
 	"goto",
 	"sleep",
@@ -100,6 +101,7 @@ async function hostMain({
 	env,
 	timerScale,
 	clockNowMs,
+	includeScopeEntries,
 }) {
 	window.__pageshimEnv = env || {};
 	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
@@ -121,7 +123,12 @@ async function hostMain({
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	const captured = new Set();
 	const impl = {
-		requestedScopes: () => scopes,
+		requestedScopes: () =>
+			scopes.map((scope) =>
+				typeof scope === "string" ? scope : scope.name,
+			),
+		requestedScopeEntries: () =>
+			includeScopeEntries ? scopes : undefined,
 		evaluate: (code) => call("evaluate", [String(code)]),
 		goto: (url) => call("goto", [url]),
 		sleep,
@@ -467,6 +474,7 @@ export async function runHarness({
 	resultStreamNeverAck = false,
 	readBridgeLatencyMs = 0,
 	clockNowMs,
+	legacyScopeBridge = false,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -486,7 +494,9 @@ export async function runHarness({
 	let result = null;
 	let harnessLoggedIn = false;
 	const streamHost = new ResultStreamHarness({
-		approvedScopes: scopes,
+		approvedScopes: scopes.map((scope) =>
+			typeof scope === "string" ? scope : scope.name,
+		),
 		directory: resultSpoolDirectory,
 		failAt: resultStreamFailure,
 		streamingSupported: resultStreaming,
@@ -582,7 +592,13 @@ export async function runHarness({
 						}
 						result = nextResult;
 					} else if (a[0] === "STATE") {
-						if (!scopes.includes(a[1]?.stream))
+						if (
+							!scopes.some(
+								(scope) =>
+									(typeof scope === "string" ? scope : scope.name) ===
+									a[1]?.stream,
+							)
+						)
 							return { __shimError: "invalid PDPP STATE message" };
 						if (stateAckDelayMs > 0)
 							await new Promise((resolve) =>
@@ -741,6 +757,7 @@ export async function runHarness({
 			env,
 			timerScale,
 			clockNowMs,
+			includeScopeEntries: !legacyScopeBridge,
 		});
 		sampling = false;
 		await sampler;
