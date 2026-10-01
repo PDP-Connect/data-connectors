@@ -64,6 +64,8 @@ const archives = new Map<
 	string,
 	{ names: string[]; entries: Array<{ name: string; size: number }> }
 >();
+/** Host handle of the last extracted archive, for readSavedZipEntryChunk. */
+let activeArchiveHandle: string | null = null;
 const openFiles = new Map<number, string>();
 let nextFd = 3;
 

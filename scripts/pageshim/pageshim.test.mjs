@@ -1175,15 +1175,27 @@ test("anthropic: export paths on the PageShim host", {
 	});
 });
 
-test("anthropic: five-part metadata-only shell contract reads part entries through bounded chunks", {
+// resultStreaming models the thin host, which offers page.input.
+for (const resultStreaming of [false, true])
+test(`anthropic: five-part metadata-only shell contract reads part entries through bounded chunks (${resultStreaming ? "streamed" : "one message"})`, {
 	timeout: 300_000,
 }, async () => {
 	const fx = await import("./fixtures/anthropic.mjs");
 	const c = fx.pageshimCase;
 	const built = await buildPageshim({
 		connector: "anthropic",
-		outfile: join(out, "anthropic-multipart-chunks.js"),
+		outfile: join(
+			out,
+			`anthropic-multipart-chunks-${resultStreaming ? "streamed" : "one"}.js`,
+		),
 	});
+	// esbuild emits "use strict" when it finds a strict tsconfig.json above
+	// the checkout, as the served 0.2.20 bundle had. Run in strict mode so an
+	// undeclared assignment in a shim fails here too.
+	writeFileSync(
+		built.outfile,
+		`"use strict";\n${readFileSync(built.outfile, "utf8")}`,
+	);
 	const partData = [
 		{
 			category: "conversations",
@@ -1292,13 +1304,26 @@ test("anthropic: five-part metadata-only shell contract reads part entries throu
 			return c.fixtures.resolve(raw);
 		},
 	};
+	const spool = mkdtempSync(join(out, "anthropic-multipart-result-"));
 	const run = await runHarness({
 		bundle: built.outfile,
 		fixtures: shellFixtures,
 		scopes: c.scopes,
+		resultStreaming,
+		resultSpoolDirectory: spool,
 	});
 	assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
 	assertCleanRun(run);
+	if (resultStreaming) {
+		assert.equal(run.streamResult?.completed, true, run.data.error);
+		run.result = Object.fromEntries(
+			Object.entries(run.streamScopeFiles).map(([scope, path]) => [
+				scope,
+				JSON.parse(readFileSync(path, "utf8")),
+			]),
+		);
+	}
+	rmSync(spool, { recursive: true, force: true });
 	assert.equal(run.calls.captureDownload, 5);
 	assert.equal(run.calls.extractZipEntries, 5);
 	assert.ok(
