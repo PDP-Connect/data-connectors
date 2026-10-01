@@ -90,6 +90,12 @@ export const SHIM_METHODS = [
 	"promptUser",
 ];
 
+// The thin host (page_shim.dart with runConnector) also offers page.input,
+// and it accepts streamed results. Older shells offer neither.
+export const THIN_HOST_SHIM_METHODS = SHIM_METHODS.flatMap((method) =>
+	method === "requestedScopeEntries" ? [method, "input"] : [method],
+);
+
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
 async function hostMain({
 	source,
@@ -102,6 +108,7 @@ async function hostMain({
 	timerScale,
 	clockNowMs,
 	includeScopeEntries,
+	thinHost,
 }) {
 	window.__pageshimEnv = env || {};
 	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
@@ -129,6 +136,8 @@ async function hostMain({
 			),
 		requestedScopeEntries: () =>
 			includeScopeEntries ? scopes : undefined,
+		// Opaque run input from the web layer; null for catalog runs.
+		...(thinHost ? { input: () => null } : {}),
 		evaluate: (code) => call("evaluate", [String(code)]),
 		goto: (url) => call("goto", [url]),
 		sleep,
@@ -444,6 +453,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {string[]} o.scopes
  * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
+ * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept streamed results
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -752,12 +762,13 @@ export async function runHarness({
 			scopes,
 			initialState,
 			supportsStateArgument,
-			methods: SHIM_METHODS,
+			methods: resultStreaming ? THIN_HOST_SHIM_METHODS : SHIM_METHODS,
 			loginWaitMs,
 			env,
 			timerScale,
 			clockNowMs,
 			includeScopeEntries: !legacyScopeBridge,
+			thinHost: resultStreaming,
 		});
 		sampling = false;
 		await sampler;

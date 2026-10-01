@@ -320,6 +320,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		const full = await run(fx.pageshimCase.scopes);
 		assert.deepEqual(full.ret, { ok: true }, full.log.slice(-20).join("\n"));
 		assert.deepEqual(full.result.errors, []);
+		assert.equal(full.streamResult, null);
 		assert.equal(full.result["chatgpt.conversations"].records.length, 4);
 		assert.equal(full.result["chatgpt.messages"].records.length, 4);
 		assert.equal(bundleSha256(built.outfile), digest);
@@ -435,7 +436,6 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const detailCalls = [];
@@ -516,6 +516,83 @@ test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed page
 	assert.match(r.data.status, /^Complete!/);
 });
 
+test("chatgpt: the published bundle streams a large 30-day result only when the host offers page.input", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	// Built exactly as scripts/pageshim/attach-to-artifact.mjs builds it.
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-published.js"),
+	});
+	const now = Date.now();
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const url = new URL(raw);
+		if (url.pathname === "/backend-api/conversations/search") {
+			const body = JSON.parse(response.body);
+			body.items = body.items.map((item) => ({
+				...item,
+				create_time: now / 1000 - 86400,
+				update_time: now / 1000 - 86400,
+			}));
+			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(url.pathname)) {
+			stampChatGptDetail(response, now / 1000 - 86400);
+			const body = JSON.parse(response.body);
+			for (const node of Object.values(body.mapping))
+				if (node.message) node.message.content.parts = ["x".repeat(50_000)];
+			response.body = JSON.stringify(body);
+		}
+		return response;
+	};
+	const run = (name, resultStreaming) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...fx.pageshimCase.fixtures, resolve },
+			scopes: thirtyDayScopes(fx.pageshimCase.scopes, now),
+			env: {
+				PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS: "1",
+				PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "1",
+			},
+			resultStreaming,
+			resultSpoolDirectory: join(out, name),
+		});
+	fx.useConversationCount(4);
+	let thinHost;
+	let olderShell;
+	try {
+		thinHost = await run("chatgpt-published-thin-host", true);
+		olderShell = await run("chatgpt-published-older-shell", false);
+	} finally {
+		fx.useConversationCount(2);
+	}
+
+	assertCleanRun(thinHost);
+	assert.deepEqual(thinHost.ret, { ok: true }, thinHost.log.slice(-20).join("\n"));
+	assert.equal(thinHost.result, null);
+	assert.equal(thinHost.streamResult.mode, "stream");
+	assert.equal(thinHost.streamResult.completed, true);
+	assert.deepEqual(thinHost.streamDone.errors, []);
+	assert.ok(thinHost.maxBridgePayloadUnits <= 256 * 1024);
+	const messages = await readFile(
+		thinHost.streamScopeFiles["chatgpt.messages"],
+		"utf8",
+	);
+	assert.ok(messages.length > 125 * 1024, `${messages.length}`);
+	assert.equal(JSON.parse(messages).records.length, 4);
+	assert.match(thinHost.data.status, /^Complete!/);
+
+	// Without page.input the same bundle sends one result message, which an
+	// older shell cannot carry at this size.
+	assertCleanRun(olderShell);
+	assert.equal(olderShell.streamResult, null);
+	assert.match(
+		olderShell.data.error,
+		/exceeds the 128000-unit legacy bridge limit/,
+	);
+});
+
 test("chatgpt: 30-day bundle stops after three old pages without fetching old details", {
 	timeout: 180_000,
 }, async () => {
@@ -523,7 +600,6 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-full-history.js"),
-		streamResults: true,
 	});
 	const cursors = [];
 	const detailCalls = [];
@@ -578,7 +654,6 @@ test("chatgpt: 30-day walk keeps later in-window rows after older rows on unorde
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-unordered-pages.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const cursors = [];
@@ -685,7 +760,6 @@ test("chatgpt: 30-day PageShim skips missing times and includes later window pag
 	const built = await buildPageshim({
 		connector: "chatgpt",
 		outfile: join(out, "chatgpt-30d-multipage.js"),
-		streamResults: true,
 	});
 	const now = Date.now() / 1000;
 	const detailCalls = [];
@@ -975,7 +1049,6 @@ test("anthropic: export paths on the PageShim host", {
 		const streamBundle = await buildPageshim({
 			connector: "anthropic",
 			outfile: join(out, "anthropic-streamed.js"),
-			streamResults: true,
 		});
 		const spool = mkdtempSync(join(out, "anthropic-result-"));
 		try {
@@ -1318,7 +1391,6 @@ test("anthropic: one range across streams filters streamed collection", {
 	const streamBundle = await buildPageshim({
 		connector: "anthropic",
 		outfile: join(out, "anthropic-window.js"),
-		streamResults: true,
 	});
 	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
 	try {

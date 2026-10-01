@@ -39,7 +39,6 @@ const assertCleanRun = (run) =>
 
 async function buildSyntheticBundle(
 	recordCount,
-	streamResults,
 	swallowEmitErrors = false,
 	surrogateEdge = false,
 	serializeError = false,
@@ -51,13 +50,12 @@ async function buildSyntheticBundle(
 	emitState = false,
 ) {
 	await mkdir(root, { recursive: true });
-	const outfile = join(root, `stream-${recordCount}-${streamResults}.js`);
+	const outfile = join(root, `stream-${recordCount}.js`);
 	await buildPageshim({
 		connector: "strava_browser",
 		entryPoint,
 		outfile,
 		minify: true,
-		streamResults,
 		bridgeCallTimeoutMs,
 		extraDefines: {
 			PAGESHIM_SYNTHETIC_RECORD_COUNT: String(recordCount),
@@ -79,7 +77,6 @@ test("a rejected result completion after STATE ack leaves the prior cursor uncom
 }, async () => {
 	const bundle = await buildSyntheticBundle(
 		3,
-		true,
 		false,
 		false,
 		false,
@@ -226,10 +223,10 @@ test("result stream rejects malformed order, mixed protocols, and split surrogat
 	}
 });
 
-test("build-time default keeps the legacy result path for bounded results", {
+test("a host without page.input gets the legacy result path for bounded results", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(1, false);
+	const bundle = await buildSyntheticBundle(1);
 	const run = await runHarness({
 		bundle,
 		fixtures,
@@ -245,7 +242,7 @@ test("build-time default keeps the legacy result path for bounded results", {
 test("runtime chunking keeps an astral character intact at the size boundary", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(1, true, false, true);
+	const bundle = await buildSyntheticBundle(1, false, true);
 	const spoolDirectory = join(root, "spool-surrogate-edge");
 	try {
 		const run = await runHarness({
@@ -271,7 +268,7 @@ test("a shell that never acknowledges a result call fails with a timeout", {
 	timeout: 180_000,
 }, async () => {
 	const bundle = await buildSyntheticBundle(
-		1, true, false, false, false, false, false, 0, 100_000, 50,
+		1, false, false, false, false, false, 0, 100_000, 50,
 	);
 	const run = await runHarness({
 		bundle,
@@ -286,11 +283,11 @@ test("a shell that never acknowledges a result call fails with a timeout", {
 	assertCleanRun(run);
 });
 
-test("build-time streaming bounds each transfer while spooling a 150 MB result", {
+test("streaming bounds each transfer while spooling a 150 MB result", {
 	timeout: 600_000,
 }, async () => {
 	const recordCount = 1500;
-	const bundle = await buildSyntheticBundle(recordCount, true);
+	const bundle = await buildSyntheticBundle(recordCount);
 	const spoolDirectory = join(root, "spool-150mb");
 	try {
 		const run = await runHarness({
@@ -343,7 +340,6 @@ test("CDP heap sampling catches a retained allocation above the streaming bound"
 }, async () => {
 	const bundle = await buildSyntheticBundle(
 		2,
-		true,
 		false,
 		false,
 		false,
@@ -373,7 +369,6 @@ test("a 60 MiB single conversation crosses the bridge only in bounded pieces", {
 }, async () => {
 	const bundle = await buildSyntheticBundle(
 		0,
-		true,
 		false,
 		false,
 		false,
@@ -413,7 +408,6 @@ test("an evaluation result above the per-item bound fails with a clear error", {
 }, async () => {
 	const bundle = await buildSyntheticBundle(
 		0,
-		true,
 		false,
 		false,
 		false,
@@ -445,7 +439,7 @@ test("an evaluation result above the per-item bound fails with a clear error", {
 test("a rejected stream chunk is terminal and is not retried", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(3, true);
+	const bundle = await buildSyntheticBundle(3);
 	const spoolDirectory = join(root, "spool-terminal-error");
 	try {
 		const run = await runHarness({
@@ -470,7 +464,7 @@ test("a rejected stream chunk is terminal and is not retried", {
 test("a collector cannot swallow a rejected chunk and complete a partial scope", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(3, true, true);
+	const bundle = await buildSyntheticBundle(3, true);
 	const spoolDirectory = join(root, "spool-swallowed-error");
 	try {
 		const run = await runHarness({
@@ -493,7 +487,7 @@ test("a collector cannot swallow a rejected chunk and complete a partial scope",
 test("a collector cannot swallow a record serialization error and complete invalid JSON", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(3, true, true, false, true);
+	const bundle = await buildSyntheticBundle(3, true, false, true);
 	const spoolDirectory = join(root, "spool-serialization-error");
 	try {
 		const run = await runHarness({
@@ -524,7 +518,7 @@ test("a collector cannot swallow a record serialization error and complete inval
 test("streamed collection errors set a partial status", {
 	timeout: 180_000,
 }, async () => {
-	const bundle = await buildSyntheticBundle(2, true, false, false, false, true);
+	const bundle = await buildSyntheticBundle(2, false, false, false, true);
 	const spoolDirectory = join(root, "spool-partial-result");
 	try {
 		const run = await runHarness({
@@ -554,7 +548,6 @@ test("the browser harness rejects both orders of mixed result protocols", {
 			connector: "strava_browser",
 			entryPoint: mixedEntry,
 			outfile,
-			streamResults: true,
 			extraDefines: { PAGESHIM_LEGACY_FIRST: String(legacyFirst) },
 		});
 		const run = await runHarness({
