@@ -1310,10 +1310,7 @@ export async function collectAnthropic({
 				const source = parsed.projectSources[index];
 				if (!source || source.record_key !== record.id)
 					throw new Error("Anthropic project source alignment failed");
-				if (
-					isWithinTimeWindow(record.update_time) &&
-					isRecordSelected?.(PROJECTS_STREAM, record)
-				)
+				if (isRecordSelected?.(PROJECTS_STREAM, record))
 					selectedProjects.push({ record, source });
 			}
 		}
@@ -1422,7 +1419,6 @@ export async function collectAnthropic({
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
 				if (oversizedProjectIds.has(doc.project_id)) continue;
-				if (!isWithinTimeWindow(doc.update_time)) continue;
 				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
 			}
 		}
