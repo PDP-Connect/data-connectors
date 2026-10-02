@@ -36,10 +36,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import {
 	buildBrowserStalenessLimitation,
 	evaluateClaimEligibility,
@@ -58,8 +58,6 @@ import {
 } from "../src/scenario/validate.ts";
 import { driverEvidenceSatisfied } from "../src/scenario/wire-registry.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const VERIFY_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-verify.ts");
 const FIXTURES_DIR = join(PACKAGE_ROOT, "src", "test-fixtures");
 

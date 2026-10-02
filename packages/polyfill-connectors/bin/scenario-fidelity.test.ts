@@ -38,7 +38,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import type { ScenarioInteraction } from "../src/scenario/format.ts";
 import {
 	isNamespaceIsolationAvailable,
@@ -60,8 +60,6 @@ import {
 	writeReplayBridgePreload,
 } from "../src/scenario/subprocess-fetch-preloads.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const FIXTURES_DIR = join(PACKAGE_ROOT, "src", "test-fixtures");
 
 // ─── Standalone provider process (mirrors bin/scenario-cli.test.ts) ───────

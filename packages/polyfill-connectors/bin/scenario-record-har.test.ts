@@ -33,16 +33,14 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import type {
 	ConnectorScenario,
 	ScenarioBrowserNetworkDriver,
 } from "../src/scenario/format.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const RECORD_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-record.ts");
 const HAR_STUB_CONNECTOR_PATH = join(
 	PACKAGE_ROOT,

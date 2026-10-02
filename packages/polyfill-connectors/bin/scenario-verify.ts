@@ -85,6 +85,10 @@ import type { InteractionResponse } from "@pdpp/connector-protocol/connector-run
 import { config as dotenvConfig } from "dotenv";
 import { BROWSER_HEADLESS_ENV } from "../src/browser-launch.ts";
 import {
+	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
+} from "../src/connector-paths.ts";
+import {
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
 	readManifest,
@@ -152,10 +156,6 @@ import {
 	assertValidInteractionMessage,
 	driverEvidenceSatisfied,
 } from "../src/scenario/wire-registry.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
-const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 

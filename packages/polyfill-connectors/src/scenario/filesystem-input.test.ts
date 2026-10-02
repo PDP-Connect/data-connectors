@@ -18,10 +18,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { manifestPath } from "../connector-paths.ts";
+import { connectorsDir, manifestPath } from "../connector-paths.ts";
 import { buildFilesystemInputLimitation } from "./claims.ts";
 import {
 	FilesystemInputError,
@@ -34,8 +33,6 @@ import {
 	requiredFilesystemBinds,
 	spawnWithNetworkIsolation,
 } from "./isolation.ts";
-
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const STRAVA_LIKE = {
 	envVar: "STRAVA_EXPORT_DIR",
@@ -230,7 +227,7 @@ test("requiredFilesystemBinds adds an extra path as a read-only bind, and adds n
 });
 
 test("an extra path inside the repo is absorbed by the repo's own read-only bind, not bound twice", () => {
-	const inside = join(PACKAGE_ROOT, "manifests");
+	const inside = connectorsDir;
 	const binds = requiredFilesystemBinds([inside]);
 	assert.equal(
 		binds.some((b) => b.path === inside),

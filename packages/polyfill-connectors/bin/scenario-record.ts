@@ -224,6 +224,10 @@ import {
 	STORAGE_STATE_RECORD_PATH_ENV,
 } from "../src/browser-launch.ts";
 import {
+	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
+} from "../src/connector-paths.ts";
+import {
 	handleInteraction,
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
@@ -270,10 +274,6 @@ import {
 	type RawTraceMessage,
 } from "../src/scenario/verify.ts";
 import { assertKnownMessageType } from "../src/scenario/wire-registry.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
-const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
 
 const REPO_ENV_LOCAL = join(REPO_ROOT, ".env.local");
 dotenvConfig({ path: REPO_ENV_LOCAL, quiet: true });
