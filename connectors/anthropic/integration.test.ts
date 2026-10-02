@@ -150,6 +150,7 @@ function makeContext(overrides: {
 	streams: string[];
 	resources?: Record<string, string[]>;
 	since?: string;
+	until?: string;
 	state?: Record<string, unknown>;
 	fetchStub: FetchStub;
 }): {
@@ -163,7 +164,14 @@ function makeContext(overrides: {
 	const page = new FakePage(overrides.fetchStub);
 	const scopeStreams = overrides.streams.map((name) => ({
 		name,
-		...(overrides.since ? { time_range: { since: overrides.since } } : {}),
+		...(overrides.since || overrides.until
+			? {
+					time_range: {
+						...(overrides.since ? { since: overrides.since } : {}),
+						...(overrides.until ? { until: overrides.until } : {}),
+					},
+				}
+			: {}),
 		...(overrides.resources?.[name]
 			? { resources: overrides.resources[name] }
 			: {}),
@@ -428,11 +436,13 @@ test("collectAnthropic: full happy path — new export, ready immediately, emits
 	);
 });
 
-test("collectAnthropic: time window filters conversations with their messages and filters projects and documents", async () => {
+test("collectAnthropic: time window filters conversations and messages but retains full project and document inventory", async () => {
 	const now = Date.now();
 	const since = new Date(now - 30 * 86_400_000).toISOString();
+	const until = new Date(now).toISOString();
 	const recent = new Date(now - 2 * 86_400_000).toISOString();
 	const old = new Date(now - 31 * 86_400_000).toISOString();
+	const future = new Date(now + 86_400_000).toISOString();
 	const baseMessage = CONVERSATIONS_JSON[0]?.chat_messages[0] ?? {};
 	const zipBytes = await buildZipBytes(
 		undefined,
@@ -452,7 +462,7 @@ test("collectAnthropic: time window filters conversations with their messages an
 		],
 		{
 			...PROJECT_JSON,
-			updated_at: recent,
+			updated_at: old,
 			docs: [
 				{
 					uuid: "doc-recent",
@@ -465,6 +475,12 @@ test("collectAnthropic: time window filters conversations with their messages an
 					filename: "old.md",
 					content: "old",
 					updated_at: old,
+				},
+				{
+					uuid: "doc-after-until",
+					filename: "future.md",
+					content: "future",
+					updated_at: future,
 				},
 			],
 		},
@@ -480,6 +496,7 @@ test("collectAnthropic: time window filters conversations with their messages an
 	const { ctx, emitted, page } = makeContext({
 		streams: ["conversations", "messages", "projects", "project_documents"],
 		since,
+		until,
 		fetchStub,
 	});
 	const originalGoto = page.goto.bind(page);
@@ -504,8 +521,14 @@ test("collectAnthropic: time window filters conversations with their messages an
 		conversations: ["conv-recent"],
 		messages: ["msg-recent"],
 		projects: ["proj-1"],
-		project_documents: ["doc-recent"],
+		project_documents: ["doc-recent", "doc-old", "doc-after-until"],
 	});
+	assert.ok(
+		emitted
+			.filter((record) => record.stream === "project_documents")
+			.every((record) => record.data.project_id === "proj-1"),
+		"retained project documents must keep their project relationship",
+	);
 });
 
 test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is left out with its messages in a PROGRESS note; no stream is skipped", async () => {

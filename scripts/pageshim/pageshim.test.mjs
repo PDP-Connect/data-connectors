@@ -1542,7 +1542,7 @@ test(`anthropic: five-part metadata-only shell contract reads part entries throu
 	);
 });
 
-test("anthropic: one range across streams filters streamed collection", {
+test("anthropic: conversation range filters conversations and messages but retains streamed project inventory", {
 	timeout: 300_000,
 }, async () => {
 	const fx = await import("./fixtures/anthropic.mjs");
@@ -1609,10 +1609,18 @@ test("anthropic: one range across streams filters streamed collection", {
 	const spool = mkdtempSync(join(scratchRoot, "anthropic-window-"));
 	try {
 		fx.reset({ zip });
+		const range = {
+			since: "2026-01-01T00:00:00.000Z",
+			until: "2026-02-01T00:00:00.000Z",
+		};
+		const timeRanges = {
+			"claude.conversations": range,
+			"claude.messages": range,
+		};
 		const run = await runHarness({
 			bundle: streamBundle.outfile,
 			fixtures: c.fixtures,
-			scopes: thirtyDayScopes(c.scopes, Date.parse("2026-01-31T00:00:00.000Z")),
+			scopes: scopeEntries(c.scopes, timeRanges),
 			resultStreaming: true,
 			resultSpoolDirectory: spool,
 			clockNowMs: Date.parse("2026-01-31T00:00:00.000Z"),
@@ -1636,11 +1644,20 @@ test("anthropic: one range across streams filters streamed collection", {
 		);
 		assert.deepEqual(
 			streamed["claude.projects"]?.map((record) => record.id),
-			["project-recent"],
+			["project-recent", "project-old"],
 		);
 		assert.deepEqual(
 			streamed["claude.project_documents"]?.map((record) => record.id),
-			["doc-recent"],
+			["doc-recent", "doc-old"],
+		);
+		const projectIds = new Set(
+			streamed["claude.projects"]?.map((record) => record.id),
+		);
+		assert.ok(
+			streamed["claude.project_documents"]?.every((record) =>
+				projectIds.has(record.project_id),
+			),
+			"retained project documents must join to an exported project",
 		);
 		assert.equal(
 			run.streamResult?.donePayload?.exportSummary?.window,
@@ -1779,8 +1796,14 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 	assert.deepEqual(filtered.result.errors, []);
 	assert.deepEqual(recordIds(filtered.result, "claude.conversations"), ["conv-recent"]);
 	assert.deepEqual(recordIds(filtered.result, "claude.messages"), ["msg-recent"]);
-	assert.deepEqual(recordIds(filtered.result, "claude.projects"), ["project-recent"]);
-	assert.deepEqual(recordIds(filtered.result, "claude.project_documents"), ["doc-recent"]);
+	assert.deepEqual(recordIds(filtered.result, "claude.projects"), [
+		"project-recent",
+		"project-old",
+	]);
+	assert.deepEqual(recordIds(filtered.result, "claude.project_documents"), [
+		"doc-recent",
+		"doc-old",
+	]);
 	assertDigest();
 
 	for (const since of [
