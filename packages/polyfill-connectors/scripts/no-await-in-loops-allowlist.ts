@@ -1862,14 +1862,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/reddit/index.ts",
-			line: 530,
+			line: 535,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/reddit/index.ts",
-			line: 722,
+			line: 727,
 			column: 18,
 			category: "dependent_pagination",
 			note: "collectStream(): next request depends on the prior page's cursor/offset/response",
