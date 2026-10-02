@@ -216,7 +216,10 @@ for (const name of pageShimConnectors(
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes: c.scopes,
+				requestedScopes:
+					name === "chatgpt"
+						? [...c.scopes, "chatgpt.memories"]
+						: c.scopes,
 			});
 		});
 
@@ -225,7 +228,10 @@ for (const name of pageShimConnectors(
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes: c.scopes,
+				requestedScopes:
+					name === "chatgpt"
+						? [...c.scopes, "chatgpt.memories"]
+						: c.scopes,
 			});
 		});
 
@@ -292,10 +298,120 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 		assert.deepEqual(r.result.exportSummary, {
 			count: 1,
 			label: "conversation",
-			details: { conversations: 1, messages: 1 },
+			details: { conversations: 1, messages: 1, memories: 0 },
 		});
 	} finally {
 		fx.useConversationCount(2);
+	}
+});
+
+test("chatgpt: memories are accepted and emitted with conversation scopes", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const scopes = [...fx.pageshimCase.scopes, "chatgpt.memories"];
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-memories.js"),
+	});
+	const spool = mkdtempSync(join(out, "chatgpt-memories-result-"));
+	try {
+		const legacy = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: scopeEntries(scopes, {
+				"chatgpt.memories": {
+					since: "2026-09-01T00:00:00.000Z",
+					until: "2026-10-01T00:00:00.000Z",
+				},
+			}),
+		});
+		assert.deepEqual(
+			legacy.ret,
+			{ ok: true },
+			legacy.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(legacy.result.errors, []);
+		assert.deepEqual(
+			legacy.result["chatgpt.memories"].records.map(({ id, content }) => ({
+				id,
+				content,
+			})),
+			[{ id: "memory-fixture-1", content: "Synthetic fixture memory" }],
+		);
+		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
+		assert.equal(legacy.result["chatgpt.messages"].records.length, 2);
+		assert.deepEqual(legacy.result.exportSummary.details, {
+			conversations: 2,
+			messages: 2,
+			memories: 1,
+		});
+
+		const streamed = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: scopeEntries(scopes, {
+				"chatgpt.memories": {
+					since: "2026-09-01T00:00:00.000Z",
+					until: "2026-10-01T00:00:00.000Z",
+				},
+			}),
+			resultStreaming: true,
+			resultSpoolDirectory: spool,
+		});
+		assert.deepEqual(
+			streamed.ret,
+			{ ok: true },
+			streamed.log.slice(-20).join("\n"),
+		);
+		assert.equal(streamed.streamResult?.completed, true);
+		const memoryRecords = JSON.parse(
+			readFileSync(streamed.streamScopeFiles["chatgpt.memories"], "utf8"),
+		).records;
+		assert.deepEqual(memoryRecords, legacy.result["chatgpt.memories"].records);
+		assert.deepEqual(streamed.streamDone.exportSummary.details, {
+			conversations: 2,
+			messages: 2,
+			memories: 1,
+		});
+
+		const unsupported = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: [...scopes, "chatgpt.unsupported"],
+		});
+		assert.deepEqual(
+			unsupported.ret,
+			{ ok: true },
+			unsupported.log.slice(-20).join("\n"),
+		);
+		assert.match(
+			unsupported.result.errors[0]?.reason ?? "",
+			/unsupported requestedScopes: chatgpt\.unsupported/,
+		);
+		assert.equal(unsupported.result["chatgpt.memories"], undefined);
+
+		const memoriesOnly = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chatgpt.memories"],
+		});
+		assert.deepEqual(
+			memoriesOnly.ret,
+			{ ok: true },
+			memoriesOnly.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(memoriesOnly.result.errors, []);
+		assert.equal(memoriesOnly.result["chatgpt.conversations"], undefined);
+		assert.equal(memoriesOnly.result["chatgpt.messages"], undefined);
+		assert.equal(memoriesOnly.result["chatgpt.memories"].records.length, 1);
+		assert.deepEqual(memoriesOnly.result.exportSummary.details, {
+			conversations: 0,
+			messages: 0,
+			memories: 1,
+		});
+	} finally {
+		rmSync(spool, { recursive: true, force: true });
 	}
 });
 
@@ -944,7 +1060,7 @@ test("chatgpt: capped PageShim walk reports partial with omitted detail evidence
 	assert.deepEqual(r.result.exportSummary, {
 		count: 1,
 		label: "conversation",
-		details: { conversations: 1, messages: 1 },
+		details: { conversations: 1, messages: 1, memories: 0 },
 	});
 	assert.deepEqual(r.result.errors, [
 		{
