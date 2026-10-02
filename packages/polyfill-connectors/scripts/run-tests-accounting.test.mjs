@@ -55,10 +55,16 @@ function fixture() {
 		"scripts/d.test.mjs",
 		"src/e.test.ts",
 	];
+	// Post-cutover, connectors live at the repo root (root/connectors/<name>/),
+	// not nested under this package — run-tests.mjs's real glob pattern is
+	// "../../connectors/**/*.test.ts", resolved two directories up from its
+	// own cwd. The fixture mirrors that split: a connectors/ path is rooted
+	// at `root`, everything else stays under the package's own `cwd`.
 	for (const path of paths) {
-		mkdirSync(dirname(join(cwd, path)), { recursive: true });
+		const base = path.startsWith("connectors/") ? root : cwd;
+		mkdirSync(dirname(join(base, path)), { recursive: true });
 		writeFileSync(
-			join(cwd, path),
+			join(base, path),
 			`import test from 'node:test'; test(${JSON.stringify(path)},()=>{});\n`,
 		);
 	}
@@ -67,7 +73,9 @@ function fixture() {
 		`import test from 'node:test';\n${names.map((name) => `test(${JSON.stringify(name)},{skip:true},()=>{});`).join("\n")}\ntest('real assertion',()=>{});\n`,
 	);
 	const files = paths
-		.map((path) => `packages/polyfill-connectors/${path}`)
+		.map((path) =>
+			path.startsWith("connectors/") ? path : `packages/polyfill-connectors/${path}`,
+		)
 		.sort();
 	const issued = {
 		schema: "pdpp.test-run-authority/v1",
@@ -93,7 +101,8 @@ function fixture() {
 			{ cwd, env, encoding: "utf8", timeout: 20_000 },
 		);
 	};
-	return { root, cwd, paths, issued, authority, run };
+	const onDisk = (path) => join(path.startsWith("connectors/") ? root : cwd, path);
+	return { root, cwd, paths, issued, authority, run, onDisk };
 }
 function result(stdout) {
 	const lines = stdout
@@ -129,10 +138,14 @@ test("authority and ordinary modes execute the same five-pattern real children a
 			.split("\n")
 			.map(JSON.parse);
 		assert.equal(diagnostics.filter((row) => row.type === "test").length, 11);
+		// Post-cutover, an accounted file's root-relative path is either under
+		// the package (packages/polyfill-connectors/...) or, for connectors,
+		// directly under the repo root (connectors/...) — assert against the
+		// issued selection itself rather than a single fixed prefix.
 		assert.ok(
 			diagnostics
 				.filter((row) => row.type === "test")
-				.every((row) => row.file?.startsWith("packages/polyfill-connectors/")),
+				.every((row) => f.issued.files.includes(row.file)),
 		);
 	} finally {
 		rmSync(f.root, { recursive: true, force: true });
@@ -143,7 +156,7 @@ test("zero, omitted, extra, duplicate, reordered selection and wrong profile rej
 	const f = fixture();
 	try {
 		writeFileSync(
-			join(f.cwd, f.paths[1]),
+			f.onDisk(f.paths[1]),
 			`import {writeFileSync} from 'node:fs';writeFileSync('SPAWNED','yes');`,
 		);
 		const selections = [
@@ -193,7 +206,7 @@ test("real assertion failure, loader failure and signal cannot become a successf
 			"import './missing-module.mjs';",
 			"process.kill(process.pid,'SIGTERM');",
 		]) {
-			writeFileSync(join(f.cwd, f.paths[1]), source);
+			writeFileSync(f.onDisk(f.paths[1]), source);
 			const observed = f.run();
 			assert.notEqual(observed.status, 0);
 			const value = result(observed.stdout);
@@ -208,7 +221,7 @@ test("real assertion failure, loader failure and signal cannot become a successf
 test("diagnostics preserve nested sibling names, todo and cancellation from real children", () => {
 	const f = fixture();
 	try {
-		const path = join(f.cwd, f.paths[1]);
+		const path = f.onDisk(f.paths[1]);
 		writeFileSync(
 			path,
 			`import {describe,it,test} from 'node:test';describe('a',{concurrency:true},()=>{it('same',async()=>{await new Promise(r=>setTimeout(r,15))});it.todo('later')});describe('b',()=>{it('same',()=>{});});test('cancelled',{timeout:30},()=>new Promise(()=>{}));`,
