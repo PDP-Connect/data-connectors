@@ -1,8 +1,8 @@
 # PDPP Collection Profile v0.1.0
 
-Status: Normative draft for connectors in this repository.
+Status: Normative draft. This is the canonical PDPP Collection Profile.
 
-Date: 2026-09-02
+Date: 2026-10-02
 
 ## 1. Scope
 
@@ -12,25 +12,21 @@ that reads data from a source and emits records. A connector runtime selects a
 connector, supplies its collection scope and prior state, and processes its
 messages.
 
-This document is normative for connectors in `PDP-Connect/data-connectors`, and
-its vocabularies are the ones gated here by
-[`scripts/check-pdpp-authoring-docs.mjs`](../../scripts/check-pdpp-authoring-docs.mjs).
-It does not bind other repositories, and it does not supersede any document
-published elsewhere.
+This document is the canonical Collection Profile. It is normative for
+connectors and connector runtimes in the PDPP ecosystem, in this repository and
+elsewhere. Its machine-readable half is
+[`schemas/connector-manifest.schema.json`](../../schemas/connector-manifest.schema.json),
+which validates `runtime_requirements.bindings`.
 
-`PDP-Connect/pdpp` publishes an earlier `spec-collection-profile.md` marked
-`Status: Informative`, which states that it defines no conformance requirement.
-That document lists three additional binding names, and a wider `DONE.status`
-and `coverage_strategy` set, than this one. For a connector in this repository,
-the vocabulary in section 3 governs and the gate above enforces it; a name
-published only in that informative document is not usable here. Reconciling or
-withdrawing that document is tracked separately and is not this repository's
-change to make.
+`PDP-Connect/pdpp` publishes `spec-collection-profile.md`, marked
+`Status: Informative`. That copy defines no conformance requirement. Where it
+differs from this document, for example in binding names, `DONE.status`, or
+`coverage_strategy` values, this document governs.
 
 This profile does not standardize a source platform API, process sandbox,
-package format, artifact registry, or resource-server ingest transport.
-Legacy `*-playwright` artifacts use a different manifest, page API, and runner.
-They do not implement this profile.
+package format, artifact registry, or resource-server ingest transport. The
+retired legacy `*-playwright` artifacts used a different manifest, page API,
+and runner. They do not implement this profile.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and
@@ -375,7 +371,9 @@ record. A connector can read broader source-side data when the source cannot
 filter precisely, but it MUST restrict what it emits.
 
 Runtime-specific `START` members for backfill and detail-gap recovery are
-defined in the runtime note. They are not portable v0.1 fields.
+defined in the
+[runtime note](../../packages/polyfill-connectors/docs/collection-profile-runtime.md).
+They are not portable v0.1 fields.
 
 ### 5.2 `RECORD`
 
