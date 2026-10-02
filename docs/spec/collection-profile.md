@@ -428,6 +428,7 @@ The runtime sends `START` to initialize one run.
 {
   "type": "START",
   "run_id": "run-abc123",
+  "now": "2026-09-02T00:00:00Z",
   "collection_mode": "incremental",
   "scope": {
     "streams": [
@@ -452,6 +453,7 @@ The runtime sends `START` to initialize one run.
 | `collection_mode` | REQUIRED `full_refresh` or `incremental`. |
 | `state` | REQUIRED map of prior connector-owned state, or `null` when no prior state applies. |
 | `bindings` | REQUIRED map of binding names to descriptors available for this run. |
+| `now` | OPTIONAL [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) date-time with a time-zone offset. It is the run's notion of the current time. |
 
 Each scope stream has a REQUIRED `name`. `resources` is an OPTIONAL array of
 canonical record-key strings. `fields` is an OPTIONAL array of top-level record
@@ -470,6 +472,15 @@ the declared `consent_time_field`. A runtime MUST NOT send `time_range` for a
 stream without that field. During a time-bounded run, the connector MUST NOT
 emit a record whose consent-time value is absent, null, or not a valid ISO 8601
 timestamp.
+
+`now` lets a runtime make a run reproducible. When `now` is present, a
+connector SHOULD use it instead of its own clock to compute time-based
+watermarks, cursors, and relative windows such as "the last 30 days". A replay
+runtime SHOULD send the `now` value recorded for the original run, so the same
+inputs produce the same records and state. When `now` is absent, the connector
+uses its own clock. A connector that does not read `now` remains conforming.
+`now` does not change `emitted_at`, which is still the time the connector
+emitted the message.
 
 The runtime MUST include a descriptor for each required manifest binding. A
 connector MUST fail if a required descriptor is missing. It MUST ignore
