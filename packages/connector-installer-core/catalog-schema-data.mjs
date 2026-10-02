@@ -177,7 +177,7 @@ export const connectorManifestSchema = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
   "title": "Collection Profile manifest runtime requirements",
-  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding names and binding features. Other manifest fields are outside this schema's scope.",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding names, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope.",
   "type": "object",
   "properties": {
     "runtime_requirements": {
@@ -190,6 +190,11 @@ export const connectorManifestSchema = {
           "type": "object",
           "propertyNames": {
             "$ref": "#/$defs/bindingName"
+          },
+          "properties": {
+            "filesystem": {
+              "$ref": "#/$defs/filesystemBinding"
+            }
           },
           "additionalProperties": {
             "$ref": "#/$defs/binding"
@@ -236,6 +241,61 @@ export const connectorManifestSchema = {
             "$ref": "#/$defs/bindingFeature"
           },
           "uniqueItems": true
+        }
+      }
+    },
+    "filesystemBinding": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/binding"
+        }
+      ],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/filesystemInput"
+          }
+        }
+      }
+    },
+    "filesystemInput": {
+      "type": "object",
+      "description": "A local path the connector reads. env_var values must be unique within inputs; JSON Schema cannot express that, so the profile states it and the schema test checks it for checked-in manifests.",
+      "additionalProperties": false,
+      "required": [
+        "env_var",
+        "kind",
+        "access"
+      ],
+      "properties": {
+        "env_var": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "dir"
+          ]
+        },
+        "access": {
+          "type": "string",
+          "enum": [
+            "read"
+          ]
+        },
+        "accepted_extensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\.[a-z0-9]+(\\.[a-z0-9]+)*$"
+          }
         }
       }
     },

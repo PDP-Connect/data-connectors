@@ -18,7 +18,8 @@ elsewhere. Its machine-readable half is
 [`schemas/connector-manifest.schema.json`](../../schemas/connector-manifest.schema.json),
 which validates `runtime_requirements.bindings`.
 [`schemas/connector-manifest.schema.test.mjs`](../../schemas/connector-manifest.schema.test.mjs)
-checks that the binding and feature tables in Section 3.3 match the schema, and
+checks that the binding, feature, and filesystem input tables in Section 3.3
+match the schema, and
 that every manifest under `connectors/` validates against it.
 
 `PDP-Connect/pdpp` publishes `spec-collection-profile.md`, marked
@@ -174,7 +175,7 @@ The binding registry is:
 | --- | --- |
 | `browser` | A runtime-managed browser surface. |
 | `desktop_session` | The owner's active, logged-in desktop session and its operating-system facilities, such as the session keyring. |
-| `filesystem` | Access to local files. |
+| `filesystem` | Access to local files. Section 3.3.2 defines declared inputs. |
 | `network` | Outbound network access. |
 
 Unqualified binding names are reserved for this registry. A runtime MUST
@@ -223,6 +224,76 @@ cannot, the binding counts as missing. A declaration without `features` makes
 no claim about specific capabilities. A host that supports only part of a
 binding MUST NOT place a connector whose required declaration for that binding
 omits `features`.
+
+#### 3.3.2 Filesystem inputs
+
+A `filesystem` declaration MAY contain `inputs`, the list of local paths the
+connector reads:
+
+```json
+"filesystem": {
+  "required": true,
+  "inputs": [
+    {
+      "env_var": "APPLE_HEALTH_EXPORT_DIR",
+      "kind": "dir",
+      "access": "read",
+      "accepted_extensions": [".zip", ".xml"]
+    }
+  ]
+}
+```
+
+| Field | Requirement |
+| --- | --- |
+| `env_var` | REQUIRED. The environment variable through which the runtime passes the path. It MUST match `^[A-Z][A-Z0-9_]*$` and MUST be unique within `inputs`. |
+| `kind` | REQUIRED. `file` or `dir`. |
+| `access` | REQUIRED. `read` is the only v0.1 value. |
+| `accepted_extensions` | OPTIONAL non-empty array of unique lowercase extensions, each with a leading dot. It names the file types the connector reads from the input. |
+
+An input object has no other members. `inputs`, when present, is a non-empty
+array.
+
+Declared inputs serve three purposes. They let a runtime grant least
+privilege. They show the owner and the runtime exactly what a connector reads.
+They let a replay runtime bind recorded inputs read-only.
+
+When a `filesystem` declaration contains `inputs`:
+
+- The runtime MUST set each declared `env_var` to a path of the declared
+  `kind`, and it MUST NOT pass the connector other paths through this binding.
+  Where the runtime confines the connector process, for example with a
+  sandbox or container mounts, it MUST make only the declared inputs visible.
+- When `access` is `read`, the runtime MUST provide the input read-only where
+  its confinement allows. The connector MUST NOT create, modify, rename, or
+  delete anything under that input.
+- The runtime SHOULD show the owner each declared input and the path it
+  resolves to before the first run.
+- The connector MUST NOT read owner data from a local path that is not a
+  declared input.
+
+A connector that runs on the owner's device and reads fixed paths under the
+user's home directory, such as a local application's session directory,
+declares each such path as an input. The input's `env_var` is the variable
+that overrides the default location. `runtime_requirements.local_paths`
+(Section 3.7) can still describe the default location and readiness checks.
+
+A `filesystem` declaration without `inputs` remains valid in v0.1. It makes no
+claim about which paths the connector reads, so a runtime cannot narrow the
+binding. A runtime SHOULD tell the owner that such a connector has broad file
+access.
+
+`setup.manual_or_upload.import_dir_env_var` is deprecated. A `dir` input
+supersedes it. A runtime that supports `import_dir_env_var` MUST accept both
+forms for every 0.x version of this profile; only a major version (Section 8)
+can remove `import_dir_env_var`. During the transition:
+
+- A new manifest SHOULD declare `inputs` instead of `import_dir_env_var`.
+- A manifest that carries both MUST name the same variable in
+  `import_dir_env_var` and in the `env_var` of one `dir` input. A runtime
+  MUST use `inputs` when both are present.
+- A runtime that finds `import_dir_env_var` and no `inputs` SHOULD treat the
+  variable as one `dir` input with `access: "read"`.
 
 ### 3.4 Human interaction and protocol capabilities
 
@@ -291,6 +362,9 @@ Capability metadata includes `refresh_policy`, `public_listing`, `proven`,
 `record_identity`. Stream metadata includes `required`,
 `compaction_fingerprint`, `compaction_class`, `compaction_class_note`,
 `cursor_shape`, `availability`, and `coverage_policy`.
+
+`setup.manual_or_upload.import_dir_env_var` is deprecated in favor of
+filesystem inputs (Section 3.3.2).
 
 These members are not part of portable v0.1 conformance. A runtime MAY support
 them as implementation metadata. Any manifest member that this profile does
@@ -696,6 +770,8 @@ A conforming connector:
 9. Declares every optional protocol capability it can emit.
 10. Produces the checkpoint and detail evidence required by its declared
     strategies.
+11. When it declares filesystem inputs, reads owner data from local paths only
+    through those inputs and writes nothing under a `read` input.
 
 ### 6.2 Runtime conformance
 
@@ -714,6 +790,9 @@ A conforming runtime:
 8. Terminates a connector on a protocol violation.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
    successful.
+10. Provides only the declared filesystem inputs, read-only when `access` is
+    `read`. If it supports the deprecated `import_dir_env_var`, it follows the
+    transition rules in Section 3.3.2.
 
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either

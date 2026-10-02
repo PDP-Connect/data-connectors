@@ -95,3 +95,76 @@ test("binding declarations keep binding-specific fields and require the required
   assert.equal(validate(manifestWith({ network: {} })), false);
   assert.equal(validate(manifestWith({ browser: { required: true, features: ["goto"] } })), false);
 });
+
+const input = (overrides = {}) => ({ env_var: "EXAMPLE_EXPORT_DIR", kind: "dir", access: "read", ...overrides });
+const filesystemWith = (declaration) => manifestWith({ filesystem: { required: true, ...declaration } });
+
+test("the profile filesystem input table matches the schema input members exactly", () => {
+  assert.deepEqual(
+    tableRowKeys("#### 3.3.2 Filesystem inputs").sort(),
+    Object.keys(schema.$defs.filesystemInput.properties).sort(),
+  );
+});
+
+test("the profile filesystem input example validates", () => {
+  const section = profile.split(/^#### 3\.3\.2 Filesystem inputs$/m)[1];
+  const example = section.match(/```json\n([\s\S]*?)\n```/);
+  assert.ok(example, "Section 3.3.2 must contain a JSON example");
+  const bindings = JSON.parse(`{${example[1]}}`);
+  assert.equal(validate(manifestWith(bindings)), true, JSON.stringify(validate.errors));
+});
+
+test("filesystem inputs accept declared files and directories", () => {
+  assert.equal(validate(filesystemWith({ inputs: [input()] })), true);
+  assert.equal(
+    validate(
+      filesystemWith({
+        inputs: [
+          input({ env_var: "CODEX_SESSIONS_DIR" }),
+          input({ env_var: "CODEX_STATE_DB", kind: "file", accepted_extensions: [".sqlite"] }),
+          input({ env_var: "TAKEOUT_DIR", accepted_extensions: [".zip", ".tar.gz"] }),
+        ],
+      }),
+    ),
+    true,
+    JSON.stringify(validate.errors),
+  );
+  assert.equal(validate(filesystemWith({ rationale: "Reads an owner export." })), true);
+});
+
+test("filesystem inputs reject undeclared shapes", () => {
+  const cases = {
+    "empty inputs": { inputs: [] },
+    "missing env_var": { inputs: [{ kind: "dir", access: "read" }] },
+    "lowercase env_var": { inputs: [input({ env_var: "export_dir" })] },
+    "missing kind": { inputs: [{ env_var: "EXAMPLE_DIR", access: "read" }] },
+    "unknown kind": { inputs: [input({ kind: "socket" })] },
+    "missing access": { inputs: [{ env_var: "EXAMPLE_DIR", kind: "dir" }] },
+    "write access": { inputs: [input({ access: "write" })] },
+    "unknown member": { inputs: [input({ path: "/home/owner/export" })] },
+    "extension without a dot": { inputs: [input({ accepted_extensions: ["zip"] })] },
+    "uppercase extension": { inputs: [input({ accepted_extensions: [".ZIP"] })] },
+    "duplicate extension": { inputs: [input({ accepted_extensions: [".zip", ".zip"] })] },
+    "empty extensions": { inputs: [input({ accepted_extensions: [] })] },
+  };
+  for (const [name, declaration] of Object.entries(cases)) {
+    assert.equal(validate(filesystemWith(declaration)), false, name);
+  }
+  assert.equal(validate(manifestWith({ filesystem: { inputs: [input()] } })), false, "missing required flag");
+});
+
+test("manifest filesystem inputs have unique variables and agree with import_dir_env_var", () => {
+  for (const { path, manifest } of connectorManifests()) {
+    const inputs = manifest.runtime_requirements?.bindings?.filesystem?.inputs;
+    if (inputs === undefined) continue;
+    const variables = inputs.map((entry) => entry.env_var);
+    assert.equal(new Set(variables).size, variables.length, `${path}: duplicate filesystem input env_var`);
+    const importDir = manifest.setup?.manual_or_upload?.import_dir_env_var;
+    if (importDir !== undefined) {
+      assert.ok(
+        inputs.some((entry) => entry.kind === "dir" && entry.env_var === importDir),
+        `${path}: import_dir_env_var ${importDir} must name a dir input`,
+      );
+    }
+  }
+});
