@@ -16,7 +16,9 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { chromium } from "playwright";
 import type { Page } from "playwright";
 import type {
 	BrowserCollectContext,
@@ -26,6 +28,7 @@ import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summ
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	adsSurfacesRecoveryHint,
+	classifyAdsDialogInPage,
 	collectAllStreams,
 	scrapeAdvertisers,
 } from "./index.ts";
@@ -44,7 +47,12 @@ interface ScriptedFetch {
  *  a fake Playwright Response exposing `.json()`/`.status()`. `null` means
  *  "the page never triggers this request" (used to prove the
  *  `meta_posts_response_not_observed` failure path). */
-type ScriptedPostsPage = { json: unknown; status: number } | null;
+type ScriptedPostsPage = {
+	json: unknown;
+	status: number;
+	operationName?: string;
+	fromCurrentPage?: boolean;
+} | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
  *  fetches keyed by URL path prefix, and scripted DOM-scrape results keyed
@@ -59,11 +67,14 @@ function makeFakePage(options: {
 	categoryRows?: Array<{ description: string | null; name: string }>;
 	dialogScrapes?: string[][];
 	dialogReached?: boolean[];
+	dialogEmptyMessages?: boolean[];
 	delayFirstDialogItems?: boolean;
 	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
 	navigationFailures?: string[];
 	postsScript?: ScriptedPostsPage[];
+	categoryEmptyMessage?: boolean;
+	challengePage?: boolean;
 	webInfoUser?: unknown;
 }): {
 	calls: string[];
@@ -81,7 +92,9 @@ function makeFakePage(options: {
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
+	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
+	let dialogClassificationCount = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
 	const resolveReadiness = (ready: boolean): Promise<unknown> =>
@@ -104,25 +117,47 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
-		next({
+		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
+		const response = {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({ method: () => "POST" }),
+			request: () => ({
+				frame: () => ({
+					page: () =>
+						scripted.fromCurrentPage === false ? ({} as Page) : page,
+				}),
+				headers: () => ({ "x-fb-friendly-name": operationName }),
+				method: () => "POST",
+				postData: () => `fb_api_req_friendly_name=${operationName}`,
+			}),
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
-		});
+		};
+		if (pendingPostsPredicate && !pendingPostsPredicate(response)) {
+			next(null);
+			return;
+		}
+		next(response);
 	};
 
 	const page = {
+		url: () =>
+			options.challengePage
+				? "https://www.instagram.com/challenge/"
+				: "https://www.instagram.com/testuser/",
 		goto: (url?: string): Promise<null> => {
-			if (url && options.navigationFailures?.some((path) => url.includes(path))) {
+			if (
+				url &&
+				options.navigationFailures?.some((path) => url.includes(path))
+			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-		waitForResponse: (_predicate: unknown, _opts?: unknown): Promise<unknown> =>
+		waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
 			new Promise((resolve) => {
 				pendingPostsResolve = resolve;
+				pendingPostsPredicate = predicate as (value: unknown) => boolean;
 			}),
 		waitForFunction: (
 			condition: unknown,
@@ -142,6 +177,9 @@ function makeFakePage(options: {
 			};
 			if (source.includes("Manage info")) {
 				return readiness(options.categoriesAvailable === true);
+			}
+			if (source.includes("verify you are human")) {
+				return readiness(false);
 			}
 			if (source.includes("Categories used to reach you")) {
 				return readiness(options.categoriesAvailable === true);
@@ -204,6 +242,40 @@ function makeFakePage(options: {
 		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
+			if (fnSource.includes("classifyAdsDialogInPage")) {
+				const args = arg as {
+					emptyMessage: string;
+					requiredAffordance?: string;
+					uiOnlyPatternSource?: string;
+				};
+				if (args.emptyMessage === "No categories") {
+					const items = options.categoryRows?.map((row) => row.name) ?? [];
+					if (items.length > 0) return Promise.resolve({ items, kind: "data" });
+					return Promise.resolve(
+						options.categoryEmptyMessage
+							? { kind: "verified_empty" }
+							: { kind: "unavailable" },
+					);
+				}
+				const index = dialogClassificationCount++;
+				const items = dialogQueue[0] ?? [];
+				const filteredItems = args.uiOnlyPatternSource
+					? items.filter(
+							(item) => !new RegExp(args.uiOnlyPatternSource!, "i").test(item),
+						)
+					: items;
+				const reached = dialogReachedQueue[0] ?? dialogQueue[0] !== undefined;
+				const hasEmptyMessage = options.dialogEmptyMessages?.[index] === true;
+				dialogReachedQueue.shift();
+				if (filteredItems.length > 0) {
+					return Promise.resolve({ items: filteredItems, kind: "data" });
+				}
+				return Promise.resolve(
+					reached && hasEmptyMessage
+						? { kind: "verified_empty" }
+						: { kind: "unavailable" },
+				);
+			}
 			if (fnSource.includes("scrollTo")) {
 				resolveNextPostsPage();
 				return Promise.resolve(undefined);
@@ -292,8 +364,11 @@ function makeCtx(args: {
 		categoriesAvailable?: boolean;
 		categoryDestinationReached?: boolean;
 		categoryRows?: Array<{ description: string | null; name: string }>;
+		categoryEmptyMessage?: boolean;
+		challengePage?: boolean;
 		dialogScrapes?: string[][];
 		dialogReached?: boolean[];
+		dialogEmptyMessages?: boolean[];
 		navigationFailures?: string[];
 	};
 	fetchScript: Record<string, ScriptedFetch[]>;
@@ -574,7 +649,7 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 	);
 });
 
-test("collectAllStreams: posts request never observed is a terminal error, not a silent empty result", async () => {
+test("collectAllStreams: posts request never observed emits a stream skip, not empty completion", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -583,10 +658,368 @@ test("collectAllStreams: posts request never observed is a terminal error, not a
 		requestedStreams: ["posts"],
 	});
 
-	await assert.rejects(
-		collectAllStreams(ctx, NO_DELAY),
-		/meta_posts_response_not_observed/,
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
 	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: a terminal empty posts fixture completes with zero records", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts", "post_likes"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	assert.deepEqual(harness.emitted, []);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream)
+			.sort(),
+		["post_likes", "posts"],
+	);
+});
+
+test("collectAllStreams: populated posts fixture emits records without empty state", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.loaded.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "posts").length,
+		1,
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: failed posts fixture cannot complete as empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.failed.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+		"a failed timeline load is skipped without claiming empty completion",
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: status fail with empty timeline edges cannot complete", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(new URL("./fixtures/posts.empty.json", import.meta.url), "utf8"),
+	);
+	json.status = "fail";
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.equal(harness.protocolMessages.some((message) => message.type === "STATE"), false);
+	assert.ok(harness.protocolMessages.some((message) => message.type === "SKIP_RESULT" && message.stream === "posts"));
+});
+
+test("collectAllStreams: an HTTP error carrying empty edges is skipped", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 500 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: empty responses from unrelated operations or pages are skipped", async () => {
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	await Promise.all(
+		[
+			{ json, status: 200, operationName: "ProfilePageQuery" },
+			{ json, status: 200, fromCurrentPage: false },
+		].map(async (response) => {
+			const harness = makeRecordingEmit(validateRecord);
+			const { ctx } = makeCtx({
+				fetchScript: {},
+				harness,
+				postsScript: [response],
+				requestedStreams: ["posts"],
+			});
+
+			await collectAllStreams(ctx, NO_DELAY);
+			assert.equal(
+				harness.protocolMessages.some((message) => message.type === "STATE"),
+				false,
+			);
+			assert.ok(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" && message.stream === "posts",
+				),
+			);
+		}),
+	);
+});
+
+test("collectAllStreams: an empty nonterminal timeline does not complete posts", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [
+			{
+				json: {
+					data: {
+						xdt_api__v1__feed__user_timeline_graphql_connection: {
+							edges: [],
+							page_info: { has_next_page: true },
+						},
+					},
+				},
+				status: 200,
+			},
+			null,
+		],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: a login challenge cannot turn an empty response into completion", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		pageOptions: { challengePage: true },
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(ctx, NO_DELAY);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("scrapeAdvertisers distinguishes explicit empty, populated, and failed fixtures", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		await Promise.all(
+			(
+				[
+					[
+						"ads.empty.html",
+						{
+							items: [],
+							reached: true,
+							step: "reached_empty",
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.loaded.html",
+						{
+							items: ["Example Advertiser"],
+							reached: true,
+							step: null,
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.failed.html",
+						{
+							items: [],
+							reached: false,
+							step: "destination_list_not_found",
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.blank.html",
+						{
+							items: [],
+							reached: false,
+							step: "destination_list_not_found",
+							surface: "advertisers",
+						},
+					],
+				] as const
+			).map(async ([fixture, expected]) => {
+				const html = await readFile(
+					new URL(`./fixtures/${fixture}`, import.meta.url),
+					"utf8",
+				);
+				const page = await browser.newPage();
+				try {
+					await page.route("https://accountscenter.instagram.com/**", (route) =>
+						route.fulfill({
+							body: html,
+							contentType: "text/html",
+							status: 200,
+						}),
+					);
+					assert.deepEqual(await scrapeAdvertisers(page), expected, fixture);
+				} finally {
+					await page.close();
+				}
+			}),
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("classifyAdsDialogInPage requires visible surface-specific empty messages", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		await Promise.all(
+			(
+				[
+					["ads.topics.empty.html", "No ad topics"],
+					["ads.categories.empty.html", "No categories"],
+				] as const
+			).map(async ([fixture, emptyMessage]) => {
+				const page = await browser.newPage();
+				try {
+					const html = await readFile(
+						new URL(`./fixtures/${fixture}`, import.meta.url),
+						"utf8",
+					);
+					await page.setContent(html);
+					assert.deepEqual(
+						await page.evaluate(classifyAdsDialogInPage, { emptyMessage }),
+						{ kind: "verified_empty" },
+						fixture,
+					);
+				} finally {
+					await page.close();
+				}
+			}),
+		);
+		const page = await browser.newPage();
+		try {
+			const blank = await readFile(
+				new URL("./fixtures/ads.blank.html", import.meta.url),
+				"utf8",
+			);
+			await page.setContent(blank);
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, {
+					emptyMessage: "No advertisers",
+				}),
+				{ kind: "unavailable" },
+			);
+			await page.setContent('<div role="dialog"><div role="list" style="height:0"></div><p>No advertisers</p><p>Something went wrong</p></div>');
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, { emptyMessage: "No advertisers" }),
+				{ kind: "unavailable" },
+				"error text overrides a coincident empty marker",
+			);
+			await page.setContent('<div role="dialog"><div role="list" style="height:0"></div><p>No advertisers</p></div>');
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, { emptyMessage: "No advertisers" }),
+				{ kind: "verified_empty" },
+				"a visible source message proves empty even if list geometry is zero",
+			);
+		} finally {
+			await page.close();
+		}
+	} finally {
+		await browser.close();
+	}
 });
 
 // ─── Invariant 4: following walks to completion or reports honest coverage ──
@@ -745,8 +1178,10 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
+		categoryEmptyMessage: true,
 		categoryRows: [],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
@@ -826,6 +1261,7 @@ test("scrapeAdvertisers preserves a genuine empty list after the settle window",
 	const { page, waitTimeouts } = makeFakePage({
 		dialogScrapes: [[]],
 		fetchScript: {},
+		dialogEmptyMessages: [true],
 		waitEmptySettle: true,
 	});
 	const startedAt = Date.now();
@@ -921,9 +1357,11 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
+		categoryEmptyMessage: true,
 		categoryRows: [],
 		dialogReached: [false, true],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
@@ -977,6 +1415,7 @@ test("collectAllStreams: successful category clicks without a destination list e
 		categoryDestinationReached: false,
 		categoryRows: [],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
