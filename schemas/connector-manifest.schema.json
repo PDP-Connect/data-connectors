@@ -7,7 +7,6 @@
   "properties": {
     "runtime_requirements": {
       "type": "object",
-      "required": ["bindings"],
       "properties": {
         "bindings": {
           "type": "object",

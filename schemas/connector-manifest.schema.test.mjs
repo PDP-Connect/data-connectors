@@ -68,6 +68,10 @@ test("every connector manifest validates against the manifest schema", () => {
   }
 });
 
+test("runtime_requirements without bindings validates", () => {
+  assert.equal(validate({ runtime_requirements: {} }), true, JSON.stringify(validate.errors));
+});
+
 test("registry and namespaced extension binding names are accepted", () => {
   for (const name of ["browser", "desktop_session", "filesystem", "network", "example.com/scanner", "nvidia.com/gpu"]) {
     assert.equal(validate(manifestWith({ [name]: { required: true } })), true, name);

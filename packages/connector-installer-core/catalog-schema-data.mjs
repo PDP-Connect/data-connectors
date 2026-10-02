@@ -182,9 +182,6 @@ export const connectorManifestSchema = {
   "properties": {
     "runtime_requirements": {
       "type": "object",
-      "required": [
-        "bindings"
-      ],
       "properties": {
         "bindings": {
           "type": "object",
