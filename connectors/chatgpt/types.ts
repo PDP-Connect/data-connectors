@@ -148,7 +148,8 @@ export interface ChatGptApi {
 
 export interface RawMemoryEntry {
 	content?: string;
-	created_at?: string | null;
+	/** Epoch seconds; null on older memories. The API has no `created_at`. */
+	created_timestamp?: number | null;
 	id?: string;
 	name?: string;
 	type?: string | null;

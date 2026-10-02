@@ -460,6 +460,30 @@ test("buildMemoryRecord: carries type through when present", () => {
 	assert.equal(rec?.type, "user_provided");
 });
 
+test("buildMemoryRecord: created_at comes from created_timestamp (epoch seconds)", () => {
+	const dated = buildMemoryRecord({
+		id: "m-dated",
+		content: "synthetic dated memory",
+		created_timestamp: 1759406400,
+		updated_at: "2025-10-02T12:00:00Z",
+	});
+	assert.equal(dated?.created_at, "2025-10-02T12:00:00.000Z");
+	assert.equal(dated?.updated_at, "2025-10-02T12:00:00Z");
+});
+
+test("buildMemoryRecord: created_at is null for an undated memory", () => {
+	const nullTs = buildMemoryRecord({
+		id: "m-undated",
+		content: "synthetic undated memory",
+		created_timestamp: null,
+		updated_at: "2024-01-01T00:00:00Z",
+	});
+	assert.equal(nullTs?.created_at, null);
+	assert.equal(nullTs?.updated_at, "2024-01-01T00:00:00Z");
+	const absent = buildMemoryRecord({ id: "m-absent", content: "synthetic" });
+	assert.equal(absent?.created_at, null);
+});
+
 test("buildMemoryRecord: type is null when absent", () => {
 	const rec = buildMemoryRecord({ id: "m1", content: "x" });
 	assert.equal(rec?.type, null);
