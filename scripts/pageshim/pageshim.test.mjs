@@ -1183,12 +1183,13 @@ test("anthropic: export paths on the PageShim host", {
 		connector: "anthropic",
 		outfile: join(out, "anthropic-paths.js"),
 	});
-	const run = (o) => {
+	const run = (o, initialState) => {
 		fx.reset(o);
 		return runHarness({
 			bundle: built.outfile,
 			fixtures: c.fixtures,
 			scopes: c.scopes,
+			initialState,
 		});
 	};
 	const assertFatalReason = (r, pattern) => {
@@ -1345,11 +1346,78 @@ test("anthropic: export paths on the PageShim host", {
 		},
 	);
 
-	await t.test("spent nonce: the host error ends the run", async () => {
-		const r = await run({ mintFailure: { error: "nonce consumed" } });
-		assertFatalReason(r, /could not be downloaded \(consumed\)/);
+	await t.test("spent nonce of a fresh export: the host error ends the run", async () => {
+		const r = await run({ spentNonces: [fx.NONCE] });
+		assertFatalReason(r, /only issues each one once/);
 		assert.equal(r.calls.captureDownload, 1);
+		assert.deepEqual(fx.counts, { exportRequests: 1, mints: 1 });
 	});
+
+	// The iPhone failure: a run after a successful import resumed the spent
+	// nonce and ended with "Couldn't import your data".
+	const requestedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+	const spentRef = {
+		organization_id: fx.ORG,
+		nonce: "nonce-spent",
+		requested_at: requestedAt,
+	};
+	for (const [label, cursor] of [
+		[
+			"consumed export within 24 h",
+			{
+				consumed_export: spentRef,
+				last_export_requested_at: requestedAt,
+				synced_at: requestedAt,
+			},
+		],
+		[
+			"pending export",
+			{ pending_export: spentRef, last_export_requested_at: requestedAt },
+		],
+	])
+		await t.test(
+			`spent nonce of a resumed ${label}: drops it and imports a fresh export`,
+			async () => {
+				const r = await run(
+					{ spentNonces: ["nonce-spent"] },
+					{ "claude.conversations": cursor },
+				);
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.deepEqual(r.result.errors, []);
+				assert.equal(r.data.error, null, "the host error is cleared");
+				assert.deepEqual(r.result.exportSummary, c.exportSummary);
+				assert.deepEqual(fx.counts, { exportRequests: 1, mints: 2 });
+				const committed = r.states["claude.conversations"];
+				assert.equal(committed.consumed_export.nonce, fx.NONCE);
+				assert.equal(committed.pending_export, undefined);
+				assert.ok(committed.synced_at > requestedAt);
+				assert.ok(
+					!JSON.stringify(r.stateMessages.at(-1)).includes("nonce-spent"),
+				);
+			},
+		);
+
+	await t.test(
+		"resumed export refused for another reason: fatal, nonce not dropped",
+		async () => {
+			const pending = {
+				organization_id: fx.ORG,
+				nonce: fx.NONCE,
+				requested_at: requestedAt,
+			};
+			const r = await run(
+				{ mintFailure: { error: "forbidden" }, mintFailureStatus: 403 },
+				{ "claude.conversations": { pending_export: pending } },
+			);
+			assertFatalReason(r, /could not be downloaded \(auth\)/);
+			assert.deepEqual(fx.counts, { exportRequests: 0, mints: 1 });
+			assert.deepEqual(r.stateMessages, []);
+			assert.deepEqual(r.states["claude.conversations"], {
+				pending_export: pending,
+			});
+		},
+	);
 
 	await t.test("multi-part export format: fatal, named", async () => {
 		const r = await run({ exportFormat: "new" });
