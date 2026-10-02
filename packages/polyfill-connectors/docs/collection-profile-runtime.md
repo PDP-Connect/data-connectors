@@ -92,13 +92,14 @@ against Section 3.
 | --- | --- |
 | Binding registry | The packaged collector capability profile advertises `network`, `browser`, `filesystem`, and `local_device`. It does not advertise `desktop_session`, which `signal` requires. `local_device` is a runtime mode in the profile, not a binding. |
 | Filesystem inputs | No manifest declares `filesystem.inputs` yet, and no runtime confines a connector to declared inputs. Six manifests still use `setup.manual_or_upload.import_dir_env_var`. `claude_code` and `codex` describe fixed home paths in `runtime_requirements.local_paths`. |
-| Catalog projection of inputs | The connector catalog schema closes each binding object to `required` and `features`, and catalog generation copies bindings from the published profile. A published manifest that declares `filesystem.inputs` would fail catalog validation until the catalog admits or drops that member. |
+| Catalog projection of inputs | `scripts/generate-connector-catalog.mjs` projects each published binding to `required` and `features`, so the catalog carries no `inputs` or `rationale`. Installers validate the catalog against the schema bundled in their release, which closes each binding object. A versioned catalog is needed before the catalog can carry inputs. |
 | Runtime clock | No runtime sends `START.now`, and no connector reads it. |
 | Collection time in record data | Seven connectors (`amazon`, `chase`, `heb`, `jellyfin`, `reddit`, `slack`, `usaa`) declare a `fetched_at` field in record data. A separate change removes them. |
 | Manifest validation before spawn | Placement checks bindings and protocol capabilities, but no local validator checks the full Collection Profile manifest. |
 | Exactly one `START` | The first line is checked. A later `START` is not rejected by the connector-side runtime. |
 | Scope stream enforcement | A non-empty scope is required. `emitRecord()` does not reject an undeclared stream or project `fields`. The parent runtime is expected to enforce both before durable write. |
 | Record envelope | The parent runtime is expected to check key, data, operation, and ISO 8601 `emitted_at`. The ingest path remains responsible for schema and record-identity checks. |
+| Delete records | `emitRecord()` builds a tombstone from `data.id` alone: `key` is `String(data.id)` and `data` is `{ id }`. That meets the profile only for a stream whose primary key is the single field `id`. |
 | Consent time | Time-bounded runs reject absent or unparseable values. Three Steam streams (`owned_games`, `recently_played_games`, `friends`) declare integer Unix-time consent fields instead of ISO 8601 strings. |
 | Interaction timeout | The package interaction handler accepts `timeout`. The connector-protocol type declares `error` instead. |
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |

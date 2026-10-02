@@ -376,10 +376,31 @@ async function readPublishedMetadata({
     connector_id: config.connector_id,
     display_name: config.display_name,
     tier: config.tier,
-    runtime_requirements: { bindings },
+    runtime_requirements: { bindings: projectCatalogBindings(bindings) },
     setup: { modality: modality ?? null },
     version: config.version,
   };
+}
+
+/**
+ * Projects published binding declarations onto the members the catalog schema
+ * allows: `required` and `features`. The Collection Profile lets a binding
+ * carry binding-specific members such as `filesystem.inputs` or
+ * `desktop_session.rationale`, but installers validate the catalog against the
+ * schema bundled in their own release, which closes each binding object. Until
+ * a versioned catalog can carry those members, the catalog drops them; the
+ * signed artifact's profile still holds the full declaration.
+ */
+export function projectCatalogBindings(bindings) {
+  return Object.fromEntries(
+    Object.entries(bindings).map(([name, declaration]) => [
+      name,
+      {
+        required: declaration?.required,
+        ...(declaration?.features === undefined ? {} : { features: declaration.features }),
+      },
+    ]),
+  );
 }
 
 export async function generateConnectorCatalog({
