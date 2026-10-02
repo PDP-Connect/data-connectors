@@ -343,8 +343,18 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 		log.push(`[capture] not ready: ${why}`);
 		return { ok: false, ready: false, error: "export not ready" };
 	};
+	// The shell's own text for these outcomes (zip_download.dart
+	// captureFailures): the bundle sees only the message.
+	const shellMessages = {
+		consumed:
+			"Claude had already handed out the download link for this export, and it only issues each one once. Nothing was saved. Re-run to ask Claude for a fresh export.",
+		httpfail:
+			"Claude’s storage host refused the download link it had just issued. Nothing was saved. Re-run to ask Claude for a fresh export.",
+	};
 	const terminal = (outcome) => {
-		const message = `The Claude export could not be downloaded (${outcome}).`;
+		const message =
+			shellMessages[outcome] ??
+			`The Claude export could not be downloaded (${outcome}).`;
 		log.push(`[capture] fail: ${outcome}`);
 		data.error = message;
 		return { __shimError: message };
@@ -777,7 +787,7 @@ export async function runHarness({
 		await sampler;
 		if (
 			ret?.ok &&
-			data.error === undefined &&
+			data.error == null &&
 			(result || streamHost.doneValue)
 		) {
 			for (const [scope, cursor] of Object.entries(stagedStates)) {

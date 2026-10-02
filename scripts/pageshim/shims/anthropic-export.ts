@@ -22,8 +22,9 @@
 //   readZipEntriesFromFile -> entries from that result.
 //   readManifestDownload -> always "not a manifest" (see readFileSync).
 // A host error that will not clear on retry (spent nonce, auth, bad URL,
-// unreadable archive) is thrown from savePlaywrightDownload, which the
-// connector does not catch, so the run ends with that error.
+// unreadable archive) is thrown from savePlaywrightDownload. A spent link
+// gets code EXPORT_LINK_SPENT, which index.ts handles: it drops a resumed
+// export and requests a fresh one. Any other error ends the run.
 //
 // Host blobs: index.ts spools each conversation/project source object to
 // PDPP_BLOB_SPOOL_DIR. The PageShim host has no blob store, so writeFileSync
@@ -70,6 +71,25 @@ const openFiles = new Map<number, string>();
 let nextFd = 3;
 
 type Download = { terminal?: Error };
+
+/** Same value as EXPORT_LINK_SPENT in connectors/anthropic/index.ts. */
+const EXPORT_LINK_SPENT = "export_link_spent";
+/** The host's messages for a link Claude already gave out. Only the
+ * message reaches the bundle, not the host's outcome name. The two forms
+ * are the "consumed" and "httpfail" outcomes in the mobile shell's
+ * zip_download.dart. */
+const SPENT_LINK_ERROR =
+	/only issues each one once|refused the download link it had just issued/i;
+
+/** Tag a spent-link host error for index.ts. The host already set
+ * data.error; clear it, because index.ts may recover. If it does not, the
+ * runtime sets data.error again. */
+async function classifyCaptureError(error: unknown): Promise<Error> {
+	const e = error instanceof Error ? error : new Error(String(error));
+	if (!SPENT_LINK_ERROR.test(e.message)) return e;
+	await host?.setData("error", null);
+	return Object.assign(e, { code: EXPORT_LINK_SPENT });
+}
 
 /** The entry calls this once, before collect(). */
 export function bindExportHost(shim: ExportHostPage): void {
@@ -124,9 +144,7 @@ export function attachDownloadQueue(_page: unknown) {
 				r = await host.captureDownload(url);
 			} catch (error) {
 				// The host throws only for outcomes a retry cannot fix.
-				return {
-					terminal: error instanceof Error ? error : new Error(String(error)),
-				};
+				return { terminal: await classifyCaptureError(error) };
 			}
 			return r?.ok && r.ready ? {} : null;
 		},

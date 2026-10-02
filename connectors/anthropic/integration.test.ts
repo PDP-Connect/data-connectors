@@ -2311,3 +2311,92 @@ test("collectAnthropic: dev override of the request interval lets a hand-run con
 		if (priorRunId !== undefined) process.env.PDPP_RUN_ID = priorRunId;
 	}
 });
+
+// ─── Export link checkpoints ──────────────────────────────────────────────
+// A spent link (EXPORT_LINK_SPENT) comes only from the PageShim download
+// binding; scripts/pageshim/pageshim.test.mjs covers it end to end.
+
+/** Serve `zipBytes` for every export download, except that a download of
+ * a nonce in `failures` fails with that nonce's error. */
+function serveDownloadsByNonce(
+	page: FakePage,
+	zipBytes: Buffer,
+	failures: Record<string, () => Error>,
+): void {
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		const nonce = /\/export\/[^/]+\/download\/([^/?#]+)/.exec(url)?.[1];
+		if (nonce) {
+			const fail = failures[nonce];
+			const download = fail
+				? {
+						saveAs: () => Promise.reject(fail()),
+						suggestedFilename: () => "export.zip",
+					}
+				: makeFakeDownload(zipBytes).download;
+			queueMicrotask(() => page.emit("download", download));
+		}
+		return result;
+	};
+}
+
+test("collectAnthropic: a read export clears the pending nonce before any record is emitted", async () => {
+	const counter = { exportRequests: 0 };
+	const { ctx, events, page } = makeContext({
+		streams: ["conversations", "messages"],
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownloadsByNonce(page, await buildZipBytes(), {});
+
+	await collectAnthropic(ctx);
+
+	const firstRecord = events.findIndex((e) => e.kind === "record");
+	assert.ok(firstRecord > 0);
+	const statesBefore = events
+		.slice(0, firstRecord)
+		.flatMap((e) =>
+			e.kind === "message" &&
+			e.message.type === "STATE" &&
+			e.message.stream === "conversations"
+				? [e.message.cursor as Record<string, unknown>]
+				: [],
+		);
+	assert.equal(statesBefore.length, 2);
+	const [requestedState, readState] = statesBefore;
+	assert.ok(requestedState && readState);
+	assert.equal(
+		(requestedState.pending_export as { nonce: string }).nonce,
+		"nonce-layout",
+		"the request is checkpointed before polling",
+	);
+	assert.equal(readState.pending_export, undefined);
+	assert.equal(
+		(readState.consumed_export as { nonce: string }).nonce,
+		"nonce-layout",
+	);
+	assert.equal(readState.synced_at, undefined);
+});
+
+test("collectAnthropic: a download failure that is not a spent link keeps the pending nonce", async () => {
+	const counter = { exportRequests: 0 };
+	const pending = {
+		organization_id: "org-1",
+		nonce: "kept-nonce",
+		requested_at: "2025-12-31T00:00:00.000Z",
+	};
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations"],
+		state: { conversations: { pending_export: pending } },
+		fetchStub: oldFormatFetchStub(counter),
+	});
+	serveDownloadsByNonce(page, await buildZipBytes(), {
+		"kept-nonce": () => new Error("disk full"),
+	});
+
+	await assert.rejects(collectAnthropic(ctx), /disk full/);
+
+	assert.equal(counter.exportRequests, 0);
+	assert.equal(emitted.length, 0);
+	assert.deepEqual(statesOf(protocolMessages), []);
+});

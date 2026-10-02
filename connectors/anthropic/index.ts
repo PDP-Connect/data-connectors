@@ -95,13 +95,19 @@
  *      reference to STATE immediately (before polling), so a crash mid-poll
  *      still leaves a resumable checkpoint.
  *   3. Polls the download URL within a bounded run budget. If the export
- *      becomes ready, downloads the ZIP, parses it, emits records, clears
- *      the pending STATE, and emits a fresh STATE with `synced_at`.
+ *      becomes ready, downloads the ZIP and clears the pending STATE as soon
+ *      as the archive is recognized, then parses it, emits records, and
+ *      emits a fresh STATE with `synced_at`.
  *   4. If the run budget expires before the export is ready, emits a
  *      RETRYABLE SKIP_RESULT (recovery_hint: retry_by_runtime) per
  *      requested stream and leaves the pending STATE in place for the next
  *      run to resume — no data loss, no abandoned job, no duplicate
  *      request.
+ *   5. Claude gives out each download link only once. If the runtime
+ *      reports that the link of a resumed export (pending or consumed) was
+ *      already used (`EXPORT_LINK_SPENT`), the run drops that reference
+ *      from STATE and requests a fresh export in the same run. If the link
+ *      of an export requested in this run is spent, the run fails.
  *
  * Tested surfaces: process-level protocol tests against a fake page/context
  * (integration.test.ts) for both formats, and pure-parser tests against
@@ -464,6 +470,15 @@ function priorCursorWithoutSyncedAt(
 	return copy;
 }
 
+function cursorWithoutExportRefs(
+	cursor: AnthropicCursorState,
+): AnthropicCursorState {
+	const copy = { ...cursor };
+	delete copy.pending_export;
+	delete copy.consumed_export;
+	return copy;
+}
+
 function readPendingExport(
 	state: Record<string, unknown>,
 ): PendingExportState | null {
@@ -786,6 +801,23 @@ interface ExportAttemptResult {
 	ready: boolean;
 	zipPath?: string;
 	cleanup?: () => Promise<void>;
+	/** The provider refused the link because it was already used. */
+	linkSpent?: Error;
+}
+
+/**
+ * A runtime's download binding sets this `code` on the error it throws when
+ * Claude refuses an export link because it was already used. Claude issues
+ * each link once, so that export can never be downloaded again. Desktop
+ * Playwright cannot tell this apart from "not ready yet" and never sets it.
+ */
+export const EXPORT_LINK_SPENT = "export_link_spent";
+
+function isExportLinkSpent(error: unknown): error is Error {
+	return (
+		error instanceof Error &&
+		(error as Error & { code?: unknown }).code === EXPORT_LINK_SPENT
+	);
 }
 
 /**
@@ -814,7 +846,13 @@ async function attemptDownload(
 		}
 		const dir = await mkdtemp(join(tmpdir(), "pdpp-anthropic-export-"));
 		const zipPath = join(dir, "export.zip");
-		await savePlaywrightDownload(download, zipPath);
+		try {
+			await savePlaywrightDownload(download, zipPath);
+		} catch (error) {
+			await rm(dir, { recursive: true, force: true });
+			if (isExportLinkSpent(error)) return { ready: false, linkSpent: error };
+			throw error;
+		}
 		return {
 			ready: true,
 			zipPath,
@@ -1256,7 +1294,9 @@ export async function collectAnthropic({
 		);
 	}
 
-	const priorCursor = readConversationsCursor(state);
+	// The conversations cursor from STATE. The run updates it when it drops a
+	// spent export reference or reads an export, so later STATE builds on it.
+	let priorCursor = readConversationsCursor(state);
 
 	/**
 	 * Emit the parsed export. Callers must first confirm the archive layout
@@ -1786,11 +1826,17 @@ export async function collectAnthropic({
 	// job's budget and waste Anthropic's rate limit on this account). The
 	// NEW manifest format has no equivalent resume path (see module header)
 	// — STATE only ever holds an old-format pending reference.
+	//
+	// A resumed export whose link Claude reports as already used is dropped,
+	// and the run requests a fresh export below. The 24 h request interval
+	// does not apply then: without a fresh export the run has nothing to
+	// import. Claude's own 429 back-off still applies.
 	const pending = readPendingExport(state);
+	let resumedLinkSpent = false;
 
 	if (pending) {
-		await pollAndEmitOldFormat(pending, false);
-		return;
+		if ((await pollAndEmitOldFormat(pending, false)) === "done") return;
+		resumedLinkSpent = true;
 	}
 
 	const retryNotBefore = priorCursor.export_retry_not_before;
@@ -1814,7 +1860,7 @@ export async function collectAnthropic({
 	}
 
 	const lastRequestedAt = priorCursor.last_export_requested_at;
-	if (lastRequestedAt) {
+	if (lastRequestedAt && !resumedLinkSpent) {
 		const elapsedMs = Date.now() - Date.parse(lastRequestedAt);
 		const minIntervalMs = exportRequestMinIntervalMs();
 		if (elapsedMs >= 0 && elapsedMs < minIntervalMs) {
@@ -1823,28 +1869,28 @@ export async function collectAnthropic({
 			// that skipped a stream last time can finish it.
 			const consumed = readExportReference(priorCursor.consumed_export);
 			if (consumed) {
-				await pollAndEmitOldFormat(consumed, false);
+				if ((await pollAndEmitOldFormat(consumed, false)) === "done") return;
+			} else {
+				const nextAt = new Date(
+					Date.parse(lastRequestedAt) + minIntervalMs,
+				).toISOString();
+				for (const stream of ALL_STREAMS) {
+					if (!requested.has(stream)) {
+						continue;
+					}
+					await emit({
+						type: "SKIP_RESULT",
+						stream,
+						reason: "export_recently_requested",
+						message:
+							`A Claude export was already requested at ${lastRequestedAt}. ` +
+							"Each request sends you an email, so a new one is not sent " +
+							`before ${nextAt}.`,
+						recovery_hint: { action: "retry_by_runtime", retryable: true },
+					});
+				}
 				return;
 			}
-			const nextAt = new Date(
-				Date.parse(lastRequestedAt) + minIntervalMs,
-			).toISOString();
-			for (const stream of ALL_STREAMS) {
-				if (!requested.has(stream)) {
-					continue;
-				}
-				await emit({
-					type: "SKIP_RESULT",
-					stream,
-					reason: "export_recently_requested",
-					message:
-						`A Claude export was already requested at ${lastRequestedAt}. ` +
-						"Each request sends you an email, so a new one is not sent " +
-						`before ${nextAt}.`,
-					recovery_hint: { action: "retry_by_runtime", retryable: true },
-				});
-			}
-			return;
 		}
 	}
 
@@ -1952,10 +1998,12 @@ export async function collectAnthropic({
 		false,
 	);
 
+	/** Returns "link_spent" when a resumed export can no longer be
+	 * downloaded and the caller should request a fresh one. */
 	async function pollAndEmitOldFormat(
 		pendingExport: PendingExportState,
 		pendingExportWasCreatedThisRun: boolean,
-	): Promise<void> {
+	): Promise<"done" | "link_spent"> {
 		const downloadUrl = exportDownloadUrl(
 			pendingExport.organization_id,
 			pendingExport.nonce,
@@ -1971,13 +2019,37 @@ export async function collectAnthropic({
 				{ stream: CONVERSATIONS_STREAM },
 			);
 			attempt = await attemptDownload(page, downloadUrl);
-			if (attempt.ready) {
+			if (attempt.ready || attempt.linkSpent) {
 				break;
 			}
 			if (Date.now() - waitStart > MAX_POLL_WAIT_MS) {
 				break;
 			}
 			await politeDelay(POLL_INTERVAL_MS);
+		}
+
+		if (attempt.linkSpent) {
+			// Retrying this nonce can never succeed, so drop it from STATE.
+			priorCursor = cursorWithoutExportRefs(priorCursor);
+			await emit({
+				type: "STATE",
+				stream: CONVERSATIONS_STREAM,
+				cursor: pendingExportWasCreatedThisRun
+					? {
+							...priorCursor,
+							last_export_requested_at: pendingExport.requested_at,
+						}
+					: priorCursor,
+			});
+			// A nonce requested in this run has no older export to fall back
+			// from, so the run fails as before.
+			if (pendingExportWasCreatedThisRun) throw attempt.linkSpent;
+			await progress(
+				"Claude already gave out the download link for the saved export. " +
+					"Requesting a new export...",
+				{ stream: CONVERSATIONS_STREAM },
+			);
+			return "link_spent";
 		}
 
 		if (!attempt.ready || !attempt.zipPath) {
@@ -1990,7 +2062,7 @@ export async function collectAnthropic({
 					"The request is checkpointed — the next run will resume polling " +
 					"the same export instead of requesting a new one.",
 			);
-			return;
+			return "done";
 		}
 
 		try {
@@ -2011,7 +2083,7 @@ export async function collectAnthropic({
 					pendingExportWasCreatedThisRun,
 					true,
 				);
-				return;
+				return "done";
 			}
 			const streamedArchive = readZipEntryChunk
 				? await readExportZipMetadata(attempt.zipPath, readZipEntryChunk)
@@ -2034,8 +2106,21 @@ export async function collectAnthropic({
 			if (!recognized) {
 				// No STATE: pending_export stays so the same export is reused.
 				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
-				return;
+				return "done";
 			}
+			// The export is read, and Claude gives out each download link only
+			// once. Drop pending_export now, so a later failure in this run does
+			// not leave a spent nonce for the next run to resume.
+			priorCursor = {
+				...cursorWithoutExportRefs(priorCursor),
+				consumed_export: pendingExport,
+				last_export_requested_at: pendingExport.requested_at,
+			};
+			await emit({
+				type: "STATE",
+				stream: CONVERSATIONS_STREAM,
+				cursor: priorCursor,
+			});
 			if (streamedArchive?.conversationsEntry) {
 				const parsedProjects = parseExport(
 					[],
@@ -2053,7 +2138,7 @@ export async function collectAnthropic({
 					},
 					parsedProjects,
 				);
-				return;
+				return "done";
 			}
 			const parsed = parseExport(
 				conversationsJson,
@@ -2069,6 +2154,7 @@ export async function collectAnthropic({
 					last_export_requested_at: pendingExport.requested_at,
 				},
 			);
+			return "done";
 		} finally {
 			await attempt.cleanup?.();
 		}

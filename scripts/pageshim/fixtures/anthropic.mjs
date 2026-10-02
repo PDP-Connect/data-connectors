@@ -16,8 +16,8 @@ export const syntheticExport = readFileSync(
 	),
 );
 
-const ORG = "org-syn-0000-0000-0000-000000000001";
-const NONCE = "nonce-syn-0001";
+export const ORG = "org-syn-0000-0000-0000-000000000001";
+export const NONCE = "nonce-syn-0001";
 const SIGNED = "https://storage.claude-export.test/export.zip?sig=synthetic";
 
 let loggedIn = true;
@@ -26,6 +26,9 @@ let archive = syntheticExport;
 let mintRefusals = 0;
 /** Mint error body, e.g. a spent nonce; null issues the signed URL. */
 let mintError = null;
+let mintErrorStatus = 410;
+/** Nonces whose mint Claude refuses as already used. */
+let spent = new Set();
 /** "old": export_data returns {nonce}. "new": a multi-part manifest. */
 let format = "old";
 export const counts = { exportRequests: 0, mints: 0 };
@@ -37,11 +40,15 @@ export function reset({
 	zip = syntheticExport,
 	notReadyPolls = 0,
 	mintFailure = null,
+	mintFailureStatus = 410,
+	spentNonces = [],
 	exportFormat = "old",
 } = {}) {
 	archive = zip;
 	mintRefusals = notReadyPolls;
 	mintError = mintFailure;
+	mintErrorStatus = mintFailureStatus;
+	spent = new Set(spentNonces);
 	format = exportFormat;
 	counts.exportRequests = 0;
 	counts.mints = 0;
@@ -91,13 +98,19 @@ export function resolveFixture(raw) {
 			});
 		return json({ nonce: NONCE });
 	}
+	const mint =
+		/^\/api\/organizations\/([^/]+)\/export_signed_url\/([^/]+)$/.exec(p);
+	if (mint && spent.has(mint[2])) {
+		counts.mints += 1;
+		return json({ error: "nonce consumed" }, 404);
+	}
 	if (p === `/api/organizations/${ORG}/export_signed_url/${NONCE}`) {
 		counts.mints += 1;
 		if (mintRefusals > 0) {
 			mintRefusals -= 1;
 			return json({ error: "not found" }, 404);
 		}
-		if (mintError) return json(mintError, 410);
+		if (mintError) return json(mintError, mintErrorStatus);
 		return json({ signed_url: SIGNED });
 	}
 	return json({ error: "not found" }, 404);
