@@ -525,6 +525,14 @@ schema. For each primary-key field, the value in `data` MUST identify the same
 value as the corresponding component of `key`. A runtime MUST reject a record
 when these identities disagree.
 
+`data` carries values from the source. A connector MUST NOT put its own
+collection or processing time in `data`, such as the time it fetched a page,
+parsed a file, or ran. `emitted_at` records when the connector emitted the
+record, and the stream's freshness strategy (Section 3.5) reports collection
+timing. A time that the source itself provides, such as a source
+`updated_at` value or the generation time of an export file, is a source value
+and stays in `data`.
+
 `op` is OPTIONAL. Its values are `upsert` and `delete`. Absence means upsert. A
 delete identifies a record by `stream` and `key`. It can omit `data`. If `data`
 is present, it MAY contain only key fields. A connector MUST NOT delete from an
@@ -537,8 +545,10 @@ is present, it MAY contain only key fields. A connector MUST NOT delete from an
 ```
 
 `stream` and `cursor` are REQUIRED. `cursor` is an object or `null`. Its object
-members are opaque to the runtime. Only the connector interprets them on a
-later run.
+members are opaque to the runtime and to the resource server. Only the
+connector interprets them on a later run. A cursor MAY hold a wall-clock
+watermark, such as the end of the last completed collection window. When
+`START.now` is present, the connector SHOULD derive that watermark from it.
 
 The runtime stages `STATE` only after it durably writes all prior records. It
 commits staged state only after successful `DONE`, except for the certified
@@ -777,11 +787,12 @@ A conforming connector:
 5. Emits final `DONE` where possible and emits nothing after it.
 6. Emits `STATE` only after the records covered by that state.
 7. Stores no secret in state, diagnostics, or detail locators.
-8. Waits for a matching response after `INTERACTION`.
-9. Declares every optional protocol capability it can emit.
-10. Produces the checkpoint and detail evidence required by its declared
+8. Puts no collection or processing time of its own in record `data`.
+9. Waits for a matching response after `INTERACTION`.
+10. Declares every optional protocol capability it can emit.
+11. Produces the checkpoint and detail evidence required by its declared
     strategies.
-11. When it declares filesystem inputs, reads owner data from local paths only
+12. When it declares filesystem inputs, reads owner data from local paths only
     through those inputs and writes nothing under a `read` input.
 
 ### 6.2 Runtime conformance
