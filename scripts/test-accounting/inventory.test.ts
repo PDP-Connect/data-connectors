@@ -1094,6 +1094,7 @@ test("reviewed hosted default profile skip baseline is explicit", async () => {
 			"GROUPME_ACCESS_TOKEN unset": 2,
 			"local Amazon raw-DOM fixture directory not present": 2,
 			"local Chase raw-DOM fixture directory not present": 3,
+			"local Gmail fixture directory not present": 1,
 			"local USAA raw fixture directory not present": 1,
 			"requires --experimental-test-module-mocks": 1,
 			"run with --expose-gc for a reliable memory-growth comparison": 1,
@@ -1279,7 +1280,7 @@ test("a suite-scoped authority run does not fail closed on an unrelated suite's 
 	);
 });
 
-test("six destination fixture mappings remain exact and server mappings do not resolve", () => {
+test("seven destination fixture mappings remain exact and server mappings do not resolve", () => {
 	const names = configuredNamedSkipMappingIdentities(
 		"polyfill-connectors",
 		"default",
@@ -1291,6 +1292,7 @@ test("six destination fixture mappings remain exact and server mappings do not r
 		"parseStatementsListDom: local real capture parses ≥1 statement row",
 		"parseCurrentActivityDom: local real capture — dashboard-accounts.html parses ≥1 MDS row",
 		"parseModernCheckingEra: local statement text parses ≥1 txn (smoke)",
+		"real gmail fixtures (if present on disk) smoke-parse",
 	]);
 	for (const name of names) assert.ok(resolveNamedSkipMapping(name));
 	assert.equal(
