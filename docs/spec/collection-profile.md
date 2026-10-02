@@ -212,6 +212,10 @@ A binding declaration can contain binding-specific fields. A connector MUST
 ignore declaration fields it does not understand. A runtime MUST fail a missing
 required binding before it starts the connector.
 
+The four bindings above are initial resource families, not a ceiling. A new core binding is admitted into the registry when it needs its own enforcement, availability, consent, or revocation that no existing binding provides. A namespaced extension binding is promoted into the registry against those same criteria.
+
+A declared constraint, such as `filesystem.inputs`, is not an access limit unless a runtime enforces it. A runtime or tool MUST NOT present a recorded-only declaration to the owner as a limit on what the connector can access.
+
 #### 3.3.1 Binding features
 
 A `browser` or `network` declaration MAY contain `features`, an array of unique
