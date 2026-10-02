@@ -122,7 +122,14 @@ import { createReplayFetch, type ReplayFetch } from "./replay.ts";
  *     oracle has no normalizer or driver to check. Withholding is the honest
  *     disposition — marking it "tracked" would assert a comparison this
  *     oracle does not perform, and "diagnostic_excluded" would wrongly imply
- *     it carries no completeness claim.
+ *     it carries no completeness claim. BLOB joins them for the same reason:
+ *     it arrived with @pdpp/connector-protocol 2.x (also after this oracle
+ *     was written) and hands a record's content to a host-provided spool
+ *     directory (`PDPP_BLOB_SPOOL_DIR`) outside this offline replay's
+ *     fetch-bridge sandbox — this oracle has no spool driver to stage that
+ *     directory or verify the emitted `sha256`/`size_bytes` against replayed
+ *     bytes, so it cannot back a `recorded_replay` claim for a run that used
+ *     it.
  */
 export type TraceDisposition =
 	| "covered_elsewhere"
@@ -146,6 +153,7 @@ export const TRACE_POLICY = {
 	ASSISTANCE: "unsupported_claim_withheld",
 	ASSISTANCE_STATUS: "unsupported_claim_withheld",
 	STREAM_EVIDENCE: "unsupported_claim_withheld",
+	BLOB: "unsupported_claim_withheld",
 } satisfies Record<EmittedMessage["type"], TraceDisposition>;
 
 /** The subset of `TRACE_POLICY` keys dispositioned `"tracked"` — kept in
