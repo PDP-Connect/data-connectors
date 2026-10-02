@@ -228,7 +228,7 @@ async function makeMiniGroupMeLikeRepo(): Promise<string> {
   git(["init", "-q", "-b", "main"], repoRoot);
   git(["config", "user.email", "test@example.com"], repoRoot);
   git(["config", "user.name", "Test"], repoRoot);
-  const targetDir = resolve(repoRoot, "packages/polyfill-connectors/connectors/groupme");
+  const targetDir = resolve(repoRoot, "connectors/groupme");
   await mkdir(targetDir, { recursive: true });
   await writeFile(resolve(targetDir, "index.ts"), "export const marker = 1;\n");
   git(["add", "-A"], repoRoot);
@@ -245,7 +245,7 @@ test("commitMutant: throws ForbiddenPathChangeError if applying an operator woul
     const misconfiguredOperator: GroupMeOperator = {
       id: "test-forbidden-path-operator",
       version: "1",
-      targetFile: "packages/polyfill-connectors/connectors/groupme/index.ts",
+      targetFile: "connectors/groupme/index.ts",
       preimage: "export const marker = 1;\n",
       riskDescription: "test fixture: writes outside its declared target",
       applyPostimage: (content: string) => {
@@ -268,7 +268,7 @@ test("commitMutant: a well-scoped operator commits cleanly as a real one-commit 
     const wellScopedOperator: GroupMeOperator = {
       id: "test-well-scoped-operator",
       version: "1",
-      targetFile: "packages/polyfill-connectors/connectors/groupme/index.ts",
+      targetFile: "connectors/groupme/index.ts",
       preimage: "export const marker = 1;\n",
       riskDescription: "test fixture: well-scoped change",
       applyPostimage: (content: string) => content.replace("export const marker = 1;", "export const marker = 2;"),
@@ -278,7 +278,7 @@ test("commitMutant: a well-scoped operator commits cleanly as a real one-commit 
     const parentSha = git(["rev-parse", `${mutantSha}^`], repoRoot);
     assert.equal(parentSha, headBefore, "the mutant must be a one-commit descendant of the base commit");
     const changedFiles = git(["diff", "--name-only", headBefore, mutantSha], repoRoot).split("\n").filter(Boolean);
-    assert.deepEqual(changedFiles, ["packages/polyfill-connectors/connectors/groupme/index.ts"]);
+    assert.deepEqual(changedFiles, ["connectors/groupme/index.ts"]);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }
@@ -290,7 +290,7 @@ test("commitMutant: propagates PreimageMismatchError when the operator's preimag
     const mismatchedOperator: GroupMeOperator = {
       id: "test-mismatched-operator",
       version: "1",
-      targetFile: "packages/polyfill-connectors/connectors/groupme/index.ts",
+      targetFile: "connectors/groupme/index.ts",
       preimage: "this text does not exist in the target file",
       riskDescription: "test fixture: preimage mismatch",
       applyPostimage: (content: string) => content,
@@ -364,7 +364,7 @@ test("judge identity binds actual raw bytes including binary files", async () =>
   const root=await mkdtemp(join(tmpdir(),"groupme-identity-"));
   try {
     git(["init","-q"],root);
-    const files=["packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts","package-lock.json","packages/polyfill-connectors/package-lock.json","scripts/mutation-falsification/groupme-runner.ts","scripts/mutation-falsification/groupme-operators.ts","scripts/mutation-falsification/workspace.ts","scripts/test-accounting/authority.ts","scripts/test-accounting/receipt.ts","scripts/test-accounting/inventory.ts","scripts/test-accounting/node-reporter.ts","binary.dat"];
+    const files=["connectors/groupme/incremental-frontier.test.ts","package-lock.json","packages/polyfill-connectors/package-lock.json","scripts/mutation-falsification/groupme-runner.ts","scripts/mutation-falsification/groupme-operators.ts","scripts/mutation-falsification/workspace.ts","scripts/test-accounting/authority.ts","scripts/test-accounting/receipt.ts","scripts/test-accounting/inventory.ts","scripts/test-accounting/node-reporter.ts","binary.dat"];
     for(const file of files){await mkdir(resolve(root,file,".."),{recursive:true});await writeFile(resolve(root,file),"fixture");}
     git(["add","-A"],root);
     await writeFile(resolve(root,"binary.dat"),Buffer.from([0xff]));
@@ -470,7 +470,7 @@ async function makePreparedSurvivorFixture(root: string, options: {omitNative?: 
   await writeFile(resolve(dirname(target),"backstop.test.ts"),`import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';test('complete backstop catches the forced focused survivor',()=>assert.equal(readFileSync(new URL('./index.ts',import.meta.url),'utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES'),false));\n`);
   git(["init","-q"],repoRoot);git(["add","-A"],repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","fixture base"],repoRoot);
   const base=git(["rev-parse","HEAD"],repoRoot);
-  await writeFile(resolve(repoRoot,"test-accounting.manifest.json"),JSON.stringify({schema:"pdpp.test-accounting/v3",inventory_base_sha:base,suites:[{id:"polyfill-connectors",cwd:".",loader:"node-test",execution:"direct",authority_argument:null,command:["node","--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts"],include:["packages/polyfill-connectors/connectors/groupme/*.test.ts"],profiles:[{id:"default",required:true,skip_reasons:{}}]}],exclusions:[]}));
+  await writeFile(resolve(repoRoot,"test-accounting.manifest.json"),JSON.stringify({schema:"pdpp.test-accounting/v3",inventory_base_sha:base,suites:[{id:"polyfill-connectors",cwd:".",loader:"node-test",execution:"direct",authority_argument:null,command:["node","--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts"],include:["connectors/groupme/*.test.ts"],profiles:[{id:"default",required:true,skip_reasons:{}}]}],exclusions:[]}));
   git(["add","-A"],repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","fixture manifest"],repoRoot);
   return {repoRoot,focus,head:git(["rev-parse","HEAD"],repoRoot),preparation:{cacheRoot,cacheDigest:await directoryDigest(cacheRoot),browserRoot,browserDigest:await directoryDigest(browserRoot),nativeModule,nativeDigest:await fileDigest(nativeModule),rootLockDigest:await fileDigest(resolve(repoRoot,"package-lock.json")),packageLockDigest:await fileDigest(resolve(packageRoot,"package-lock.json"))}};
 }
@@ -508,7 +508,7 @@ test("forced focused survivor runs complete mutant authority and rejection stays
     // A synchronous fixture side effect during the clean authority phase changes only the original
     // source judge, simulating identity drift between baseline and first operator without a timing race.
     await writeFile(fixture.focus,"import test from 'node:test';for(let i=0;i<23;i++)test('focused fixture '+i,()=>{});");
-    const backstopPath=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    const backstopPath=resolve(fixture.repoRoot,"connectors/groupme/backstop.test.ts");
     await writeFile(backstopPath,`import test from 'node:test';import {writeFileSync} from 'node:fs';test('change original source judge after clean focus',()=>writeFileSync(${JSON.stringify(fixture.focus)},'// changed judge during clean authority'));`);
     git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","judge drift fixture"],fixture.repoRoot);
     await assert.rejects(()=>runGroupMePilotBatch({...policy,workspacePolicy:{...policy.workspacePolicy,workspaceRoot:resolve(root,"drift-workspaces")},evidenceStorePolicy:{...policy.evidenceStorePolicy,evidenceRoot:resolve(root,"judge-drift-evidence")}},intentFor(git(["rev-parse","HEAD"],fixture.repoRoot)),[GROUPME_PAGE_CEILING_V1.id]),/clean evidence identity or reuse window changed/);
@@ -616,7 +616,7 @@ test("whole batch refuses changed retained clean bytes and crossing 600 seconds 
   const root=await mkdtemp(join(tmpdir(),"groupme-baseline-boundary-"));
   try {
     const fixture=await makePreparedSurvivorFixture(root);
-    const backstop=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    const backstop=resolve(fixture.repoRoot,"connectors/groupme/backstop.test.ts");
     for(const mode of ["changed","missing","elapsed","two-hours"] as const){
       const evidenceRoot=resolve(root,mode+"-evidence"),marker=resolve(root,mode+"-clock");
       const clockAdvance=mode==="elapsed"?600001:mode==="two-hours"?7200001:0;
@@ -661,7 +661,7 @@ test("interrupted real clean and mutant authorities quarantine private clones an
       await cp(authority,resolve(fixture.repoRoot,"scripts/test-accounting/authority-fixture-original.ts"));
       await writeFile(authority,`import {runAuthority as original} from './authority-fixture-original.ts';import {readFileSync,mkdirSync,writeFileSync} from 'node:fs';
         export async function runAuthority(options){
-          const mutant=readFileSync('packages/polyfill-connectors/connectors/groupme/index.ts','utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES');
+          const mutant=readFileSync('connectors/groupme/index.ts','utf8').includes('__MUTATION_FALSIFICATION_MAX_PAGES');
           if(${JSON.stringify(phase)}==='clean'||mutant){mkdirSync('.git/test-accounting/runs',{recursive:true});writeFileSync('.git/test-accounting/runs/interrupted-fixture.partial','unfinished authority fixture');process.kill(process.pid,'SIGTERM');await new Promise(()=>{});}
           return original(options);
         }`);
@@ -702,7 +702,7 @@ test("a quarantined mutant setup failure stops the next operator and blocks a fr
   const root=await mkdtemp(join(tmpdir(),"groupme-stop-after-quarantine-"));
   try {
     const fixture=await makePreparedSurvivorFixture(root);
-    const backstop=resolve(fixture.repoRoot,"packages/polyfill-connectors/connectors/groupme/backstop.test.ts");
+    const backstop=resolve(fixture.repoRoot,"connectors/groupme/backstop.test.ts");
     await writeFile(backstop,`import test from 'node:test';import {writeFileSync} from 'node:fs';test('fixture changes prepared cache after clean materialization',()=>writeFileSync(${JSON.stringify(resolve(fixture.preparation.cacheRoot,"changed-after-clean"))},'changed declared preparation'));`);
     git(["add","-A"],fixture.repoRoot);git(["-c","user.name=Fixture","-c","user.email=fixture@localhost","commit","-qm","post-clean preparation drift fixture"],fixture.repoRoot);
     const policy={sourceRepoRoot:fixture.repoRoot,policyVersion:"fixture-policy/v1",workspacePolicy:defaultWorkspacePolicy({workspaceRoot:resolve(root,"workspaces"),minFreeBytesPreflight:1024,preparation:fixture.preparation}),evidenceStorePolicy:{evidenceRoot:resolve(root,"evidence"),maxAttempts:20,maxRetainedBytes:128*1024*1024,retentionDeadlineDays:30 as const}};
@@ -722,7 +722,7 @@ test("dirty source is refused as focused_source_not_clean before the focused chi
   const root=await mkdtemp(join(tmpdir(),"groupme-dirty-before-focus-"));
   try {
     const repoRoot=resolve(root,"repo"),sentinel=resolve(root,"focused-child-ran");
-    const focusedFile=resolve(repoRoot,"packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts");
+    const focusedFile=resolve(repoRoot,"connectors/groupme/incremental-frontier.test.ts");
     await mkdir(resolve(focusedFile,".."),{recursive:true});
     await mkdir(resolve(repoRoot,"scripts/test-accounting"),{recursive:true});
     await writeFile(resolve(repoRoot,"package.json"),'{"type":"module"}');

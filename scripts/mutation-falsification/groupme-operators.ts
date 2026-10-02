@@ -3,7 +3,7 @@
 
 /**
  * Checked-in registry of exactly 2 declarative fault operators over
- * `packages/polyfill-connectors/connectors/groupme/index.ts` (design.md
+ * `connectors/groupme/index.ts` (design.md
  * Decision #2/#6, tasks.md 2.1). Each operator's exact target preimage is
  * checked VERBATIM before applying — a mismatch aborts with
  * `PreimageMismatchError` rather than applying a stale or unintended
@@ -14,10 +14,10 @@
  *
  * Both preimages are quoted here as they existed at commit `abc720e9bec812d9321349b931a40a9bcf8378cd`
  * (this branch's HEAD when this file was authored) in
- * `packages/polyfill-connectors/connectors/groupme/index.ts`.
+ * `connectors/groupme/index.ts`.
  */
 
-const GROUPME_INDEX_RELATIVE_PATH = "packages/polyfill-connectors/connectors/groupme/index.ts";
+const GROUPME_INDEX_RELATIVE_PATH = "connectors/groupme/index.ts";
 
 export class PreimageMismatchError extends Error {
   constructor(operatorId: string, targetFile: string) {

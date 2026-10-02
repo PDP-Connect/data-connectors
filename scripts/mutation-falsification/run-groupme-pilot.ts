@@ -60,7 +60,7 @@ async function main(): Promise<void> {
     // Policy identities use declared private-path roles; execution artifacts retain actual paths.
     environmentConfiguration: Object.fromEntries(Object.entries(env).map(([name,value]) => [name,
       typeof value === "string" ? value.replaceAll(privateRoot, "<private-workspace>") : value])),
-    focusedCommand: [process.execPath,"--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts","packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts"], batchWallTimeMs: PILOT_BATCH_WALL_TIME_MS,
+    focusedCommand: [process.execPath,"--test","--import","tsx","--test-reporter","scripts/test-accounting/node-reporter.ts","connectors/groupme/incremental-frontier.test.ts"], batchWallTimeMs: PILOT_BATCH_WALL_TIME_MS,
     cleanCostAdmissionMaximumMs: 300_000,
   };
   const identity = digestOf(plan);

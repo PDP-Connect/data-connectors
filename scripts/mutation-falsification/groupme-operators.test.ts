@@ -18,7 +18,7 @@ import {
 const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 
 async function readRealGroupMeIndex(): Promise<string> {
-  return readFile(resolve(REPO_ROOT, "packages/polyfill-connectors/connectors/groupme/index.ts"), "utf8");
+  return readFile(resolve(REPO_ROOT, "connectors/groupme/index.ts"), "utf8");
 }
 
 test("exactly 2 operators are registered (design.md permits two or three; two is enough here)", () => {
@@ -77,9 +77,9 @@ test("applyOperator: throws PreimageMismatchError when the target function has a
   assert.throws(() => applyOperator(GROUPME_NONPROGRESS_WEAKENING_V1, alreadyMutated), PreimageMismatchError);
 });
 
-test("both operators declare the same target file (packages/polyfill-connectors/connectors/groupme/index.ts)", () => {
-  assert.equal(GROUPME_PAGE_CEILING_V1.targetFile, "packages/polyfill-connectors/connectors/groupme/index.ts");
-  assert.equal(GROUPME_NONPROGRESS_WEAKENING_V1.targetFile, "packages/polyfill-connectors/connectors/groupme/index.ts");
+test("both operators declare the same target file (connectors/groupme/index.ts)", () => {
+  assert.equal(GROUPME_PAGE_CEILING_V1.targetFile, "connectors/groupme/index.ts");
+  assert.equal(GROUPME_NONPROGRESS_WEAKENING_V1.targetFile, "connectors/groupme/index.ts");
 });
 
 test("both operators carry a non-empty risk description", () => {
