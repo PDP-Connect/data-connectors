@@ -1,6 +1,6 @@
 {
   "schema": "pdpp.test-accounting/v3",
-  "inventory_base_sha": "8df81721c7a37f55a8cd6390aae2be1d5ac50249",
+  "inventory_base_sha": "f35b6cf16a8c65d2871fe250f60eb043daf4f3bb",
   "suites": [
     {
       "id": "mutation-falsification",
@@ -89,7 +89,7 @@
       ],
       "include": [
         "packages/polyfill-connectors/bin/**/*.test.ts",
-        "packages/polyfill-connectors/connectors/**/*.test.ts",
+        "connectors/**/*.test.ts",
         "packages/polyfill-connectors/scripts/related-tests/*.test.ts",
         "packages/polyfill-connectors/scripts/**/*.test.mjs",
         "packages/polyfill-connectors/src/**/*.test.ts"
@@ -115,33 +115,6 @@
             "requires usable unshare prerequisites": 19,
             "requires writable socket location: an ssh-agent-shaped path under $HOME/.ssh/agent": 1
           }
-        }
-      ]
-    },
-    {
-      "id": "root-anthropic",
-      "cwd": ".",
-      "loader": "node-test",
-      "execution": "direct",
-      "authority_argument": null,
-      "command": [
-        "node",
-        "--test",
-        "--import",
-        "tsx",
-        "--test-reporter",
-        "scripts/test-accounting/node-reporter.ts"
-      ],
-      "include": [
-        "connectors/anthropic/__tests__/claude-code-trajectories.test.cjs",
-        "connectors/anthropic/__tests__/claude-export-classifier.test.cjs",
-        "connectors/anthropic/__tests__/claude-export-ingest.test.cjs"
-      ],
-      "profiles": [
-        {
-          "id": "default",
-          "required": true,
-          "skip_reasons": {}
         }
       ]
     },
@@ -214,40 +187,15 @@
         "packages/connector-installer-cli/cli.test.mjs",
         "packages/connector-installer-core/index.test.mjs",
         "packages/connector-installer-core/oci-catalog.test.mjs",
+        "packages/connector-installer-core/oci-fixture-shape.test.mjs",
         "packages/connector-installer-core/oci-identity.test.mjs",
+        "packages/connector-installer-core/oci-live-registry.test.mjs",
         "packages/connector-installer-core/oci-registry.test.mjs",
         "packages/connector-installer-core/oci.test.mjs",
         "packages/connector-installer-core/packaging.test.mjs",
         "packages/connector-installer-core/signer-identity.test.mjs",
+        "packages/connector-installer-core/source-declaration.test.mjs",
         "packages/connector-installer-core/tar-stream.test.mjs"
-      ],
-      "profiles": [
-        {
-          "id": "default",
-          "required": true,
-          "skip_reasons": {}
-        }
-      ]
-    },
-    {
-      "id": "root-runner",
-      "cwd": ".",
-      "loader": "node-test",
-      "execution": "direct",
-      "authority_argument": null,
-      "command": [
-        "node",
-        "--test",
-        "--import",
-        "tsx",
-        "--test-reporter",
-        "scripts/test-accounting/node-reporter.ts"
-      ],
-      "include": [
-        "playwright-runner/result-classifier.conformance.test.cjs",
-        "playwright-runner/result-classifier.test.cjs",
-        "playwright-runner/runner-compat.test.cjs",
-        "playwright-runner/zip-reader.test.cjs"
       ],
       "profiles": [
         {
@@ -310,11 +258,18 @@
         "scripts/generate-scope-catalog.test.mjs",
         "scripts/lookup-manifest.test.mjs",
         "scripts/manager-engines.test.mjs",
+        "scripts/old-installer-compat.test.mjs",
+        "scripts/pageshim/capabilities.test.mjs",
+        "scripts/pageshim/claude-real-size.test.mjs",
+        "scripts/pageshim/pageshim-streaming.test.mjs",
+        "scripts/pageshim/pageshim.test.mjs",
         "scripts/publish-connector-catalog.test.mjs",
         "scripts/publish-ref-gate.test.mjs",
         "scripts/publish-tag-guard.test.mjs",
+        "scripts/published-state.test.mjs",
         "scripts/schema-artifact-kind.test.mjs",
         "scripts/schema-health-gate.test.mjs",
+        "scripts/select-publish-connectors.test.mjs",
         "scripts/select-publish-target.test.mjs",
         "scripts/test-connectors.test.cjs",
         "scripts/youtube-watched-at.test.mjs"
@@ -358,7 +313,7 @@
   ],
   "exclusions": [
     {
-      "path": "packages/polyfill-connectors/connectors/github/index.test.ts",
+      "path": "connectors/github/index.test.ts",
       "suite": "polyfill-connectors",
       "profile": "default",
       "reason": "Requires the reference implementation ingest pipeline; owned by cross-repository semantic CI, not this local package suite.",
