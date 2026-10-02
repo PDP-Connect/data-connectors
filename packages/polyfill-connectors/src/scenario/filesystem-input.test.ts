@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { manifestPath } from "../connector-paths.ts";
 import { buildFilesystemInputLimitation } from "./claims.ts";
 import {
 	FilesystemInputError,
@@ -61,9 +62,7 @@ function expectGuardFailure(env: NodeJS.ProcessEnv, pattern: RegExp): void {
 // ─── manifest read ──────────────────────────────────────────────────────────
 
 test("readDeclaredFilesystemInput reads the real strava manifest's declaration", () => {
-	const manifest = JSON.parse(
-		readFileSync(join(PACKAGE_ROOT, "manifests", "strava.json"), "utf8"),
-	);
+	const manifest = JSON.parse(readFileSync(manifestPath("strava"), "utf8"));
 	assert.deepEqual(readDeclaredFilesystemInput(manifest), {
 		envVar: "STRAVA_EXPORT_DIR",
 		acceptedFileExtensions: [".zip", ".csv"],
@@ -71,9 +70,7 @@ test("readDeclaredFilesystemInput reads the real strava manifest's declaration",
 });
 
 test("readDeclaredFilesystemInput is undefined for a connector that declares no import directory", () => {
-	const manifest = JSON.parse(
-		readFileSync(join(PACKAGE_ROOT, "manifests", "reddit.json"), "utf8"),
-	);
+	const manifest = JSON.parse(readFileSync(manifestPath("reddit"), "utf8"));
 	assert.equal(readDeclaredFilesystemInput(manifest), undefined);
 	assert.equal(readDeclaredFilesystemInput(undefined), undefined);
 	assert.equal(

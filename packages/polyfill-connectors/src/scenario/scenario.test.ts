@@ -1918,7 +1918,7 @@ test("protocol trace menagerie: a malformed DETAIL_GAP_RECOVERED (missing gap_id
 // TRACE_POLICY's key set or to this test's own hardcoded expectation is
 // caught in `node --test` output too, not only in a `tsc --noEmit` pass a
 // contributor might skip locally.
-test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, exactly the fourteen kinds the protocol declares", () => {
+test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, exactly the fifteen kinds the protocol declares", () => {
 	const expectedKinds = [
 		"RECORD",
 		"STATE",
@@ -1935,6 +1935,10 @@ test("TRACE_POLICY: every EmittedMessage kind has an explicit disposition, exact
 		"INTERACTION",
 		// Added by @pdpp/connector-protocol 0.0.2, after this oracle was written.
 		"STREAM_EVIDENCE",
+		// Added by @pdpp/connector-protocol 2.x, also after this oracle was
+		// written — a host-blob spool reference this offline replay has no
+		// driver for (see verify.ts's TRACE_POLICY doc comment).
+		"BLOB",
 	] satisfies EmittedMessage["type"][];
 	assert.deepEqual(Object.keys(TRACE_POLICY).sort(), [...expectedKinds].sort());
 });
@@ -1955,17 +1959,20 @@ test("TRACE_POLICY: the tracked subset matches exactly the seven kinds this orac
 	]);
 });
 
-test("TRACE_POLICY: ASSISTANCE, ASSISTANCE_STATUS and STREAM_EVIDENCE are the only unsupported_claim_withheld kinds", () => {
+test("TRACE_POLICY: ASSISTANCE, ASSISTANCE_STATUS, STREAM_EVIDENCE and BLOB are the only unsupported_claim_withheld kinds", () => {
 	const withheld = Object.entries(TRACE_POLICY)
 		.filter(([, disposition]) => disposition === "unsupported_claim_withheld")
 		.map(([kind]) => kind)
 		.sort();
 	// STREAM_EVIDENCE carries a child-stream coverage claim this offline
 	// HTTP-replay oracle has no normalizer for, so it is withheld rather than
-	// asserted — same reasoning as the two ASSISTANCE kinds.
+	// asserted — same reasoning as the two ASSISTANCE kinds. BLOB hands record
+	// content to a host-provided spool directory this offline replay has no
+	// driver to stage or verify (see verify.ts's TRACE_POLICY doc comment).
 	assert.deepEqual(withheld, [
 		"ASSISTANCE",
 		"ASSISTANCE_STATUS",
+		"BLOB",
 		"STREAM_EVIDENCE",
 	]);
 });

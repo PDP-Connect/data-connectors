@@ -228,10 +228,8 @@ import {
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
 import {
-	CONNECTORS_DIR,
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
-	MANIFEST_DIR,
 	readManifest,
 } from "../src/orchestrator.ts";
 import {
@@ -1073,13 +1071,13 @@ function resolveConnector(args: CliArgs): ResolvedConnector {
 			usageAndExit(2);
 		}
 		const manifest = readManifest(args.connector);
-		const { connectorPath } = getConnectorPaths(args.connector);
+		const { connectorPath, manifestPath } = getConnectorPaths(args.connector);
 		return {
 			connectorPath,
 			streams: (manifest.streams ?? []) as ManifestStream[],
 			usedEntrypointOverride: false,
-			manifestPath: join(MANIFEST_DIR, `${args.connector}.json`),
-			connectorDir: join(CONNECTORS_DIR, args.connector),
+			manifestPath,
+			connectorDir: dirname(connectorPath),
 		};
 	})();
 	if (!args.streams) {

@@ -44,6 +44,7 @@ export const KNOWN_MESSAGE_TYPES = {
 	DONE: true,
 	INTERACTION: true,
 	STREAM_EVIDENCE: true,
+	BLOB: true,
 } satisfies Record<EmittedMessage["type"], true>;
 
 /**

@@ -55,6 +55,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { getConnectorPaths } from "../src/orchestrator.ts";
 import type { ConnectorScenario } from "../src/scenario/format.ts";
 import {
 	computeDeclarationDigest,
@@ -2400,8 +2401,9 @@ test("scenario-verify: reports (never fails) a differing captured_with source by
 // in `finally` regardless of assertion outcome, so this test never leaves
 // the real oura connector directory altered.
 test("assertNoPostRunSourceMutation: detects a source mutation between the pre-flight hash and the post-run check, and reports no mutation when nothing changed", () => {
-	const connectorDir = join(PACKAGE_ROOT, "connectors", "oura");
-	const manifestPath = join(PACKAGE_ROOT, "manifests", "oura.json");
+	const ouraPaths = getConnectorPaths("oura");
+	const connectorDir = dirname(ouraPaths.connectorPath);
+	const manifestPath = ouraPaths.manifestPath;
 	const preflightSourceDigest = computeSourceDigest(connectorDir);
 	const preflightDeclarationDigest = computeDeclarationDigest(manifestPath);
 	const baseArgs = {
