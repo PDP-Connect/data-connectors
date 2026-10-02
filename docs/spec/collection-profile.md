@@ -321,6 +321,8 @@ read `inputs`. During the transition:
 - A runtime that finds `import_dir_env_var` and no `inputs` SHOULD treat the
   variable as one `dir` input with `access: "read"`.
 
+`filesystem.inputs` is the initial filesystem input form. A later binding mechanism may describe a binding's local paths as typed instances. If that mechanism arrives, `filesystem.inputs` remains valid as an alias for it: a runtime MUST normalize both forms to one runtime form, a manifest that declares both MUST make them equal, and a runtime MUST reject a manifest whose two declarations conflict. The precedence of `import_dir_env_var` relative to `inputs`, given above, carries over unchanged.
+
 ### 3.4 Human interaction and protocol capabilities
 
 `capabilities.human_interaction` is an OPTIONAL array. Its values are
