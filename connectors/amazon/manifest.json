@@ -9,7 +9,7 @@
 	},
 	"connector_key": "amazon",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-	"version": "0.1.11",
+	"version": "1.0.0",
 	"display_name": "Amazon",
 	"brand": {
 		"icon": "icon.svg",
@@ -127,10 +127,6 @@
 					},
 					"item_count": {
 						"type": ["integer", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "order_date"]
@@ -172,8 +168,7 @@
 						"payment_method_summary",
 						"gift_order",
 						"digital_order",
-						"item_count",
-						"fetched_at"
+						"item_count"
 					]
 				}
 			],

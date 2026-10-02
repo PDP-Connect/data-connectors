@@ -58,7 +58,6 @@ export interface MergedItem {
 export interface OrdersRecord {
 	delivery_status: string | null;
 	digital_order: boolean;
-	fetched_at: string;
 	gift_order: boolean;
 	id: string;
 	item_count: number | null;

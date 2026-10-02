@@ -5,7 +5,7 @@
 // GENERATED FILE — DO NOT EDIT.
 //
 // Source manifest: manifests/jellyfin.json
-// Manifest digest (sha256, first 16 hex chars): 13da7e7a1d22120f
+// Manifest digest (sha256, first 16 hex chars): 27d561f8263aef76
 // Generator: validator-gen/1 (bin/generate-validators.ts)
 //
 // Regenerate with:
@@ -22,7 +22,6 @@ export const librariesSchema = z.object({
 	id: z.string(),
 	name: z.string(),
 	collection_type: z.string().nullable().optional(),
-	fetched_at: z.string().describe("format:date-time"),
 });
 
 export const itemsSchema = z.object({

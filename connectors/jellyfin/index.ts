@@ -516,15 +516,11 @@ function pageFingerprint(pageItems: unknown[]): string {
 /**
  * Build a libraries record from a Jellyfin View.
  */
-function libraryRecord(
-	view: Record<string, unknown>,
-	fetchedAt: string,
-): RecordData {
+function libraryRecord(view: Record<string, unknown>): RecordData {
 	return {
 		id: view.Id as string,
 		name: view.Name as string,
 		collection_type: (view.CollectionType ?? null) as string | null,
-		fetched_at: fetchedAt,
 	};
 }
 
@@ -874,7 +870,7 @@ async function collectLibraries(
 	const views = await fetchLibraries(conn);
 
 	for (const view of views) {
-		const rec = libraryRecord(view, now);
+		const rec = libraryRecord(view);
 		if (libraryCursor.shouldEmit(rec)) {
 			await emitRecord("libraries", rec);
 		}

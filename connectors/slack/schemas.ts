@@ -211,7 +211,6 @@ export const channelMembershipsSchema = z.object({
 	id: z.string().min(3).max(300), // Composite: "channel_id:user_id"
 	channel_id: z.string().regex(SLACK_ID_RE),
 	user_id: z.string().regex(SLACK_ID_RE),
-	fetched_at: isoDatetimeSchema,
 });
 
 // canvases stream: 5 records in sample
@@ -251,7 +250,6 @@ export const workspaceSchema = z.object({
 	authenticated_user_id: slackIdSchema,
 	authenticated_username: z.string().nullable(),
 	authenticated_bot_id: slackIdSchema,
-	fetched_at: isoDatetimeSchema,
 });
 
 // Layer-2 streams declared in the manifest but skipped by the current
@@ -302,7 +300,6 @@ export const dmReadStatesSchema = z.object({
 	last_read_at: nullableIsoDatetimeSchema,
 	unread_count: nullableNonNegativeIntSchema,
 	unread_count_display: nullableNonNegativeIntSchema,
-	fetched_at: isoDatetimeSchema,
 });
 
 /**

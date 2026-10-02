@@ -95,7 +95,9 @@ export function toSlackTime(iso: string | null): string | null {
 
 export function buildWorkspaceRecord(
 	r: WorkspaceRow,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 ): RecordData {
 	const d = parseBlob(r.DATA);
 	return {
@@ -110,7 +112,6 @@ export function buildWorkspaceRecord(
 		authenticated_user_id: r.USER_ID ?? d.user_id ?? null,
 		authenticated_username: r.USERNAME ?? d.user ?? null,
 		authenticated_bot_id: d.bot_id || null,
-		fetched_at: emittedAt,
 	};
 }
 
@@ -203,13 +204,14 @@ export function buildChannelStatsRecord(
 
 export function buildChannelMembershipRecord(
 	r: ChannelUserRow,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 ): RecordData {
 	return {
 		id: `${r.CHANNEL_ID}:${r.USER_ID}`,
 		channel_id: r.CHANNEL_ID,
 		user_id: r.USER_ID,
-		fetched_at: emittedAt,
 	};
 }
 
@@ -578,7 +580,9 @@ export function buildReminderRecord(r: SlackReminder): RecordData {
  */
 export function buildDmReadStateRecord(
 	state: DmReadState,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 ): RecordData {
 	const lastReadIso = tsToIso(state.lastRead);
 	return {
@@ -588,7 +592,6 @@ export function buildDmReadStateRecord(
 		last_read_at: lastReadIso,
 		unread_count: state.unreadCount,
 		unread_count_display: state.unreadCountDisplay,
-		fetched_at: emittedAt,
 	};
 }
 

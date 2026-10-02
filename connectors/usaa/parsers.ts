@@ -360,7 +360,9 @@ function csvRowToTransaction({
 	idx,
 	accountId: rowAccountId,
 	accountName,
-	fetchedAt,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept on the shared args shape so call sites stay stable.
+	fetchedAt: _fetchedAt,
 	tupleOrdinal,
 }: RowToTxnArgs): TransactionRecord | null {
 	if (row.every((f) => !f?.trim())) {
@@ -398,7 +400,6 @@ function csvRowToTransaction({
 		balance_after_cents: balanceRaw ? currencyToCents(balanceRaw) : null,
 		check_number: checkMatch?.[1] ?? null,
 		source: "csv_export",
-		fetched_at: fetchedAt,
 	};
 }
 
@@ -696,7 +697,9 @@ export function accountId(a: DashboardAccount): string {
 
 export function buildAccountRecord(
 	a: DashboardAccount,
-	fetchedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
 ): AccountRecord {
 	return {
 		id: accountId(a),
@@ -704,7 +707,6 @@ export function buildAccountRecord(
 		name: stableAccountName(a),
 		last_four: a.last_four,
 		status: "open",
-		fetched_at: fetchedAt,
 	};
 }
 
@@ -742,7 +744,9 @@ export function buildAccountStatsRecord(
 export function buildInboxMessageRecord(
 	m: InboxRow,
 	year: number,
-	fetchedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
 ): InboxMessageRecord | null {
 	if (!m.date_short) {
 		return null;
@@ -758,7 +762,6 @@ export function buildInboxMessageRecord(
 		status: UNREAD_RE.test(m.status) ? "unread" : "read",
 		subject: m.preview.slice(0, 120),
 		preview: m.preview,
-		fetched_at: fetchedAt,
 	};
 }
 
@@ -772,7 +775,9 @@ export function creditCardId(a: DashboardAccount): string {
 export function buildCreditCardBillingRecord(
 	a: DashboardAccount,
 	billing: BillingKv,
-	fetchedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
 ): CreditCardBillingRecord {
 	return {
 		id: creditCardId(a),
@@ -782,7 +787,6 @@ export function buildCreditCardBillingRecord(
 		annual_percent_rate: billing["Annual Percent Rate"] ?? null,
 		cash_advance_apr: billing["Cash Advance APR"] ?? null,
 		card_holders: billing["Card Holders"] ?? null,
-		fetched_at: fetchedAt,
 	};
 }
 

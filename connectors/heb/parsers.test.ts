@@ -1007,7 +1007,6 @@ test("buildOrderRecord maps a parsed list order into the emitted orders shape", 
 	assert.equal(record.order_date, "2026-07-14");
 	assert.equal(record.fulfillment_method, "curbside");
 	assert.equal(record.total_cents, 8745);
-	assert.equal(record.fetched_at, "2026-07-14T12:00:00.000Z");
 });
 
 test("buildOrderItemRecord maps a parsed detail item into the emitted order_items shape", () => {
@@ -1255,7 +1254,6 @@ test("buildProfileRecord builds the fixed-literal-id profile record", () => {
 			},
 		],
 		email: "shopper@example.com",
-		fetched_at: "2026-07-14T12:00:00.000Z",
 		id: "profile",
 		name: "Jamie Shopper",
 		phone: "(512) 555-0100",

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.1.7",
+	"version": "1.0.0",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",
@@ -129,11 +129,6 @@
 					"balance_as_of": {
 						"type": ["string", "null"],
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]
@@ -234,10 +229,6 @@
 					"source": {
 						"type": "string",
 						"description": "Always 'qfx_download_<YYYY-MM-DD>_to_<YYYY-MM-DD>'. Provenance for audit and re-extraction."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "account_id", "fitid", "date", "amount", "currency"]
@@ -334,7 +325,8 @@
 					},
 					"activity_date": {
 						"type": "string",
-						"format": "date"
+						"format": "date",
+						"x_pdpp_role": "event-time"
 					},
 					"posted_date": {
 						"type": ["string", "null"],
@@ -364,11 +356,6 @@
 					"source": {
 						"type": "string",
 						"description": "Always 'chase_activity_ui'."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": [
@@ -383,8 +370,7 @@
 					"description",
 					"memo",
 					"ui_transaction_id",
-					"source",
-					"fetched_at"
+					"source"
 				]
 			},
 			"primary_key": ["id"],
@@ -468,7 +454,8 @@
 					},
 					"date_delivered": {
 						"type": ["string", "null"],
-						"format": "date"
+						"format": "date",
+						"x_pdpp_role": "event-time"
 					},
 					"account_reference": {
 						"type": ["string", "null"]
@@ -492,11 +479,6 @@
 					"pdf_page_count": {
 						"type": ["integer", "null"],
 						"description": "Integer page count from the PDF structure. A structural content invariant alongside pdf_text_sha256. Null when extraction failed."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "title"]
@@ -554,7 +536,8 @@
 					"as_of": {
 						"type": "string",
 						"format": "date-time",
-						"description": "QFX DTASOF — when Chase measured the balance."
+						"description": "QFX DTASOF — when Chase measured the balance.",
+						"x_pdpp_role": "event-time"
 					},
 					"ledger_balance_cents": {
 						"type": ["integer", "null"],
@@ -563,11 +546,6 @@
 					"available_balance_cents": {
 						"type": ["integer", "null"],
 						"description": "QFX AVAILBAL."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "account_id", "as_of"]
