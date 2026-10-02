@@ -1280,7 +1280,7 @@ test("a suite-scoped authority run does not fail closed on an unrelated suite's 
 	);
 });
 
-test("seven destination fixture mappings remain exact and server mappings do not resolve", () => {
+test("six destination fixture mappings remain exact and server mappings do not resolve", () => {
 	const names = configuredNamedSkipMappingIdentities(
 		"polyfill-connectors",
 		"default",
@@ -1292,7 +1292,6 @@ test("seven destination fixture mappings remain exact and server mappings do not
 		"parseStatementsListDom: local real capture parses ≥1 statement row",
 		"parseCurrentActivityDom: local real capture — dashboard-accounts.html parses ≥1 MDS row",
 		"parseModernCheckingEra: local statement text parses ≥1 txn (smoke)",
-		"real gmail fixtures (if present on disk) smoke-parse",
 	]);
 	for (const name of names) assert.ok(resolveNamedSkipMapping(name));
 	assert.equal(
