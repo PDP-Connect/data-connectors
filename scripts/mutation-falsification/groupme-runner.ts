@@ -56,7 +56,7 @@ const execFileAsync = promisify(execFile);
 export const GROUPME_PILOT_ADAPTER_ID = "data-connectors/groupme-cursor-frontier/v1" as const;
 export const GROUPME_PILOT_ADAPTER_VERSION = "2" as const;
 export const PILOT_BATCH_WALL_TIME_MS = 10 * 60 * 1000;
-const FOCUSED_TEST_FILE = "packages/polyfill-connectors/connectors/groupme/incremental-frontier.test.ts";
+const FOCUSED_TEST_FILE = "connectors/groupme/incremental-frontier.test.ts";
 const BACKSTOP_SUITE_ID = "polyfill-connectors";
 /** Reuse window for a clean baseline within one locked batch (design.md Decision #6). */
 const CLEAN_EVIDENCE_REUSE_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -88,7 +88,7 @@ export function judgeIdentityFor(operator: GroupMeOperator | null, root = resolv
     "scripts/mutation-falsification/groupme-runner.ts", "scripts/mutation-falsification/groupme-operators.ts",
     "scripts/mutation-falsification/workspace.ts", "scripts/test-accounting/authority.ts",
     "scripts/test-accounting/receipt.ts", "scripts/test-accounting/inventory.ts", "scripts/test-accounting/node-reporter.ts"];
-  const files = [...new Set([...tracked, ...explicit])].filter(p => p !== "packages/polyfill-connectors/connectors/groupme/index.ts").sort();
+  const files = [...new Set([...tracked, ...explicit])].filter(p => p !== "connectors/groupme/index.ts").sort();
   return digestOf({ files: files.map(path => [path, createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex")]),
     focusedCommand: focusedCommand(root), backstopSuite: BACKSTOP_SUITE_ID, profile: "default",
     operator: operator ? { id: operator.id, version: operator.version, preimage: operator.preimage,
