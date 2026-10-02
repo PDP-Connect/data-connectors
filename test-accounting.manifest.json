@@ -108,7 +108,7 @@
             "run with --expose-gc for a reliable memory-growth comparison": 1,
             "packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
             "network isolation unavailable on this host: unshare namespace+procfs-mount dry run exited 1: unshare: write failed /proc/self/uid_map: Operation not permitted \u2014 either unprivileged user namespaces are unavailable on this host (kernel sysctl or an LSM policy such as AppArmor's unprivileged-userns restriction is the usual cause), or namespace creation succeeded but the PID-namespace's own `mount -t proc proc /proc` was refused by the kernel (commonly: Docker's default procfs masking combined with a CAP_SYS_ADMIN grant that stops short of full --privileged, producing a kernel \"Mount too revealing\" refusal); pdpp isolation: trusted launcher 'bwrap' not found in any trusted location (/usr/sbin, /usr/bin, /sbin, /bin) \u2014 refusing to fall back to a PATH-resolved lookup": 2,
-            "requires usable bwrap": 10,
+            "requires usable bwrap": 11,
             "requires usable bwrap and unshare bind mounts": 5,
             "requires usable unshare bind mounts": 23,
             "requires usable unshare": 4,
