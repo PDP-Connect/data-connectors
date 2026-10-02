@@ -827,6 +827,9 @@ This profile does not define `ASSISTANCE`, `ASSISTANCE_STATUS`,
 `DETAIL_GAP_ATTEMPTED`, or `DETAIL_GAP_RECOVERED`. It also does not define
 `START.detail_gaps`, `START.recovery_only`, or `START.streamsToBackfill`.
 It does not define `CANCEL`, `RECORD_ERROR`, or a versioned `STATE` schema.
+It does not define the `BLOB` message or the `BLOB` protocol capability, which
+the current connector-protocol package defines and the `anthropic` manifest
+declares.
 
 A runtime MAY define these features in a separately versioned extension. A
 connector MUST NOT require one without explicit capability or package-version
