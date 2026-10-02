@@ -95,12 +95,6 @@ export const DESTINATION_NAMED_SKIP_MAPPING_TABLE =
 				"polyfill-connectors",
 				["default"],
 			],
-			[
-				"real gmail fixtures (if present on disk) smoke-parse",
-				"local Gmail fixture directory not present",
-				"polyfill-connectors",
-				["default"],
-			],
 		],
 	});
 export function configuredNamedSkipMappingIdentities(

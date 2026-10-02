@@ -1082,7 +1082,9 @@ test("envelopeParticipants: filters missing addresses and handles undefined enve
 // None yet — Gmail captures land in ../../fixtures/gmail/... Leaving a
 // skipped placeholder so future commits can add real fixture parsing tests.
 test("real gmail fixtures (if present on disk) smoke-parse", {
-	skip: !existsSync(join(__dirname, "..", "..", "fixtures", "gmail")),
+	skip: existsSync(join(__dirname, "..", "..", "fixtures", "gmail"))
+		? false
+		: "local Gmail fixture directory not present",
 }, () => {
 	// Placeholder: a future commit can enumerate files under fixtures/gmail
 	// and round-trip parse them. Current fixtures format is JSONL, not raw
