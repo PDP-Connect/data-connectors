@@ -1398,15 +1398,15 @@
 					},
 					"last_read": {
 						"type": ["string", "null"],
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					},
 					"last_read_at": {
 						"type": ["string", "null"],
 						"format": "date-time"
 					},
 					"unread_count": {
-						"type": ["integer", "null"]
+						"type": ["integer", "null"],
+						"x_pdpp_role": "amount"
 					},
 					"unread_count_display": {
 						"type": ["integer", "null"]

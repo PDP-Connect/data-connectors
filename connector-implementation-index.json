@@ -2031,8 +2031,7 @@
 								},
 								"activity_date": {
 									"type": "string",
-									"format": "date",
-									"x_pdpp_role": "event-time"
+									"format": "date"
 								},
 								"posted_date": {
 									"type": ["string", "null"],
@@ -2160,8 +2159,7 @@
 								},
 								"date_delivered": {
 									"type": ["string", "null"],
-									"format": "date",
-									"x_pdpp_role": "event-time"
+									"format": "date"
 								},
 								"account_reference": {
 									"type": ["string", "null"]
@@ -2242,12 +2240,12 @@
 								"as_of": {
 									"type": "string",
 									"format": "date-time",
-									"description": "QFX DTASOF — when Chase measured the balance.",
-									"x_pdpp_role": "event-time"
+									"description": "QFX DTASOF — when Chase measured the balance."
 								},
 								"ledger_balance_cents": {
 									"type": ["integer", "null"],
-									"description": "QFX LEDGERBAL."
+									"description": "QFX LEDGERBAL.",
+									"x_pdpp_role": "amount"
 								},
 								"available_balance_cents": {
 									"type": ["integer", "null"],
@@ -13178,8 +13176,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -13255,8 +13252,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -13329,8 +13325,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -13408,8 +13403,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -13489,8 +13483,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -13570,8 +13563,7 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								}
 							},
 							"required": ["id", "created_utc"]
@@ -15462,15 +15454,15 @@
 								},
 								"last_read": {
 									"type": ["string", "null"],
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"format": "date-time"
 								},
 								"last_read_at": {
 									"type": ["string", "null"],
 									"format": "date-time"
 								},
 								"unread_count": {
-									"type": ["integer", "null"]
+									"type": ["integer", "null"],
+									"x_pdpp_role": "amount"
 								},
 								"unread_count_display": {
 									"type": ["integer", "null"]
@@ -17500,8 +17492,7 @@
 								},
 								"date_delivered": {
 									"type": ["string", "null"],
-									"format": "date",
-									"x_pdpp_role": "event-time"
+									"format": "date"
 								},
 								"account_reference": {
 									"type": ["string", "null"]
@@ -17581,8 +17572,7 @@
 								},
 								"date_received": {
 									"type": ["string", "null"],
-									"format": "date",
-									"x_pdpp_role": "event-time"
+									"format": "date"
 								},
 								"status": {
 									"type": ["string", "null"]
