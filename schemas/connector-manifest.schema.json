@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
-  "title": "Connector manifest runtime requirements",
-  "description": "Defines the runtime requirements contract used by connector manifests. Other manifest fields are outside this schema's scope.",
+  "title": "Collection Profile manifest runtime requirements",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding names and binding features. Other manifest fields are outside this schema's scope.",
   "type": "object",
   "properties": {
     "runtime_requirements": {
@@ -11,23 +11,38 @@
       "properties": {
         "bindings": {
           "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "required": ["required"],
-            "properties": {
-              "required": { "type": "boolean" },
-              "features": {
-                "type": "array",
-                "items": { "$ref": "#/$defs/bindingFeature" },
-                "uniqueItems": true
-              }
-            }
-          }
+          "propertyNames": { "$ref": "#/$defs/bindingName" },
+          "additionalProperties": { "$ref": "#/$defs/binding" }
         }
       }
     }
   },
   "$defs": {
+    "bindingName": {
+      "type": "string",
+      "description": "A registry binding name, or an extension binding namespaced as <domain>/<name>. Unqualified names are reserved for the registry.",
+      "anyOf": [
+        { "$ref": "#/$defs/registryBinding" },
+        { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$" }
+      ]
+    },
+    "registryBinding": {
+      "type": "string",
+      "description": "Binding registry:\n- browser: A runtime-managed browser surface.\n- desktop_session: The owner's active, logged-in desktop session and its operating-system facilities.\n- filesystem: Access to local files.\n- network: Outbound network access.",
+      "enum": ["browser", "desktop_session", "filesystem", "network"]
+    },
+    "binding": {
+      "type": "object",
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "features": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bindingFeature" },
+          "uniqueItems": true
+        }
+      }
+    },
     "bindingFeature": {
       "type": "string",
       "description": "Host capability definitions:\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.",

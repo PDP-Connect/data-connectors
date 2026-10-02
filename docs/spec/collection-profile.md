@@ -17,6 +17,9 @@ connectors and connector runtimes in the PDPP ecosystem, in this repository and
 elsewhere. Its machine-readable half is
 [`schemas/connector-manifest.schema.json`](../../schemas/connector-manifest.schema.json),
 which validates `runtime_requirements.bindings`.
+[`schemas/connector-manifest.schema.test.mjs`](../../schemas/connector-manifest.schema.test.mjs)
+checks that the binding and feature tables in Section 3.3 match the schema, and
+that every manifest under `connectors/` validates against it.
 
 `PDP-Connect/pdpp` publishes `spec-collection-profile.md`, marked
 `Status: Informative`. That copy defines no conformance requirement. Where it
@@ -158,28 +161,68 @@ The manifest can contain Core declaration fields such as `description`,
 runtime MAY preserve them for a resource server, but this profile does not
 change their Core meaning.
 
-### 3.3 Standard bindings
+### 3.3 Bindings
 
-`runtime_requirements.bindings` maps a binding name to an object with a
-`required` boolean. Before spawn, a runtime MUST provide every binding whose
-declaration has `required: true`. It MAY ignore a binding with
-`required: false`.
+`runtime_requirements.bindings` maps a binding name to a binding declaration.
+Each declaration is an object with a REQUIRED `required` boolean. Before spawn,
+a runtime MUST provide every binding whose declaration has `required: true`. It
+MAY omit a binding with `required: false`.
 
-The standard unqualified binding names are:
+The binding registry is:
 
 | Binding | Meaning |
 | --- | --- |
 | `browser` | A runtime-managed browser surface. |
-| `desktop_session` | The active local desktop session and its operating-system facilities. |
-| `filesystem` | Local filesystem access. |
-| `interactive` | Handling for `INTERACTION` messages. |
+| `desktop_session` | The owner's active, logged-in desktop session and its operating-system facilities, such as the session keyring. |
+| `filesystem` | Access to local files. |
 | `network` | Outbound network access. |
 
+Unqualified binding names are reserved for this registry. A runtime MUST
+reject an unqualified name that is not in the registry, whether the binding is
+required or optional. An extension binding uses a namespaced name of the form
+`<domain>/<name>`, where `<domain>` is a DNS name that the extension author
+controls, for example `example.com/scanner`. A runtime MUST fail the run
+before spawn when it does not support a required extension binding. It MAY
+ignore an optional extension binding that it does not support.
+
+The names `browser_automation`, `browser_profile`, `loopback_listen`, and
+`interactive` are not in the registry, and no manifest in this repository uses
+them. Support for `INTERACTION` messages is declared by
+`capabilities.human_interaction` (Section 3.4), not by a binding.
+
+`local_device` is not a binding. It names a runtime mode in which the runtime
+runs on the owner's own device. A connector that reads local files declares
+`filesystem`. A connector that needs the owner's logged-in session declares
+`desktop_session`.
+
 A binding declaration can contain binding-specific fields. A connector MUST
-ignore declaration fields it does not understand. The binding-name set is
-closed in v0.1. A runtime MUST reject any other binding name, whether the
-binding is required or optional. It MUST fail a missing required binding before
-it starts the connector.
+ignore declaration fields it does not understand. A runtime MUST fail a missing
+required binding before it starts the connector.
+
+#### 3.3.1 Binding features
+
+A `browser` or `network` declaration MAY contain `features`, an array of unique
+host capability names. Each name MUST be one of these values:
+
+| Feature | Capability the host provides |
+| --- | --- |
+| `page_navigation` | Navigate the active page to a URL. |
+| `page_script_evaluation` | Run script in the active page context. |
+| `page_content_read` | Read rendered page content. |
+| `page_condition_wait` | Wait until a condition in the active page becomes true. |
+| `same_origin_page_fetch` | Fetch same-origin resources from the active page context. |
+| `host_http_request` | Make an HTTP request from the host runtime outside the page context. |
+| `host_download_capture` | Capture content downloaded by the active page. |
+| `host_archive_extraction` | Extract downloaded archive contents in the host runtime. |
+| `host_archive_entry_chunk_read` | Read an extracted archive entry in chunks. |
+
+The names describe host capabilities, not the API of one host. A host
+publishes the set of features it supports for each binding. A runtime that
+provides a binding MUST provide every feature listed in its declaration. If it
+cannot, the binding counts as missing. A declaration without `features` makes
+no claim about specific capabilities. A host that supports only part of a
+binding MUST NOT place a connector whose required declaration for that binding
+omits `features`.
 
 ### 3.4 Human interaction and protocol capabilities
 
@@ -265,8 +308,8 @@ The runtime and connector exchange one JSON object per line. The runtime writes
 to connector standard input. The connector writes to standard output.
 Standard error is diagnostic only and MUST NOT contain protocol messages.
 
-Before spawn, the runtime MUST match the bindings required by the connector and
-protocol capabilities against its advertised support. A mismatch fails the run
+Before spawn, the runtime MUST match the bindings, binding features, and
+protocol capabilities required by the connector against its advertised support. A mismatch fails the run
 before any connector code executes.
 
 The runtime sends exactly one `START` message. It is the first message on
@@ -658,8 +701,8 @@ A conforming connector:
 
 A conforming runtime:
 
-1. Validates the manifest and matches bindings and protocol capabilities before
-   spawn.
+1. Validates the manifest and matches bindings, binding features, and protocol
+   capabilities before spawn.
 2. Sends one first `START` with a non-empty, resolved scope.
 3. Enforces that scope again before durable write.
 4. Treats connector messages and state as untrusted input.
