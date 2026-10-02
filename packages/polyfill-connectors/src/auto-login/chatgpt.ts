@@ -261,6 +261,25 @@ function chatGptAuthProbeDiagnosticMessage(
 	return `ChatGPT auth probe diagnostic ${JSON.stringify(diagnostic)}`;
 }
 
+/**
+ * Technical detail for the run log. `progress` text is shown to the owner
+ * verbatim, so diagnostics go to stderr (tests replace the sink).
+ */
+type ChatGptAuthDiagnosticSink = (line: string) => void;
+
+const defaultChatGptAuthDiagnosticSink: ChatGptAuthDiagnosticSink = (line) => {
+	process.stderr.write(`[chatgpt-diagnostic] ${line}\n`);
+};
+
+let chatGptAuthDiagnosticSink: ChatGptAuthDiagnosticSink =
+	defaultChatGptAuthDiagnosticSink;
+
+export function setChatGptAuthDiagnosticSink(
+	sink: ChatGptAuthDiagnosticSink | undefined,
+): void {
+	chatGptAuthDiagnosticSink = sink ?? defaultChatGptAuthDiagnosticSink;
+}
+
 function checkpointOption(checkpoint: SessionCheckpointFn | undefined): {
 	checkpoint?: SessionCheckpointFn;
 } {
@@ -599,10 +618,7 @@ function classifyChatGptRoute(page: Page): ChatGptRouteClass {
 	return "other";
 }
 
-async function navigateAndProbeSession(
-	page: Page,
-	progress?: EnsureChatGptSessionArgs["progress"],
-): Promise<boolean> {
+async function navigateAndProbeSession(page: Page): Promise<boolean> {
 	await page
 		.goto("https://chatgpt.com/", {
 			waitUntil: "domcontentloaded",
@@ -614,7 +630,7 @@ async function navigateAndProbeSession(
 	const { active: apiSessionUser, attempts: apiSessionUserAttempts } =
 		await checkSessionWithRetry(page);
 	const domProbe = await checkLoggedInViaDOMDetails(page);
-	await progress?.(
+	chatGptAuthDiagnosticSink(
 		chatGptAuthProbeDiagnosticMessage({
 			object: "chatgpt_auth_probe",
 			stage: "initial",
@@ -735,7 +751,10 @@ export async function handleBrowserLoginAssistance({
 				"ChatGPT login did not complete automatically; waiting for explicit browser confirmation.",
 		});
 	} else if (diagnosticMessage) {
-		await progress?.(diagnosticMessage);
+		chatGptAuthDiagnosticSink(diagnosticMessage);
+		await progress?.(
+			"ChatGPT sign-in is not finished yet; complete it in the browser to continue",
+		);
 	}
 
 	await manualAction(
@@ -1273,16 +1292,17 @@ export async function ensureChatGptSession({
 	progress,
 	sendInteraction,
 }: EnsureChatGptSessionArgs): Promise<boolean> {
-	if (await navigateAndProbeSession(page, progress)) {
+	if (await navigateAndProbeSession(page)) {
 		return true;
 	}
 
 	const interactiveAuthRepairAllowed =
 		allowInteractiveAuthRepair ?? chatGptAllowsInteractiveAuthRepair();
 	if (!interactiveAuthRepairAllowed) {
-		await progress?.(
+		chatGptAuthDiagnosticSink(
 			"ChatGPT session is not active; automatic refresh will not start interactive auth repair.",
 		);
+		await progress?.("ChatGPT needs you to sign in again");
 		throw new Error(CHATGPT_SESSION_REQUIRED_NON_INTERACTIVE_MESSAGE);
 	}
 

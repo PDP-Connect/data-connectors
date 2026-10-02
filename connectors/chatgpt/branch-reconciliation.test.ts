@@ -26,9 +26,13 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { processConversationDetail, type StreamDeps } from "./index.ts";
+import {
+	processConversationDetail,
+	type StreamDeps,
+	setChatGptDiagnosticSink,
+} from "./index.ts";
 import { buildConversationRecord, type ConversationDetail } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -36,6 +40,23 @@ import type {
 	ChatGptNode,
 	ConversationListItem,
 } from "./types.ts";
+
+// Record-level branch facts are diagnostic lines (stderr sink), not PROGRESS:
+// PROGRESS is shown to the owner verbatim. Capture the lines per test.
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setChatGptDiagnosticSink((line) => diagnostics.push(line));
+});
+afterEach(() => setChatGptDiagnosticSink(undefined));
+
+/** No record-level diagnostic may ever surface as an owner-facing PROGRESS. */
+function progressTexts(messages: readonly unknown[]): string[] {
+	return messages.flatMap((m) => {
+		const msg = m as { type?: string; message?: string };
+		return msg.type === "PROGRESS" ? [msg.message ?? ""] : [];
+	});
+}
 
 function makeHarness(
 	requested: readonly string[] = ["conversations", "messages"],
@@ -53,22 +74,16 @@ function makeHarness(
 		requested: new Map(requested.map((name) => [name, { name }])),
 	};
 	// A branch gap is a fact about one conversation, so it is a record-level
-	// PROGRESS diagnostic ("<reason>: ..."), never a stream-level SKIP_RESULT.
+	// diagnostic line ("<reason>: ..."), never a stream-level SKIP_RESULT.
 	// A stream skip would make Desktop drop every message of the run.
 	const streamSkips = (): Record<string, unknown>[] =>
 		harness.protocolMessages.filter(
 			(m) => (m as { type?: string }).type === "SKIP_RESULT",
 		) as unknown as Record<string, unknown>[];
 	const skips = (): { reason: string; message: string }[] =>
-		harness.protocolMessages.flatMap((m) => {
-			const msg = m as { type?: string; message?: string };
-			const match =
-				msg.type === "PROGRESS"
-					? /^(branch_truncated|branch_tip_missing): /.exec(msg.message ?? "")
-					: null;
-			return match?.[1]
-				? [{ reason: match[1], message: msg.message ?? "" }]
-				: [];
+		diagnostics.flatMap((line) => {
+			const match = /^(branch_truncated|branch_tip_missing): /.exec(line);
+			return match?.[1] ? [{ reason: match[1], message: line }] : [];
 		});
 	return {
 		deps,
@@ -201,6 +216,9 @@ async function runWithFilteredRecords(
 	currentNode: string,
 	excluded: ReadonlySet<string>,
 ) {
+	// The diagnostic sink is process-global, so callers run this sequentially;
+	// each run gets its own copy of the lines.
+	diagnostics.length = 0;
 	const harness = makeRecordingEmit(validateRecord);
 	const deps: StreamDeps = {
 		api: {
@@ -227,6 +245,7 @@ async function runWithFilteredRecords(
 		emitConversation(deps),
 	);
 	return {
+		diagnosticLines: [...diagnostics],
 		emitted: harness.emitted,
 		protocolMessages: harness.protocolMessages,
 	};
@@ -243,20 +262,21 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 		filteredShape(["m0", "m1"], ["m1"], "m1"),
 	];
 
-	const runs = await Promise.all(
-		cases.map((fixture) =>
-			runWithFilteredRecords(
+	const runs: Awaited<ReturnType<typeof runWithFilteredRecords>>[] = [];
+	for (const fixture of cases) {
+		runs.push(
+			await runWithFilteredRecords(
 				fixture.mapping,
 				fixture.currentNode,
 				fixture.excluded,
 			),
-		),
-	);
+		);
+	}
 	for (let index = 0; index < cases.length; index += 1) {
 		const fixture = cases[index];
 		const run = runs[index];
 		if (!fixture || !run) continue;
-		const { emitted, protocolMessages } = run;
+		const { diagnosticLines, emitted, protocolMessages } = run;
 		const conversation = emitted.find(
 			(record) => record.stream === "conversations",
 		);
@@ -290,16 +310,22 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 			branch.length,
 			"every emitted branch message must be reachable from current_node",
 		);
-		const filterNote = protocolMessages.find(
-			(record) =>
-				(record as { type?: string; message?: string }).type === "PROGRESS" &&
-				(record as { message?: string }).message?.startsWith(
-					"branch_message_filtered: ",
-				),
-		) as { message?: string } | undefined;
-		assert.ok(filterNote, "filtered branch nodes must produce a bounded reason note");
+		const filterNote = diagnosticLines.find((line) =>
+			line.startsWith("branch_message_filtered: "),
+		);
+		assert.ok(
+			filterNote,
+			"filtered branch nodes must produce a bounded reason note",
+		);
+		assert.equal(
+			progressTexts(protocolMessages).some((t) =>
+				t.startsWith("branch_message_filtered"),
+			),
+			false,
+			"the filter note is a diagnostic, never owner-facing PROGRESS",
+		);
 		assert.match(
-			filterNote.message ?? "",
+			filterNote,
 			fixture.excluded.has(fixture.currentNode)
 				? /current_node_filtered=selection/u
 				: /current_node_filtered=no/u,
@@ -314,7 +340,9 @@ test("an all-filtered current branch has no current node and reports zero messag
 		fixture.currentNode,
 		fixture.excluded,
 	);
-	const conversation = emitted.find((record) => record.stream === "conversations");
+	const conversation = emitted.find(
+		(record) => record.stream === "conversations",
+	);
 
 	assert.equal(conversation?.data.current_node, null);
 	assert.equal(conversation?.data.message_count_on_current_branch, 0);
@@ -323,13 +351,11 @@ test("an all-filtered current branch has no current node and reports zero messag
 		0,
 	);
 	assert.ok(
-		protocolMessages.some(
-			(record) =>
-				(record as { type?: string; message?: string }).type === "PROGRESS" &&
-				(record as { message?: string }).message?.startsWith(
-					"branch_message_filtered: ",
-				),
-		),
+		diagnostics.some((line) => line.startsWith("branch_message_filtered: ")),
+	);
+	assert.equal(
+		progressTexts(protocolMessages).some((t) => /branch_/.test(t)),
+		false,
 	);
 });
 
@@ -346,21 +372,15 @@ test("a roleless current tip is reported as a filtered non-message node", async 
 		},
 		leaf: { parent: "m1", children: [], message: {} },
 	};
-	const { emitted, protocolMessages } = await runWithFilteredRecords(
-		mapping,
-		"leaf",
-		new Set(),
+	const { emitted } = await runWithFilteredRecords(mapping, "leaf", new Set());
+	const conversation = emitted.find(
+		(record) => record.stream === "conversations",
 	);
-	const conversation = emitted.find((record) => record.stream === "conversations");
 	assert.equal(conversation?.data.current_node, "m1");
 	assert.equal(conversation?.data.message_count_on_current_branch, 1);
 	assert.ok(
-		protocolMessages.some(
-			(record) =>
-				(record as { type?: string; message?: string }).type === "PROGRESS" &&
-				(record as { message?: string }).message?.includes(
-					"current_node_filtered=non_message",
-				),
+		diagnostics.some((line) =>
+			line.includes("current_node_filtered=non_message"),
 		),
 	);
 });
@@ -383,14 +403,21 @@ test("chatgpt branch: a whole conversation reconciles clean and reports no gap",
 test("chatgpt branch: a truncated branch is surfaced as a gap, not a silent pass", async () => {
 	// This is the defect the declared-count comparison cannot see: the count and
 	// the data agree with each other, and both are short.
-	const { skips, streamSkips } = await run(truncatedBranch(), "a1");
+	const { skips, streamSkips, messages } = await run(truncatedBranch(), "a1");
+	assert.equal(
+		progressTexts(messages).some((t) =>
+			/branch_|convo-abc|missing-user-turn/.test(t),
+		),
+		false,
+		"the gap is a diagnostic line, not owner-facing PROGRESS",
+	);
 
 	const gap = skips().find((s) => s.reason === "branch_truncated");
 	assert.ok(gap, "a branch whose parent chain dangles must report a gap");
 	assert.ok(
 		!gap.message.includes("aaa2c1fa-missing-user-turn") &&
 			!gap.message.includes("convo-abc"),
-		"PROGRESS is the owner's status line: no node or conversation id",
+		"diagnostics carry no node or conversation id",
 	);
 	assert.equal(
 		streamSkips().length,
@@ -431,16 +458,21 @@ test("chatgpt branch: the tautological count check would have passed this trunca
 test("chatgpt branch: a current_node absent from the mapping is surfaced", async () => {
 	// The conversation says it is on a tip the payload does not contain, so the
 	// branch we walked is not the branch it claims to be on.
-	const { skips, streamSkips } = await run(
+	const { skips, streamSkips, messages } = await run(
 		wholeBranch(),
 		"tip-we-never-received",
+	);
+	assert.equal(
+		progressTexts(messages).some((t) => /branch_|convo-abc/.test(t)),
+		false,
+		"the gap is a diagnostic line, not owner-facing PROGRESS",
 	);
 
 	const gap = skips().find((s) => s.reason === "branch_tip_missing");
 	assert.ok(gap, "an unreachable declared tip must report a gap");
 	assert.ok(
 		!gap.message.includes("convo-abc"),
-		"PROGRESS is the owner's status line: no conversation id",
+		"diagnostics carry no conversation id",
 	);
 	assert.equal(
 		streamSkips().length,
