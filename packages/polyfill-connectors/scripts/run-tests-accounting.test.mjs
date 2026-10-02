@@ -74,7 +74,9 @@ function fixture() {
 	);
 	const files = paths
 		.map((path) =>
-			path.startsWith("connectors/") ? path : `packages/polyfill-connectors/${path}`,
+			path.startsWith("connectors/")
+				? path
+				: `packages/polyfill-connectors/${path}`,
 		)
 		.sort();
 	const issued = {
@@ -101,7 +103,8 @@ function fixture() {
 			{ cwd, env, encoding: "utf8", timeout: 20_000 },
 		);
 	};
-	const onDisk = (path) => join(path.startsWith("connectors/") ? root : cwd, path);
+	const onDisk = (path) =>
+		join(path.startsWith("connectors/") ? root : cwd, path);
 	return { root, cwd, paths, issued, authority, run, onDisk };
 }
 function result(stdout) {
