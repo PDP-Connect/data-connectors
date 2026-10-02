@@ -251,6 +251,31 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			"storageState file should exist next to the scenario",
 		);
 
+		// ── provider_contact counts the HAR's traffic too, not only recorded-
+		// http interactions[] (regression: before this fix, a complete
+		// recorded-browser capture with real non-loopback HAR entries reported
+		// "zero requests were observed" / authorities=[] / completed_requests=0
+		// — all literally false). This fixture makes ONE recorded-http fetch to
+		// the loopback stub provider AND writes ONE HAR entry to the
+		// non-loopback https://provider.example.test — both must be counted.
+		// (`evidence_class` itself stays `synthetic-spike` regardless, per
+		// `computeEvidenceClass`'s condition (a): this test drives the
+		// connector via `--entrypoint`, which forces that label independently
+		// of provider_contact — see `evidenceClassReason`.) ──
+		const { provider_contact: providerContact } = scenario.capture;
+		assert.ok(providerContact, "capture.provider_contact must be present");
+		assert.equal(providerContact?.completed_requests, 2);
+		assert.equal(providerContact?.observed, true);
+		assert.ok(
+			providerContact?.authorities.includes("https://provider.example.test"),
+			`expected the HAR's authority among ${JSON.stringify(providerContact?.authorities)}`,
+		);
+		assert.equal(providerContact?.loopback_only, false);
+		assert.match(
+			result.stdout,
+			/provider_contact: authorities=\[.*provider\.example\.test.*\] completed_requests=2/,
+		);
+
 		// clock.fixed_now (the capture instant) is stamped, ISO 8601 UTC.
 		assert.match(
 			scenario.runs[0]?.clock?.fixed_now ?? "",

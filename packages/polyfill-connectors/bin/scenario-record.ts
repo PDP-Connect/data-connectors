@@ -362,18 +362,31 @@ function isLoopbackHostname(hostname: string): boolean {
  * Computes `ScenarioProviderContact` mechanically from every interaction
  * actually recorded across ALL runs in this capture — the evidence
  * `evidence_class` is grounded in (see this function's caller and
- * `computeEvidenceClass`). `authorities` is every distinct request origin
- * observed; `loopback_only` is true only when EVERY observed origin resolved
- * to loopback (an empty authority set is vacuously NOT loopback_only — see
- * `computeEvidenceClass`'s separate `observed_requests === 0` branch for
- * that case instead, so the two conditions stay independently legible).
+ * `computeEvidenceClass`) — PLUS every HAR entry from `browserCaptures`
+ * (recorded-browser runs; see `extractHarAuthorities`'s doc comment for why
+ * this half is needed: a browser run's traffic never appears in
+ * `interactions`, so without it a complete, real browser capture reported
+ * zero observed requests). `authorities` is every distinct request origin
+ * observed across BOTH sources; `loopback_only` is true only when EVERY
+ * observed origin resolved to loopback (an empty authority set is vacuously
+ * NOT loopback_only — see `computeEvidenceClass`'s separate
+ * `observed_requests === 0` branch for that case instead, so the two
+ * conditions stay independently legible).
  */
 function computeProviderContact(
 	interactions: readonly ScenarioInteraction[],
+	browserCaptures: readonly BrowserCaptureArtifact[],
 ): ScenarioProviderContact {
 	const authorities = new Set<string>();
 	for (const interaction of interactions) {
 		authorities.add(interaction.request.origin);
+	}
+	let browserRequestCount = 0;
+	for (const capture of browserCaptures) {
+		browserRequestCount += capture.harEntryCount;
+		for (const authority of extractHarAuthorities(capture.harPath)) {
+			authorities.add(authority);
+		}
 	}
 	const authorityList = [...authorities].sort((a, b) => a.localeCompare(b));
 	const loopbackOnly =
@@ -385,10 +398,11 @@ function computeProviderContact(
 				return false;
 			}
 		});
-	const observed = interactions.length > 0;
+	const completedRequests = interactions.length + browserRequestCount;
+	const observed = completedRequests > 0;
 	return {
 		authorities: authorityList,
-		completed_requests: interactions.length,
+		completed_requests: completedRequests,
 		loopback_only: loopbackOnly,
 		observed,
 		// FIX 3 (non-loopback honesty): names exactly what this mechanical
@@ -1992,6 +2006,53 @@ function countHarEntriesForRecord(harPath: string): number {
 }
 
 /**
+ * Distinct request origins (`scheme://host[:port]`, matching
+ * `ScenarioProviderContact.authorities`' own shape) observed across a HAR
+ * file's entries — the recorded-browser counterpart to
+ * `computeProviderContact`'s recorded-http `authorities` set, which only
+ * ever sees `ScenarioInteraction[]` (empty for a browser-driven run; browser
+ * traffic is captured as a HAR, never as `interactions`). Without this, a
+ * complete recorded-browser capture with real traffic printed
+ * `evidence_class: synthetic-spike — zero requests were observed` and
+ * `provider_contact: authorities=[] completed_requests=0 observed=false` —
+ * both literally false for a run that made real non-loopback requests, just
+ * not through the recorded-http path this label used to check exclusively.
+ *
+ * Best-effort, matching `countHarEntriesForRecord`'s posture: a missing/
+ * unparseable HAR, a missing `log.entries` array, or an entry with a
+ * missing/malformed `request.url` contributes nothing rather than throwing
+ * — this grounds a disclosure label, not a correctness gate.
+ */
+function extractHarAuthorities(harPath: string): string[] {
+	let parsed: { log?: { entries?: Array<{ request?: { url?: unknown } }> } };
+	try {
+		parsed = JSON.parse(readFileSync(harPath, "utf8")) as {
+			log?: { entries?: Array<{ request?: { url?: unknown } }> };
+		};
+	} catch {
+		return [];
+	}
+	const entries = parsed.log?.entries;
+	if (!Array.isArray(entries)) {
+		return [];
+	}
+	const authorities = new Set<string>();
+	for (const entry of entries) {
+		const url = entry.request?.url;
+		if (typeof url !== "string") {
+			continue;
+		}
+		try {
+			authorities.add(new URL(url).origin);
+		} catch {
+			// A malformed URL in one HAR entry must not crash the whole label —
+			// skip it and keep whatever other entries parsed cleanly.
+		}
+	}
+	return [...authorities];
+}
+
+/**
  * Requests HAR + storageState recording for ONE run at workspace-scoped
  * temp paths, runs it, then checks (via `fileFlushOutcome` — the same
  * nonempty-file honesty check `browser-launch.ts`'s
@@ -2325,9 +2386,31 @@ function buildScenario(
 	},
 	capturedAt: string,
 ): BuiltScenario {
-	const { runs, complete, normalizerNames } = captureResult;
+	const { runs, complete, normalizerNames, browserCaptures } = captureResult;
 	const allInteractions = runs.flatMap((r) => r.interactions);
-	const providerContact = computeProviderContact(allInteractions);
+	// Only a run `resolveRunEnvironment` actually promoted to recorded-browser
+	// (harFlushed, harEntryCount > 0, storageStateFlushed all held) counts
+	// here — a capture attempt that produced nothing usable keeps that run's
+	// true driver, recorded-http, and must not contribute a HAR this label
+	// never actually backed.
+	const recordedBrowserCaptures = runs
+		.map((run, index) => ({
+			driver: run.environment?.network?.driver,
+			capture: browserCaptures[index],
+		}))
+		.filter(
+			(
+				entry,
+			): entry is {
+				driver: "recorded-browser";
+				capture: BrowserCaptureArtifact;
+			} => entry.driver === "recorded-browser" && entry.capture !== undefined,
+		)
+		.map((entry) => entry.capture);
+	const providerContact = computeProviderContact(
+		allInteractions,
+		recordedBrowserCaptures,
+	);
 	const evidenceClass = computeEvidenceClass(
 		resolved.usedEntrypointOverride,
 		providerContact,
