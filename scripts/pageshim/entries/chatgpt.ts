@@ -9,7 +9,7 @@ import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 declare const PAGESHIM_CONNECTOR_VERSION: string;
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const STREAMS = ["conversations", "messages"];
+const STREAMS = ["conversations", "messages", "memories"];
 const env = (globalThis as { __pageshimEnv?: Record<string, string> })
 	.__pageshimEnv ?? {};
 
@@ -78,7 +78,7 @@ const count = (scope: unknown): number => {
 		},
 		toScope: (_stream, records) => ({ records }),
 		streamScopeRecords: {
-			order: ["messages", "conversations"],
+			order: ["messages", "conversations", "memories"],
 			summarizeCounts: (counts) => {
 				const details = Object.fromEntries(
 					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),

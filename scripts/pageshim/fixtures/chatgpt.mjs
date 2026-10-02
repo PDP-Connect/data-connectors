@@ -58,6 +58,8 @@ const html = (body) => ({
 	body,
 });
 
+const SYNTHETIC_MEMORY_TIMESTAMP = "2026-09-30T12:00:00.000Z";
+
 const json = (value) => ({
 	status: 200,
 	contentType: "application/json; charset=utf-8",
@@ -93,6 +95,18 @@ export function resolveFixture(raw) {
 	}
 	if (path === "/api/auth/session") {
 		return json(emptySession ? {} : { accessToken: "fixture-token" });
+	}
+	if (path === "/backend-api/memories") {
+		return json({
+			memories: [
+				{
+					id: "memory-fixture-1",
+					content: "Synthetic fixture memory",
+					created_at: SYNTHETIC_MEMORY_TIMESTAMP,
+					updated_at: SYNTHETIC_MEMORY_TIMESTAMP,
+				},
+			],
+		});
 	}
 	if (
 		path === "/backend-api/conversations" ||
@@ -142,11 +156,11 @@ export const pageshimCase = {
 	exportSummary: {
 		count: 2,
 		label: "conversations",
-		details: { conversations: 2, messages: 2 },
+		details: { conversations: 2, messages: 2, memories: 0 },
 	},
 	emptyExportSummary: {
 		count: 0,
 		label: "conversations",
-		details: { conversations: 0, messages: 0 },
+		details: { conversations: 0, messages: 0, memories: 0 },
 	},
 };
