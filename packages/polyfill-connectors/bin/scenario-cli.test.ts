@@ -54,8 +54,8 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import { getConnectorPaths } from "../src/orchestrator.ts";
 import type { ConnectorScenario } from "../src/scenario/format.ts";
 import {
@@ -69,8 +69,6 @@ import {
 	parseArgs as parseVerifyArgs,
 } from "./scenario-verify.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = join(__dirname, "..");
 const RECORD_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-record.ts");
 const VERIFY_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-verify.ts");
 const STUB_CONNECTOR_PATH = join(
