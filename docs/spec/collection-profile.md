@@ -1,6 +1,6 @@
 # PDPP Collection Profile v0.1.0
 
-Status: Normative draft
+Status: Normative draft for connectors in this repository.
 
 Date: 2026-09-02
 
@@ -11,6 +11,21 @@ between a connector and a connector runtime. A connector is a bounded program
 that reads data from a source and emits records. A connector runtime selects a
 connector, supplies its collection scope and prior state, and processes its
 messages.
+
+This document is normative for connectors in `PDP-Connect/data-connectors`, and
+its vocabularies are the ones gated here by
+[`scripts/check-pdpp-authoring-docs.mjs`](../../scripts/check-pdpp-authoring-docs.mjs).
+It does not bind other repositories, and it does not supersede any document
+published elsewhere.
+
+`PDP-Connect/pdpp` publishes an earlier `spec-collection-profile.md` marked
+`Status: Informative`, which states that it defines no conformance requirement.
+That document lists three additional binding names, and a wider `DONE.status`
+and `coverage_strategy` set, than this one. For a connector in this repository,
+the vocabulary in section 3 governs and the gate above enforces it; a name
+published only in that informative document is not usable here. Reconciling or
+withdrawing that document is tracked separately and is not this repository's
+change to make.
 
 This profile does not standardize a source platform API, process sandbox,
 package format, artifact registry, or resource-server ingest transport.
