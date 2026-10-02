@@ -7,7 +7,7 @@
 // can be left out by path.
 import { spawn } from "node:child_process";
 import { glob, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
@@ -50,7 +50,18 @@ if (args.length > 0) {
 	if (args.length !== 2 || args[0] !== "--accounting-authority")
 		throw new Error("expected --accounting-authority <issued record>");
 	issued = JSON.parse(await readFile(args[1], "utf8"));
-	const selected = files.map((file) => `packages/polyfill-connectors/${file}`);
+	// `file` is relative to this package's cwd, so a simple template-string
+	// prefix is correct for patterns resolved within the package (bin/,
+	// scripts/, src/) but wrong for the cutover's root-level
+	// "../../connectors/**/*.test.ts" pattern, whose matches already carry
+	// a "../../" escape -- naively prefixing that yields a literal
+	// "packages/polyfill-connectors/../../connectors/..." string instead of
+	// the root-relative "connectors/..." the manifest issues. `posix.join`
+	// collapses the "../../" the same way the manifest's own root-relative
+	// accounting does, so both sides compare the same normalized path.
+	const selected = files.map((file) =>
+		posix.join("packages/polyfill-connectors", file),
+	);
 	if (
 		issued.schema !== "pdpp.test-run-authority/v1" ||
 		issued.suite !== "polyfill-connectors" ||
