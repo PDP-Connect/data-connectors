@@ -225,7 +225,12 @@ function filesystemInputShapedCollector(
 ): RunCollector {
 	return (runIndex, { emit }) => {
 		if (runRecordCounts[runIndex]) {
-			emit({ type: "RECORD", stream: "activities", id: "a1", data: { id: "a1" } });
+			emit({
+				type: "RECORD",
+				stream: "activities",
+				id: "a1",
+				data: { id: "a1" },
+			});
 			emit({ type: "STATE", stream: "activities", cursor: { last: "a1" } });
 		}
 		return Promise.resolve();

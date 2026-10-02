@@ -837,6 +837,28 @@ interface FilesystemBind {
  * there surfaces as bwrap's own loud, diagnostic bind error, never a silent
  * widening of the sandbox.
  */
+/**
+ * The Playwright/Patchright browser-binary cache path this module binds
+ * read-only (see `requiredFilesystemBinds`'s doc comment above) — honors a
+ * caller override the same way Playwright/Patchright itself resolves
+ * browser binaries, falling back to the default `~/.cache/ms-playwright`.
+ * Exported so a caller spawning the isolated child can set
+ * `PLAYWRIGHT_BROWSERS_PATH` in its environment to this EXACT value: the
+ * child's own `$XDG_CACHE_HOME` is redirected into sandbox-local scratch
+ * space (`sandboxScratchEnv`), so without this override Playwright/
+ * Patchright would resolve its default cache location under the scratch
+ * directory instead of the real, bound-read-only cache — a directory that
+ * was never populated — and fail with "Executable doesn't exist" even
+ * though the real browser binaries ARE bound and readable inside the
+ * sandbox, just not at the path the child would otherwise compute.
+ */
+export function resolvedPlaywrightBrowsersPath(): string {
+	return (
+		process.env.PLAYWRIGHT_BROWSERS_PATH ||
+		join(homedir(), ".cache", "ms-playwright")
+	);
+}
+
 export function requiredFilesystemBinds(
 	extraReadOnlyPaths: readonly string[] = [],
 ): readonly FilesystemBind[] {
@@ -847,9 +869,7 @@ export function requiredFilesystemBinds(
 		{ path: "/usr", mode: "ro" },
 		{ path: "/etc", mode: "ro" },
 	];
-	const playwrightCache =
-		process.env.PLAYWRIGHT_BROWSERS_PATH ||
-		join(homedir(), ".cache", "ms-playwright");
+	const playwrightCache = resolvedPlaywrightBrowsersPath();
 	if (existsSync(playwrightCache)) {
 		binds.push({ path: playwrightCache, mode: "ro" });
 	}
