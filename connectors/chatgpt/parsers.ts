@@ -460,7 +460,7 @@ export function buildMemoryRecord(m: RawMemoryEntry): RecordData | null {
 	return {
 		id: m.id,
 		content: m.content || m.name || "",
-		created_at: m.created_at || null,
+		created_at: tsToIso(m.created_timestamp),
 		updated_at: m.updated_at || null,
 		type: m.type || null,
 	};
