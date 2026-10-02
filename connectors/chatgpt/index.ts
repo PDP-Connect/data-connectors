@@ -4755,6 +4755,7 @@ export async function runMessagesAndConversationsWithDetail(
 
 		const rateLimitedBeforeWave = deps.preDetailPressure?.rateLimited ?? 0;
 		let waveWasClean = true;
+		let batchFailure: unknown = null;
 		await Promise.all(
 			chunks.map(async (chunkIds) => {
 				const batchStarted = performance.now();
@@ -4797,15 +4798,28 @@ export async function runMessagesAndConversationsWithDetail(
 					)
 						waveWasClean = false;
 					await recordConversationDetailProviderSuccess();
-				} catch {
+				} catch (err) {
 					// Batch results are an optimization; the ordered per-id lane retries gaps.
 					batchEndpointUnavailable = true;
+					batchFailure ??= err;
 					waveWasClean = false;
 				} finally {
 					setTimingConversation?.(null);
 				}
 			}),
 		);
+		if (batchFailure !== null) {
+			const reason = scrubChatGptTerminalDiagnostic(
+				batchFailure instanceof Error
+					? batchFailure.message
+					: String(batchFailure),
+			);
+			await deps.emit({
+				type: "PROGRESS",
+				stream: "messages",
+				message: `ChatGPT batch conversation-detail fetch failed (${reason}); fetching the remaining conversation details one at a time`,
+			});
+		}
 		const rateLimitedDuringWave =
 			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBeforeWave;
 		if (!waveWasClean || rateLimitedDuringWave) {

@@ -3038,6 +3038,66 @@ test("runMessagesAndConversationsWithDetail: unavailable batch endpoint degrades
 	]);
 	assert.deepEqual(coverage.hydratedKeys, ["convo-1", "convo-2", "convo-3"]);
 	assert.deepEqual(coverage.gapKeys, []);
+	const fallbackNotices = harness.protocolMessages.filter(
+		(message) =>
+			message.type === "PROGRESS" &&
+			message.message.startsWith("ChatGPT batch conversation-detail fetch failed"),
+	);
+	assert.equal(fallbackNotices.length, 1, "the downgrade is logged once");
+	assert.match(
+		(fallbackNotices[0] as { message: string }).message,
+		/\(batch unavailable\); fetching the remaining conversation details one at a time$/,
+	);
+});
+
+test("runMessagesAndConversationsWithDetail: batch requests in a wave overlap in wall-clock time", async () => {
+	const BATCH_LATENCY_MS = 100;
+	const harness = makeRecordingEmit(validateRecord);
+	const batchCalls: string[][] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			const id = path.replace("/conversation/", "");
+			return Promise.resolve(makeDetailOkForConversation(id));
+		},
+		fetchBatch: async (
+			ids: readonly string[],
+		): Promise<ChatGptFetchResult[]> => {
+			batchCalls.push([...ids]);
+			await new Promise((resolve) => setTimeout(resolve, BATCH_LATENCY_MS));
+			return ids.map((id) => makeDetailOkForConversation(id));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const convos = Array.from({ length: 80 }, (_, index) =>
+		makeConvo({ id: `convo-${index + 1}` }),
+	);
+
+	const started = performance.now();
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		convos,
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+	const elapsedMs = performance.now() - started;
+
+	// Waves of 2, 2, 3 and 1 requests: four batch latencies, not eight.
+	assert.equal(batchCalls.length, 8);
+	assert.ok(
+		elapsedMs < 6 * BATCH_LATENCY_MS,
+		`8 batches took ${Math.round(elapsedMs)}ms; serial would take >= ${8 * BATCH_LATENCY_MS}ms`,
+	);
+	assert.equal(coverage.hydratedKeys.length, 80);
 });
 
 test("runMessagesAndConversationsWithDetail: intermediate pressure is bounded and redacted", async () => {
