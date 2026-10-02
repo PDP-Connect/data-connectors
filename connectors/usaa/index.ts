@@ -863,7 +863,6 @@ export async function emitStatementRecords(
 			pdf_path: pointers.pdf_path,
 			pdf_text_sha256: pointers.pdf_text_sha256 ?? null,
 			pdf_page_count: pointers.pdf_page_count ?? null,
-			fetched_at: nowIso(),
 		};
 		// Record the resolved pointers (fresh, carried, or all-null) so the
 		// next run's prior map stays complete and the prune step is correct.

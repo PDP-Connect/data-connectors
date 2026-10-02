@@ -32,7 +32,6 @@ const PROFILE_RECORD = {
 		},
 	],
 	email: "shopper@example.com",
-	fetched_at: "2026-07-14T12:00:00.000Z",
 	id: "profile",
 	name: "Jamie Shopper",
 	phone: "(512) 555-0100",
@@ -49,7 +48,6 @@ const NUTRITION_RECORD = {
 	cholesterol_mg: 20,
 	confidence: "high",
 	fat_g: 8,
-	fetched_at: "2026-07-14T12:00:00.000Z",
 	fiber_g: 0,
 	highlights: ["Organic"],
 	id: "123456789",
@@ -91,7 +89,6 @@ const ORDER_RECORD = {
 	total_cents: 8745,
 	item_count: 12,
 	unfulfilled_count: 0,
-	fetched_at: "2026-07-14T12:00:00.000Z",
 };
 
 const ORDER_ITEM_RECORD = {
@@ -108,7 +105,6 @@ const ORDER_ITEM_RECORD = {
 	line_total: "$4.29",
 	line_total_cents: 429,
 	order_date: "2026-07-14",
-	fetched_at: "2026-07-14T12:00:00.000Z",
 };
 
 test("orders schema accepts a parser-shaped record", () => {

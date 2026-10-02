@@ -39,6 +39,11 @@
  * pages.
  *
  * CHANGES
+ *   v1.0.0 (2026-10-02) — removed the connector-stamped `fetched_at` from
+ *     every record (PDPP spec-core: a producer must not put its own
+ *     collection time in `data`; that is the envelope's `emitted_at`).
+ *     `created_utc` (source-provided) now carries the `event-time` role in
+ *     the manifest.
  *   v0.2.0 (2026-04-24) — extracted parsers.ts / schemas.ts / types.ts;
  *     added zod shape-check; added upvoted/downvoted/hidden streams;
  *     enriched records with domain, *_len, is_top_level, is_post,

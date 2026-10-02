@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.1.11",
+				"version": "1.0.0",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -133,10 +133,6 @@
 								},
 								"item_count": {
 									"type": ["integer", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id", "order_date"]
@@ -178,8 +174,7 @@
 									"payment_method_summary",
 									"gift_order",
 									"digital_order",
-									"item_count",
-									"fetched_at"
+									"item_count"
 								]
 							}
 						],
@@ -1713,7 +1708,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.1.7",
+				"version": "1.0.0",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -1833,11 +1828,6 @@
 								"balance_as_of": {
 									"type": ["string", "null"],
 									"format": "date-time"
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id"]
@@ -1938,10 +1928,6 @@
 								"source": {
 									"type": "string",
 									"description": "Always 'qfx_download_<YYYY-MM-DD>_to_<YYYY-MM-DD>'. Provenance for audit and re-extraction."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": [
@@ -2045,7 +2031,8 @@
 								},
 								"activity_date": {
 									"type": "string",
-									"format": "date"
+									"format": "date",
+									"x_pdpp_role": "event-time"
 								},
 								"posted_date": {
 									"type": ["string", "null"],
@@ -2075,11 +2062,6 @@
 								"source": {
 									"type": "string",
 									"description": "Always 'chase_activity_ui'."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": [
@@ -2094,8 +2076,7 @@
 								"description",
 								"memo",
 								"ui_transaction_id",
-								"source",
-								"fetched_at"
+								"source"
 							]
 						},
 						"primary_key": ["id"],
@@ -2179,7 +2160,8 @@
 								},
 								"date_delivered": {
 									"type": ["string", "null"],
-									"format": "date"
+									"format": "date",
+									"x_pdpp_role": "event-time"
 								},
 								"account_reference": {
 									"type": ["string", "null"]
@@ -2203,11 +2185,6 @@
 								"pdf_page_count": {
 									"type": ["integer", "null"],
 									"description": "Integer page count from the PDF structure. A structural content invariant alongside pdf_text_sha256. Null when extraction failed."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id", "title"]
@@ -2265,7 +2242,8 @@
 								"as_of": {
 									"type": "string",
 									"format": "date-time",
-									"description": "QFX DTASOF — when Chase measured the balance."
+									"description": "QFX DTASOF — when Chase measured the balance.",
+									"x_pdpp_role": "event-time"
 								},
 								"ledger_balance_cents": {
 									"type": ["integer", "null"],
@@ -2274,11 +2252,6 @@
 								"available_balance_cents": {
 									"type": ["integer", "null"],
 									"description": "QFX AVAILBAL."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id", "account_id", "as_of"]
@@ -9635,7 +9608,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.5.15",
+				"version": "1.0.0",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -9758,10 +9731,6 @@
 								"unfulfilled_count": {
 									"type": ["integer", "null"],
 									"description": "Count of purchase-line items the source reports as unfulfilled on this order, from the structured order-list source's orderChangesOverview.unfulfilledCount. Distinct from item_count (the order's total item count). Null when the structured source did not supply this row."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id", "order_date"]
@@ -9810,8 +9779,7 @@
 									"total",
 									"total_cents",
 									"item_count",
-									"unfulfilled_count",
-									"fetched_at"
+									"unfulfilled_count"
 								]
 							}
 						],
@@ -9896,10 +9864,6 @@
 									"type": "string",
 									"format": "date",
 									"x_pdpp_role": "event-time"
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id", "order_id", "name", "order_date"]
@@ -9985,10 +9949,6 @@
 										},
 										"required": ["address", "is_primary", "label"]
 									}
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id"]
@@ -10149,10 +10109,6 @@
 											"type": "null"
 										}
 									]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id", "product_id", "product_url", "name"]
@@ -10794,7 +10750,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.1.5",
+				"version": "1.0.0",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -10904,13 +10860,9 @@
 								},
 								"collection_type": {
 									"type": ["string", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
-							"required": ["id", "name", "fetched_at"]
+							"required": ["id", "name"]
 						},
 						"primary_key": ["id"],
 						"required": true,
@@ -13106,7 +13058,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.2.5",
+				"version": "1.0.0",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -13226,10 +13178,6 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
-									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
 								}
@@ -13307,10 +13255,6 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
-									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
 								}
@@ -13384,10 +13328,6 @@
 									"type": ["string", "null"]
 								},
 								"created_utc": {
-									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
 									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
@@ -13467,10 +13407,6 @@
 									"type": ["integer", "null"]
 								},
 								"created_utc": {
-									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
 									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
@@ -13553,10 +13489,6 @@
 								},
 								"created_utc": {
 									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
-									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
 								}
@@ -13637,10 +13569,6 @@
 									"type": ["integer", "null"]
 								},
 								"created_utc": {
-									"type": "string",
-									"format": "date-time"
-								},
-								"fetched_at": {
 									"type": "string",
 									"format": "date-time",
 									"x_pdpp_role": "event-time"
@@ -14140,7 +14068,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.6.1",
+				"version": "1.0.0",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -14297,17 +14225,11 @@
 								},
 								"authenticated_bot_id": {
 									"type": ["string", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "fetched_at",
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -14318,8 +14240,7 @@
 								"lexical_fields": ["name", "domain", "enterprise_name", "url"]
 							},
 							"aggregations": {
-								"count": true,
-								"group_by_time": ["fetched_at"]
+								"count": true
 							}
 						},
 						"coverage_strategy": "singleton_presence",
@@ -14557,12 +14478,8 @@
 									"type": "string"
 								},
 								"user_id": {
-									"type": "string"
-								},
-								"fetched_at": {
 									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
+									"x_pdpp_role": "actor"
 								}
 							},
 							"required": ["id", "channel_id", "user_id"]
@@ -15545,7 +15462,8 @@
 								},
 								"last_read": {
 									"type": ["string", "null"],
-									"format": "date-time"
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
 								},
 								"last_read_at": {
 									"type": ["string", "null"],
@@ -15556,11 +15474,6 @@
 								},
 								"unread_count_display": {
 									"type": ["integer", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id", "channel_id"]
@@ -17258,7 +17171,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.1.5",
+				"version": "1.0.0",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {
@@ -17347,11 +17260,6 @@
 								},
 								"status": {
 									"type": ["string", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id"]
@@ -17488,10 +17396,6 @@
 								},
 								"source": {
 									"type": "string"
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time"
 								}
 							},
 							"required": ["id", "account_id", "date", "amount", "currency"]
@@ -17596,7 +17500,8 @@
 								},
 								"date_delivered": {
 									"type": ["string", "null"],
-									"format": "date"
+									"format": "date",
+									"x_pdpp_role": "event-time"
 								},
 								"account_reference": {
 									"type": ["string", "null"]
@@ -17620,11 +17525,6 @@
 								"pdf_page_count": {
 									"type": ["integer", "null"],
 									"description": "Integer page count from the PDF structure. A structural content invariant alongside pdf_text_sha256. Null when extraction failed."
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id", "title"]
@@ -17681,7 +17581,8 @@
 								},
 								"date_received": {
 									"type": ["string", "null"],
-									"format": "date"
+									"format": "date",
+									"x_pdpp_role": "event-time"
 								},
 								"status": {
 									"type": ["string", "null"]
@@ -17692,11 +17593,6 @@
 								},
 								"preview": {
 									"type": ["string", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id"]
@@ -17747,7 +17643,8 @@
 									"type": ["string", "null"]
 								},
 								"account_nickname": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
 								},
 								"credit_limit_cents": {
 									"type": ["integer", "null"]
@@ -17760,11 +17657,6 @@
 								},
 								"card_holders": {
 									"type": ["string", "null"]
-								},
-								"fetched_at": {
-									"type": "string",
-									"format": "date-time",
-									"x_pdpp_role": "event-time"
 								}
 							},
 							"required": ["id"]

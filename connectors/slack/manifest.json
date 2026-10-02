@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-	"version": "0.6.1",
+	"version": "1.0.0",
 	"display_name": "Slack",
 	"brand": {
 		"icon": "icon.svg",
@@ -166,17 +166,11 @@
 					},
 					"authenticated_bot_id": {
 						"type": ["string", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "fetched_at",
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -187,8 +181,7 @@
 					"lexical_fields": ["name", "domain", "enterprise_name", "url"]
 				},
 				"aggregations": {
-					"count": true,
-					"group_by_time": ["fetched_at"]
+					"count": true
 				}
 			},
 			"coverage_strategy": "singleton_presence",
@@ -421,12 +414,8 @@
 						"type": "string"
 					},
 					"user_id": {
-						"type": "string"
-					},
-					"fetched_at": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"x_pdpp_role": "actor"
 					}
 				},
 				"required": ["id", "channel_id", "user_id"]
@@ -1409,7 +1398,8 @@
 					},
 					"last_read": {
 						"type": ["string", "null"],
-						"format": "date-time"
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
 					},
 					"last_read_at": {
 						"type": ["string", "null"],
@@ -1420,11 +1410,6 @@
 					},
 					"unread_count_display": {
 						"type": ["integer", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "channel_id"]

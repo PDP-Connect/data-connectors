@@ -923,7 +923,14 @@ export function buildOrderRecord(
 	listOrder: ListPageOrder,
 	detail: OrderDetail | null,
 	orderDate: string,
-	emittedAt: string,
+	// `emittedAt` (the run clock) is accepted for call-site/signature stability
+	// across every build*Record sibling but intentionally unused: PDPP
+	// spec-core now forbids a connector from putting its own collection time
+	// into `data` (that is the envelope's `emitted_at`, stamped by the
+	// runtime, not the connector). Kept as a parameter so fingerprint-cursor
+	// helpers like `listSurfaceFingerprint` don't need their own signatures
+	// disturbed.
+	_emittedAt: string,
 ): OrdersRecord {
 	const orderTotalRaw = detail?.grand_total || listOrder.orderTotal || null;
 	return {
@@ -939,6 +946,5 @@ export function buildOrderRecord(
 		gift_order: detail?.gift_order ?? false,
 		digital_order: detail?.digital_order ?? false,
 		item_count: resolveItemCount(listOrder, detail),
-		fetched_at: emittedAt,
 	};
 }

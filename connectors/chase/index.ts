@@ -1618,7 +1618,6 @@ export async function emitAccountsStream(
 			statement_balance_cents: null,
 			status: null,
 			balance_as_of: null,
-			fetched_at: deps.emittedAt,
 		};
 		if (!fingerprintCursor || fingerprintCursor.shouldEmit(record)) {
 			await deps.emitRecord("accounts", record);
@@ -1806,7 +1805,6 @@ export async function emitTransactionsForAccount(
 			check_number: t.check_number,
 			reference_number: t.reference_number,
 			source: `qfx_download_${activity}_${t.date}`,
-			fetched_at: deps.emittedAt,
 		};
 		// Gate on a per-transaction fingerprint that excludes run/acquisition
 		// metadata (`fetched_at`, `source`). A posted transaction's identity
@@ -1859,7 +1857,6 @@ export async function emitCurrentActivityForAccount(
 			memo: row.memo,
 			ui_transaction_id: row.ui_transaction_id,
 			source: "chase_activity_ui",
-			fetched_at: deps.emittedAt,
 		};
 		// Gate on a per-row fingerprint that excludes the run-clock
 		// `fetched_at`. The dashboard overview re-renders the same recent
@@ -1960,7 +1957,6 @@ export async function emitStatementIndexOnly(
 		pdf_sha256: carried.pdf_sha256,
 		pdf_text_sha256: carried.pdf_text_sha256 ?? null,
 		pdf_page_count: carried.pdf_page_count ?? null,
-		fetched_at: deps.emittedAt,
 	};
 	// Record the resolved pointers (carried or all-null) so the next run's
 	// prior map stays complete and the prune step has the right inputs.
@@ -2474,7 +2470,6 @@ async function processAccountDownload(
 			as_of: balance.as_of,
 			ledger_balance_cents: balance.ledger_cents,
 			available_balance_cents: balance.available_cents,
-			fetched_at: deps.emittedAt,
 		});
 		balanceEmitted = true;
 	}
@@ -2905,7 +2900,6 @@ async function processStatementRow(
 			pdf_sha256: dlResult.pdfSha256,
 			pdf_text_sha256: dlResult.content.pdf_text_sha256,
 			pdf_page_count: dlResult.content.pdf_page_count,
-			fetched_at: deps.emittedAt,
 		};
 		// Record this run's fresh hydration so a later run that fails to
 		// re-download can carry these content-addressed pointers AND the positive

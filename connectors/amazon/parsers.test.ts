@@ -806,7 +806,6 @@ test("buildOrderRecord: both list + detail present — detail wins for enrichmen
 	// zero case is where the two surfaces stop being interchangeable — see
 	// item-count-honesty.test.ts.
 	assert.equal(rec.item_count, 2);
-	assert.equal(rec.fetched_at, "2024-01-20T00:00:00Z");
 });
 
 test("buildOrderRecord: detail null — falls back to list-page fields", () => {

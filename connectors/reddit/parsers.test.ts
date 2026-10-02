@@ -150,7 +150,6 @@ test("submittedRecord: full link post → enriched record, passes schema", () =>
 	assert.equal(r.selftext, "");
 	assert.equal(r.selftext_len, 0);
 	assert.equal(r.created_utc, "2024-04-02T10:52:54.000Z");
-	assert.equal(r.fetched_at, FETCHED_AT);
 	const v = validateRecord("submitted", r);
 	assert.ok(v.ok, `schema failed: ${v.ok ? "" : JSON.stringify(v.issues)}`);
 });

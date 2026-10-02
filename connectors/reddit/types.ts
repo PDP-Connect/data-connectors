@@ -50,7 +50,6 @@ export interface RedditFetchResult {
 export interface SubmittedRecord {
 	created_utc: string;
 	domain: string | null;
-	fetched_at: string;
 	gilded: number | null;
 	id: string;
 	is_self: boolean | null;
@@ -72,7 +71,6 @@ export interface CommentRecord {
 	body: string | null;
 	body_len: number | null;
 	created_utc: string;
-	fetched_at: string;
 	gilded: number | null;
 	id: string;
 	is_top_level: boolean | null;
@@ -89,7 +87,6 @@ export interface SavedRecord {
 	body: string | null;
 	body_len: number | null;
 	created_utc: string;
-	fetched_at: string;
 	id: string;
 	is_post: boolean;
 	kind: string;
@@ -107,7 +104,6 @@ export interface VoteRecord {
 	body: string | null;
 	body_len: number | null;
 	created_utc: string;
-	fetched_at: string;
 	id: string;
 	is_post: boolean;
 	kind: string;

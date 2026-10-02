@@ -385,17 +385,6 @@ test("emitOrderAndItems: duplicate ASINs across list+detail dedupe to one item r
 	);
 });
 
-// ─── Invariant 6: emittedAt threads into the order record ────────────────
-
-test("emitOrderAndItems: emittedAt propagates into the order record's fetched_at", async () => {
-	const frozen = "2026-04-22T09:30:00.000Z";
-	const { deps, emitted } = makeRecordingDeps({ emittedAt: frozen });
-	await emitOrderAndItems(deps, makeListOrder(), makeDetail(), "2026-01-05");
-	const orderRecord = emitted.find((r) => r.stream === "orders");
-	assert.ok(orderRecord);
-	assert.equal(orderRecord.data.fetched_at, frozen);
-});
-
 test("runYear reports non-PII granular progress across list pages and order processing", () => {
 	const src = readFileSync(AMAZON_INDEX_PATH, "utf8");
 	const progressMessages = [
