@@ -160,6 +160,158 @@ test("vacuous run: a run with zero interactions but at least one expected record
 	);
 });
 
+// ─── vacuous run: filesystem-input carve-out (approved 2026-10-02) ─────────
+//
+// A `setup.manual_or_upload` connector (strava, apple_health, ...) has zero
+// interactions BY CONSTRUCTION — it reads a declared filesystem input, never
+// `fetch`. An incremental run that legitimately finds nothing new in an
+// already-exhausted input would otherwise always fail `vacuous_run`, exactly
+// like `recordedBrowserHasEvidence`'s shape above — confirmed against the
+// real strava connector after main removed its `coverage_diagnostics`
+// stream (#251). `verifyScenario`'s third parameter
+// (`filesystemInputResolved`) models "the caller already resolved a declared
+// filesystem input and it passed the presence guard" without needing a real
+// filesystem or connector here.
+
+/** A minimal filesystem-input-shaped scenario: every run has zero
+ *  interactions (nothing is ever fetched), and `runRecordCounts[i]` sets run
+ *  i's single `activities` stream expectation — `0` means an empty
+ *  `expected.records` (no stream entry at all, matching the real vacuous
+ *  shape), anything else a stream expecting that many records. Each run
+ *  after the first is seeded from the previous run's actual final state. */
+function filesystemInputShapedScenario(
+	runRecordCounts: readonly number[],
+): ConnectorScenario {
+	return {
+		format: SCENARIO_FORMAT,
+		connector: { id: "toy-fs" },
+		capture: {
+			captured_at: "2026-08-01T00:00:00.000Z",
+			evidence_class: "synthetic-spike",
+			privacy_class: "local-only",
+			recorder_version: "test",
+			complete: true,
+		},
+		runs: runRecordCounts.map((count, index) => ({
+			start: {
+				scope: { streams: [{ name: "activities" }] },
+				state: null,
+				...(index === 0 ? {} : { state_from_run: index - 1 }),
+			},
+			interactions: [],
+			expected: {
+				records:
+					count === 0
+						? {}
+						: {
+								activities: {
+									count,
+									ids: ["a1"],
+									ops: ["upsert"] as const,
+									record_sha256s: [canonicalHash({ id: "a1" })],
+								},
+							},
+				final_state: { activities: { last: "a1" } },
+			},
+		})),
+	};
+}
+
+/** Emits one RECORD + STATE on run 0 only, for every run whose
+ *  `runRecordCounts` entry is nonzero; later runs emit nothing — the
+ *  "exhausted filesystem input" shape. Never calls `fetch`. */
+function filesystemInputShapedCollector(
+	runRecordCounts: readonly number[],
+): RunCollector {
+	return (runIndex, { emit }) => {
+		if (runRecordCounts[runIndex]) {
+			emit({ type: "RECORD", stream: "activities", id: "a1", data: { id: "a1" } });
+			emit({ type: "STATE", stream: "activities", cursor: { last: "a1" } });
+		}
+		return Promise.resolve();
+	};
+}
+
+test("vacuous run filesystem-input carve-out: run 1 (zero records) is NOT vacuous when run 0 yielded records from the same declared filesystem input", async () => {
+	const runRecordCounts = [1, 0];
+	const scenario = filesystemInputShapedScenario(runRecordCounts);
+	const result = await verifyScenario(
+		scenario,
+		filesystemInputShapedCollector(runRecordCounts),
+		true,
+	);
+
+	assert.equal(result.pass, true, JSON.stringify(result.failures));
+	assert.equal(
+		result.failures.some((f) => f.kind === "vacuous_run"),
+		false,
+	);
+	assert.deepEqual(result.vacuousRunFilesystemInputCarveOuts, [
+		{ runIndex: 1, sourceRunIndex: 0 },
+	]);
+});
+
+test("vacuous run filesystem-input carve-out negative control: both runs zero records -> vacuous_run still fires on both", async () => {
+	const runRecordCounts = [0, 0];
+	const scenario = filesystemInputShapedScenario(runRecordCounts);
+	const result = await verifyScenario(
+		scenario,
+		filesystemInputShapedCollector(runRecordCounts),
+		true,
+	);
+
+	assert.equal(result.pass, false);
+	const vacuousRunIndexes = result.failures
+		.filter((f) => f.kind === "vacuous_run")
+		.map((f) => f.runIndex)
+		.sort();
+	// Neither run has an OTHER run with records to point to, so the carve-out
+	// never applies to either — both fail exactly as before this carve-out
+	// existed.
+	assert.deepEqual(vacuousRunIndexes, [0, 1]);
+	assert.deepEqual(result.vacuousRunFilesystemInputCarveOuts, []);
+});
+
+test("vacuous run filesystem-input carve-out negative control: a single-run scenario with zero records and a declared filesystem input still fails vacuous_run", async () => {
+	const runRecordCounts = [0];
+	const scenario = filesystemInputShapedScenario(runRecordCounts);
+	const result = await verifyScenario(
+		scenario,
+		filesystemInputShapedCollector(runRecordCounts),
+		true,
+	);
+
+	assert.equal(result.pass, false);
+	assert.equal(
+		result.failures.some((f) => f.kind === "vacuous_run" && f.runIndex === 0),
+		true,
+	);
+	assert.deepEqual(result.vacuousRunFilesystemInputCarveOuts, []);
+});
+
+test("vacuous run filesystem-input carve-out negative control: zero-records run with NO declared filesystem input (recorded-http) still fails vacuous_run, unchanged", async () => {
+	// Same two-run shape as the passing case above, but filesystemInputResolved
+	// is false (the default) — mirrors a recorded-http scenario, which never
+	// has a declared filesystem input to resolve. recorded-http's own
+	// non-vacuity proof stays `interactions.length`, untouched by this
+	// carve-out.
+	const runRecordCounts = [1, 0];
+	const scenario = filesystemInputShapedScenario(runRecordCounts);
+	const result = await verifyScenario(
+		scenario,
+		filesystemInputShapedCollector(runRecordCounts),
+	);
+
+	assert.equal(result.pass, false);
+	assert.deepEqual(
+		result.failures
+			.filter((f) => f.kind === "vacuous_run")
+			.map((f) => f.runIndex),
+		[1],
+	);
+	assert.deepEqual(result.vacuousRunFilesystemInputCarveOuts, []);
+});
+
 test("unmatched request: a collector request with no recorded interaction fails verification with ScenarioMismatchError detail", async () => {
 	// The scenario has zero interactions, so the collector's GET has nothing
 	// to match — replay throws ScenarioMismatchError, caught and reported as

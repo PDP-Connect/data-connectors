@@ -1583,6 +1583,15 @@ export interface VerifyResult {
 	failures: VerifyFailure[];
 	metrics: VerifyMetrics;
 	pass: boolean;
+	/** Every run `vacuousRunFilesystemInputCarveOutSourceIndex` saved from a
+	 *  `vacuous_run` failure, for `bin/scenario-verify.ts` to disclose as a
+	 *  `VacuousRunFilesystemInputCarveOutLimitation` (claims.ts). Empty for
+	 *  every scenario that never needed the carve-out — i.e. almost all of
+	 *  them. */
+	vacuousRunFilesystemInputCarveOuts: Array<{
+		runIndex: number;
+		sourceRunIndex: number;
+	}>;
 }
 
 function mergeStateMessages(
@@ -1733,6 +1742,78 @@ function verifyRunProtocolTrace(
 	}
 }
 
+/** Sum of every declared stream's `count` for one run's expectations — "did
+ *  this run actually expect any records at all", not just "does its
+ *  `expected.records` map have any keys" (a stream entry can declare
+ *  `count: 0`). Used by `vacuousRunFilesystemInputCarveOutSourceIndex` to
+ *  find an OTHER run that proves a declared filesystem input really does
+ *  yield data for this connector. */
+function totalExpectedRecordCount(run: ScenarioRun): number {
+	return Object.values(run.expected.records).reduce(
+		(sum, stream) => sum + stream.count,
+		0,
+	);
+}
+
+/**
+ * `recordedBrowserHasEvidence`'s filesystem-input counterpart (approved
+ * 2026-10-02, during the #81 rebase onto main). A `setup.manual_or_upload`
+ * connector has zero interactions BY CONSTRUCTION — it never calls fetch —
+ * so an incremental run that legitimately finds nothing new in an exhausted
+ * declared input would otherwise always fail `vacuous_run`, the same shape
+ * `recordedBrowserHasEvidence` above already carves out for recorded-browser.
+ *
+ * Input PRESENCE alone does not prove the connector actually READ it, though:
+ * a connector that silently ignored its filesystem input and emitted nothing
+ * would show the identical zero-interactions/zero-records shape, and that
+ * case must still fail. The carve-out therefore additionally requires:
+ *   (a) the connector declares a filesystem input AND verify resolved it and
+ *       it passed the non-vacuity presence guard — `filesystemInputResolved`,
+ *       computed once by the caller the same way `bin/scenario-verify.ts`
+ *       already resolves it for the sandbox bind and its own disclosure line
+ *       (`ResolvedFilesystemInput`, filesystem-input.ts);
+ *   (b) at least one OTHER run in the SAME scenario actually expected
+ *       records (`totalExpectedRecordCount > 0`) — proof that THIS declared
+ *       input, for THIS connector, is capable of producing data, not just
+ *       existing;
+ *   (c) the scenario has more than one run — a single-run scenario has no
+ *       "other run" that could supply that proof.
+ * `recorded-http` is unaffected: `filesystemInputResolved` is only ever true
+ * for a `manual_or_upload` connector, so a recorded-http scenario (whose
+ * proof-of-real-provider-contact remains `interactions.length`, unchanged)
+ * never reaches this branch.
+ *
+ * Returns the index of the first other run with a positive expected record
+ * count — the disclosed `sourceRunIndex` — or `undefined` when the carve-out
+ * does not apply and the ordinary `vacuous_run` failure must fire.
+ */
+function vacuousRunFilesystemInputCarveOutSourceIndex(
+	runIndex: number,
+	scenario: ConnectorScenario,
+	filesystemInputResolved: boolean,
+): number | undefined {
+	if (!filesystemInputResolved || scenario.runs.length <= 1) {
+		return undefined;
+	}
+	const sourceIndex = scenario.runs.findIndex(
+		(otherRun, otherIndex) =>
+			otherIndex !== runIndex && totalExpectedRecordCount(otherRun) > 0,
+	);
+	return sourceIndex === -1 ? undefined : sourceIndex;
+}
+
+export interface VerifyRunResult {
+	failures: VerifyFailure[];
+	/** Set only when `vacuousRunFilesystemInputCarveOutSourceIndex` applied —
+	 *  threaded up to `VerifyResult` so `bin/scenario-verify.ts` can disclose
+	 *  it as a `ClaimLimitation` (see claims.ts's
+	 *  `VacuousRunFilesystemInputCarveOutLimitation`). */
+	vacuousRunFilesystemInputCarveOut?: {
+		runIndex: number;
+		sourceRunIndex: number;
+	};
+}
+
 /**
  * Verify every run in `scenario` against `runCollector`, strictly offline.
  * Runs execute in array order so `state_from_run` can reference an earlier
@@ -1745,7 +1826,8 @@ async function verifyRun(
 	scenario: ConnectorScenario,
 	runCollector: RunCollector,
 	actualFinalStateByRun: Map<number, unknown>,
-): Promise<VerifyFailure[]> {
+	filesystemInputResolved: boolean,
+): Promise<VerifyRunResult> {
 	const failures: VerifyFailure[] = [];
 	const run = scenario.runs[runIndex] as ScenarioRun;
 	// Same declaration `scenario-record` hashed under. Read from the manifest
@@ -1792,10 +1874,21 @@ async function verifyRun(
 		typeof network.har_entry_count === "number" &&
 		Number.isInteger(network.har_entry_count) &&
 		network.har_entry_count > 0;
+	const isVacuousShape =
+		run.interactions.length === 0 &&
+		Object.keys(run.expected.records).length === 0;
+	const vacuousRunCarveOutSourceIndex =
+		!recordedBrowserHasEvidence && isVacuousShape
+			? vacuousRunFilesystemInputCarveOutSourceIndex(
+					runIndex,
+					scenario,
+					filesystemInputResolved,
+				)
+			: undefined;
 	if (
 		!recordedBrowserHasEvidence &&
-		run.interactions.length === 0 &&
-		Object.keys(run.expected.records).length === 0
+		isVacuousShape &&
+		vacuousRunCarveOutSourceIndex === undefined
 	) {
 		failures.push({
 			kind: "vacuous_run",
@@ -1803,7 +1896,7 @@ async function verifyRun(
 			detail:
 				"run has zero recorded interactions and zero expected records - it cannot prove anything about the connector and must not be reported as passing",
 		});
-		return failures;
+		return { failures };
 	}
 
 	const seedState =
@@ -1855,7 +1948,7 @@ async function verifyRun(
 			runIndex,
 			detail: err instanceof Error ? err.message : String(err),
 		});
-		return failures;
+		return { failures };
 	}
 
 	try {
@@ -1934,12 +2027,29 @@ async function verifyRun(
 	// `verifyRunProtocolTrace`.
 	failures.push(...verifyRunProtocolTrace(runIndex, run, rawTraceMessages));
 
-	return failures;
+	return {
+		failures,
+		...(vacuousRunCarveOutSourceIndex === undefined
+			? {}
+			: {
+					vacuousRunFilesystemInputCarveOut: {
+						runIndex,
+						sourceRunIndex: vacuousRunCarveOutSourceIndex,
+					},
+				}),
+	};
 }
 
 export async function verifyScenario(
 	scenario: ConnectorScenario,
 	runCollector: RunCollector,
+	// True when the connector declares a filesystem input AND the caller
+	// already resolved it and it passed the non-vacuity presence guard — see
+	// `vacuousRunFilesystemInputCarveOutSourceIndex`'s doc comment. Defaults
+	// to false so every other caller (scenario.test.ts's hand-rolled
+	// collectors, every recorded-http/recorded-browser scenario) is
+	// unaffected.
+	filesystemInputResolved = false,
 ): Promise<VerifyResult> {
 	const actualFinalStateByRun = new Map<number, unknown>();
 	const interactionCount = scenario.runs.reduce(
@@ -1955,19 +2065,38 @@ export async function verifyScenario(
 	// keeps every await in a `.then()` callback instead, structurally
 	// satisfying the rule rather than needing an allowlist exception — same
 	// pattern as connectors/github/index.test.ts's `ingestPullRequestRecords`.
-	const failures = await scenario.runs.reduce<Promise<VerifyFailure[]>>(
-		(previous, _run, runIndex) =>
-			previous.then(async (acc) => {
-				const runFailures = await verifyRun(
-					runIndex,
-					scenario,
-					runCollector,
-					actualFinalStateByRun,
-				);
-				return [...acc, ...runFailures];
-			}),
-		Promise.resolve([]),
-	);
+	const { failures, vacuousRunFilesystemInputCarveOuts } =
+		await scenario.runs.reduce<
+			Promise<{
+				failures: VerifyFailure[];
+				vacuousRunFilesystemInputCarveOuts: Array<{
+					runIndex: number;
+					sourceRunIndex: number;
+				}>;
+			}>
+		>(
+			(previous, _run, runIndex) =>
+				previous.then(async (acc) => {
+					const runResult = await verifyRun(
+						runIndex,
+						scenario,
+						runCollector,
+						actualFinalStateByRun,
+						filesystemInputResolved,
+					);
+					return {
+						failures: [...acc.failures, ...runResult.failures],
+						vacuousRunFilesystemInputCarveOuts:
+							runResult.vacuousRunFilesystemInputCarveOut === undefined
+								? acc.vacuousRunFilesystemInputCarveOuts
+								: [
+										...acc.vacuousRunFilesystemInputCarveOuts,
+										runResult.vacuousRunFilesystemInputCarveOut,
+									],
+					};
+				}),
+			Promise.resolve({ failures: [], vacuousRunFilesystemInputCarveOuts: [] }),
+		);
 
 	return {
 		pass: failures.length === 0,
@@ -1976,5 +2105,6 @@ export async function verifyScenario(
 			normalizerCount: scenario.normalizers?.length ?? 0,
 			interactionCount,
 		},
+		vacuousRunFilesystemInputCarveOuts,
 	};
 }
