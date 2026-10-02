@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import type { InteractionResponse } from "../connector-runtime.ts";
 import {
 	CHATGPT_BROWSER_LOGIN_ASSISTANCE_MESSAGE,
@@ -16,7 +16,17 @@ import {
 	interactionResponseCode,
 	isLikelyChatGptPushApprovalText,
 	resolveChatGptPushApprovalTimeoutMs,
+	setChatGptAuthDiagnosticSink,
 } from "./chatgpt.ts";
+
+// Technical detail goes to the diagnostic sink, not to owner-visible progress.
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setChatGptAuthDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
+});
 
 function response(extra: Partial<InteractionResponse>): InteractionResponse {
 	return {
@@ -273,9 +283,10 @@ test("ChatGPT initial auth probe emits bounded diagnostic before credential logi
 		/chatgpt_session_required/u,
 	);
 
-	assert.equal(progressMessages.length, 2);
-	assert.doesNotMatch(progressMessages[0] ?? "", /private-conversation-id/u);
-	const diagnostic = extractAuthProbeDiagnostic(progressMessages[0] ?? "");
+	assert.deepEqual(progressMessages, ["ChatGPT needs you to sign in again"]);
+	assert.equal(diagnostics.length, 2);
+	assert.doesNotMatch(diagnostics[0] ?? "", /private-conversation-id/u);
+	const diagnostic = extractAuthProbeDiagnostic(diagnostics[0] ?? "");
 	// The mocked session probe always resolves null, so the retry (see
 	// checkSessionWithRetry) exhausts every attempt before the initial probe
 	// honestly reports "still not active after retrying" — proving a `false`
@@ -342,8 +353,9 @@ test("ChatGPT initial auth probe preserves existing API-session decision", async
 
 	assert.equal(ok, true);
 	assert.equal(loginOpened, false);
-	assert.equal(progressMessages.length, 1);
-	const diagnostic = extractAuthProbeDiagnostic(progressMessages[0] ?? "");
+	assert.equal(progressMessages.length, 0);
+	assert.equal(diagnostics.length, 1);
+	const diagnostic = extractAuthProbeDiagnostic(diagnostics[0] ?? "");
 	assert.equal(diagnostic.api_session_user, true);
 	assert.equal(diagnostic.decision, "accepted_by_api_session");
 });
@@ -439,7 +451,8 @@ test("ChatGPT initial auth probe survives ONE transient /api/auth/session blip o
 		2,
 		"recovery on the second attempt must not keep retrying past success",
 	);
-	const diagnostic = extractAuthProbeDiagnostic(progressMessages[0] ?? "");
+	assert.equal(progressMessages.length, 0);
+	const diagnostic = extractAuthProbeDiagnostic(diagnostics[0] ?? "");
 	assert.equal(diagnostic.api_session_user, true);
 	assert.equal(diagnostic.api_session_user_attempts, 2);
 	assert.equal(diagnostic.decision, "accepted_by_api_session");
@@ -532,13 +545,16 @@ test("ChatGPT scheduled auth repair fails before credential login or owner promp
 			);
 
 			assert.deepEqual(visitedUrls, ["https://chatgpt.com/"]);
-			assert.equal(progressMessages.length, 2);
+			assert.deepEqual(progressMessages, [
+				"ChatGPT needs you to sign in again",
+			]);
+			assert.equal(diagnostics.length, 2);
 			assert.equal(
-				extractAuthProbeDiagnostic(progressMessages[0] ?? "").decision,
+				extractAuthProbeDiagnostic(diagnostics[0] ?? "").decision,
 				"credential_login_required",
 			);
 			assert.match(
-				progressMessages[1] ?? "",
+				diagnostics[1] ?? "",
 				/automatic refresh will not start interactive auth repair/u,
 			);
 		},

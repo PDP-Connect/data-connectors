@@ -1194,6 +1194,45 @@ async function withTimeout<T>(
 	}
 }
 
+/**
+ * Technical detail for the run log. PROGRESS messages are shown to the owner
+ * verbatim (the Vana mobile sheet renders `PROGRESS.message` as-is), so counts,
+ * lanes, codes and concurrency go here, to the run log (console.error), instead. The protocol has no
+ * LOG event; tests replace the sink to read these lines.
+ */
+type ChatGptDiagnosticSink = (line: string) => void;
+
+const defaultChatGptDiagnosticSink: ChatGptDiagnosticSink = (line) => {
+	// `console.error`, not `process.stderr`: the PageShim host passes a bare
+	// `process` with no stderr, so a stderr write would throw there.
+	console.error(`[chatgpt-diagnostic] ${line}`);
+};
+
+let chatGptDiagnosticSink: ChatGptDiagnosticSink = defaultChatGptDiagnosticSink;
+
+export function setChatGptDiagnosticSink(
+	sink: ChatGptDiagnosticSink | undefined,
+): void {
+	chatGptDiagnosticSink = sink ?? defaultChatGptDiagnosticSink;
+}
+
+function chatGptDiagnostic(line: string): void {
+	chatGptDiagnosticSink(line);
+}
+
+/** Plain-English wait for owner-facing PROGRESS text ("30 seconds", "2 minutes"). */
+function formatUserWait(ms: number): string {
+	const seconds = Math.max(1, Math.ceil(ms / 1000));
+	if (seconds < 60) {
+		return `${seconds} second${seconds === 1 ? "" : "s"}`;
+	}
+	const minutes = Math.round(seconds / 60);
+	return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+const CHATGPT_DEFER_NEXT_RUN_MESSAGE =
+	"ChatGPT is limiting requests. Saved what we could; the rest will be fetched next time";
+
 function formatSleepDuration(ms: number): string {
 	if (ms < 1000) {
 		return `${ms}ms`;
@@ -1349,9 +1388,17 @@ async function emitChatGptProviderBudgetTransitions({
 		return;
 	}
 	for (const transition of providerBudget.drainCircuitTransitions()) {
+		chatGptDiagnostic(
+			`provider-budget circuit ${transition.previousState} -> ${transition.state} (${transition.reason})`,
+		);
 		await emit({
 			type: "PROGRESS",
-			message: `Provider-budget circuit ${transition.previousState} -> ${transition.state} (${transition.reason})`,
+			message:
+				transition.state === "open"
+					? "ChatGPT is limiting requests; slowing down"
+					: transition.state === "closed"
+						? "ChatGPT is responding normally again"
+						: "Checking whether ChatGPT is ready to continue",
 			provider_budget: providerBudgetTransitionProgress(transition),
 		});
 	}
@@ -1728,9 +1775,12 @@ export function createChatGptApi({
 					retryAfterMs === undefined
 						? `jittered exponential backoff, capped at ${formatSleepDuration(CHATGPT_RATE_LIMIT_MAX_DELAY_MS)}`
 						: `server Retry-After, capped at ${formatSleepDuration(CHATGPT_RATE_LIMIT_MAX_RETRY_AFTER_MS)}`;
+				chatGptDiagnostic(
+					`rate limit/backoff on ${method} ${chatGptEndpointRoute(path)}: ${status}; waiting ${formatSleepDuration(delayMs)} before ${attempt + 1 === maxAttempts ? "final " : ""}retry ${attempt + 1}/${maxAttempts} (${policy})`,
+				);
 				await emit?.({
 					type: "PROGRESS",
-					message: `ChatGPT rate limit/backoff on ${method} ${chatGptEndpointRoute(path)}: ${status}; waiting ${formatSleepDuration(delayMs)} before ${attempt + 1 === maxAttempts ? "final " : ""}retry ${attempt + 1}/${maxAttempts} (${policy})`,
+					message: `ChatGPT is slowing down requests; waiting ${formatUserWait(delayMs)} before continuing`,
 				});
 			},
 			request: async () => {
@@ -2010,9 +2060,11 @@ async function runChatGptSideEffectProbe({
 	await emit({
 		type: "PROGRESS",
 		stream: "conversations",
-		message:
-			"ChatGPT side-effect probe enabled; running one GET-only list/detail/list comparison and skipping collection",
+		message: "Running a read-only ChatGPT check instead of collecting data",
 	});
+	chatGptDiagnostic(
+		"side-effect probe enabled; running one GET-only list/detail/list comparison and skipping collection",
+	);
 	const auth = await api.auth();
 	const result = (await page.evaluate(`(async () => {
     const accessToken = ${JSON.stringify(auth.accessToken)};
@@ -2115,10 +2167,11 @@ async function runChatGptSideEffectProbe({
     };
   })()`)) as ChatGptSideEffectProbeResult;
 
+	chatGptDiagnostic(summarizeChatGptSideEffectProbe(result));
 	await emit({
 		type: "PROGRESS",
 		stream: "conversations",
-		message: summarizeChatGptSideEffectProbe(result),
+		message: "ChatGPT check finished",
 	});
 }
 
@@ -2218,7 +2271,7 @@ export async function runMemoriesStream(deps: StreamDeps): Promise<void> {
 			await deps.emitRecord("memories", rec);
 			covered += 1;
 		} else {
-			emitChatGptShapeCheckFailed(deps, "memories", m, "missing id");
+			emitChatGptShapeCheckFailed("memories", m, "missing id");
 		}
 	}
 	deps.emit({
@@ -2367,7 +2420,6 @@ export async function runCustomInstructionsStream(
  * "we reached it, and what it gave us is internally inconsistent".
  */
 async function emitBranchReconciliation(
-	deps: StreamDeps,
 	mapping: Record<string, ChatGptNode>,
 	currentNode: string | null | undefined,
 	emittedBranchCount: number,
@@ -2378,11 +2430,9 @@ async function emitBranchReconciliation(
 	// Measured at the payload boundary, independently of what was emitted: does
 	// the graph contain the tip it claims to be on?
 	if (!mapping[currentNode]) {
-		await deps.emit({
-			type: "PROGRESS",
-			stream: "messages",
-			message: `branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
-		});
+		chatGptDiagnostic(
+			`branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
+		);
 		return;
 	}
 	// Walk the declared parent chain to its end. A chain that ends on a node
@@ -2390,13 +2440,11 @@ async function emitBranchReconciliation(
 	// branch continues in the provider's data but not in ours.
 	const danglingParent = findDanglingBranchParent(mapping, currentNode);
 	if (danglingParent !== null) {
-		// PROGRESS is the owner's status line, so it carries no conversation or
-		// node id (the same form as `empty_detail`).
-		await deps.emit({
-			type: "PROGRESS",
-			stream: "messages",
-			message: `branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
-		});
+		// The diagnostic carries no conversation or node id (the same form as
+		// `empty_detail`).
+		chatGptDiagnostic(
+			`branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
+		);
 	}
 }
 
@@ -2468,11 +2516,9 @@ export async function processConversationDetail(
 		);
 	};
 	if (detail.status !== 200 || !detail.json?.mapping) {
-		deps.emit({
-			type: "PROGRESS",
-			stream: "messages",
-			message: `${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
-		});
+		chatGptDiagnostic(
+			`${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
+		);
 		// Fall back to list-only conversation record.
 		reportProcessingTime();
 		await emitConversation(c, null);
@@ -2585,16 +2631,13 @@ export async function processConversationDetail(
 	// from the same selected, schema-valid records that will be emitted below.
 	await emitConversation(c, conversationDetail);
 	if (filteredBranchCount > 0) {
-		deps.emit({
-			type: "PROGRESS",
-			stream: "messages",
-			message:
-				`branch_message_filtered: current_node and branch count reflect emitted messages ` +
+		chatGptDiagnostic(
+			`branch_message_filtered: current_node and branch count reflect emitted messages ` +
 				`(filtered=${filteredBranchCount}, selection=${filteredBySelection}, ` +
 				`shape=${filteredByShape}, duplicate=${filteredAsDuplicate}, ` +
 				`non_message=${filteredAsNonMessage}, ` +
 				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
-		});
+		);
 	}
 	let emittedMessageCount = 0;
 	for (const candidate of candidates) {
@@ -2604,12 +2647,7 @@ export async function processConversationDetail(
 		emittedMessageCount += 1;
 		await deps.emitRecord("messages", msg);
 	}
-	await emitBranchReconciliation(
-		deps,
-		mapping,
-		currentNode,
-		emittedBranchCount,
-	);
+	await emitBranchReconciliation(mapping, currentNode, emittedBranchCount);
 	if (emittedMessageCount === 0) {
 		// Completeness guard. A 200-with-mapping detail whose graph contains NO
 		// message-bearing node leaves a bare conversation row with zero messages
@@ -2625,14 +2663,12 @@ export async function processConversationDetail(
 		// stream-level SKIP_RESULT tells the host that the whole `messages` stream
 		// is unavailable, and Desktop then drops every message of the run because
 		// of one odd conversation. This fact is about one record, so it is a
-		// PROGRESS diagnostic. PROGRESS is display text, so it carries no conversation id. The `node_count` lets a
+		// diagnostic line. It carries no conversation id. The `node_count` lets a
 		// reviewer distinguish a genuinely empty graph (0) from one whose every
 		// node was synthetic/role-less (>0).
-		deps.emit({
-			type: "PROGRESS",
-			stream: "messages",
-			message: `empty_detail: a conversation returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
-		});
+		chatGptDiagnostic(
+			`empty_detail: a conversation returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
+		);
 	}
 }
 
@@ -2816,7 +2852,6 @@ function classifyChatGptListPage<T>(
  * item body.
  */
 function emitChatGptShapeCheckFailed(
-	deps: StreamDeps,
 	stream: string,
 	raw: unknown,
 	reason: string,
@@ -2827,11 +2862,9 @@ function emitChatGptShapeCheckFailed(
 			: null;
 	// Record-level: one rejected item must not mark the whole stream skipped.
 	// The stream's DETAIL_COVERAGE already counts it as considered, not covered.
-	deps.emit({
-		type: "PROGRESS",
-		stream,
-		message: `shape_check_failed: ${stream} list item rejected: ${reason} (raw_type=${raw === null ? "null" : typeof raw}, raw_keys=${rawKeys === null ? "null" : rawKeys.join(",")})`,
-	});
+	chatGptDiagnostic(
+		`shape_check_failed: ${stream} list item rejected: ${reason} (raw_type=${raw === null ? "null" : typeof raw}, raw_keys=${rawKeys === null ? "null" : rawKeys.join(",")})`,
+	);
 }
 
 /**
@@ -2910,7 +2943,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 				await deps.emitRecord("custom_gpts", rec);
 				covered += 1;
 			} else {
-				emitChatGptShapeCheckFailed(deps, "custom_gpts", raw, "missing id");
+				emitChatGptShapeCheckFailed("custom_gpts", raw, "missing id");
 			}
 		}
 		// Cursor pagination is gizmo-specific (the other list endpoints in this
@@ -3033,7 +3066,6 @@ export async function runSharedConversationsStream(
 			const rec = buildSharedConversationRecord(s);
 			if (!rec) {
 				emitChatGptShapeCheckFailed(
-					deps,
 					"shared_conversations",
 					s,
 					"missing id/share_id",
@@ -3345,8 +3377,8 @@ async function listConversationsSinceCursor(
 		type: "PROGRESS",
 		stream: "conversations",
 		message: priorCursor
-			? `Listing conversations updated after ${priorCursor}`
-			: "Listing conversations (full pass)",
+			? "Checking for new and updated conversations"
+			: "Listing your conversations",
 	});
 	while (true) {
 		const attempts: ConversationListItem[][] = [];
@@ -4102,10 +4134,14 @@ export async function applyChatGptColdStatePreflight(
 	if (!probeIds.length) {
 		return requestedTuning;
 	}
+	chatGptDiagnostic(
+		`cold-state preflight: probing source pressure with ${probeIds.length} serial detail request(s) before raising detail concurrency to ${requestedTuning.maxConcurrency}`,
+	);
 	deps.emit({
 		type: "PROGRESS",
 		stream: "messages",
-		message: `ChatGPT cold-state preflight: probing source pressure with ${probeIds.length} serial detail request(s) before raising detail concurrency to ${requestedTuning.maxConcurrency}`,
+		message:
+			"Checking how much ChatGPT will allow before fetching conversations",
 	});
 	const result = await classifyChatGptSourcePressure(
 		deps,
@@ -4114,17 +4150,23 @@ export async function applyChatGptColdStatePreflight(
 		requestedTuning.maxConcurrency,
 	);
 	if (result.classification === "pressured") {
+		chatGptDiagnostic(
+			`cold-state preflight: source is pressured (rate_limited=${result.rateLimited}/${result.attempted}); holding detail lane at serial concurrency=1 for this run`,
+		);
 		deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `ChatGPT cold-state preflight: source is pressured (rate_limited=${result.rateLimited}/${result.attempted}); holding detail lane at serial concurrency=1 for this run`,
+			message: "ChatGPT is busy; fetching conversations one at a time this run",
 		});
 		return CHATGPT_SERIAL_TUNING;
 	}
+	chatGptDiagnostic(
+		`cold-state preflight: source is cold (${result.attempted}/${result.attempted} ok); allowing requested detail concurrency=${requestedTuning.maxConcurrency}`,
+	);
 	deps.emit({
 		type: "PROGRESS",
 		stream: "messages",
-		message: `ChatGPT cold-state preflight: source is cold (${result.attempted}/${result.attempted} ok); allowing requested detail concurrency=${requestedTuning.maxConcurrency}`,
+		message: "ChatGPT is responding well; fetching conversations",
 	});
 	return requestedTuning;
 }
@@ -4199,7 +4241,7 @@ function formatConversationDetailLaneProgress(
 	event: AdaptiveLaneEvent,
 ): string {
 	const parts = [
-		`ChatGPT conversation-detail lane ${event.type}`,
+		`conversation-detail lane ${event.type}`,
 		`active=${event.activeCount}`,
 		`queued=${event.queueSize}`,
 		`concurrency=${event.concurrency}/${event.maxConcurrency}`,
@@ -4621,10 +4663,14 @@ export async function runMessagesAndConversationsWithDetail(
 			if (!shouldEmitConversationDetailLaneProgress(event)) {
 				return;
 			}
+			chatGptDiagnostic(formatConversationDetailLaneProgress(event));
 			return deps.emit({
 				type: "PROGRESS",
 				stream: "messages",
-				message: formatConversationDetailLaneProgress(event),
+				message:
+					event.type === "started"
+						? "Fetching conversation details"
+						: "ChatGPT is slowing down; retrying some conversations",
 			});
 		},
 	});
@@ -4986,10 +5032,13 @@ export async function runMessagesAndConversationsWithDetail(
 			observedRecoverablePressure = makeRateLimitDensityPressureError(
 				densityTracker.count,
 			);
+			chatGptDiagnostic(
+				`conversation-detail lane: source still hot after ${densityWaitCycles} cool-down wait(s); deferring remaining conversation details as resumable DETAIL_GAP records (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+			);
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "messages",
-				message: `ChatGPT conversation-detail lane: source still hot after ${densityWaitCycles} cool-down wait(s); deferring remaining conversation details as resumable DETAIL_GAP records (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+				message: CHATGPT_DEFER_NEXT_RUN_MESSAGE,
 			});
 			return emitTailConversationDetailGaps(from, (item) =>
 				makeDeferredConversationDetailGap(
@@ -5015,10 +5064,13 @@ export async function runMessagesAndConversationsWithDetail(
 				: CHATGPT_DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT_MS,
 		);
 		const waitMs = Math.min(desiredWaitMs, remainingRunBudgetMs);
+		chatGptDiagnostic(
+			`conversation-detail lane hot after ${servedCount} served 429s; waiting ${formatSleepDuration(waitMs)} for the account to cool down, then resuming detail collection (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+		);
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `ChatGPT conversation-detail lane hot after ${servedCount} served 429s; waiting ${formatSleepDuration(waitMs)} for the account to cool down, then resuming detail collection (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+			message: `ChatGPT is slowing down requests; waiting ${formatUserWait(waitMs)} before continuing`,
 		});
 		await sleep(waitMs);
 		// The wait discharged the hot bucket — reset the accumulator so the lane
@@ -5039,10 +5091,14 @@ export async function runMessagesAndConversationsWithDetail(
 			capReason === "max_wall_clock"
 				? `wall-clock budget after ${runBudget.elapsedMs()}ms elapsed`
 				: `provider-request budget after ${runBudget.count} conversation-detail request(s)`;
+		chatGptDiagnostic(
+			`conversation-detail lane reached its per-run ${budgetDescription}; deferring the remaining conversation details as resumable DETAIL_GAP records for the next run`,
+		);
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `ChatGPT conversation-detail lane reached its per-run ${budgetDescription}; deferring the remaining conversation details as resumable DETAIL_GAP records for the next run`,
+			message:
+				"Reached the limit for this run. Saved what we could; the rest will be fetched next time",
 		});
 		return emitRunCapTailConversationDetailGaps(from, capReason);
 	}
@@ -5058,10 +5114,14 @@ export async function runMessagesAndConversationsWithDetail(
 		if (err instanceof ChatGptPlannedProviderBudgetDeferredError) {
 			runCapDeferReason = err.reason;
 			const providerBudgetReason = err.gate?.reason ?? err.reason;
+			chatGptDiagnostic(
+				`conversation-detail lane reached its per-run provider budget (${providerBudgetReason}); deferring remaining conversation details as resumable DETAIL_GAP records`,
+			);
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "messages",
-				message: `ChatGPT conversation-detail lane reached its per-run provider budget (${providerBudgetReason}); deferring remaining conversation details as resumable DETAIL_GAP records`,
+				message:
+					"Reached the limit for this run. Saved what we could; the rest will be fetched next time",
 			});
 			return emitRunCapTailConversationDetailGaps(from, err.reason);
 		}
@@ -5101,10 +5161,13 @@ export async function runMessagesAndConversationsWithDetail(
 						: CHATGPT_DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT_MS,
 				);
 				const waitMs = Math.min(desiredWaitMs, remainingRunBudgetMs);
+				chatGptDiagnostic(
+					`conversation-detail lane hit a recoverable rate limit on this conversation; waiting ${formatSleepDuration(waitMs)} for the account to cool down, then resuming the SAME conversation (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+				);
 				await deps.emit({
 					type: "PROGRESS",
 					stream: "messages",
-					message: `ChatGPT conversation-detail lane hit a recoverable rate limit on this conversation; waiting ${formatSleepDuration(waitMs)} for the account to cool down, then resuming the SAME conversation (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+					message: `ChatGPT is slowing down requests; waiting ${formatUserWait(waitMs)} before continuing`,
 				});
 				await sleep(waitMs);
 				densityTracker.resetAfterWaitOut();
@@ -5115,11 +5178,13 @@ export async function runMessagesAndConversationsWithDetail(
 
 			// Bounded envelope spent → existing latch + lose-nothing tail defer:
 			observedRecoverablePressure = err;
+			chatGptDiagnostic(
+				"conversation-detail lane opened upstream-pressure circuit; deferring remaining conversation details as DETAIL_GAP records",
+			);
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "messages",
-				message:
-					"ChatGPT conversation-detail lane opened upstream-pressure circuit; deferring remaining conversation details as DETAIL_GAP records",
+				message: CHATGPT_DEFER_NEXT_RUN_MESSAGE,
 			});
 			return emitTailConversationDetailGaps(from, (item, index) =>
 				index === 0
@@ -5207,10 +5272,13 @@ export async function runMessagesAndConversationsWithDetail(
 			CHATGPT_CIRCUIT_WAIT_OUT_MIN_TICK_MS,
 			Math.min(cooldownMs, remainingRunBudgetMs),
 		);
+		chatGptDiagnostic(
+			`upstream-pressure circuit open; waiting ${formatSleepDuration(waitMs)} for the provider to cool down, then resuming conversation-detail collection within the remaining run budget (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+		);
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
-			message: `ChatGPT upstream-pressure circuit open; waiting ${formatSleepDuration(waitMs)} for the provider to cool down, then resuming conversation-detail collection within the remaining run budget (${formatWaitBound(consecutiveWaitOutsWithoutSuccess)})`,
+			message: `ChatGPT is slowing down requests; waiting ${formatUserWait(waitMs)} before continuing`,
 		});
 		await sleep(waitMs);
 		return { remainingRunBudgetMs };
@@ -5697,11 +5765,14 @@ async function recoverPendingMessageDetailGapsBeforeForwardRun(
 		pacing,
 	);
 	if (recovery.stoppedWithPending) {
+		chatGptDiagnostic(
+			"gap recovery stopped short with retryable gaps still pending; they remain durable DETAIL_GAP records and the run continues its forward walk while budget remains",
+		);
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "messages",
 			message:
-				"Gap recovery stopped short with retryable gaps still pending; they remain durable DETAIL_GAP records and the run continues its forward walk while budget remains",
+				"Some conversations are still pending; they will be fetched next time",
 		});
 	}
 }
@@ -5870,7 +5941,7 @@ export async function runConversationsAndMessagesStreams(
 		const foundMessageDetailProgressMsg = {
 			type: "PROGRESS",
 			stream: "messages",
-			message: `Found ${messageDetailConversations.length} conversations requiring message detail`,
+			message: `Found ${messageDetailConversations.length} conversations to fetch messages for`,
 			count: messageDetailConversations.length,
 			total: messageDetailConversations.length,
 		} as const;
@@ -6090,9 +6161,10 @@ export async function collectChatGpt(
 
 	// Verify session (extract bearer token for /backend-api calls)
 	const auth = await api.auth();
-	progress(
-		`Authenticated to ChatGPT (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
+	chatGptDiagnostic(
+		`authenticated (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
 	);
+	progress("Signed in to ChatGPT");
 
 	const deps: StreamDeps = {
 		api,

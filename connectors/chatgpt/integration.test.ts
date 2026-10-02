@@ -50,7 +50,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import {
 	RetryExhaustedError,
 	retryHttp,
@@ -100,6 +100,7 @@ import {
 	runMessagesAndConversationsWithDetail,
 	runSharedConversationsStream,
 	type StreamDeps,
+	setChatGptDiagnosticSink,
 	shouldKeepRetryingChatGptDetail,
 	summarizeChatGptSideEffectProbe,
 } from "./index.ts";
@@ -1053,6 +1054,81 @@ test("summarizeChatGptSideEffectProbe reports update and order side effects", ()
 	assert.match(summary, /order_changed=true/);
 	assert.match(summary, /update_time_changed=true/);
 });
+
+// Technical detail (counts, lanes, codes, raw route paths) goes to the
+// diagnostic sink, not PROGRESS: PROGRESS is rendered to the owner verbatim.
+// Tests assert plain text against PROGRESS and technical text against these
+// lines. Tests in this file run sequentially, so one shared buffer is safe.
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setChatGptDiagnosticSink((line) => diagnostics.push(line));
+});
+afterEach(() => setChatGptDiagnosticSink(undefined));
+
+/** Owner-facing guard: PROGRESS text must not carry technical detail. The only
+ *  digits allowed are in "Synced N" / "Found N" count messages. */
+const PROGRESS_TECHNICAL_LEAK =
+	/current_node|mapping|http|429|concurrency|lane|DETAIL_|_ms\b|=\d/i;
+function assertProgressUserFacing(messages: readonly unknown[]): void {
+	for (const m of messages) {
+		const msg = m as { type?: string; message?: string };
+		if (msg.type !== "PROGRESS") continue;
+		const text = msg.message ?? "";
+		if (/^(Synced|Found) \d/.test(text)) continue;
+		assert.doesNotMatch(
+			text,
+			PROGRESS_TECHNICAL_LEAK,
+			`PROGRESS must stay user-facing: ${text}`,
+		);
+	}
+}
+
+/** All PROGRESS message texts in an emitted-protocol list. */
+function progressTexts(messages: readonly EmittedMessage[]): string[] {
+	return messages.flatMap((m) => (m.type === "PROGRESS" ? [m.message] : []));
+}
+
+/** Diagnostic lines matching `pred`, shaped like PROGRESS entries (`.message`)
+ *  so the technical wait/defer assertions read the same as before. */
+function diagnosticEntries(
+	pred: (line: string) => boolean,
+): { message: string }[] {
+	return diagnostics.filter(pred).map((message) => ({ message }));
+}
+
+/** Owner-facing wait notice emitted for every rate-limit wait-out. */
+function slowdownWaitProgress(messages: readonly EmittedMessage[]): string[] {
+	return progressTexts(messages).filter((t) =>
+		/^ChatGPT is slowing down requests; waiting \d+ (second|minute)s? before continuing$/.test(
+			t,
+		),
+	);
+}
+
+/** Owner-facing "the rest will be fetched next time" notice for a pressure defer. */
+function deferNextRunProgress(messages: readonly EmittedMessage[]): string[] {
+	return progressTexts(messages).filter((t) =>
+		t.startsWith("ChatGPT is limiting requests. Saved what we could"),
+	);
+}
+
+/** Record-level diagnostics are diagnostic lines only: a line with this prefix
+ *  must exist, and no PROGRESS may carry it. Returns the line. */
+function recordDiagnostic(
+	messages: readonly EmittedMessage[],
+	prefix: string,
+	why: string,
+): string {
+	const line = diagnostics.find((l) => l.startsWith(prefix));
+	assert.ok(line, why);
+	assert.equal(
+		progressTexts(messages).some((t) => t.includes(prefix)),
+		false,
+		`${prefix} is a diagnostic line, never owner-facing PROGRESS`,
+	);
+	return line;
+}
 
 /** Build a StreamDeps with a configurable fake ChatGptApi. Records every
  *  emit() + emitRecord() call so tests can introspect the protocol. */
@@ -2180,19 +2256,19 @@ test("runMemoriesStream: a rejected entry counts toward considered but NOT cover
 		0,
 		"a rejected entry must not emit a stream-level SKIP_RESULT",
 	);
-	const shapeCheck = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
+	const shapeCheck = recordDiagnostic(
+		messages,
+		"shape_check_failed: ",
+		"the drop must be diagnosable, not silent",
 	);
-	assert.ok(shapeCheck, "the drop must be diagnosable, not silent");
-	assert.equal(shapeCheck.stream, "memories");
+	assert.match(shapeCheck, /^shape_check_failed: memories list item/);
 	assert.match(
-		shapeCheck.message,
+		shapeCheck,
 		/raw_keys=content\b/,
 		"diagnostic carries structural keys, not values",
 	);
 	assert.equal(
-		shapeCheck.message.includes("no id on this one"),
+		shapeCheck.includes("no id on this one"),
 		false,
 		"diagnostic must not leak entry content",
 	);
@@ -2235,25 +2311,25 @@ test("processConversationDetail: detail.status=404 — still emits conversation 
 		0,
 		"a failed detail must not emit a stream-level SKIP_RESULT",
 	);
-	const diagnostic = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("http_error: "),
-	);
-	assert.ok(diagnostic, "a diagnostic must emit when detail fetch failed");
-	assert.equal(
-		diagnostic.stream,
-		"messages",
-		"detail failure is charged to the messages stream",
+	const diagnostic = recordDiagnostic(
+		messages,
+		"http_error: ",
+		"a diagnostic must emit when detail fetch failed",
 	);
 	assert.match(
-		diagnostic.message,
+		diagnostic,
 		/a conversation detail returned http 404/,
 		"message carries the http status",
 	);
 	assert.doesNotMatch(
-		diagnostic.message,
+		diagnostic,
 		/convo-abc/,
-		"PROGRESS is the owner's status line: no conversation id",
+		"diagnostics carry no conversation id",
+	);
+	assert.doesNotMatch(
+		progressTexts(messages).join("\n"),
+		/convo-abc|http 404/,
+		"PROGRESS carries no conversation id or http status",
 	);
 });
 
@@ -2278,14 +2354,18 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 		0,
 		"a missing mapping must not emit a stream-level SKIP_RESULT",
 	);
-	const diagnostic = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("missing_mapping: "),
+	const diagnostic = recordDiagnostic(
+		messages,
+		"missing_mapping: ",
+		"missing mapping must be diagnosable",
 	);
-	assert.ok(diagnostic, "missing mapping must be diagnosable");
-	assert.equal(diagnostic.stream, "messages");
-	assert.match(diagnostic.message, /http 200/);
-	assert.doesNotMatch(diagnostic.message, /convo-abc/);
+	assert.match(diagnostic, /http 200/);
+	assert.doesNotMatch(diagnostic, /convo-abc/);
+	assert.doesNotMatch(
+		progressTexts(messages).join("\n"),
+		/convo-abc|mapping/,
+		"PROGRESS carries no conversation id or mapping detail",
+	);
 });
 
 test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — records a record-level empty_detail diagnostic, not a stream SKIP", async () => {
@@ -2334,27 +2414,28 @@ test("processConversationDetail: detail=200 with mapping but zero message-bearin
 		"an empty conversation must not emit a stream-level SKIP_RESULT",
 	);
 	// ...but the emptiness is OBSERVABLE via a record-level diagnostic.
-	const diag = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("empty_detail:"),
-	);
-	assert.ok(
-		diag,
+	const diag = recordDiagnostic(
+		messages,
+		"empty_detail:",
 		"200-with-mapping but zero messages must emit an empty_detail diagnostic",
 	);
-	assert.equal(diag.stream, "messages");
 	assert.doesNotMatch(
-		diag.message,
+		diag,
+		/convo-/,
+		"diagnostics must not leak conversation ids",
+	);
+	assert.doesNotMatch(
+		progressTexts(messages).join("\n"),
 		/convo-/,
 		"PROGRESS is display text and must not leak conversation ids",
 	);
 	assert.match(
-		diag.message,
+		diag,
 		/no message-bearing nodes/,
 		"message names the empty-graph cause",
 	);
 	assert.match(
-		diag.message,
+		diag,
 		/node_count=2\)/,
 		"node_count distinguishes a genuinely empty graph from one with only role-less nodes",
 	);
@@ -2623,17 +2704,26 @@ test("runMessagesAndConversationsWithDetail: fetches detail through adaptive lan
 			.map((m) => m.message),
 		["Synced 1 / 2 conversations", "Synced 2 / 2 conversations"],
 	);
-	const laneMessages = progressMessages.filter((m) =>
-		m.message.startsWith("ChatGPT conversation-detail lane "),
+	const laneDiagnostics = diagnostics.filter((l) =>
+		l.startsWith("conversation-detail lane "),
 	);
 	assert.deepEqual(
-		laneMessages.map((m) =>
-			m.message.replace(/ active=\d+ queued=\d+ concurrency=1\/1.*/, ""),
+		laneDiagnostics.map((l) =>
+			l.replace(/ active=\d+ queued=\d+ concurrency=1\/1.*/, ""),
 		),
-		["ChatGPT conversation-detail lane started"],
+		["conversation-detail lane started"],
+	);
+	assert.deepEqual(
+		progressMessages
+			.map((m) => m.message)
+			.filter((t) => !t.startsWith("Synced ")),
+		["Fetching conversation details"],
+		"the lane start is announced in plain English",
 	);
 	assert.equal(
-		laneMessages.some((m) => m.message.includes("/conversation/")),
+		[...laneDiagnostics, ...progressMessages.map((m) => m.message)].some((l) =>
+			l.includes("/conversation/"),
+		),
 		false,
 		"lane progress must not expose raw API paths",
 	);
@@ -3120,42 +3210,42 @@ test("runMessagesAndConversationsWithDetail: intermediate pressure is bounded an
 		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
 			m.type === "PROGRESS" && m.stream === "messages",
 	);
-	const laneMessages = progressMessages.filter((m) =>
-		m.message.startsWith("ChatGPT conversation-detail lane "),
+	const laneMessages = diagnostics.filter((l) =>
+		l.startsWith("conversation-detail lane "),
 	);
 	assert.equal(
-		laneMessages.filter((m) =>
-			m.message.startsWith("ChatGPT conversation-detail lane started"),
-		).length,
+		laneMessages.filter((l) => l.startsWith("conversation-detail lane started"))
+			.length,
 		1,
 	);
 	assert.equal(
 		laneMessages.some(
-			(m) =>
-				m.message.includes("lane cooldown") &&
-				m.message.includes("retry_after_ms=99000"),
+			(l) => l.includes("lane cooldown") && l.includes("retry_after_ms=99000"),
 		),
 		true,
-		"intermediate pressure should still be visible as bounded lane cooldown progress",
+		"intermediate pressure should still be visible as bounded lane cooldown diagnostics",
 	);
 	assert.equal(
-		laneMessages.every((m) => m.message.includes("concurrency=1/1")),
+		laneMessages.every((l) => l.includes("concurrency=1/1")),
 		true,
-		"progress must report the configured max concurrency of 1",
+		"diagnostics must report the configured max concurrency of 1",
 	);
 	assert.equal(
-		laneMessages.some((m) => m.message.includes("delay_ms=45000")),
+		laneMessages.some((l) => l.includes("delay_ms=45000")),
 		true,
-		"lane progress should expose bounded pressure delay semantics without raw request details",
+		"lane diagnostics should expose bounded pressure delay semantics without raw request details",
 	);
 	assert.equal(
-		laneMessages.some(
-			(m) =>
-				m.message.includes("sensitive-convo") ||
-				m.message.includes("/conversation/"),
+		[...laneMessages, ...progressMessages.map((m) => m.message)].some(
+			(l) => l.includes("sensitive-convo") || l.includes("/conversation/"),
 		),
 		false,
 		"lane progress must not expose raw conversation ids or API paths",
+	);
+	assert.equal(
+		progressMessages.some((m) => m.message.includes("retry_after_ms")),
+		false,
+		"PROGRESS carries no lane timing detail",
 	);
 });
 
@@ -3262,13 +3352,19 @@ test("runMessagesAndConversationsWithDetail: cumulative 429 density WAITS OUT th
 	// The density trip surfaces a WAIT progress event (the account cooled, the lane
 	// resumed), not a defer/terminate. It names the served-429 count and leaks no
 	// conversation ids or API paths (the data-hygiene guard the old test pinned).
+	const densityWaitDiagnostics = diagnostics.filter(
+		(l) =>
+			l.includes("waiting") &&
+			l.includes("cool down") &&
+			l.includes("served 429s"),
+	);
 	const densityWaitProgress = harness.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
 			m.type === "PROGRESS" &&
 			m.stream === "messages" &&
-			m.message.includes("waiting") &&
-			m.message.includes("cool down") &&
-			m.message.includes("served 429s"),
+			/^ChatGPT is slowing down requests; waiting \d+ (second|minute)s? before continuing$/.test(
+				m.message,
+			),
 	);
 	// Wait-resume re-earns its way to each stop: after a wait, the density
 	// accumulator resets to 0, so the threshold (2) re-trips every two served 429s.
@@ -3278,18 +3374,24 @@ test("runMessagesAndConversationsWithDetail: cumulative 429 density WAITS OUT th
 	// contract — the lane neither stops permanently after the first trip nor loops
 	// unbounded.
 	assert.equal(
-		densityWaitProgress.length,
+		densityWaitDiagnostics.length,
 		2,
 		"the density trip waits out the cool-down and resumes, re-earning each stop (two trips across five 429s at threshold 2)",
 	);
 	assert.equal(
-		densityWaitProgress.some(
-			(m) =>
-				m.message.includes("convo-") || m.message.includes("/conversation/"),
-		),
-		false,
-		"the density-wait progress message must not leak conversation ids or API paths",
+		densityWaitProgress.length,
+		2,
+		"each density trip is announced once in plain English",
 	);
+	assert.equal(
+		[
+			...densityWaitDiagnostics,
+			...densityWaitProgress.map((m) => m.message),
+		].some((l) => l.includes("convo-") || l.includes("/conversation/")),
+		false,
+		"the density-wait messages must not leak conversation ids or API paths",
+	);
+	assertProgressUserFacing(harness.protocolMessages);
 });
 
 test("runMessagesAndConversationsWithDetail: served 429s below the density threshold do not defer (no over-trigger)", async () => {
@@ -3452,22 +3554,25 @@ test("runMessagesAndConversationsWithDetail: pre-detail 429s seed the density st
 
 	// The wait trips exactly once and reports the FULL cumulative count (seed +
 	// in-lane), so the operator sees run-level pressure, not just the detail slice.
-	const densityWaitProgress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.stream === "messages" &&
-			m.message.includes("waiting") &&
-			m.message.includes("cool down"),
+	const densityWaitDiagnostics = diagnostics.filter(
+		(l) => l.includes("waiting") && l.includes("cool down"),
 	);
 	assert.equal(
-		densityWaitProgress.length,
+		densityWaitDiagnostics.length,
 		1,
 		"the seeded density trip waits out the cool-down exactly once",
 	);
 	assert.equal(
-		densityWaitProgress[0]?.message.includes("3 served 429s"),
+		densityWaitDiagnostics[0]?.includes("3 served 429s"),
 		true,
-		"the wait names the cumulative seed+in-lane count",
+		"the wait diagnostic names the cumulative seed+in-lane count",
+	);
+	assert.equal(
+		progressTexts(harness.protocolMessages).filter((t) =>
+			/^ChatGPT is slowing down requests; waiting/.test(t),
+		).length,
+		1,
+		"the owner sees one plain-English wait",
 	);
 });
 
@@ -3892,31 +3997,36 @@ test("runMessagesAndConversationsWithDetail: a provider-request budget defers th
 	);
 
 	// The trip is reported once, in operator voice, without leaking ids or paths.
-	const capProgress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.stream === "messages" &&
-			m.message.includes("reached its per-run"),
+	const capDiagnostics = diagnostics.filter((l) =>
+		l.includes("reached its per-run"),
+	);
+	assert.equal(
+		capDiagnostics.length,
+		1,
+		"the cap trip is recorded exactly once",
+	);
+	assert.equal(
+		capDiagnostics[0]?.includes("provider-request budget"),
+		true,
+		"the diagnostic names the provider-request budget",
+	);
+	assert.equal(
+		capDiagnostics[0]?.includes("detail-count cap"),
+		false,
+		"the diagnostic must not frame the run budget as a connector-specific detail-count cap",
+	);
+	const capProgress = progressTexts(harness.protocolMessages).filter((t) =>
+		t.startsWith("Reached the limit for this run"),
 	);
 	assert.equal(capProgress.length, 1, "the cap trip is announced exactly once");
 	assert.equal(
-		capProgress[0]?.message.includes("provider-request budget"),
-		true,
-		"the message names the provider-request budget",
-	);
-	assert.equal(
-		capProgress[0]?.message.includes("detail-count cap"),
-		false,
-		"the message must not frame the run budget as a connector-specific detail-count cap",
-	);
-	assert.equal(
-		capProgress.some(
-			(m) =>
-				m.message.includes("convo-") || m.message.includes("/conversation/"),
+		[...capDiagnostics, ...capProgress].some(
+			(l) => l.includes("convo-") || l.includes("/conversation/"),
 		),
 		false,
-		"the cap-trip progress message must not leak conversation ids or API paths",
+		"the cap-trip messages must not leak conversation ids or API paths",
 	);
+	assertProgressUserFacing(harness.protocolMessages);
 });
 
 test("runMessagesAndConversationsWithDetail: a wall-clock budget defers the tail via an injected clock", async () => {
@@ -3991,16 +4101,17 @@ test("runMessagesAndConversationsWithDetail: a wall-clock budget defers the tail
 		true,
 		"wall-clock-deferred gaps reuse the same resumable run-cap contract",
 	);
-	const capProgress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.stream === "messages" &&
-			m.message.includes("wall-clock budget"),
-	);
 	assert.equal(
-		capProgress.length,
+		diagnostics.filter((l) => l.includes("wall-clock budget")).length,
 		1,
 		"the wall-clock trip names the wall-clock budget exactly once",
+	);
+	assert.equal(
+		progressTexts(harness.protocolMessages).filter((t) =>
+			t.startsWith("Reached the limit for this run"),
+		).length,
+		1,
+		"the owner is told once, in plain English",
 	);
 });
 
@@ -4104,20 +4215,29 @@ test("runMessagesAndConversationsWithDetail: an open upstream-pressure circuit w
 		false,
 		"a transient circuit trip with budget remaining defers nothing",
 	);
-	const waitProgress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("circuit open; waiting"),
+	const waitDiagnostics = diagnostics.filter((l) =>
+		l.includes("circuit open; waiting"),
+	);
+	assert.ok(
+		waitDiagnostics.length >= 1,
+		"the wait-out is recorded in the diagnostics",
+	);
+	const waitProgress = progressTexts(harness.protocolMessages).filter((t) =>
+		/^ChatGPT is slowing down requests; waiting \d+ (second|minute)s? before continuing$/.test(
+			t,
+		),
 	);
 	assert.ok(
 		waitProgress.length >= 1,
 		"the wait-out emits operator-legible progress",
 	);
 	assert.equal(
-		JSON.stringify(waitProgress).includes("convo-1") ||
-			JSON.stringify(waitProgress).includes("convo-2"),
+		JSON.stringify([...waitDiagnostics, ...waitProgress]).includes("convo-1") ||
+			JSON.stringify([...waitDiagnostics, ...waitProgress]).includes("convo-2"),
 		false,
-		"wait-out progress does not leak conversation ids",
+		"wait-out messages do not leak conversation ids",
 	);
+	assertProgressUserFacing(harness.protocolMessages);
 });
 
 test("runMessagesAndConversationsWithDetail: genuine wall-clock exhaustion DURING a circuit wait defers the tail (budget exhaustion still stops)", async () => {
@@ -4678,13 +4798,16 @@ test("runMessagesAndConversationsWithDetail: provider request budget defers clea
 	);
 	assert.deepEqual(coverage.hydratedKeys, ["convo-1"]);
 	assert.deepEqual(coverage.gapKeys, ["convo-2", "convo-3"]);
-	const progress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("provider budget (max_requests)"),
+	assert.equal(
+		diagnostics.filter((l) => l.includes("provider budget (max_requests)"))
+			.length,
+		1,
+		"provider-budget exhaustion is recorded once",
 	);
 	assert.equal(
-		progress.length,
+		progressTexts(harness.protocolMessages).filter((t) =>
+			t.startsWith("Reached the limit for this run"),
+		).length,
 		1,
 		"provider-budget exhaustion is announced once",
 	);
@@ -6274,28 +6397,25 @@ test("runConversationsAndMessagesStreams: detail failure rejects before conversa
 		/required detail fetch failed/,
 	);
 
-	const laneMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.stream === "messages" &&
-			m.message.startsWith("ChatGPT conversation-detail lane "),
+	const laneMessages = diagnostics.filter((l) =>
+		l.startsWith("conversation-detail lane "),
 	);
 	assert.ok(
 		laneMessages.some(
-			(m) =>
-				m.message.includes("completed") && m.message.includes("error=Error"),
+			(l) => l.includes("completed") && l.includes("error=Error"),
 		),
 		"failed detail work should emit a safe lane terminal event",
 	);
 	assert.equal(
-		laneMessages.some(
-			(m) =>
-				m.message.includes("required detail fetch failed") ||
-				m.message.includes("/conversation/"),
+		[...laneMessages, ...progressTexts(harness.protocolMessages)].some(
+			(l) =>
+				l.includes("required detail fetch failed") ||
+				l.includes("/conversation/"),
 		),
 		false,
 		"lane progress must not expose raw error messages or API paths",
 	);
+	assertProgressUserFacing(harness.protocolMessages);
 	assert.equal(
 		harness.protocolMessages.some(
 			(m) => m.type === "STATE" && m.stream === "conversations",
@@ -6677,35 +6797,39 @@ test("runConversationsAndMessagesStreams: a single recoverable rate-limit on ONE
 	);
 
 	// The wait-out emits PROGRESS messages — one per wait cycle (8 total)
-	const waitMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("hit a recoverable rate limit"),
+	const waitDiagnostics = diagnostics.filter((l) =>
+		l.includes("hit a recoverable rate limit"),
 	);
 	assert.equal(
-		waitMessages.length,
+		waitDiagnostics.length,
 		8,
-		"exactly 8 wait-out PROGRESS messages should fire (one per cycle before the envelope is spent)",
+		"exactly 8 wait-out diagnostics should fire (one per cycle before the envelope is spent)",
+	);
+	const waitProgress = slowdownWaitProgress(harness.protocolMessages);
+	assert.equal(
+		waitProgress.length,
+		8,
+		"exactly 8 plain wait-out PROGRESS messages should fire (one per cycle)",
 	);
 	assert.equal(
-		waitMessages.some(
-			(m) =>
-				m.message.includes("convo-") || m.message.includes("/conversation/"),
+		[...waitDiagnostics, ...waitProgress].some(
+			(l) => l.includes("convo-") || l.includes("/conversation/"),
 		),
 		false,
-		"wait-out progress messages must not leak conversation ids or API paths",
+		"wait-out messages must not leak conversation ids or API paths",
 	);
 
 	// After 8 cycles the envelope is spent and the latch fires
-	const circuitMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("opened upstream-pressure circuit"),
-	);
 	assert.equal(
-		circuitMessages.length,
+		diagnostics.filter((l) => l.includes("opened upstream-pressure circuit"))
+			.length,
 		1,
 		"circuit-open latch must fire exactly once after envelope is spent",
+	);
+	assert.equal(
+		deferNextRunProgress(harness.protocolMessages).length,
+		1,
+		"the owner is told once that the rest is deferred",
 	);
 
 	// The pressure item itself gets a DETAIL_GAP with its error detail
@@ -6838,27 +6962,29 @@ test("runConversationsAndMessagesStreams: retry-exhaustion wait envelope exhaust
 	);
 
 	// Exactly 8 wait-out PROGRESS messages (all from c-exhaust-1's wait cycles)
-	const waitMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("hit a recoverable rate limit"),
+	assert.equal(
+		diagnostics.filter((l) => l.includes("hit a recoverable rate limit"))
+			.length,
+		8,
+		"exactly 8 wait-out diagnostics (envelope cycle count)",
 	);
 	assert.equal(
-		waitMessages.length,
+		slowdownWaitProgress(harness.protocolMessages).length,
 		8,
-		"exactly 8 wait-out PROGRESS messages (envelope cycle count)",
+		"exactly 8 plain wait-out PROGRESS messages (envelope cycle count)",
 	);
 
 	// Exactly 1 circuit-open latch (fires on c-exhaust-2's first attempt after envelope spent)
-	const circuitMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("opened upstream-pressure circuit"),
-	);
 	assert.equal(
-		circuitMessages.length,
+		diagnostics.filter((l) => l.includes("opened upstream-pressure circuit"))
+			.length,
 		1,
 		"circuit-open latch must fire exactly once",
+	);
+	assert.equal(
+		deferNextRunProgress(harness.protocolMessages).length,
+		1,
+		"the owner is told once that the rest is deferred",
 	);
 
 	// All three items must have DETAIL_GAP records (lose-nothing)
@@ -7098,15 +7224,21 @@ test("runConversationsAndMessagesStreams: 30/278 pressure exhaustion records a d
 		"gap diagnostic must not expose raw auth text",
 	);
 
-	const circuitMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("opened upstream-pressure circuit"),
-	);
+	const circuitMessages = [
+		...diagnostics.filter((l) =>
+			l.includes("opened upstream-pressure circuit"),
+		),
+		...deferNextRunProgress(harness.protocolMessages),
+	];
 	assert.equal(
-		circuitMessages.length,
+		deferNextRunProgress(harness.protocolMessages).length,
 		1,
 		"operator should see when remaining detail fetches are deferred",
+	);
+	assert.equal(
+		diagnostics.filter((l) => l.includes("opened upstream-pressure circuit"))
+			.length,
+		1,
 	);
 	assert.equal(
 		JSON.stringify(circuitMessages).includes(
@@ -7813,22 +7945,15 @@ test("runConversationsAndMessagesStreams: a hot account that SUCCEEDS drains to 
 		"no conversations deferred — density wait-resume does not give up on a succeeding account",
 	);
 	assert.equal(
-		harness.protocolMessages.some(
-			(m) =>
-				m.type === "PROGRESS" &&
-				/source still hot after .* cool-down wait/.test(m.message),
-		),
+		diagnostics.some((l) => /source still hot after .* cool-down wait/.test(l)),
 		false,
 		"the density give-up message is never emitted when successes reset the no-progress counter",
 	);
 
 	// Sanity: the density wait progress events DID fire (> 8 times, proving the
 	// counter truly reset and the old fixed-cycle cap was not the stopping reason).
-	const densityWaitProgress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("waiting") &&
-			m.message.includes("cool down"),
+	const densityWaitProgress = diagnosticEntries(
+		(l) => l.includes("waiting") && l.includes("cool down"),
 	);
 	assert.ok(
 		densityWaitProgress.length > 8,
@@ -7934,11 +8059,8 @@ test("runConversationsAndMessagesStreams: a dead account (every fetch fails, no 
 	// runConversationsAndMessagesStreams calls runMessagesAndConversationsWithDetail
 	// twice (once for recovery, once for the forward walk), each with a fresh
 	// consecutiveWaitOutsWithoutSuccess counter — so total wait-outs ≤ 8 per call.
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" &&
-			m.message.includes("waiting") &&
-			m.message.includes("cool down"),
+	const waitOuts = diagnosticEntries(
+		(l) => l.includes("waiting") && l.includes("cool down"),
 	);
 	assert.ok(
 		waitOuts.length >= 1,
@@ -7962,12 +8084,16 @@ test("runConversationsAndMessagesStreams: a dead account (every fetch fails, no 
 	// The run continues to its forward walk after the durable defer (bounded stop,
 	// not a hard crash — the forward walk's list phase still runs).
 	assert.ok(
-		harness.protocolMessages.some(
-			(m) =>
-				m.type === "PROGRESS" &&
-				/run continues its forward walk while budget remains/.test(m.message),
+		diagnostics.some((l) =>
+			/run continues its forward walk while budget remains/.test(l),
 		),
-		"recovery announces the run continues its forward walk after the bounded-wait defer",
+		"recovery records that the run continues its forward walk after the bounded-wait defer",
+	);
+	assert.ok(
+		progressTexts(harness.protocolMessages).some((t) =>
+			t.startsWith("Some conversations are still pending"),
+		),
+		"the owner is told, in plain English, that some conversations are still pending",
 	);
 	assert.ok(
 		listedCursors.length >= 1,
@@ -8970,12 +9096,12 @@ test("runCustomGptsStream: considered counts enumerated items, and covered exclu
 		0,
 		"a rejected item must not emit a stream-level SKIP_RESULT",
 	);
-	const shapeCheck = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
+	const shapeCheck = recordDiagnostic(
+		messages,
+		"shape_check_failed: ",
+		"the drop must be diagnosable, not silent",
 	);
-	assert.ok(shapeCheck, "the drop must be diagnosable, not silent");
-	assert.equal(shapeCheck.stream, "custom_gpts");
+	assert.match(shapeCheck, /^shape_check_failed: custom_gpts list item/);
 });
 
 // Live shape drift, run_1786417045973 (see unwrapGizmo doc-comment): drives
@@ -9524,22 +9650,22 @@ test("runSharedConversationsStream: a rejected record counts toward considered b
 		0,
 		"a rejected record must not emit a stream-level SKIP_RESULT",
 	);
-	const shapeCheck = messages.find(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.startsWith("shape_check_failed: "),
-	);
-	assert.ok(
-		shapeCheck,
+	const shapeCheck = recordDiagnostic(
+		messages,
+		"shape_check_failed: ",
 		"a bounded diagnostic must exist so the drop is not silent",
 	);
-	assert.equal(shapeCheck.stream, "shared_conversations");
 	assert.match(
-		shapeCheck.message,
+		shapeCheck,
+		/^shape_check_failed: shared_conversations list item/,
+	);
+	assert.match(
+		shapeCheck,
 		/raw_keys=[^)]*\bconversation_id\b/,
 		"diagnostic carries structural keys, not values",
 	);
 	assert.equal(
-		shapeCheck.message.includes("Malformed"),
+		shapeCheck.includes("Malformed"),
 		false,
 		"diagnostic must not leak the raw title text",
 	);
@@ -10095,18 +10221,21 @@ test("applyChatGptColdStatePreflight: pressured account forces the run back to s
 		"pressured preflight forces serial maxConcurrency",
 	);
 	assert.equal(effective.initialConcurrency, 1);
-	const progress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS",
-	);
 	assert.ok(
-		progress.some(
-			(m) =>
-				m.message.includes("source is pressured") &&
-				m.message.includes("serial concurrency=1"),
+		diagnostics.some(
+			(l) =>
+				l.includes("source is pressured") && l.includes("serial concurrency=1"),
 		),
-		"emitted a pressured/serial preflight note",
+		"recorded a pressured/serial preflight diagnostic",
 	);
+	const progress = progressTexts(harness.protocolMessages);
+	assert.ok(
+		progress.includes(
+			"ChatGPT is busy; fetching conversations one at a time this run",
+		),
+		"told the owner in plain English that fetching is serial this run",
+	);
+	assertProgressUserFacing(harness.protocolMessages);
 });
 
 test("runMessagesAndConversationsWithDetail: hot account at probe-concurrency falls back to serial (no overlap)", async () => {
@@ -10217,18 +10346,12 @@ test("runMessagesAndConversationsWithDetail: pressure-deferred gaps do not train
 
 	assert.equal(coverage.hydratedKeys.length, 0);
 	assert.equal(coverage.gapKeys.length, 4);
-	const progress = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS",
-	);
 	assert.ok(
-		progress.some((m) =>
-			m.message.includes("opened upstream-pressure circuit"),
-		),
+		diagnostics.some((l) => l.includes("opened upstream-pressure circuit")),
 		"upstream-pressure circuit opened",
 	);
 	assert.equal(
-		progress.filter((m) => m.message.includes("concurrency_increased")).length,
+		diagnostics.filter((l) => l.includes("concurrency_increased")).length,
 		0,
 		"deferred gap bookkeeping must not count as clean success",
 	);
@@ -10264,15 +10387,16 @@ test("runMessagesAndConversationsWithDetail: serial tuning fires no preflight an
 
 	// Exactly two fetches — one per conversation, no preflight probe in front.
 	assert.deepEqual(fetches, ["/conversation/convo-1", "/conversation/convo-2"]);
-	const preflightNotes = harness.protocolMessages.filter(
-		(m) =>
-			m.type === "PROGRESS" &&
-			(m as { message?: string }).message?.includes("cold-state preflight"),
-	);
+	const preflightNotes = [
+		...diagnostics.filter((l) => l.includes("cold-state preflight")),
+		...progressTexts(harness.protocolMessages).filter((t) =>
+			/how much ChatGPT will allow|ChatGPT is (busy|responding well)/.test(t),
+		),
+	];
 	assert.deepEqual(
 		preflightNotes,
 		[],
-		"no preflight progress in serial posture",
+		"no preflight diagnostics or progress in serial posture",
 	);
 });
 
@@ -10615,10 +10739,7 @@ test("adaptive retry budget: a healthy account refills tokens so the run never d
 		"no conversations deferred — adaptive replenishment kept the lane alive beyond the initial-token ceiling",
 	);
 
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	// 6 retry-exhaustion wait-outs occurred; all > initialTokens=2 → refill proved.
 	assert.ok(
 		waitOuts.length > 2,
@@ -10697,10 +10818,7 @@ test("progress-based give-up: a dead account that never succeeds gives up after 
 
 	// The run gave up after ≤ CHATGPT_CIRCUIT_WAIT_OUT_MAX_CYCLES=8 consecutive
 	// no-progress wait-outs and deferred the tail durably (lose-nothing).
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length <= 8,
 		`dead account gives up at ≤ 8 consecutive no-progress wait-outs (got ${waitOuts.length})`,
@@ -10808,10 +10926,7 @@ test("HEALTHY DRAIN oracle: a throttled run with interleaved successes drains AL
 	);
 
 	// 50 wait-outs occurred (one per conversation on first attempt).
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length === 50,
 		"HEALTHY DRAIN: 50 wait-outs occurred (one per throttled conversation), all followed by a success",
@@ -10895,19 +11010,15 @@ test("PROGRESS RESET oracle: 5 wait-outs → success → 5 more wait-outs → NE
 	);
 
 	// 16 wait-outs occurred (one per conversation), all followed by a reset success.
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length === 16,
 		"PROGRESS RESET: 16 wait-outs occurred (one per convo), each followed by a success that reset the counter",
 	);
 
 	// The upstream-pressure give-up defer message (no-progress >= 8) must NOT have fired.
-	const giveUpMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("upstream-pressure circuit"),
+	const giveUpMessages = diagnosticEntries((l) =>
+		l.includes("upstream-pressure circuit"),
 	);
 	assert.equal(
 		giveUpMessages.length,
@@ -10979,10 +11090,7 @@ test("DEAD ACCOUNT oracle: no successes ever → gives up after CHATGPT_CIRCUIT_
 	);
 
 	// At most CHATGPT_CIRCUIT_WAIT_OUT_MAX_CYCLES=8 wait-outs before give-up.
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length <= 8,
 		`DEAD ACCOUNT: gave up after ≤ 8 consecutive no-progress wait-outs (got ${waitOuts.length})`,
@@ -10990,9 +11098,8 @@ test("DEAD ACCOUNT oracle: no successes ever → gives up after CHATGPT_CIRCUIT_
 
 	// The give-up defer fires via maybeDeferForFetchError when waitBudgetExhausted:
 	// it emits "opened upstream-pressure circuit; deferring remaining conversation details".
-	const giveUpMessages = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("upstream-pressure circuit"),
+	const giveUpMessages = diagnosticEntries((l) =>
+		l.includes("upstream-pressure circuit"),
 	);
 	assert.ok(
 		giveUpMessages.length > 0,
@@ -11046,10 +11153,7 @@ test("adaptive retry budget: no-budget fallback uses consecutiveWaitOutsWithoutS
 	);
 
 	// Fixed cap: ≤ 8 consecutive no-progress wait-outs (consecutiveWaitOutsWithoutSuccess), then durable defer.
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length <= 8,
 		`no-budget fallback: ≤ 8 wait-outs (got ${waitOuts.length})`,
@@ -11152,10 +11256,7 @@ test("regression: ProviderBudgetController present but WITHOUT retryBudget termi
 	);
 
 	// Must terminate via the consecutiveWaitOutsWithoutSuccess cap (≤ CHATGPT_CIRCUIT_WAIT_OUT_MAX_CYCLES = 8).
-	const waitOuts = harness.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			m.type === "PROGRESS" && m.message.includes("cool down"),
-	);
+	const waitOuts = diagnosticEntries((l) => l.includes("cool down"));
 	assert.ok(
 		waitOuts.length <= 8,
 		`controller-present-no-retryBudget: cycle cap must bound the loop (got ${waitOuts.length} wait-outs, expected ≤ 8)`,
