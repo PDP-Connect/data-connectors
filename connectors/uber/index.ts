@@ -23,7 +23,8 @@
  *     live-account run to verify before implementing; tracked as a
  *     follow-up, not implemented here.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
- *     totals), fetched from `GetReceipt` only. Declared `state_stream:
+ *     totals), fetched from `GetReceipt` with `GetTrip` supplying its
+ *     headline-fare fallback. Declared `state_stream:
  *     "trips"` in the manifest — it rides trips' checkpoint rather than
  *     proving its own, because it is fetched in the SAME per-trip loop as
  *     trips and has no independent hydration lane (see the Collection
@@ -32,8 +33,9 @@
  *     `state_stream`-declared stream must never construct a
  *     DETAIL_COVERAGE — this connector does not.
  *   - A trips-only START (receipts absent from `requested`) makes ZERO
- *     GetReceipt calls — proven in integration.test.ts. It still calls
- *     GetTrip, because trips' own fields are hydrated from GetTrip.
+ *     GetReceipt calls — proven in integration.test.ts. A receipts-only
+ *     START calls GetTrip for the headline-fare fallback but emits no trips
+ *     records.
  *
  * Architecture: same browser-session JSON-read pattern already proven by
  * `venmo`/`reddit` in this repo — an isolated persistent Patchright profile
@@ -64,10 +66,10 @@
  * CHANGES
  *   v0.4.0 (2026-09-22) — D5 revised per lead_decision_live: trips is now
  *     hydrated per-trip from GetTrip (previously list-level-only, all
- *     detail fields null); receipts is now GetReceipt-only (fare_breakdown,
- *     currency, totals) and declared `state_stream: "trips"` instead of
- *     `parent_streams: ["trips"]`, since it has no independent hydration
- *     lane — both streams' detail is fetched in the same per-trip loop.
+ *     detail fields null); receipts is hydrated from GetReceipt with GetTrip
+ *     providing a fallback headline fare when the receipt HTML has no total
+ *     line. Receipts stays declared `state_stream: "trips"` because it has
+ *     no independent hydration lane.
  *   v0.3.0 (2026-09-22) — live-verified: real Activities/GetTrip/GetReceipt
  *     shapes, real pagination (nextPageToken), real CSRF/session-type
  *     headers, collect() now navigates before fetching (fixes a real
@@ -432,17 +434,17 @@ export async function collectAllStreams(
 		}
 
 		let getTrip: UberGetTripResult | undefined;
-		if (wantTrips) {
+		if (wantTrips || wantReceipts) {
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
 			} catch {
 				getTrip = undefined;
 			}
-			const record = getTrip
-				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
-				: null;
-			if (record) {
-				await emitRecord("trips", record);
+		}
+		if (wantTrips) {
+			const record = tripRecord(tripId, getTrip?.trip, getTrip?.receipt);
+			await emitRecord("trips", record);
+			if (getTrip?.trip) {
 				tripsHydrated.push(tripId);
 			}
 		}
@@ -454,7 +456,11 @@ export async function collectAllStreams(
 			} catch {
 				fareBreakdown = [];
 			}
-			const receipt = receiptRecord(tripId, fareBreakdown);
+			const receipt = receiptRecord(
+				tripId,
+				fareBreakdown,
+				getTrip?.trip?.fare,
+			);
 			if (receipt) {
 				await emitRecord("receipts", receipt);
 			}

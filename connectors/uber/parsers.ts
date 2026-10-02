@@ -160,38 +160,44 @@ export function parseDurationSeconds(
  * `trips` record for one trip, hydrated from `GetTrip`'s `trip`/`receipt`
  * (D5 revised per capability-map.json's `lead_decision_live`: the Activities
  * list carries only a trip id, so every other field comes from GetTrip, not
- * the list row). Returns null when GetTrip produced no usable trip — the
- * caller records that trip as an unhydrated key rather than emitting a
- * mostly-null record.
+ * the list row). With no usable GetTrip response, it still emits the Activity
+ * identity with unknown fields null so the source preserves trip count.
  */
 export function tripRecord(
 	tripId: string,
 	trip: UberTrip | undefined,
 	receiptSummary: UberReceiptSummary | undefined,
-): RecordData | null {
-	if (!trip) {
-		return null;
-	}
-	const waypoints = trip.waypoints ?? [];
+): RecordData {
+	const waypoints = trip?.waypoints ?? [];
 	return {
 		id: tripId,
-		status: trip.status ?? null,
-		requested_at: parseIsoDateTime(trip.beginTripTime),
-		completed_at: parseIsoDateTime(trip.dropoffTime),
+		status: trip?.status ?? null,
+		requested_at: parseIsoDateTime(trip?.beginTripTime),
+		completed_at: parseIsoDateTime(trip?.dropoffTime),
 		pickup_address: waypoints[0] ?? null,
 		dropoff_address:
 			waypoints.length > 0 ? waypoints[waypoints.length - 1] : null,
-		driver_name: trip.driver || null,
-		fare_total: trip.fare ?? null,
-		fare_total_cents: parseCurrencyCents(trip.fare),
+		driver_name: trip?.driver || null,
+		fare_total: trip?.fare ?? null,
+		fare_total_cents: parseCurrencyCents(trip?.fare),
 		distance_meters: parseDistanceMeters(
 			receiptSummary?.distance,
 			receiptSummary?.distanceLabel,
 		),
 		duration_seconds: parseDurationSeconds(receiptSummary?.duration),
+		distance_display:
+			typeof receiptSummary?.distance === "string" &&
+			typeof receiptSummary.distanceLabel === "string" &&
+			["kilometers", "miles"].includes(receiptSummary.distanceLabel)
+				? `${receiptSummary.distance} ${receiptSummary.distanceLabel}`
+				: null,
+		duration_display:
+			typeof receiptSummary?.duration === "string"
+				? receiptSummary.duration
+				: null,
 		product_type:
-			receiptSummary?.vehicleType || trip.vehicleDisplayName || null,
-		is_surge: trip.isSurgeTrip ?? null,
+			receiptSummary?.vehicleType || trip?.vehicleDisplayName || null,
+		is_surge: trip?.isSurgeTrip ?? null,
 	};
 }
 
@@ -225,13 +231,14 @@ export function parseFareBreakdown(
 export function receiptRecord(
 	tripId: string,
 	fareBreakdown: UberFareBreakdownLine[],
-): RecordData | null {
-	if (fareBreakdown.length === 0) {
-		return null;
-	}
+	tripFare?: string | null,
+): RecordData {
 	const totalLine = fareBreakdown.find((l) => l.slug === "fare_total");
 	const breakdownLines = fareBreakdown.filter((l) => l.slug !== "fare_total");
-	const fareRaw = totalLine?.amountRaw ?? null;
+	// GetReceipt often exposes only itemized lines. GetTrip's fare is the
+	// same headline value the legacy trip-detail page exposed, so use it when
+	// the receipt HTML has no explicit total line.
+	const fareRaw = totalLine?.amountRaw ?? tripFare ?? null;
 	return {
 		// The runtime's emit gate requires a literal `id` field regardless of
 		// the manifest's declared `primary_key` (see connector-runtime.ts's
