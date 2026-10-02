@@ -186,10 +186,22 @@ controls, for example `example.com/scanner`. A runtime MUST fail the run
 before spawn when it does not support a required extension binding. It MAY
 ignore an optional extension binding that it does not support.
 
-The names `browser_automation`, `browser_profile`, `loopback_listen`, and
-`interactive` are not in the registry, and no manifest in this repository uses
-them. Support for `INTERACTION` messages is declared by
-`capabilities.human_interaction` (Section 3.4), not by a binding.
+The informative pdpp copy of this profile listed four names that are not in
+this registry. No manifest in this repository uses them. That copy defined no
+conformance requirement, so there was no earlier normative registry to
+version, and dropping these names does not change the profile version. A
+manifest that uses one of them migrates as follows:
+
+| Removed name | Replacement |
+| --- | --- |
+| `browser_automation` | `browser`, with the `features` the connector needs (Section 3.3.1). |
+| `browser_profile` | None. A persistent browser profile is a runtime concern under `browser`. A connector that truly needs its own profile declares a namespaced extension binding. |
+| `interactive` | `capabilities.human_interaction` (Section 3.4). |
+| `loopback_listen` | A namespaced extension binding. |
+
+A runtime already fails, before spawn, a run whose required binding it cannot
+satisfy, so an unmigrated manifest fails closed rather than running without the
+binding it asked for.
 
 `local_device` is not a binding. It names a runtime mode in which the runtime
 runs on the owner's own device. A connector that reads local files declares
@@ -254,39 +266,53 @@ connector reads:
 An input object has no other members. `inputs`, when present, is a non-empty
 array.
 
+Each input is a slot: the runtime supplies a path through its `env_var`. A
+connector can also have an implementation-specific default path that it uses
+when the variable is unset, such as a local application's data directory under
+the user's home. The default is not part of the input declaration.
+
 Declared inputs serve three purposes. They let a runtime grant least
 privilege. They show the owner and the runtime exactly what a connector reads.
 They let a replay runtime bind recorded inputs read-only.
 
 When a `filesystem` declaration contains `inputs`:
 
-- The runtime MUST set each declared `env_var` to a path of the declared
-  `kind`, and it MUST NOT pass the connector other paths through this binding.
-  Where the runtime confines the connector process, for example with a
-  sandbox or container mounts, it MUST make only the declared inputs visible.
-- When `access` is `read`, the runtime MUST provide the input read-only where
-  its confinement allows. The connector MUST NOT create, modify, rename, or
-  delete anything under that input.
+- A runtime that supplies a path for an input MUST set its `env_var` to a path
+  of the declared `kind`.
+- A runtime that confines filesystem access, for example with a sandbox or
+  container mounts, MUST make only the declared inputs visible to the
+  connector. When `access` is `read`, it MUST make the input read-only.
+- The connector MUST NOT create, modify, rename, or delete anything under a
+  `read` input.
 - The runtime SHOULD show the owner each declared input and the path it
   resolves to before the first run.
-- The connector MUST NOT read owner data from a local path that is not a
-  declared input.
+- The connector MUST NOT read owner data from a local path outside its
+  declared inputs. A default path that the connector uses when an input's
+  `env_var` is unset counts as that input.
 
 A connector that runs on the owner's device and reads fixed paths under the
-user's home directory, such as a local application's session directory,
-declares each such path as an input. The input's `env_var` is the variable
-that overrides the default location. `runtime_requirements.local_paths`
-(Section 3.7) can still describe the default location and readiness checks.
+user's home directory declares an input for each such path and documents its
+default location. The input's `env_var` is the variable that overrides the
+default. `runtime_requirements.local_paths` (Section 3.7) can still describe the
+default location and readiness checks. A confining runtime that wants the
+connector to read the default location supplies it through the `env_var`.
 
 A `filesystem` declaration without `inputs` remains valid in v0.1. It makes no
 claim about which paths the connector reads, so a runtime cannot narrow the
 binding. A runtime SHOULD tell the owner that such a connector has broad file
 access.
 
+Connector catalogs do not yet carry `inputs`. The catalog in this repository
+projects each binding to `required` and `features`, because installers validate
+the catalog against the schema bundled in their release. A runtime reads
+declared inputs from the manifest in the signed connector artifact.
+
 `setup.manual_or_upload.import_dir_env_var` is deprecated. A `dir` input
-supersedes it. A runtime that supports `import_dir_env_var` MUST accept both
-forms for every 0.x version of this profile; only a major version (Section 8)
-can remove `import_dir_env_var`. During the transition:
+supersedes it. A runtime that implements this revision of the profile and
+supports `import_dir_env_var` MUST accept both forms for the remaining 0.x
+versions of the profile; only a major version (Section 8) can remove
+`import_dir_env_var`. A runtime built before this revision is not required to
+read `inputs`. During the transition:
 
 - A new manifest SHOULD declare `inputs` instead of `import_dir_env_var`.
 - A manifest that carries both MUST name the same variable in
@@ -306,7 +332,7 @@ requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
-The only v0.1 capability is `STREAM_EVIDENCE`. A connector that can emit
+The only portable v0.1 capability is `STREAM_EVIDENCE`. A connector that can emit
 `STREAM_EVIDENCE` MUST declare that value. A runtime that does not advertise it
 MUST NOT start that connector.
 
@@ -383,8 +409,8 @@ to connector standard input. The connector writes to standard output.
 Standard error is diagnostic only and MUST NOT contain protocol messages.
 
 Before spawn, the runtime MUST match the bindings, binding features, and
-protocol capabilities required by the connector against its advertised support. A mismatch fails the run
-before any connector code executes.
+protocol capabilities required by the connector against its advertised support.
+A mismatch fails the run before any connector code executes.
 
 The runtime sends exactly one `START` message. It is the first message on
 standard input. The connector reads it before it emits any message. A connector
@@ -473,14 +499,15 @@ stream without that field. During a time-bounded run, the connector MUST NOT
 emit a record whose consent-time value is absent, null, or not a valid ISO 8601
 timestamp.
 
-`now` lets a runtime make a run reproducible. When `now` is present, a
-connector SHOULD use it instead of its own clock to compute time-based
-watermarks, cursors, and relative windows such as "the last 30 days". A replay
-runtime SHOULD send the `now` value recorded for the original run, so the same
-inputs produce the same records and state. When `now` is absent, the connector
-uses its own clock. A connector that does not read `now` remains conforming.
-`now` does not change `emitted_at`, which is still the time the connector
-emitted the message.
+`now` stabilizes the decisions a connector derives from the current time. When
+`now` is present, a connector SHOULD use it instead of its own clock to compute
+time-based watermarks, cursors, and relative windows such as "the last 30
+days". A replay runtime SHOULD send the `now` value recorded for the original
+run, so those decisions match the original run. `now` does not make a replay
+byte-identical: `emitted_at` is still the time the connector emitted each
+message, and other connector behavior can still vary. When `now` is absent, the
+connector uses its own clock. A connector that does not read `now` remains
+conforming.
 
 The runtime MUST include a descriptor for each required manifest binding. A
 connector MUST fail if a required descriptor is missing. It MUST ignore
@@ -520,23 +547,29 @@ in-scope stream. `key` is a non-empty string or a non-empty array of strings.
 An array preserves composite-key field order. `emitted_at` is the ISO 8601 time
 when the connector emitted the message.
 
-`data` is REQUIRED unless `op` is `delete`. It MUST conform to the stream
-schema. For each primary-key field, the value in `data` MUST identify the same
-value as the corresponding component of `key`. A runtime MUST reject a record
-when these identities disagree.
+`data` is REQUIRED. For an upsert, it MUST conform to the stream schema. For
+each primary-key field, the value in `data` MUST identify the same value as the
+corresponding component of `key`. A runtime MUST reject a record when these
+identities disagree.
 
 `data` carries values from the source. A connector MUST NOT put its own
 collection or processing time in `data`, such as the time it fetched a page,
 parsed a file, or ran. `emitted_at` records when the connector emitted the
-record, and the stream's freshness strategy (Section 3.5) reports collection
-timing. A time that the source itself provides, such as a source
-`updated_at` value or the generation time of an export file, is a source value
-and stays in `data`.
+record. The resource server reports collection timing for each instance through
+PDPP Core freshness metadata (`last_success_at`). A time that the source itself
+provides, such as a source `updated_at` value or the generation time of an
+export file, is a source value and stays in `data`.
 
 `op` is OPTIONAL. Its values are `upsert` and `delete`. Absence means upsert. A
-delete identifies a record by `stream` and `key`. It can omit `data`. If `data`
-is present, it MAY contain only key fields. A connector MUST NOT delete from an
+delete identifies a record by `stream` and `key`. As PDPP Core requires, its
+`data` MUST contain every primary-key field, matching `key`; other
+schema-required fields MAY be absent. A connector MUST NOT delete from an
 `append_only` stream.
+
+A connector record carries no instance. Core identifies a stored record by its
+instance and canonical key, so the ingest adapter binds each connector record
+to one Core instance, the connection the run collected for, before it writes
+the record.
 
 ### 5.3 `STATE`
 
@@ -812,9 +845,10 @@ A conforming runtime:
 8. Terminates a connector on a protocol violation.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
    successful.
-10. Provides only the declared filesystem inputs, read-only when `access` is
-    `read`. If it supports the deprecated `import_dir_env_var`, it follows the
-    transition rules in Section 3.3.2.
+10. If it confines filesystem access, makes only the declared filesystem
+    inputs visible, read-only when `access` is `read`. If it supports the
+    deprecated `import_dir_env_var`, it follows the transition rules in
+    Section 3.3.2.
 
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
