@@ -83,6 +83,7 @@ import { fileURLToPath } from "node:url";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
+import { BROWSER_HEADLESS_ENV } from "../src/browser-launch.ts";
 import {
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
@@ -111,6 +112,7 @@ import {
 	type IsolationMechanism,
 	isNamespaceIsolationAvailable,
 	type NamespaceIsolationCapability,
+	resolvedPlaywrightBrowsersPath,
 	type SocketScanResult,
 	sandboxScratchEnv,
 	spawnWithNetworkIsolation,
@@ -1157,37 +1159,59 @@ function runReplaySubprocess(args: {
 }> {
 	return new Promise((resolvePromise, rejectPromise) => {
 		const { preloadPath } = args;
+		const childEnv: NodeJS.ProcessEnv = {
+			...subprocessEnv(),
+			// Sandbox-local HOME/TMPDIR/XDG_CACHE_HOME (P1-2, ninth review) —
+			// only when isolation is actually active (`args.isolate` truthy);
+			// `sandboxScratchEnv` itself already no-ops to `{}` when
+			// `args.workspace.dir` weren't meaningful, but gating on `args.isolate`
+			// here too avoids redirecting HOME/TMPDIR for the un-isolated
+			// process-local-only fallback, where the workspace dir was never
+			// bind-mounted anywhere and redirecting HOME there would just be an
+			// unrelated behavior change with no isolation benefit.
+			...(args.isolate ? sandboxScratchEnv(args.workspace.dir) : {}),
+			...(args.fixedNow === undefined
+				? {}
+				: { [PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV]: args.fixedNow }),
+			...(args.udsPath === undefined
+				? {}
+				: { [PDPP_SCENARIO_BRIDGE_UDS_PATH_ENV]: args.udsPath }),
+			...(args.filesystemInput === undefined
+				? {}
+				: { [args.filesystemInput.envVar]: args.filesystemInput.path }),
+			NODE_OPTIONS: `--import ${preloadPath}`,
+			PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
+				process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
+			PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
+				process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
+			// `$XDG_CACHE_HOME` is redirected into sandbox-local scratch space
+			// above, so without an explicit override Playwright/Patchright would
+			// compute its default browser-cache location under that EMPTY scratch
+			// directory instead of the real cache `requiredFilesystemBinds` binds
+			// read-only — confirmed: replay failed "Executable doesn't exist"
+			// against the real, populated cache until this was set. Must name the
+			// exact path that was bound, not rely on Playwright re-deriving it.
+			PLAYWRIGHT_BROWSERS_PATH: resolvedPlaywrightBrowsersPath(),
+			// Replay never needs a display: every response (recorded-http) or HAR
+			// entry (recorded-browser) is already captured, so a headed launch
+			// only recreates the ORIGINAL recording session's X11/Wayland
+			// requirement for no benefit, and the sandbox correctly provides no
+			// display socket — a headed launch here failed
+			// "launchPersistentContext: Target page, context or browser has been
+			// closed" when the caller's own session (e.g. an interactive
+			// recording shell) happened to have DISPLAY set. Force headless and
+			// drop both display vars rather than relying on the callee to ignore
+			// an inherited DISPLAY it was never meant to see.
+			[BROWSER_HEADLESS_ENV]: "1",
+		};
+		delete childEnv.DISPLAY;
+		delete childEnv.WAYLAND_DISPLAY;
 		const child = spawnWithNetworkIsolation(
 			process.execPath,
 			["--import", "tsx", args.connectorPath],
 			{
 				cwd: PACKAGE_ROOT,
-				env: {
-					...subprocessEnv(),
-					// Sandbox-local HOME/TMPDIR/XDG_CACHE_HOME (P1-2, ninth review) —
-					// only when isolation is actually active (`args.isolate` truthy);
-					// `sandboxScratchEnv` itself already no-ops to `{}` when
-					// `args.workspace.dir` weren't meaningful, but gating on `args.isolate`
-					// here too avoids redirecting HOME/TMPDIR for the un-isolated
-					// process-local-only fallback, where the workspace dir was never
-					// bind-mounted anywhere and redirecting HOME there would just be an
-					// unrelated behavior change with no isolation benefit.
-					...(args.isolate ? sandboxScratchEnv(args.workspace.dir) : {}),
-					...(args.fixedNow === undefined
-						? {}
-						: { [PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV]: args.fixedNow }),
-					...(args.udsPath === undefined
-						? {}
-						: { [PDPP_SCENARIO_BRIDGE_UDS_PATH_ENV]: args.udsPath }),
-					...(args.filesystemInput === undefined
-						? {}
-						: { [args.filesystemInput.envVar]: args.filesystemInput.path }),
-					NODE_OPTIONS: `--import ${preloadPath}`,
-					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
-						process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
-					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
-						process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
-				},
+				env: childEnv,
 				stdio: ["pipe", "pipe", "pipe"],
 				isolate: args.isolate,
 				filesystemBindPath: args.workspace.dir,
@@ -1761,6 +1785,17 @@ async function main(): Promise<void> {
 	process.stdout.write(
 		`  driver: ${declaredDrivers.length > 0 ? declaredDrivers.join(", ") : "(none declared)"}\n`,
 	);
+	// A recorded-browser run's traffic is already fully captured (HAR), so
+	// replay never needs the ORIGINAL recording session's display — see
+	// `runReplaySubprocess`'s PLAYWRIGHT_BROWSERS_PATH/BROWSER_HEADLESS_ENV
+	// comment. Disclosed here, not just set silently, so a caller who DID set
+	// DISPLAY (e.g. an interactive recording shell re-running verify) can see
+	// why a headed launch was not attempted.
+	if (declaredDrivers.includes("recorded-browser")) {
+		process.stdout.write(
+			"  browser replay: forced headless (PDPP_BROWSER_HEADLESS=1); DISPLAY/WAYLAND_DISPLAY not forwarded to the replay subprocess\n",
+		);
+	}
 
 	// FIX D — digest model split: reported by default (never fails), or
 	// strict (throws before any subprocess is spawned) under

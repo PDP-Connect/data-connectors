@@ -55,6 +55,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import { getConnectorPaths } from "../src/orchestrator.ts";
 import type { ConnectorScenario } from "../src/scenario/format.ts";
 import {
@@ -3501,4 +3502,140 @@ test("scenario-verify --json is opt-in and carries a path", () => {
 	assert.equal(mixed.connector, "reddit");
 	assert.equal(mixed.scenarioPath, "/tmp/s.json");
 	assert.equal(mixed.jsonPath, "/tmp/claim.json");
+});
+
+// ─── Replay subprocess env: Playwright cache path forced, headless forced,
+// DISPLAY/WAYLAND_DISPLAY dropped (live reddit recording, 2026-10-02) ──────
+//
+// A real recorded-browser replay failed two ways when run from an
+// interactive session with DISPLAY set and no PLAYWRIGHT_BROWSERS_PATH
+// exported:
+//   1. "Executable doesn't exist" — isolation.ts's sandboxScratchEnv
+//      redirects the child's XDG_CACHE_HOME into sandbox-local scratch
+//      space, so Playwright/Patchright computed its default browser-cache
+//      location under that EMPTY scratch directory instead of the real,
+//      bound-read-only cache (`requiredFilesystemBinds`'s
+//      `resolvedPlaywrightBrowsersPath()` entry).
+//   2. "launchPersistentContext: Target page, context or browser has been
+//      closed" — the replay child inherited the caller's DISPLAY, so
+//      Playwright attempted a headed launch inside a sandbox that
+//      (correctly) provides no display socket.
+//
+// Both are fixed by `runReplaySubprocess` (bin/scenario-verify.ts) always
+// setting PLAYWRIGHT_BROWSERS_PATH to the exact bound path and
+// PDPP_BROWSER_HEADLESS=1, and dropping DISPLAY/WAYLAND_DISPLAY, regardless
+// of driver — this is proved below WITHOUT a real browser or HAR: any
+// replay subprocess (recorded-http included) goes through the same env
+// construction, so a plain --entrypoint connector that echoes back what it
+// observed is sufficient, and faster/more hermetic than a real
+// recorded-browser round trip. The scenario is hand-authored (not recorded)
+// specifically so its one expected record hash is computed from the
+// FORCED/EXPECTED replay-time env, not whatever this test process's own
+// ambient env happens to be at record time — a mismatch there would itself
+// prove the fix is working (the two environments differ on purpose).
+
+function writeEnvEchoConnector(): string {
+	const connectorRuntimePath = join(
+		PACKAGE_ROOT,
+		"src",
+		"connector-runtime.ts",
+	);
+	const scriptPath = join(
+		packageScratchDir(),
+		`pdpp-env-echo-connector-${String(process.pid)}-${String(Date.now())}.ts`,
+	);
+	const src = `
+import type { RecordData, ValidateRecord } from ${JSON.stringify(connectorRuntimePath)};
+import { runConnector } from ${JSON.stringify(connectorRuntimePath)};
+
+const validateRecord: ValidateRecord = (_stream: string, data: RecordData) => ({ ok: true, data });
+
+runConnector({
+  name: "env-echo-connector",
+  validateRecord,
+  async collect({ emitRecord }) {
+    await emitRecord("env", {
+      id: "env",
+      playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null,
+      display: process.env.DISPLAY ?? null,
+      waylandDisplay: process.env.WAYLAND_DISPLAY ?? null,
+      headless: process.env.PDPP_BROWSER_HEADLESS ?? null,
+    });
+  },
+});
+`;
+	writeFileSync(scriptPath, src);
+	return scriptPath;
+}
+
+test("scenario-verify: replay subprocess forces PLAYWRIGHT_BROWSERS_PATH and PDPP_BROWSER_HEADLESS=1, and drops DISPLAY/WAYLAND_DISPLAY, even though the caller's own env sets all three differently", () => {
+	const connectorPath = writeEnvEchoConnector();
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-replay-env-test-"));
+	const scenarioPath = join(tmpDir, "env-echo.scenario.json");
+	const fakePlaywrightPath = "/fake/playwright/cache/for/test";
+
+	// The exact record the replay MUST produce once the fix forces these
+	// three env vars — computed here, not copied from a real recording, so
+	// this assertion is independent of whatever DISPLAY/WAYLAND_DISPLAY this
+	// test process happens to have.
+	const expectedData = {
+		id: "env",
+		playwrightBrowsersPath: fakePlaywrightPath,
+		display: null,
+		waylandDisplay: null,
+		headless: "1",
+	};
+	const scenario: ConnectorScenario = {
+		format: "pdpp.connector-scenario/1",
+		connector: { id: "env-echo-connector" },
+		capture: {
+			captured_at: "2026-08-01T00:00:00.000Z",
+			evidence_class: "synthetic-spike",
+			privacy_class: "local-only",
+			recorder_version: "test",
+			complete: true,
+		},
+		runs: [
+			{
+				start: { scope: { streams: [{ name: "env" }] }, state: null },
+				interactions: [],
+				expected: {
+					records: {
+						env: {
+							count: 1,
+							ids: ["env"],
+							ops: ["upsert"],
+							record_sha256s: [hashCanonicalJson(expectedData)],
+						},
+					},
+					final_state: {},
+				},
+			},
+		],
+	};
+	writeFileSync(scenarioPath, JSON.stringify(scenario));
+
+	try {
+		// The caller's own env deliberately sets all three differently from what
+		// the replay subprocess must observe — proving the fix actively
+		// overrides them rather than merely happening to agree by default.
+		const verifyResult = runVerifyCli(
+			["env-echo-connector", "--entrypoint", connectorPath, scenarioPath],
+			{
+				DISPLAY: ":99",
+				WAYLAND_DISPLAY: "wayland-99",
+				PLAYWRIGHT_BROWSERS_PATH: fakePlaywrightPath,
+				PDPP_BROWSER_HEADLESS: "0",
+			},
+		);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`expected success (record hash match proves the forced env); stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+		rmSync(connectorPath, { force: true });
+	}
 });
