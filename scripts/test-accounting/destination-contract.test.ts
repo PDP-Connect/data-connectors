@@ -12,7 +12,7 @@ import { classifyTrackedPath } from "./inventory.ts";
 import { configuredNamedSkipMappingIdentities, resolveNamedSkipMapping } from "./receipt.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const BASE = "8df81721c7a37f55a8cd6390aae2be1d5ac50249";
+const BASE = "f35b6cf16a8c65d2871fe250f60eb043daf4f3bb";
 const M_IDENTITIES = {
   "scripts/test-accounting/authority.ts": "57e5857eb8d52835fd9b70561b8e1119527e5397f74e0660e43d1defdfa6c26e",
   "scripts/test-accounting/node-reporter.ts": "08eceb3aba1fc9f5c997dab11919cb257a785d663fd4fbbf922ba7ce88e605fd",
