@@ -338,8 +338,7 @@
 					},
 					"date_delivered": {
 						"type": ["string", "null"],
-						"format": "date",
-						"x_pdpp_role": "event-time"
+						"format": "date"
 					},
 					"account_reference": {
 						"type": ["string", "null"]
@@ -419,8 +418,7 @@
 					},
 					"date_received": {
 						"type": ["string", "null"],
-						"format": "date",
-						"x_pdpp_role": "event-time"
+						"format": "date"
 					},
 					"status": {
 						"type": ["string", "null"]

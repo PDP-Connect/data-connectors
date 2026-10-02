@@ -129,8 +129,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -206,8 +205,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -280,8 +278,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -359,8 +356,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -440,8 +436,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -521,8 +516,7 @@
 					},
 					"created_utc": {
 						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
+						"format": "date-time"
 					}
 				},
 				"required": ["id", "created_utc"]
