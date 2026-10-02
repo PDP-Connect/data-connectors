@@ -319,12 +319,16 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["oura.readiness", "c152a01bbdffce42"],
 	["oura.activity", "84eda8d7791f9822"],
 	["pocket.items", "0bd037ae0e378345"],
-	["reddit.submitted", "dda537b9eb701de8"],
-	["reddit.comments", "930a68711ff5b78e"],
-	["reddit.saved", "b932abf40690ab85"],
-	["reddit.upvoted", "33f9037aa1ea6d85"],
-	["reddit.downvoted", "1a9026c2bead89eb"],
-	["reddit.hidden", "a4178a68b917c4c1"],
+	// Re-frozen after 7f1ef9bf1 declared compaction_fingerprint on all six
+	// streams (reddit's history compactor churn fix) — the diff against the
+	// prior freeze is six identical additive compaction_fingerprint blocks
+	// and nothing else; see that commit's message for the full rationale.
+	["reddit.submitted", "0cc8d8c8a9a17f54"],
+	["reddit.comments", "9a9991bac0aef0a9"],
+	["reddit.saved", "a27541bb88ad5ae4"],
+	["reddit.upvoted", "7781fc5bf4bd1d9e"],
+	["reddit.downvoted", "2d127820d382fe53"],
+	["reddit.hidden", "4d57569c74138bc2"],
 	["slack.workspace", "2b5e89d561548e8a"],
 	["slack.channels", "b7ef731906d7805a"],
 	["slack.channel_stats", "e1992218be93380a"],
