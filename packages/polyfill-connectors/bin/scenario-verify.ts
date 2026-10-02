@@ -2040,7 +2040,11 @@ async function main(): Promise<void> {
 
 	let result: VerifyResult;
 	try {
-		result = await verifyScenario(scenario, runCollector);
+		result = await verifyScenario(
+			scenario,
+			runCollector,
+			filesystemInput !== undefined,
+		);
 	} catch (err) {
 		const message =
 			err instanceof Error ? (err.stack ?? err.message) : String(err);
@@ -2129,6 +2133,7 @@ async function main(): Promise<void> {
 		observedUnsupportedEvidenceSurface(allRunMessages),
 		socketScanResult,
 		filesystemInput,
+		result.vacuousRunFilesystemInputCarveOuts,
 	);
 	process.exitCode = 0;
 }
@@ -2163,6 +2168,10 @@ function printCoverageReport(
 	observedUnsupportedEvidenceSurfaceFlag: boolean,
 	socketScanResult: SocketScanResult,
 	filesystemInput: ResolvedFilesystemInput | undefined,
+	vacuousRunFilesystemInputCarveOuts: ReadonlyArray<{
+		runIndex: number;
+		sourceRunIndex: number;
+	}>,
 ): void {
 	const capturedAt = scenario.capture.captured_at;
 	// state_seeded_second_run_with_changed_requests (formerly named
@@ -2278,6 +2287,9 @@ function printCoverageReport(
 						},
 					],
 				}),
+		...(vacuousRunFilesystemInputCarveOuts.length === 0
+			? {}
+			: { vacuousRunFilesystemInputCarveOuts }),
 		isEntrypointOverride: Boolean(args.entrypoint),
 		capturedDeclarationDigestPresent:
 			digestObservation.capturedDeclarationDigestPresent,

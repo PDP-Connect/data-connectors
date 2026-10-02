@@ -1125,6 +1125,24 @@ test("evaluateClaimEligibility: a manifest-declared filesystem input is always n
 	]);
 });
 
+test("evaluateClaimEligibility: a vacuous-run filesystem-input carve-out is always named, alongside the filesystem-input disclosure it depends on", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		filesystemInputs: [
+			{ envVar: "STRAVA_EXPORT_DIR", path: "/data/strava", readOnlyBind: true },
+		],
+		vacuousRunFilesystemInputCarveOuts: [{ runIndex: 1, sourceRunIndex: 0 }],
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"filesystem input: replay read /data/strava via STRAVA_EXPORT_DIR (read-only bind, manifest-declared); isolation did not exclude this host path",
+		"run 1: zero records and zero interactions; accepted as non-vacuous because run 0 yielded records from the same declared filesystem input (file reads are not observed)",
+	]);
+});
+
 test("evaluateClaimEligibility: condition (a) fails — --entrypoint override yields 'unbound entrypoint replay'", () => {
 	const decision = evaluateClaimEligibility({
 		scenario: eligibleScenario(),

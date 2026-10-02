@@ -169,6 +169,52 @@ export function buildFilesystemInputLimitation(
 		: `filesystem input: replay read ${input.path} via ${input.envVar} (manifest-declared); not bound read-only - isolation inactive`;
 }
 
+/**
+ * The vacuous-run filesystem-input carve-out disclosure, PARAMETERIZED on
+ * the carved-out run's own index and the OTHER run's index that proved the
+ * same declared filesystem input actually yields data for this connector —
+ * a template-literal type for the same reason `FilesystemInputLimitation`
+ * is: both indices are per-scenario data, not a closed enum value.
+ *
+ * WHY IT EXISTS. `verify.ts`'s `vacuous_run` guard normally fails a run with
+ * zero interactions and zero expected records outright — such a run proves
+ * nothing about the connector by itself. A `setup.manual_or_upload`
+ * connector has zero interactions by construction (it never calls fetch),
+ * so an incremental run that legitimately finds nothing new in an exhausted
+ * declared input would otherwise always fail this guard even though nothing
+ * is wrong — confirmed 2026-10-02 against the real strava connector after
+ * main removed its `coverage_diagnostics` stream (#251): the stream used to
+ * give an exhausted incremental run a nonzero expected-record count as a
+ * side effect, which is not what proved the connector worked.
+ *
+ * Input PRESENCE alone does not prove the connector actually READ it,
+ * though: a connector that silently ignored its filesystem input and
+ * emitted nothing would show the identical zero-interactions/zero-records
+ * shape. `verify.ts`'s `vacuousRunFilesystemInputCarveOutSourceIndex`
+ * additionally requires a SECOND run in the SAME scenario to have actually
+ * expected records from that same declared input before granting the
+ * carve-out; this string names that run so the disclosure is checkable, not
+ * just asserted.
+ *
+ * File reads are never observed by this offline oracle — there is no fetch
+ * bridge for the filesystem, unlike recorded-http/recorded-browser — so the
+ * limitation says so explicitly rather than implying this run's own read
+ * was witnessed.
+ */
+export type VacuousRunFilesystemInputCarveOutLimitation =
+	`run ${number}: zero records and zero interactions; accepted as non-vacuous because run ${number} yielded records from the same declared filesystem input (file reads are not observed)`;
+
+/** The single place a `VacuousRunFilesystemInputCarveOutLimitation` string is
+ *  built. `sourceRunIndex` is the OTHER run (not `runIndex` itself) whose
+ *  nonzero expected-record count justified the carve-out — see
+ *  `verify.ts`'s `vacuousRunFilesystemInputCarveOutSourceIndex`. */
+export function buildVacuousRunFilesystemInputCarveOutLimitation(
+	runIndex: number,
+	sourceRunIndex: number,
+): VacuousRunFilesystemInputCarveOutLimitation {
+	return `run ${runIndex}: zero records and zero interactions; accepted as non-vacuous because run ${sourceRunIndex} yielded records from the same declared filesystem input (file reads are not observed)`;
+}
+
 export type ClaimLimitation =
 	| "unbound entrypoint replay"
 	| "no capture-time declaration digest"
@@ -186,7 +232,8 @@ export type ClaimLimitation =
 	| PreexistingSocketLimitation
 	| SocketScanIncompleteLimitation
 	| ScenarioStalenessLimitation
-	| FilesystemInputLimitation;
+	| FilesystemInputLimitation
+	| VacuousRunFilesystemInputCarveOutLimitation;
 
 /**
  * Builds the exact repository-UDS-socket limitation string for a run whose
@@ -247,6 +294,16 @@ export interface ClaimEligibilityInput {
 	 *  adds a `FilesystemInputLimitation`. Optional so callers with no such
 	 *  input (every network/browser connector) change nothing. */
 	filesystemInputs?: readonly FilesystemInputDisclosure[];
+	/** Every run `verify.ts`'s `vacuousRunFilesystemInputCarveOutSourceIndex`
+	 *  saved from a `vacuous_run` failure this verification pass (`VerifyResult.
+	 *  vacuousRunFilesystemInputCarveOuts`). Each one adds a
+	 *  `VacuousRunFilesystemInputCarveOutLimitation`. Optional, and empty for
+	 *  almost every scenario — only a filesystem-input connector with an
+	 *  exhausted incremental run ever populates this. */
+	vacuousRunFilesystemInputCarveOuts?: readonly {
+		runIndex: number;
+		sourceRunIndex: number;
+	}[];
 	/** True when `scenario.connector.captured_with` (or its deprecated
 	 *  top-level fallback) carries a `declaration_digest` — the capture-time
 	 *  half of the declaration-identity binding. */
@@ -512,6 +569,18 @@ export function evaluateClaimEligibility(
 	// was widened from the absence of a stronger claim.
 	for (const fsInput of input.filesystemInputs ?? []) {
 		limitations.push(buildFilesystemInputLimitation(fsInput));
+	}
+
+	// Always named when present, for the same reason the other disclosures
+	// are: a reader of `limitations` must never have to infer that a run's
+	// "pass" rested on an exception to the ordinary vacuous-run check.
+	for (const carveOut of input.vacuousRunFilesystemInputCarveOuts ?? []) {
+		limitations.push(
+			buildVacuousRunFilesystemInputCarveOutLimitation(
+				carveOut.runIndex,
+				carveOut.sourceRunIndex,
+			),
+		);
 	}
 
 	if (limitations.length === 0) {
