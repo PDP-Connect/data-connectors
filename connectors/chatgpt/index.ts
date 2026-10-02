@@ -1197,13 +1197,15 @@ async function withTimeout<T>(
 /**
  * Technical detail for the run log. PROGRESS messages are shown to the owner
  * verbatim (the Vana mobile sheet renders `PROGRESS.message` as-is), so counts,
- * lanes, codes and concurrency go here, to stderr, instead. The protocol has no
+ * lanes, codes and concurrency go here, to the run log (console.error), instead. The protocol has no
  * LOG event; tests replace the sink to read these lines.
  */
 type ChatGptDiagnosticSink = (line: string) => void;
 
 const defaultChatGptDiagnosticSink: ChatGptDiagnosticSink = (line) => {
-	process.stderr.write(`[chatgpt-diagnostic] ${line}\n`);
+	// `console.error`, not `process.stderr`: the PageShim host passes a bare
+	// `process` with no stderr, so a stderr write would throw there.
+	console.error(`[chatgpt-diagnostic] ${line}`);
 };
 
 let chatGptDiagnosticSink: ChatGptDiagnosticSink = defaultChatGptDiagnosticSink;

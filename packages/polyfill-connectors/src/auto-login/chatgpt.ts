@@ -268,7 +268,9 @@ function chatGptAuthProbeDiagnosticMessage(
 type ChatGptAuthDiagnosticSink = (line: string) => void;
 
 const defaultChatGptAuthDiagnosticSink: ChatGptAuthDiagnosticSink = (line) => {
-	process.stderr.write(`[chatgpt-diagnostic] ${line}\n`);
+	// `console.error`, not `process.stderr`: the PageShim host passes a bare
+	// `process` with no stderr, so a stderr write would throw there.
+	console.error(`[chatgpt-diagnostic] ${line}`);
 };
 
 let chatGptAuthDiagnosticSink: ChatGptAuthDiagnosticSink =
