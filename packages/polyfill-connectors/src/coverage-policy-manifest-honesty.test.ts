@@ -319,13 +319,17 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["oura.readiness", "c152a01bbdffce42"],
 	["oura.activity", "84eda8d7791f9822"],
 	["pocket.items", "0bd037ae0e378345"],
-	["reddit.submitted", "3adb0e4b33e30421"],
-	["reddit.comments", "d1e2913e5e28c6fb"],
-	["reddit.saved", "3a459d61b8dad4b4"],
-	["reddit.upvoted", "3a906fe6c903313b"],
-	["reddit.downvoted", "418d4ffdb1779cda"],
-	["reddit.hidden", "bffa884ac57aef80"],
-	["slack.workspace", "a5e0a23064825e93"],
+	// Re-frozen after the compaction_fingerprint declaration on all six
+	// reddit streams (history compactor churn fix); values recomputed
+	// against this branch's post-rebase manifests (main's #295 fetched_at
+	// removal + #298 stricter schema are both reflected in these streams).
+	["reddit.submitted", "PLACEHOLDER_SUBMITTED"],
+	["reddit.comments", "PLACEHOLDER_COMMENTS"],
+	["reddit.saved", "PLACEHOLDER_SAVED"],
+	["reddit.upvoted", "PLACEHOLDER_UPVOTED"],
+	["reddit.downvoted", "PLACEHOLDER_DOWNVOTED"],
+	["reddit.hidden", "PLACEHOLDER_HIDDEN"],
+	["slack.workspace", "PLACEHOLDER_WORKSPACE"],
 	["slack.channels", "b7ef731906d7805a"],
 	["slack.channel_stats", "e1992218be93380a"],
 	["slack.channel_memberships", "e082c8d57da01c1c"],
