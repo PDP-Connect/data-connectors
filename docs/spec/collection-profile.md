@@ -276,6 +276,16 @@ userinfo. `host` is either the exact host or one leading `*.` wildcard label
 followed by at least one more label; a wildcard MUST NOT apply to an IP
 literal.
 
+A wildcard matches exactly one additional label, never the bare apex and
+never two or more additional labels: `*.chase.com` matches
+`secure.chase.com`, but it matches neither `chase.com` itself nor
+`a.b.chase.com`. The design note does not fix a wildcard's matching depth;
+this profile picks the narrowest reading, the same depth a single-label TLS
+certificate wildcard covers, rather than the unbounded depth some other
+systems (for example CSP host-source wildcards) allow.
+`schemas/connector-binding-grammar.mjs#hostMatchesWildcardApex` is the
+reference implementation.
+
 A manifest MUST state a web origin or host in its canonical form: lowercase;
 the host converted to ASCII by the Unicode IDNA/UTS46 algorithm; the scheme's
 default port (80 for `http`, 443 for `https`) dropped if stated; an IPv6
@@ -330,6 +340,15 @@ grant, and MUST show the owner that concrete value, not the field name.
 link-local resolution of that one field without the instance otherwise being
 treated as reaching every private address.
 
+The owner's approval of a `setup_field` grant binds to the concrete canonical
+value the runtime resolved and showed at approval time, not to the field
+itself. A later change to that setup field, for example the owner editing a
+self-hosted base URL, invalidates the existing grant for that destination; a
+runtime MUST NOT carry an approval forward onto a new resolved value without
+the owner approving the new value. This mirrors how a manifest constraint
+itself is a fixed value the owner approves once, not a live reference the
+runtime can silently re-point.
+
 Provisional: a response-derived host (a signed export URL's host, a partition
 host a validation response names) is not yet part of this grammar. The design
 intends a bounded, policy-approved grant tied to the response that named the
@@ -337,14 +356,19 @@ host, never automatic trust in a URL a connector happens to receive. Exact
 member names are not decided; a manifest MUST NOT claim conformance for a
 member that implements this before it is specified.
 
-A `network` instance can also name a non-HTTP endpoint, because forcing a
-protocol such as IMAP into an HTTP-shaped origin would misstate what the
-connector reaches: `scheme://host[:port]`, with the same host canonicalization
-as above, no wildcard, and the scheme stated explicitly (for example
-`imaps://imap.gmail.com`). An endpoint's port MAY be omitted only when its
-scheme has one conventional default port (`http`, `https`, `ws`, `wss`, and
-the common mail, directory, and file-transfer protocols). An endpoint whose
-scheme has no listed default MUST state its port.
+A `network` instance can also name a non-HTTP, non-WebSocket endpoint,
+because forcing a protocol such as IMAP into an HTTP-shaped origin would
+misstate what the connector reaches: `scheme://host[:port]`, with the same
+host canonicalization as above, no wildcard, and the scheme stated explicitly
+(for example `imaps://imap.gmail.com`). `http`, `https`, `ws`, and `wss` are
+not valid endpoint schemes: the first two use the web-host grammar above, and
+the WebSocket schemes are reserved for `browser.connect` (Section 3.3.3), not
+for a `network` endpoint. An endpoint's port MAY be omitted only when its
+scheme is one of the following, which this profile treats as having one
+conventional default port: `imap` (143), `imaps` (993), `pop3` (110),
+`pop3s` (995), `smtp` (25), `smtps` (465), `submission` (587), `ldap` (389),
+`ldaps` (636), `ftp` (21), `ftps` (990). An endpoint whose scheme is not in
+that list MUST state its port.
 
 #### 3.3.3 Browser constraints
 
@@ -579,12 +603,16 @@ intermediate archive extraction to scratch before reading it back through a
 declared filesystem input or extracting it further, never to an ambient
 temporary-directory location it chooses itself.
 
-A non-reserved slot names a durable output root, for example the directory a
-connector's downloaded statements persist in across runs. A runtime MUST
-treat an output root as a tree separate from every input root and every other
-output root: a connector MUST NOT create a link, rename, or otherwise move a
-file across that boundary. `overwrite` and `delete` state rights beyond
-creating and appending to a new file; a runtime MUST NOT grant either right
+A non-reserved slot's persistence follows its `durable` member, the same as
+`scratch`'s is fixed to false: a non-reserved slot with `durable: true` names
+an output root that persists across runs, for example the directory a
+connector's downloaded statements persist in, and a non-reserved slot that
+omits `durable` or sets it to false is an ephemeral working area the runtime
+MAY clean up like scratch. A runtime MUST treat an output root as a tree
+separate from every input root and every other output root: a connector MUST
+NOT create a link, rename, or otherwise move a file across that boundary.
+`overwrite` and `delete` state rights beyond creating and appending to a new
+file; a runtime MUST NOT grant either right
 to a slot whose declaration omits it.
 
 #### 3.3.7 Desktop session
@@ -655,6 +683,26 @@ no claim about specific capabilities. A host that supports only part of a
 binding MUST NOT place a connector whose required declaration for that binding
 omits `features`.
 
+A feature states the functionality a connector requires, not the maximum
+authority a handle happens to carry. A browser handle that provides
+`page_script_evaluation`, for example, could in principle let a connector do
+anything a withheld feature would have allowed, because script evaluation is
+general-purpose; declaring only `page_script_evaluation` is not itself a
+claim that the connector is limited to the narrower operations other feature
+names describe. A runtime or display tool MUST claim an independent limit
+for one feature only where the handle actually proves that limit (Section
+3.3.10 governs whether such a limit can be called `enforced`), never by
+inference from which feature names a declaration omits.
+
+A feature belongs to one kind's interface. A connector's actual operation can
+still depend on a different kind entirely; that dependency is a separate,
+explicit declaration, not an implicit property of the feature name. For
+example, a browser download the connector keeps needs a filesystem write
+authority: the manifest declares a `filesystem` instance with a
+`constraints.outputs` slot (Section 3.3.6) alongside the `browser` instance
+that declares `host_download_capture`, rather than treating the download
+feature as if it already carried its own write permission.
+
 `host_cookie_jar_request` names a host-side HTTP request that carries the
 active browser page's cookies (for example Playwright's page-bound request
 API). It belongs to `browser`, not `network`, because it depends on a live
@@ -711,12 +759,29 @@ first possible egress, so nothing the runtime cannot yet vouch for has already
 left. The record is bound to the run and to the policy identity that approved
 it; it does not describe a connector in the abstract.
 
+Lifecycle, coverage, and observation are three separate facts the record
+keeps apart. The record also carries, per channel, the observation data the
+runtime collected: the actual destinations, frames, paths, or items the
+connector reached or attempted, independent of that channel's declared
+coverage outcome. Coverage states what the runtime could vouch for;
+observation states what the runtime actually saw. A runtime MUST include
+observation data for every channel it can observe, including one whose
+coverage outcome is `recorded` or `not_observable`. Logging a blocked
+request (Section 3.3.3) is one instance of observation; it does not by
+itself satisfy this requirement for every other channel.
+
 Before spawn, a runtime MUST fail placement when a required instance's
-lifecycle outcome is not `granted`. Running a connector against a
-`recorded`-only or `not_observable`-only coverage for a required instance
-needs an explicit policy decision; it is not the default. Revocation MUST
-close every handle and connection the revoked instance backed; a runtime MUST
-NOT leave a connection open after the grant that authorized it is revoked.
+lifecycle outcome is not `granted`. For a granted required instance, a
+runtime MUST ALSO fail placement, per channel, when that channel's coverage
+outcome is not `enforced`, unless explicit policy authorizes that specific
+channel's weaker coverage. This check is per channel, not per instance: an
+instance with some channels `enforced` and others `recorded` or
+`not_observable` MUST NOT be placed on the strength of its enforced channels
+alone, and a runtime MUST NOT treat one channel's authorized exception as
+covering a different, unauthorized channel in the same binding. Revocation
+MUST close every handle and connection the revoked instance backed; a
+runtime MUST NOT leave a connection open after the grant that authorized it
+is revoked.
 
 Provisional: this section states the lifecycle, coverage, and content this
 record MUST carry. The exact member names of the record are not decided.
@@ -818,13 +883,23 @@ an owner evaluates how much a connector can reach before the detail of what
 it does with that reach.
 
 An instance that declares a `kind` but no `constraints` (Section 3.3.2) makes
-no claim about which destinations, paths, or secret items it reaches. A
-runtime cannot narrow the binding to less than that kind's full reach, and an
-owner-facing display MUST present it as unbounded or undeclared for that
-kind, never as limited, and never by omitting the binding from the display.
-This is the status quo for every manifest in this repository today, none of
-which declares `constraints`, so undeclared reach is not itself one of this
-section's exceptional grants and does not by itself require a `rationale`.
+no claim about which destinations, paths, or secret items it requests; its
+absence of `constraints` states undeclared REQUESTED reach, up to that kind's
+full reach, not a floor on what the runtime must actually grant. Deployment
+policy MAY still narrow what it actually grants for such an instance, the
+same way Section 3.3.9's record can show an effective grant narrower than
+what a declared constraint requested; narrowing an undeclared request is not
+a contradiction of the request, because the request itself never bounded the
+runtime's discretion below the kind's full reach. An owner-facing display
+MUST show the instance's actual effective and remaining ambient authority
+(Section 3.3.9), not the bare fact that `constraints` is absent, and this
+applies equally to a shorthand instance (Section 3.3.1) and to a named
+instance with an explicit `kind`. A display MUST NOT present undeclared
+reach as a limited grant, and MUST NOT omit the binding from display because
+it declares no `constraints`. Declaring no `constraints` is the status quo
+for every manifest in this repository today, so undeclared reach is not
+itself one of this section's exceptional grants and does not by itself
+require a `rationale`.
 
 An instance that declares one of this profile's exceptional grants -- a local
 or development server exception to the private-destination denial (Section
