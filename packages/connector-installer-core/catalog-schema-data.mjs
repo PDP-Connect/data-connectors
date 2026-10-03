@@ -443,7 +443,14 @@ export const connectorManifestSchema = {
         "features": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/browserFeature"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/browserFeature"
+              },
+              {
+                "$ref": "#/$defs/legacyBrowserFeature"
+              }
+            ]
           },
           "uniqueItems": true
         },
@@ -555,6 +562,13 @@ export const connectorManifestSchema = {
         "cookie_read",
         "page_response_observation",
         "host_cookie_jar_request"
+      ]
+    },
+    "legacyBrowserFeature": {
+      "type": "string",
+      "description": "Section 3.3.8: host_http_request is also valid on browser as a named legacy dual placement, not the target shape. It is not added to browserFeature, so a validator can tell a legacy placement from the one-kind-per-feature rule new features follow. github_browser and strava_browser already declare it here, and scripts/pageshim/capabilities.mjs already supports it on both kinds. A future versioned alias, coordinated with the mobile host, is expected to resolve this; this schema does not perform that move.",
+      "enum": [
+        "host_http_request"
       ]
     },
     "networkFeature": {
