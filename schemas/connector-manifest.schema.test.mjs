@@ -68,52 +68,46 @@ test("the profile feature table matches the schema feature enum exactly", () => 
   );
 });
 
-// Section 3.3.8 gives each feature exactly one providing kind:
-// `host_http_request` belongs to `network`, not `browser`. github_browser and
-// strava_browser already declare it on both bindings today (also flagged by
-// the binding-model fit test against the 51 connectors, item 3 of its
-// "most common gaps" table). That is real drift between those two manifests
-// and their own declared reach, not a schema defect, and this PR does not
-// edit connector manifests to paper over it. These two are the only
-// pre-existing manifests this stricter rule affects; every other manifest
-// still validates unchanged.
-const KNOWN_FEATURE_OWNERSHIP_VIOLATIONS = new Set(["github_browser", "strava_browser"]);
+// Section 3.3.8's one-providing-kind rule is the target shape, not an
+// absolute today: `host_http_request` is a named legacy exception, valid on
+// both `browser` and `network`, because github_browser and strava_browser
+// already declare it on both (also flagged by the binding-model fit test
+// against the 51 connectors, item 3 of its "most common gaps" table) and
+// scripts/pageshim/capabilities.mjs already supports it on both kinds. This
+// is schema.$defs.legacyBrowserFeature, not schema.$defs.browserFeature, so
+// a reader can tell the grandfathered case from the rule new features
+// follow. It is resolved later through a versioned alias, not performed
+// here (Section 3.3.8).
 
-test("every connector manifest validates against the manifest schema, except two known, reported exceptions", () => {
+test("every connector manifest validates against the manifest schema, with no exceptions", () => {
   const manifests = connectorManifests();
   assert.ok(manifests.length > 0, "connector manifests must be present");
-  const failing = new Set();
   for (const { path, manifest } of manifests) {
-    const name = path.split("/").at(-2);
-    const ok = validate(manifest);
-    if (!ok) failing.add(name);
-    if (KNOWN_FEATURE_OWNERSHIP_VIOLATIONS.has(name)) continue;
-    assert.equal(ok, true, `${path}: ${JSON.stringify(validate.errors)}`);
+    assert.equal(validate(manifest), true, `${path}: ${JSON.stringify(validate.errors)}`);
   }
-  assert.deepEqual(
-    failing,
-    KNOWN_FEATURE_OWNERSHIP_VIOLATIONS,
-    "the set of manifests failing validation must be exactly the known, reported exceptions; " +
-      "update KNOWN_FEATURE_OWNERSHIP_VIOLATIONS (and report it) if this changes",
-  );
 });
 
-test("the two known exceptions fail for the expected reason: host_http_request declared on both browser and network", () => {
-  for (const { path, manifest } of connectorManifests()) {
-    const name = path.split("/").at(-2);
-    if (!KNOWN_FEATURE_OWNERSHIP_VIOLATIONS.has(name)) continue;
-    assert.equal(validate(manifest), false, `${path} was expected to fail validation`);
-    const errors = validate.errors ?? [];
-    assert.ok(
-      errors.every((e) => e.schemaPath === "#/$defs/browserFeature/enum"),
-      `${path}: expected only a browserFeature enum violation, got ${JSON.stringify(errors)}`,
-    );
+test("the legacy dual placement is accepted: host_http_request validates on both browser and network", () => {
+  assert.equal(validate(manifestWith({ browser: { required: true, features: ["host_http_request"] } })), true);
+  assert.equal(validate(manifestWith({ network: { required: true, features: ["host_http_request"] } })), true);
+  // github_browser and strava_browser rely on exactly this: both bindings
+  // declare host_http_request today.
+  for (const name of ["github_browser", "strava_browser"]) {
+    const manifest = JSON.parse(readFileSync(join(root, "connectors", name, "manifest.json"), "utf8"));
     assert.deepEqual(
       manifest.runtime_requirements.bindings.browser.features.filter((f) => f === "host_http_request"),
       ["host_http_request"],
-      `${path}: expected host_http_request under the browser binding`,
+      `${name}: expected host_http_request under the browser binding`,
     );
+    assert.equal(validate(manifest), true, `${name}: ${JSON.stringify(validate.errors)}`);
   }
+});
+
+test("a new (non-legacy) feature placed on the wrong kind is still rejected", () => {
+  for (const feature of ["page_input", "cookie_read", "page_response_observation", "host_cookie_jar_request"]) {
+    assert.equal(validate(manifestWith({ network: { required: true, features: [feature] } })), false, feature);
+  }
+  assert.equal(validate(manifestWith({ browser: { required: true, features: ["same_origin_page_fetch"] } })), false);
 });
 
 test("runtime_requirements without bindings validates", () => {
@@ -329,12 +323,13 @@ test("an unknown top-level field on a binding declaration is preserved, not reje
 
 // --- Section 3.3.8: feature ownership ----------------------------------------
 
-test("a feature belongs to exactly one kind; the other kind rejects it", () => {
-  assert.equal(validate(manifestWith({ browser: { required: true, features: ["host_http_request"] } })), false);
+test("a feature belongs to exactly one kind, except the named legacy exception; the other kind rejects everything else", () => {
   assert.equal(validate(manifestWith({ browser: { required: true, features: ["same_origin_page_fetch"] } })), false);
   assert.equal(validate(manifestWith({ network: { required: true, features: ["page_navigation"] } })), false);
   assert.equal(validate(manifestWith({ network: { required: true, features: ["host_http_request"] } })), true);
   assert.equal(validate(manifestWith({ browser: { required: true, features: ["host_cookie_jar_request"] } })), true);
+  // host_http_request is the one named legacy exception (schema.$defs.legacyBrowserFeature): valid on both kinds.
+  assert.equal(validate(manifestWith({ browser: { required: true, features: ["host_http_request"] } })), true);
 });
 
 test("filesystem and desktop_session instances MUST NOT declare features", () => {
@@ -481,7 +476,6 @@ test("new-reader compatibility: a pre-binding-instances schema (PR #62's head) r
   // Every manifest the old schema already accepted (pure shorthand) is still
   // accepted by the new schema: the additive direction of compatibility.
   for (const { path, manifest } of connectorManifests()) {
-    if (KNOWN_FEATURE_OWNERSHIP_VIOLATIONS.has(path.split("/").at(-2))) continue;
     assert.equal(oldValidate(manifest), true, `${path}: expected the pre-PR schema to accept this unmodified manifest`);
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
   }

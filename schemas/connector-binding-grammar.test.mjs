@@ -200,10 +200,18 @@ test("normalizeFilesystemInputs: both forms present but disagree is rejected", (
   assert.throws(() => normalizeFilesystemInputs(instance), GrammarError);
 });
 
-test("normalizeFilesystemInputs: both forms present with the same env_var but a different field disagree", () => {
+test("normalizeFilesystemInputs: same env_var, different accepted_extensions is rejected, not just compared by env_var", () => {
   const instance = {
     inputs: [{ env_var: "A_DIR", kind: "dir", access: "read" }],
     constraints: { inputs: [{ env_var: "A_DIR", kind: "dir", access: "read", accepted_extensions: [".zip"] }] },
+  };
+  assert.throws(() => normalizeFilesystemInputs(instance), GrammarError);
+});
+
+test("normalizeFilesystemInputs: same env_var, different kind is rejected", () => {
+  const instance = {
+    inputs: [{ env_var: "A_DIR", kind: "dir", access: "read" }],
+    constraints: { inputs: [{ env_var: "A_DIR", kind: "file", access: "read" }] },
   };
   assert.throws(() => normalizeFilesystemInputs(instance), GrammarError);
 });

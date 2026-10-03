@@ -20,6 +20,7 @@ import { assertCatalog } from "../packages/connector-installer-core/catalog-sche
 import {
   generateConnectorCatalog,
   serializeConnectorCatalog,
+  projectCatalogBindings,
 } from "./generate-connector-catalog.mjs";
 
 const SOURCE_COMMIT = "a".repeat(40);
@@ -555,5 +556,46 @@ test("binding-specific profile members stay out of the catalog so bundled catalo
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the installer-side catalog schema accepts the real github_browser and strava_browser binding declarations", () => {
+  // These two connectors declare host_http_request on both their browser and
+  // network bindings (Collection Profile Section 3.3.8's named legacy
+  // exception, schemas/connector-manifest.schema.json#/$defs/legacyBrowserFeature).
+  // This proves the installer path they actually go through -- the catalog an
+  // installer validates its own bundled schema against, not the connector
+  // manifest schema directly -- accepts them, because projectCatalogBindings
+  // only keeps `required` and `features`, and the catalog schema's feature
+  // enum (bindingFeature) was never kind-restricted in the first place.
+  for (const connectorKey of ["github_browser", "strava_browser"]) {
+    const manifest = JSON.parse(
+      readFileSync(join(repoRoot, "connectors", connectorKey, "manifest.json"), "utf8"),
+    );
+    const bindings = manifest.runtime_requirements.bindings;
+    assert.ok(
+      bindings.browser.features.includes("host_http_request"),
+      `${connectorKey}: expected host_http_request under browser in the fixture manifest, sources drifted`,
+    );
+    const digest = `sha256:${"a".repeat(64)}`;
+    const catalogKey = connectorKey.replaceAll("_", "-");
+    const catalog = {
+      catalog_version: "1.0",
+      generated_at: GENERATED_AT,
+      source_commit: SOURCE_COMMIT,
+      connectors: [
+        {
+          connector_key: catalogKey,
+          connector_id: `https://registry.pdpp.dev/connectors/${catalogKey}`,
+          display_name: manifest.display_name,
+          tier: "development",
+          runtime_requirements: { bindings: projectCatalogBindings(bindings) },
+          setup: { modality: null },
+          latest: { version: "1.0.0", digest },
+          versions: [{ version: "1.0.0", digest }],
+        },
+      ],
+    };
+    assert.equal(assertCatalog(catalog), catalog, `${connectorKey}: expected the catalog schema to accept it`);
   }
 });
