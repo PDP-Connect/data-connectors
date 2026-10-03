@@ -9,7 +9,7 @@
 	},
 	"connector_key": "jellyfin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-	"version": "0.1.5",
+	"version": "1.0.0",
 	"display_name": "Jellyfin",
 	"brand": {
 		"icon": "icon.svg",
@@ -119,13 +119,9 @@
 					},
 					"collection_type": {
 						"type": ["string", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
-				"required": ["id", "name", "fetched_at"]
+				"required": ["id", "name"]
 			},
 			"primary_key": ["id"],
 			"required": true,

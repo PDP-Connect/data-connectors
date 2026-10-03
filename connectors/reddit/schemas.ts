@@ -65,7 +65,6 @@ export const submittedSchema = z.object({
 	upvote_ratio: upvoteRatioSchema,
 	gilded: z.number().int().min(0).nullable(),
 	created_utc: isoDateTimeSchema,
-	fetched_at: isoDateTimeSchema,
 });
 
 export const commentSchema = z.object({
@@ -86,7 +85,6 @@ export const commentSchema = z.object({
 	score: scoreSchema,
 	gilded: z.number().int().min(0).nullable(),
 	created_utc: isoDateTimeSchema,
-	fetched_at: isoDateTimeSchema,
 });
 
 export const savedSchema = z.object({
@@ -102,7 +100,6 @@ export const savedSchema = z.object({
 	permalink: permalinkSchema,
 	url: pdppSafeText.max(4096).nullable(),
 	created_utc: isoDateTimeSchema,
-	fetched_at: isoDateTimeSchema,
 });
 
 // upvoted/downvoted/hidden share one shape — the same mix of t1/t3.
@@ -121,7 +118,6 @@ export const voteSchema = z.object({
 	score: scoreSchema,
 	num_comments: z.number().int().min(0).nullable(),
 	created_utc: isoDateTimeSchema,
-	fetched_at: isoDateTimeSchema,
 });
 
 /** Map stream name → schema. Single source of truth for what streams this

@@ -21,15 +21,11 @@ const ISO_DATETIME_RE =
 
 /**
  * Jellyfin libraries (Views) — root containers (Movies, TV Shows, Music, etc.).
- * Note: fetched_at is a collection-time field added by the connector, not from Jellyfin API.
  */
 export const librariesSchema = z.object({
 	id: z.string(),
 	name: z.string(),
 	collection_type: z.string().nullable(),
-	fetched_at: z
-		.string()
-		.regex(ISO_DATETIME_RE, "fetched_at must be ISO-8601 datetime"),
 });
 
 /**

@@ -107,7 +107,6 @@ export const orderSchema = z.object({
 	// unknown, and a non-nullable count can only express that as `0` — which
 	// reads as a proven-empty order. See `resolveItemCount`.
 	item_count: z.number().int().min(0).nullable(),
-	fetched_at: z.string(),
 });
 
 export const orderItemSchema = z.object({

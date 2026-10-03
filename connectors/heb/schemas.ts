@@ -89,7 +89,6 @@ export const ordersSchema = z.object({
 	total_cents: centsSchema,
 	item_count: z.number().int().min(0).nullable(),
 	unfulfilled_count: z.number().int().min(0).nullable(),
-	fetched_at: z.string(),
 });
 
 /**
@@ -111,7 +110,6 @@ export const orderItemsSchema = z.object({
 	line_total: currencyStringSchema,
 	line_total_cents: centsSchema,
 	order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
-	fetched_at: z.string(),
 });
 
 // Internal: shape returned by list-page extraction (pre-shape-check). Used to
@@ -137,12 +135,6 @@ export const listPageOrderShape = z.object({
 	unfulfilledCount: z.number().int().min(0).nullable(),
 });
 
-/** Sanity-check that fetched_at is a well-formed ISO-8601 datetime, used only
- *  by tests that want to assert on the emitted shape directly. */
-export const fetchedAtSchema = z
-	.string()
-	.regex(ISO_DATETIME_RE, "fetched_at must be an ISO-8601 datetime");
-
 /**
  * A single delivery address on file (legacy heb.profile `deliveryAddresses[]`,
  * connectors/heb/schemas/heb.profile.json D3). Not its own child stream: a
@@ -165,7 +157,6 @@ const deliveryAddressSchema = z.object({
 export const profileSchema = z.object({
 	delivery_addresses: deliveryAddressSchema.array(),
 	email: z.string().email("email must be a valid email address").nullable(),
-	fetched_at: z.string(),
 	id: z.literal("profile"),
 	name: pdppSafeText.max(200).nullable(),
 	phone: pdppSafeText.max(40).nullable(),
@@ -215,7 +206,6 @@ export const nutritionSchema = z.object({
 	cholesterol_mg: nonNegativeNutrientSchema,
 	confidence: z.enum(["high", "medium", "low"]),
 	fat_g: nonNegativeNutrientSchema,
-	fetched_at: z.string(),
 	fiber_g: nonNegativeNutrientSchema,
 	highlights: pdppSafeText.max(200).array().nullable(),
 	id: z.string().min(1).max(64),

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.1.7",
+	"version": "1.0.0",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",
@@ -129,11 +129,6 @@
 					"balance_as_of": {
 						"type": ["string", "null"],
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]
@@ -234,10 +229,6 @@
 					"source": {
 						"type": "string",
 						"description": "Always 'qfx_download_<YYYY-MM-DD>_to_<YYYY-MM-DD>'. Provenance for audit and re-extraction."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "account_id", "fitid", "date", "amount", "currency"]
@@ -364,11 +355,6 @@
 					"source": {
 						"type": "string",
 						"description": "Always 'chase_activity_ui'."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": [
@@ -383,8 +369,7 @@
 					"description",
 					"memo",
 					"ui_transaction_id",
-					"source",
-					"fetched_at"
+					"source"
 				]
 			},
 			"primary_key": ["id"],
@@ -492,11 +477,6 @@
 					"pdf_page_count": {
 						"type": ["integer", "null"],
 						"description": "Integer page count from the PDF structure. A structural content invariant alongside pdf_text_sha256. Null when extraction failed."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "title"]
@@ -558,16 +538,12 @@
 					},
 					"ledger_balance_cents": {
 						"type": ["integer", "null"],
-						"description": "QFX LEDGERBAL."
+						"description": "QFX LEDGERBAL.",
+						"x_pdpp_role": "amount"
 					},
 					"available_balance_cents": {
 						"type": ["integer", "null"],
 						"description": "QFX AVAILBAL."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "account_id", "as_of"]

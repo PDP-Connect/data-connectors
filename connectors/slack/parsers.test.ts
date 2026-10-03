@@ -122,7 +122,6 @@ test("buildWorkspaceRecord: prefers row TEAM_ID, then blob, then stringified ID"
 	assert.equal(rec.domain, "eng");
 	assert.equal(rec.icon_url, "i230.png");
 	assert.equal(rec.authenticated_bot_id, "B1");
-	assert.equal(rec.fetched_at, "2026-04-22T10:00:00.000Z");
 });
 
 test("buildChannelRecord: flattens topic/purpose + canvas/restriction flags from fixture (no num_members)", () => {
@@ -199,7 +198,6 @@ test("buildChannelMembershipRecord: composite id is channel:user", () => {
 	assert.equal(rec.id, "C1:U1");
 	assert.equal(rec.channel_id, "C1");
 	assert.equal(rec.user_id, "U1");
-	assert.equal(rec.fetched_at, "2026-04-22T10:00:00.000Z");
 });
 
 test("buildUserRecord: flattens profile + role flags from fixture", () => {
@@ -568,7 +566,6 @@ test("buildDmReadStateRecord: converts Slack ts last_read to ISO and passes sche
 	assert.equal(rec.last_read, tsToIso("1714032849.123456"));
 	assert.equal(rec.last_read_at, rec.last_read);
 	assert.equal(rec.unread_count, 2);
-	assert.equal(rec.fetched_at, "2026-07-10T00:00:00.000Z");
 	assert.doesNotThrow(() => dmReadStatesSchema.parse(rec));
 });
 
