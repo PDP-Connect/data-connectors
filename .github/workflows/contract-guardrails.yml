@@ -33,6 +33,9 @@ jobs:
       - name: Test installer artifact contracts
         run: npm run installer:test
 
+      - name: Test the manifest schema against the Collection Profile and manifests
+        run: npm run manifest-schema:test
+
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 

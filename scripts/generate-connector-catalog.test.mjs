@@ -71,11 +71,16 @@ async function startRegistry({
   tokenFault = null,
   publishedRepository = "acme/connector/public-name",
   publishedVersions = ["1.1.0", "1.1.0-beta.1", "1.0.0"],
+  runtimeBindings = undefined,
 } = {}) {
   const registry = new FixtureRegistry({ challenge: true });
   registry.digests = new Map();
   for (const version of ["1.0.0", "1.1.0-beta.1", "1.1.0"]) {
-    const artifact = publishArtifact(registry, { version, connectorKey: publishedRepository.split("/").at(-1) });
+    const artifact = publishArtifact(registry, {
+      version,
+      connectorKey: publishedRepository.split("/").at(-1),
+      ...(runtimeBindings === undefined ? {} : { runtimeBindings }),
+    });
     registry.digests.set(version, artifact.digest);
   }
   registry.setPublishedVersions = (versions) => {
@@ -517,6 +522,36 @@ test("the generated catalog validates against the shared schema", async () => {
     const mismatchedLatest = structuredClone(catalog);
     mismatchedLatest.connectors[0].latest.digest = registry.digests.get("1.0.0");
     assert.throws(() => assertCatalog(mismatchedLatest), /latest entry.*match the last version/);
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("binding-specific profile members stay out of the catalog so bundled catalog schemas still validate", async () => {
+  const root = fixtureDirectory();
+  const runtimeBindings = {
+    filesystem: {
+      required: true,
+      inputs: [{ env_var: "EXAMPLE_EXPORT_DIR", kind: "dir", access: "read", accepted_extensions: [".zip"] }],
+    },
+    desktop_session: { required: true, rationale: "The key unwraps only through the session keyring." },
+    network: { required: false, features: ["host_http_request"] },
+  };
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"], runtimeBindings });
+  try {
+    fixtureManifestWithMetadata(root, { bindings: runtimeBindings });
+    const catalog = await generate(root, registry.registry);
+    assert.equal(assertCatalog(catalog), catalog);
+    assert.deepEqual(catalog.connectors[0].runtime_requirements.bindings, {
+      filesystem: { required: true },
+      desktop_session: { required: true },
+      network: { required: false, features: ["host_http_request"] },
+    });
+
+    const unprojected = structuredClone(catalog);
+    unprojected.connectors[0].runtime_requirements.bindings.filesystem = runtimeBindings.filesystem;
+    assert.throws(() => assertCatalog(unprojected), /does not match its schema/);
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });
