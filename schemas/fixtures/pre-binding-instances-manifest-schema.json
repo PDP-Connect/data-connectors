@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
+  "title": "Collection Profile manifest runtime requirements",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding names, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope.",
+  "type": "object",
+  "properties": {
+    "runtime_requirements": {
+      "type": "object",
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/bindingName" },
+          "properties": {
+            "filesystem": { "$ref": "#/$defs/filesystemBinding" }
+          },
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bindingName": {
+      "type": "string",
+      "description": "A registry binding name, or an extension binding namespaced as <domain>/<name>. Unqualified names are reserved for the registry.",
+      "anyOf": [
+        { "$ref": "#/$defs/registryBinding" },
+        { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$" }
+      ]
+    },
+    "registryBinding": {
+      "type": "string",
+      "description": "Binding registry:\n- browser: A runtime-managed browser surface.\n- desktop_session: The owner's active, logged-in desktop session and its operating-system facilities.\n- filesystem: Access to local files.\n- network: Outbound network access.",
+      "enum": ["browser", "desktop_session", "filesystem", "network"]
+    },
+    "binding": {
+      "type": "object",
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "features": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bindingFeature" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "filesystemBinding": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/binding" }],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filesystemInput" }
+        }
+      }
+    },
+    "filesystemInput": {
+      "type": "object",
+      "description": "A local path the connector reads. env_var values must be unique within inputs; JSON Schema cannot express that, so the profile states it and the schema test checks it for checked-in manifests.",
+      "additionalProperties": false,
+      "required": ["env_var", "kind", "access"],
+      "properties": {
+        "env_var": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "kind": { "type": "string", "enum": ["file", "dir"] },
+        "access": { "type": "string", "enum": ["read"] },
+        "accepted_extensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^\\.[a-z0-9]+(\\.[a-z0-9]+)*$" }
+        }
+      }
+    },
+    "bindingFeature": {
+      "type": "string",
+      "description": "Host capability definitions:\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.",
+      "enum": [
+        "page_navigation",
+        "page_script_evaluation",
+        "page_content_read",
+        "page_condition_wait",
+        "same_origin_page_fetch",
+        "host_http_request",
+        "host_download_capture",
+        "host_archive_extraction",
+        "host_archive_entry_chunk_read"
+      ]
+    }
+  }
+}

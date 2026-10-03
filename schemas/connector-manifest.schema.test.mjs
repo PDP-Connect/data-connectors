@@ -7,10 +7,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { execFileSync } from "node:child_process";
 import Ajv from "ajv/dist/2020.js";
 
-import { findDuplicateJsonKeys, normalizeFilesystemInputs, isCanonicalWebHost } from "./connector-binding-grammar.mjs";
+import { findDuplicateJsonKeys, normalizeFilesystemInputs, deepEqualJson, isCanonicalWebHost } from "./connector-binding-grammar.mjs";
 
 const schemaDir = dirname(fileURLToPath(import.meta.url));
 const root = join(schemaDir, "..");
@@ -18,10 +17,17 @@ const schema = JSON.parse(readFileSync(join(schemaDir, "connector-manifest.schem
 const profile = readFileSync(join(root, "docs/spec/collection-profile.md"), "utf8");
 const validate = new Ajv({ strict: true, allErrors: true }).compile(schema);
 
-// The commit this PR's branch is stacked on (PR #62's head). Used only to
-// load the pre-binding-instances schema for the old-reader compatibility
-// test below; it never changes once #62 is merged.
-const BASE_COMMIT = "adc6cf821b";
+// A committed snapshot of connector-manifest.schema.json as it stood at
+// adc6cf821b, PR #62's head, before this PR's binding instances existed.
+// This is a file in the repo, not a `git show` call: a git lookup that fails
+// (a shallow clone, a rebase that drops the blob) must not make a
+// compatibility test silently pass by skipping, which is what the previous
+// version of this test did. `readFileSync` with no try/catch means a missing
+// or unreadable fixture fails this whole test file loading, not one test.
+const oldSchema = JSON.parse(
+  readFileSync(join(schemaDir, "fixtures/pre-binding-instances-manifest-schema.json"), "utf8"),
+);
+const oldValidate = new Ajv({ strict: true, allErrors: true }).compile(oldSchema);
 
 function manifestWith(bindings) {
   return { runtime_requirements: { bindings } };
@@ -369,6 +375,11 @@ test("network.hosts accepts a literal host, a non-HTTP endpoint, and a setup_fie
   );
 });
 
+test("network.hosts rejects ws/wss: those schemes are reserved for browser.connect, not a network endpoint", () => {
+  assert.equal(validate(manifestWith({ network: { required: true, constraints: { hosts: ["wss://example.com"] } } })), false);
+  assert.equal(validate(manifestWith({ network: { required: true, constraints: { hosts: ["ws://example.com"] } } })), false);
+});
+
 test("a structurally non-canonical constraint string is rejected at the schema level (uppercase, path, bad wildcard)", () => {
   assert.equal(validate(manifestWith({ browser: { required: true, constraints: { navigate: ["https://EXAMPLE.com"] } } })), false);
   assert.equal(validate(manifestWith({ browser: { required: true, constraints: { navigate: ["https://example.com/path"] } } })), false);
@@ -434,6 +445,83 @@ test("a filesystem instance with disagreeing top-level and constraints.inputs va
 });
 
 // --- Old-reader / new-reader compatibility -----------------------------------
+//
+// "Compatible" means two readers derive the same INTERPRETATION of a binding
+// map, not merely that both validate it. The functions below model what each
+// reader resolves a binding declaration to: kind, required, features, and
+// the effective filesystem inputs (after the import_dir_env_var precedence
+// rule, which this PR does not change). The old reader only ever saw
+// shorthand keys and the top-level `inputs` member; the new reader also
+// understands an explicit `kind` and `constraints.inputs`.
+
+function resolveImportDirPrecedence(inputs, manifest) {
+  const importDir = manifest.setup?.manual_or_upload?.import_dir_env_var;
+  if (inputs !== undefined) return inputs;
+  if (importDir !== undefined) return [{ env_var: importDir, kind: "dir", access: "read" }];
+  return undefined;
+}
+
+function sortedInputs(inputs) {
+  if (inputs === undefined) return undefined;
+  return [...inputs].sort((a, b) => a.env_var.localeCompare(b.env_var));
+}
+
+function interpretOldReaderBindings(bindings, manifest) {
+  const result = {};
+  for (const [key, declaration] of Object.entries(bindings ?? {})) {
+    result[key] = {
+      kind: key, // the old reader has no `kind` member; the key was always the kind.
+      required: declaration.required,
+      features: declaration.features ? [...declaration.features].sort() : undefined,
+      inputs: sortedInputs(resolveImportDirPrecedence(declaration.inputs, manifest)),
+    };
+  }
+  return result;
+}
+
+function interpretNewReaderBindings(bindings, manifest) {
+  const result = {};
+  for (const [key, declaration] of Object.entries(bindings ?? {})) {
+    result[key] = {
+      kind: declaration.kind ?? key,
+      required: declaration.required,
+      features: declaration.features ? [...declaration.features].sort() : undefined,
+      inputs: sortedInputs(resolveImportDirPrecedence(normalizeFilesystemInputs(declaration), manifest)),
+    };
+  }
+  return result;
+}
+
+test("old-reader and new-reader interpretations agree for all 51 manifests: same kind, required, features, and effective filesystem inputs", () => {
+  const manifests = connectorManifests();
+  assert.ok(manifests.length > 0, "connector manifests must be present");
+  for (const { path, manifest } of manifests) {
+    const bindings = manifest.runtime_requirements?.bindings;
+    if (!bindings) continue;
+    const oldInterpretation = interpretOldReaderBindings(bindings, manifest);
+    const newInterpretation = interpretNewReaderBindings(bindings, manifest);
+    assert.deepEqual(Object.keys(newInterpretation).sort(), Object.keys(oldInterpretation).sort(), `${path}: same binding keys`);
+    for (const key of Object.keys(oldInterpretation)) {
+      assert.ok(
+        deepEqualJson(oldInterpretation[key], newInterpretation[key]),
+        `${path}: ${key} interpretation differs; old=${JSON.stringify(oldInterpretation[key])} new=${JSON.stringify(newInterpretation[key])}`,
+      );
+    }
+  }
+});
+
+test("interpretOldReaderBindings/interpretNewReaderBindings actually detect a real interpretation difference (the comparison is not vacuous)", () => {
+  const manifest = { setup: {} };
+  const bindings = { chase_site: { kind: "browser", required: true } };
+  // A key with an explicit `kind` different from the key itself is read
+  // differently: the old reader (no `kind` concept) takes the key as the
+  // kind; the new reader takes the declared `kind`.
+  const oldInterpretation = interpretOldReaderBindings(bindings, manifest);
+  const newInterpretation = interpretNewReaderBindings(bindings, manifest);
+  assert.notEqual(oldInterpretation.chase_site.kind, newInterpretation.chase_site.kind);
+  assert.equal(oldInterpretation.chase_site.kind, "chase_site");
+  assert.equal(newInterpretation.chase_site.kind, "browser");
+});
 
 test("old-reader compatibility: a manifest using only shorthand instances means exactly what it meant before this PR", () => {
   for (const { manifest } of connectorManifests()) {
@@ -446,23 +534,7 @@ test("old-reader compatibility: a manifest using only shorthand instances means 
   }
 });
 
-test("new-reader compatibility: a pre-binding-instances schema (PR #62's head) rejects a manifest that uses a named instance", () => {
-  let oldSchemaText;
-  try {
-    oldSchemaText = execFileSync("git", ["show", `${BASE_COMMIT}:schemas/connector-manifest.schema.json`], {
-      cwd: root,
-      encoding: "utf8",
-    });
-  } catch {
-    // The base commit is unreachable in this checkout (for example a shallow
-    // clone with no history). This is a regression lock, not a correctness
-    // requirement that must run everywhere, so skip rather than fail closed
-    // on an environment limitation.
-    return;
-  }
-  const oldSchema = JSON.parse(oldSchemaText);
-  const oldValidate = new Ajv({ strict: true, allErrors: true }).compile(oldSchema);
-
+test("new-reader compatibility: the committed pre-binding-instances schema fixture rejects a manifest that uses a named instance", () => {
   const namedInstanceManifest = manifestWith({
     chase_site: { kind: "browser", required: true, constraints: { navigate: ["https://secure.chase.com"] } },
   });
@@ -475,6 +547,8 @@ test("new-reader compatibility: a pre-binding-instances schema (PR #62's head) r
 
   // Every manifest the old schema already accepted (pure shorthand) is still
   // accepted by the new schema: the additive direction of compatibility.
+  // No try/catch here: if the fixture is missing or malformed, module load
+  // already failed above and this whole file fails, which is the point.
   for (const { path, manifest } of connectorManifests()) {
     assert.equal(oldValidate(manifest), true, `${path}: expected the pre-PR schema to accept this unmodified manifest`);
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
