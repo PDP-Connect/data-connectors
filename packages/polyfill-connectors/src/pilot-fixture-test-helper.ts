@@ -115,6 +115,16 @@ export function registerPilotFixtureTests(
 
 	if (!existsSync(recordsDir)) {
 		if (expectMissing) {
+			// A silent early return leaves this file's node:test process with
+			// zero registered tests, so it never emits a per-file summary event
+			// — the test-accounting runner's diagnostics-completeness check
+			// (packages/polyfill-connectors/scripts/run-tests.mjs) expects one
+			// summary per included file and fails closed on the gap. Register
+			// one explicitly skipped test instead so the file still completes,
+			// and so the skip itself carries the opt-out's reason.
+			test(`pilot-real-shape/${connector}: fixture directory exists`, {
+				skip: "no pilot-real-shape fixture yet; expectMissing opt-out (see this file's header comment)",
+			}, () => {});
 			return;
 		}
 		test(`pilot-real-shape/${connector}: fixture directory exists`, () => {

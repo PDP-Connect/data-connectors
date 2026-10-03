@@ -1096,6 +1096,7 @@ test("reviewed hosted default profile skip baseline is explicit", async () => {
 			"local Chase raw-DOM fixture directory not present": 3,
 			"local Gmail fixture directory not present": 1,
 			"local USAA raw fixture directory not present": 1,
+			"no pilot-real-shape fixture yet; expectMissing opt-out (see this file's header comment)": 2,
 			"requires --experimental-test-module-mocks": 1,
 			"run with --expose-gc for a reliable memory-growth comparison": 1,
 			"packages/cli does not exist in this repository (not part of the polyfill-connectors extraction)": 1,
