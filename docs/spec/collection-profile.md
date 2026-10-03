@@ -16,7 +16,10 @@ This document is the canonical Collection Profile. It is normative for
 connectors and connector runtimes in the PDPP ecosystem, in this repository and
 elsewhere. Its machine-readable half is
 [`schemas/connector-manifest.schema.json`](../../schemas/connector-manifest.schema.json),
-which validates `runtime_requirements.bindings`.
+which validates `runtime_requirements.bindings`, together with
+[`schemas/connector-binding-grammar.mjs`](../../schemas/connector-binding-grammar.mjs),
+which canonicalizes and validates the constraint grammars of Section 3.3.2
+beyond what JSON Schema alone can express.
 [`schemas/connector-manifest.schema.test.mjs`](../../schemas/connector-manifest.schema.test.mjs)
 checks that the binding, feature, and filesystem input tables in Section 3.3
 match the schema, and
@@ -175,7 +178,7 @@ The binding registry is:
 | --- | --- |
 | `browser` | A runtime-managed browser surface. |
 | `desktop_session` | The owner's active, logged-in desktop session and its operating-system facilities, such as the session keyring. |
-| `filesystem` | Access to local files. Section 3.3.2 defines declared inputs. |
+| `filesystem` | Access to local files. Section 3.3.5 defines declared inputs. |
 | `network` | Outbound network access. |
 
 Unqualified binding names are reserved for this registry. A runtime MUST
@@ -194,7 +197,7 @@ manifest that uses one of them migrates as follows:
 
 | Removed name | Replacement |
 | --- | --- |
-| `browser_automation` | `browser`, with the `features` the connector needs (Section 3.3.1). |
+| `browser_automation` | `browser`, with the `features` the connector needs (Section 3.3.8). |
 | `browser_profile` | None. A persistent browser profile is a runtime concern under `browser`. A connector that truly needs its own profile declares a namespaced extension binding. |
 | `interactive` | `capabilities.human_interaction` (Section 3.4). |
 | `loopback_listen` | A namespaced extension binding. |
@@ -216,32 +219,236 @@ The four bindings above are initial resource families, not a ceiling. A new core
 
 A declared constraint, such as `filesystem.inputs`, is not an access limit unless a runtime enforces it. A runtime or tool MUST NOT present a recorded-only declaration to the owner as a limit on what the connector can access.
 
-#### 3.3.1 Binding features
+#### 3.3.1 Binding instances
 
-A `browser` or `network` declaration MAY contain `features`, an array of unique
-host capability names. Each name MUST be one of these values:
+A binding declaration names one binding instance. `runtime_requirements.bindings`
+maps an instance key to its declaration, and the runtime resolves each
+instance into its own restricted handle before spawn.
 
-| Feature | Capability the host provides |
-| --- | --- |
-| `page_navigation` | Navigate the active page to a URL. |
-| `page_script_evaluation` | Run script in the active page context. |
-| `page_content_read` | Read rendered page content. |
-| `page_condition_wait` | Wait until a condition in the active page becomes true. |
-| `same_origin_page_fetch` | Fetch same-origin resources from the active page context. |
-| `host_http_request` | Make an HTTP request from the host runtime outside the page context. |
-| `host_download_capture` | Capture content downloaded by the active page. |
-| `host_archive_extraction` | Extract downloaded archive contents in the host runtime. |
-| `host_archive_entry_chunk_read` | Read an extracted archive entry in chunks. |
+An instance key is either a registry or namespaced binding name, used as
+shorthand for one instance of that kind, or a free-form author-local name.
 
-The names describe host capabilities, not the API of one host. A host
-publishes the set of features it supports for each binding. A runtime that
-provides a binding MUST provide every feature listed in its declaration. If it
-cannot, the binding counts as missing. A declaration without `features` makes
-no claim about specific capabilities. A host that supports only part of a
-binding MUST NOT place a connector whose required declaration for that binding
-omits `features`.
+A registry name (`browser`, `desktop_session`, `filesystem`, `network`) or a
+namespaced extension name, used as an instance key, is shorthand for one
+instance of that kind with an unspecified interface version. A shorthand
+declaration MUST NOT contain a `kind` member; the key already names the kind.
+Every manifest written before this section used only shorthand keys, and
+keeps its meaning unchanged.
 
-#### 3.3.2 Filesystem inputs
+A free-form instance key MUST match `^[a-z][a-z0-9_]*$` and MUST NOT equal a
+registry name. Its declaration MUST contain a `kind` member naming a registry
+or namespaced binding name. The kind, not the key, selects which features and
+constraints the instance can declare: an instance keyed `chase_site` with
+`"kind": "browser"` uses the same feature and constraint shape as the
+`browser` shorthand.
+
+Every instance key in a manifest MUST be unique. A manifest's JSON text MUST
+NOT repeat an object key anywhere, including an instance key. A JSON parser
+that silently keeps only the last value for a repeated key hides an author or
+generator mistake, and two conforming readers could disagree about which
+value won.
+
+An instance's `interface` member states its interface version, for example
+`browser@1`. It is OPTIONAL. Its absence means an unspecified interface
+version, which is what every shorthand instance meant before this section. A
+stated interface version MUST have the form `<kind>@<version>`, where
+`<kind>` is the instance's kind and `<version>` is a positive integer with no
+leading zero.
+
+This revision defines no behavioral difference between interface versions of
+one kind. `browser@1`, `network@1`, `filesystem@1`, and `desktop_session@1`
+are the only versions in use. A later profile revision can define a kind's
+next version, alongside the compatibility rule a runtime that supports only
+the earlier version follows.
+
+#### 3.3.2 Constraint grammars
+
+A `browser`, `network`, `filesystem`, or `desktop_session` instance declares
+its typed constraints, if any, in a `constraints` object. An instance that
+declares no `constraints` makes no claim about which destinations, paths, or
+secret items it reaches; Section 3.3.13 states how a runtime and an
+owner-facing tool MUST treat that absence.
+
+`browser` and an HTTP(S) `network` host share one grammar for a web origin or
+host: `[scheme://]host[:port]`. `host` is a DNS name, an IPv4 address, or a
+bracketed IPv6 address. The value carries no path, query, fragment, or
+userinfo. `host` is either the exact host or one leading `*.` wildcard label
+followed by at least one more label; a wildcard MUST NOT apply to an IP
+literal.
+
+A manifest MUST state a web origin or host in its canonical form: lowercase;
+the host converted to ASCII by the Unicode IDNA/UTS46 algorithm; the scheme's
+default port (80 for `http`, 443 for `https`) dropped if stated; an IPv6
+address written in its normalized, compressed, lowercase, bracketed form; and
+a single trailing dot, if present, removed. A manifest MUST NOT state a host
+as an IPv4-looking label, such as a decimal, octal, or hexadecimal number,
+unless it is already the exact dotted-quad address. A runtime or validator
+MUST reject a non-canonical IPv4-looking label rather than reinterpret it as
+an address, because DNS resolvers and runtimes disagree about which address a
+non-canonical form names. A publish-time linter MUST reject a web origin or
+host that is not already in this canonical form, so two readers of the same
+manifest never need to normalize it differently.
+
+An omitted scheme matches every scheme the constraint's context allows
+(Section 3.3.3, 3.3.4). An omitted port matches only the matching scheme's own
+default port; it does not mean "any port", unlike a CSP host-source value with
+no port. An explicit port matches exactly that port.
+
+A wildcard host names an unlisted number of subdomains, so a runtime MUST
+re-check a redirect's destination at every hop against the same constraint
+list it checked for the original request, for both `navigate` and `connect`;
+it MUST NOT treat only the first hop of a redirect chain as checked. A
+publish-time linter MUST reject a wildcard whose apex is a public suffix by
+checking the apex against the full Public Suffix List, including its private
+section; a manifest schema validator is not required to carry that list,
+because the list changes independently of this profile. The private section
+matters in practice: a site's essential assets often come from a per-customer
+subdomain of shared hosting, for example a CDN distribution host under
+`cloudfront.net` or an object-storage bucket host under
+`s3.amazonaws.com`. A wildcard one label above that subdomain, such as
+`*.cloudfront.net` or `*.s3.amazonaws.com`, would grant every other AWS
+customer's content on that host, not just the one site the connector targets.
+The PSL lists both domains in its private section for exactly this reason,
+and a publish-time lint against the full list catches this case; an author
+who needs one of these hosts lists the exact per-customer host instead of a
+wildcard.
+
+A destination that resolves to a private or link-local address is denied
+unless the instance declares it, judged on the address the connector or
+browser actually connects to, not on the literal host text. Section 3.3.13
+requires a `rationale` member on an instance that declares this exception,
+alongside any other exceptional grant.
+
+A `network` instance can name a destination through a manifest setup field
+instead of a literal, because some destinations are only known at install
+time (a self-hosted base URL, a CardDAV origin, a Jellyfin server):
+`{"setup_field": "<field name>"}`. This is a typed reference, not string
+interpolation into a constraint string. A runtime MUST resolve a
+`setup_field` reference to one concrete value before the owner approves the
+grant, and MUST show the owner that concrete value, not the field name.
+`{"setup_field": "...", "allow_private": true}` admits a private or
+link-local resolution of that one field without the instance otherwise being
+treated as reaching every private address.
+
+Provisional: a response-derived host (a signed export URL's host, a partition
+host a validation response names) is not yet part of this grammar. The design
+intends a bounded, policy-approved grant tied to the response that named the
+host, never automatic trust in a URL a connector happens to receive. Exact
+member names are not decided; a manifest MUST NOT claim conformance for a
+member that implements this before it is specified.
+
+A `network` instance can also name a non-HTTP endpoint, because forcing a
+protocol such as IMAP into an HTTP-shaped origin would misstate what the
+connector reaches: `scheme://host[:port]`, with the same host canonicalization
+as above, no wildcard, and the scheme stated explicitly (for example
+`imaps://imap.gmail.com`). An endpoint's port MAY be omitted only when its
+scheme has one conventional default port (`http`, `https`, `ws`, `wss`, and
+the common mail, directory, and file-transfer protocols). An endpoint whose
+scheme has no listed default MUST state its port.
+
+#### 3.3.3 Browser constraints
+
+A `browser` instance MAY contain `constraints.navigate` and
+`constraints.connect`, each a non-empty array of unique web hosts in the
+grammar of Section 3.3.2.
+
+```json
+"chase_site": {
+  "kind": "browser",
+  "interface": "browser@1",
+  "required": true,
+  "features": ["page_navigation", "page_input"],
+  "constraints": {
+    "navigate": ["https://secure.chase.com", "https://*.chase.com"],
+    "connect": ["https://*.chase.com", "https://*.chasecdn.com"]
+  }
+}
+```
+
+`navigate` lists the origins the browser may load as a navigable document:
+the top-level page the connector drives, and a frame within it that itself
+loads a document, such as an embedded anti-abuse challenge, a consent
+dialog, or an identity-provider sign-in page. It does not list a resource the
+page merely fetches or renders without navigating to it.
+
+A live capture can show a frame the flow cannot complete without: a CAPTCHA
+challenge the site requires before it accepts a login, or a cookie-consent
+dialog that blocks interaction until the owner responds to it. These frames
+are part of `navigate`, the same as the top-level page, not an optional
+extra. An author who knows a flow depends on such a frame lists its origin.
+A runtime that does not grant a listed, required frame MUST let the
+dependent flow fail visibly; it MUST NOT let the connector silently proceed
+past a login or consent step it could not actually complete.
+
+`connect` lists the hosts any request from the page may reach: subresources
+(scripts, stylesheets, images, fonts), `fetch` and `XMLHttpRequest`, and a
+WebSocket. Because a WebSocket is opened from a document already loaded over
+HTTP(S), `connect` accepts the `ws` and `wss` schemes in addition to `http`
+and `https`; `navigate` accepts only `http` and `https`, because a navigation
+always loads a document. A live capture of a browser connector's traffic
+typically needs both forms: for example `wss://ws.example.com` alongside
+`https://*.example.com`.
+
+A real page loads more than the connector's own requests. A live capture of
+browser connectors in this repository found: a connector's own navigation,
+confined to one or two origins; page subresources served from a content
+delivery network under a wildcard of the site's own domain or a dedicated
+asset domain; and, on one login page, an identity-provider script
+(`accounts.google.com`) loaded unconditionally before the owner chose a
+sign-in method. A per-provider or per-CDN wildcard (`*.example.com`,
+`*.examplecdn.com`) is the natural author form for `connect`, confirmed across
+every capture read for this profile. A third-party script a page loads
+unconditionally, without the owner choosing it, is a `connect` concern: an
+author who can identify it lists it in `connect` like any other host, and a
+runtime MAY block it without failing the run if it is not listed (for example
+an analytics or telemetry endpoint the connector does not need).
+
+A runtime MUST record every blocked `connect` request in the observation data
+behind the effective-authority record (Section 3.3.9), whether or not the
+block fails the run. A runtime MUST NOT let a blocked request silently change
+what the connector collects: if the missing resource would alter the data a
+connector emits, the run MUST fail or the omission MUST be surfaced to the
+run's result, not absorbed as if the request had never been blocked. Whether
+one blocked request is consequential is a judgment the runtime or connector
+author makes; the observability requirement is not conditional on that
+judgment.
+
+Provisional: a one-run grant for the owner's in-session choice of a sign-in
+provider the author cannot enumerate in advance is not yet part of this
+grammar. It applies only to the owner's own navigation to that provider (for
+example clicking "Sign in with Google" during `manual_action`), never to a
+provider script or stylesheet a page loads on its own, which is an ordinary
+`connect` entry and needs no such grant. Exact member names are not decided.
+
+#### 3.3.4 Network constraints
+
+A `network` instance MAY contain `constraints.hosts`, a non-empty array of
+unique entries. Each entry is a web host or non-HTTP endpoint in the grammar
+of Section 3.3.2, or a setup-field reference.
+
+```json
+"self_hosted_api": {
+  "kind": "network",
+  "interface": "network@1",
+  "required": true,
+  "constraints": { "hosts": [{ "setup_field": "base_url" }] }
+}
+```
+
+```json
+"mailbox": {
+  "kind": "network",
+  "required": true,
+  "constraints": { "hosts": ["imaps://imap.gmail.com"] }
+}
+```
+
+A `hosts` entry that states an `http` or `https` scheme, or no scheme, uses
+the web-host grammar (wildcard allowed). Any other explicit scheme uses the
+non-HTTP endpoint grammar (exact host, scheme and, where the scheme has no
+listed default, port required).
+
+#### 3.3.5 Filesystem inputs
 
 A `filesystem` declaration MAY contain `inputs`, the list of local paths the
 connector reads:
@@ -325,7 +532,293 @@ read `inputs`. During the transition:
 - A runtime that finds `import_dir_env_var` and no `inputs` SHOULD treat the
   variable as one `dir` input with `access: "read"`.
 
-`filesystem.inputs` is the initial filesystem input form. A later binding mechanism may describe a binding's local paths as typed instances. If that mechanism arrives, `filesystem.inputs` remains valid as an alias for it: a runtime MUST normalize both forms to one runtime form, a manifest that declares both MUST make them equal, and a runtime MUST reject a manifest whose two declarations conflict. The precedence of `import_dir_env_var` relative to `inputs`, given above, carries over unchanged.
+A filesystem-kind instance's inputs can also be declared at `constraints.inputs`
+(Section 3.3.1), in the same shape as the top-level `inputs` member above.
+`inputs` at the top level of the declaration is an alias for
+`constraints.inputs`: an instance MAY declare either, or both. A runtime MUST
+normalize both forms to one list. A manifest that declares both MUST make them
+equal, compared by `env_var`; a runtime MUST reject a manifest whose two
+declarations disagree. The `import_dir_env_var` precedence given above is
+unchanged: a runtime resolves it against whichever input list results from
+this normalization.
+
+#### 3.3.6 Filesystem outputs and scratch
+
+A `filesystem` instance MAY contain `constraints.outputs`, a non-empty array
+of declared output roots:
+
+```json
+"chase_statements": {
+  "kind": "filesystem",
+  "interface": "filesystem@1",
+  "required": true,
+  "constraints": {
+    "outputs": [
+      { "slot": "scratch", "access": "write" },
+      { "slot": "statements", "access": "write", "durable": true, "overwrite": false, "delete": false }
+    ]
+  }
+}
+```
+
+| Field | Requirement |
+| --- | --- |
+| `slot` | REQUIRED. An author-local name for the output root, matching `^[a-z][a-z0-9_]*$`. |
+| `access` | REQUIRED. `write` is the only v0.1 value. |
+| `overwrite` | OPTIONAL boolean. Whether the connector may overwrite an existing file in this slot. Default false. |
+| `delete` | OPTIONAL boolean. Whether the connector may delete a file in this slot. Default false. |
+| `durable` | OPTIONAL boolean. Whether this slot persists across runs. Default false. |
+
+`scratch` is a reserved slot name. It names the runtime's ephemeral, per-run,
+per-connector output directory. A `scratch` declaration MUST NOT set
+`durable: true`: the runtime provides a fresh scratch directory for each run,
+private to that run, quota-limited, and removed by the runtime when the run
+ends, including after a crash. A connector writes a browser download or an
+intermediate archive extraction to scratch before reading it back through a
+declared filesystem input or extracting it further, never to an ambient
+temporary-directory location it chooses itself.
+
+A non-reserved slot names a durable output root, for example the directory a
+connector's downloaded statements persist in across runs. A runtime MUST
+treat an output root as a tree separate from every input root and every other
+output root: a connector MUST NOT create a link, rename, or otherwise move a
+file across that boundary. `overwrite` and `delete` state rights beyond
+creating and appending to a new file; a runtime MUST NOT grant either right
+to a slot whose declaration omits it.
+
+#### 3.3.7 Desktop session
+
+A `desktop_session` instance MAY contain `constraints.items`, a non-empty
+array of exact secret items and the operations brokered on them:
+
+```json
+"signal_keyring": {
+  "kind": "desktop_session",
+  "required": true,
+  "rationale": "Signal Desktop's SQLCipher key unwraps only through the session-bound OS keyring.",
+  "constraints": {
+    "items": [
+      { "service": "os_keyring", "selector": "signal-desktop-safestorage", "operations": ["unwrap"] }
+    ]
+  }
+}
+```
+
+| Field | Requirement |
+| --- | --- |
+| `service` | REQUIRED non-empty string. The OS facility brokering the item, for example `os_keyring`. |
+| `selector` | REQUIRED non-empty string. An opaque, connector- and OS-specific identifier for the exact secret item. Its meaning is resolved by the runtime's broker, never by the manifest. |
+| `operations` | REQUIRED non-empty array of unique values from `read`, `unwrap`. |
+
+A `desktop_session` instance grants exactly the named items and operations
+through a runtime broker. It MUST NOT grant direct access to the underlying
+secret store, and a runtime MUST NOT present a `desktop_session` grant to the
+owner as access to a whole service. Per-item enforcement differs by platform:
+macOS keychain access control lists can scope access to one item and one
+requesting application; the freedesktop Secret Service on Linux mandates no
+access control once a connector can reach the session bus; Windows DPAPI and
+Credential Manager scope by user, not by application. A runtime on Linux or
+Windows reports a `desktop_session` grant as `recorded` (Section 3.3.10) until
+it proves a stronger isolation, for example running the connector with no
+session-bus access on Linux, or a proven security-context isolation on
+Windows.
+
+#### 3.3.8 Features
+
+A `browser` or `network` declaration MAY contain `features`, an array of
+unique host capability names. Each name belongs to exactly one kind, and a
+declaration MUST only use a name that belongs to its own kind:
+
+| Feature | Kind | Capability the host provides |
+| --- | --- | --- |
+| `page_navigation` | `browser` | Navigate the active page to a URL. |
+| `page_script_evaluation` | `browser` | Run script in the active page context. |
+| `page_content_read` | `browser` | Read rendered page content. |
+| `page_condition_wait` | `browser` | Wait until a condition in the active page becomes true. |
+| `page_input` | `browser` | Interact with the active page: click and type. |
+| `cookie_read` | `browser` | Read the active page's cookie jar. |
+| `page_response_observation` | `browser` | Observe page network responses, including response body content. |
+| `host_download_capture` | `browser` | Capture content downloaded by the active page. |
+| `host_archive_extraction` | `browser` | Extract downloaded archive contents in the host runtime. |
+| `host_archive_entry_chunk_read` | `browser` | Read an extracted archive entry in chunks. |
+| `host_cookie_jar_request` | `browser` | Make an HTTP request from the host runtime using the active page's cookie jar. |
+| `same_origin_page_fetch` | `network` | Fetch same-origin resources from the active page context. |
+| `host_http_request` | `network` | Make an HTTP request from the host runtime outside the page context. |
+
+The names describe host capabilities, not the API of one host. A host
+publishes the set of features it supports for each binding. A runtime that
+provides a binding MUST provide every feature listed in its declaration. If it
+cannot, the binding counts as missing. A declaration without `features` makes
+no claim about specific capabilities. A host that supports only part of a
+binding MUST NOT place a connector whose required declaration for that binding
+omits `features`.
+
+`host_cookie_jar_request` names a host-side HTTP request that carries the
+active browser page's cookies (for example Playwright's page-bound request
+API). It belongs to `browser`, not `network`, because it depends on a live
+browser cookie jar; a connector that also needs independent host-side network
+access declares a separate `network` instance for that.
+
+Not performed in this revision, and noted here only as a planning note: a
+future minor version could move `same_origin_page_fetch` to `browser` through
+a versioned alias, because it names a page-context operation and sits on
+`network` today only because no `browser`-owned equivalent existed when it was
+added. Any such move needs a deprecation alias and a migration path, because a
+mobile host selector keys on the current name. This profile does not perform
+that move; every manifest that declares `same_origin_page_fetch` on `network`
+today remains conforming.
+
+#### 3.3.9 Negotiation and the effective-authority record
+
+Before spawn, a runtime negotiates every binding instance the manifest
+declares and produces an effective-authority record. The record states what
+the runtime actually resolved, not what the manifest asked for; owner display
+and replay read the record, never the manifest, because only the record can
+say what a run actually had.
+
+For each instance, the record states a lifecycle outcome:
+
+| Outcome | Meaning |
+| --- | --- |
+| `granted` | The runtime resolved the instance to a handle. |
+| `unsupported` | The runtime does not implement this kind or interface version. |
+| `denied` | Policy declined to grant the instance. |
+| `unavailable` | The runtime would support the instance, but a required resource is not available in this environment. |
+| `revoked` | A grant that was active is no longer active. |
+| `optional_not_granted` | The instance was not required, and the runtime did not grant it. |
+
+For each binding and each channel within it (for example `browser.navigate`,
+`browser.connect`, `network.hosts`, a `filesystem` input or output slot, a
+`desktop_session` item), the record states a coverage outcome from Section
+3.3.10: `enforced`, `recorded`, or `not_observable`. A binding can mix
+coverage outcomes across its own channels; the record states each
+separately, the same way `systemd-analyze security` reports partial coverage
+per directive rather than one verdict for a whole unit.
+
+The record also carries, for an instance that was granted: the requested and
+the effective constraint values (so a narrower grant than what was declared is
+visible); the mechanism and version that provided the grant; any policy
+exception applied (for example an owner-approved exceptional grant, Section
+3.3.13); and remaining ambient access the handle did not eliminate, when the
+runtime can state it. A runtime MUST emit the record before the connector's
+first possible egress, so nothing the runtime cannot yet vouch for has already
+left. The record is bound to the run and to the policy identity that approved
+it; it does not describe a connector in the abstract.
+
+Before spawn, a runtime MUST fail placement when a required instance's
+lifecycle outcome is not `granted`. Running a connector against a
+`recorded`-only or `not_observable`-only coverage for a required instance
+needs an explicit policy decision; it is not the default. Revocation MUST
+close every handle and connection the revoked instance backed; a runtime MUST
+NOT leave a connection open after the grant that authorized it is revoked.
+
+Provisional: this section states the lifecycle, coverage, and content this
+record MUST carry. The exact member names of the record are not decided.
+
+#### 3.3.10 What `enforced` means
+
+A coverage outcome of `enforced` for one channel is an attestation about that
+channel alone. It is never a claim about a whole binding, and it is never a
+claim about a runtime in general.
+
+A runtime MAY attest `enforced` for a channel only when all of the following
+hold for that channel, for the connector's whole process tree (the connector,
+its browser if any, and every helper process, Section 3.3.11):
+
+- An OS-level forced egress boundary routes every outbound connection,
+  including DNS resolution, through the runtime's own proxy or equivalent
+  control. A direct socket or a UDP packet that bypasses that boundary is
+  denied, not merely unobserved.
+- The connector's and every helper's environment and inherited file
+  descriptors are sealed to what their binding declarations and Section
+  3.3.11 allow.
+- For a `browser` channel, a browser-side guard additionally covers
+  navigation, every frame, every popup, and every redirect hop, DevTools
+  stays inside the runtime and is never exposed to the connector, the browser
+  loads no extension, and the runtime uses one browser profile per connector
+  per binding instance.
+
+A destination the proxy enforces and an origin the browser guard enforces are
+distinct coverage facts; a runtime states them separately rather than
+collapsing them into one claim for the binding. Traffic inside a TLS tunnel
+the runtime already allowed is coverage of reach to the tunnel's endpoint, not
+of the origin reached inside it; a runtime MUST NOT attest `enforced` for an
+inner origin it cannot see.
+
+Until a runtime meets the conditions above for a given channel, that channel's
+coverage outcome MUST be `recorded` (the runtime observed what happened,
+without blocking what it did not allow) or `not_observable` (the runtime
+neither blocked nor observed it). A runtime or any owner-facing tool MUST NOT
+present a `recorded` or `not_observable` channel to the owner as a limit on
+what the connector could do; Section 3.3.13 requires the opposite: that every
+non-`enforced` channel stays visible to the owner as such.
+
+This profile does not itself claim that any runtime meets the conditions
+above today. Declaring a `browser`, `network`, `filesystem`, or
+`desktop_session` constraint in a manifest under this section is a statement
+of intended reach. It becomes an enforced limit only when a specific runtime,
+for a specific channel, proves the conditions above and reports `enforced`
+for a run.
+
+#### 3.3.11 Helpers
+
+A connector can run a helper process (for example an archive exporter or a
+native client library) through `runtime_requirements.external_tools`. A
+helper process MUST run inside the same OS confinement as the connector that
+launched it; a runtime MUST NOT let a helper reach a destination, path, or
+secret item the connector's own bindings do not cover. A helper's
+inter-process communication and file descriptors are restricted to what its
+task needs, not inherited wholesale from the runtime or the connector. A
+helper MUST receive only the environment variables the manifest declares for
+it; a runtime MUST NOT pass its own or the connector's full environment to a
+helper process.
+
+#### 3.3.12 Blob sink
+
+A runtime SHOULD provide connectors a blob sink for uploading collected
+binary content, instead of a bearer credential in the connector's
+environment. A blob sink is bound to one run and one owner; it accepts bytes
+or a verified regular-file handle, never a caller-supplied path or
+destination string; it is upload-only; it is quota-limited; and the runtime
+MAY revoke it before a run ends. A connector that uploads through a blob sink
+holds no credential that outlives the sink or that would let it reach a
+destination the sink does not front.
+
+This profile does not yet define the wire mechanism a connector uses to reach
+a blob sink. Section 7 lists the `BLOB` message as a runtime-specific
+extension outside this profile; a blob sink is the authority model that
+message, or a successor to it, is expected to use once it is specified here.
+
+#### 3.3.13 Risk and display
+
+A connector's declared bindings, constraints, and features set a minimum risk
+classification, derived from the operation performed, any sensitive resource
+reached, the breadth of what is declared, and the coverage outcomes Section
+3.3.9 and 3.3.10 define. Deployment policy MAY raise that classification; it
+MUST NOT lower it below what the declaration implies. Publisher review of a
+connector's code, an owner's approval of a grant, and the runtime's
+containment of a running connector are three separate decisions; none
+substitutes for another.
+
+An owner-facing display of a connector's access MUST show: its effective
+reach (what Section 3.3.9's record says was actually granted, not what the
+manifest requested); the consequential actions available through that reach;
+the stated purpose; and, for every binding and channel, whether its coverage
+outcome is `enforced`, `recorded`, or `not_observable`. It MUST show every
+`recorded` or `not_observable` channel, not only the `enforced` ones; omitting
+a non-`enforced` channel from display would let the owner believe the
+connector is more contained than it is. Breadth comes first in this display:
+an owner evaluates how much a connector can reach before the detail of what
+it does with that reach.
+
+An instance that declares one of this profile's exceptional grants --
+universal network reach, a local or development server exception to the
+private-destination denial (Section 3.3.2), or access to a named sensitive
+resource such as a `desktop_session` item -- MUST carry a `rationale` member
+stating why the grant is needed. A `rationale` is a statement for review and
+display, not a capability; a runtime MUST NOT widen a grant because a
+`rationale` is present, and MUST NOT accept a `rationale` as a substitute for
+the grant actually meeting its declared constraint.
 
 ### 3.4 Human interaction and protocol capabilities
 
@@ -396,7 +889,7 @@ Capability metadata includes `refresh_policy`, `public_listing`, `proven`,
 `cursor_shape`, `availability`, and `coverage_policy`.
 
 `setup.manual_or_upload.import_dir_env_var` is deprecated in favor of
-filesystem inputs (Section 3.3.2).
+filesystem inputs (Section 3.3.5).
 
 These members are not part of portable v0.1 conformance. A runtime MAY support
 them as implementation metadata. Any manifest member that this profile does
@@ -854,7 +1347,7 @@ A conforming runtime:
 10. If it confines filesystem access, makes only the declared filesystem
     inputs visible, read-only when `access` is `read`. If it supports the
     deprecated `import_dir_env_var`, it follows the transition rules in
-    Section 3.3.2.
+    Section 3.3.5.
 
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
