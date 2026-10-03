@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import type { EmittedMessage } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { ConnectorScenario, ScenarioInteraction } from "./format.ts";
@@ -25,7 +26,12 @@ import {
 	UnconsumedInteractionsError,
 } from "./replay.ts";
 import { ScenarioValidationError, validateScenario } from "./validate.ts";
-import type { RawTraceMessage, RunCollector } from "./verify.ts";
+import type {
+	RawTraceMessage,
+	RunCollector,
+	StreamRecordComparison,
+	VerifyFailure,
+} from "./verify.ts";
 import {
 	buildProtocolTrace,
 	TRACE_POLICY,
@@ -360,6 +366,60 @@ test("tampered response body: a mutated recorded response makes the record hash 
 	const hashFailure = result.failures.find((f) => f.kind === "record_hash");
 	assert.ok(hashFailure, "expected a record_hash failure");
 	assert.match(hashFailure?.detail ?? "", /expected sha256/);
+});
+
+test("onStreamMismatch: fires for a record_hash mismatch, carrying the mismatched record's id/op/hashes and the exact projected object that was hashed", async () => {
+	// Same tampering as the record_hash test above — the real replayed record
+	// is {id:"w1", name:"TAMPERED"}, which disagrees with the scenario's
+	// expected hash (computed for the untampered body).
+	const tampered = widgetsInteraction(1, "w1");
+	tampered.response.body = { id: "w1", name: "TAMPERED" };
+	const scenario = toyScenario([tampered]);
+
+	const mismatches: Array<{
+		comparisons: readonly StreamRecordComparison[];
+		failures: readonly VerifyFailure[];
+		runIndex: number;
+		stream: string;
+	}> = [];
+	const result = await verifyScenario(scenario, toyCollector, false, (info) => {
+		mismatches.push(info);
+	});
+
+	assert.equal(result.pass, false);
+	assert.equal(mismatches.length, 1, "expected exactly one mismatching stream");
+	const [mismatch] = mismatches;
+	assert.equal(mismatch?.runIndex, 0);
+	assert.equal(mismatch?.stream, "widgets");
+	assert.ok(
+		mismatch?.failures.some((f) => f.kind === "record_hash"),
+		"the listener's own failures must include the record_hash kind that triggered it",
+	);
+	assert.equal(mismatch?.comparisons.length, 1);
+	const [comparison] = mismatch?.comparisons ?? [];
+	assert.equal(comparison?.id, "w1");
+	assert.equal(comparison?.op, "upsert");
+	assert.notEqual(comparison?.actual_sha256, comparison?.expected_sha256);
+	assert.deepEqual(comparison?.projected, { id: "w1", name: "TAMPERED" });
+	// Round trip: hashing the dumped `projected` value with the SAME canonical
+	// routine verify.ts itself hashes under reproduces `actual_sha256` exactly
+	// — proves `projected` is the literal value that was hashed, not a
+	// reconstruction a dump consumer couldn't actually trust.
+	assert.equal(
+		hashCanonicalJson(comparison?.projected),
+		comparison?.actual_sha256,
+	);
+});
+
+test("onStreamMismatch: never fires when every stream in the run passes", async () => {
+	const scenario = toyScenario([widgetsInteraction(1, "w1")]);
+	const mismatches: unknown[] = [];
+	const result = await verifyScenario(scenario, toyCollector, false, (info) => {
+		mismatches.push(info);
+	});
+
+	assert.equal(result.pass, true);
+	assert.equal(mismatches.length, 0);
 });
 
 test("record data containing `undefined` makes verify throw instead of silently hashing a collision", async () => {

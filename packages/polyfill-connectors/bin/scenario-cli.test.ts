@@ -67,6 +67,7 @@ import {
 	assertNoPostRunSourceMutation,
 	createInactivityWatchdog as createVerifyInactivityWatchdog,
 	parseArgs as parseVerifyArgs,
+	resolveDumpRecordsDir,
 } from "./scenario-verify.ts";
 
 const RECORD_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-record.ts");
@@ -480,6 +481,226 @@ test("scenario-record + scenario-verify: record against a stub connector's loopb
 		assert.doesNotMatch(tamperedVerifyResult.stdout, /recorded_replay: PASS/);
 
 		t.diagnostic(`tampered verify stdout:\n${tamperedVerifyResult.stdout}`);
+	} finally {
+		await stubProvider.close().catch(() => undefined);
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// ─── --dump-records: a failed replay's mismatched records, written for a
+// maintainer to actually look at (the motivating case: a real 1-in-41
+// intermittent reddit replay mismatch whose printed detail line named only
+// two hashes, with no way to see what had changed). ─────────────────────────
+
+test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on failure (hash round-trips from `projected`), honors flag-over-env precedence, enforces 0700/0600 modes, writes nothing on a pass, and leaves the no-flag path unchanged", async (t) => {
+	const stubProvider = await startStubProvider();
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-dump-test-"));
+	const scenarioPath = join(tmpDir, "stub.scenario.json");
+
+	try {
+		const recordResult = runRecordCli(
+			[
+				"scenario-cli-stub-connector",
+				"--entrypoint",
+				STUB_CONNECTOR_PATH,
+				"--out",
+				scenarioPath,
+			],
+			{ PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url },
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		await stubProvider.close();
+
+		const verifyBaseArgs = [
+			"scenario-cli-stub-connector",
+			"--entrypoint",
+			STUB_CONNECTOR_PATH,
+		];
+		const verifyEnv = { PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url };
+
+		// ── Regression anchor: a passing verify with no dump flag/env present,
+		// run twice, to prove the feature is a no-op when unused — no new
+		// "dumped"/"WARNING" lines leak into the default path's stdout. ──
+		const baselineVerify = runVerifyCli(
+			[...verifyBaseArgs, scenarioPath],
+			verifyEnv,
+		);
+		assert.equal(baselineVerify.code, 0);
+		assert.doesNotMatch(baselineVerify.stdout, /dumped \d+ mismatched record/);
+		assert.doesNotMatch(
+			baselineVerify.stdout,
+			/WARNING: dump directory contains collected personal data/,
+		);
+		const regressionVerify = runVerifyCli(
+			[...verifyBaseArgs, scenarioPath],
+			verifyEnv,
+		);
+		assert.equal(
+			regressionVerify.stdout,
+			baselineVerify.stdout,
+			"verify output without --dump-records must be byte-identical run to run",
+		);
+		assert.equal(regressionVerify.code, baselineVerify.code);
+
+		// ── A passing verify WITH --dump-records must still write nothing —
+		// not even the directory. ──
+		const noMismatchDumpDir = join(tmpDir, "dump-no-mismatch");
+		const passWithDump = runVerifyCli(
+			[...verifyBaseArgs, scenarioPath, "--dump-records", noMismatchDumpDir],
+			verifyEnv,
+		);
+		assert.equal(passWithDump.code, 0);
+		assert.equal(
+			existsSync(noMismatchDumpDir),
+			false,
+			"a passing verify must not create the dump directory at all",
+		);
+
+		// ── Tamper run 0's first item (same mechanism as the record_hash
+		// regression test above) so `items` fails record_hash on replay. ──
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		const tamperedPath = join(tmpDir, "stub.tampered.scenario.json");
+		const tampered: ConnectorScenario = JSON.parse(
+			JSON.stringify(scenario),
+		) as ConnectorScenario;
+		const firstInteraction = tampered.runs[0]?.interactions[0];
+		if (
+			!(
+				firstInteraction &&
+				typeof firstInteraction.response.body === "object" &&
+				firstInteraction.response.body
+			)
+		) {
+			throw new Error(
+				"test setup: expected run 0 interaction 0 to have an object body",
+			);
+		}
+		const tamperedBody = firstInteraction.response.body as {
+			items: StubItem[];
+		};
+		const [firstItem] = tamperedBody.items;
+		if (!firstItem) {
+			throw new Error(
+				"test setup: expected at least one item in the tampered page",
+			);
+		}
+		firstItem.value = "TAMPERED-FOR-DUMP";
+		writeFileSync(tamperedPath, JSON.stringify(tampered, null, 2));
+
+		// ── --dump-records on a mismatch: writes exactly the mismatched
+		// record(s), the directory/file modes are 0700/0600, and the hash
+		// round-trips from the dumped `projected` value. ──
+		const flagDumpDir = join(tmpDir, "dump-flag");
+		const flagVerify = runVerifyCli(
+			[...verifyBaseArgs, tamperedPath, "--dump-records", flagDumpDir],
+			verifyEnv,
+		);
+		assert.notEqual(flagVerify.code, 0);
+		assert.match(flagVerify.stdout, /run 0: FAIL/);
+		assert.match(flagVerify.stdout, /dumped \d+ mismatched record\(s\) to /);
+		assert.match(
+			flagVerify.stdout,
+			/WARNING: dump directory contains collected personal data/,
+		);
+
+		const dirMode = statSync(flagDumpDir).mode & 0o777;
+		assert.equal(
+			dirMode,
+			0o700,
+			`dump dir mode expected 0700, got ${dirMode.toString(8)}`,
+		);
+		const dumpFilePath = join(flagDumpDir, "run0-items.json");
+		assert.equal(existsSync(dumpFilePath), true);
+		const fileMode = statSync(dumpFilePath).mode & 0o777;
+		assert.equal(
+			fileMode,
+			0o600,
+			`dump file mode expected 0600, got ${fileMode.toString(8)}`,
+		);
+
+		const dumped = JSON.parse(readFileSync(dumpFilePath, "utf8")) as Array<{
+			actual_sha256: string;
+			expected_sha256: string | null;
+			id: string;
+			op: string;
+			projected: unknown;
+		}>;
+		assert.equal(
+			dumped.length,
+			1,
+			"exactly one record (item-1) actually mismatched by content",
+		);
+		assert.equal(dumped[0]?.id, "item-1");
+		assert.equal(dumped[0]?.op, "upsert");
+		assert.notEqual(dumped[0]?.expected_sha256, dumped[0]?.actual_sha256);
+		assert.equal(
+			hashCanonicalJson(dumped[0]?.projected),
+			dumped[0]?.actual_sha256,
+			"hashing the dumped `projected` value must reproduce the dumped actual_sha256 exactly",
+		);
+
+		// ── PDPP_SCENARIO_DUMP_DIR alone also enables dumping. ──
+		const envDumpDir = join(tmpDir, "dump-env");
+		const envVerify = runVerifyCli([...verifyBaseArgs, tamperedPath], {
+			...verifyEnv,
+			PDPP_SCENARIO_DUMP_DIR: envDumpDir,
+		});
+		assert.notEqual(envVerify.code, 0);
+		assert.equal(
+			existsSync(join(envDumpDir, "run0-items.json")),
+			true,
+			"PDPP_SCENARIO_DUMP_DIR alone must enable dumping",
+		);
+
+		// ── The --dump-records flag wins over the env var when both are set. ──
+		const flagWinsDir = join(tmpDir, "dump-flag-wins");
+		const envLosesDir = join(tmpDir, "dump-env-loses");
+		const precedenceVerify = runVerifyCli(
+			[...verifyBaseArgs, tamperedPath, "--dump-records", flagWinsDir],
+			{ ...verifyEnv, PDPP_SCENARIO_DUMP_DIR: envLosesDir },
+		);
+		assert.notEqual(precedenceVerify.code, 0);
+		assert.equal(
+			existsSync(join(flagWinsDir, "run0-items.json")),
+			true,
+			"the --dump-records flag's directory must receive the dump",
+		);
+		assert.equal(
+			existsSync(envLosesDir),
+			false,
+			"the env var's directory must not be used when --dump-records is also passed",
+		);
+
+		// ── --dump-all-records: every record of the mismatching stream, not
+		// just the mismatched one. ──
+		const dumpAllDir = join(tmpDir, "dump-all");
+		const dumpAllVerify = runVerifyCli(
+			[
+				...verifyBaseArgs,
+				tamperedPath,
+				"--dump-records",
+				dumpAllDir,
+				"--dump-all-records",
+			],
+			verifyEnv,
+		);
+		assert.notEqual(dumpAllVerify.code, 0);
+		const dumpAllRecords = JSON.parse(
+			readFileSync(join(dumpAllDir, "run0-items.json"), "utf8"),
+		) as Array<{ id: string }>;
+		assert.deepEqual(
+			dumpAllRecords.map((r) => r.id),
+			["item-1", "item-2", "item-3"],
+			"--dump-all-records must dump every record of the stream, not just the mismatched one",
+		);
+
+		t.diagnostic(`flag verify stdout:\n${flagVerify.stdout}`);
 	} finally {
 		await stubProvider.close().catch(() => undefined);
 		rmSync(tmpDir, { recursive: true, force: true });
@@ -2407,6 +2628,7 @@ test("assertNoPostRunSourceMutation: detects a source mutation between the pre-f
 	const preflightDeclarationDigest = computeDeclarationDigest(manifestPath);
 	const baseArgs = {
 		connector: "oura",
+		dumpAllRecords: false,
 		requireCaptureSource: false,
 		scenarioPath: "unused",
 		timeoutSeconds: 300,
@@ -3500,6 +3722,48 @@ test("scenario-verify --json is opt-in and carries a path", () => {
 	assert.equal(mixed.connector, "reddit");
 	assert.equal(mixed.scenarioPath, "/tmp/s.json");
 	assert.equal(mixed.jsonPath, "/tmp/claim.json");
+});
+
+test("scenario-verify --dump-records / --dump-all-records: parsed, and default to unset/false", () => {
+	const bare = parseVerifyArgs(["reddit", "/tmp/s.json"]);
+	assert.equal(bare.dumpRecordsDir, undefined);
+	assert.equal(bare.dumpAllRecords, false);
+
+	const withDump = parseVerifyArgs([
+		"reddit",
+		"/tmp/s.json",
+		"--dump-records",
+		"/tmp/dumps",
+		"--dump-all-records",
+	]);
+	assert.equal(withDump.dumpRecordsDir, "/tmp/dumps");
+	assert.equal(withDump.dumpAllRecords, true);
+});
+
+test("resolveDumpRecordsDir: the --dump-records flag wins over PDPP_SCENARIO_DUMP_DIR, and either alone is sufficient", () => {
+	assert.equal(
+		resolveDumpRecordsDir(
+			{ dumpRecordsDir: "/flag" },
+			{ PDPP_SCENARIO_DUMP_DIR: "/env" },
+		),
+		"/flag",
+		"the flag must win when both are set",
+	);
+	assert.equal(
+		resolveDumpRecordsDir({}, { PDPP_SCENARIO_DUMP_DIR: "/env" }),
+		"/env",
+		"the env var alone must be sufficient",
+	);
+	assert.equal(
+		resolveDumpRecordsDir({ dumpRecordsDir: "/flag" }, {}),
+		"/flag",
+		"the flag alone must be sufficient",
+	);
+	assert.equal(
+		resolveDumpRecordsDir({}, {}),
+		undefined,
+		"neither set means dumping is off",
+	);
 });
 
 // ─── Replay subprocess env: Playwright cache path forced, headless forced,
