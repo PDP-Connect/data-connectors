@@ -42,6 +42,25 @@
  * this CLI drives the exact same connector code as a real subprocess), so a
  * fixed total-duration kill was just as wrong here.
  *
+ * `--dump-records <dir>` (also `PDPP_SCENARIO_DUMP_DIR=<dir>`; the flag wins
+ * when both are set) writes the mismatched records of every FAILING stream to
+ * `<dir>/run<N>-<stream>.json` — a `record_hash` failure's printed `detail`
+ * names only the two hex digests, not what changed, which made a real
+ * intermittent reddit replay mismatch undiagnosable. Each entry is `{id, op,
+ * expected_sha256, actual_sha256, projected}`, where `projected` is the exact
+ * object that was hashed (after `exclude_keys` removal and canonicalization)
+ * — a scenario stores only expected HASHES, never record bodies, so the
+ * expected content itself can never be shown; diff `projected` against a dump
+ * from a passing replay, or re-record the scenario. `--dump-all-records`
+ * additionally dumps every record of a mismatching stream, not just the
+ * mismatched ones (for diffing two full replays). Writes NOTHING when there
+ * is no mismatch (not even the directory). Dump files are personal data
+ * pulled from a real replayed response: the directory is created mode 0700
+ * and every file mode 0600, and a WARNING line is printed whenever anything
+ * is written — never commit or share a dump. This CLI never invents its own
+ * dump path; it only ever writes to the directory the caller explicitly
+ * named.
+ *
  * Exit code: 0 when every run passes; non-zero when any run fails (prints
  * the structured failure list `verifyScenario` returns) or the scenario
  * file/connector can't be resolved at all.
@@ -77,7 +96,14 @@
  * scrub pass).
  */
 
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "@pdpp/collector-runtime";
@@ -144,6 +170,7 @@ import {
 import type {
 	RawTraceMessage,
 	RunCollectorEmit,
+	StreamRecordComparison,
 	VerifyFailure,
 	VerifyResult,
 } from "../src/scenario/verify.ts";
@@ -161,6 +188,19 @@ dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 
 export interface CliArgs {
 	connector: string;
+	/** `--dump-all-records`: with dumping active (`dumpRecordsDir` resolved —
+	 *  see `resolveDumpRecordsDir`), dump every record of a mismatching stream,
+	 *  not just the mismatched ones. False by default: the common case (a
+	 *  single mismatched record) does not need every sibling record repeated
+	 *  alongside it. */
+	dumpAllRecords: boolean;
+	/** `--dump-records <dir>`: on a mismatch, write the mismatched records of
+	 *  every failing stream to `<dir>/run<N>-<stream>.json` — see this file's
+	 *  module doc comment. `undefined` here does not necessarily mean dumping
+	 *  is off: `PDPP_SCENARIO_DUMP_DIR` can still enable it — resolve the
+	 *  effective directory via `resolveDumpRecordsDir`, never this field
+	 *  directly. */
+	dumpRecordsDir?: string;
 	entrypoint?: string;
 	/** `--json <path>`: also write the claim decision as a machine-readable
 	 *  record, for a CI gate or a PR comment to consume. The human stdout
@@ -179,12 +219,42 @@ export interface CliArgs {
 	timeoutSeconds: number;
 }
 
+/**
+ * The effective `--dump-records` directory: the flag wins when both the flag
+ * and `PDPP_SCENARIO_DUMP_DIR` are set — see this file's module doc comment.
+ * `undefined` means dumping is off entirely (no flag, no env var); callers
+ * must gate all dump behavior on this, never on `args.dumpRecordsDir` alone.
+ * A pure function of its two inputs (not reading `process.env` itself) so it
+ * is trivially unit-testable without mutating global state.
+ */
+export function resolveDumpRecordsDir(
+	args: Pick<CliArgs, "dumpRecordsDir">,
+	env: { PDPP_SCENARIO_DUMP_DIR?: string | undefined },
+): string | undefined {
+	return args.dumpRecordsDir ?? env.PDPP_SCENARIO_DUMP_DIR ?? undefined;
+}
+
 function usageAndExit(code: number): never {
 	process.stderr.write(
-		"Usage: scenario-verify <connector> <scenario-path> [--require-capture-source] [--timeout <seconds>]\n",
+		"Usage: scenario-verify <connector> <scenario-path> [--require-capture-source] " +
+			"[--timeout <seconds>] [--dump-records <dir>] [--dump-all-records]\n",
 	);
 	process.stderr.write(
 		`Known connectors: ${KNOWN_CONNECTOR_NAMES.join(", ")}\n`,
+	);
+	process.stderr.write(
+		"--dump-records <dir> (also PDPP_SCENARIO_DUMP_DIR=<dir>; the flag wins over the env var):\n" +
+			"  on a mismatch, write the mismatched records of each failing stream to\n" +
+			"  <dir>/run<N>-<stream>.json, each entry {id, op, expected_sha256,\n" +
+			"  actual_sha256, projected}. A scenario stores only expected hashes, not\n" +
+			"  record bodies, so expected content can't be shown directly - diff\n" +
+			"  `projected` against a dump from a passing replay, or re-record the\n" +
+			"  scenario. Writes nothing when there is no mismatch. Dump files are\n" +
+			"  personal data: directory mode 0700, file mode 0600 - never commit or\n" +
+			"  share them.\n" +
+			"--dump-all-records: with dumping active, also dump every record of a\n" +
+			"  mismatching stream, not just the mismatched ones (for diffing two\n" +
+			"  replays).\n",
 	);
 	process.exit(code);
 }
@@ -224,6 +294,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 	let requireCaptureSource = false;
 	let jsonPath: string | undefined;
 	let timeoutSeconds = DEFAULT_INACTIVITY_WINDOW_SECONDS;
+	let dumpRecordsDir: string | undefined;
+	let dumpAllRecords = false;
 	let i = 0;
 	while (i < argv.length) {
 		const arg = argv[i];
@@ -254,6 +326,19 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 			({ timeoutSeconds, nextIndex: i } = consumeTimeoutFlag(argv, i));
 			continue;
 		}
+		if (arg === "--dump-records") {
+			const value = argv[i];
+			i += 1;
+			if (!value) {
+				usageAndExit(2);
+			}
+			dumpRecordsDir = value;
+			continue;
+		}
+		if (arg === "--dump-all-records") {
+			dumpAllRecords = true;
+			continue;
+		}
 		if (arg && !arg.startsWith("--") && !connector) {
 			connector = arg;
 			continue;
@@ -272,8 +357,10 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		scenarioPath,
 		requireCaptureSource,
 		timeoutSeconds,
+		dumpAllRecords,
 		...(entrypoint ? { entrypoint } : {}),
 		...(jsonPath ? { jsonPath } : {}),
+		...(dumpRecordsDir ? { dumpRecordsDir } : {}),
 	};
 }
 
@@ -1495,6 +1582,82 @@ function printFailures(failures: readonly VerifyFailure[]): void {
 	}
 }
 
+/**
+ * Writes `<dumpDir>/run<N>-<stream>.json` for every stream `verifyScenario`
+ * reported via its `onStreamMismatch` listener (src/scenario/verify.ts) —
+ * see this file's module doc comment for the full `--dump-records`/
+ * `--dump-all-records` contract. `dumped.projected` is the exact value
+ * `verifyStream` hashed to get `actual_sha256` (`projectRecordForComparison`
+ * output — `exclude_keys` already removed, canonical-JSON-ready), so
+ * `hashCanonicalJson(dumped.projected) === dumped.actual_sha256` always
+ * holds; that round trip is what lets a maintainer trust the dump actually
+ * reproduces what failed, rather than a reconstruction that might not match.
+ *
+ * Writes NOTHING — not even the directory — when no stream in `mismatches`
+ * has an entry to dump (either `mismatches` is empty, or `dumpAllRecords` is
+ * false and every stream's hashes happen to already agree despite a count/ids
+ * failure — e.g. a purely-missing trailing record has nothing to project).
+ * `dumpDir` is always the caller's own explicit `--dump-records`/
+ * `PDPP_SCENARIO_DUMP_DIR` value (`resolveDumpRecordsDir`) — this function
+ * never invents a path, so it can never write inside the repo unless the
+ * caller explicitly pointed it there.
+ *
+ * Dump files are personal data pulled from a real (if replayed) provider
+ * response: the directory is created mode 0700 and every file mode 0600 —
+ * `chmodSync` after each create because `mkdirSync`/`writeFileSync`'s own
+ * `mode` option is still subject to the process umask, which could otherwise
+ * leave either more permissive than intended regardless of the requested
+ * mode.
+ */
+function writeMismatchDumps(
+	dumpDir: string,
+	dumpAllRecords: boolean,
+	mismatches: readonly {
+		comparisons: readonly StreamRecordComparison[];
+		runIndex: number;
+		stream: string;
+	}[],
+): void {
+	let dirCreated = false;
+	for (const { runIndex, stream, comparisons } of mismatches) {
+		const records = dumpAllRecords
+			? comparisons
+			: comparisons.filter((c) => c.actual_sha256 !== c.expected_sha256);
+		if (records.length === 0) {
+			continue;
+		}
+		if (!dirCreated) {
+			mkdirSync(dumpDir, { recursive: true, mode: 0o700 });
+			chmodSync(dumpDir, 0o700);
+			dirCreated = true;
+		}
+		const filePath = join(dumpDir, `run${String(runIndex)}-${stream}.json`);
+		const payload = records.map((c) => ({
+			id: c.id,
+			op: c.op,
+			// `null`, not an omitted key: an actual record beyond the scenario's
+			// expected length has no expected hash at all — a fixed-shape literal
+			// is less surprising for a consumer to parse than a key that's
+			// sometimes present and sometimes not.
+			expected_sha256: c.expected_sha256 ?? null,
+			actual_sha256: c.actual_sha256,
+			projected: c.projected,
+		}));
+		writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
+			mode: 0o600,
+		});
+		chmodSync(filePath, 0o600);
+		process.stdout.write(
+			`  dumped ${String(records.length)} mismatched record(s) to ${filePath}\n`,
+		);
+	}
+	if (dirCreated) {
+		process.stdout.write(
+			"  WARNING: dump directory contains collected personal data - do not commit or share it\n",
+		);
+	}
+}
+
 /** Every stream name declared in a manifest's `streams` array, read
  *  defensively (a manifest is external JSON, not a type-checked value). */
 function declaredStreamNamesFromManifest(
@@ -2073,12 +2236,27 @@ async function main(): Promise<void> {
 		}
 	};
 
+	// `--dump-records`/`PDPP_SCENARIO_DUMP_DIR` (see this file's module doc
+	// comment): resolved once up front so the whole feature is a no-op —
+	// `onStreamMismatch` stays `undefined`, `verifyScenario` behaves exactly as
+	// it did before this option existed — whenever neither is set, rather than
+	// collecting comparisons that are never written anywhere.
+	const dumpRecordsDir = resolveDumpRecordsDir(args, process.env);
+	const streamMismatches: Array<{
+		comparisons: readonly StreamRecordComparison[];
+		runIndex: number;
+		stream: string;
+	}> = [];
+
 	let result: VerifyResult;
 	try {
 		result = await verifyScenario(
 			scenario,
 			runCollector,
 			filesystemInput !== undefined,
+			dumpRecordsDir === undefined
+				? undefined
+				: (info) => streamMismatches.push(info),
 		);
 	} catch (err) {
 		const message =
@@ -2110,6 +2288,10 @@ async function main(): Promise<void> {
 		if (runFailures.length > 0) {
 			printFailures(runFailures);
 		}
+	}
+
+	if (dumpRecordsDir !== undefined) {
+		writeMismatchDumps(dumpRecordsDir, args.dumpAllRecords, streamMismatches);
 	}
 
 	const userInteractionCount = scenario.runs.reduce(

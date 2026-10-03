@@ -1574,6 +1574,51 @@ export interface VerifyFailure {
 	stream?: string;
 }
 
+/**
+ * One actual record's hash-comparison outcome from `verifyStream`'s
+ * `record_hash` loop — threaded out via `StreamMismatchListener` purely so a
+ * caller (`bin/scenario-verify.ts`'s `--dump-records`) can recover what a
+ * mismatched record actually hashed to, since a `record_hash` `VerifyFailure`'s
+ * `detail` string names only the two hex digests, not the record itself. Not
+ * a new comparison — `actual_sha256`/`expected_sha256` are exactly the two
+ * values `verifyStream` already computes; this type just carries them (plus
+ * the record's identity and the exact object that produced `actual_sha256`)
+ * out instead of discarding them once the pass/fail verdict is taken.
+ */
+export interface StreamRecordComparison {
+	actual_sha256: string;
+	/** `undefined` when this run emitted more records than the scenario
+	 *  declared — there is no expected hash at this index at all. */
+	expected_sha256: string | undefined;
+	id: string;
+	op: "upsert" | "delete";
+	/** The exact value `hashRecordDataStrict` hashed to produce
+	 *  `actual_sha256` — `data` after `exclude_keys` removal
+	 *  (`projectRecordForComparison`) and canonical-JSON ordering. A caller
+	 *  that hashes THIS value with the same canonical-JSON routine always
+	 *  reproduces `actual_sha256` exactly — see `StreamRecordComparison`'s own
+	 *  doc comment. */
+	projected: unknown;
+}
+
+/**
+ * Notified by `verifyRun` once per stream that had at least one
+ * `record_hash`/`count`/`ids` failure (the three kinds `verifyStream`'s
+ * record-comparison loop can produce — `record_op_mismatch` is deliberately
+ * excluded: an op-only mismatch has nothing to usefully diff via a content
+ * dump, since every record_hash in that stream still matched). `comparisons`
+ * covers EVERY actual record of the stream (not just the mismatched ones) —
+ * a caller that wants every record of a mismatching stream (e.g. to diff two
+ * replays) reads all of `comparisons`; a caller that wants only what
+ * disagreed filters on `actual_sha256 !== expected_sha256`.
+ */
+export type StreamMismatchListener = (info: {
+	comparisons: readonly StreamRecordComparison[];
+	failures: readonly VerifyFailure[];
+	runIndex: number;
+	stream: string;
+}) => void;
+
 export interface VerifyMetrics {
 	interactionCount: number;
 	normalizerCount: number;
@@ -1667,7 +1712,7 @@ function verifyStream(
 	 *  `scenario-record` hashed under, or every record mismatches — see
 	 *  `record-comparison-fields.ts`. */
 	excludedFields: readonly string[],
-): VerifyFailure[] {
+): { comparisons: StreamRecordComparison[]; failures: VerifyFailure[] } {
 	const failures: VerifyFailure[] = [];
 
 	if (actual.length !== expected.count) {
@@ -1689,9 +1734,17 @@ function verifyStream(
 		});
 	}
 
-	const actualHashes = actual.map((r) =>
-		hashRecordDataStrict(projectRecordForComparison(r.data, excludedFields)),
+	// Projected (exclude_keys-removed) per actual record, kept alongside its
+	// hash so `StreamRecordComparison` can hand a caller the EXACT value that
+	// was hashed — not just the hash itself — without recomputing it a second
+	// time under a possibly-different exclusion set.
+	const actualProjections = actual.map((r) =>
+		projectRecordForComparison(r.data, excludedFields),
 	);
+	const actualHashes = actualProjections.map((projected) =>
+		hashRecordDataStrict(projected),
+	);
+	const comparisons: StreamRecordComparison[] = [];
 	for (
 		let i = 0;
 		i < Math.max(actualHashes.length, expected.record_sha256s.length);
@@ -1707,11 +1760,24 @@ function verifyStream(
 				detail: `record[${String(i)}] (id=${actualIds[i] ?? "?"}) expected sha256 ${String(expectedHash)}, got ${String(actualHash)}`,
 			});
 		}
+		// Only a record this run actually emitted has an id/op/projected value
+		// to report — an expected record this run never produced (actual
+		// shorter than expected) has nothing to dump.
+		const actualRecord = actual[i];
+		if (actualHash !== undefined && actualRecord !== undefined) {
+			comparisons.push({
+				id: actualRecord.id,
+				op: actualRecord.op,
+				actual_sha256: actualHash,
+				expected_sha256: expectedHash,
+				projected: actualProjections[i],
+			});
+		}
 	}
 
 	failures.push(...verifyStreamOps(runIndex, stream, actual, expected));
 
-	return failures;
+	return { failures, comparisons };
 }
 
 /**
@@ -1827,6 +1893,7 @@ async function verifyRun(
 	runCollector: RunCollector,
 	actualFinalStateByRun: Map<number, unknown>,
 	filesystemInputResolved: boolean,
+	onStreamMismatch: StreamMismatchListener | undefined,
 ): Promise<VerifyRunResult> {
 	const failures: VerifyFailure[] = [];
 	const run = scenario.runs[runIndex] as ScenarioRun;
@@ -1992,15 +2059,32 @@ async function verifyRun(
 	}
 
 	for (const [stream, expected] of Object.entries(run.expected.records)) {
-		failures.push(
-			...verifyStream(
+		const streamResult = verifyStream(
+			runIndex,
+			stream,
+			byStream.get(stream) ?? [],
+			expected,
+			excludedComparisonFields.get(stream) ?? [],
+		);
+		failures.push(...streamResult.failures);
+		// See `StreamMismatchListener`'s doc comment for why record_op_mismatch
+		// alone does not qualify — this is the same "same code path" trio
+		// (record_hash/count/ids) that reads an actual record's content, which
+		// is the only case a dump can usefully show anything for.
+		if (
+			onStreamMismatch &&
+			streamResult.failures.some(
+				(f) =>
+					f.kind === "record_hash" || f.kind === "count" || f.kind === "ids",
+			)
+		) {
+			onStreamMismatch({
 				runIndex,
 				stream,
-				byStream.get(stream) ?? [],
-				expected,
-				excludedComparisonFields.get(stream) ?? [],
-			),
-		);
+				failures: streamResult.failures,
+				comparisons: streamResult.comparisons,
+			});
+		}
 	}
 
 	if (
@@ -2050,6 +2134,13 @@ export async function verifyScenario(
 	// collectors, every recorded-http/recorded-browser scenario) is
 	// unaffected.
 	filesystemInputResolved = false,
+	// ADDITIVE, optional: notified once per stream that had at least one
+	// record_hash/count/ids failure — see `StreamMismatchListener`'s doc
+	// comment. `undefined` for every existing caller (every test in
+	// scenario.test.ts, every connector spike collector); `bin/scenario-
+	// verify.ts`'s `--dump-records`/`PDPP_SCENARIO_DUMP_DIR` is the only
+	// current consumer.
+	onStreamMismatch?: StreamMismatchListener,
 ): Promise<VerifyResult> {
 	const actualFinalStateByRun = new Map<number, unknown>();
 	const interactionCount = scenario.runs.reduce(
@@ -2083,6 +2174,7 @@ export async function verifyScenario(
 						runCollector,
 						actualFinalStateByRun,
 						filesystemInputResolved,
+						onStreamMismatch,
 					);
 					return {
 						failures: [...acc.failures, ...runResult.failures],
