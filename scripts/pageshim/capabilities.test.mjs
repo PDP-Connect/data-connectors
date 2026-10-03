@@ -37,6 +37,10 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 		"host_download_capture",
 		"host_archive_extraction",
 		"host_archive_entry_chunk_read",
+		"page_input",
+		"cookie_read",
+		"page_response_observation",
+		"host_cookie_jar_request",
 	];
 	const catalogSchema = JSON.parse(
 		readFileSync(new URL("../../schemas/connector-catalog.schema.json", import.meta.url), "utf8"),
@@ -62,6 +66,12 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 	const manifestAjv = new Ajv2020({ strict: false, validateFormats: false });
 	const validateManifest = manifestAjv.compile(manifestSchema);
 	const connectorsDirectory = fileURLToPath(new URL("../../connectors/", import.meta.url));
+	// Collection Profile Section 3.3.8's one-providing-kind rule is the target
+	// shape; host_http_request is a named legacy exception valid on both
+	// browser and network (schema.$defs.legacyBrowserFeature), because
+	// github_browser and strava_browser already declare it on both and this
+	// file's own PAGE_SHIM_BINDING_FEATURES map already supports it on both.
+	// So every manifest, including those two, validates here with no skip.
 	for (const name of readdirSync(connectorsDirectory)) {
 		const manifestPath = `${connectorsDirectory}/${name}/manifest.json`;
 		if (!existsSync(manifestPath)) continue;
