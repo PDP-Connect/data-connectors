@@ -262,10 +262,12 @@ test("normalizeFilesystemInputs: both forms present, same entries in a different
   assert.deepEqual(normalizeFilesystemInputs({ inputs: topLevel, constraints: { inputs: nested } }), topLevel);
 });
 
-test("hostMatchesWildcardApex: matches exactly one additional label, not the apex, not two or more labels", () => {
-  assert.equal(hostMatchesWildcardApex("chase.com", "secure.chase.com"), true);
-  assert.equal(hostMatchesWildcardApex("chase.com", "chase.com"), false, "the bare apex is not matched");
-  assert.equal(hostMatchesWildcardApex("chase.com", "a.b.chase.com"), false, "two additional labels is not matched");
-  assert.equal(hostMatchesWildcardApex("chase.com", "evilchase.com"), false, "a label boundary is required, not just a string suffix");
-  assert.equal(hostMatchesWildcardApex("chase.com", "chase.com.evil.com"), false);
+test("hostMatchesWildcardApex: matches one or more leftmost labels (CSP host-source convention), never the bare apex", () => {
+  assert.equal(hostMatchesWildcardApex("example.com", "a.example.com"), true, "one label matches");
+  assert.equal(hostMatchesWildcardApex("example.com", "a.b.example.com"), true, "two or more labels still match");
+  assert.equal(hostMatchesWildcardApex("example.com", "example.com"), false, "the bare apex is not matched");
+  assert.equal(hostMatchesWildcardApex("example.com", "badexample.com"), false, "a label boundary is required, not just a string suffix");
+  assert.equal(hostMatchesWildcardApex("example.com", "example.com.evil.com"), false);
+  // Real capture evidence: *.redditmedia.com must cover a second-level label.
+  assert.equal(hostMatchesWildcardApex("redditmedia.com", "b.thumbs.redditmedia.com"), true);
 });

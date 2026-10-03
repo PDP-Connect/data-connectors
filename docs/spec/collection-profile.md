@@ -276,13 +276,17 @@ userinfo. `host` is either the exact host or one leading `*.` wildcard label
 followed by at least one more label; a wildcard MUST NOT apply to an IP
 literal.
 
-A wildcard matches exactly one additional label, never the bare apex and
-never two or more additional labels: `*.chase.com` matches
-`secure.chase.com`, but it matches neither `chase.com` itself nor
-`a.b.chase.com`. The design note does not fix a wildcard's matching depth;
-this profile picks the narrowest reading, the same depth a single-label TLS
-certificate wildcard covers, rather than the unbounded depth some other
-systems (for example CSP host-source wildcards) allow.
+A wildcard matches one or more leftmost labels prepended to its apex, at any
+depth, and never the bare apex itself: `*.chase.com` matches
+`secure.chase.com` and `a.b.chase.com`, but not `chase.com`. This follows
+the CSP host-source convention, the same reduction the confidence pass behind
+this grammar found across every surveyed wildcard syntax (Section 3.3.2's
+evidence base). An author who also needs the bare apex reachable lists it as
+its own separate entry; the wildcard does not imply it. The single leading
+`*.` label in the grammar above is this profile's wildcard SYNTAX; it does
+not bound the MATCHING depth, which real traffic needs: a live capture for
+this profile loaded `b.thumbs.redditmedia.com`, two labels under
+`redditmedia.com`, which `*.redditmedia.com` must cover.
 `schemas/connector-binding-grammar.mjs#hostMatchesWildcardApex` is the
 reference implementation.
 
@@ -368,7 +372,9 @@ scheme is one of the following, which this profile treats as having one
 conventional default port: `imap` (143), `imaps` (993), `pop3` (110),
 `pop3s` (995), `smtp` (25), `smtps` (465), `submission` (587), `ldap` (389),
 `ldaps` (636), `ftp` (21), `ftps` (990). An endpoint whose scheme is not in
-that list MUST state its port.
+that list MUST state its port. A later revision may admit a host-side
+WebSocket endpoint distinct from `browser.connect`, if a connector needs one
+that does not go through a page; this revision does not define one.
 
 #### 3.3.3 Browser constraints
 

@@ -281,14 +281,19 @@ export function isCanonicalWebHost(raw, options) {
  * Whether `candidateHost` (already canonical: lowercase, IDNA ASCII, no
  * trailing dot) is matched by the wildcard apex `apex` (the canonical host
  * text after a leading `*.`, for example `"chase.com"` from
- * `"*.chase.com"`). Section 3.3.2's rule, chosen because the design note does
- * not fix wildcard depth: a wildcard matches exactly one additional label,
- * the same depth a single-label TLS certificate wildcard covers. It does
- * NOT match the bare apex itself, and it does NOT match two or more
- * additional labels.
+ * `"*.chase.com"`). Section 3.3.2's rule follows the CSP host-source
+ * convention: a wildcard matches one or more leftmost labels prepended to
+ * the apex, at any depth, and never the bare apex itself, which an author
+ * lists as its own separate entry when it also needs to be reachable. A
+ * single leading `*.` label is this grammar's SYNTAX (Section 3.3.2); it
+ * does not bound the MATCHING depth, which real captures need: the reddit
+ * capture loaded `b.thumbs.redditmedia.com`, two labels under
+ * `redditmedia.com`, which `*.redditmedia.com` must cover.
  *
- * Examples for apex `"chase.com"`: matches `"secure.chase.com"`; does not
- * match `"chase.com"` itself; does not match `"a.b.chase.com"`.
+ * Examples for apex `"chase.com"`: matches `"secure.chase.com"` and
+ * `"a.b.chase.com"`; does not match `"chase.com"` itself; does not match
+ * `"evilchase.com"` (a label boundary is required, not just a string
+ * suffix).
  *
  * @param {string} apex
  * @param {string} candidateHost
@@ -298,7 +303,7 @@ export function hostMatchesWildcardApex(apex, candidateHost) {
   const suffix = `.${apex}`;
   if (!candidateHost.endsWith(suffix)) return false;
   const prefix = candidateHost.slice(0, candidateHost.length - suffix.length);
-  return prefix.length > 0 && !prefix.includes(".");
+  return prefix.length > 0;
 }
 
 /**
