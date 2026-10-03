@@ -673,8 +673,8 @@ export const connectorManifestSchema = {
     },
     "endpointString": {
       "type": "string",
-      "description": "Canonical scheme://host[:port] for a non-HTTP network endpoint, for example IMAP (Section 3.3.4): scheme required, no wildcard, otherwise the same host canonicalization as webHostString. schemas/connector-binding-grammar.mjs#canonicalizeEndpoint is the reference implementation.",
-      "pattern": "^(?!https?://)[a-z][a-z0-9+.-]*://((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[[0-9a-f:]+\\]|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?$"
+      "description": "Canonical scheme://host[:port] for a non-HTTP, non-WebSocket network endpoint, for example IMAP (Section 3.3.4): scheme required, no wildcard, otherwise the same host canonicalization as webHostString. ws/wss are reserved for browser.connect (Section 3.3.3) and are not valid here. schemas/connector-binding-grammar.mjs#canonicalizeEndpoint is the reference implementation.",
+      "pattern": "^(?!(https?|wss?)://)[a-z][a-z0-9+.-]*://((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[[0-9a-f:]+\\]|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?$"
     },
     "filesystemConstraints": {
       "type": "object",
