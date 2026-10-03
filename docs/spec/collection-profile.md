@@ -389,19 +389,17 @@ always loads a document. A live capture of a browser connector's traffic
 typically needs both forms: for example `wss://ws.example.com` alongside
 `https://*.example.com`.
 
-A real page loads more than the connector's own requests. A live capture of
-browser connectors in this repository found: a connector's own navigation,
-confined to one or two origins; page subresources served from a content
-delivery network under a wildcard of the site's own domain or a dedicated
-asset domain; and, on one login page, an identity-provider script
-(`accounts.google.com`) loaded unconditionally before the owner chose a
-sign-in method. A per-provider or per-CDN wildcard (`*.example.com`,
-`*.examplecdn.com`) is the natural author form for `connect`, confirmed across
-every capture read for this profile. A third-party script a page loads
-unconditionally, without the owner choosing it, is a `connect` concern: an
-author who can identify it lists it in `connect` like any other host, and a
-runtime MAY block it without failing the run if it is not listed (for example
-an analytics or telemetry endpoint the connector does not need).
+A page's own subresources and third-party scripts reach hosts beyond the
+connector's own navigation: a content delivery network under the site's own
+domain or a dedicated asset domain, and a provider script a page loads
+unconditionally before the owner makes any choice. `connect` lists are
+therefore normally wider than `navigate`, and a per-site or per-CDN wildcard
+(`*.example.com`, `*.examplecdn.com`) is the expected author form. A
+third-party script a page loads unconditionally, without the owner choosing
+it, is a `connect` concern: an author who can identify it lists it in
+`connect` like any other host, and a runtime MAY block it without failing the
+run if it is not listed (for example an analytics or telemetry endpoint the
+connector does not need).
 
 A runtime MUST record every blocked `connect` request in the observation data
 behind the effective-authority record (Section 3.3.9), whether or not the
@@ -536,11 +534,14 @@ A filesystem-kind instance's inputs can also be declared at `constraints.inputs`
 (Section 3.3.1), in the same shape as the top-level `inputs` member above.
 `inputs` at the top level of the declaration is an alias for
 `constraints.inputs`: an instance MAY declare either, or both. A runtime MUST
-normalize both forms to one list. A manifest that declares both MUST make them
-equal, compared by `env_var`; a runtime MUST reject a manifest whose two
-declarations disagree. The `import_dir_env_var` precedence given above is
-unchanged: a runtime resolves it against whichever input list results from
-this normalization.
+normalize both forms to one list. A manifest that declares both MUST make the
+two lists equal as sets of whole input entries: matching `env_var` alone is
+not enough, because two entries with the same `env_var` but a different
+`kind`, `access`, or `accepted_extensions` describe different inputs. A
+runtime MUST reject a manifest whose two declarations disagree on any member
+of an entry. The `import_dir_env_var` precedence given above is unchanged: a
+runtime resolves it against whichever input list results from this
+normalization.
 
 #### 3.3.6 Filesystem outputs and scratch
 
@@ -626,8 +627,9 @@ Windows.
 #### 3.3.8 Features
 
 A `browser` or `network` declaration MAY contain `features`, an array of
-unique host capability names. Each name belongs to exactly one kind, and a
-declaration MUST only use a name that belongs to its own kind:
+unique host capability names. The target rule is that each name belongs to
+exactly one kind, and a declaration uses a name only on its own kind. Two
+placements predate this rule and stay valid as named legacy exceptions:
 
 | Feature | Kind | Capability the host provides |
 | --- | --- | --- |
@@ -643,7 +645,7 @@ declaration MUST only use a name that belongs to its own kind:
 | `host_archive_entry_chunk_read` | `browser` | Read an extracted archive entry in chunks. |
 | `host_cookie_jar_request` | `browser` | Make an HTTP request from the host runtime using the active page's cookie jar. |
 | `same_origin_page_fetch` | `network` | Fetch same-origin resources from the active page context. |
-| `host_http_request` | `network` | Make an HTTP request from the host runtime outside the page context. |
+| `host_http_request` | `network`; legacy also `browser` | Make an HTTP request from the host runtime outside the page context. |
 
 The names describe host capabilities, not the API of one host. A host
 publishes the set of features it supports for each binding. A runtime that
@@ -659,14 +661,18 @@ API). It belongs to `browser`, not `network`, because it depends on a live
 browser cookie jar; a connector that also needs independent host-side network
 access declares a separate `network` instance for that.
 
-Not performed in this revision, and noted here only as a planning note: a
-future minor version could move `same_origin_page_fetch` to `browser` through
-a versioned alias, because it names a page-context operation and sits on
-`network` today only because no `browser`-owned equivalent existed when it was
-added. Any such move needs a deprecation alias and a migration path, because a
-mobile host selector keys on the current name. This profile does not perform
-that move; every manifest that declares `same_origin_page_fetch` on `network`
-today remains conforming.
+Two placements are named legacy exceptions to the one-kind target, and a
+validator MUST continue to accept them: `host_http_request` is valid on
+`browser` as well as `network`, because it already shipped on `browser` in
+existing connectors before this rule existed; `same_origin_page_fetch` is
+valid only on `network` today even though it names a page-context operation,
+for the same historical reason. Neither placement is performed or reversed by
+this revision. A future minor version is expected to resolve both together,
+coordinated with every host that selects features today (a mobile host's
+selector keys on the current names), through a versioned alias and a
+migration path, not a silent reinterpretation of an existing feature name. A
+manifest that uses either placement today remains conforming before, during,
+and after that future change.
 
 #### 3.3.9 Negotiation and the effective-authority record
 
@@ -691,9 +697,9 @@ For each binding and each channel within it (for example `browser.navigate`,
 `browser.connect`, `network.hosts`, a `filesystem` input or output slot, a
 `desktop_session` item), the record states a coverage outcome from Section
 3.3.10: `enforced`, `recorded`, or `not_observable`. A binding can mix
-coverage outcomes across its own channels; the record states each
-separately, the same way `systemd-analyze security` reports partial coverage
-per directive rather than one verdict for a whole unit.
+coverage outcomes across its own channels (as `systemd-analyze security`
+reports partial coverage per directive); the record states each channel
+separately rather than one verdict for the whole binding.
 
 The record also carries, for an instance that was granted: the requested and
 the effective constraint values (so a narrower grant than what was declared is
@@ -811,14 +817,23 @@ connector is more contained than it is. Breadth comes first in this display:
 an owner evaluates how much a connector can reach before the detail of what
 it does with that reach.
 
-An instance that declares one of this profile's exceptional grants --
-universal network reach, a local or development server exception to the
-private-destination denial (Section 3.3.2), or access to a named sensitive
-resource such as a `desktop_session` item -- MUST carry a `rationale` member
-stating why the grant is needed. A `rationale` is a statement for review and
-display, not a capability; a runtime MUST NOT widen a grant because a
-`rationale` is present, and MUST NOT accept a `rationale` as a substitute for
-the grant actually meeting its declared constraint.
+An instance that declares a `kind` but no `constraints` (Section 3.3.2) makes
+no claim about which destinations, paths, or secret items it reaches. A
+runtime cannot narrow the binding to less than that kind's full reach, and an
+owner-facing display MUST present it as unbounded or undeclared for that
+kind, never as limited, and never by omitting the binding from the display.
+This is the status quo for every manifest in this repository today, none of
+which declares `constraints`, so undeclared reach is not itself one of this
+section's exceptional grants and does not by itself require a `rationale`.
+
+An instance that declares one of this profile's exceptional grants -- a local
+or development server exception to the private-destination denial (Section
+3.3.2), or access to a named sensitive resource such as a `desktop_session`
+item -- MUST carry a `rationale` member stating why the grant is needed. A
+`rationale` is a statement for review and display, not a capability; a
+runtime MUST NOT widen a grant because a `rationale` is present, and MUST NOT
+accept a `rationale` as a substitute for the grant actually meeting its
+declared constraint.
 
 ### 3.4 Human interaction and protocol capabilities
 
