@@ -53,7 +53,12 @@ const WEB_SCHEMES = NAVIGATE_SCHEMES;
 // listed; an endpoint whose scheme is not here must always state its port
 // (Section 3.3.4). ws/wss share http/https's ports because a WebSocket
 // upgrade begins as an http(s) request.
-const DEFAULT_PORTS = {
+// Object.create(null) has no prototype chain, so a scheme named
+// "constructor", "__proto__", "toString", or "hasOwnProperty" cannot read an
+// inherited value through `DEFAULT_PORTS[scheme]` and be mistaken for a
+// scheme with a real default port. A plain object literal is vulnerable to
+// exactly this (schemas/connector-binding-grammar.test.mjs tests it).
+const DEFAULT_PORTS = Object.assign(Object.create(null), {
   http: 80,
   https: 443,
   ws: 80,
@@ -69,7 +74,7 @@ const DEFAULT_PORTS = {
   ldaps: 636,
   ftp: 21,
   ftps: 990,
-};
+});
 
 function assertNoWhitespaceOrControl(raw) {
   if (typeof raw !== "string" || raw.length === 0) {
@@ -163,6 +168,7 @@ function assertValidDnsLabels(host) {
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label)) {
       throw new GrammarError(`invalid host label '${label}'`);
     }
+    if (label.length > 63) throw new GrammarError(`host label '${label}' exceeds 63 octets`);
   }
 }
 
@@ -272,6 +278,30 @@ export function isCanonicalWebHost(raw, options) {
 }
 
 /**
+ * Whether `candidateHost` (already canonical: lowercase, IDNA ASCII, no
+ * trailing dot) is matched by the wildcard apex `apex` (the canonical host
+ * text after a leading `*.`, for example `"chase.com"` from
+ * `"*.chase.com"`). Section 3.3.2's rule, chosen because the design note does
+ * not fix wildcard depth: a wildcard matches exactly one additional label,
+ * the same depth a single-label TLS certificate wildcard covers. It does
+ * NOT match the bare apex itself, and it does NOT match two or more
+ * additional labels.
+ *
+ * Examples for apex `"chase.com"`: matches `"secure.chase.com"`; does not
+ * match `"chase.com"` itself; does not match `"a.b.chase.com"`.
+ *
+ * @param {string} apex
+ * @param {string} candidateHost
+ * @returns {boolean}
+ */
+export function hostMatchesWildcardApex(apex, candidateHost) {
+  const suffix = `.${apex}`;
+  if (!candidateHost.endsWith(suffix)) return false;
+  const prefix = candidateHost.slice(0, candidateHost.length - suffix.length);
+  return prefix.length > 0 && !prefix.includes(".");
+}
+
+/**
  * Canonicalizes one entry of `browser.connect` (Section 3.3.3): the same
  * grammar as `canonicalizeWebHost`, with `ws` and `wss` also accepted.
  *
@@ -361,6 +391,29 @@ export function isCanonicalNetworkHost(raw) {
  * @returns {unknown[] | undefined} the normalized inputs, or undefined when neither form is present
  * @throws {GrammarError} when both forms are present and disagree
  */
+/**
+ * Structural equality for plain JSON values (objects, arrays, strings,
+ * numbers, booleans, null). Unlike `JSON.stringify(a) === JSON.stringify(b)`,
+ * this does not depend on an object's member order -- two filesystem input
+ * entries with the same fields written in a different key order compare
+ * equal. Array element order still matters (an array is an ordered list,
+ * e.g. `accepted_extensions`, and reordering it is a real difference).
+ */
+export function deepEqualJson(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    return a.length === b.length && a.every((value, i) => deepEqualJson(value, b[i]));
+  }
+  if (typeof a === "object") {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    return keysA.length === keysB.length && keysA.every((key) => Object.hasOwn(b, key) && deepEqualJson(a[key], b[key]));
+  }
+  return false;
+}
+
 export function normalizeFilesystemInputs(instance) {
   const topLevel = instance?.inputs;
   const nested = instance?.constraints?.inputs;
@@ -375,7 +428,7 @@ export function normalizeFilesystemInputs(instance) {
   const a = byEnvVar(topLevel);
   const b = byEnvVar(nested);
   const sameKeys = a.size === b.size && [...a.keys()].every((key) => b.has(key));
-  const sameEntries = sameKeys && [...a.entries()].every(([key, value]) => JSON.stringify(value) === JSON.stringify(b.get(key)));
+  const sameEntries = sameKeys && [...a.entries()].every(([key, value]) => deepEqualJson(value, b.get(key)));
   if (!sameEntries) {
     throw new GrammarError("filesystem.inputs and constraints.inputs disagree; declare one, or make both equal");
   }

@@ -15,6 +15,8 @@ import {
   canonicalizeNetworkHost,
   isCanonicalNetworkHost,
   normalizeFilesystemInputs,
+  deepEqualJson,
+  hostMatchesWildcardApex,
   findDuplicateJsonKeys,
 } from "./connector-binding-grammar.mjs";
 
@@ -220,4 +222,50 @@ test("findDuplicateJsonKeys: object values inside an array do not escape their o
   const text = `{"list": [{"a": 1, "a": 2}, {"a": 1}]}`;
   const found = findDuplicateJsonKeys(text);
   assert.deepEqual(found, [{ path: "list.[].a", key: "a" }]);
+});
+
+test("canonicalizeEndpoint: a scheme named after an Object.prototype member has no default port and is rejected, not silently accepted", () => {
+  for (const scheme of ["constructor", "tostring", "hasownproperty", "valueof", "isprototypeof"]) {
+    assert.throws(() => canonicalizeEndpoint(`${scheme}://example.com`), GrammarError, scheme);
+  }
+  // A real __proto__-named scheme is syntactically impossible (a scheme must
+  // start with a letter, RFC 3986), so it is rejected for that reason instead.
+  assert.throws(() => canonicalizeEndpoint("__proto__://example.com"), GrammarError);
+});
+
+test("canonicalizeEndpoint: a scheme with a real default port is unaffected by the prototype-pollution fix", () => {
+  assert.equal(canonicalizeEndpoint("imaps://imap.example.com"), "imaps://imap.example.com");
+});
+
+test("canonicalizeWebHost: a 63-octet label is accepted, a 64-octet label is rejected", () => {
+  const label63 = "a".repeat(63);
+  const label64 = "a".repeat(64);
+  assert.equal(canonicalizeWebHost(`https://${label63}.com`), `https://${label63}.com`);
+  assert.throws(() => canonicalizeWebHost(`https://${label64}.com`), GrammarError);
+});
+
+test("deepEqualJson: object member order does not affect equality", () => {
+  const a = { env_var: "A_DIR", kind: "dir", access: "read" };
+  const b = { access: "read", kind: "dir", env_var: "A_DIR" };
+  assert.equal(deepEqualJson(a, b), true);
+  assert.equal(deepEqualJson(a, { ...a, kind: "file" }), false);
+});
+
+test("deepEqualJson: array element order still matters", () => {
+  assert.equal(deepEqualJson([".zip", ".xml"], [".xml", ".zip"]), false);
+  assert.equal(deepEqualJson([".zip", ".xml"], [".zip", ".xml"]), true);
+});
+
+test("normalizeFilesystemInputs: both forms present, same entries in a different member order, is accepted", () => {
+  const topLevel = [{ env_var: "A_DIR", kind: "dir", access: "read" }];
+  const nested = [{ access: "read", kind: "dir", env_var: "A_DIR" }];
+  assert.deepEqual(normalizeFilesystemInputs({ inputs: topLevel, constraints: { inputs: nested } }), topLevel);
+});
+
+test("hostMatchesWildcardApex: matches exactly one additional label, not the apex, not two or more labels", () => {
+  assert.equal(hostMatchesWildcardApex("chase.com", "secure.chase.com"), true);
+  assert.equal(hostMatchesWildcardApex("chase.com", "chase.com"), false, "the bare apex is not matched");
+  assert.equal(hostMatchesWildcardApex("chase.com", "a.b.chase.com"), false, "two additional labels is not matched");
+  assert.equal(hostMatchesWildcardApex("chase.com", "evilchase.com"), false, "a label boundary is required, not just a string suffix");
+  assert.equal(hostMatchesWildcardApex("chase.com", "chase.com.evil.com"), false);
 });
