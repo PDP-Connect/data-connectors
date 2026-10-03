@@ -15,6 +15,15 @@
 | `host_download_capture` | Capture content downloaded by the active page. |
 | `host_archive_extraction` | Extract downloaded archive contents in the host runtime. |
 | `host_archive_entry_chunk_read` | Read an extracted archive entry in chunks. |
+| `page_input` | Interact with the active page: click and type. |
+| `cookie_read` | Read the active page's cookie jar. |
+| `page_response_observation` | Observe page network responses, including response body content. |
+| `host_cookie_jar_request` | Make an HTTP request from the host runtime using the active page's cookie jar. |
+
+PageShim does not implement the last four features yet (Collection Profile
+Section 3.3.8); they are part of the shared vocabulary so a connector can
+declare them, and a host that does not support them is simply ineligible for
+that connector, the same as any other unsupported feature.
 
 The enum is defined in `schemas/connector-manifest.schema.json`; the catalog and implementation-index schemas reference that shared definition. A host declares support with a set of feature names for each binding. PageShim's binding-to-feature support map is in `scripts/pageshim/capabilities.mjs`; another host publishes its own map. Eligibility requires every required binding and declared feature to be supported.
 
