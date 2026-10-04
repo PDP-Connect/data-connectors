@@ -91,6 +91,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
 	},
+	fitbit: {
+		activities: { field: "start_time", format: "date-time" },
+		daily_summaries: { field: "date", format: "date" },
+		sleep: { field: "date", format: "date" },
+	},
 	github: {
 		contributions: null,
 		events: { field: "created_at", format: "date-time" },
