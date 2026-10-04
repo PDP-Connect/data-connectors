@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Oura's browser-session profile. The PAT profile remains `oura`; this
- * profile uses the authenticated cloud.ouraring.com account endpoint. */
+ * profile uses authenticated Oura account pages on cloud and app origins. */
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
@@ -16,6 +16,8 @@ import { validateRecord } from "./schemas.ts";
 
 const HOME = "https://cloud.ouraring.com/";
 const ORIGIN = new URL(HOME).origin;
+const APP_ORIGIN = "https://moi.ouraring.com";
+const OURA_ORIGINS = new Set([ORIGIN, APP_ORIGIN]);
 // Include today in the initial 90-day snapshot.
 const INITIAL_LOOKBACK_DAYS = 89;
 const MAX_WINDOW_DAYS = 90;
@@ -87,13 +89,14 @@ interface OuraDailyData {
 
 async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]): Promise<boolean> {
   try {
-    if (new URL(page.url()).origin !== ORIGIN) return false;
+    if (!OURA_ORIGINS.has(new URL(page.url()).origin)) return false;
   } catch {
     return false;
   }
   return page.evaluate(async () => {
     try {
-      if (location.origin !== "https://cloud.ouraring.com") return false;
+      if (location.origin !== "https://cloud.ouraring.com" &&
+        location.origin !== "https://moi.ouraring.com") return false;
       return (await fetch("/api/me", { credentials: "include" })).ok;
     } catch {
       return false;
@@ -102,7 +105,7 @@ async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]):
 }
 
 async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<boolean> {
-  if (new URL(page.url()).origin !== ORIGIN) {
+  if (!OURA_ORIGINS.has(new URL(page.url()).origin)) {
     await page.goto(HOME, { waitUntil: "domcontentloaded" });
   }
   return hasOuraSessionOnCurrentPage(page);
@@ -113,7 +116,8 @@ export async function probeOuraBrowserSession(
 ): Promise<boolean> {
   return page.evaluate(async () => {
     try {
-      if (location.origin !== "https://cloud.ouraring.com") return false;
+      if (location.origin !== "https://cloud.ouraring.com" &&
+        location.origin !== "https://moi.ouraring.com") return false;
       return (await fetch("/api/me", { credentials: "include" })).ok;
     } catch {
       return false;
@@ -144,7 +148,10 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
 async function fetchDailyData(page: BrowserCollectContext["page"], start: string, end: string): Promise<OuraDailyData> {
   return page.evaluate(
     async ({ start, end }) => {
-      if (location.origin !== "https://cloud.ouraring.com") throw new Error("oura_auth_failed: wrong browser origin");
+      if (location.origin !== "https://cloud.ouraring.com" &&
+        location.origin !== "https://moi.ouraring.com") {
+        throw new Error("oura_auth_failed: wrong browser origin");
+      }
       const query = new URLSearchParams({ start, end });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30_000);
