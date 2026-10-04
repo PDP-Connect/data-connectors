@@ -91,6 +91,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	claude_code: c("claude_code"),
 	codex: c("codex"),
 	apple_health: c("apple_health"),
+	fitbit: c("fitbit"),
 	apple_photos: c("apple_photos"),
 	ical: c("ical"),
 	chase: c("chase"),

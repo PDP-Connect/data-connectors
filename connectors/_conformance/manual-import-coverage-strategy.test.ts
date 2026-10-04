@@ -67,6 +67,7 @@ test("every manual-upload connector is discoverable by setup modality", () => {
 	// would silently empty and every assertion below would vacuously pass.
 	assert.deepEqual(found, [
 		"apple-health",
+		"fitbit",
 		"google-maps",
 		"netflix-export",
 		"strava",

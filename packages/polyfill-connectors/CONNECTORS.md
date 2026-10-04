@@ -78,6 +78,7 @@ These connectors parse local files without network access. Run on-device only. *
 | whatsapp | `~/.pdpp/imports/whatsapp/*.txt` (chat exports) | 🟡 code ready | ✅ (expected) |
 | google_takeout | `~/.pdpp/imports/google_takeout/` (extracted takeout) | 🟡 code ready | ✅ (expected) |
 | google_maps | `~/.pdpp/imports/google_maps/` (Google Maps Timeline export file or legacy Takeout location file; not API-backed) | 🟡 code ready | ✅ (expected) |
+| fitbit | `~/.pdpp/imports/fitbit/` (Google Takeout `.zip` files with only Fitbit selected, all parts of one export; no Google credential, no network) | 🟡 code ready | ✅ (expected) |
 | twitter_archive | `~/.pdpp/imports/twitter_archive/` (extracted archive) | 🟡 code ready | ✅ (expected) |
 | imessage | `~/Library/Messages/chat.db` (auto-discovered on macOS) | 🟡 code ready | ✅ (expected) |
 | apple_health | `~/.pdpp/imports/apple_health/` (extracted iOS export) | 🟡 code ready | ✅ (expected) |
