@@ -26,6 +26,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["codex", "codex"],
     ["discord_browser", "discord-browser"],
     ["doordash", "doordash"],
+    ["garmin_browser", "garmin-browser"],
     [
       "github",
       "github",

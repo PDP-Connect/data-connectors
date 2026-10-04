@@ -1,0 +1,62 @@
+[
+	{
+		"activityId": 41000102,
+		"activityName": "Fixture Ride",
+		"activityType": {
+			"typeId": 2,
+			"typeKey": "cycling",
+			"parentTypeId": 17
+		},
+		"startTimeLocal": "2026-09-16 07:15:00",
+		"startTimeGMT": "2026-09-15 19:15:00",
+		"beginTimestamp": 1789499700000,
+		"distance": 25012.4,
+		"duration": 3720.5,
+		"elapsedDuration": 3720.5,
+		"movingDuration": 3480.2,
+		"averageSpeed": 7.187,
+		"calories": 610,
+		"averageHR": 128,
+		"maxHR": 161,
+		"startLatitude": 12.345678,
+		"startLongitude": 23.456789,
+		"endLatitude": 12.345699,
+		"endLongitude": 23.456711,
+		"locationName": "Fixture Park",
+		"ownerId": 41001,
+		"ownerDisplayName": "fixture-owner",
+		"ownerFullName": "Fixture Owner",
+		"deviceId": 41002,
+		"activityUUID": "00000000-0000-4000-8000-000000000102"
+	},
+	{
+		"activityId": 41000101,
+		"activityName": "Fixture Run",
+		"activityType": {
+			"typeId": 1,
+			"typeKey": "running",
+			"parentTypeId": 17
+		},
+		"startTimeLocal": "2026-09-14 18:30:00",
+		"startTimeGMT": "2026-09-14 06:30:00",
+		"beginTimestamp": 1789367400000,
+		"distance": 8040.0,
+		"duration": 2895.0,
+		"elapsedDuration": 2895.0,
+		"movingDuration": 2860.0,
+		"averageSpeed": 2.811,
+		"calories": 540,
+		"averageHR": 148.0,
+		"maxHR": 172.0,
+		"startLatitude": 12.345678,
+		"startLongitude": 23.456789,
+		"endLatitude": 12.345678,
+		"endLongitude": 23.456789,
+		"locationName": "Fixture Park",
+		"ownerId": 41001,
+		"ownerDisplayName": "fixture-owner",
+		"ownerFullName": "Fixture Owner",
+		"deviceId": 41002,
+		"activityUUID": "00000000-0000-4000-8000-000000000101"
+	}
+]
