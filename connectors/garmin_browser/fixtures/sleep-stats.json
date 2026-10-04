@@ -1,0 +1,40 @@
+{
+	"overallStats": {},
+	"individualStats": [
+		{
+			"calendarDate": "2026-09-15",
+			"values": {
+				"totalSleepTimeInSeconds": 27000,
+				"deepTime": 5400,
+				"lightTime": 15300,
+				"remTime": 6300,
+				"awakeTime": 1800,
+				"gmtSleepStartTimeInMillis": 1789389600000,
+				"gmtSleepEndTimeInMillis": 1789418400000,
+				"localSleepStartTimeInMillis": 1789432800000,
+				"localSleepEndTimeInMillis": 1789461600000,
+				"sleepScore": 81,
+				"sleepScoreQuality": "GOOD",
+				"respiration": 14
+			}
+		},
+		{
+			"calendarDate": "2026-09-16",
+			"values": {
+				"totalSleepTimeInSeconds": 25200,
+				"deepTime": 4200,
+				"lightTime": 14400,
+				"remTime": 6600,
+				"awakeTime": 2400,
+				"gmtSleepStartTimeInMillis": 1789473300000,
+				"gmtSleepEndTimeInMillis": 1789500900000,
+				"localSleepStartTimeInMillis": 1789516500000,
+				"localSleepEndTimeInMillis": 1789544100000,
+				"sleepScore": 72,
+				"sleepScoreQuality": "FAIR",
+				"respiration": 15,
+				"spO2": 95
+			}
+		}
+	]
+}
