@@ -118,6 +118,13 @@ const EMAIL_SPLIT_RE = /^(.*)@([^@]+)$/;
 
 const FETCH_HEADER_BATCH_PROGRESS = 1000;
 const SNIPPET_FETCH_MAX_BYTES = 4096;
+// Bounds runDeltaPass's highest_modseq hold-back (see runAllMailPasses's
+// STATE emission): after this many CONSECUTIVE runs held back because of a
+// skipped delta message, the next run advances highest_modseq anyway rather
+// than letting one persistently-failing message (malformed MIME, a message
+// the server always errors on) stall the cursor forever and grow every
+// later run's changedSince set without bound.
+const DELTA_HOLDBACK_RUN_LIMIT = 3;
 const ERROR_MSG_TAIL = 400;
 const DEFAULT_CRED_TIMEOUT_S = 1800;
 const DEFAULT_GMAIL_CONNECTOR_ID = "https://registry.pdpp.dev/connectors/gmail";
@@ -778,6 +785,37 @@ export function buildMessageBodyDetailGap(params: {
 	});
 }
 
+/**
+ * Recoverable `DETAIL_GAP` for `runDeltaPass`'s skip-on-failed-snippet-refetch
+ * case (see that function's doc comment). Unlike `buildMessageBodyDetailGap`,
+ * this gap is on `messages` itself, not a child detail stream — the delta
+ * pass skipped emitting the `messages` RECORD, not a separate detail record,
+ * so there is no `parent_stream` to name and no separate stream's own
+ * DETAIL_COVERAGE to desync: `messages`' considered/covered counts are
+ * computed solely from the forward/historical walk (see `runAllMailPasses`),
+ * which already counted this message as covered in an earlier run.
+ *
+ * `reason` is `temporary_unavailable` for the same reason as the
+ * `message_bodies` gap: a thrown bounded-snippet fetch mixes transient
+ * network/IMAP faults with no exhaustion signal.
+ */
+export function buildMessageDeltaSnippetDetailGap(params: {
+	failureClass?: string | undefined;
+	gmMsgid: string;
+}): DetailGapMessage {
+	const { gmMsgid, failureClass } = params;
+	return buildDetailGap({
+		stream: "messages",
+		recordKey: gmMsgid,
+		reason: "temporary_unavailable",
+		locator: {
+			kind: "gmail.message_delta_snippet_detail",
+			message_id: gmMsgid,
+		},
+		...(failureClass ? { error: { class: failureClass } } : {}),
+	});
+}
+
 function normalizeAttachmentRecoveryKey(
 	recordKey: string | number | null | undefined,
 ): string | null {
@@ -1044,6 +1082,15 @@ async function emitMessageBody(
  *      durable retryable DETAIL_GAP on `message_bodies`, so the body stays
  *      refetchable after the UID cursor advances past it. A genuinely
  *      bodyless message emits `body_source: "empty"` with no gap.
+ *
+ *      Note this is NOT the destructive-overwrite case `runDeltaPass`
+ *      guards against: a UID this function processes is visited here
+ *      exactly once, ever (the forward/historical UID walk never revisits a
+ *      UID) — there is no prior `messages` record for this gmMsgid to
+ *      protect, so `snippet: null` on a failed fetch is an honest "unknown
+ *      yet", not a loss. `runDeltaPass` is the only pass that can re-visit
+ *      an ALREADY-stored message, which is why its failure handling differs
+ *      (skip-and-gap instead of null).
  *
  * Returns true if the message produced any emits (or would have, modulo
  * scope). Returns false when skipped by an early filter so the caller
@@ -1500,6 +1547,9 @@ interface AllMailSession {
 	fullResync: boolean;
 	highestModseqCursor: number | string | null;
 	messagesBackfill: MessagesBackfillCursor;
+	/** See `AllMailCursor.delta_holdback_runs`. Always a non-negative integer —
+	 *  tolerantly parsed, defaulting to 0 for absent/malformed prior state. */
+	priorDeltaHoldbackRuns: number;
 	priorExistsTotal: number | undefined;
 	priorModseq: number | string | null | undefined;
 	priorUidnext: number;
@@ -1545,6 +1595,60 @@ function validateExistsTotal(
 		);
 	}
 	return value;
+}
+
+/**
+ * Tolerantly parse the prior `all_mail.delta_holdback_runs` counter.
+ * Absent (state written before this counter existed), non-number, negative,
+ * non-finite, or fractional input all read as 0 — the safe default is "not
+ * currently held back," never a crash and never a negative/fractional count
+ * that could make the `>= DELTA_HOLDBACK_RUN_LIMIT` comparison misbehave.
+ */
+export function parseDeltaHoldbackRuns(value: unknown): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		value < 0 ||
+		!Number.isInteger(value)
+	) {
+		return 0;
+	}
+	return value;
+}
+
+/**
+ * Decide this run's `messages.all_mail.highest_modseq` and
+ * `delta_holdback_runs`, given whether `runDeltaPass` skipped a message.
+ * Pure — the bound (`DELTA_HOLDBACK_RUN_LIMIT`) lives here so it has one
+ * seam to unit-test independent of a full `runAllMailPasses` + IMAP mock.
+ *
+ *   - No skip this run: advance to the live value, counter resets to 0 —
+ *     a clean run always clears the streak, matching `runDeltaPass`'s own
+ *     "not lossy" framing of `!requested.has("messages")`.
+ *   - Skip, and the streak (prior + this run) has not yet reached the
+ *     limit: hold `highest_modseq` at `priorModseq`, counter becomes the
+ *     new streak length.
+ *   - Skip, and the streak WOULD reach the limit: advance to the live
+ *     value anyway (the cursor must not stall forever on one persistently-
+ *     failing message) and reset the counter to 0 — the still-failing
+ *     message's retryable DETAIL_GAP (emitted by `runDeltaPass` itself,
+ *     independent of this decision) is what keeps the miss visible in
+ *     coverage once the cursor moves past it.
+ */
+export function resolveDeltaCursorAdvance(args: {
+	liveHighestModseq: number | string | null;
+	priorHoldbackRuns: number;
+	priorModseq: number | string | null | undefined;
+	skippedAnyMessage: boolean;
+}): { highestModseq: number | string | null; holdbackRuns: number } {
+	if (!args.skippedAnyMessage) {
+		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
+	}
+	const streak = args.priorHoldbackRuns + 1;
+	if (streak >= DELTA_HOLDBACK_RUN_LIMIT) {
+		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
+	}
+	return { highestModseq: args.priorModseq ?? null, holdbackRuns: streak };
 }
 
 /**
@@ -1612,6 +1716,9 @@ function deriveAllMailSession(
 					},
 		fullResync: !priorUidvalidity || priorUidvalidity !== uidvalidityNum,
 		highestModseqCursor: bigintToCursor(mailbox.highestModseq),
+		priorDeltaHoldbackRuns: parseDeltaHoldbackRuns(
+			priorAllMail.delta_holdback_runs,
+		),
 		priorModseq: priorAllMail.highest_modseq,
 		priorUidnext: priorAllMail.forward_uidnext ?? priorAllMail.uidnext ?? 1,
 		uidnext: mailbox.uidNext,
@@ -3917,6 +4024,57 @@ export function validateAttachmentHydrationPreflight(args: {
  * `wantBodies: false` it fetches at most `SNIPPET_FETCH_MAX_BYTES` of the
  * plain part — enough to rebuild `snippet`, without touching the
  * externally-throttled full-body/attachment path.
+ *
+ * That re-fetch can itself fail (a transient IMAP error on the bounded
+ * read), and UNLIKE a fetch failure in `processMessage`, this message
+ * already has a stored `messages` record from an earlier run — emitting
+ * ANY record here, including one with `snippet: null`, replaces that row
+ * wholesale (same destructive-upsert rule as the envelope-absent case
+ * above) and destroys its real snippet. So a thrown re-fetch here SKIPS the
+ * emit entirely (`continue`) rather than writing anything: the stored
+ * record, snippet included, is left exactly as it was. A durable retryable
+ * `messages`-stream DETAIL_GAP (`buildMessageDeltaSnippetDetailGap`) records
+ * the miss so it is not silently absent from the coverage story, mirroring
+ * the `message_bodies` gap pattern (2026-08-23 owner decision) — though,
+ * same as that gap, nothing in this connector currently consumes a served
+ * gap of this kind to force a re-fetch.
+ *
+ * Skipping the RECORD is not enough on its own, though. The caller always
+ * persists `highest_modseq` as the mailbox's CURRENT value (see
+ * `runAllMailPasses`'s STATE emission), not "the modseq this pass actually
+ * finished covering" — so a skipped message's flag/label change (the very
+ * thing this pass exists to apply) would be silently and PERMANENTLY
+ * dropped once the floor moves past it: `changedSince` on the next run only
+ * re-surfaces a message whose modseq changes AGAIN, which may never happen.
+ * That is the exact defect this function guards `snippet` against, just
+ * aimed at `labels`/`is_seen`/`is_flagged` instead — recoverable-looking,
+ * actually permanent. `skippedAnyMessage` in the return value tells the
+ * caller a message was left behind this run, so it can hold `highest_modseq`
+ * at its PRIOR value instead of advancing it: the next run's `changedSince`
+ * then re-covers every message changed since that same floor, including the
+ * ones that succeeded this run. Re-emitting those is harmless — ingest
+ * treats a byte-identical re-emit as a no-op (`postgres-records.ts`'s
+ * `IS NOT DISTINCT FROM`).
+ *
+ * The hold-back itself is bounded, not indefinite (`resolveDeltaCursorAdvance`,
+ * `DELTA_HOLDBACK_RUN_LIMIT`): a message that fails PERSISTENTLY (a malformed
+ * MIME structure, a message the server always errors on) would otherwise
+ * stall `highest_modseq` forever and make every later run's `changedSince`
+ * set grow without bound. After `DELTA_HOLDBACK_RUN_LIMIT` consecutive
+ * held-back runs, `runAllMailPasses` advances `highest_modseq` anyway; the
+ * still-failing message's retryable DETAIL_GAP (emitted below, independent
+ * of the cursor decision) is what keeps that miss visible in coverage once
+ * the cursor moves past it, rather than it going silent.
+ *
+ * Both skip sites in this function set it: a thrown snippet re-fetch above,
+ * and the pre-existing envelope-absent skip below (same defect — an
+ * envelope-free message was ALREADY being skipped to avoid blanking the
+ * stored row, but until now nothing told the caller to hold the cursor back
+ * for it either). The one skip that does NOT set it is `!requested.has(
+ * "messages")`: that is not a failure to cover a change, it's "this run was
+ * never asked to collect `messages` at all," the same as `processMessage`'s
+ * own `wantMessages` gate — advancing the cursor past a scope the run
+ * deliberately excluded is correct, not lossy.
  */
 export async function runDeltaPass(
 	client: Pick<ImapFlow, "fetch">,
@@ -3925,13 +4083,13 @@ export async function runDeltaPass(
 	emitRecord: EmitRecordFn,
 	receivedAtFallback: string,
 	fetchBodiesFn: FetchBodiesFn,
-): Promise<void> {
+): Promise<{ skippedAnyMessage: boolean }> {
 	if (
 		session.fullResync ||
 		session.priorModseq === undefined ||
 		session.priorModseq === null
 	) {
-		return;
+		return { skippedAnyMessage: false };
 	}
 	const { priorModseq } = session;
 	const priorModseqBig =
@@ -3971,6 +4129,13 @@ export async function runDeltaPass(
 	// then tripped the runtime's post-DONE guard while the abandoned iterator
 	// drained. Draining first keeps the envelope guarantee below intact and
 	// costs only the metadata already held in memory.
+	// Set whenever a message this pass KNOWS changed (it passed the
+	// `changedSince` filter) does not get a record emitted for that change —
+	// see this function's doc comment for why the caller must hold
+	// `highest_modseq` back when this is true. NOT set by `!requested.has(
+	// "messages")`: that message was never examined for a change to apply,
+	// so there is nothing to hold the cursor back for.
+	let skippedAnyMessage = false;
 	const deltaMetas: FetchMessageObject[] = [];
 	for await (const msg of client.fetch("1:*", deltaQuery, {
 		uid: true,
@@ -3985,6 +4150,7 @@ export async function runDeltaPass(
 		// No envelope means no safe record to write. Skipping preserves the
 		// stored row; emitting would blank it.
 		if (!msg.envelope) {
+			skippedAnyMessage = true;
 			continue;
 		}
 		deltaMetas.push(msg);
@@ -4003,12 +4169,22 @@ export async function runDeltaPass(
 		// Bounded snippet-only body read, exactly as the forward pass does for a
 		// messages-without-bodies scope. Sequential by necessity: this is one IMAP
 		// command at a time on a connection that is not concurrent.
-		const { snippet } = await fetchBodiesFn(
+		const { snippet, fetchFailed, failureClass } = await fetchBodiesFn(
 			msg,
 			selectBodyParts(msg.bodyStructure, false),
 			false,
 			true,
 		);
+		if (fetchFailed) {
+			// This message already has a stored `messages` record (see this
+			// function's doc comment) — emitting nothing is what keeps its real
+			// snippet (and every other field) intact. A genuinely bodyless
+			// message is NOT this branch: `fetchFailed` is false/absent for it,
+			// so it falls through to the normal emit below with `snippet: null`.
+			skippedAnyMessage = true;
+			await emit(buildMessageDeltaSnippetDetailGap({ failureClass, gmMsgid }));
+			continue;
+		}
 		await emitRecord(
 			"messages",
 			buildMessageRecord({
@@ -4030,6 +4206,7 @@ export async function runDeltaPass(
 			}),
 		);
 	}
+	return { skippedAnyMessage };
 }
 
 // ─── Threads pass ───────────────────────────────────────────────────────
@@ -4512,7 +4689,7 @@ export async function runAllMailPasses(
 	await emitAttachmentDetailGaps(attachmentCoverage);
 
 	// Pass 2: detect flag/label changes on already-seen messages (incremental only)
-	await runDeltaPass(
+	const { skippedAnyMessage: deltaPassSkippedAnyMessage } = await runDeltaPass(
 		client,
 		session,
 		deps.requested,
@@ -4597,6 +4774,30 @@ export async function runAllMailPasses(
 		nextMessagesBackfill && nextMessagesBackfill.completed_at === null
 			? (nextMessagesBackfill.backfilled_through_uid ?? 0) + 1
 			: nextForwardUidnext;
+	// Advancing to the mailbox's CURRENT highestModseq is only correct when
+	// `runDeltaPass` covered every change since `priorModseq` — otherwise a
+	// skipped message's flag/label change falls permanently behind the new
+	// floor (see `runDeltaPass`'s doc comment: `changedSince` only re-surfaces
+	// a message whose modseq moves AGAIN, which this run's skip does nothing
+	// to cause). Holding the floor at `priorModseq` repeats this run's
+	// `changedSince` window next run; the messages that already succeeded
+	// re-emit byte-identically and ingest no-ops them.
+	//
+	// That hold-back is bounded (`resolveDeltaCursorAdvance`,
+	// `DELTA_HOLDBACK_RUN_LIMIT`): one message that fails PERSISTENTLY (a
+	// malformed MIME structure, a message the server always errors on) must
+	// not stall `highest_modseq` forever and grow every later run's
+	// `changedSince` set without bound. `delta_holdback_runs` tracks the
+	// consecutive held-back streak; once it would reach the limit, the
+	// cursor advances anyway and the streak resets — the message's retryable
+	// DETAIL_GAP (already emitted by `runDeltaPass`) keeps the miss visible.
+	const { highestModseq: nextHighestModseq, holdbackRuns: nextHoldbackRuns } =
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: session.highestModseqCursor ?? null,
+			priorHoldbackRuns: session.priorDeltaHoldbackRuns,
+			priorModseq: session.priorModseq,
+			skippedAnyMessage: deltaPassSkippedAnyMessage,
+		});
 	await emit({
 		type: "STATE",
 		stream: "messages",
@@ -4605,7 +4806,8 @@ export async function runAllMailPasses(
 				uidvalidity: session.uidvalidityNum,
 				uidnext: nextUidnext,
 				forward_uidnext: nextForwardUidnext,
-				highest_modseq: session.highestModseqCursor ?? null,
+				highest_modseq: nextHighestModseq,
+				delta_holdback_runs: nextHoldbackRuns,
 				// Carry the mailbox's own EXISTS forward so the next run in this epoch
 				// can prove the inventory did not shrink underneath us.
 				exists: session.existsTotal,

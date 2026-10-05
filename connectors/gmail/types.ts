@@ -165,6 +165,17 @@ export interface BlobRef {
 
 export interface AllMailCursor {
 	/**
+	 * Consecutive runs `highest_modseq` has been held at its prior value
+	 * because `runDeltaPass` skipped at least one message (see
+	 * `runAllMailPasses`'s STATE emission). Bounds the hold-back: once this
+	 * reaches `DELTA_HOLDBACK_RUN_LIMIT`, the next run advances
+	 * `highest_modseq` to the live value anyway rather than stalling the
+	 * cursor forever on one persistently-failing message, and resets to 0.
+	 * Any run that advances cleanly (no skip) also resets it to 0. Absent on
+	 * state written before this counter existed, which reads as 0.
+	 */
+	delta_holdback_runs?: number;
+	/**
 	 * The IMAP `EXISTS` count this mailbox reported on the run that wrote this
 	 * cursor — the server's own inventory size for All Mail. Persisted so the
 	 * next run can detect a DECREASE within the same UIDVALIDITY epoch, which is

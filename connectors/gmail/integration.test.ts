@@ -95,6 +95,7 @@ import {
 	isoToImapDate,
 	makeAttachmentDetailCoverage,
 	makeAttachmentHydrator,
+	parseDeltaHoldbackRuns,
 	type PerMessageDeps,
 	processMessage,
 	recordAttachmentCoverage,
@@ -106,6 +107,7 @@ import {
 	resolveAttachmentProgressMinIntervalMs,
 	resolveAttachmentRecoveryPageByteBudget,
 	resolveAttachmentStallTimeoutMs,
+	resolveDeltaCursorAdvance,
 	resolveGmailAddressFromEnv,
 	resolveGmailPasswordFromEnv,
 	resolveMaxAttachmentBytes,
@@ -2509,6 +2511,9 @@ test("runAllMailPasses: scheduled runs advance historical pages while forwarding
 			exists: 1200,
 			forward_uidnext: 1201,
 			highest_modseq: null,
+			// No delta-pass skip this run (first run is a full resync — runDeltaPass
+			// is a no-op), so the hold-back streak stays at its zero default.
+			delta_holdback_runs: 0,
 			uidnext: 501,
 			uidvalidity: 123,
 		});
@@ -2777,6 +2782,428 @@ test("runAllMailPasses: a completed historical walk reopens for new mail instead
 			typeof reopened.completed_at,
 			"string",
 			"a walk that reached its reopened ceiling is complete",
+		);
+	} finally {
+		globalThis.process.stdout.write = originalWrite;
+	}
+});
+
+test("parseDeltaHoldbackRuns: tolerates missing/malformed input, otherwise passes a valid non-negative integer through", () => {
+	assert.equal(parseDeltaHoldbackRuns(undefined), 0, "absent — pre-counter state");
+	assert.equal(parseDeltaHoldbackRuns(null), 0);
+	assert.equal(parseDeltaHoldbackRuns("2"), 0, "non-number");
+	assert.equal(parseDeltaHoldbackRuns(-1), 0, "negative");
+	assert.equal(parseDeltaHoldbackRuns(1.5), 0, "fractional");
+	assert.equal(parseDeltaHoldbackRuns(Number.NaN), 0);
+	assert.equal(parseDeltaHoldbackRuns(Number.POSITIVE_INFINITY), 0);
+	assert.equal(parseDeltaHoldbackRuns(0), 0, "a valid zero passes through");
+	assert.equal(parseDeltaHoldbackRuns(2), 2, "a valid positive integer passes through");
+});
+
+test("resolveDeltaCursorAdvance: no skip always advances to the live value and resets the streak to 0, regardless of prior streak", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 0,
+			priorModseq: 400,
+			skippedAnyMessage: false,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+	// Proves "no counter growth on clean runs" at the unit level: even a
+	// nonzero prior streak resets the instant a run has nothing to skip.
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 5,
+			priorModseq: 400,
+			skippedAnyMessage: false,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+});
+
+test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak while under the limit", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 0,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 400, holdbackRuns: 1 },
+		"first held-back run",
+	);
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 1,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 400, holdbackRuns: 2 },
+		"second held-back run — still under DELTA_HOLDBACK_RUN_LIMIT (3)",
+	);
+});
+
+test("resolveDeltaCursorAdvance: a skip that would reach the limit advances anyway and resets the streak", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 2,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+		"the third consecutive skip hits the limit — advance, don't stall forever",
+	);
+	// Defensive: even a prior streak already past the limit (e.g. the limit
+	// was lowered, or state was hand-edited) never gets stuck.
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 10,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+});
+
+// ─── Invariant: a skipped delta message must hold highest_modseq back ───
+//
+// REGRESSION EVIDENCE. The messages STATE cursor's `highest_modseq` was
+// always written from the mailbox's CURRENT value (`session.highestModseqCursor`),
+// independent of whether `runDeltaPass` actually covered every message that
+// changed since the prior floor. A message skipped this run (failed snippet
+// re-fetch, or the pre-existing envelope-absent skip) therefore fell
+// permanently behind the new floor: `changedSince` on the next run only
+// re-surfaces a message whose modseq moves AGAIN, which may never happen —
+// trading a temporary blank snippet for silently stale labels/read-state
+// forever. `runDeltaPass` now reports `skippedAnyMessage`, and this run's
+// STATE holds `highest_modseq` at the prior value whenever that is true, so
+// the next run's `changedSince` re-covers exactly the same window.
+test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (and bumps delta_holdback_runs) at the prior value; a later successful run advances both", async () => {
+	const originalWrite = globalThis.process.stdout.write;
+	const protocolMessages: Record<string, unknown>[] = [];
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	globalThis.process.stdout.write = ((data: string): boolean => {
+		if (typeof data === "string") {
+			try {
+				protocolMessages.push(JSON.parse(data) as Record<string, unknown>);
+			} catch {
+				// Ignore non-protocol output.
+			}
+		}
+		return true;
+	}) as typeof process.stdout.write;
+
+	try {
+		let highestModseqLive = 100n;
+		let fetchOneOutcome: "fail" | "succeed" = "fail";
+		let deltaLabels = new Set<string>(["\\Inbox"]);
+		const plainLeaf: MessageStructureObject = {
+			type: "text/plain",
+			encoding: "7bit",
+			parameters: { charset: "utf-8" },
+		};
+
+		const client: Pick<
+			ImapFlow,
+			"close" | "download" | "fetch" | "fetchOne" | "mailbox" | "search"
+		> = {
+			close: mock.fn(),
+			download: () => {
+				throw new Error("download must not be called without attachments");
+			},
+			fetchOne: () => {
+				if (fetchOneOutcome === "fail") {
+					return Promise.reject(new Error("synthetic transient IMAP error"));
+				}
+				return Promise.resolve({
+					seq: 1,
+					uid: 1,
+					bodyParts: new Map([["1", Buffer.from("A fresh real snippet")]]),
+				});
+			},
+			search: mock.fn(() => Promise.resolve([])),
+			mailbox: {
+				delimiter: "/",
+				exists: 1,
+				flags: new Set<string>(),
+				path: "[Gmail]/All Mail",
+				uidNext: 2,
+				uidValidity: 123n,
+				get highestModseq() {
+					return highestModseqLive;
+				},
+			},
+			// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
+			async *fetch(
+				_range: string,
+				_query: unknown,
+				options?: { changedSince?: bigint },
+			) {
+				if (options?.changedSince === undefined) {
+					// The regular forward/historical metadata walk — yield nothing so
+					// this test's only moving part is the delta pass.
+					return;
+				}
+				yield makeMsg({
+					uid: 1,
+					emailId: "gmmsgid-delta-track",
+					envelope: {
+						date: new Date("2026-04-20T10:00:00.000Z"),
+						subject: "Test subject",
+						from: [{ name: "Alice", address: "alice@example.com" }],
+						to: [],
+						cc: [],
+						bcc: [],
+						messageId: "<msg-abc@example.com>",
+					},
+					labels: deltaLabels,
+					bodyStructure: plainLeaf,
+				});
+			},
+		};
+
+		const run = async (
+			state: Record<string, unknown>,
+		): Promise<Record<string, unknown>> => {
+			protocolMessages.length = 0;
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				emitRecord: (stream, data) => {
+					emitted.push({ data, stream });
+					return Promise.resolve(true);
+				},
+				emittedAt: FROZEN_NOW,
+				requested: makeRequested(["messages"]),
+			});
+			const stateMessage = protocolMessages.find(
+				(message) => message.type === "STATE" && message.stream === "messages",
+			);
+			assert.ok(stateMessage, "each run commits a messages state");
+			return stateMessage.cursor as Record<string, unknown>;
+		};
+
+		// Run 1: first run (full resync) — establishes the highest_modseq
+		// baseline. `runDeltaPass` does not run on a full resync, so nothing can
+		// be skipped and the live value (100) is simply adopted.
+		const afterRun1 = await run({});
+		assert.equal(
+			(afterRun1.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"first run adopts the live highestModseq as the baseline",
+		);
+		assert.equal(
+			(afterRun1.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"no skip on a full resync — the hold-back streak starts at 0",
+		);
+
+		// Run 2: mail state advances (live highestModseq 100 -> 150) and the
+		// tracked message's snippet re-fetch FAILS. No record for it may emit
+		// (see runDeltaPass's own tests), and — the behavior under test —
+		// highest_modseq must stay at the PRIOR value (100), not jump to the
+		// live 150, or the next run's changedSince would never re-examine it.
+		highestModseqLive = 150n;
+		fetchOneOutcome = "fail";
+		emitted.length = 0;
+		const afterRun2 = await run({ messages: afterRun1 });
+		assert.equal(
+			emitted.filter((r) => r.stream === "messages").length,
+			0,
+			"the failed re-fetch emits no messages record this run",
+		);
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"a skipped delta message holds highest_modseq at the prior value, not the live one",
+		);
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
+			1,
+			"the first held-back run starts the streak at 1",
+		);
+
+		// Run 3: same prior floor (100, carried from run 2's held-back STATE) —
+		// this time the re-fetch SUCCEEDS and the tracked message's labels have
+		// also changed since run 1. The full record — new labels AND the fresh
+		// snippet — must land, and with nothing skipped this run,
+		// highest_modseq advances to the live value (still 150).
+		fetchOneOutcome = "succeed";
+		deltaLabels = new Set<string>(["\\Inbox", "\\Important"]);
+		emitted.length = 0;
+		const afterRun3 = await run({ messages: afterRun2 });
+		const recovered = emitted.find((r) => r.stream === "messages");
+		assert.ok(recovered, "a working re-fetch emits the full record");
+		assert.equal(recovered.data.snippet, "A fresh real snippet");
+		assert.deepEqual(recovered.data.labels, ["\\Inbox", "\\Important"]);
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
+			150,
+			"no skips this run — highest_modseq advances to the live value like before this fix",
+		);
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"a success after one held-back run resets the streak to 0",
+		);
+	} finally {
+		globalThis.process.stdout.write = originalWrite;
+	}
+});
+
+// ─── Invariant: the hold-back is bounded, not indefinite ──────────────────
+//
+// A message that fails its snippet re-fetch EVERY run (malformed MIME, a
+// message the server always errors on) must not stall highest_modseq
+// forever — that would make every later run's changedSince set grow
+// without bound. After DELTA_HOLDBACK_RUN_LIMIT (3) consecutive held-back
+// runs, the cursor advances anyway; the still-failing message's retryable
+// DETAIL_GAP is what keeps the miss visible in coverage once the cursor
+// moves past it, rather than it going silent.
+test("runAllMailPasses: a persistently failing delta snippet re-fetch is held back up to the limit, then the cursor advances with the gap still present", async () => {
+	const originalWrite = globalThis.process.stdout.write;
+	const protocolMessages: Record<string, unknown>[] = [];
+	globalThis.process.stdout.write = ((data: string): boolean => {
+		if (typeof data === "string") {
+			try {
+				protocolMessages.push(JSON.parse(data) as Record<string, unknown>);
+			} catch {
+				// Ignore non-protocol output.
+			}
+		}
+		return true;
+	}) as typeof process.stdout.write;
+
+	try {
+		let highestModseqLive = 100n;
+		const plainLeaf: MessageStructureObject = {
+			type: "text/plain",
+			encoding: "7bit",
+			parameters: { charset: "utf-8" },
+		};
+
+		const client: Pick<
+			ImapFlow,
+			"close" | "download" | "fetch" | "fetchOne" | "mailbox" | "search"
+		> = {
+			close: mock.fn(),
+			download: () => {
+				throw new Error("download must not be called without attachments");
+			},
+			// ALWAYS fails — the persistently-broken message this test models.
+			fetchOne: () =>
+				Promise.reject(new Error("synthetic persistent IMAP error")),
+			search: mock.fn(() => Promise.resolve([])),
+			mailbox: {
+				delimiter: "/",
+				exists: 1,
+				flags: new Set<string>(),
+				path: "[Gmail]/All Mail",
+				uidNext: 2,
+				uidValidity: 123n,
+				get highestModseq() {
+					return highestModseqLive;
+				},
+			},
+			// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
+			async *fetch(
+				_range: string,
+				_query: unknown,
+				options?: { changedSince?: bigint },
+			) {
+				if (options?.changedSince === undefined) {
+					return;
+				}
+				yield makeMsg({
+					uid: 1,
+					emailId: "gmmsgid-persistent-fail",
+					bodyStructure: plainLeaf,
+				});
+			},
+		};
+
+		const run = async (
+			state: Record<string, unknown>,
+		): Promise<Record<string, unknown>> => {
+			protocolMessages.length = 0;
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				emitRecord: () => Promise.resolve(true),
+				emittedAt: FROZEN_NOW,
+				requested: makeRequested(["messages"]),
+			});
+			const stateMessage = protocolMessages.find(
+				(message) => message.type === "STATE" && message.stream === "messages",
+			);
+			assert.ok(stateMessage, "each run commits a messages state");
+			return stateMessage.cursor as Record<string, unknown>;
+		};
+		const gapForThisRun = (): Record<string, unknown> | undefined =>
+			protocolMessages.find(
+				(m) =>
+					m.type === "DETAIL_GAP" &&
+					m.stream === "messages" &&
+					(m.detail_locator as Record<string, unknown> | undefined)
+						?.message_id === "gmmsgid-persistent-fail",
+			);
+
+		// Run 1: baseline (full resync — runDeltaPass is a no-op).
+		const afterRun1 = await run({});
+		assert.equal((afterRun1.all_mail as Record<string, unknown>).highest_modseq, 100);
+		assert.equal(
+			(afterRun1.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+		);
+
+		// Runs 2 and 3: the message fails again each time. The cursor holds at
+		// the prior value (100) and the streak climbs 1, then 2 — still below
+		// DELTA_HOLDBACK_RUN_LIMIT (3).
+		highestModseqLive = 999n; // the "live" value every held-back run must NOT adopt
+		const afterRun2 = await run({ messages: afterRun1 });
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"held back — run 1 of persistent failure",
+		);
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
+			1,
+		);
+		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
+
+		const afterRun3 = await run({ messages: afterRun2 });
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"held back — run 2 of persistent failure",
+		);
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
+			2,
+		);
+		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
+
+		// Run 4: the THIRD consecutive failure. The streak would reach the
+		// limit, so this run advances highest_modseq to the live value anyway
+		// — the cursor must not stall forever — and the streak resets to 0.
+		// The gap for the still-failing message is still present: the miss
+		// stays visible in coverage even though the cursor moved past it.
+		const afterRun4 = await run({ messages: afterRun3 });
+		assert.equal(
+			(afterRun4.all_mail as Record<string, unknown>).highest_modseq,
+			999,
+			"the bound is reached — the cursor advances despite the ongoing failure",
+		);
+		assert.equal(
+			(afterRun4.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"hitting the limit resets the streak",
+		);
+		assert.ok(
+			gapForThisRun(),
+			"the still-failing message's gap is kept even as the cursor advances past it",
 		);
 	} finally {
 		globalThis.process.stdout.write = originalWrite;
@@ -3422,6 +3849,7 @@ test("runAttachmentBackfillAndRecoveryPass: served gaps preempt historical attac
 				backfilled_through_uid: 0,
 				completed_at: null,
 			},
+			priorDeltaHoldbackRuns: 0,
 			priorModseq: null,
 			priorUidnext: 500,
 			uidnext: 600,
@@ -3659,6 +4087,7 @@ test("runAttachmentBackfillAndRecoveryPass: recoveryOnly=true recovers served ga
 				backfilled_through_uid: 0,
 				completed_at: null,
 			},
+			priorDeltaHoldbackRuns: 0,
 			priorModseq: null,
 			priorUidnext: 500,
 			uidnext: 600,
@@ -5156,6 +5585,234 @@ test("processMessage: genuinely empty body emits body_source='empty' and NO gap"
 	);
 });
 
+// ─── Invariant: a failed body fetch must not blank a collected snippet ─────
+//
+// REGRESSION EVIDENCE (live sample on Tim's instance): ~15,401 `messages`
+// versions identical to the version before them, and messages alternating
+// between a snippet and `null` as consecutive runs disagreed about whether
+// the body fetch succeeded — 2,482 of 2,485 sampled regressed keys later
+// recovered when a subsequent run refetched the body, confirming this is
+// churn + a temporary data regression (readers briefly see no snippet), not
+// permanent loss. `records` upserts replace `record_json` wholesale, so a
+// `null` written here replaces a real value until the next lucky run.
+//
+// The forward/historical walk (`processMessage`) visits a given UID exactly
+// ONCE, ever — there is no prior `messages` record for a brand-new message
+// to protect, so a failed fetch there emitting `snippet: null` is an honest
+// "unknown yet", not a loss. The destructive-overwrite case can only happen
+// in `runDeltaPass`, which re-visits an ALREADY-stored message to apply a
+// flag/label change. That is why the fix lives entirely in `runDeltaPass`:
+// skip the emit (so the stored record, snippet included, survives
+// untouched) and record a retryable DETAIL_GAP, with no snippet content
+// carried through STATE.
+
+test("processMessage: body-fetch failure still emits the messages record with snippet=null (first-sight message, nothing to protect)", async () => {
+	const { deps, emitted } = makeHarness({
+		fetchBodies: (): Promise<FetchedBodies> =>
+			Promise.resolve({
+				bodyHtmlFull: null,
+				bodyTextFull: null,
+				snippet: null,
+				fetchFailed: true,
+				failureClass: "imap_body_fetch_transient",
+			}),
+		wantMessages: true,
+	});
+	await processMessage(deps, makeMsg());
+	assert.equal(
+		emitted.find((r) => r.stream === "messages")?.data.snippet,
+		null,
+		"a UID the forward/historical walk visits for the first and only time has no prior snippet to protect",
+	);
+});
+
+/** Narrow a captured JSONL protocol stream (see the stdout-capture pattern
+ *  used throughout this file, e.g. `runAllMailPasses: first historical
+ *  page...`) to a `messages`-stream DETAIL_GAP, or null. `runDeltaPass`
+ *  emits protocol messages (PROGRESS, DETAIL_GAP) through the module-level
+ *  `emit`, which writes real JSONL to `process.stdout` — there is no
+ *  `emitProtocol` dependency to inject, so capturing stdout is the only way
+ *  to observe them from a test. */
+function findMessagesStreamGap(
+	protocolMessages: readonly Record<string, unknown>[],
+): DetailGapMessage | null {
+	const gap = protocolMessages.find(
+		(m) => m.type === "DETAIL_GAP" && m.stream === "messages",
+	);
+	return gap ? (gap as unknown as DetailGapMessage) : null;
+}
+
+test("runDeltaPass: body-fetch failure skips the messages record (stored snippet survives) and records a retryable DETAIL_GAP", async () => {
+	const delta = makeMsg({
+		uid: 102,
+		emailId: "gmmsgid-delta-fail",
+		flags: new Set(["\\Seen"]),
+	});
+	// biome-ignore lint/suspicious/useAwait: stands in for ImapFlow.fetch's async-iterable-returning signature.
+	const fetch = mock.fn(async function* () {
+		yield delta;
+	});
+	const fetchBodies = mock.fn(() =>
+		Promise.resolve({
+			bodyHtmlFull: null,
+			bodyTextFull: null,
+			snippet: null,
+			fetchFailed: true,
+			failureClass: "imap_body_fetch_transient",
+		}),
+	);
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	const emitRecord = (
+		stream: string,
+		data: Record<string, unknown>,
+	): Promise<void> => {
+		emitted.push({ data, stream });
+		return Promise.resolve();
+	};
+
+	const originalWrite = globalThis.process.stdout.write;
+	const protocolMessages: Record<string, unknown>[] = [];
+	globalThis.process.stdout.write = ((data: string): boolean => {
+		if (typeof data === "string") {
+			try {
+				protocolMessages.push(JSON.parse(data) as Record<string, unknown>);
+			} catch {
+				// Ignore non-protocol output.
+			}
+		}
+		return true;
+	}) as typeof process.stdout.write;
+
+	let result: { skippedAnyMessage: boolean };
+	try {
+		result = await runDeltaPass(
+			{ fetch } as unknown as Pick<ImapFlow, "fetch">,
+			{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
+				typeof runDeltaPass
+			>[1],
+			makeRequested(["messages"]),
+			emitRecord,
+			"2026-08-20T00:00:00.000Z",
+			fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
+		);
+	} finally {
+		globalThis.process.stdout.write = originalWrite;
+	}
+
+	assert.equal(
+		emitted.filter((r) => r.stream === "messages").length,
+		0,
+		"no record is emitted — emitting ANY record (even with snippet:null) would replace the stored row wholesale",
+	);
+	assert.equal(
+		result.skippedAnyMessage,
+		true,
+		"the caller must be told to hold highest_modseq back for this message",
+	);
+	const gap = findMessagesStreamGap(protocolMessages);
+	assert.ok(gap, "a failed re-fetch must leave a retryable gap, not silence");
+	assert.equal(gap.record_key, "gmmsgid-delta-fail");
+	assert.equal(gap.status, "pending");
+	assert.equal(gap.retryable, true);
+	assert.equal(gap.reference_only, true);
+	assert.equal(
+		gap.parent_stream,
+		undefined,
+		"messages is the parent stream itself, not a child detail stream",
+	);
+	const locator = gap.detail_locator as Record<string, unknown>;
+	assert.equal(locator.kind, "gmail.message_delta_snippet_detail");
+	assert.equal(locator.message_id, "gmmsgid-delta-fail");
+	assert.equal(gap.last_error?.class, "imap_body_fetch_transient");
+});
+
+test("runDeltaPass: a later run whose fetch succeeds emits the full record normally", async () => {
+	// Demonstrates recovery with NO shared state between calls — unlike the
+	// removed carry-forward cursor, nothing here persists a value across
+	// runs; the stored row simply stays whatever it was until a run with a
+	// working fetch replaces it with fresh, real data.
+	const delta = makeMsg({
+		uid: 103,
+		emailId: "gmmsgid-delta-recovered",
+		flags: new Set(["\\Seen"]),
+	});
+	// biome-ignore lint/suspicious/useAwait: stands in for ImapFlow.fetch's async-iterable-returning signature.
+	const fetch = mock.fn(async function* () {
+		yield delta;
+	});
+	const fetchBodies = mock.fn(() =>
+		Promise.resolve({
+			bodyHtmlFull: null,
+			bodyTextFull: "Hello there",
+			snippet: "Hello there",
+		}),
+	);
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	const emitRecord = (
+		stream: string,
+		data: Record<string, unknown>,
+	): Promise<void> => {
+		emitted.push({ data, stream });
+		return Promise.resolve();
+	};
+
+	await runDeltaPass(
+		{ fetch } as unknown as Pick<ImapFlow, "fetch">,
+		{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
+			typeof runDeltaPass
+		>[1],
+		makeRequested(["messages"]),
+		emitRecord,
+		"2026-08-20T00:00:00.000Z",
+		fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
+	);
+
+	const rec = emitted.find((r) => r.stream === "messages");
+	assert.ok(rec, "a working fetch emits the full record");
+	assert.equal(rec.data.snippet, "Hello there");
+});
+
+test("runDeltaPass: a genuinely bodyless message (fetchFailed false, snippet null) is still emitted with snippet null", async () => {
+	const delta = makeMsg({
+		uid: 104,
+		emailId: "gmmsgid-delta-bodyless",
+		flags: new Set(["\\Seen"]),
+	});
+	// biome-ignore lint/suspicious/useAwait: stands in for ImapFlow.fetch's async-iterable-returning signature.
+	const fetch = mock.fn(async function* () {
+		yield delta;
+	});
+	const fetchBodies = mock.fn(() =>
+		Promise.resolve({ bodyHtmlFull: null, bodyTextFull: null, snippet: null }),
+	);
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	const emitRecord = (
+		stream: string,
+		data: Record<string, unknown>,
+	): Promise<void> => {
+		emitted.push({ data, stream });
+		return Promise.resolve();
+	};
+
+	await runDeltaPass(
+		{ fetch } as unknown as Pick<ImapFlow, "fetch">,
+		{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
+			typeof runDeltaPass
+		>[1],
+		makeRequested(["messages"]),
+		emitRecord,
+		"2026-08-20T00:00:00.000Z",
+		fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
+	);
+
+	const rec = emitted.find((r) => r.stream === "messages");
+	assert.ok(
+		rec,
+		"a genuinely bodyless message still gets a record (fetchFailed is false, not a failure)",
+	);
+	assert.equal(rec.data.snippet, null);
+});
+
 // A schema-REJECTED body record is the sibling loss: `emitRecord` returns false,
 // a SKIP_RESULT goes out, nothing lands, and the cursor advances anyway. Gmail's
 // own makeEmitRecord returns Promise<boolean>, so processMessage can honor it.
@@ -6569,7 +7226,7 @@ test("runDeltaPass: emits a WHOLE messages record, never a null-envelope shell",
 		}),
 	);
 
-	await runDeltaPass(
+	const result = await runDeltaPass(
 		{ fetch } as unknown as Pick<ImapFlow, "fetch">,
 		{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
 			typeof runDeltaPass
@@ -6579,6 +7236,10 @@ test("runDeltaPass: emits a WHOLE messages record, never a null-envelope shell",
 		"2026-08-20T00:00:00.000Z",
 		fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
 	);
+
+	// Regression guard: a clean run (nothing skipped) must NOT tell the
+	// caller to hold highest_modseq back.
+	assert.equal(result.skippedAnyMessage, false);
 
 	const rec = emitted.find((r) => r.stream === "messages");
 	assert.ok(rec, "delta pass emits a messages record");
@@ -6633,7 +7294,7 @@ test("runDeltaPass: skips a message the server returns without an envelope", asy
 		Promise.resolve({ bodyHtmlFull: null, bodyTextFull: null, snippet: null }),
 	);
 
-	await runDeltaPass(
+	const result = await runDeltaPass(
 		{ fetch } as unknown as Pick<ImapFlow, "fetch">,
 		{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
 			typeof runDeltaPass
@@ -6648,6 +7309,14 @@ test("runDeltaPass: skips a message the server returns without an envelope", asy
 		emitted.length,
 		0,
 		"no record emitted when the envelope is absent",
+	);
+	// Same defect as the failed-snippet skip: this message's flag/label
+	// change is being left uncovered, so the caller must be told to hold
+	// highest_modseq back — otherwise `changedSince` never re-examines it.
+	assert.equal(
+		result.skippedAnyMessage,
+		true,
+		"the envelope-absent skip must also report a coverage gap to the caller",
 	);
 });
 
