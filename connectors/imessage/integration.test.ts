@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	manifestPath as manifestPathFor,
@@ -184,6 +185,19 @@ test("iMessage emits a one-to-one conversation and a monotonic date cursor", asy
 		});
 
 		const result = await runImessage(dbPath, ["messages"]);
+		assertUserFacingProgress(result.messages);
+		assert.ok(
+			result.messages.some(
+				(m) =>
+					m.type === "PROGRESS" &&
+					m.message === "Importing your iMessage messages",
+			),
+			"owner sees a plain stage line",
+		);
+		assert.match(
+			result.stderr,
+			/\[imessage-diagnostic\] stage_progress \{"phase":"emit","pass":"emit","stream":"messages","detail":"streaming rows"\}/,
+		);
 		const msgs = records(result.messages, "messages");
 		assert.equal(msgs.length, 2);
 		assert.equal(msgs[0]?.chat_id, "1");

@@ -73,6 +73,7 @@ import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type EmittedMessage,
 	type RecordData,
@@ -382,12 +383,15 @@ async function emitMessageRows({
 			latestApple = Number(r.date);
 		}
 		if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
-			await progress(
-				`iMessage phase=emit pass=emit stream=messages item=${itemOrdinal}`,
-				{
-					stream: "messages",
-				},
-			);
+			connectorDiagnostic("imessage", "stage_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "messages",
+				item: itemOrdinal,
+			});
+			await progress(`Imported ${itemOrdinal} messages`, {
+				stream: "messages",
+			});
 		}
 	}
 	if (skippedNullDate > 0) {
@@ -714,21 +718,27 @@ async function emitAttachmentRows({
 		emitted += 1;
 
 		if (emitted % ATTACHMENT_PROGRESS_INTERVAL === 0) {
-			await progress(
-				`iMessage phase=emit pass=emit stream=attachments item=${emitted}`,
-				{
-					stream: "attachments",
-				},
-			);
+			connectorDiagnostic("imessage", "stage_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "attachments",
+				item: emitted,
+			});
+			await progress(`Imported ${emitted} attachments`, {
+				stream: "attachments",
+			});
 		}
 	}
 	if (emitted > 0 && emitted % ATTACHMENT_PROGRESS_INTERVAL !== 0) {
-		await progress(
-			`iMessage phase=emit pass=emit stream=attachments item=${emitted}`,
-			{
-				stream: "attachments",
-			},
-		);
+		connectorDiagnostic("imessage", "stage_progress", {
+			phase: "emit",
+			pass: "emit",
+			stream: "attachments",
+			item: emitted,
+		});
+		await progress(`Imported ${emitted} attachments`, {
+			stream: "attachments",
+		});
 	}
 	return emitted;
 }
@@ -758,10 +768,15 @@ if (isMainModule(import.meta.url)) {
 					last_apple_date?: number;
 				};
 				const since = messagesState.last_apple_date ?? 0;
-				await progress(
-					"iMessage phase=index pass=index stream=messages querying rows",
-					{ stream: "messages" },
-				);
+				connectorDiagnostic("imessage", "stage_progress", {
+					phase: "index",
+					pass: "index",
+					stream: "messages",
+					detail: "querying rows",
+				});
+				await progress("Reading your iMessage messages", {
+					stream: "messages",
+				});
 
 				// Row iteration is lazy: query errors surface while stepping the iterator,
 				// so the emit loop runs inside the failure boundary that maps any query
@@ -769,10 +784,15 @@ if (isMainModule(import.meta.url)) {
 				let latestApple: number;
 				try {
 					const rows = queryMessageRows(db, since);
-					await progress(
-						"iMessage phase=emit pass=emit stream=messages streaming rows",
-						{ stream: "messages" },
-					);
+					connectorDiagnostic("imessage", "stage_progress", {
+						phase: "emit",
+						pass: "emit",
+						stream: "messages",
+						detail: "streaming rows",
+					});
+					await progress("Importing your iMessage messages", {
+						stream: "messages",
+					});
 					latestApple = await emitMessageRows({
 						emit,
 						emitRecord,
@@ -793,12 +813,13 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			if (requested.has("participants")) {
-				await progress(
-					"iMessage phase=index pass=index stream=participants querying rows",
-					{
-						stream: "participants",
-					},
-				);
+				connectorDiagnostic("imessage", "stage_progress", {
+					phase: "index",
+					pass: "index",
+					stream: "participants",
+					detail: "querying rows",
+				});
+				await progress("Reading chat participants", { stream: "participants" });
 				const emitted = await emitParticipantRows({ db, emitRecord });
 				if (emitted === 0 && !tableExists(db, "chat_handle_join")) {
 					await emit({
@@ -819,12 +840,13 @@ if (isMainModule(import.meta.url)) {
 			if (requested.has("attachments")) {
 				const maxBytes = resolveMaxAttachmentBytes(process.env);
 				const attachmentsRoot = resolveAttachmentsRoot(process.env);
-				await progress(
-					"iMessage phase=index pass=index stream=attachments querying rows",
-					{
-						stream: "attachments",
-					},
-				);
+				connectorDiagnostic("imessage", "stage_progress", {
+					phase: "index",
+					pass: "index",
+					stream: "attachments",
+					detail: "querying rows",
+				});
+				await progress("Reading attachments", { stream: "attachments" });
 				const hasAttachmentTables =
 					tableExists(db, "attachment") &&
 					tableExists(db, "message_attachment_join");
