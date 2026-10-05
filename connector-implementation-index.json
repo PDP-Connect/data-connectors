@@ -15656,7 +15656,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",

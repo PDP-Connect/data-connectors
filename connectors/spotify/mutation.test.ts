@@ -4,6 +4,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	EmittedMessage,
 	StreamScope,
@@ -212,6 +216,8 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 	}> = [];
 	const messages: EmittedMessage[] = [];
 	const progressMessages: string[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 	const operations: Array<{
 		operationName: string;
 		variables: Record<string, unknown>;
@@ -397,6 +403,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 			requested,
 		});
 	} finally {
+		setConnectorDiagnosticSink(undefined);
 		globalThis.fetch = originalFetch;
 		(globalThis as unknown as { window: unknown }).window = originalWindow;
 		(globalThis as unknown as { document: unknown }).document =
@@ -427,8 +434,19 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 	assert.equal(saved[0]?.data.explicit, false);
 	assert.equal(saved[1]?.data.id, "unknownExplicit");
 	assert.equal(saved[1]?.data.explicit, null);
+	assert.deepEqual(
+		progressMessages.filter((message) => message.startsWith("Skipped")),
+		["Skipped 1 saved track with no save date"],
+	);
+	assertUserFacingProgress(
+		progressMessages.map((message) => ({ type: "PROGRESS", message })),
+	);
 	assert.ok(
-		progressMessages.some((message) => message.includes("missing added_at")),
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[spotify-diagnostic] saved_track_missing_added_at ") &&
+				line.includes('"track_id":'),
+		),
 	);
 });
 
