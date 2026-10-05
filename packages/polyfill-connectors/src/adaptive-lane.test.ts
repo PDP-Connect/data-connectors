@@ -642,3 +642,43 @@ test("adaptive lane fake timing does not require wall-clock sleeps", async () =>
 		"test should not wait for the configured fake delay",
 	);
 });
+
+test("adaptive lane starts local items without a launch wait and keeps the cooldown for the next provider launch", async () => {
+	const sleeps: number[] = [];
+	const lane = createAdaptiveLane<string>({
+		name: "test.local-items",
+		initialConcurrency: 1,
+		maxAttempts: 1,
+		maxConcurrency: 1,
+		maxDelayMs: 5000,
+		maxQueueSize: 10,
+		minConcurrency: 1,
+		minDelayMs: 100,
+		classifyOutcome: () => ({ kind: "ok" }),
+		launchDelayHint: () => 700,
+		random: () => 0,
+		sleep: (ms) => {
+			sleeps.push(ms);
+		},
+	});
+	const items = ["provider-a", "local-b", "local-c", "provider-d"];
+
+	const results = await lane.runAll(
+		items,
+		async (item, context) => {
+			if (item === "provider-a") {
+				await context.reportPressure({
+					kind: "rate_limited",
+					retryAfterMs: 2000,
+				});
+			}
+			return item;
+		},
+		{ isLocalItem: (item) => item.startsWith("local-") },
+	);
+
+	assert.deepEqual(results, items);
+	// provider-a: the pacing hint. local-b and local-c: no wait.
+	// provider-d: the cooldown provider-a reported, which the local items kept.
+	assert.deepEqual(sleeps, [700, 2000]);
+});

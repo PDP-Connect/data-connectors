@@ -13,6 +13,7 @@ declare const PAGESHIM_NEGATIVE_HEAP_CONTROL: boolean;
 declare const PAGESHIM_EVALUATE_RESULT_MIB: number;
 declare const PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: number;
 declare const PAGESHIM_EMIT_STATE: boolean;
+declare const PAGESHIM_EVALUATE_CHAR: string;
 
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
@@ -40,7 +41,9 @@ declare const PAGESHIM_EMIT_STATE: boolean;
 						id: "synthetic-60mb-conversation",
 						messages: [
 							{
-								text: "x".repeat(PAGESHIM_EVALUATE_RESULT_MIB * 1024 * 1024),
+								text: PAGESHIM_EVALUATE_CHAR.repeat(
+									PAGESHIM_EVALUATE_RESULT_MIB * 1024 * 1024,
+								),
 							},
 						],
 					},
