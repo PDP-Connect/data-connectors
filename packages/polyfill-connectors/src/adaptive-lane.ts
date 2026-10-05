@@ -74,9 +74,20 @@ export interface AdaptiveLaneRunContext {
 }
 
 export interface AdaptiveLaneRunOptions {
+	/**
+	 * True when the task will not contact the provider (for example, its
+	 * result is already cached). The lane then starts it without a launch
+	 * wait and keeps any pending cooldown for the next provider launch.
+	 */
+	isLocal?: () => boolean;
 	onBeforeStart?: () => void;
 	onFailure?: (error: unknown) => void;
 	signal?: AbortSignal;
+}
+
+export interface AdaptiveLaneRunAllOptions<I> extends AdaptiveLaneRunOptions {
+	/** Per-item form of `isLocal`, checked when the item starts. */
+	isLocalItem?: (item: I) => boolean;
 }
 
 export interface AdaptiveLaneOptions<T> {
@@ -123,7 +134,7 @@ export interface AdaptiveLane<T> {
 	runAll: <I>(
 		items: readonly I[],
 		task: (item: I, context: AdaptiveLaneRunContext) => T | Promise<T>,
-		options?: AdaptiveLaneRunOptions,
+		options?: AdaptiveLaneRunAllOptions<I>,
 	) => Promise<T[]>;
 	snapshot: () => AdaptiveLaneSnapshot;
 }
@@ -519,6 +530,10 @@ export function createAdaptiveLane<T>(
 			queued.delete(entry);
 			ensureNotCancelled(signal);
 			runOptions.onBeforeStart?.();
+			if (runOptions.isLocal?.()) {
+				await emit({ type: "started" });
+				return await runAttempts(task, signal);
+			}
 			const delayMs = launchDelay();
 			const cooldownMs = pendingLaunchCooldownMs;
 			pendingLaunchCooldownMs = 0;
@@ -582,7 +597,7 @@ export function createAdaptiveLane<T>(
 		runAll: async <I>(
 			items: readonly I[],
 			task: (item: I, context: AdaptiveLaneRunContext) => T | Promise<T>,
-			runOptions?: AdaptiveLaneRunOptions,
+			runOptions?: AdaptiveLaneRunAllOptions<I>,
 		): Promise<T[]> => {
 			let firstFailure: unknown = null;
 			const sharedRunOptions: AdaptiveLaneRunOptions = {
@@ -598,8 +613,14 @@ export function createAdaptiveLane<T>(
 			if (runOptions?.signal) {
 				sharedRunOptions.signal = runOptions.signal;
 			}
+			const isLocalItem = runOptions?.isLocalItem;
 			const runs = items.map((item) =>
-				run((context) => task(item, context), sharedRunOptions),
+				run(
+					(context) => task(item, context),
+					isLocalItem
+						? { ...sharedRunOptions, isLocal: () => isLocalItem(item) }
+						: sharedRunOptions,
+				),
 			);
 			try {
 				return await Promise.all(runs);

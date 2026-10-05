@@ -2930,6 +2930,58 @@ test("runMessagesAndConversationsWithDetail: 100 conversations use 10 capped bat
 	assert.deepEqual(coverage.gapKeys, []);
 });
 
+test("runMessagesAndConversationsWithDetail: batch-cached conversations skip per-conversation launch pacing", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let batchCalls = 0;
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			throw new Error(`unexpected per-id GET: ${path}`);
+		},
+		fetchBatch: (ids: readonly string[]): Promise<ChatGptFetchResult[]> => {
+			batchCalls += 1;
+			return Promise.resolve(ids.map((id) => makeDetailOkForConversation(id)));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const convos = Array.from({ length: 100 }, (_, index) =>
+		makeConvo({ id: `convo-${index + 1}` }),
+	);
+	const sleeps: number[] = [];
+
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		convos,
+		makeEmitConversation(deps),
+		{
+			// The largest launch jitter, so every paced launch sleeps.
+			random: () => 0.999,
+			sleep: (ms: number) => {
+				sleeps.push(ms);
+			},
+		},
+	);
+
+	assert.equal(coverage.hydratedKeys.length, 100);
+	assert.equal(batchCalls, 10);
+	// Only a launch that starts a provider batch wave is paced; the other
+	// conversations are read from the batch cache.
+	const pacedLaunches = sleeps.filter((ms) => ms > 0).length;
+	assert.ok(
+		pacedLaunches <= batchCalls,
+		`expected at most ${batchCalls} paced launches, got ${pacedLaunches}`,
+	);
+});
+
 test("runMessagesAndConversationsWithDetail: batch waves ramp to four and emit before the next bounded wave", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	let activeBatchRequests = 0;
@@ -8353,32 +8405,27 @@ test("runMessagesAndConversationsWithDetail: batch hydration ETA counts conversa
 		progressMessages.push(message);
 		return Promise.resolve();
 	};
-	const conversations = [
-		makeConvo({ id: "batch-r1" }),
-		makeConvo({ id: "batch-r2" }),
-		makeConvo({ id: "batch-r3" }),
-	];
+	const conversations = Array.from({ length: 60 }, (_, index) =>
+		makeConvo({ id: `batch-r${index + 1}` }),
+	);
 	await runMessagesAndConversationsWithDetail(
 		deps,
 		conversations,
 		makeEmitConversation(deps),
 		{ random: () => 0, sleep: () => undefined },
 	);
-	assert.ok(
-		progressMessages.some((message) =>
-			message.startsWith("Fetching conversation details: 1 of 3 "),
-		),
-		progressMessages.join("\n"),
-	);
-	assert.ok(
-		progressMessages.some((message) =>
-			message.startsWith("Fetching conversation details: 2 of 3 "),
-		),
-		progressMessages.join("\n"),
-	);
+	const counts = progressMessages
+		.map((message) =>
+			message.match(/^Fetching conversation details: (\d+) of 60 /),
+		)
+		.filter((match) => match !== null)
+		.map((match) => Number(match[1]));
+	// Six batch requests, but the count advances per conversation: the first,
+	// every 25th and the last.
+	assert.deepEqual(counts, [1, 25, 50, 60], progressMessages.join("\n"));
 	assert.ok(
 		progressMessages.includes(
-			"Fetching conversation details: 3 of 3 (about 0 min left)",
+			"Fetching conversation details: 60 of 60 (about 0 min left)",
 		),
 		progressMessages.join("\n"),
 	);
