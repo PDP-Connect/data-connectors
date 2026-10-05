@@ -7,6 +7,7 @@ import test from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext, EmittedMessage, RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { assertUserFacingProgress, setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { collectOuraBrowser, ensureOuraSession, initialStartDate } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -70,7 +71,9 @@ function harness(names: string[], browserPage: Page, state: Record<string, unkno
       failures.push({ stream, retryable: options?.retryable === true });
       messages.push({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message });
     },
-    progress: async () => {},
+    progress: async (message: string, extra?: Record<string, unknown>) => {
+      messages.push({ type: "PROGRESS", message, ...extra } as EmittedMessage);
+    },
   });
   return { ctx, messages, records, failures };
 }
@@ -176,10 +179,26 @@ test("browser schema accepts offset timestamps and preserves every daily score d
 test("failed required window reports runtime failure and saves retry state", async () => {
   const today = new Date().toISOString().slice(0, 10);
   let retryState: unknown;
+  const diagnostics: string[] = [];
+  setConnectorDiagnosticSink((line) => diagnostics.push(line));
   await withBrowser(async () => { throw new Error("network unavailable"); }, async () => {
     const h = harness(["activity"], page(HOME), {}, { since: today });
-    await collectOuraBrowser(h.ctx);
+    try {
+      await collectOuraBrowser(h.ctx);
+    } finally {
+      setConnectorDiagnosticSink(undefined);
+    }
     assert.deepEqual(h.failures, [{ stream: "activity", retryable: true }]);
+    // Owner text is plain; the raw error detail moved to a diagnostic line.
+    const progress = h.messages.filter((m) => m.type === "PROGRESS");
+    assert.deepEqual(progress.map((m) => (m as { message: string }).message), [
+      `Fetching activity: ${today} to ${today}`,
+      `Could not fetch Oura activity data for ${today} to ${today}`,
+    ]);
+    assertUserFacingProgress(h.messages);
+    assert.deepEqual(diagnostics, [
+      `[oura_browser-diagnostic] chunk_failed {"stream":"activity","from":"${today}","to":"${today}","detail":"network unavailable","retryable":true}`,
+    ]);
     assert.ok(h.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed"));
     assert.deepEqual(h.messages.find((m) => m.type === "STATE")?.cursor, {
       next_day: today, requested_since: today, failed_windows: [{ start: today, end: today }],
