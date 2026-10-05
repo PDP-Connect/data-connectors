@@ -521,6 +521,19 @@
 		}
 	},
 	{
+		"file": "slack_browser.json",
+		"manifest": {
+			"connector_key": "slack-browser",
+			"reason_display_messages": {
+				"collection_interrupted": "Slack stopped answering partway through, so some conversations are missing. The next run continues from where this one stopped.",
+				"optional_stream_failed": "We couldn't read one part of your Slack data, so we skipped it. Everything else was collected normally.",
+				"sign_in_required": "Slack needs you to sign in again before this can continue.",
+				"source_unreadable": "Slack answered with something this connector doesn't recognise, so nothing more was read. Slack may have changed its API - please report this rather than retrying.",
+				"workspace_not_signed_in": "The workspace named in SLACK_WORKSPACE is not one this browser is signed in to. Sign in to it, or clear SLACK_WORKSPACE to read every signed-in workspace."
+			}
+		}
+	},
+	{
 		"file": "spotify.json",
 		"manifest": {
 			"connector_key": "spotify",

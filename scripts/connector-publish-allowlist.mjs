@@ -68,6 +68,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
       "slack",
       "Requires slackdump from PATH or $SLACKDUMP_BIN and a code-relative config asset; the OCI builder does not implement a per-platform tool layer or asset rewrite yet.",
     ],
+    ["slack_browser", "slack-browser"],
     ["spotify", "spotify"],
     ["steam", "steam"],
     ["strava", "strava"],

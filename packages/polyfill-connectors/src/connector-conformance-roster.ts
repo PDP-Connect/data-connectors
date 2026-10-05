@@ -94,6 +94,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+	slack_browser: { testFile: "connectors/slack_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
 	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
