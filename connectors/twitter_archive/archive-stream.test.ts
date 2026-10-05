@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -201,6 +202,22 @@ test("twitter_archive end-to-end: streams tweet + DM records and STATE cursors",
 	assert.equal(dms[0]?.conversation_id, "111-222");
 	assert.equal(dms[2]?.conversation_id, "333-444");
 
+	const progress = result.messages.filter((m) => m.type === "PROGRESS");
+	assert.deepEqual(
+		progress.map((m) => (m as { message: string }).message),
+		["Reading your tweets", "Reading your direct messages"],
+	);
+	assertUserFacingProgress(result.messages);
+	// Technical detail moved to diagnostic lines on stderr.
+	assert.match(
+		result.stderr,
+		/\[twitter_archive-diagnostic\] stream_started \{"phase":"emit","pass":"emit","stream":"tweets"\}/,
+	);
+	assert.match(
+		result.stderr,
+		/\[twitter_archive-diagnostic\] stream_started \{"phase":"emit","pass":"emit","stream":"direct_messages"\}/,
+	);
+
 	const states = result.messages.filter((m) => m.type === "STATE");
 	assert.ok(
 		states.some(
@@ -258,4 +275,40 @@ test("twitter_archive end-to-end: missing archive dir reports SKIP_RESULT, not f
 	assert.equal(done?.status, "succeeded", result.stderr);
 	const skips = result.messages.filter((m) => m.type === "SKIP_RESULT");
 	assert.equal(skips.length, 2);
+});
+
+test("twitter_archive end-to-end: periodic progress is plain text, ordinal goes to diagnostics", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "tw-progress-"));
+	mkdirSync(join(dir, "data"));
+	const entries = Array.from({ length: 10_000 }, (_, i) => ({
+		tweet: {
+			id_str: String(i),
+			full_text: `tweet ${i}`,
+			created_at: "Wed Jun 05 13:45:22 +0000 2024",
+			entities: { media: [], urls: [] },
+		},
+	}));
+	writeFileSync(
+		join(dir, "data", "tweets.js"),
+		`window.YTD.tweets.part0 = ${JSON.stringify(entries)};\n`,
+	);
+	const result = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: ENTRYPOINT,
+		env: { TWITTER_ARCHIVE_DIR: dir },
+		start: {
+			type: "START",
+			scope: { streams: [{ name: "tweets" }] },
+			state: {},
+		},
+	});
+	const messages = result.messages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => (m as { message: string }).message);
+	assert.deepEqual(messages, ["Reading your tweets", "Read 10000 tweets"]);
+	assertUserFacingProgress(result.messages);
+	assert.match(
+		result.stderr,
+		/\[twitter_archive-diagnostic\] stream_progress \{"phase":"emit","pass":"emit","stream":"tweets","item":10000\}/,
+	);
 });
