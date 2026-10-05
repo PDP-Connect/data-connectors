@@ -166,6 +166,18 @@
 		}
 	},
 	{
+		"file": "garmin_browser.json",
+		"manifest": {
+			"connector_key": "garmin-browser",
+			"reason_display_messages": {
+				"collection_interrupted": "Garmin Connect stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+				"sign_in_required": "Garmin Connect needs you to sign in again before this can continue.",
+				"source_limit_reached": "This run read as much Garmin history as one run allows. The next run continues from where this one stopped.",
+				"source_unreadable": "Garmin Connect answered with something this connector doesn't recognise, so nothing more was read. Garmin may have changed its site; please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "github.json",
 		"manifest": {
 			"connector_key": "github",

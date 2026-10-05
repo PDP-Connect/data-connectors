@@ -1,0 +1,32 @@
+{
+	"userId": 41001,
+	"latestTrainingStatusData": {
+		"41002": {
+			"calendarDate": "2026-09-16",
+			"sinceDate": "2026-09-10",
+			"weeklyTrainingLoad": 412,
+			"trainingStatus": 7,
+			"timestamp": 1789535564000,
+			"deviceId": 41002,
+			"loadTunnelMin": 280,
+			"loadTunnelMax": 560,
+			"loadLevelTrend": 2,
+			"sport": "RUNNING",
+			"subSport": "GENERIC",
+			"fitnessTrendSport": "RUNNING",
+			"fitnessTrend": 2,
+			"trainingStatusFeedbackPhrase": "PRODUCTIVE_AER_HIGH_SHORT",
+			"trainingPaused": false,
+			"acuteTrainingLoadDTO": null,
+			"primaryTrainingDevice": false
+		}
+	},
+	"recordedDevices": [
+		{
+			"deviceId": 41002,
+			"deviceName": "Fixture Watch"
+		}
+	],
+	"showSelector": false,
+	"lastPrimarySyncDate": "2026-09-16"
+}

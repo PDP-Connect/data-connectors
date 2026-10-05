@@ -1,0 +1,12 @@
+{
+	"userProfileId": 41001,
+	"displayName": "fixture-owner",
+	"calendarDate": "2026-09-16",
+	"totalSteps": 8432,
+	"restingHeartRate": 52,
+	"minHeartRate": 47,
+	"lastSevenDaysAvgRestingHeartRate": 53,
+	"averageStressLevel": 31,
+	"bodyBatteryHighestValue": 88,
+	"bodyBatteryLowestValue": 24
+}
