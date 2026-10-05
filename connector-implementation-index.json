@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "1.0.0",
+				"version": "0.2.0",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -1708,7 +1708,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "1.0.0",
+				"version": "0.2.0",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -9606,7 +9606,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "1.0.0",
+				"version": "0.6.0",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -10748,7 +10748,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "1.0.0",
+				"version": "0.2.0",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -13056,7 +13056,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "1.0.0",
+				"version": "0.3.0",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -14060,7 +14060,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "1.0.0",
+				"version": "0.7.0",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -17163,7 +17163,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "1.0.0",
+				"version": "0.2.0",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {
