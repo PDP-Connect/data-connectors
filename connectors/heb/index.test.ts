@@ -28,6 +28,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { chromium, type Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -51,6 +55,8 @@ import {
 	type NutritionTarget,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
+	nutritionCoverageBlockReason,
+	nutritionCoverageRecoveryHint,
 	type OrderItemsCoverage,
 	type OrdersCoverage,
 	priorOrdersAreBeyondRetention,
@@ -61,8 +67,6 @@ import {
 	reasonForDetailFailure,
 	recordDetailOutcome,
 	recoverPendingOrderItemDetailGaps,
-	nutritionCoverageBlockReason,
-	nutritionCoverageRecoveryHint,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	reportListPageCeiling,
 	resolveOrderDetail,
@@ -361,7 +365,17 @@ test("processListOrder: a malformed order date records a 'gap' coverage outcome 
 	});
 	const listOrder = makeListOrder({ orderDateRaw: "not a real date" });
 
-	await processListOrder(NEVER_CALLED_PAGE, deps, makeRunFlags(), listOrder);
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		await processListOrder(NEVER_CALLED_PAGE, deps, makeRunFlags(), listOrder);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.deepEqual(diagnosticLines, [
+		'[heb-diagnostic] unparseable_order_date {"stream":"orders","coverage":"considered_not_covered"}',
+	]);
+	assertUserFacingProgress(protocolMessages);
 
 	assert.deepEqual(
 		coverage.required,
@@ -384,7 +398,7 @@ test("processListOrder: a malformed order date records a 'gap' coverage outcome 
 			(m) =>
 				m.type === "PROGRESS" &&
 				m.stream === "orders" &&
-				m.message.startsWith("unparseable_order_date: "),
+				m.message === "We skipped an order because its date could not be read",
 		),
 		"the record-level diagnostic at the order level fires",
 	);
@@ -420,7 +434,12 @@ test("processListOrder: a malformed order date emits no DETAIL_GAP when order_it
 	});
 	const listOrder = makeListOrder({ orderDateRaw: "not a real date" });
 
-	await processListOrder(NEVER_CALLED_PAGE, deps, makeRunFlags(), listOrder);
+	setConnectorDiagnosticSink(() => undefined);
+	try {
+		await processListOrder(NEVER_CALLED_PAGE, deps, makeRunFlags(), listOrder);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
 	assert.deepEqual(
 		coverage.required,
@@ -434,7 +453,7 @@ test("processListOrder: a malformed order date emits no DETAIL_GAP when order_it
 			(m) =>
 				m.type === "PROGRESS" &&
 				m.stream === "orders" &&
-				m.message.startsWith("unparseable_order_date: "),
+				m.message === "We skipped an order because its date could not be read",
 		),
 		"the record-level diagnostic at the order level still fires",
 	);
@@ -3053,29 +3072,35 @@ test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", a
 			},
 		);
 		const diagnostics: string[] = [];
+		const progressMessages: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnostics.push(line));
 		const result = await fetchOrderDetail(page, "HEB-DEBUG-SURFACE", {
 			detailSurfaceTimeoutMs: 5000,
 			expectedItemCount: 20,
 			onDetailProgress: async (message) => {
-				diagnostics.push(message);
+				progressMessages.push(message);
 			},
 			waitForHydration: immediateWait,
 		});
 
 		assert.equal(result.status, "hydrated");
+		assertUserFacingProgress(
+			progressMessages.map((message) => ({ type: "PROGRESS", message })),
+		);
 		const pollMessages = diagnostics.filter((message) =>
-			message.startsWith("detail_surface_poll;"),
+			message.startsWith("[heb-diagnostic] detail_surface_poll "),
 		);
 		assert.ok(pollMessages.length > 0, "debug mode emits every surface poll");
 		assert.match(
 			pollMessages[0] ?? "",
-			/^detail_surface_poll;changed=initial;atEnd=(true|false);loading=(true|false);actionableControl=(true|false);observedUnits=unknown;expectedUnits=20;stablePolls=0;qtyFailures=row 1:Qty: #\.# of #,# lbs \[text\]/,
+			/^\[heb-diagnostic\] detail_surface_poll \{"changed":"initial","at_end":(true|false),"loading":(true|false),"actionable_control":(true|false),"observed_units":"unknown","expected_units":20,"stable_polls":0,"qty_failures":"row 1:Qty: #\.# of #,# lbs \[text\]/,
 		);
 		assert.ok(
 			pollMessages.every((message) => !message.includes("Static item")),
 			"debug diagnostics must not expose product names",
 		);
 	} finally {
+		setConnectorDiagnosticSink(undefined);
 		if (previousDebug === undefined) {
 			delete process.env.HEB_DETAIL_SURFACE_DEBUG;
 		} else {
@@ -3101,8 +3126,14 @@ test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap,
 		`unexpected settlement: ${result.failureKind}`,
 	);
 	assert.match(result.diagnostic ?? "", /detail_surface_(timeout|incomplete)/);
-	assert.ok(Number.isFinite(result.elapsedMs), "surface failure records elapsed time");
-	assert.ok((result.pollCount ?? 0) > 0, "surface failure records its poll count");
+	assert.ok(
+		Number.isFinite(result.elapsedMs),
+		"surface failure records elapsed time",
+	);
+	assert.ok(
+		(result.pollCount ?? 0) > 0,
+		"surface failure records its poll count",
+	);
 });
 
 test("fetchOrderDetail: a surface evaluation error is an observable gap, not swallowed partial hydration", async () => {
@@ -3552,6 +3583,8 @@ test("processListOrder keeps fully collected items and reports a remaining count
 				progressMessages.push(message);
 			},
 		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
 
 		await processListOrder(
 			page,
@@ -3570,23 +3603,30 @@ test("processListOrder keeps fully collected items and reports a remaining count
 		);
 		assert.equal(nutritionTargetSink.targets.length, 58);
 		assert.ok(
-			progressMessages.some((message) =>
-				message.includes(
-					"item_count_reconciliation: card_units=85; product_rows=58; fulfilled_units=84; reason=unit_and_row_counts_differ",
-				),
+			progressMessages.includes(
+				"An order's item count did not match its details",
 			),
-			"the mismatch reason and all three counts are owner-readable progress",
+			"the owner sees a plain mismatch line",
+		);
+		assertUserFacingProgress(
+			progressMessages.map((message) => ({ type: "PROGRESS", message })),
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":85,"product_rows":58,"fulfilled_units":84,"reason":"unit_and_row_counts_differ"}',
+			),
+			"the reason and all three counts stay in the diagnostic line",
 		);
 		assert.equal(
 			protocolMessages.filter(
 				(message) =>
-					message.type === "SKIP_RESULT" &&
-					message.stream === "order_items",
+					message.type === "SKIP_RESULT" && message.stream === "order_items",
 			).length,
 			0,
 			"a delivered order_items stream must not also emit SKIP_RESULT",
 		);
 	} finally {
+		setConnectorDiagnosticSink(undefined);
 		await browser.close();
 	}
 });
@@ -3758,7 +3798,6 @@ test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redi
 	assert.ok(skip);
 });
 
-
 test("nutritionCoverageBlockReason requires orders and order_items in the same run", () => {
 	assert.equal(
 		nutritionCoverageBlockReason({
@@ -3788,8 +3827,6 @@ test("nutritionCoverageBlockReason blocks on the 50-page order-history ceiling",
 		"order history stopped at the page budget before all orders were scanned",
 	);
 });
-
-
 
 test("nutritionCoverageBlockReason blocks on a resume checkpoint boundary stop", () => {
 	assert.equal(
@@ -4044,10 +4081,21 @@ test("collectNutrition emits nothing when given zero targets", async () => {
 
 test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, because the held checkpoint makes the next run hit the same cap", async () => {
 	const { deps, protocolMessages } = makeRecordingDeps();
+	const progressTexts: string[] = [];
+	deps.progress = (message: string): Promise<void> => {
+		progressTexts.push(message);
+		return Promise.resolve();
+	};
 	await reportListPageCeiling(deps, HEB_MAX_LIST_PAGES + 3);
 	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
 	assert.equal(skip?.type, "SKIP_RESULT");
 	assert.equal(skip.reason, "older_pages_deferred_page_budget");
+	assertUserFacingProgress(
+		progressTexts.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.deepEqual(progressTexts, [
+		`Stopped after ${String(HEB_MAX_LIST_PAGES)} pages of orders; older orders were not read`,
+	]);
 	assert.deepEqual(skip.recovery_hint, {
 		action: "retry_on_connector_upgrade",
 		retryable: false,
@@ -4066,5 +4114,8 @@ test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", 
 	assert.deepEqual(nutritionCoverageRecoveryHint("item_count_short"), upgrade);
 	assert.deepEqual(nutritionCoverageRecoveryHint("prior_detail_gaps"), retry);
 	assert.deepEqual(nutritionCoverageRecoveryHint("detail_gaps"), retry);
-	assert.deepEqual(nutritionCoverageRecoveryHint("order_scan_suppressed"), retry);
+	assert.deepEqual(
+		nutritionCoverageRecoveryHint("order_scan_suppressed"),
+		retry,
+	);
 });
