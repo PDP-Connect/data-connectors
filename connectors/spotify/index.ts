@@ -14,6 +14,7 @@
 import { createHmac } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type EmittedMessage,
@@ -95,8 +96,14 @@ interface BrowserData {
 	saved_tracks: Record<string, unknown>[];
 }
 
+/** Non-fatal collection problem; `event` is the diagnostic event name. */
+interface BrowserWarning {
+	event: "missing_query_hashes" | "saved_track_missing_added_at";
+	fields: Record<string, string>;
+}
+
 interface BrowserCollectResult extends BrowserData {
-	warnings: string[];
+	warnings: BrowserWarning[];
 }
 
 /**
@@ -355,7 +362,7 @@ async function collectSpotifyWebData(
 	await openSpotify(page);
 	return await page.evaluate(async (requested) => {
 		const wanted = new Set(requested);
-		const warnings: string[] = [];
+		const warnings: BrowserWarning[] = [];
 		const result: BrowserData = {
 			profile: null,
 			playlists: [],
@@ -553,7 +560,10 @@ async function collectSpotifyWebData(
 			}
 			const missing = needed.filter((name) => !found[name]);
 			if (missing.length > 0)
-				warnings.push(`missing query hashes: ${missing.join(", ")}`);
+				warnings.push({
+					event: "missing_query_hashes",
+					fields: { names: missing.join(", ") },
+				});
 			return found;
 		}
 
@@ -807,7 +817,10 @@ async function collectSpotifyWebData(
 					if (!t || !id) continue;
 					const addedAt = item.addedAt?.isoString;
 					if (!addedAt) {
-						warnings.push(`saved track ${id} missing added_at; skipped`);
+						warnings.push({
+							event: "saved_track_missing_added_at",
+							fields: { track_id: id },
+						});
 						continue;
 					}
 					result.saved_tracks.push({
@@ -930,7 +943,20 @@ export async function spotifyCollect({
 		});
 	}
 	for (const warning of data.warnings) {
-		await progress(warning);
+		connectorDiagnostic("spotify", warning.event, warning.fields);
+	}
+	const skippedTracks = data.warnings.filter(
+		(warning) => warning.event === "saved_track_missing_added_at",
+	).length;
+	if (
+		data.warnings.some((warning) => warning.event === "missing_query_hashes")
+	) {
+		await progress("Some Spotify data could not be loaded");
+	}
+	if (skippedTracks > 0) {
+		await progress(
+			`Skipped ${skippedTracks} saved ${skippedTracks === 1 ? "track" : "tracks"} with no save date`,
+		);
 	}
 	for (const stream of ["top_artists", "recently_played"] as const) {
 		if (requested.has(stream)) {
