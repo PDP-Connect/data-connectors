@@ -48,6 +48,7 @@ async function buildSyntheticBundle(
 	recordTextUnits = 100_000,
 	bridgeCallTimeoutMs = 30_000,
 	emitState = false,
+	evaluateChar = "x",
 ) {
 	await mkdir(root, { recursive: true });
 	const outfile = join(root, `stream-${recordCount}.js`);
@@ -67,6 +68,7 @@ async function buildSyntheticBundle(
 			PAGESHIM_EVALUATE_RESULT_MIB: String(evaluateResultMiB),
 			PAGESHIM_SYNTHETIC_RECORD_TEXT_UNITS: String(recordTextUnits),
 			PAGESHIM_EMIT_STATE: String(emitState),
+			PAGESHIM_EVALUATE_CHAR: JSON.stringify(evaluateChar),
 		},
 	});
 	return outfile;
@@ -264,6 +266,46 @@ test("runtime chunking keeps an astral character intact at the size boundary", {
 	}
 });
 
+test("small records share result chunks instead of one bridge message each", {
+	timeout: 180_000,
+}, async () => {
+	const bundle = await buildSyntheticBundle(
+		2000,
+		false,
+		false,
+		false,
+		false,
+		false,
+		0,
+		50,
+	);
+	const spoolDirectory = join(root, "spool-coalesced-records");
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations", "chatgpt.messages"],
+			resultStreaming: true,
+			resultSpoolDirectory: spoolDirectory,
+		});
+		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
+		const scope = JSON.parse(
+			await readFile(run.streamScopeFiles["chatgpt.messages"], "utf8"),
+		);
+		assert.equal(scope.records.length, 2000);
+		assert.ok(run.streamResult.maxChunkUnits <= 256 * 1024);
+		// About 140 Ki units of records fit in two chunks; one message per record
+		// (and per separator) needed about 4,000.
+		assert.ok(
+			run.streamResult.messageCount < 20,
+			`expected few stream messages, got ${run.streamResult.messageCount}`,
+		);
+		assertCleanRun(run);
+	} finally {
+		await rm(spoolDirectory, { recursive: true, force: true });
+	}
+});
+
 test("a shell that never acknowledges a result call fails with a timeout", {
 	timeout: 180_000,
 }, async () => {
@@ -387,7 +429,8 @@ test("a 60 MiB single conversation crosses the bridge only in bounded pieces", {
 		});
 		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
 		assert.equal(run.streamResult.completed, true);
-		assert.ok(run.bridgeCallCount > 900);
+		// 60 MiB of JSON text in 120 Ki slices.
+		assert.ok(run.bridgeCallCount > 500);
 		assert.ok(run.maxBridgePayloadUnits <= 256 * 1024);
 		const conversations = JSON.parse(
 			await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"),
@@ -398,6 +441,44 @@ test("a 60 MiB single conversation crosses the bridge only in bounded pieces", {
 				messageCharacters: 60 * 1024 * 1024,
 			},
 		]);
+	} finally {
+		await rm(spoolDirectory, { recursive: true, force: true });
+	}
+});
+
+test("an evaluation slice stays within the bridge bound when every character is escaped twice", {
+	timeout: 180_000,
+}, async () => {
+	// A quote becomes two units in the page's JSON text and four after the
+	// bridge serializes the slice again: the worst case for the slice size.
+	const bundle = await buildSyntheticBundle(
+		0,
+		false,
+		false,
+		false,
+		false,
+		false,
+		1,
+		100_000,
+		30_000,
+		false,
+		'"',
+	);
+	const spoolDirectory = join(root, "spool-escaped-evaluate-result");
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations", "chatgpt.messages"],
+			resultStreaming: true,
+			resultSpoolDirectory: spoolDirectory,
+		});
+		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
+		assert.ok(run.maxBridgePayloadUnits <= 256 * 1024);
+		const conversations = JSON.parse(
+			await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"),
+		);
+		assert.equal(conversations.records[0].messageCharacters, 1024 * 1024);
 	} finally {
 		await rm(spoolDirectory, { recursive: true, force: true });
 	}

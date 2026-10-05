@@ -4718,6 +4718,15 @@ export async function runMessagesAndConversationsWithDetail(
 
 	async function reportConversationDetailHydrated(): Promise<void> {
 		completedDetails += 1;
+		// One progress update per conversation costs a host round trip each on
+		// mobile; report the first, every 25th and the last instead.
+		if (
+			completedDetails !== 1 &&
+			completedDetails !== convosToSync.length &&
+			completedDetails % CHATGPT_DETAIL_PROGRESS_EVERY !== 0
+		) {
+			return;
+		}
 		lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
 			providerBudget,
 			lastEmittedRateIntervalMs,
@@ -5465,6 +5474,9 @@ export async function runMessagesAndConversationsWithDetail(
 				setTimingConversation?.(null);
 			}
 		},
+		// A batch-cached detail needs no provider request, so it skips the
+		// per-launch pacing that protects the provider.
+		(c) => batchDetailCache.has(c.id),
 	);
 	return coverage;
 }
@@ -5491,9 +5503,13 @@ async function runLaneUntilTailStopped(
 		c: ConversationListItem,
 		context: AdaptiveLaneRunContext,
 	) => Promise<ChatGptFetchResult>,
+	isLocalItem?: (c: ConversationListItem) => boolean,
 ): Promise<void> {
 	try {
-		await lane.runAll(items, task, { signal: tailStopSignal });
+		await lane.runAll(items, task, {
+			signal: tailStopSignal,
+			...(isLocalItem ? { isLocalItem } : {}),
+		});
 	} catch (err) {
 		if (tailStopSignal.aborted && err instanceof AdaptiveLaneCancelledError) {
 			return;

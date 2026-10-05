@@ -58,7 +58,12 @@ const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
 // Leave room for that second encoding and the message fields.
 const RESULT_CHUNK_MAX_UNITS = 125 * 1024;
 const EVALUATE_INLINE_MAX_UNITS = 64 * 1024;
-const EVALUATE_CHUNK_MAX_UNITS = 64 * 1024;
+// A slice is JSON text that the bridge escapes again, so it uses the request
+// bound mobile-host-v1 amendment A4 sets for escape-heavy chunks: twice this
+// stays under PAGE_BRIDGE_MAX_UNITS.
+const EVALUATE_CHUNK_MAX_UNITS = 120 * 1024;
+// Slice reads in flight for one large evaluation result.
+const EVALUATE_READS_IN_FLIGHT = 4;
 const EVALUATE_RESULT_MAX_UNITS = 64 * 1024 * 1024;
 const ERROR_TEXT_MAX_UNITS = 4 * 1024;
 const EVALUATE_RESULT_STORE = "__pdppPageshimEvaluateResults";
@@ -203,27 +208,35 @@ function boundedPageEvaluate(shim: ShimPage) {
 			);
 		}
 
+		const length = response.length;
+		const readPiece = async (offset: number): Promise<string> => {
+			const end = Math.min(offset + EVALUATE_CHUNK_MAX_UNITS, length);
+			const piece = await shim.evaluate(
+				`globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]?.slice(${offset}, ${end}) ?? null`,
+			);
+			if (typeof piece !== "string" || piece.length !== end - offset) {
+				throw new Error(
+					"PageShim evaluation chunk exceeded its transfer bound",
+				);
+			}
+			return piece;
+		};
 		const chunks: string[] = [];
 		try {
-			for (let offset = 0; offset < response.length; ) {
-				const end = Math.min(
-					offset + EVALUATE_CHUNK_MAX_UNITS,
-					response.length,
-				);
-				const piece = await shim.evaluate(
-					`globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]?.slice(${offset}, ${end}) ?? null`,
-				);
-				if (
-					typeof piece !== "string" ||
-					piece.length === 0 ||
-					piece.length > EVALUATE_CHUNK_MAX_UNITS
-				) {
-					throw new Error(
-						"PageShim evaluation chunk exceeded its transfer bound",
-					);
-				}
-				chunks.push(piece);
-				offset += piece.length;
+			// Keep a few slice reads in flight; each read is one bridge round trip.
+			for (
+				let offset = 0;
+				offset < length;
+				offset += EVALUATE_CHUNK_MAX_UNITS * EVALUATE_READS_IN_FLIGHT
+			) {
+				const offsets: number[] = [];
+				for (
+					let at = offset;
+					at < length && offsets.length < EVALUATE_READS_IN_FLIGHT;
+					at += EVALUATE_CHUNK_MAX_UNITS
+				)
+					offsets.push(at);
+				chunks.push(...(await Promise.all(offsets.map(readPiece))));
 			}
 			const json = chunks.join("");
 			if (json.length !== response.length) {
@@ -236,9 +249,12 @@ function boundedPageEvaluate(shim: ShimPage) {
 			const reason = error instanceof Error ? error.message : String(error);
 			throw new Error(`PageShim evaluation transfer failed: ${reason}`);
 		} finally {
-			await shim.evaluate(
-				`delete globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]`,
-			);
+			// Cleanup only frees page memory; the caller need not wait a round trip.
+			void shim
+				.evaluate(
+					`delete globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]`,
+				)
+				.catch(() => undefined);
 		}
 	};
 }
@@ -472,8 +488,13 @@ export async function runOnPageShim(
 	let activeSequence = 0;
 	let activeRecordCount = 0;
 	let activeChunkConversationIds = new Set<string>();
+	// Record text waiting for a full chunk. One bridge message per record made
+	// a large ChatGPT run cost two host round trips per message record.
+	let pendingStreamText = "";
+	const pendingChunkConversationIds = new Set<string>();
 	let streamedScopeCount = 0;
 	let streamFailure: Error | null = null;
+	let streamSendFailed = false;
 	const conversationTimings = new Map<
 		string,
 		{
@@ -574,6 +595,7 @@ export async function runOnPageShim(
 		try {
 			await shim.setData(key, value);
 		} catch (error) {
+			streamSendFailed = true;
 			streamFailure = error instanceof Error ? error : new Error(String(error));
 			throw streamFailure;
 		}
@@ -595,6 +617,37 @@ export async function runOnPageShim(
 			offset = end;
 		}
 	};
+	// Send buffered record text: only whole chunks unless `all` is set.
+	// Flushes run one at a time so chunk text keeps its order.
+	let streamFlushChain: Promise<void> = Promise.resolve();
+	const flushStreamText = (all: boolean): Promise<void> => {
+		const run = streamFlushChain.then(() => flushStreamTextNow(all));
+		streamFlushChain = run.catch(() => undefined);
+		return run;
+	};
+	const flushStreamTextNow = async (all: boolean): Promise<void> => {
+		if (activeStream === null) return;
+		const scope = `${prefix}${activeStream}`;
+		let end = all
+			? pendingStreamText.length
+			: pendingStreamText.length -
+				(pendingStreamText.length % RESULT_CHUNK_MAX_UNITS);
+		if (end === 0) return;
+		if (
+			end < pendingStreamText.length &&
+			isHighSurrogate(pendingStreamText.charCodeAt(end - 1))
+		)
+			end--;
+		const text = pendingStreamText.slice(0, end);
+		pendingStreamText = pendingStreamText.slice(end);
+		activeChunkConversationIds = new Set(pendingChunkConversationIds);
+		if (pendingStreamText.length === 0) pendingChunkConversationIds.clear();
+		try {
+			await sendStreamText(scope, text);
+		} finally {
+			activeChunkConversationIds.clear();
+		}
+	};
 	const beginStreamScope = async (stream: string): Promise<void> => {
 		const scope = `${prefix}${stream}`;
 		streamProtocolUsed = true;
@@ -604,10 +657,8 @@ export async function runOnPageShim(
 		activeSequence = 0;
 		activeRecordCount = 0;
 		activeChunkConversationIds = new Set();
-		await sendStreamText(
-			scope,
-			`{${JSON.stringify(streamConfig?.arrayKey ?? "records")}:[`,
-		);
+		pendingStreamText = `{${JSON.stringify(streamConfig?.arrayKey ?? "records")}:[`;
+		pendingChunkConversationIds.clear();
 	};
 	const appendStreamRecord = async (
 		stream: string,
@@ -628,17 +679,14 @@ export async function runOnPageShim(
 					const timing = conversationTimings.get(conversationId);
 					if (timing)
 						timing.bytes += new TextEncoder().encode(serialized).length;
-					activeChunkConversationIds.add(conversationId);
+					pendingChunkConversationIds.add(conversationId);
 				}
 			}
-			try {
-				if (activeRecordCount > 0)
-					await sendStreamText(`${prefix}${stream}`, ",");
-				await sendStreamText(`${prefix}${stream}`, serialized);
-			} finally {
-				activeChunkConversationIds.clear();
-			}
+			pendingStreamText +=
+				activeRecordCount > 0 ? `,${serialized}` : serialized;
 			activeRecordCount++;
+			if (pendingStreamText.length >= RESULT_CHUNK_MAX_UNITS)
+				await flushStreamText(false);
 		} catch (error) {
 			streamFailure = error instanceof Error ? error : new Error(String(error));
 			throw streamFailure;
@@ -647,7 +695,8 @@ export async function runOnPageShim(
 	const finishStreamScope = async (): Promise<void> => {
 		if (activeStream === null) return;
 		const scope = `${prefix}${activeStream}`;
-		await sendStreamText(scope, "]}");
+		pendingStreamText += "]}";
+		await flushStreamText(true);
 		await sendStreamMessage("result:scope-done", {
 			scope,
 			chunkCount: activeSequence,
@@ -693,6 +742,8 @@ export async function runOnPageShim(
 				const stream = String(msg.stream);
 				const scope = scopeByStream.get(stream);
 				if (!scope) throw new Error(`unsupported STATE stream: ${stream}`);
+				// A checkpoint must not reach the host before the records it covers.
+				await flushStreamText(true);
 				if (supportsState)
 					await shim.setData("STATE", {
 						type: "STATE",
@@ -923,6 +974,9 @@ export async function runOnPageShim(
 						disposition: "fatal",
 						phase: "collect",
 					};
+		// Keep the records collected before the failure in the host's partial
+		// result, as when every record was sent on its own.
+		if (!streamSendFailed) await flushStreamText(true).catch(() => undefined);
 		if (!streamProtocolUsed && !streamingHost)
 			await shim.setData("result", result({}, [fatal]));
 		await shim.setData("error", fatal.reason);

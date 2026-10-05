@@ -1462,6 +1462,14 @@ codes, identifiers, `key=value` counters, file paths, HTTP details, or raw
 error text. A connector writes that technical detail to standard error as a
 diagnostic (§4), and carries machine-readable counts in `count` and `total`.
 
+A diagnostic MUST NOT contain credentials, tokens, or other secret values.
+[PDPP Core](https://github.com/PDP-Connect/pdpp/blob/main/spec-core.md) Section
+10 already forbids a runtime to log or persist credential data. A diagnostic
+SHOULD contain as little personal data as possible. Diagnostics are for the
+owner on the owner's device or deployment. A runtime MUST NOT send them off
+that device or deployment, or to a data recipient, without an action by the
+owner.
+
 ### 5.10 `OBSERVATION`
 
 `OBSERVATION` reports one typed fact about the run: what the connector saw,
