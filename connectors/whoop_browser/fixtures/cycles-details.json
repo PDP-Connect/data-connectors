@@ -1,0 +1,169 @@
+{
+	"records": [
+		{
+			"cycle": {
+				"id": 1000000101,
+				"user_id": 41001,
+				"during": "['2026-09-14T12:40:00.000Z','2026-09-15T13:05:00.000Z')",
+				"days": "['2026-09-14','2026-09-15')",
+				"timezone_offset": "+1000",
+				"data_state": "complete",
+				"scaled_strain": 12.4,
+				"day_strain": 0.0042,
+				"day_kilojoules": 9876.5,
+				"day_avg_heart_rate": 64,
+				"day_max_heart_rate": 171,
+				"predicted_end": "2026-09-15T13:00:00.000+0000",
+				"created_at": "2026-09-14T21:10:00.000+0000",
+				"updated_at": "2026-09-15T13:06:00.000+0000",
+				"sleep_need": null,
+				"intensity_score": null
+			},
+			"recovery": {
+				"activity_id": "00000000-0000-4000-8000-000000000101",
+				"user_id": 41001,
+				"state": "complete",
+				"recovery_score": 71,
+				"hrv_rmssd": 0.0612,
+				"resting_heart_rate": 52,
+				"spo2": 96.5,
+				"skin_temp_celsius": 33.9,
+				"calibrating": false,
+				"created_at": "2026-09-14T21:10:00.000Z",
+				"updated_at": "2026-09-14T21:12:00.000Z"
+			},
+			"sleeps": [
+				{
+					"activity_id": "00000000-0000-4000-8000-000000000101",
+					"during": "['2026-09-14T12:40:00.000Z','2026-09-14T20:55:00.000Z')",
+					"timezone_offset": "+10:00",
+					"is_nap": false,
+					"significant": true,
+					"normal": true,
+					"state": "complete",
+					"score": 88,
+					"respiratory_rate": 14.6,
+					"time_in_bed": 29700000,
+					"wake_duration": 2400000,
+					"light_sleep_duration": 13800000,
+					"slow_wave_sleep_duration": 6300000,
+					"rem_sleep_duration": 7200000,
+					"no_data_duration": 0,
+					"in_sleep_efficiency": 0.92,
+					"created_at": "2026-09-14T21:00:00.000Z",
+					"updated_at": "2026-09-14T21:05:00.000Z"
+				},
+				{
+					"activity_id": "00000000-0000-4000-8000-000000000102",
+					"during": "['2026-09-15T05:10:00.000Z','2026-09-15T05:40:00.000Z')",
+					"timezone_offset": "+10:00",
+					"is_nap": true,
+					"significant": false,
+					"normal": true,
+					"state": "complete",
+					"respiratory_rate": 15.1,
+					"time_in_bed": 1800000,
+					"wake_duration": 300000,
+					"light_sleep_duration": 1200000,
+					"slow_wave_sleep_duration": 300000,
+					"rem_sleep_duration": 0
+				}
+			],
+			"workouts": [
+				{
+					"activity_id": "00000000-0000-4000-8000-000000000201",
+					"during": "['2026-09-14T22:00:00.000Z','2026-09-14T22:48:30.000Z')",
+					"timezone_offset": "+10:00",
+					"sport_id": 0,
+					"score": 9.8,
+					"kilojoules": 2150.25,
+					"average_heart_rate": 148,
+					"max_heart_rate": 176,
+					"percent_recorded": 0.9998,
+					"zone_durations_v2": {
+						"zone0_to50_duration": 30,
+						"zone50_to60_duration": 120,
+						"zone60_to70_duration": 600,
+						"zone70_to80_duration": 1200,
+						"zone80_to90_duration": 900,
+						"zone90_to100_duration": 60
+					},
+					"gps_data": null,
+					"total_steps": 6400,
+					"msk_score": null
+				}
+			],
+			"v2_activities": [
+				{
+					"id": "00000000-0000-4000-8000-000000000201",
+					"type": "running",
+					"score_state": "SCORED",
+					"score_type": "CARDIO",
+					"timezone": "Australia/Sydney",
+					"timezone_offset": null,
+					"timezone_offset_from_model": "+10:00"
+				}
+			]
+		},
+		{
+			"cycle": {
+				"id": 1000000102,
+				"user_id": 41001,
+				"during": "['2026-09-15T13:05:00.000Z','2026-09-16T12:50:00.000Z')",
+				"days": "['2026-09-15','2026-09-16')",
+				"timezone_offset": "+1000",
+				"data_state": "complete",
+				"scaled_strain": 6.1,
+				"day_strain": 0.0019,
+				"day_kilojoules": 7012.0,
+				"day_avg_heart_rate": 61,
+				"day_max_heart_rate": 132,
+				"created_at": "2026-09-15T21:00:00.000+0000",
+				"updated_at": "2026-09-16T12:51:00.000+0000"
+			},
+			"recovery": null,
+			"sleeps": []
+		},
+		{
+			"cycle": {
+				"id": 1000000103,
+				"user_id": 41001,
+				"during": "['2026-09-16T12:50:00.000Z',)",
+				"days": "['2026-09-16',)",
+				"timezone_offset": "+1000",
+				"data_state": "provisional",
+				"day_avg_heart_rate": 58,
+				"day_max_heart_rate": 97,
+				"predicted_end": "2026-09-17T13:00:00.000+0000",
+				"created_at": "2026-09-16T21:00:00.000+0000",
+				"updated_at": "2026-09-16T21:02:00.000+0000"
+			},
+			"recovery": {
+				"activity_id": "00000000-0000-4000-8000-000000000103",
+				"user_id": 41001,
+				"state": "pending",
+				"recovery_score": null,
+				"hrv_rmssd": null,
+				"resting_heart_rate": null,
+				"spo2": null,
+				"skin_temp_celsius": null,
+				"calibrating": false
+			},
+			"sleeps": [
+				{
+					"activity_id": "00000000-0000-4000-8000-000000000103",
+					"during": "['2026-09-16T12:50:00.000Z','2026-09-16T20:30:00.000Z')",
+					"timezone_offset": "+10:00",
+					"is_nap": false,
+					"state": "pending",
+					"respiratory_rate": null,
+					"time_in_bed": 27600000,
+					"wake_duration": null,
+					"light_sleep_duration": null,
+					"slow_wave_sleep_duration": null,
+					"rem_sleep_duration": null
+				}
+			]
+		}
+	]
+}

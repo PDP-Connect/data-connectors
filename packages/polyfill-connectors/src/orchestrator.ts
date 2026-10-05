@@ -88,6 +88,7 @@ const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
 	notion: c("notion"),
 	reddit: c("reddit"),
 	whoop: c("whoop"),
+	whoop_browser: c("whoop_browser"),
 	claude_code: c("claude_code"),
 	codex: c("codex"),
 	apple_health: c("apple_health"),

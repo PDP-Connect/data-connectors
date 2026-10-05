@@ -55,6 +55,7 @@ First-run-portability notes are platform-specific and worth reading before handi
 | shopify | Shopify admin login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
 | strava_browser | Owner sign-in to strava.com | 🟡 code ready | ⚠ owner login required | — | Browser-session profile for the Strava source; reads the activity list strava.com serves the signed-in owner. Heart rate, calories and gear are not in that list and arrive null. `strava` remains the account-export profile. Verified live on 2026-09-28 against a test account with 10 synthetic activities. |
 | oura_browser | Owner sign-in to Oura cloud | 🟡 code ready | ⚠ owner login required | — | Separate browser-session profile for the Oura streams; `oura` remains the PAT setup profile. |
+| whoop_browser | Owner sign-in to app.whoop.com | 🟡 code ready | ⚠ owner login required | — | Browser-session profile under its own source; reads the cycles, recoveries, sleeps and workouts app.whoop.com loads for the signed-in owner. Independent of `whoop`, which it neither imports nor changes. Not yet run against a live account. |
 | heb | HEB.com login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
 | wholefoods | Piggybacks on Amazon session | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. Inherits Amazon's portability profile. |
 | linkedin | LinkedIn login | 🟡 scaffolded | — | — | Uses `browser-scraper-runtime.js`. |
