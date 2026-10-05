@@ -34,8 +34,15 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
@@ -59,6 +66,24 @@ import {
 import { driverEvidenceSatisfied } from "../src/scenario/wire-registry.ts";
 
 const VERIFY_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-verify.ts");
+const RECORD_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-record.ts");
+
+function runRecordCli(
+	args: readonly string[],
+	extraEnv: Record<string, string>,
+): { code: number | null; stderr: string; stdout: string } {
+	const result = spawnSync(
+		process.execPath,
+		["--import", "tsx", RECORD_CLI_PATH, ...args],
+		{
+			cwd: PACKAGE_ROOT,
+			env: { ...process.env, ...extraEnv },
+			encoding: "utf8",
+			timeout: 30_000,
+		},
+	);
+	return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+}
 const FIXTURES_DIR = join(PACKAGE_ROOT, "src", "test-fixtures");
 
 function runVerifyCli(args: readonly string[]): {
@@ -532,6 +557,36 @@ test("computeSourceDigest: sha256 over sorted relative paths + per-file content,
 			computeSourceDigest(connectorDir),
 			baseline,
 			"editing a real source file must change source_digest (this is 'source drift since capture')",
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("computeSourceDigest: excludes an evidence/ directory — a committed claim.json must never make itself stale on write", () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "scenario-verify-source-digest-evidence-test-"),
+	);
+	try {
+		const connectorDir = join(tmpDir, "toy");
+		mkdirSync(connectorDir, { recursive: true });
+		writeFileSync(join(connectorDir, "index.ts"), "export const x = 1;\n");
+
+		const baseline = computeSourceDigest(connectorDir);
+
+		// Writing a claim INTO connectors/<name>/evidence/claim.json (exactly
+		// what bin/scenario-verify.ts's --json does) must not change the
+		// digest that very claim's captured_with was computed against —
+		// otherwise no claim could ever read as bound the moment it exists.
+		mkdirSync(join(connectorDir, "evidence"), { recursive: true });
+		writeFileSync(
+			join(connectorDir, "evidence", "claim.json"),
+			JSON.stringify({ schema: "pdpp.connector-claim/1" }),
+		);
+		assert.equal(
+			computeSourceDigest(connectorDir),
+			baseline,
+			"writing/editing evidence/claim.json must not affect source_digest",
 		);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
@@ -2040,4 +2095,103 @@ test("evaluateClaimEligibility: a recorded-http scenario NEVER carries the brows
 	// include the browser string") proves the browser-only trigger condition
 	// (anyRunDeclaresBrowserDriver) didn't fire a false positive on an
 	// ordinary recorded-http scenario.
+});
+
+// ─── committed claim.json safety: a real filesystem-input connector ───────
+//
+// `writeClaimRecord` (this file) must never leak an absolute host path or
+// $HOME into the file this repo's authoring docs tell a connector author to
+// commit at `connectors/<name>/evidence/claim.json`. The filesystem-input
+// driver is the one case `buildFilesystemInputLimitation` (claims.ts)
+// DELIBERATELY discloses a real host path in the LIVE stdout report (see
+// that function's doc comment) — so this is the one case that actually
+// exercises `redactHostPaths`'s path->`$ENVVAR` substitution, not just its
+// `scenario_path`-basename fallback. Runs the REAL `strava` connector (not
+// a stub) against a small synthetic export this test writes itself — never
+// a file outside the repo, so this test is reproducible in CI and on any
+// contributor's machine, unlike the one-off synthetic
+// `~/Downloads/strava-mock-export.zip` fixture used to seed #81's own
+// committed claim.
+test("scenario-verify --json: a filesystem-input connector's committed claim replaces the host path with $ENVVAR, never the real path or $HOME", () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "scenario-verify-fs-claim-safety-"),
+	);
+	const exportDir = join(tmpDir, "export");
+	const scenarioPath = join(tmpDir, "strava.scenario.json");
+	const claimPath = join(tmpDir, "claim.json");
+	mkdirSync(exportDir, { recursive: true });
+	writeFileSync(
+		join(exportDir, "activities.csv"),
+		[
+			"Activity ID,Activity Date,Activity Name,Activity Type,Activity Description,Elapsed Time,Distance,Max Heart Rate,Relative Effort,Activity Gear,Filename,Athlete Weight,Bike Weight,Elapsed Time,Moving Time,Distance,Average Heart Rate,Elevation Gain,Calories",
+			'11385479490,"May 20, 2024, 1:05:32 PM","Test Run",Run,"synthetic fixture",48:10,5.04,178,62,,activities/1.fit.gz,,,2890,2710,8111.2,152.3,64.2,612',
+			"",
+		].join("\n"),
+		"utf8",
+	);
+	const savedExportDir = process.env.STRAVA_EXPORT_DIR;
+	process.env.STRAVA_EXPORT_DIR = exportDir;
+	try {
+		assert.ok(
+			tmpDir.startsWith(homedir()),
+			"sanity: this test's own tmpdir must actually be under $HOME, or the assertions below would pass vacuously",
+		);
+
+		const recordResult = runRecordCli(
+			["strava", "--streams", "activities", "--out", scenarioPath],
+			{ STRAVA_EXPORT_DIR: exportDir },
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`record should succeed; stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+
+		const verifyResult = runVerifyCli([
+			"strava",
+			scenarioPath,
+			"--json",
+			claimPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`verify should succeed; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.ok(existsSync(claimPath), "--json should have written a claim");
+
+		const claimText = readFileSync(claimPath, "utf8");
+		assert.ok(
+			!claimText.includes(homedir()),
+			`claim.json must not contain $HOME (${homedir()}); got: ${claimText}`,
+		);
+		assert.ok(
+			!claimText.includes(exportDir),
+			`claim.json must not contain the real export directory (${exportDir}); got: ${claimText}`,
+		);
+		assert.ok(
+			claimText.includes("$STRAVA_EXPORT_DIR"),
+			`claim.json's filesystem-input limitation should name the env var as a placeholder; got: ${claimText}`,
+		);
+		const claim = JSON.parse(claimText) as {
+			scenario_path: string;
+			limitations: string[];
+		};
+		assert.equal(claim.scenario_path, "strava.scenario.json");
+		assert.ok(
+			claim.limitations.some((l) =>
+				l.startsWith(
+					"filesystem input: replay read $STRAVA_EXPORT_DIR via STRAVA_EXPORT_DIR",
+				),
+			),
+			`expected a filesystem-input limitation naming the placeholder; got: ${JSON.stringify(claim.limitations)}`,
+		);
+	} finally {
+		if (savedExportDir === undefined) {
+			delete process.env.STRAVA_EXPORT_DIR;
+		} else {
+			process.env.STRAVA_EXPORT_DIR = savedExportDir;
+		}
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
 });

@@ -2640,6 +2640,8 @@ test("assertNoPostRunSourceMutation: detects a source mutation between the pre-f
 		currentSourceDigestComputed: true,
 		preflightDeclarationDigest,
 		preflightSourceDigest,
+		capturedDeclarationDigest: preflightDeclarationDigest,
+		capturedSourceDigest: preflightSourceDigest,
 	};
 
 	// No mutation: the connector directory is untouched between "pre-flight"

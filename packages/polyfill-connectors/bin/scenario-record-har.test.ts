@@ -32,7 +32,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
@@ -42,6 +42,24 @@ import type {
 } from "../src/scenario/format.ts";
 
 const RECORD_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-record.ts");
+const VERIFY_CLI_PATH = join(PACKAGE_ROOT, "bin", "scenario-verify.ts");
+
+function runVerifyCli(
+	args: readonly string[],
+	extraEnv: Record<string, string>,
+): { code: number | null; stderr: string; stdout: string } {
+	const result = spawnSync(
+		process.execPath,
+		["--import", "tsx", VERIFY_CLI_PATH, ...args],
+		{
+			cwd: PACKAGE_ROOT,
+			env: { ...process.env, ...extraEnv },
+			encoding: "utf8",
+			timeout: 30_000,
+		},
+	);
+	return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+}
 const HAR_STUB_CONNECTOR_PATH = join(
 	PACKAGE_ROOT,
 	"src",
@@ -379,6 +397,94 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 		);
 	} finally {
 		await provider.close();
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// ─── the committed claim.json convention is safe to commit ────────────────
+//
+// `writeClaimRecord` (bin/scenario-verify.ts) is the thing that produces the
+// file this repo's authoring docs tell a connector author to commit at
+// `connectors/<name>/evidence/claim.json`, and the thing a PR's CI reads —
+// so unlike the live stdout report it must never carry an absolute host
+// path or a username. The recorded-browser scenario this file already
+// knows how to produce cheaply (no real browser, see this file's module
+// doc comment) lives in a tmpdir UNDER the real `os.tmpdir()`, which on
+// this host is itself under the operator's home directory — exactly the
+// shape a real personal recording's scenario directory has, just
+// synthetic. Proves BOTH: `scenario_path` never leaks the directory (only
+// `basename()`), and nothing else about a recorded-browser claim
+// accidentally carries a path (har_path/storage_state_path are resolved
+// host paths too, and never enter the claim record at all).
+//
+// Deliberately omits `PDPP_SCENARIO_STUB_BASE_URL` (no stub provider, no
+// extra fetch call): the fixture's `else` branch then emits a fixed
+// `{id:"stub-1"}` record directly, identically on both record and replay —
+// this scenario's ONLY job is proving claim-record safety, not round-
+// tripping a fetch through a driver (browser-har-replay.ts's preload) that
+// was never built to intercept a plain Node-side fetch in the first place.
+test("scenario-verify --json: a recorded-browser scenario's committed claim carries no absolute path and no $HOME", async () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-verify-claim-safety-"));
+	const scenarioPath = join(tmpDir, "claim-safety.scenario.json");
+	const claimPath = join(tmpDir, "claim.json");
+	try {
+		const recordResult = runRecordCli(
+			[
+				"har-stub",
+				"--entrypoint",
+				HAR_STUB_CONNECTOR_PATH,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+				"--record-har",
+			],
+			{},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`record should succeed; stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.ok(
+			tmpDir.startsWith(homedir()),
+			"sanity: this test's own tmpdir must actually be under $HOME, or the assertions below would pass vacuously",
+		);
+
+		const verifyResult = runVerifyCli(
+			[
+				"har-stub",
+				"--entrypoint",
+				HAR_STUB_CONNECTOR_PATH,
+				scenarioPath,
+				"--json",
+				claimPath,
+			],
+			{},
+		);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`verify should succeed; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.ok(existsSync(claimPath), "--json should have written a claim");
+
+		const claimText = readFileSync(claimPath, "utf8");
+		const claim = JSON.parse(claimText) as { scenario_path: string };
+		assert.ok(
+			!claimText.includes(homedir()),
+			`claim.json must not contain $HOME (${homedir()}); got: ${claimText}`,
+		);
+		assert.ok(
+			!claimText.includes(tmpDir),
+			`claim.json must not contain the scenario's own absolute directory (${tmpDir}); got: ${claimText}`,
+		);
+		assert.equal(
+			claim.scenario_path,
+			"claim-safety.scenario.json",
+			"scenario_path must be reduced to a bare filename, never the directory it lives in",
+		);
+	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });

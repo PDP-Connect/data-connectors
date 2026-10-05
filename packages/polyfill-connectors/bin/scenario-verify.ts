@@ -104,7 +104,8 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -527,6 +528,15 @@ interface CaptureSourceDigestObservation {
 	/** The PRE-FLIGHT source digest value — see `preflightDeclarationDigest`'s
 	 *  doc comment; same purpose, for `computeSourceDigest`. */
 	preflightSourceDigest: string | undefined;
+	/** The CAPTURED declaration digest value itself (condition (b1)'s value,
+	 *  not just whether one was present) — `writeClaimRecord`'s PR-evidence
+	 *  `captured_with` field reads this rather than re-deriving it from
+	 *  `scenario.connector.captured_with`, per this function's "NOT A SECOND
+	 *  EVALUATION" discipline. */
+	capturedDeclarationDigest: string | undefined;
+	/** The CAPTURED source digest value — see `capturedDeclarationDigest`'s
+	 *  doc comment; same purpose, for condition (b2). */
+	capturedSourceDigest: string | undefined;
 }
 
 /**
@@ -563,6 +573,8 @@ function reportCaptureSourceDigests(
 			currentSourceDigestComputed: false,
 			preflightDeclarationDigest: undefined,
 			preflightSourceDigest: undefined,
+			capturedDeclarationDigest: undefined,
+			capturedSourceDigest: undefined,
 		};
 	}
 
@@ -621,6 +633,8 @@ function reportCaptureSourceDigests(
 		currentSourceDigestComputed: currentSource !== undefined,
 		preflightDeclarationDigest: currentDeclaration,
 		preflightSourceDigest: currentSource,
+		capturedDeclarationDigest: capturedDeclaration,
+		capturedSourceDigest: capturedSource,
 	};
 
 	if (!args.requireCaptureSource) {
@@ -1705,6 +1719,43 @@ function declaredStreamNamesFromManifest(
  * `--entrypoint` mode (no manifest to compare against).
  */
 /**
+ * Replaces every occurrence of an absolute, personally-identifying
+ * filesystem path in `text` with a neutral placeholder — the ONE place
+ * `writeClaimRecord` scrubs text before it lands in a file this repo's own
+ * convention commits at `connectors/<name>/evidence/claim.json` (see that
+ * function's doc comment). Two passes, most-specific first:
+ *
+ *  1. `filesystemInput.path` (a filesystem connector's manifest-declared
+ *     import directory, the exact host path
+ *     `buildFilesystemInputLimitation` (claims.ts) deliberately discloses in
+ *     the LIVE report — see that function's doc comment for why disclosure
+ *     there is correct) becomes `$<envVar>`, naming the environment
+ *     variable instead of the path it happened to resolve to on this
+ *     machine.
+ *  2. `os.homedir()` (catches anything else under the operator's home
+ *     directory this function didn't anticipate — e.g. a future limitation
+ *     string, or `$TMPDIR` defaulting under `$HOME`) becomes `$HOME`.
+ *
+ * Deliberately NOT a regex-based "looks like a path" heuristic — an exact
+ * substring replace of two KNOWN values can't accidentally mangle an
+ * unrelated string that happens to contain slashes.
+ */
+function redactHostPaths(
+	text: string,
+	filesystemInput: ResolvedFilesystemInput | undefined,
+): string {
+	let out = text;
+	if (filesystemInput) {
+		out = out.split(filesystemInput.path).join(`$${filesystemInput.envVar}`);
+	}
+	const home = homedir();
+	if (home.length > 0) {
+		out = out.split(home).join("$HOME");
+	}
+	return out;
+}
+
+/**
  * `--json <path>`: the claim decision this run just printed, serialized.
  *
  * WHY. The verification story ends at a human reading stdout. A maintainer
@@ -1714,10 +1765,32 @@ function declaredStreamNamesFromManifest(
  * printed, written once so CI can assert on it.
  *
  * NOT A SECOND EVALUATION. Every field is copied from values already computed
- * for the human report; this function decides nothing. If it ever needs a
+ * for the human report (routed through `digestObservation`, the same return
+ * value `main()` already got from `reportCaptureSourceDigests`, rather than
+ * re-deriving them here); this function decides nothing. If it ever needs a
  * branch of its own, that branch belongs in `evaluateClaimEligibility`
  * instead, or the two outputs will drift and the machine-readable one will be
  * the one nobody notices is wrong.
+ *
+ * SAFE TO COMMIT. This repo's convention (see `docs/` connector-authoring
+ * guide) is to commit the LATEST claim at `connectors/<name>/evidence/
+ * claim.json` — a file every PR reviewer and this repo's CI job reads, so
+ * unlike the live stdout report (which stays on the author's own machine)
+ * it must never carry an absolute host path, a username, or any personal
+ * record/URL segment:
+ *   - `scenario_path` is reduced to `basename(args.scenarioPath)` — a bare
+ *     filename, never the directory it lives in (which, for a real
+ *     recording, is deliberately kept OUTSIDE this repo and may itself
+ *     embed the operator's home directory or an identifying label).
+ *   - every `limitations` string is passed through `redactHostPaths` —
+ *     today the only one that can carry a host path is
+ *     `buildFilesystemInputLimitation`'s (claims.ts), which this function
+ *     does not special-case by text matching; it just scrubs whatever
+ *     string it's handed.
+ *   - record/URL CONTENT never enters this record at all — every field
+ *     here is a count, a digest, a stream/driver NAME, or one of the
+ *     sanitized strings above, never a value read from a captured
+ *     request/response/record.
  *
  * Best-effort by design: a failed write warns and does not change the exit
  * code, because the verification verdict is already correct on stdout and
@@ -1729,21 +1802,26 @@ function writeClaimRecord(
 	decision: ClaimDecision,
 	coverage: readonly string[],
 	capturedAt: string,
+	digestObservation: CaptureSourceDigestObservation,
+	filesystemInput: ResolvedFilesystemInput | undefined,
 ): void {
 	if (!args.jsonPath) {
 		return;
 	}
+	// `ClaimDecision` carries limitations only on the withheld branch — the
+	// type makes "recorded_replay with caveats" unrepresentable, and this
+	// serialization keeps that property rather than casting around it.
+	const limitations =
+		decision.claim === "diagnostic_replay" ? [...decision.limitations] : [];
 	const record = {
 		schema: "pdpp.connector-claim/1",
 		connector: scenario.connector.id,
 		captured_at: capturedAt,
 		verified_at: new Date().toISOString(),
 		claim: decision.claim,
-		// `ClaimDecision` carries limitations only on the withheld branch — the
-		// type makes "recorded_replay with caveats" unrepresentable, and this
-		// serialization keeps that property rather than casting around it.
-		limitations:
-			decision.claim === "diagnostic_replay" ? [...decision.limitations] : [],
+		limitations: limitations.map((limitation) =>
+			redactHostPaths(limitation, filesystemInput),
+		),
 		coverage: [...coverage],
 		runs: scenario.runs.length,
 		drivers: [
@@ -1753,7 +1831,23 @@ function writeClaimRecord(
 				),
 			),
 		],
-		scenario_path: args.scenarioPath,
+		// The digests THIS claim was captured/verified against — a CI job
+		// recomputes its OWN current digests (the same way scenario-record.ts
+		// does) and compares against `captured_with` to decide bound vs stale;
+		// `verified_subject` is informational context (what the author's own
+		// environment saw when the claim was made), never authoritative for
+		// that decision.
+		captured_with: {
+			source_digest: digestObservation.capturedSourceDigest ?? null,
+			declaration_digest: digestObservation.capturedDeclarationDigest ?? null,
+		},
+		verified_subject: {
+			source_digest: digestObservation.preflightSourceDigest ?? null,
+			declaration_digest: digestObservation.preflightDeclarationDigest ?? null,
+		},
+		// Bare filename only — never the directory (see this function's doc
+		// comment, "SAFE TO COMMIT").
+		scenario_path: basename(args.scenarioPath),
 		scenario_status: "candidate oracle",
 	};
 	try {
@@ -2603,7 +2697,15 @@ function printCoverageReport(
 	);
 	process.stdout.write(`${isolationLine}\n`);
 	printStreamCoverageLine(args, scenario);
-	writeClaimRecord(args, scenario, decision, coverage, capturedAt);
+	writeClaimRecord(
+		args,
+		scenario,
+		decision,
+		coverage,
+		capturedAt,
+		digestObservation,
+		filesystemInput,
+	);
 	if (scenario.runs.length >= 2 && !incrementalProven) {
 		// Three distinct, non-overlapping reasons
 		// state_seeded_second_run_with_changed_requests can go unclaimed even

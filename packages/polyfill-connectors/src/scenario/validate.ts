@@ -31,6 +31,17 @@ import type {
 import { SCENARIO_FORMAT } from "./format.ts";
 
 const FIXTURE_DIR_NAME_RE = /^(__)?fixtures(__)?$/i;
+// `connectors/<name>/evidence/claim.json` (bin/scenario-verify.ts's
+// `--json`, see docs/connector-authoring-guide.md's "Scenario replay
+// evidence" section) is written INTO the connector's own directory and
+// read back by CI to compare against a FRESH `computeSourceDigest` of
+// that same directory — self-referentially including it in the digest it
+// is itself compared against would mean the digest changes the moment the
+// claim is written, so no claim could ever read as bound to the code that
+// produced it. Same rationale as `FIXTURE_DIR_NAME_RE`: this directory's
+// content follows replay/verification activity, never the connector's own
+// collection logic.
+const EVIDENCE_DIR_NAME_RE = /^evidence$/i;
 
 export class ScenarioValidationError extends Error {
 	readonly reason: string;
@@ -400,10 +411,14 @@ export function computeDeclarationDigest(manifestPath: string): string {
  * Every file under `connectorDir`, recursively, EXCLUDING:
  *   - any file whose name ends in `.test.ts` (tests are not part of the
  *     connector's runtime behavior; a test edit must not look like source
- *     drift), and
+ *     drift),
  *   - any file under a path component that looks like a fixtures directory
  *     (`fixtures`, `__fixtures__`, case-insensitive) — fixture data changes
- *     with test needs, not with the connector's actual collection logic.
+ *     with test needs, not with the connector's actual collection logic,
+ *     and
+ *   - any file under an `evidence` directory (`EVIDENCE_DIR_NAME_RE`'s doc
+ *     comment) — the committed `claim.json` this digest is itself compared
+ *     against, which would otherwise make itself stale on write.
  * Returned as POSIX-style relative paths (forward slashes, regardless of
  * host OS), sorted lexicographically, so the digest is stable across
  * platforms and directory-listing order.
@@ -425,7 +440,10 @@ function listSourceFiles(connectorDir: string): string[] {
 		const entries = readdirSync(dir, { withFileTypes: true });
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
-				if (FIXTURE_DIR_NAME_RE.test(entry.name)) {
+				if (
+					FIXTURE_DIR_NAME_RE.test(entry.name) ||
+					EVIDENCE_DIR_NAME_RE.test(entry.name)
+				) {
 					continue;
 				}
 				walk(join(dir, entry.name));
