@@ -4,6 +4,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	EmittedMessage,
 	RecordData,
@@ -19,6 +23,26 @@ import {
 	TRAINING_URL,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+/** Run `fn` with diagnostics captured; returns the lines written. */
+async function captureDiagnostics(fn: () => Promise<void>): Promise<string[]> {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await fn();
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	return lines;
+}
+
+/** Parse the first `[strava_browser-diagnostic] coverage {...}` line. */
+function coverageOf(lines: string[]): Record<string, string | number> {
+	const prefix = "[strava_browser-diagnostic] coverage ";
+	const line = lines.find((candidate) => candidate.startsWith(prefix));
+	assert.ok(line, "a coverage diagnostic line was written");
+	return JSON.parse(line.slice(prefix.length));
+}
 
 const ORIGIN = "https://www.strava.com";
 const fixture = (name: string) =>
@@ -102,7 +126,10 @@ async function withStrava<T>(
 	const savedFetch = globalThis.fetch;
 	const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
 	const savedDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
-	const savedPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+	const savedPerformance = Object.getOwnPropertyDescriptor(
+		globalThis,
+		"performance",
+	);
 	Object.defineProperty(globalThis, "location", {
 		configurable: true,
 		value: { origin },
@@ -110,9 +137,7 @@ async function withStrava<T>(
 	Object.defineProperty(globalThis, "document", {
 		configurable: true,
 		value: {
-			querySelectorAll: () => [
-				{ getAttribute: () => "/athletes/900001" },
-			],
+			querySelectorAll: () => [{ getAttribute: () => "/athletes/900001" }],
 		},
 	});
 	Object.defineProperty(globalThis, "performance", {
@@ -256,7 +281,6 @@ test("shares the strava source and its stream names", () => {
 	);
 });
 
-
 test("incremental discovery emits new summaries and stops at a known boundary", async () => {
 	const log: string[] = [];
 	const h = harness(BOTH, {
@@ -276,7 +300,13 @@ test("incremental discovery emits new summaries and stops at a known boundary", 
 		["90000000005", "90000000004"],
 	);
 	assert.deepEqual(h.cursor(), {
-		known_ids: ["90000000003", "90000000002", "90000000001", "90000000005", "90000000004"],
+		known_ids: [
+			"90000000003",
+			"90000000002",
+			"90000000001",
+			"90000000005",
+			"90000000004",
+		],
 		pending_detail_ids: [],
 		list_complete: true,
 		requested_since: null,
@@ -302,10 +332,14 @@ test("a full refresh ignores the cursor", async () => {
 
 test("activity records include heart-rate summary and calories from detail resources", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const h = harness(BOTH, { activities: initial.cursor() });
 	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
-	const newest = h.of("activities").find((record) => record.id === "90000000005");
+	const newest = h
+		.of("activities")
+		.find((record) => record.id === "90000000005");
 	assert.deepEqual(
 		{
 			average_heartrate: newest?.average_heartrate,
@@ -322,35 +356,37 @@ test("activity records include heart-rate summary and calories from detail resou
 	);
 });
 
-test("unmatched gear ids keep activities and report reason and count through progress", async () => {
+test("unmatched gear ids keep activities and report reason and count through diagnostics", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const h = harness(BOTH, { activities: initial.cursor() });
-	await withStrava(
-		listFetcher(),
-		() => collectStravaBrowser(h.ctx, FAST),
-		ORIGIN,
-		"[]",
+	const lines = await captureDiagnostics(() =>
+		withStrava(
+			listFetcher(),
+			() => collectStravaBrowser(h.ctx, FAST),
+			ORIGIN,
+			"[]",
+		),
 	);
 	assert.equal(h.of("activities").length, 5);
-	assert.equal(h.of("activities").every((record) => record.gear === null), true);
-	assert.equal(h.skips().length, 0);
-	const progress = h.messages.find(
-		(message) =>
-			message.type === "PROGRESS" &&
-			"message" in message &&
-			message.message.includes("gear_name_unresolved="),
+	assert.equal(
+		h.of("activities").every((record) => record.gear === null),
+		true,
 	);
-	const progressMessage =
-		progress && "message" in progress ? progress.message : undefined;
-	assert.ok(progressMessage);
-	assert.match(progressMessage, /gear_name_unresolved=1/);
-	assert.match(progressMessage, /gear_name_reasons=gear_id_unmatched:1/);
+	assert.equal(h.skips().length, 0);
+	const coverage = coverageOf(lines);
+	assert.equal(coverage.gear_name_unresolved, 1);
+	assert.equal(coverage.gear_name_reasons, "gear_id_unmatched:1");
+	assertUserFacingProgress(h.messages);
 });
 
 test("detail work resumes from the pending queue without repeating summaries", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const first = harness(BOTH, { activities: initial.cursor() });
 	await withStrava(listFetcher(), () =>
 		collectStravaBrowser(first.ctx, { ...FAST, maxDetails: 2 }),
@@ -379,7 +415,9 @@ test("detail work resumes from the pending queue without repeating summaries", a
 
 test("a failed activity detail stays queued while later details continue", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const firstPending = (initial.cursor() as { pending_detail_ids: string[] })
 		.pending_detail_ids[0];
 	const h = harness(BOTH, { activities: initial.cursor() });
@@ -399,7 +437,9 @@ test("a failed activity detail stays queued while later details continue", async
 
 test("an interrupted detail run checkpoints pending work for the next run", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const queued = (initial.cursor() as { pending_detail_ids: string[] })
 		.pending_detail_ids;
 	const interrupted = harness(BOTH, { activities: initial.cursor() });
@@ -413,12 +453,15 @@ test("an interrupted detail run checkpoints pending work for the next run", asyn
 	assert.equal(interrupted.of("activities").length, 0);
 	assert.deepEqual(interrupted.skips()[0]?.reason, "collection_interrupted");
 	assert.deepEqual(
-		(interrupted.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		(interrupted.cursor() as { pending_detail_ids: string[] })
+			.pending_detail_ids,
 		queued,
 	);
 
 	const resumed = harness(BOTH, { activities: interrupted.cursor() });
-	await withStrava(listFetcher(), () => collectStravaBrowser(resumed.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(resumed.ctx, FAST),
+	);
 	assert.equal(resumed.of("activities").length, 5);
 	assert.deepEqual(
 		(resumed.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
@@ -428,7 +471,9 @@ test("an interrupted detail run checkpoints pending work for the next run", asyn
 
 test("details completed before an interruption are stored while the remainder resumes", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const interrupted = harness(BOTH, { activities: initial.cursor() });
 	let requests = 0;
 	await withStrava(
@@ -444,7 +489,9 @@ test("details completed before an interruption are stored while the remainder re
 	assert.equal(remaining.length, 3);
 
 	const resumed = harness(BOTH, { activities: interrupted.cursor() });
-	await withStrava(listFetcher(), () => collectStravaBrowser(resumed.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(resumed.ctx, FAST),
+	);
 	assert.equal(resumed.of("activities").length, 3);
 	assert.deepEqual(
 		(resumed.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
@@ -454,7 +501,9 @@ test("details completed before an interruption are stored while the remainder re
 
 test("a new activity arriving during backfill emits its summary and joins the queue", async () => {
 	const initial = harness(BOTH);
-	await withStrava(listFetcher(), () => collectStravaBrowser(initial.ctx, FAST));
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
 	const pageOne = JSON.parse(PAGES["1"] as string) as {
 		models: Array<Record<string, unknown>>;
 		perPage: number;
@@ -481,60 +530,60 @@ test("a new activity arriving during backfill emits its summary and joins the qu
 	assert.equal(newActivity[0]?.average_heartrate, null);
 	assert.equal(newActivity[1]?.average_heartrate, 81.2);
 	assert.ok(
-		!(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids.includes(
-			"90000000006",
-		),
+		!(
+			h.cursor() as { pending_detail_ids: string[] }
+		).pending_detail_ids.includes("90000000006"),
 	);
 });
 
 test("a complete run reports redacted coverage and requested time bounds", async () => {
-	const h = harness(["activities"], {}, {
-		since: "2026-09-01T00:00:00Z",
-		until: "2026-10-01T00:00:00Z",
-	});
-	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
+	const h = harness(
+		["activities"],
+		{},
+		{
+			since: "2026-09-01T00:00:00Z",
+			until: "2026-10-01T00:00:00Z",
+		},
+	);
+	const lines = await captureDiagnostics(() =>
+		withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST)),
+	);
+	const coverage = coverageOf(lines);
+	assert.equal(coverage.status, "complete");
+	assert.equal(coverage.pages_read, 2);
+	assert.equal(coverage.unreadable, 0);
+	assert.equal(coverage.window_requested_from, "2026-09-01T00:00:00Z");
+	assert.equal(coverage.window_requested_to, "2026-10-01T00:00:00Z");
+	assert.match(String(coverage.window_covered_from), /^2026-09-01T19:00:00Z/);
+	assert.equal(coverage.window_covered_to, "2026-09-20T13:30:00Z");
+	assert.doesNotMatch(lines.join("\n"), /9000000000/);
+
 	const summary = h.messages.find(
 		(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
 			message.type === "PROGRESS" &&
-			message.message.includes("phase=coverage"),
+			message.message.startsWith("Finished reading Strava activities"),
 	);
-	assert.ok(summary, "successful runs expose coverage after removing its stream");
-	assert.match(summary.message, /status=complete pages_read=2 unreadable=0/);
+	assert.ok(summary, "a closing plain-English summary is shown to the owner");
 	assert.match(
 		summary.message,
-		/window_requested_from=2026-09-01T00:00:00Z window_requested_to=2026-10-01T00:00:00Z/,
+		/^Finished reading Strava activities: \d+ saved/,
 	);
-	assert.match(summary.message, /window_covered_from=2026-09-01T19:00:00Z/);
-	assert.match(summary.message, /window_covered_to=2026-09-20T13:30:00Z/);
-	assert.doesNotMatch(summary.message, /9000000000/);
+	assertUserFacingProgress(h.messages);
 });
 
 test("an unreadable row marks the run summary partial", async () => {
 	const page = JSON.parse(PAGES["1"] as string) as { models: unknown[] };
 	page.models.push({});
 	const h = harness(["activities"]);
-	await withStrava(
-		listFetcher({ ...PAGES, "1": JSON.stringify(page) }),
-		() => collectStravaBrowser(h.ctx, FAST),
+	const lines = await captureDiagnostics(() =>
+		withStrava(listFetcher({ ...PAGES, "1": JSON.stringify(page) }), () =>
+			collectStravaBrowser(h.ctx, FAST),
+		),
 	);
-	const summary = h.messages.find(
-		(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-			message.type === "PROGRESS" &&
-			message.message.includes("phase=coverage"),
-	);
-	assert.ok(summary);
-	assert.match(summary.message, /status=partial/);
-	assert.match(summary.message, /unreadable=1/);
+	const coverage = coverageOf(lines);
+	assert.equal(coverage.status, "partial");
+	assert.equal(coverage.unreadable, 1);
 });
-
-
-
-
-
-
-
-
-
 
 test("off strava.com, collection navigates to the training page first", async () => {
 	const visits: string[] = [];
@@ -615,8 +664,13 @@ test("a first run emits the full 2,150-activity summary inventory", async () => 
 	const h = harness(BOTH);
 	await withStrava(listFetcher(pages), () => collectStravaBrowser(h.ctx, FAST));
 	assert.equal(h.of("activities").length, 2150);
-	assert.equal(new Set(h.of("activities").map((record) => record.id)).size, 2150);
-	assert.ok(h.of("activities").every((record) => record.average_heartrate === null));
+	assert.equal(
+		new Set(h.of("activities").map((record) => record.id)).size,
+		2150,
+	);
+	assert.ok(
+		h.of("activities").every((record) => record.average_heartrate === null),
+	);
 });
 
 test("detail backfill updates the keyed inventory in batches of 100", async () => {
@@ -640,5 +694,7 @@ test("detail backfill updates the keyed inventory in batches of 100", async () =
 	}
 	assert.equal(stored.size, 2150);
 	assert.equal(firstCount, 2150);
-	assert.ok([...stored.values()].every((record) => record.average_heartrate === 81.2));
+	assert.ok(
+		[...stored.values()].every((record) => record.average_heartrate === 81.2),
+	);
 });
