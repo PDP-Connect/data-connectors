@@ -205,6 +205,21 @@ test("a bound inside a day holds at its instant: the runtime's date rule keeps t
 		[{ since: "2026-03-13T23:00:00Z" }, true],
 		[{ since: "2026-03-13T12:00:00-12:00" }, false],
 		[{ until: "2026-03-13T23:00:00Z" }, false],
+		// Finer than a millisecond: Date.parse alone would read these as 23:00.
+		[{ since: "2026-03-13T23:00:00.0001Z" }, false],
+		[{ since: "2026-03-13T23:00:00.0000Z" }, true],
+		[{ since: "2026-03-13t23:00:00.0001z" }, false],
+		[{ since: "2026-03-13T23:00:00,0001Z" }, false],
+		[{ since: "2026-03-13T22:00:00.0001-01:00" }, false],
+		[{ since: "2026-03-13T22:00:00-01:00" }, true],
+		[{ since: "2026-03-13 23:00:00Z" }, true],
+		[{ since: "0001-01-01T00:00:00Z" }, true],
+		[{ since: "2026-03-13T22:59:60Z" }, true],
+		[{ since: "2026-03-13T22:59:60.001Z" }, false],
+		// Not an instant: withheld, never read by its date.
+		[{ since: "2026-03-13T23:00Z" }, false],
+		[{ since: "2026-02-30T00:00:00Z" }, false],
+		[{ until: "garbage" }, false],
 	] as const) {
 		const { ctx, records } = fakeContext([
 			{ name: "activities", time_range: range },

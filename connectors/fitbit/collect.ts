@@ -326,8 +326,8 @@ function isOutsideRange(timeKey: string | null, range: TimeRange): boolean {
 /**
  * This connector's reading of a window for a UTC start: inclusive `since`,
  * exclusive `until`, each compared as an instant (Collection Profile §5.1),
- * and a row with no time key kept. A bound that is not an instant is read by
- * its first ten characters, as the runtime reads it.
+ * and a row with no time key kept. A bound that is not an instant withholds
+ * every row, so no spelling of a bound can widen the window.
  */
 function isOutsideInstantRange(
 	timeKey: string | null,
@@ -336,20 +336,78 @@ function isOutsideInstantRange(
 	if (timeKey === null || range === undefined) {
 		return false;
 	}
+	// A time key is always `YYYY-MM-DDTHH:MM:SSZ` (parsers.ts).
 	const at = Date.parse(timeKey);
-	const since = range.since ? Date.parse(range.since) : Number.NaN;
-	const until = range.until ? Date.parse(range.until) : Number.NaN;
-	if (
-		Number.isNaN(at) ||
-		(range.since && Number.isNaN(since)) ||
-		(range.until && Number.isNaN(until))
-	) {
-		return isOutsideRange(timeKey, range);
+	if (range.since) {
+		const since = boundMs(range.since);
+		if (Number.isNaN(since) || at < since) {
+			return true;
+		}
 	}
-	return (
-		(Boolean(range.since) && at < since) ||
-		(Boolean(range.until) && at >= until)
-	);
+	if (range.until) {
+		const until = boundMs(range.until);
+		if (Number.isNaN(until) || at >= until) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** An RFC 3339 date-time (`T`, `t` or a space between date and time), or a full date. */
+const BOUND_RE =
+	/^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:[Zz]|([+-])(\d{2}):(\d{2})))?$/;
+
+/**
+ * A bound as milliseconds since the epoch, or NaN when it is not an RFC 3339
+ * date-time or a full date (read as that day's UTC midnight). A fraction
+ * finer than a millisecond rounds up: a start, always whole seconds, is at or
+ * after a bound exactly when it is at or after the bound rounded up.
+ */
+function boundMs(bound: string): number {
+	const match = BOUND_RE.exec(bound);
+	if (match === null) {
+		return Number.NaN;
+	}
+	const [year, month, day, hour, minute, second] = match
+		.slice(1, 7)
+		.map((part) => Number(part ?? "0")) as [
+		number,
+		number,
+		number,
+		number,
+		number,
+		number,
+	];
+	const fraction = match[7] ?? "";
+	const sign = match[8];
+	const offsetHours = Number(match[9] ?? "0");
+	const offsetMinutes = Number(match[10] ?? "0");
+	// setUTCFullYear, unlike Date.UTC, keeps years 0 to 99 as written. A leap
+	// second (:60) is read as :59 plus one second: no start falls inside it.
+	const leap = second === 60 ? 1 : 0;
+	const check = new Date(0);
+	check.setUTCFullYear(year, month - 1, day);
+	check.setUTCHours(hour, minute, second - leap, 0);
+	if (
+		check.getUTCFullYear() !== year ||
+		check.getUTCMonth() !== month - 1 ||
+		check.getUTCDate() !== day ||
+		check.getUTCHours() !== hour ||
+		check.getUTCMinutes() !== minute ||
+		check.getUTCSeconds() !== second - leap ||
+		offsetHours > 23 ||
+		offsetMinutes > 59
+	) {
+		return Number.NaN;
+	}
+	const wall = check.getTime() + leap * 1000;
+	const offset =
+		sign === undefined
+			? 0
+			: (sign === "-" ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
+	const millis = Number(fraction.slice(0, 3).padEnd(3, "0"));
+	const finer = /[1-9]/.test(fraction.slice(3)) ? 1 : 0;
+	return wall - offset + millis + finer;
 }
 
 /** Whether a row falls outside the window as this connector reads it for the stream. */

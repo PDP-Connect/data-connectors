@@ -101,7 +101,7 @@
 					},
 					"distance_m": {
 						"type": ["number", "null"],
-						"description": "Metres, converted from the kilometres or miles Fitbit recorded. Null when the exercise has no distance, and when the export gave a distance without a unit this import knows; the run's progress report then names distance_m in fields_unreadable."
+						"description": "Metres, converted from the kilometres or miles Fitbit recorded. Null when the exercise has no distance, and when the export gave a distance without a unit this import knows; the run's coverage diagnostic then names distance_m in fields_unreadable."
 					},
 					"elapsed_time_s": {
 						"type": ["number", "null"],
@@ -176,7 +176,7 @@
 					},
 					"steps": {
 						"type": ["integer", "null"],
-						"description": "Steps that day: the sum of Fitbit's minute counts. Null when Fitbit counted no minutes that day. Also null when the total cannot be trusted: on a day where a minute's count could not be read; on a day covered, or possibly covered, by a part of Fitbit's minute-by-minute steps files that could not be read, since a partial sum would be wrong; and on every day when the export's time zone setting could not be read, since minutes cannot be placed on days without it. The run's progress report then names steps in fields_unreadable. Each record replaces the earlier one for its day, so such a null also replaces the steps an earlier import stored for that day, until an import reads the files in full."
+						"description": "Steps that day: the sum of Fitbit's minute counts. Null when Fitbit counted no minutes that day. Also null when the total cannot be trusted: on a day where a minute's count could not be read; on a day covered, or possibly covered, by a part of Fitbit's minute-by-minute steps files that could not be read, since a partial sum would be wrong; and on every day when the export's time zone setting could not be read, since minutes cannot be placed on days without it. The run's coverage diagnostic then names steps in fields_unreadable. Each record replaces the earlier one for its day, so such a null also replaces the steps an earlier import stored for that day, until an import reads the files in full."
 					},
 					"distance_m": {
 						"type": ["number", "null"],
@@ -196,7 +196,7 @@
 					},
 					"resting_heart_rate_bpm": {
 						"type": ["number", "null"],
-						"description": "Fitbit's resting heart rate for the day, beats per minute, as exported and not rounded. Null when Fitbit had no estimate for the day. Also null when the value, or the part of Fitbit's resting heart rate files that would hold it, could not be read; the run's progress report then names resting_heart_rate_bpm in fields_unreadable."
+						"description": "Fitbit's resting heart rate for the day, beats per minute, as exported and not rounded. Null when Fitbit had no estimate for the day. Also null when the value, or the part of Fitbit's resting heart rate files that would hold it, could not be read; the run's coverage diagnostic then names resting_heart_rate_bpm in fields_unreadable."
 					},
 					"freshness": {
 						"type": "string",
@@ -271,7 +271,7 @@
 					},
 					"sleep_score": {
 						"type": ["number", "null"],
-						"description": "Fitbit's overall sleep score for the log, 0 to 100, from the export's sleep score file. Null when Fitbit gave the log no score, and when the uploaded files include no sleep score file; the run's progress report then names sleep_score in fields_unavailable, when the rest of the sleep files were read in full. Also null when the score, or part of the sleep score file, could not be read; the report then names sleep_score in fields_unreadable.",
+						"description": "Fitbit's overall sleep score for the log, 0 to 100, from the export's sleep score file. Null when Fitbit gave the log no score, and when the uploaded files include no sleep score file; the run's coverage diagnostic then names sleep_score in fields_unavailable, when the rest of the sleep files were read in full. Also null when the score, or part of the sleep score file, could not be read; the report then names sleep_score in fields_unreadable.",
 						"x_pdpp_role": "amount"
 					},
 					"asleep_duration_s": {
