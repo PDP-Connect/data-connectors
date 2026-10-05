@@ -193,8 +193,17 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: node --import tsx scripts/connector-evidence-summary.ts $CHANGED_CONNECTORS
 
+      # Labels need a WRITE token. On a pull_request from a FORK, GitHub
+      # downgrades GITHUB_TOKEN to read-only no matter what this job's
+      # `permissions:` block says (security default — this workflow stays
+      # plain `pull_request`, never `pull_request_target`, so it never runs
+      # with the base repo's elevated token against untrusted code). Without
+      # this guard, every outside contributor's PR would get a false-red
+      # 403 here. The job summary table above still prints unconditionally
+      # (GITHUB_STEP_SUMMARY needs no token) — only the label mutation is
+      # same-repo-only.
       - name: Ensure the three evidence labels exist
-        if: steps.connectors.outputs.list != ''
+        if: steps.connectors.outputs.list != '' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -205,8 +214,12 @@ jobs:
           gh label create "evidence: none" --color CCCCCC \
             --description "A touched connector has no committed replay claim yet" --force
 
+      - name: Note that labels are skipped for fork PRs
+        if: steps.connectors.outputs.list != '' && github.event.pull_request.head.repo.full_name != github.repository
+        run: echo "_(Labels are only applied on same-repo PRs — GITHUB_TOKEN is read-only on a fork PR.)_" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Apply the evidence label(s)
-        if: steps.connectors.outputs.list != ''
+        if: steps.connectors.outputs.list != '' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
