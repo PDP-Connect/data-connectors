@@ -136,6 +136,7 @@
 
 import { spawn } from "node:child_process";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type CollectContext,
 	emitDetailCoverage,
@@ -805,14 +806,20 @@ export async function collect({
 	// prior emission.
 	const cursor = openFingerprintCursor(state.messages);
 
+	connectorDiagnostic("google_messages", "emit_started", {
+		phase: "emit",
+		pass: "emit",
+		messages: parsed.length,
+	});
 	await progress(
-		`Google Messages phase=emit pass=emit messages=${String(parsed.length)}`,
+		`Checking ${String(parsed.length)} ${parsed.length === 1 ? "message" : "messages"} from Google Messages`,
 	);
 	// Tallied per message rather than read off `parsed.length`. The runtime
 	// drops a record that fails its shape check, so a message the validator
 	// rejects was weighed but never accounted for — counting it would let a
 	// schema drift that discards every message still report full coverage.
 	let covered = 0;
+	let emitted = 0;
 	for (const message of parsed) {
 		const record = { ...message };
 		if (validateRecord("messages", record).ok) {
@@ -820,10 +827,19 @@ export async function collect({
 		}
 		if (cursor.shouldEmit(record)) {
 			await emitRecord("messages", record);
+			emitted += 1;
 		}
 	}
+	connectorDiagnostic("google_messages", "emit_finished", {
+		phase: "emit",
+		pass: "emit",
+		messages: parsed.length,
+		emitted,
+	});
 	await progress(
-		`Google Messages phase=emit pass=emit done messages=${String(parsed.length)}`,
+		emitted === 0
+			? "No new or changed Google Messages to save"
+			: `Saved ${String(emitted)} new or changed ${emitted === 1 ? "message" : "messages"} from Google Messages`,
 	);
 
 	// STATE is written only after every fetched message has passed
