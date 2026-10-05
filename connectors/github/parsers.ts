@@ -6,6 +6,7 @@
 // client and pagination loops live in index.ts.
 
 import { parseHTML } from "linkedom";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import type {
 	GitHubAchievement,
 	GitHubContributionsCollection,
@@ -461,7 +462,7 @@ export function isBeforeSince(
 	if (!(since && iso)) {
 		return false;
 	}
-	return iso < since;
+	return isOutsideTimeRange({ since }, iso);
 }
 
 export function isAtOrAfterUntil(
@@ -471,5 +472,5 @@ export function isAtOrAfterUntil(
 	if (!(until && iso)) {
 		return false;
 	}
-	return iso >= until;
+	return isOutsideTimeRange({ until }, iso);
 }

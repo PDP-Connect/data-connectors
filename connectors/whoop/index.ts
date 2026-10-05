@@ -407,18 +407,6 @@ if (isMainModule(import.meta.url)) {
 		retryablePattern:
 			/ECONN|ETIMEDOUT|timeout|whoop_rate_limited|whoop_http_5\d\d/i,
 		browser: { profileName: "whoop" },
-		timeRangeField: (stream) => {
-			if (stream === "recoveries") {
-				return "created_at";
-			}
-			if (stream === "cycles") {
-				return "start_date";
-			}
-			if (stream === "sleeps" || stream === "workouts") {
-				return "start_at";
-			}
-			return "observed_at";
-		},
 		async ensureSession({
 			assist,
 			capture,

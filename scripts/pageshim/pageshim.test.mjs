@@ -415,6 +415,27 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 	}
 });
 
+test("chatgpt: a calendar-date bound on an instant field never completes empty", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-date-bound.js"),
+	});
+	const r = await runHarness({
+		bundle: built.outfile,
+		fixtures: fx.pageshimCase.fixtures,
+		scopes: scopeEntries(["chatgpt.memories"], {
+			"chatgpt.memories": { since: "2026-01-01" },
+		}),
+	});
+	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+	assert.equal(r.result["chatgpt.memories"], undefined);
+	assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+	assert.doesNotMatch(r.data.status ?? "", /^Complete!/);
+});
+
 test("chatgpt: legacy string-only scope bridge runs full history", {
 	timeout: 180_000,
 }, async () => {
@@ -543,11 +564,12 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		assert.deepEqual(ranged.result.errors, []);
 		assert.deepEqual(
 			ranged.result["chatgpt.conversations"].records.map((record) => record.id),
-			["conv-3", "conv-4"],
+			// conv-4 was created on 2026-02-02, after the exclusive until bound.
+			["conv-3"],
 		);
 		assert.deepEqual(
 			ranged.result["chatgpt.messages"].records.map((record) => record.id),
-			["msg-3-a", "msg-4-a"],
+			["msg-3-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
@@ -570,7 +592,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 			messagesOnly.result["chatgpt.messages"].records.map(
 				(record) => record.id,
 			),
-			["msg-3-a", "msg-4-a"],
+			["msg-3-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
@@ -1727,6 +1749,7 @@ test("anthropic: conversation range filters conversations and messages but retai
 			{
 				uuid: "conv-recent",
 				name: "recent",
+				created_at: "2026-01-20T00:00:00.000Z",
 				updated_at: "2026-01-20T00:00:00.000Z",
 				chat_messages: [
 					{
@@ -1740,6 +1763,7 @@ test("anthropic: conversation range filters conversations and messages but retai
 			{
 				uuid: "conv-old",
 				name: "old",
+				created_at: "2025-12-31T00:00:00.000Z",
 				updated_at: "2025-12-31T00:00:00.000Z",
 				chat_messages: [
 					{
@@ -1854,6 +1878,7 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 			{
 				uuid: "conv-recent",
 				name: "recent",
+				created_at: "2026-01-20T00:00:00.000Z",
 				updated_at: "2026-01-20T00:00:00.000Z",
 				chat_messages: [
 					{
@@ -1867,6 +1892,7 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 			{
 				uuid: "conv-old",
 				name: "old",
+				created_at: "2025-12-31T00:00:00.000Z",
 				updated_at: "2025-12-31T00:00:00.000Z",
 				chat_messages: [
 					{
@@ -1961,7 +1987,12 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 		since: "2026-01-01T00:00:00.000Z",
 		until: "2026-02-01T00:00:00.000Z",
 	};
-	const ranges = Object.fromEntries(c.scopes.map((scope) => [scope, sameRange]));
+	// A conversation window. Projects, documents and the profile are requested
+	// unbounded; a range on them would apply to their own consent fields.
+	const ranges = {
+		"claude.conversations": sameRange,
+		"claude.messages": sameRange,
+	};
 	const filtered = await run(scopeEntries(c.scopes, ranges));
 	assert.deepEqual(
 		filtered.ret,

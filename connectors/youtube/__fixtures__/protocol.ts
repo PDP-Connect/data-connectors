@@ -4,12 +4,13 @@
 // Test-only protocol entry: real runtime envelopes around a routed browser DOM.
 import { chromium } from "playwright";
 import { runConnector } from "../../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { collectYoutubeBrowser, youtubeConnectorConfig } from "../index.ts";
+import { collectYoutubeBrowser } from "../index.ts";
 import { validateRecord } from "../schemas.ts";
 
 runConnector({
 	name: "youtube-browser-protocol-fixture",
-	timeRangeField: youtubeConnectorConfig.timeRangeField,
+	timeRangeField: (stream) =>
+		stream === "watch_history" ? "watched_date" : "date",
 	validateRecord,
 	async collect(ctx) {
 		const browser = await chromium.launch({ headless: true });

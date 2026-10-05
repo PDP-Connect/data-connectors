@@ -550,6 +550,13 @@ test("gistRecord: truncates at 10 files", () => {
 
 // ─── laterIso / isBeforeSince / isAtOrAfterUntil ─────────────────────────
 
+test("isBeforeSince / isAtOrAfterUntil compare sub-millisecond bounds exactly", () => {
+	const at = "2026-05-02T12:00:00.000Z";
+	assert.equal(isAtOrAfterUntil(at, "2026-05-02T12:00:00.0005Z"), false);
+	assert.equal(isBeforeSince(at, "2026-05-02T12:00:00.0005Z"), true);
+	assert.equal(isAtOrAfterUntil(at, "2026-05-02T14:00:00+02:00"), true);
+});
+
 test("laterIso: returns the larger of two ISO strings", () => {
 	assert.equal(laterIso("2026-01-01", "2026-02-01"), "2026-02-01");
 	assert.equal(laterIso("2026-02-01", "2026-01-01"), "2026-02-01");
@@ -562,17 +569,40 @@ test("laterIso: null-tolerant", () => {
 });
 
 test("isBeforeSince: true only when both values present and iso < since", () => {
-	assert.equal(isBeforeSince("2026-01-01", "2026-02-01"), true);
-	assert.equal(isBeforeSince("2026-03-01", "2026-02-01"), false);
-	assert.equal(isBeforeSince(null, "2026-02-01"), false);
-	assert.equal(isBeforeSince("2026-03-01", null), false);
+	assert.equal(
+		isBeforeSince("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+		true,
+	);
+	assert.equal(
+		isBeforeSince("2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+		false,
+	);
+	assert.equal(
+		isBeforeSince("2026-05-03T00:00:00Z", "2026-05-03T05:30:00+05:30"),
+		false,
+	);
+	assert.equal(isBeforeSince(null, "2026-02-01T00:00:00Z"), false);
+	assert.equal(isBeforeSince("2026-03-01T00:00:00Z", null), false);
 });
 
 test("isAtOrAfterUntil: true only when both present and iso >= until", () => {
-	assert.equal(isAtOrAfterUntil("2026-02-01", "2026-02-01"), true);
-	assert.equal(isAtOrAfterUntil("2026-03-01", "2026-02-01"), true);
-	assert.equal(isAtOrAfterUntil("2026-01-01", "2026-02-01"), false);
-	assert.equal(isAtOrAfterUntil(null, "2026-02-01"), false);
+	assert.equal(
+		isAtOrAfterUntil("2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+		true,
+	);
+	assert.equal(
+		isAtOrAfterUntil("2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+		true,
+	);
+	assert.equal(
+		isAtOrAfterUntil("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+		false,
+	);
+	assert.equal(
+		isAtOrAfterUntil("2026-05-02T23:59:59Z", "2026-05-02T17:00:00-07:00"),
+		false,
+	);
+	assert.equal(isAtOrAfterUntil(null, "2026-02-01T00:00:00Z"), false);
 });
 
 // ─── eventRecord ──────────────────────────────────────────────────────────

@@ -78,6 +78,37 @@ test("rewindOneMonth: stores cutoff one month behind the highest fetched month",
 	assert.equal(rewindOneMonth("2026-01-01"), "2025-12-01");
 });
 
+test("collectMonthCategories: date-only month overlaps a partial timestamp bound", async () => {
+	const { ctx, emitted } = makeCtx();
+	await collectMonthCategories(
+		ctx,
+		[
+			{
+				activity: 0,
+				budgeted: 0,
+				categories: [],
+				deleted: false,
+				income: 0,
+				month: "2026-03-01",
+				to_be_budgeted: 0,
+			},
+		],
+		{ time_range: { until: "2026-03-01T12:00:00Z" } },
+		async (_budgetId, month) => ({
+			activity: 0,
+			budgeted: 0,
+			categories: [monthCategoryFixture()],
+			deleted: false,
+			income: 0,
+			month,
+			to_be_budgeted: 0,
+		}),
+	);
+
+	assert.equal(emitted.length, 1);
+	assert.equal(emitted[0]?.data.month, "2026-03-01");
+});
+
 test("collectMonthCategories: applies range/cutoff gates, emits records, and stores rewound cursor", async () => {
 	const { ctx, emitted, messages } = makeCtx({
 		state: {

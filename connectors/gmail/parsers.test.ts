@@ -1002,6 +1002,15 @@ test("buildMessageRecord: empty envelope + zero attachments maps to null/default
 
 // ─── isInTimeRange ──────────────────────────────────────────────────────
 
+test("isInTimeRange: a sub-millisecond until bound keeps the record before it", () => {
+	assert.equal(
+		isInTimeRange("2026-05-02T12:00:00.000Z", {
+			until: "2026-05-02T12:00:00.0005Z",
+		}),
+		true,
+	);
+});
+
 test("isInTimeRange: no range → always true", () => {
 	assert.equal(isInTimeRange("2024-01-15T00:00:00.000Z", undefined), true);
 	assert.equal(isInTimeRange("2024-01-15T00:00:00.000Z", null), true);
@@ -1017,6 +1026,21 @@ test("isInTimeRange: since / until half-open interval [since, until)", () => {
 	assert.equal(isInTimeRange("2023-12-31T00:00:00.000Z", range), false);
 	assert.equal(isInTimeRange("2024-02-01T00:00:00.000Z", range), false); // upper exclusive
 	assert.equal(isInTimeRange("2024-03-01T00:00:00.000Z", range), false);
+});
+
+test("isInTimeRange: compares offset bounds by instant", () => {
+	assert.equal(
+		isInTimeRange("2026-05-03T00:00:00Z", {
+			since: "2026-05-03T05:30:00+05:30",
+		}),
+		true,
+	);
+	assert.equal(
+		isInTimeRange("2026-05-02T23:59:59Z", {
+			until: "2026-05-02T17:00:00-07:00",
+		}),
+		true,
+	);
 });
 
 test("isInTimeRange: only-since / only-until", () => {

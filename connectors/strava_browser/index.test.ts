@@ -571,6 +571,43 @@ test("a complete run reports redacted coverage and requested time bounds", async
 	assertUserFacingProgress(h.messages);
 });
 
+test("time bounds compare start instants, not calendar days", async () => {
+	const startOf = (record: RecordData) =>
+		new Date(record.start_time as string).toISOString();
+	const until = harness(["activities"], {}, { until: "2026-09-20T14:00:00Z" });
+	await withStrava(listFetcher(), () => collectStravaBrowser(until.ctx, FAST));
+	assert.ok(
+		until.of("activities").map(startOf).includes("2026-09-20T13:30:00.000Z"),
+		"an activity before the until instant on the same day is kept",
+	);
+	const since = harness(["activities"], {}, { since: "2026-09-20T14:00:00Z" });
+	await withStrava(listFetcher(), () => collectStravaBrowser(since.ctx, FAST));
+	assert.ok(
+		!since.of("activities").map(startOf).includes("2026-09-20T13:30:00.000Z"),
+		"an activity before the since instant on the same day is dropped",
+	);
+});
+
+test("a since moved earlier by under a millisecond re-walks the full list", async () => {
+	const log: string[] = [];
+	const h = harness(
+		BOTH,
+		{
+			activities: {
+				known_ids: ["90000000005", "90000000004"],
+				pending_detail_ids: [],
+				list_complete: true,
+				requested_since: "2026-09-01T00:00:00.0005Z",
+			},
+		},
+		{ since: "2026-09-01T00:00:00Z" },
+	);
+	await withStrava(listFetcher(PAGES, log), () =>
+		collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(log.length, 2, "both list pages are read again");
+});
+
 test("an unreadable row marks the run summary partial", async () => {
 	const page = JSON.parse(PAGES["1"] as string) as { models: unknown[] };
 	page.models.push({});
