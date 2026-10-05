@@ -58,6 +58,7 @@ import {
 	buildBrowserSurfaceDiagnostic,
 } from "../../packages/polyfill-connectors/src/browser-surface-diagnostic.ts";
 import { resolveConnectorArtifactDir } from "../../packages/polyfill-connectors/src/connector-artifact-root.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -2217,13 +2218,17 @@ export async function emitNoActivityProgress(
 	deps: Pick<EmitDeps, "emit">,
 	activity: ActivityKind,
 ): Promise<void> {
+	connectorDiagnostic("chase", "qfx_no_activity", {
+		activity,
+		verified: activity !== "all",
+	});
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "transactions",
 		message:
 			activity === "all"
-				? "Chase returned no activity for an unbounded request; treating the result as unverified"
-				: `QFX request complete: no activity found (activity=${activity})`,
+				? "Chase returned no transactions; we could not confirm this"
+				: "No transactions found for this period",
 	});
 }
 
@@ -2380,10 +2385,17 @@ async function processAccountDownload(
 		deps.emittedAt,
 	);
 	const progressLabel = accountProgressLabel(accountProgress);
+	connectorDiagnostic("chase", "qfx_download_start", {
+		account: progressLabel,
+		activity: activityChoice.activity,
+		timeout_s: DOWNLOAD_TIMEOUT_MS / 1000,
+	});
 	const progressMsg = {
 		type: "PROGRESS",
 		stream: "transactions",
-		message: `Downloading QFX for account ${progressLabel} (activity=${activityChoice.activity}, timeout=${DOWNLOAD_TIMEOUT_MS / 1000}s)`,
+		message: accountProgress
+			? `Downloading transactions for account ${accountProgress.index} of ${accountProgress.total}`
+			: "Downloading transactions for an account",
 		...(accountProgress
 			? { count: accountProgress.index, total: accountProgress.total }
 			: {}),
@@ -2727,10 +2739,16 @@ export async function runCurrentActivity(
 	}
 
 	if (filteredAccounts.length > 1) {
+		connectorDiagnostic("chase", "current_activity_skipped_ambiguous", {
+			stream: "current_activity",
+			account_count: filteredAccounts.length,
+			reason: "overview_attribution_ambiguous",
+		});
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "current_activity",
-			message: `Skipping current_activity for ${filteredAccounts.length} accounts (overview attribution is ambiguous)`,
+			message:
+				"Skipping recent activity: could not tell which account each row belongs to",
 		});
 		await deps.emit({
 			type: "SKIP_RESULT",
@@ -2753,10 +2771,15 @@ export async function runCurrentActivity(
 		return;
 	}
 
+	connectorDiagnostic("chase", "current_activity_parse_start", {
+		stream: "current_activity",
+		account: "1/1",
+		surface: "dashboard_overview",
+	});
 	const progressMsg = {
 		type: "PROGRESS",
 		stream: "current_activity",
-		message: "Parsing current_activity dashboard overview rows for account 1/1",
+		message: "Reading recent activity from the dashboard",
 		count: 1,
 		total: 1,
 	} as const;
@@ -2788,10 +2811,15 @@ export async function runCurrentActivity(
 			},
 		});
 	} else {
+		connectorDiagnostic("chase", "current_activity_emitted", {
+			stream: "current_activity",
+			rows: emitted,
+			surface: "dashboard_overview",
+		});
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "current_activity",
-			message: `Emitted ${emitted} current_activity row(s) from dashboard overview`,
+			message: `Found ${emitted} recent activity ${emitted === 1 ? "row" : "rows"}`,
 		});
 		// current_activity re-enumerates the full dashboard overview boundary
 		// every run (no separate detail-hydration phase), so it is a full-scan
@@ -2854,11 +2882,15 @@ async function processStatementRow(
 			deps.capture,
 		);
 		if (!dlResult.ok) {
+			connectorDiagnostic("chase", "statement_pdf_not_hydrated", {
+				stream: "statements",
+				outcome: "index_only",
+			});
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "statements",
 				message:
-					"Statement PDF not hydrated this run; emitting index-only statement",
+					"Could not download this statement PDF; saved its listing only",
 			});
 			// Still emit a record so the owner has proof the statement exists.
 			// If it was previously hydrated, carry the prior pointers forward so a
@@ -3226,9 +3258,10 @@ if (isMainModule(import.meta.url)) {
 					deps.wantsCurrentActivity &&
 					!dashboardHtmlForCurrentActivity.rowSurfaceReady
 				) {
-					await progress(
-						"Chase dashboard recent-activity rows did not appear before snapshot",
-					);
+					connectorDiagnostic("chase", "dashboard_activity_rows_missing", {
+						stage: "before_snapshot",
+					});
+					await progress("Chase did not show recent activity in time");
 				}
 
 				await progress(`Found ${accounts.length} account(s)`);

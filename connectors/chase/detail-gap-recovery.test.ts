@@ -42,6 +42,10 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	DetailGapStartEntry,
 	EmittedMessage,
@@ -149,11 +153,24 @@ test("unbounded no-activity is not accepted as evidence that transaction history
 
 test("unbounded no-activity is reported as unverified rather than complete", async () => {
 	const { deps, messages } = makeHarness();
-	await emitNoActivityProgress(deps, "all");
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await emitNoActivityProgress(deps, "all");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 	const progress = messages.find((message) => message.type === "PROGRESS");
 	assert.ok(progress);
-	assert.match(progress.message, /unverified/);
+	assert.equal(
+		progress.message,
+		"Chase returned no transactions; we could not confirm this",
+	);
 	assert.doesNotMatch(progress.message, /complete/);
+	assertUserFacingProgress(messages);
+	assert.deepEqual(lines, [
+		'[chase-diagnostic] qfx_no_activity {"activity":"all","verified":false}',
+	]);
 });
 
 // ─── buildServedAccountGapLookup: only account-level chase gaps ──────────
