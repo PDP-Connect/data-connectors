@@ -1301,6 +1301,14 @@ to the pending connector interaction.
 `stream`, `reason`, and `message` are REQUIRED. The message reports an
 intentional omission. It does not change connector state.
 
+A connector that enumerates a stream but did not observe the end of the
+enumeration from the source (Section 6.1, item 14) MUST NOT complete that
+stream as empty or as complete. It emits `SKIP_RESULT` with `reason:
+"stream_collection_failed"` for the stream, emits no `STATE` that marks the
+enumeration finished, and ends with failed `DONE` whose `error.code` is
+`stream_collection_failed` (Section 5.8). An unprovable enumeration is a stream
+failure, never an empty success.
+
 `recovery_hint` is OPTIONAL. It is either an action string or an object with a
 REQUIRED `action` string and an OPTIONAL boolean `retryable`. Portable v0.1
 actions are `retry_by_runtime`, `retry_on_connector_upgrade`,
@@ -1765,6 +1773,16 @@ A conforming connector:
 13. When it declares `OBSERVATION`, emits facts only as Section 5.10 defines,
     with no secret and no provider text in them, and cites in
     `DONE.error.basis` only ids that it emitted in the run.
+14. Reports an enumerated stream complete, by a `STATE` that marks the
+    enumeration finished or by ending the run with no skip for that stream,
+    only after it observed the end of the enumeration from the source. A
+    `STATE` that records progress before a skip, such as a deferred window, is
+    not a completion. Evidence is a last-page signal or a connection with no
+    next page, a source total that matches the enumerated count, or the
+    source's own empty-state payload or renderer for zero items. A timeout, a
+    missing list container, or a next-page control that may not have rendered
+    is not evidence. A runtime cannot verify this item, as with
+    `STREAM_EVIDENCE.considered` (Section 5.7).
 
 ### 6.2 Runtime conformance
 
