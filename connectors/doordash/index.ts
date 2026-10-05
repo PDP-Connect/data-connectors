@@ -96,6 +96,7 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page, Response } from "playwright";
 import { ensureDoorDashSession } from "../../packages/polyfill-connectors/src/auto-login/doordash.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -294,10 +295,14 @@ export async function collectAllStreams(
 			// counts as considered and not covered.
 			ordersConsidered += 1;
 			if (wantsOrders) {
+				connectorDiagnostic("doordash", "shape_check_failed", {
+					stream: "orders",
+					reason: "order node missing orderUuid",
+				});
 				await emit({
 					type: "PROGRESS",
 					stream: "orders",
-					message: "shape_check_failed: order node missing orderUuid",
+					message: "Skipped an order DoorDash returned without an ID",
 				});
 			}
 			continue;
@@ -366,7 +371,10 @@ export async function collectAllStreams(
 				reason: "doordash_orders_response_not_observed",
 				// Both causes (endpoint drift, or an account with no orders) look
 				// the same on every run, so a rerun cannot clear this.
-				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				message:
 					"No getConsumerOrdersWithDetails response was observed on the orders page; the account may have no orders, or DoorDash's endpoint/shape has changed.",
 			});
