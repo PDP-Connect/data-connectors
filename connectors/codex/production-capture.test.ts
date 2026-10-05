@@ -37,6 +37,7 @@ import {
 	runCollectorConnector,
 } from "@pdpp/collector-runtime";
 import { buildConnectorSpec } from "../../packages/polyfill-connectors/bin/collector-runner.ts";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { resolveExecutionRoot } from "../../packages/polyfill-connectors/src/execution-root.ts";
 
 const SESSION_ID = "019d922d-c38b-7e11-ae99-9187af386148";
@@ -408,10 +409,14 @@ test("the ordinary collection path captures the complete rollout body", async ()
 	// The obligation is disclosed, not implied: the bytes are held locally and
 	// no transport exists to deliver them.
 	assert.ok(
-		harness.progress.some((line) =>
-			line.includes("artifact_bodies_awaiting_upload=1"),
+		harness.progress.some(
+			(line) =>
+				line === "1 Codex session file saved locally, waiting to upload",
 		),
 		"the undelivered body is reported in terminal output",
+	);
+	assertUserFacingProgress(
+		harness.progress.map((message) => ({ message, type: "PROGRESS" })),
 	);
 });
 
@@ -488,7 +493,7 @@ test("a transiently failed capture is retried on the next run, file unchanged", 
 	);
 	assert.ok(
 		harness.progress.some((line) =>
-			line.includes("artifact_bodies_outstanding=1"),
+			line.startsWith("1 Codex session file could not be saved this time"),
 		),
 		"the outstanding body is reported in terminal output",
 	);
@@ -947,8 +952,9 @@ test("a legacy mtime-only history enters capture instead of skipping forever", a
 		"the legacy entry was captured rather than skipped past",
 	);
 	assert.equal(
-		harness.progress.filter((line) => line.includes("awaiting_upload=1"))
-			.length,
+		harness.progress.filter((line) =>
+			line.includes("session file saved locally, waiting to upload"),
+		).length,
 		1,
 		"exactly one capture, not a re-capture storm",
 	);
@@ -965,11 +971,13 @@ test("a legacy mtime-only history enters capture instead of skipping forever", a
 	await harness.run();
 
 	assert.ok(
-		!harness.progress.some((line) => line.includes("awaiting_upload")),
+		!harness.progress.some((line) => line.includes("waiting to upload")),
 		"the second unchanged run captures nothing",
 	);
 	assert.ok(
-		!harness.progress.some((line) => line.includes("outstanding")),
+		!harness.progress.some((line) =>
+			line.includes("could not be saved this time"),
+		),
 		"and owes nothing",
 	);
 });
@@ -1041,7 +1049,7 @@ test("enabling capture backfills a previously-unavailable body exactly once", as
 	harness.progress.length = 0;
 	await harness.run();
 	assert.ok(
-		!harness.progress.some((line) => line.includes("awaiting_upload")),
+		!harness.progress.some((line) => line.includes("waiting to upload")),
 		"a settled body is not re-captured on a later unchanged run",
 	);
 });
