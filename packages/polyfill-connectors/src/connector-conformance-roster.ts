@@ -17,7 +17,7 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (loom, uber, wholefoods) — all
+ *      (loom, wholefoods) — all
  *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
@@ -48,6 +48,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		slack: { testFile: "connectors/slack/integration.test.ts" },
 		steam: { testFile: "connectors/steam/index.test.ts" },
 		strava: { testFile: "connectors/strava/index.test.ts" },
+		uber: { testFile: "connectors/uber/integration.test.ts" },
 		usaa: { testFile: "connectors/usaa/integration.test.ts" },
 		venmo: { testFile: "connectors/venmo/integration.test.ts" },
 		whatsapp: { testFile: "connectors/whatsapp/integration.test.ts" },
@@ -59,11 +60,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
  * collection) and MUST stay outside `PRODUCTION_READY_CONNECTORS` and outside
  * the owner-selectable listing until they actually collect.
  */
-export const KNOWN_SCAFFOLD_CONNECTORS = [
-	"loom",
-	"uber",
-	"wholefoods",
-] as const;
+export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
 
 /**
  * Connectors with a REAL collector (verified: no unconditional `SKIP_RESULT`
