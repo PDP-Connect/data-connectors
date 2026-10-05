@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorDir,
 	connectorEntrypoint,
@@ -105,6 +106,28 @@ test("healthy run emits messages and detail coverage", async () => {
 	assert.ok(messagesCoverage, "messages must emit DETAIL_COVERAGE");
 	assert.equal(messagesCoverage.considered, 2);
 	assert.equal(messagesCoverage.covered, 2);
+
+	// Owner-facing progress is plain English; the phase/pass tags moved to
+	// diagnostic lines on stderr.
+	assertUserFacingProgress(result.messages);
+	const progressTexts = result.messages.flatMap((m) =>
+		m.type === "PROGRESS" ? [m.message] : [],
+	);
+	assert.deepEqual(
+		progressTexts.filter((text) => /Google Messages$/.test(text)),
+		[
+			"Checking 2 messages from Google Messages",
+			"Saved 2 new or changed messages from Google Messages",
+		],
+	);
+	assert.match(
+		result.stderr,
+		/\[google_messages-diagnostic\] emit_started \{"phase":"emit","pass":"emit","messages":2\}/,
+	);
+	assert.match(
+		result.stderr,
+		/\[google_messages-diagnostic\] emit_finished \{"phase":"emit","pass":"emit","messages":2,"emitted":2\}/,
+	);
 });
 
 test("empty archive: zero messages, detail coverage still emitted", async () => {
