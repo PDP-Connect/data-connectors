@@ -259,6 +259,30 @@ export const diagnosticDescriptorsSchema = z.strictObject({
 });
 export type DiagnosticDescriptors = z.infer<typeof diagnosticDescriptorsSchema>;
 
+/**
+ * What a runtime keeps about one run for diagnosis: the connector's declared
+ * capabilities and descriptors at run time, every fact with its provenance,
+ * whether the record was truncated, and how the process ended. Written by
+ * `bin/connector-dev.ts` into the run summary and read by `bin/diagnose.ts`.
+ */
+export const runRecordSchema = z.strictObject({
+	protocol_capabilities: z.array(z.string().max(64)).max(16),
+	diagnostic_descriptors: diagnosticDescriptorsSchema.optional(),
+	facts: z
+		.array(runRecordFactSchema)
+		// Connector facts are capped at maxPerRun; the rest is kept for the
+		// runtime's own records, which a connector flood must not crowd out.
+		.max(OBSERVATION_LIMITS.maxPerRun * 2),
+	truncated: z.boolean(),
+	process_exit: z
+		.strictObject({
+			code: z.number().int().nullable(),
+			signal: z.string().max(32).nullable(),
+		})
+		.optional(),
+});
+export type RunRecord = z.infer<typeof runRecordSchema>;
+
 // ─── Connector side ───────────────────────────────────────────────────────
 
 type MessageWithoutWireFields<M> = M extends unknown
@@ -394,9 +418,14 @@ export interface ObservationIngestSnapshot {
 	truncated: boolean;
 }
 
+/** What happened to one `OBSERVATION` line. */
+export type ObservationIngestOutcome =
+	| { accepted: ConnectorRunRecordFact }
+	| { discarded: ProtocolViolationReason | "truncated" };
+
 export interface ObservationIngest {
 	/** One parsed standard-output object whose `type` is `OBSERVATION`. */
-	accept: (raw: unknown, lineBytes: number) => void;
+	accept: (raw: unknown, lineBytes: number) => ObservationIngestOutcome;
 	snapshot: () => ObservationIngestSnapshot;
 }
 
@@ -450,19 +479,21 @@ export function createObservationIngest(options: {
 	};
 
 	return {
-		accept(raw, lineBytes): void {
+		accept(raw, lineBytes): ObservationIngestOutcome {
 			if (facts.length >= OBSERVATION_LIMITS.maxPerRun) {
 				truncated = true;
-				return;
+				return { discarded: "truncated" };
 			}
 			const result = classify(raw, lineBytes);
 			if (typeof result === "string") {
 				violate(result);
-				return;
+				return { discarded: result };
 			}
 			seenIds.add(result.id);
 			const { type: _type, ...rest } = result;
-			facts.push({ source: "connector", ...rest });
+			const fact: ConnectorRunRecordFact = { source: "connector", ...rest };
+			facts.push(fact);
+			return { accepted: fact };
 		},
 		snapshot(): ObservationIngestSnapshot {
 			const defects: RuntimeRunRecordFact[] = [...violations].map(
@@ -476,4 +507,76 @@ export function createObservationIngest(options: {
 			return { facts: [...facts, ...defects], truncated };
 		},
 	};
+}
+
+/** True for a parsed standard-output object whose `type` is `OBSERVATION`. */
+export function isObservationLine(raw: unknown): boolean {
+	return (
+		typeof raw === "object" &&
+		raw !== null &&
+		Reflect.get(raw, "type") === "OBSERVATION"
+	);
+}
+
+export interface ManifestDiagnosticDeclarations {
+	readonly declaresObservation: boolean;
+	readonly descriptors: DiagnosticDescriptors | undefined;
+	/** Set when the manifest has a `diagnostic_descriptors` member that does
+	 *  not validate; the run then proceeds with no declared descriptors. */
+	readonly invalidDescriptors: boolean;
+	readonly protocolCapabilities: string[];
+}
+
+/** Read the manifest members diagnosis depends on. Invalid descriptors are
+ *  dropped, so an undeclared id can never support a cause. */
+export function manifestDiagnosticDeclarations(
+	manifest: unknown,
+): ManifestDiagnosticDeclarations {
+	const rawCapabilities: unknown =
+		typeof manifest === "object" && manifest !== null
+			? Reflect.get(manifest, "protocol_capabilities")
+			: undefined;
+	const protocolCapabilities = Array.isArray(rawCapabilities)
+		? rawCapabilities.filter(
+				(value): value is string => typeof value === "string",
+			)
+		: [];
+	const rawDescriptors: unknown =
+		typeof manifest === "object" && manifest !== null
+			? Reflect.get(manifest, "diagnostic_descriptors")
+			: undefined;
+	const parsed =
+		rawDescriptors === undefined
+			? undefined
+			: diagnosticDescriptorsSchema.safeParse(rawDescriptors);
+	return {
+		declaresObservation: protocolCapabilities.includes(OBSERVATION_CAPABILITY),
+		descriptors: parsed?.success ? parsed.data : undefined,
+		invalidDescriptors: parsed !== undefined && !parsed.success,
+		protocolCapabilities,
+	};
+}
+
+/** One-line rendering of a fact for live output and diagnosis listings. */
+export function describeFact(fact: RunRecordFact): string {
+	const step = fact.step ? ` at step ${fact.step}` : "";
+	switch (fact.fact) {
+		case "element_expectation":
+			return `element_expectation${step}: "${fact.attrs.expectation}" was ${fact.attrs.final} at the deadline (states seen: ${fact.attrs.states_seen.join(", ")})`;
+		case "wait_expired":
+			return `wait_expired${step}: waited ${fact.attrs.budget_ms} ms for "${fact.attrs.awaited}"`;
+		case "provider_message":
+			return `provider_message${step}: kind ${fact.attrs.kind}${fact.attrs.rule ? ` (rule ${fact.attrs.rule})` : ""}`;
+		case "credential_submission":
+			return `credential_submission${step}: attempt ${fact.attrs.attempt} ${fact.attrs.outcome}${fact.attrs.rule ? ` under rule ${fact.attrs.rule}` : ""}`;
+		case "rule_match":
+			return `rule_match${step}: ${fact.attrs.kind} rule ${fact.attrs.rule} matched on ${fact.attrs.handle}`;
+		case "connector_defect": {
+			const count = fact.attrs.count ? `, ${fact.attrs.count}x` : "";
+			const reason = fact.attrs.reason ? ` (${fact.attrs.reason}${count})` : "";
+			return `connector_defect: ${fact.attrs.class}${reason}`;
+		}
+		default:
+			return "unrecognized fact";
+	}
 }

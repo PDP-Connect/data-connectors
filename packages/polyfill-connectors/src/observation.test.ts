@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
 import {
 	createObservationIngest,
 	createWireObservationSink,
@@ -15,6 +17,7 @@ import {
 	setObservationSink,
 	withObservationBasis,
 } from "./observation.ts";
+import { runConnectorProtocolSubprocess } from "./test-harness.ts";
 
 afterEach(() => {
 	setObservationSink(undefined);
@@ -197,4 +200,56 @@ test("basis ids travel through an error's cause chain", () => {
 	assert.deepEqual(observationBasisOf(outer), ["o1"]);
 	assert.deepEqual(observationBasisOf(new Error("plain")), []);
 	assert.deepEqual(observationBasisOf("not an error"), []);
+});
+
+const FIXTURE = join(
+	PACKAGE_ROOT,
+	"src",
+	"test-fixtures",
+	"observation-hidden-element-fixture.ts",
+);
+const startMessage = () => ({
+	type: "START" as const,
+	scope: { streams: [{ name: "items" }] },
+});
+
+test("a connector that declares OBSERVATION sends the facts and cites them in DONE.error.basis", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: PACKAGE_ROOT,
+		entrypoint: FIXTURE,
+		env: { FIXTURE_DECLARE_OBSERVATION: "1" },
+		start: startMessage(),
+	});
+	const lines = result.rawStdout
+		.split("\n")
+		.filter((line) => line.trim())
+		.map((line): unknown => JSON.parse(line));
+	const observations = lines.filter(
+		(line) => observationMessageSchema.safeParse(line).success,
+	);
+	assert.deepEqual(
+		observations.map((o) => Reflect.get(Object(o), "fact")),
+		["element_expectation", "wait_expired"],
+	);
+	const done = result.messages.findLast((m) => m.type === "DONE");
+	assert.equal(done?.type, "DONE");
+	assert.deepEqual(Reflect.get(Object(done?.error), "basis"), ["o1", "o2"]);
+});
+
+test("without the capability no OBSERVATION reaches the wire and DONE has no basis", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: PACKAGE_ROOT,
+		entrypoint: FIXTURE,
+		env: { FIXTURE_DECLARE_OBSERVATION: "0" },
+		start: startMessage(),
+	});
+	assert.doesNotMatch(result.rawStdout, /"OBSERVATION"/u);
+	const done = result.messages.findLast((m) => m.type === "DONE");
+	assert.equal(Reflect.get(Object(done?.error), "basis"), undefined);
+	assert.match(
+		result.stderr,
+		/\[runtime-diagnostic\] observation \{"fact":"element_expectation","step":"sign_in","expectation":"email_input","states_seen":"hidden","final":"hidden"\}/u,
+	);
 });
