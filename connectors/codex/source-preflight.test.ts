@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -119,9 +120,7 @@ test("codex inventory streams emit safe metadata and exclude auth payloads", asy
 	assert(
 		!records.some((record) => JSON.stringify(record).includes("secret-token")),
 	);
-	assert(
-		!records.some((record) => record.data.relative_path === "auth.json"),
-	);
+	assert(!records.some((record) => record.data.relative_path === "auth.json"));
 });
 
 test("codex memories and context_mode are not requestable streams", async () => {
@@ -138,10 +137,7 @@ test("codex memories and context_mode are not requestable streams", async () => 
 		env: { CODEX_HOME: codexHome },
 		start: {
 			scope: {
-				streams: [
-					{ name: "memories" },
-					{ name: "context_mode" },
-				],
+				streams: [{ name: "memories" }, { name: "context_mode" }],
 			},
 			type: "START",
 		},
@@ -175,12 +171,22 @@ test("codex memories and context_mode are not requestable streams", async () => 
 	assert(
 		progress.some(
 			(msg) =>
-				msg.message.startsWith(
-					"Codex phase=index pass=index local_inventory_stores=14 status_inventory_only=2 status_missing=12 stores=",
-				) &&
-				msg.message.includes("context_mode:inventory_only") &&
-				msg.message.includes("memories:inventory_only"),
+				msg.message ===
+				"Checked 14 places Codex keeps data (2 found, 12 missing)",
 		),
+	);
+	const inventoryLine = result.stderr
+		.split("\n")
+		.find((line) => line.startsWith("[codex-diagnostic] local_inventory "));
+	assert(inventoryLine, "inventory counters belong in a diagnostic line");
+	assert(inventoryLine.includes('"local_inventory_stores":14'));
+	assert(inventoryLine.includes('"status_inventory_only":2'));
+	assert(inventoryLine.includes('"status_missing":12'));
+	assert(inventoryLine.includes("context_mode:inventory_only"));
+	assert(inventoryLine.includes("memories:inventory_only"));
+	// Other connector-specific PROGRESS lines are converted in a separate change.
+	assertUserFacingProgress(
+		progress.filter((msg) => msg.message.startsWith("Checked ")),
 	);
 	assert(
 		!progress.some(
