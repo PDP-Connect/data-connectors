@@ -20,7 +20,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
-
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "./connector-diagnostic.ts";
 import {
 	type AssistanceCompletionStatus,
 	type AssistanceRequest,
@@ -29,6 +32,7 @@ import {
 	type InteractionResponse,
 	makeSessionEstablishWatchdog,
 	resolveSessionEstablishWatchdogMs,
+	SESSION_CHECKPOINT_PROGRESS,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
 import {
@@ -814,4 +818,37 @@ test("resolveSessionEstablishWatchdogMs falls back to default on missing/invalid
 		}),
 		120_000,
 	);
+});
+
+test("checkpoint shows one plain status and logs the label as a diagnostic", async () => {
+	const progress: string[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		const watchdog = makeSessionEstablishWatchdog({
+			capture: null,
+			name: "amazon",
+			page: makeStubPage(),
+			progress: (message) => {
+				progress.push(message);
+				return Promise.resolve();
+			},
+		});
+		await watchdog.checkpoint("amazon-email-submit");
+		await watchdog.checkpoint("amazon-2fa-decision");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	// One PROGRESS per checkpoint keeps resetting host idle timeouts.
+	assert.deepEqual(progress, [
+		SESSION_CHECKPOINT_PROGRESS,
+		SESSION_CHECKPOINT_PROGRESS,
+	]);
+	assertUserFacingProgress(
+		progress.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.deepEqual(diagnostics, [
+		'[runtime-diagnostic] session_checkpoint {"connector":"amazon","label":"amazon-email-submit"}',
+		'[runtime-diagnostic] session_checkpoint {"connector":"amazon","label":"amazon-2fa-decision"}',
+	]);
 });

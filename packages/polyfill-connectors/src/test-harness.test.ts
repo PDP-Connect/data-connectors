@@ -19,6 +19,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "./connector-diagnostic.ts";
 import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
 import type { EmittedMessage, ValidateRecord } from "./connector-runtime.ts";
 import {
@@ -223,7 +224,11 @@ test("runConnectorProtocolSubprocess: non-browser fixture completes START to DON
 	});
 
 	assert.equal(result.code, 0);
-	assert.equal(result.stderr.trim(), "");
+	// The skip count goes to the run log; the owner sees plain text.
+	assert.equal(
+		result.stderr.trim(),
+		'[runtime-diagnostic] shape_check_skipped {"records":1}',
+	);
 
 	const types = result.messages.map((m) => m.type);
 	assert.deepEqual(types, [
@@ -234,6 +239,12 @@ test("runConnectorProtocolSubprocess: non-browser fixture completes START to DON
 		"PROGRESS",
 		"DONE",
 	]);
+	const summary = result.messages.at(-2);
+	assert.equal(summary?.type, "PROGRESS");
+	if (summary?.type === "PROGRESS") {
+		assert.equal(summary.message, "Skipped 1 item that could not be read");
+	}
+	assertUserFacingProgress(result.messages);
 
 	const record = result.messages.find(
 		(m): m is Extract<EmittedMessage, { type: "RECORD" }> =>

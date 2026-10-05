@@ -78,6 +78,7 @@ import {
 	minimizeBrowserWindow,
 	restoreBrowserWindow,
 } from "./browser-window.ts";
+import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
 import {
 	type CaptureSession,
@@ -2533,17 +2534,21 @@ async function finalizeRun(
 	emit: (msg: EmittedMessage) => Promise<void>,
 ): Promise<void> {
 	if (counters.totalSkipped > 0) {
+		connectorDiagnostic("runtime", "shape_check_skipped", {
+			records: counters.totalSkipped,
+		});
 		await progress(
-			`shape-check skipped ${String(counters.totalSkipped)} record(s); see SKIP_RESULT events above`,
+			`Skipped ${String(counters.totalSkipped)} ${counters.totalSkipped === 1 ? "item" : "items"} that could not be read`,
 		);
 	}
 	// Retained-with-drift records are emitted, so they are absent from the skip
-	// line above; surfacing the count keeps schema drift from going unnoticed
-	// simply because nothing was lost to it.
+	// line above; logging the count keeps schema drift from going unnoticed
+	// simply because nothing was lost to it. Nothing was lost, so the owner
+	// sees no message; each record also has its own SKIP_RESULT.
 	if (counters.totalAnomalous) {
-		await progress(
-			`shape-check retained ${String(counters.totalAnomalous)} record(s) carrying unmodeled values; see SKIP_RESULT events above`,
-		);
+		connectorDiagnostic("runtime", "shape_check_retained_unmodeled", {
+			records: counters.totalAnomalous,
+		});
 	}
 	await emit({
 		type: "DONE",
@@ -2770,6 +2775,9 @@ export function resolveSessionEstablishWatchdogMs(
 	return parsed;
 }
 
+/** Owner-facing PROGRESS text for every session-establishment checkpoint. */
+export const SESSION_CHECKPOINT_PROGRESS = "Checking your sign-in";
+
 /**
  * Build a session-establishment watchdog. Exposed (with injectable `deadlineMs`,
  * `now`, `pollIntervalMs`, and `onTrip`) so tests can drive it deterministically
@@ -2784,8 +2792,9 @@ export function makeSessionEstablishWatchdog(args: {
 	pollIntervalMs?: number;
 	/** Hook fired exactly once when the watchdog trips, before the run rejects. */
 	onTrip?: (info: { lastLabel: string | null; sinceMs: number }) => void;
-	/** Optional durable progress channel so each checkpoint phase reaches the
-	 *  timeline, not just the opt-in capture directory. */
+	/** Optional progress channel. Each checkpoint emits one owner-facing
+	 *  status (`SESSION_CHECKPOINT_PROGRESS`); the label goes to a
+	 *  `[runtime-diagnostic] session_checkpoint` line. */
 	progress?: (message: string) => Promise<void> | void;
 }): SessionEstablishWatchdog {
 	const now = args.now ?? Date.now;
@@ -2811,10 +2820,15 @@ export function makeSessionEstablishWatchdog(args: {
 
 	const checkpoint: SessionCheckpointFn = async (label) => {
 		markProgress(label);
-		// Durable phase trace. Best-effort and never fails the run, matching the
-		// capture call below.
+		// The label is technical, so it goes to the run log. The owner sees one
+		// plain status. It is still emitted at every checkpoint, because hosts
+		// reset their idle timeout on each PROGRESS message.
+		connectorDiagnostic("runtime", "session_checkpoint", {
+			connector: args.name,
+			label,
+		});
 		try {
-			await args.progress?.(`session-establish phase: ${label}`);
+			await args.progress?.(SESSION_CHECKPOINT_PROGRESS);
 		} catch {
 			// A progress emit must never fail session establishment.
 		}
