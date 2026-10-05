@@ -1517,6 +1517,21 @@ test("#18 a window is applied to the exercise's UTC start and stated as dates", 
 	assert.equal(outcome.coverage("sleep").window_covered_from, "2026-03-14");
 });
 
+test("#18b a since inside a day is applied at its instant, not the day's start", async () => {
+	// 21000000002 starts 2026-03-15T06:10:00Z, before since on since's day.
+	const outcome = await run(uploaded(), {
+		streams: ["activities"],
+		timeRanges: {
+			activities: {
+				since: "2026-03-15T12:00:00Z",
+				until: "2026-03-16T00:00:00Z",
+			},
+		},
+	});
+	assert.deepEqual(outcome.records("activities"), []);
+	assert.equal(outcome.progressDone("activities").outside_window, 4);
+});
+
 test("#19 a resource filter delivers and counts only the ids requested", async () => {
 	const outcome = await run(uploaded(), {
 		resources: {

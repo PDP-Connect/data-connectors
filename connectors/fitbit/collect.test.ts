@@ -179,6 +179,36 @@ test("the window agrees with the runtime's gate at both bounds of a UTC start", 
 	}
 });
 
+test("a bound inside a day holds at its instant: the runtime's date rule keeps the start, this connector does not", async () => {
+	// E1 starts 2026-03-13T23:00:00Z. The runtime reads each bound by its date.
+	for (const [range, kept] of [
+		[{ since: "2026-03-13T23:30:00Z" }, false],
+		[{ since: "2026-03-13T23:00:00Z" }, true],
+		[{ since: "2026-03-13T12:00:00-12:00" }, false],
+		[{ until: "2026-03-13T23:00:00Z" }, false],
+	] as const) {
+		const { ctx, records } = fakeContext([
+			{ name: "activities", time_range: range },
+		]);
+		const collector = new StreamCollector(ctx, "activities");
+		await collector.take(builtExercise());
+		assert.equal(records.length, kept ? 1 : 0, JSON.stringify(range));
+		assert.equal(collector.tally.outsideWindow, kept ? 0 : 1);
+	}
+});
+
+test("a runtime that compares exact instants agrees with this connector's window", async () => {
+	const since = "2026-03-13T23:30:00Z";
+	const { ctx, records } = fakeContext(
+		[{ name: "activities", time_range: { since } }],
+		(_stream, data) => Date.parse(String(data.start_time)) >= Date.parse(since),
+	);
+	const collector = new StreamCollector(ctx, "activities");
+	await collector.take(builtExercise());
+	assert.deepEqual(records, []);
+	assert.equal(collector.tally.outsideWindow, 1);
+});
+
 test("an unreadable row with a readable id is checked against the runtime's gate too", async () => {
 	// A sleep log whose date cannot be read: its id goes to the runtime alone.
 	const [log] = canonicalSleepLogs();

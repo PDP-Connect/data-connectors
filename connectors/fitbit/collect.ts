@@ -21,11 +21,12 @@
  * WHAT THE COVERAGE LINE COUNTS. Only the records the runtime keeps. Each
  * record is validated here first, then offered to the runtime's own id,
  * resource and time gate (`ctx.isRecordSelected`), and counted only when
- * kept. This connector also works out the window itself, and the two answers
- * must agree wherever no resource filter explains a difference: if the
- * runtime ever selects by another time rule, the coverage line would describe
- * a window the reader did not get, so the run stops with
- * `time_range_semantics_changed` instead of carrying on silently.
+ * kept. This connector also works out the window itself, an activity's start
+ * to the instant, and emits only what both keep. The runtime's answer must
+ * follow its date rule or the exact-instant rule wherever no resource filter
+ * explains a difference: if it ever selects by another time rule, the
+ * coverage line would describe a window the reader did not get, so the run
+ * stops with `time_range_semantics_changed` instead of carrying on silently.
  *
  * NAMES AND VALUES STAY HERE. Every SKIP_RESULT message is a constant per
  * reason, its diagnostics are numbers, null or fixed tokens, and every
@@ -306,7 +307,7 @@ export function timeRangeField(stream: string): string {
 }
 
 /**
- * This connector's reading of a window: inclusive `since`, exclusive `until`,
+ * The runtime's reading of a window: inclusive `since`, exclusive `until`,
  * each by its first ten characters, and a row with no time key kept.
  */
 function isOutsideRange(timeKey: string | null, range: TimeRange): boolean {
@@ -317,6 +318,46 @@ function isOutsideRange(timeKey: string | null, range: TimeRange): boolean {
 		return true;
 	}
 	return Boolean(range.until && timeKey >= range.until.slice(0, 10));
+}
+
+/**
+ * This connector's reading of a window for a UTC start: inclusive `since`,
+ * exclusive `until`, each compared as an instant (Collection Profile §5.1),
+ * and a row with no time key kept. A bound that is not an instant is read by
+ * its first ten characters, as the runtime reads it.
+ */
+function isOutsideInstantRange(
+	timeKey: string | null,
+	range: TimeRange,
+): boolean {
+	if (timeKey === null || range === undefined) {
+		return false;
+	}
+	const at = Date.parse(timeKey);
+	const since = range.since ? Date.parse(range.since) : Number.NaN;
+	const until = range.until ? Date.parse(range.until) : Number.NaN;
+	if (
+		Number.isNaN(at) ||
+		(range.since && Number.isNaN(since)) ||
+		(range.until && Number.isNaN(until))
+	) {
+		return isOutsideRange(timeKey, range);
+	}
+	return (
+		(Boolean(range.since) && at < since) ||
+		(Boolean(range.until) && at >= until)
+	);
+}
+
+/** Whether a row falls outside the window as this connector reads it for the stream. */
+function isOutsideWindow(
+	stream: string,
+	timeKey: string | null,
+	range: TimeRange,
+): boolean {
+	return stream === "activities"
+		? isOutsideInstantRange(timeKey, range)
+		: isOutsideRange(timeKey, range);
 }
 
 /**
@@ -602,7 +643,7 @@ export class StreamCollector {
 			timeKey === null ? {} : { [timeRangeField(this.stream)]: timeKey };
 		const inScope =
 			id === null
-				? !isOutsideRange(timeKey, this.range)
+				? !isOutsideWindow(this.stream, timeKey, this.range)
 				: this.selected({ id, ...placed }, timeKey);
 		if (inScope) {
 			this.tally.unreadable += 1;
@@ -664,27 +705,32 @@ export class StreamCollector {
 	}
 
 	/**
-	 * Whether the runtime keeps a record: its own id, resource and time gate,
-	 * asked rather than re-implemented, so the coverage line counts exactly
-	 * what a reader receives. Its answer must match this connector's own
-	 * reading of the window unless the stream's `resources` leave the
-	 * record's id out; otherwise the runtime selects by another rule and the
-	 * coverage line would be wrong, so the run stops.
+	 * Whether a record is kept: the runtime's own id, resource and time gate,
+	 * asked rather than re-implemented, and this connector's own reading of
+	 * the window, so the coverage line counts exactly what a reader receives.
+	 * The runtime reads a bound by its date, so on the bound's day it keeps an
+	 * activity that starts before `since`; this connector drops it. The
+	 * runtime's answer must match its date rule or the exact-instant rule
+	 * unless the stream's `resources` leave the record's id out; otherwise it
+	 * selects by another rule and the coverage line would be wrong, so the
+	 * run stops.
 	 */
 	private selected(record: RecordData, timeKey: string | null): boolean {
-		const expected = !isOutsideRange(timeKey, this.range);
+		const byDay = !isOutsideRange(timeKey, this.range);
+		const expected = !isOutsideWindow(this.stream, timeKey, this.range);
 		if (this.ctx.isRecordSelected === undefined) {
 			// Hand-built contexts only; the runtime always supplies it.
 			return expected;
 		}
 		const kept = this.ctx.isRecordSelected(this.stream, record);
 		if (
+			kept !== byDay &&
 			kept !== expected &&
 			(this.resources === null || this.resources.has(String(record.id)))
 		) {
 			throw timeGateFailure();
 		}
-		return kept;
+		return kept && expected;
 	}
 }
 
