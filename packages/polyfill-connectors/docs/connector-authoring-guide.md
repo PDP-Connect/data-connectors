@@ -623,6 +623,28 @@ This writes `pdpp.connector-claim/1` — a small, deliberately SAFE-TO-COMMIT JS
 
 A PR touching `connectors/<name>/` gets an informational job summary (never a required/blocking check) per changed connector: whether a committed claim is present, whether its `captured_with` digests still match the PR's own `connectors/<name>/` source and manifest (BOUND) or not (STALE), who produced it (always "author-run" — CI does not re-execute a real provider session), and what is NOT established (e.g. "no maintainer live run"). It also applies a `evidence: author-replay` / `evidence: stale` / `evidence: none` label. See the workflow for the exact table/label logic.
 
+### 9.2 Scenario replay evidence (`claim.json`)
+
+`bin/scenario-record.ts` and `bin/scenario-verify.ts` are this package's second evidence track, separate from the fixture-capture/scrub pipeline above: a scenario captures a connector run's real network traffic (`recorded-http`) or browser session (`recorded-browser`) and lets anyone replay it offline, without a provider account, to prove the connector's data mapping still matches. See each file's module doc comment for the full mechanics; this section is only about the ONE artifact a connector author commits.
+
+**Commit the claim, never the scenario itself.** A scenario's HAR/storageState/interactions carry real request and response content — they are `capture.privacy_class: local-only`, never committed, same as a raw fixture. What a PR DOES carry is the one-line verdict `scenario-verify --json` writes:
+
+```bash
+pnpm exec tsx bin/scenario-verify.ts <connector> <path-to-local-scenario.json> --json connectors/<connector>/evidence/claim.json
+```
+
+This writes `pdpp.connector-claim/1` — a small, deliberately SAFE-TO-COMMIT JSON record: the claim (`recorded_replay` or `diagnostic_replay`), its limitations, stream coverage, run/driver counts, the digests the claim was captured and verified against, and a bare scenario filename. It never carries an absolute host path, a username, or any record/URL content — `writeClaimRecord` (bin/scenario-verify.ts) redacts a filesystem-input connector's real import-directory path down to `$<ITS_ENV_VAR>` before the file is ever written, and reduces the scenario path to its filename. If you ever see an absolute path or `$HOME` in a generated `claim.json`, that is a bug in `writeClaimRecord`, not something to hand-edit around.
+
+**Path and freshness convention**
+
+- Commit to exactly `connectors/<connector>/evidence/claim.json` — one file, the LATEST claim only. Overwrite it (don't append a timestamped file) each time you re-verify.
+- Re-generate it whenever `connectors/<connector>/` or `connectors/<connector>/manifest.json` changes materially — the committed claim's `captured_with` digests are what this repo's CI job (see below) compares against the PR's own code to decide whether the claim is still BOUND or has gone STALE.
+- A connector with no `evidence/claim.json` simply has no established claim yet — that is a valid, honest state (CI reports it as `evidence: none`), not an error.
+
+**What CI does with it**
+
+A PR touching `connectors/<name>/` gets an informational job summary (never a required/blocking check) per changed connector: whether a committed claim is present, whether its `captured_with` digests still match the PR's own `connectors/<name>/` source and manifest (BOUND) or not (STALE), who produced it (always "author-run" — CI does not re-execute a real provider session), and what is NOT established (e.g. "no maintainer live run"). It also applies a `evidence: author-replay` / `evidence: stale` / `evidence: none` label. See the workflow for the exact table/label logic.
+
 ### Pre-ship checklist
 
 Before a new connector is considered usable by another user:
