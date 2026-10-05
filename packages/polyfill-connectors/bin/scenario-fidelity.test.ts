@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
+import { SCENARIO_CLOCK_ARM_HOOK } from "../src/connector-runtime.ts";
 import type { ScenarioInteraction } from "../src/scenario/format.ts";
 import {
 	isNamespaceIsolationAvailable,
@@ -1129,6 +1130,15 @@ test("scenario-fidelity: PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV patches Date.now()/ne
 			fixedNowIso: "2020-01-01T00:00:00.000Z",
 			workspace,
 		});
+		// This probe is a bare script, not a real connector run through
+		// connector-runtime.ts's START handshake — so it must call the
+		// preload's exposed arm hook itself (see SCENARIO_CLOCK_ARM_HOOK's
+		// doc comment, connector-runtime.ts) before reading the clock.
+		// Before arming, the preload intentionally passes through the REAL
+		// clock unchanged (module-loading-era code must never see a pinned
+		// value) — only this probe's own post-arm read is meant to observe
+		// the fixed/replayed value under test here.
+		const probeScript = `globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}]?.(); console.log(JSON.stringify({ now: Date.now(), iso: new Date().toISOString() }))`;
 		const result = await new Promise<{
 			code: number | null;
 			stdout: string;
@@ -1136,12 +1146,7 @@ test("scenario-fidelity: PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV patches Date.now()/ne
 		}>((resolve, reject) => {
 			const child = spawn(
 				process.execPath,
-				[
-					"--import",
-					"tsx",
-					"-e",
-					"console.log(JSON.stringify({ now: Date.now(), iso: new Date().toISOString() }))",
-				],
+				["--import", "tsx", "-e", probeScript],
 				{
 					env: {
 						...subprocessEnv(),
